@@ -1923,6 +1923,487 @@ fn assert_never(e: &Value, pref: &str, name: &str) {
     assert_eq!(e["fix"], POLICY_HUMAN_FIX, "{name}");
 }
 
+// ---------------------------------------------------------------- later refusals
+
+/// A person who wrote no side of the advised tension (the spec's claims are [`PERSON`]'s).
+const FOUNDER: &str = "human:founder";
+
+/// The versions the five later refusals hold, and what the person answers to make each hold.
+struct Holds {
+    spec: Spec,
+    /// A decision that no content applies: the person rejects its exception card.
+    rejected: ProposalInfo,
+    /// An edit of claim m that defers n's confirm item: the person refuses the deferral.
+    refused: ProposalInfo,
+    /// A re-affirmation of a one_way decision: the person rejects it.
+    reaffirm: ProposalInfo,
+    /// A claim in an advised semantic tension with claim C: the founder accepts the advice.
+    advised: ProposalInfo,
+    /// A typo fix of claim x with a `fail` meaning verdict: the person accepts the verdict.
+    verdict: ProposalInfo,
+    x: String,
+    m: String,
+    n: String,
+}
+
+fn holds_world(r: &mut Rdy) -> Holds {
+    use rdy_engine::plan::{PlanAnswerInput, ProposePlanRequest};
+    use rdy_model::plan::{PlanAct, PlanKind, item_display, item_hash};
+    use rdy_qa::intake::{decide_in, decision, verdict_on};
+    use rdy_qa::tensions::{ag, created, j_typo, put, put_j, upd};
+    let spec = spec_doc(r);
+    let w = write(
+        r,
+        "rules",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+            {"op": "create", "type": "claim", "id": "$m", "parent": "$s", "body": "M holds 30 days."},
+            {"op": "create", "type": "claim", "id": "$n", "parent": "$s", "body": "N builds on {{$m}}."},
+            {"op": "create", "type": "claim", "id": "$z", "parent": "$s", "body": "Z stands alone."},
+            {"op": "create", "type": "doc", "id": "$nd", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$ns", "parent": "$nd", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$ns", "body": "X holds."}
+        ]),
+    )
+    .unwrap();
+    land(r, "rules").unwrap();
+    let get = |k: &str| w.created[k].clone();
+    let agent_version = |r: &mut Rdy, name: &str| {
+        answer_open_items(r, &ag(name), name);
+        let p = r
+            .propose(&ag(name), name, name, Some(TEST_SUMMARY))
+            .unwrap_or_else(|e| panic!("propose {name}: {e}"));
+        assert!(p.ready, "{name}: {:#?}", p.issues);
+        p
+    };
+    // a one_way decision on Z lands, then Z changes: its re-affirmation is an exception
+    let one = r
+        .decide(
+            &writer(),
+            "one-way",
+            DecisionInput {
+                parent: get("$s"),
+                statement: "Never drop Z".into(),
+                depends_on: vec![get("$z")],
+                reversibility: Some("one_way".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(r, "one-way").unwrap();
+    write(r, "edit-z", json!([{"op": "update", "id": get("$z"), "body": "Z stands still."}]))
+        .unwrap();
+    land(r, "edit-z").unwrap();
+    decide_in(
+        r,
+        "rejected",
+        DecisionInput {
+            affects: vec![],
+            ..decision(&spec, "Guests see a banner", "Guests see a banner")
+        },
+    );
+    let rejected = agent_version(r, "rejected");
+    write(
+        r,
+        "reaffirm",
+        json!([{"op": "reaffirm", "id": one, "targets": [get("$z")], "reason": "Z still fits."}]),
+    )
+    .unwrap();
+    let reaffirm = r
+        .propose(&writer(), "reaffirm", "reaffirm", Some(TEST_SUMMARY))
+        .unwrap();
+    write(r, "refused", json!([{"op": "update", "id": get("$m"), "body": "M holds 60 days."}]))
+        .unwrap();
+    let answers = [PlanAnswerInput {
+        item: item_display(&item_hash(
+            &BlockId::parse(&get("$m")).unwrap(),
+            &get("$n"),
+            PlanKind::Confirm,
+        )),
+        act: PlanAct::Defer,
+        reason: Some("N waits for the review".into()),
+    }];
+    let refused = r
+        .propose_plan(
+            &writer(),
+            ProposePlanRequest {
+                summary: Some(TEST_SUMMARY),
+                plan_answers: &answers,
+                ..ProposePlanRequest::new("refused", "refused")
+            },
+        )
+        .unwrap();
+    let q = created(
+        &put(
+            r,
+            "advised",
+            json!([{"op": "create", "type": "claim", "id": "$q", "parent": spec.section.to_string(),
+                    "body": "Guests read every rule of the spec."}]),
+        ),
+        "$q",
+    );
+    verdict_on(r, &rdy_engine::Scope::Inflight, &q, &spec.c, "agent:r", true);
+    let advised = agent_version(r, "advised");
+    let x = BlockId::parse(&get("$x")).unwrap();
+    put_j(r, "verdict", upd(&x, "X holds, now."), j_typo());
+    let verdict = agent_version(r, "verdict");
+    Holds {
+        spec,
+        rejected,
+        refused,
+        reaffirm,
+        advised,
+        verdict,
+        x: get("$x"),
+        m: get("$m"),
+        n: get("$n"),
+    }
+}
+
+/// An independent `fail` meaning verdict on version `pref` (agent:verdict's) by agent:r, citing
+/// `cite`: the review's hash. A reviewer agent's act, seeded through the engine.
+fn fail_verdict(p: &Project, pref: &str, cite: &str) -> String {
+    use rdy_engine::check::api::{ReviewRequest, run_review};
+    use rdy_engine::semantic::api::run_review_submit;
+    use rdy_engine::semantic::submit::{CitationRequest, ReviewSubmitRequest};
+    p.s.stop();
+    let e = rdy_engine::engine::Local::open(p.dir()).unwrap();
+    let q = run_review(
+        &e,
+        &rdy_qa::tensions::ag("verdict"),
+        PERSON,
+        true,
+        None,
+        ReviewRequest::from_value(
+            json!({"op": "request", "check": "meaning_preservation", "subject": pref}),
+        )
+        .unwrap(),
+    )
+    .expect("request");
+    let reviewer = rdy_engine::Session::agent(
+        "agent:r".into(),
+        Some("r".into()),
+        rdy_model::Role::Reviewer,
+    )
+    .unwrap();
+    let v = run_review_submit(
+        &e,
+        &reviewer,
+        ReviewSubmitRequest {
+            request: q["request"].as_str().unwrap().into(),
+            case_hash: q["case_hash"].as_str().unwrap().into(),
+            verdict: "fail".into(),
+            citations: vec![CitationRequest {
+                block: cite.to_string(),
+                note: "the meaning moved".into(),
+            }],
+            severity: None,
+            reason: Some("it reads otherwise".into()),
+        },
+    )
+    .expect("submit");
+    e.close().unwrap();
+    v["review"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn mg5_later_refusals_block_every_approval_route() {
+    for route in ROUTES {
+        let (p, w) = Project::new(holds_world);
+        let review = fail_verdict(&p, &w.verdict.r#ref, &w.x);
+        let answer_route = if route == Route::CliApprove {
+            Route::CliAnswer
+        } else {
+            route
+        };
+        // the approve cards the person saw before each later refusal
+        let shown: Vec<Shown> = [&w.rejected, &w.refused, &w.reaffirm, &w.advised, &w.verdict]
+            .iter()
+            .map(|v| p.shown(route, &v.r#ref).unwrap_or_else(|| panic!("{route:?} {}", v.r#ref)))
+            .collect();
+        // each refusal, as the person gives it through the route
+        let q = p.mcp_queue();
+        let item_of = |kind: &str, batch: &str| -> String {
+            q["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["kind"] == kind && (i["batch"] == batch || i["ref"] == format!("defer:{batch}")))
+                .unwrap_or_else(|| panic!("no {kind} beside {batch}: {q:#}"))["ref"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let ex = item_of("confirm", &w.rejected.r#ref);
+        p.show_and_answer(answer_route, &ex, "reject").1.done();
+        let dr = format!("defer:{}", w.refused.r#ref);
+        p.show_and_answer(answer_route, &dr, "o2").1.done();
+        let ra = item_of("confirm", &w.reaffirm.r#ref);
+        p.show_and_answer(answer_route, &ra, "reject").1.done();
+        let accept = format!("accept_verdict:{review}:{}", w.verdict.id);
+        let vshown = p.shown(answer_route, &w.verdict.r#ref).unwrap();
+        p.answer(answer_route, &vshown, &accept).done();
+        p.be(FOUNDER);
+        let adv = format!("advice:{}", w.advised.r#ref);
+        p.show_and_answer(answer_route, &adv, "accept").1.done();
+        p.be(PERSON);
+        let before = p.log();
+        // the issue each hold puts on its version, ids as `<id>`
+        let want: [(&str, &str); 5] = [
+            ("E_VALIDATION", "D-<id> was rejected; drop or revise it, then propose again"),
+            ("E_VALIDATION", "the deferrals of P-<id>@1 were refused"),
+            ("E_VALIDATION", "D-<id>'s re-affirmation was rejected"),
+            ("E_BLOCKING_TENSION", ""),
+            (
+                "E_VALIDATION",
+                "meaning_preservation verdict <hash> is accepted as blocking for P-<id>@1",
+            ),
+        ];
+        for ((v, card), (issue, message)) in [&w.rejected, &w.refused, &w.reaffirm, &w.advised, &w.verdict]
+            .iter()
+            .zip(&shown)
+            .zip(want)
+        {
+            let (code, e) = p.answer(route, card, "approve").refused();
+            // the elicited route binds the card before it asks the person: a version that is
+            // no longer ready has no card, so it is refused as a moved item, with the same
+            // issues (an envelope difference, like KNOWN-ISSUES row 37; nothing lands)
+            let want_code = if route == Route::Elicited {
+                "E_ITEM_MOVED"
+            } else {
+                "E_PROPOSAL_NOT_READY"
+            };
+            assert_eq!(code, want_code, "{route:?} {}: {e:#}", v.r#ref);
+            if route == Route::Ui {
+                continue;
+            }
+            let issues = e["issues"].as_array().unwrap();
+            assert_eq!(issues.len(), 1, "{route:?} {}: {e:#}", v.r#ref);
+            assert_eq!(issues[0]["code"], issue, "{route:?} {}", v.r#ref);
+            // `rdy approve` names the blocking tension itself; the answer paths count them
+            if !message.is_empty() {
+                assert_eq!(
+                    hash_out(&ids_out(issues[0]["message"].as_str().unwrap())),
+                    message,
+                    "{route:?} {}",
+                    v.r#ref
+                );
+            }
+        }
+        assert_eq!(p.log(), before, "{route:?}: no later refusal lands");
+        // a new version of each: a refused deferral and a verdict whose case changed clear; a
+        // rejected decision, a rejected re-affirmation and accepted advice stay with the content
+        let views = ["rejected", "refused", "reaffirm", "advised", "verdict"];
+        let news: Vec<ProposalInfo> = p.seed(|r| {
+            views
+                .iter()
+                .map(|v| {
+                    write(
+                        r,
+                        v,
+                        json!([{"op": "create", "type": "claim", "parent": w.spec.section.to_string(),
+                                "body": format!("More of {v}.")}]),
+                    )
+                    .unwrap();
+                    answer_open_items(r, &writer(), v);
+                    r.propose(&writer(), v, v, Some(TEST_SUMMARY)).unwrap()
+                })
+                .collect()
+        });
+        let ready: Vec<bool> = news.iter().map(|n| n.ready).collect();
+        assert_eq!(ready, [false, true, false, false, true], "{route:?}");
+        for n in [&news[1], &news[4]] {
+            let row = p.land_via(route, &n.r#ref);
+            assert_eq!(row["approved_by"], PERSON, "{route:?}");
+        }
+        for n in [&news[0], &news[2], &news[3]] {
+            assert!(p.shown(route, &n.r#ref).is_none(), "{route:?}: still held");
+        }
+        let _ = (&w.m, &w.n);
+    }
+}
+
+/// `text` with each 64-hex hash as `<hash>`.
+fn hash_out(text: &str) -> String {
+    regex::Regex::new(r"\b[0-9a-f]{64}\b")
+        .unwrap()
+        .replace_all(text, "<hash>")
+        .into_owned()
+}
+
+// ---------------------------------------------------------------- the coverage gate
+
+/// Sets the project's `.rdy.yaml` to pack rdy-standard with `coverage.gate: gate` (the daemon
+/// stops first, so the next command reads it).
+fn set_gate(p: &Project, gate: &str, extra: &str) {
+    p.s.stop();
+    std::fs::write(
+        p.dir().join(".rdy.yaml"),
+        format!("pack: rdy-standard\ncoverage:\n  gate: {gate}\n{extra}serve:\n  idle_timeout: 60\n"),
+    )
+    .unwrap();
+}
+
+/// Six draft docs `p0`..`p5`, each with a section `s<k>` and a claim, landed with the gate off.
+/// The sections by index.
+fn gate_seed(r: &mut Rdy) -> Vec<String> {
+    let mut ops = Vec::new();
+    for k in 0..6 {
+        ops.push(json!({"op": "create", "type": "doc", "id": format!("$d{k}"),
+                        "fields": {"name": format!("p{k}"), "title": format!("P{k}"), "doc_type": "overview"}}));
+        ops.push(json!({"op": "create", "type": "section", "id": format!("$s{k}"), "parent": format!("$d{k}"),
+                        "fields": {"title": "Ideas"}}));
+        ops.push(json!({"op": "create", "type": "claim", "parent": format!("$s{k}"), "body": format!("X{k} holds.")}));
+    }
+    let w = write(r, "seed", json!(ops)).unwrap();
+    land(r, "seed").unwrap();
+    (0..6).map(|k| w.created[&format!("$s{k}")].clone()).collect()
+}
+
+/// The coverage cases: a name, whether `no_lower` refuses it, and the ops agent:<name> writes
+/// (editorial) in its view, given the sections. The source case reflects a source at a tag the
+/// linked checkout does not hold.
+fn gate_cases(s: &[String]) -> Vec<(&'static str, bool, Value)> {
+    vec![
+        ("question", true, json!([{"op": "create", "type": "question", "parent": s[0], "fields": {"prompt": "Is X enough?"}}])),
+        ("unapplied", true, json!([{"op": "create", "type": "decision", "parent": s[1],
+            "fields": {"statement": "Ideas stay short", "status": "proposed"}}])),
+        ("new_page", true, json!([
+            {"op": "create", "type": "doc", "id": "$m", "fields": {"name": "more", "title": "More", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$t", "parent": "$m", "fields": {"title": "Open"}},
+            {"op": "create", "type": "question", "parent": "$t", "fields": {"prompt": "Is more enough?"}}
+        ])),
+        ("no_content", false, json!([{"op": "create", "type": "decision", "parent": s[2],
+            "fields": {"statement": "Ideas stay long", "status": "proposed", "needs_content": false}}])),
+        ("claim", false, json!([{"op": "create", "type": "claim", "parent": s[3], "body": "A bare claim."}])),
+        ("source", false, json!([
+            {"op": "create", "type": "source", "id": "$x", "parent": s[4],
+             "fields": {"title": "Release nine", "kind": "release", "locator": "v9"}},
+            {"op": "create", "type": "claim", "parent": s[4], "body": "Release nine ships it.",
+             "links": {"reflects": ["$x"]}}
+        ])),
+    ]
+}
+
+#[test]
+fn mg5_coverage_gate_excludes_machine_facts_and_ungrounded_content() {
+    use rdy_qa::tensions::{ag, j_typo, put_j};
+    for gate in ["off", "no_lower"] {
+        let (p, sections) = Project::new(gate_seed);
+        let app = rdy_qa::git_repo::GitRepo::new();
+        app.write("a.txt", "a\n");
+        app.commit("c");
+        app.run(&["tag", "v1"]);
+        set_gate(&p, gate, "");
+        app.link(p.dir());
+        let cases = gate_cases(&sections);
+        let versions: Vec<ProposalInfo> = p.seed(|r| {
+            let mut out = Vec::new();
+            for (name, _, ops) in &cases {
+                put_j(r, name, ops.clone(), j_typo());
+                answer_open_items(r, &ag(name), name);
+                out.push(r.propose(&ag(name), name, name, Some(TEST_SUMMARY)).unwrap());
+            }
+            // making a section stable leaves its claim ungrounded: the whole score falls, the
+            // gate score does not
+            let s5 = BlockId::parse(&sections[5]).unwrap();
+            let t = rdy_qa::edit_loop::brief_of(r, &rdy_engine::Scope::Canon, &[&s5])
+                .base
+                .token;
+            rdy_qa::edit_loop::write_cited_as(
+                r,
+                &ag("ungrounded"),
+                "ungrounded",
+                json!([{"op": "update", "id": sections[5], "fields": {"title": "Ideas", "lifecycle": "stable"}}]),
+                Some(&t),
+            )
+            .unwrap();
+            answer_open_items(r, &ag("ungrounded"), "ungrounded");
+            out.push(
+                r.propose(&ag("ungrounded"), "ungrounded", "ungrounded", Some(TEST_SUMMARY))
+                    .unwrap(),
+            );
+            out
+        });
+        // the source case: this machine shows the missing tag; the intrinsic coverage the gate
+        // and the stored card read does not hold it
+        let (shown_codes, intrinsic_codes, card) = p.seed(|r| {
+            use rdy_engine::coverage::IssueCode;
+            let st = r.read();
+            let v = rdy_engine::Scope::View("source".into());
+            let codes = |c: &rdy_engine::coverage::CoverageIssues| -> usize {
+                c.blocks
+                    .values()
+                    .flat_map(|e| e.issues.iter())
+                    .filter(|i| i.code == IssueCode::SourceNotFound)
+                    .count()
+            };
+            let shown = codes(&st.display_coverage_issues(&v).unwrap());
+            let intrinsic = codes(&st.coverage_issues(&v).unwrap());
+            drop(st);
+            (shown, intrinsic, card_text(r, &versions[5].r#ref))
+        });
+        assert_eq!((shown_codes, intrinsic_codes), (1, 0), "{gate}");
+        assert!(!card.contains("source_not_found"), "{card}");
+        let mut names: Vec<(&str, bool)> = cases.iter().map(|(n, l, _)| (*n, *l)).collect();
+        names.push(("ungrounded", false));
+        for (k, ((name, lowers), v)) in names.iter().zip(&versions).enumerate() {
+            let refused = gate == "no_lower" && *lowers;
+            let gate_issues: Vec<String> = v
+                .issues
+                .iter()
+                .filter(|i| i.code == "E_COVERAGE_LOWERED")
+                .map(|i| i.message.split(" lowers coverage of ").nth(1).unwrap_or("").split(" from ").next().unwrap().to_string())
+                .collect();
+            if refused {
+                assert!(!v.ready, "{gate} {name}");
+                // a new page is compared in the corpus only; others name their page too
+                let want: Vec<String> = match *name {
+                    "new_page" => vec!["the corpus".into()],
+                    "question" => vec!["p0".into(), "the corpus".into()],
+                    _ => vec!["p1".into(), "the corpus".into()],
+                };
+                assert_eq!(gate_issues, want, "{gate} {name}: {:#?}", v.issues);
+                // no route shows a card for it, and every route refuses its approval
+                for route in ROUTES {
+                    assert!(p.shown(route, &v.r#ref).is_none(), "{route:?} {name}");
+                    let blind = Shown {
+                        r#ref: v.r#ref.clone(),
+                        card_hash: "0".repeat(64),
+                        options: Vec::new(),
+                    };
+                    let before = p.log();
+                    let (code, e) = p.answer(route, &blind, "approve").refused();
+                    let want = if route == Route::Elicited {
+                        "E_ITEM_MOVED"
+                    } else {
+                        "E_PROPOSAL_NOT_READY"
+                    };
+                    assert_eq!(code, want, "{route:?} {name}: {e:#}");
+                    assert_eq!(p.log(), before, "{route:?} {name}");
+                }
+            } else {
+                assert!(v.ready, "{gate} {name}: {:#?}", v.issues);
+                assert!(gate_issues.is_empty(), "{gate} {name}");
+                p.land_via(ROUTES[k % ROUTES.len()], &v.r#ref);
+            }
+        }
+    }
+}
+
+/// The text of the card of `r#ref` in the person's queue.
+fn card_text(r: &Rdy, r#ref: &str) -> String {
+    queue_for(r, PERSON)
+        .items
+        .into_iter()
+        .find(|i| i.r#ref == r#ref)
+        .unwrap_or_else(|| panic!("{ref} is queued"))
+        .card
+}
+
 /// Found by this task (mg5): an open removal request's card goes stale when any unrelated view
 /// writes, and the person's whole queue then fails with `E_REDACTION_STALE`, so no card of any
 /// item can be read or answered. The decided behavior is open (a stale removal card could drop,
