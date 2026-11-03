@@ -1487,4 +1487,156 @@ mod tests {
             "deep and perf stay off CI"
         );
     }
+
+    /// The M3 gate's areas and the guard ids each must report (plan Task 10).
+    const M3_AREAS: [(&str, &[&str]); 6] = [
+        ("authority", &["mg5"]),
+        ("publication", &["mg6"]),
+        ("checks", &["mg9"]),
+        ("gate", &["mg9"]),
+        ("invariants", &["mg1"]),
+        ("swarm", &["mg7", "mg8", "mg10"]),
+    ];
+
+    /// A `cargo test -- --list` listing of the real tree: each area binary's `Running` header,
+    /// then a `<file>::<test>: test` line for each `#[test]` fn of its files.
+    fn listing_of(tests: &Path) -> String {
+        let mut out = String::new();
+        for area in test_areas(tests) {
+            let _ = writeln!(
+                out,
+                "     Running tests/{area}/main.rs (target/release/deps/{area}-0)"
+            );
+            for f in dir_paths(&tests.join(&area))
+                .iter()
+                .filter(|f| is_rs_file(f))
+            {
+                let stem = f.file_stem().unwrap().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(f).unwrap();
+                let mut test = false;
+                for line in text.lines().map(str::trim) {
+                    if line == "#[test]" {
+                        test = true;
+                    } else if test && let Some(rest) = line.strip_prefix("fn ") {
+                        let name = rest.split('(').next().unwrap_or_default();
+                        let _ = writeln!(out, "{stem}::{name}: test");
+                        test = false;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Plan Task 10: the gate report names each M3 area and its guards. On the real tree, the
+    /// discovery finds the six M3 area binaries and the listing gives each its guard ids. On
+    /// miniature area results, each area row keeps its exact passed, failed, ignored and skipped
+    /// counts, its skip lines and its guard ids, in Markdown and JSON alike. A zero-test area, a
+    /// failed perf process and an empty perf result (both `perf_ok = false` in `qa-gate`'s
+    /// `perf_tier`) never read PASS.
+    #[test]
+    fn mg10_gate_reports_each_m3_area_and_guard() {
+        let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let areas = test_areas(&tests);
+        let guarded = guarded_ids(&listing_of(&tests));
+        for (area, ids) in M3_AREAS {
+            assert!(areas.iter().any(|a| a == area), "no {area} area: {areas:?}");
+            for id in ids {
+                assert!(
+                    guarded.get(area).is_some_and(|g| g.contains(*id)),
+                    "the {area} area lists no {id} guard: {:?}",
+                    guarded.get(area)
+                );
+            }
+        }
+        assert_eq!(layout_problems(&tests), Vec::<String>::new());
+
+        // miniature results: area k has k + 1 passed tests, k ignored and k % 3 skip lines
+        let mut rows = vec![];
+        let mut list = String::new();
+        for (k, (area, ids)) in M3_AREAS.iter().enumerate() {
+            let mut out = String::new();
+            for s in 0..k % 3 {
+                let _ = writeln!(
+                    out,
+                    "{}{}_s{s}: node is not installed",
+                    crate::skip::SKIP_MARK,
+                    ids[0]
+                );
+            }
+            let _ = writeln!(
+                out,
+                "test result: ok. {} passed; 0 failed; {k} ignored; 0 measured; 0 filtered out",
+                k + 1
+            );
+            add_run(&mut rows, area, true, parse_cargo_test(&out));
+            let _ = writeln!(
+                list,
+                "     Running tests/{area}/main.rs (target/release/deps/{area}-0)"
+            );
+            for id in *ids {
+                let _ = writeln!(list, "{area}_m3::{id}_holds: test");
+            }
+            let _ = writeln!(list, "{area}_m3::not_a_guard: test");
+        }
+        let mut r = report_of(rows.clone());
+        r.guarded = guarded_ids(&list);
+        r.pass = overall(&[], &rows, true);
+        assert!(r.pass, "{rows:?}");
+        let md = markdown(&r);
+        let js: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        for (k, (area, ids)) in M3_AREAS.iter().enumerate() {
+            let row = format!("| {area} | PASS | {} | 0 | {k} | {} |", k + 1, k % 3);
+            assert!(md.contains(&row), "{row} in {md}");
+            let mut want: Vec<&str> = ids.to_vec();
+            want.sort_unstable();
+            let line = format!("- {area}: {}", want.join(", "));
+            assert!(md.contains(&line), "{line} in {md}");
+            let a = js["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == *area)
+                .unwrap();
+            assert_eq!(
+                (&a["passed"], &a["ignored"], &a["skipped"]),
+                (
+                    &serde_json::json!(k + 1),
+                    &serde_json::json!(k),
+                    &serde_json::json!(k % 3)
+                ),
+                "{area}"
+            );
+            assert_eq!(a["skip_lines"].as_array().unwrap().len(), k % 3, "{area}");
+            assert_eq!(js["guarded"][*area], serde_json::json!(want), "{area}");
+            if k % 3 > 0 {
+                assert!(md.contains(&format!("Skipped in `{area}`:")), "{md}");
+            }
+        }
+
+        // an area that ran nothing, a failed perf process and an empty perf result fail
+        let mut empty = rows.clone();
+        add_run(&mut empty, "authority_new", true, TestRun::default());
+        assert!(!overall(&[], &empty, true), "a zero-test area");
+        let mut r0 = report_of(empty.clone());
+        r0.pass = overall(&[], &empty, true);
+        let md0 = markdown(&r0);
+        assert!(md0.starts_with("# rdy QA gate: FAIL"), "{md0}");
+        assert!(
+            md0.contains("| authority_new | FAIL | 0 | 0 | 0 | 0 |"),
+            "{md0}"
+        );
+        for note in [
+            "qa-perf exited with exit status: 1",
+            "qa-perf measured nothing",
+        ] {
+            let mut rp = report_of(rows.clone());
+            rp.perf_note = note.into();
+            rp.pass = overall(&[], &rows, false);
+            assert!(!rp.pass, "{note}");
+            let mdp = markdown(&rp);
+            assert!(mdp.starts_with("# rdy QA gate: FAIL"), "{mdp}");
+            assert!(mdp.contains(&format!("## Perf\n\n{note}\n")), "{mdp}");
+        }
+    }
 }

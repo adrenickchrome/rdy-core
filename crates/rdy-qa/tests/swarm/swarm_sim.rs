@@ -310,13 +310,29 @@ fn coverage(o: &Outcome) -> Coverage {
     }
 }
 
+/// The M3 route acts each fast tier acknowledges before the freeze (plan Task 10). The role
+/// route's acts are visible gaps, proven by the authority area (ruling task-8 finding 1).
+const M3_ACKNOWLEDGED: [&str; 10] = [
+    "m3_relay_answer",
+    "m3_elicit_first_rev",
+    "m3_elicit_second_rev",
+    "m3_elicit_decline",
+    "m3_relay_after_decline",
+    "m3_moved_card",
+    "m3_publication_check",
+    "m3_publication_output",
+    "m3_blob_remove",
+    "m3_compact_real",
+];
+
 /// Ruling task-5.2: the run, not the drain, exercises the acts. Every seed reaches the core acts
 /// and lands at least once before the freeze; the union of the seeds reaches every act of the
 /// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
 /// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
 /// task-5-round1.2: the union also reaches a set's winner landing again with no choice. Final
 /// review M4: the union also lands by a direct `rdy approve`. Ruling task-10.4: the union also
-/// accepts a check verdict (`accept_check_verdict`). Only acknowledged `land` calls count
+/// accepts a check verdict (`accept_check_verdict`). Plan Task 10: the union also acknowledges
+/// every M3 route act of `M3_ACKNOWLEDGED`. Only acknowledged `land` calls count
 /// as `land` (final review M14). With `RDY_QA_SWARM_SEEDS` set, only each seed's core acts are
 /// checked: the union is a property of the tier's seeds.
 #[test]
@@ -397,6 +413,8 @@ fn sg5_the_run_exercised_every_act() {
             "accept_check_verdict",
             "ui_answer",
         ])
+        // plan Task 10: the acknowledged M3 route acts (the role route is the authority area's)
+        .chain(M3_ACKNOWLEDGED)
         .filter(|a| !all.acts.contains(a))
         .collect();
     if !missing.is_empty() {
@@ -1966,11 +1984,16 @@ struct Weighed {
     stale: usize,
     /// Unbriefed stable writes, refused with `E_BRIEF_REQUIRED`.
     no_brief: usize,
+    /// Landings an acknowledged M3 route attempt names (plan Task 10).
+    m3_landings: usize,
+    /// Landings with the card the person saw journaled, for the M3 audit's card rule.
+    m3_cards: usize,
 }
 
 /// What the oracles of `runs` lacked: an assertion over an empty set passes whatever the product
 /// does. Each seed's run has reference tensions, logged moves and seen labels to check; the union
-/// of the seeds has journal collisions, inbox tension entries and both briefing refusals.
+/// of the seeds has journal collisions, inbox tension entries, both briefing refusals, an M3 route
+/// landing and a landing with a journaled card (plan Task 10).
 fn vacuous(runs: &[(u64, Weighed)]) -> Vec<String> {
     let mut out = vec![];
     for (seed, w) in runs {
@@ -1991,6 +2014,8 @@ fn vacuous(runs: &[(u64, Weighed)]) -> Vec<String> {
         ("inbox tension entry", sum(|w| w.inbox)),
         ("stale briefing refused", sum(|w| w.stale)),
         ("unbriefed write refused", sum(|w| w.no_brief)),
+        ("M3 route landing", sum(|w| w.m3_landings)),
+        ("landing with a journaled card", sum(|w| w.m3_cards)),
     ] {
         if n == 0 {
             out.push(format!("swarm seeds {seeds:?}: no {what}"));
@@ -2009,6 +2034,8 @@ fn sg5_an_oracle_with_nothing_to_check_is_reported() {
         inbox: 1,
         stale: 1,
         no_brief: 1,
+        m3_landings: 1,
+        m3_cards: 1,
     };
     assert!(vacuous(&[(1, full)]).is_empty());
     let empty = Weighed::default();
@@ -2020,7 +2047,7 @@ fn sg5_an_oracle_with_nothing_to_check_is_reported() {
             "swarm seed 2: no seen labels held to the log".to_string(),
         ]
     );
-    assert_eq!(vacuous(&[(2, empty)]).len(), 7);
+    assert_eq!(vacuous(&[(2, empty)]).len(), 9);
 }
 
 /// Adversarial review: every oracle above had something to check (`vacuous`).
@@ -2071,6 +2098,12 @@ fn sg5_the_oracles_are_not_vacuous() {
                 .filter(|e| e.act == "write_no_brief")
                 .filter(|e| e.outcome == Met::Refused("E_BRIEF_REQUIRED".into()))
                 .count(),
+            m3_landings: o
+                .before_freeze()
+                .iter()
+                .map(|e| route_records(e).len())
+                .sum(),
+            m3_cards: seen_cards(&o.journal).len(),
         };
         eprintln!("swarm seed {seed}: the oracles weighed {w:?}");
         weighed.push((*seed, w));
@@ -4709,5 +4742,967 @@ fn nb10_kill_and_reconnect_preserve_neighbor_answers() {
         checked > 0,
         "swarm seed {SEED}: no grouped answer was acknowledged: the check is vacuous:\n{}",
         lines(&o.journal)
+    );
+}
+
+// ---- mg10 (M3 gate, Task 10): the M3 routes ran, every landing passes the M3 audit, and the
+// M3 records and queue items survive the kill, the reindex, the dump and the follower ----
+
+use rdy_engine::pending::CARD_MAX_TOKENS;
+use rdy_engine::pending::queue::{Pending, PendingQuery};
+use rdy_model::LandingRecord;
+use rdy_qa::invariants::Violation;
+use rdy_qa::m3_audit::{
+    LandingFact, M3Facts, Shown as SeenCard, TemporalFacts, assessment_id, check_m3_in,
+    check_temporal, holds_of,
+};
+use rdy_qa::publication_scenario::{scan_local_links, tree};
+use rdy_qa::swarm::journal::Reply;
+use rdy_qa::swarm::m3::{COVERED_BY_AREA, LAND_CARD};
+use rdy_qa::swarm::script::{Route, m3_scenarios};
+
+/// The code an entry met, as a replay line prints it.
+fn code_of(e: &Entry) -> String {
+    match &e.outcome {
+        Met::Ok => "ok".into(),
+        Met::Refused(c) => c.clone(),
+        Met::Lost => "lost (the kill cut the call)".into(),
+        Met::Skipped => format!("skipped ({})", e.message.as_deref().unwrap_or("-")),
+    }
+}
+
+/// One line that replays a failure: the seed (as the variable that runs it again), the
+/// scenario, the act, the actor, the step, the ref and card hash shown, and the code the daemon
+/// gave.
+fn replay(seed: u64, e: &Entry) -> String {
+    let a = e.route.as_ref();
+    let scenario = a.map_or("-", |a| a.route.name());
+    let shown = a
+        .and_then(|a| a.observed_ref.as_deref())
+        .or(e.block.as_deref())
+        .unwrap_or("-");
+    let card = a.and_then(|a| a.card_hash.as_deref()).unwrap_or("-");
+    format!(
+        "RDY_QA_SWARM_SEEDS={seed}: scenario {scenario}, act {}, actor {}, step {}, shown {shown} card {card}, code {}",
+        e.act,
+        e.actor,
+        e.step,
+        code_of(e)
+    )
+}
+
+/// The M3 route acts (`Route::acts`).
+fn is_route_act(act: &str) -> bool {
+    Route::ALL.iter().any(|r| r.acts().contains(&act))
+}
+
+/// The landing ids an acknowledged route attempt names.
+fn route_records(e: &Entry) -> Vec<String> {
+    match e.route.as_ref().map(|a| &a.reply) {
+        Some(Reply::Acknowledged { records, .. }) if e.outcome == Met::Ok => records.clone(),
+        _ => vec![],
+    }
+}
+
+/// The witnesses the swarm itself must give, across the fixed seed set (plan Task 10). A route
+/// whose evidence comes from another area is in `AREA_WITNESSES`, never here.
+const SWARM_WITNESSES: [&str; 13] = [
+    "relayed landing",
+    "policy landing",
+    "refused stale card then new-card answer",
+    "accepted elicited answer (2025-11-25, in-call)",
+    "accepted elicited answer (2026-07-28, inline)",
+    "declined elicitation",
+    "local UI answer",
+    "explicit CLI fallback",
+    "accepted blocking verdict that does not land",
+    "answered plan or deferral",
+    "compact with removed bytes",
+    "org profile check of a held landing",
+    "output link scan",
+];
+
+/// The witnesses another area proves, each by the test that proves it: (witness, test file under
+/// `tests/`, test). The swarm has one person in one daemon and no public profile, so these paths
+/// cannot run inside it (ruling task-8 finding 1 for the role route; task-8 report concern 3 for
+/// the profile paths). Each named test must exist; the area's own run proves it passes.
+const AREA_WITNESSES: [(&str, &str, &str); 6] = [
+    (
+        "refused wrong-role answer",
+        "authority/authority_routes.rs",
+        "mg5_roles_route_and_enforce_the_same_person",
+    ),
+    (
+        "public blocked check",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "org warning",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "hidden-link-only pass",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "dropped outside decision citation",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "excluded canary scan",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+];
+
+/// How many times one seed's run (before the freeze, except the store's own policy landings and
+/// verdict holds) gave each witness of `SWARM_WITNESSES`.
+fn swarm_witnesses(o: &Outcome) -> BTreeMap<&'static str, usize> {
+    let run = o.before_freeze();
+    let ok = |act: &str| {
+        run.iter()
+            .filter(|e| e.act == act && e.outcome == Met::Ok)
+            .count()
+    };
+    let mut w: BTreeMap<&'static str, usize> = SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
+    let mut set = |name: &'static str, n: usize| {
+        *w.get_mut(name).expect("a listed witness") += n;
+    };
+    set(
+        "relayed landing",
+        run.iter()
+            .filter(|e| {
+                matches!(e.act, "m3_relay_answer" | "m3_relay_after_decline")
+                    && !route_records(e).is_empty()
+            })
+            .count(),
+    );
+    set("policy landing", landing_counts(o).0);
+    // a refusal of the old card, then an acknowledged answer on a newer card, in one scenario
+    let mut moved = 0;
+    for (i, e) in run.iter().enumerate() {
+        if e.act != "m3_moved_card" || e.outcome != Met::Refused("E_PROPOSAL_MOVED".into()) {
+            continue;
+        }
+        let old = e.route.as_ref().and_then(|a| a.card_hash.clone());
+        moved += usize::from(run[i + 1..].iter().any(|n| {
+            n.act == "m3_moved_card"
+                && n.actor == e.actor
+                && n.step == e.step
+                && !route_records(n).is_empty()
+                && n.route.as_ref().and_then(|a| a.card_hash.clone()) != old
+        }));
+    }
+    set("refused stale card then new-card answer", moved);
+    set(
+        "accepted elicited answer (2025-11-25, in-call)",
+        run.iter()
+            .filter(|e| e.act == "m3_elicit_first_rev" && !route_records(e).is_empty())
+            .count(),
+    );
+    set(
+        "accepted elicited answer (2026-07-28, inline)",
+        run.iter()
+            .filter(|e| e.act == "m3_elicit_second_rev" && !route_records(e).is_empty())
+            .count(),
+    );
+    set(
+        "declined elicitation",
+        run.iter()
+            .filter(|e| e.act == "m3_elicit_decline" && e.outcome == Met::Ok)
+            .filter(|e| e.reply.as_ref().is_some_and(|r| r["state"] == "declined"))
+            .count(),
+    );
+    set(
+        "local UI answer",
+        run.iter()
+            .filter(|e| e.act == "ui_answer" && e.outcome == Met::Ok)
+            .filter(|e| e.ui.as_ref().is_some_and(|u| u.landing.is_some()))
+            .count(),
+    );
+    set(
+        "explicit CLI fallback",
+        run.iter()
+            .filter(|e| e.act == "land" && e.outcome == Met::Ok && e.actor == HUMAN)
+            .count(),
+    );
+    let stored = oracle::stored_checks(&o.dir, &oracle::proposed_versions(&o.journal));
+    set(
+        "accepted blocking verdict that does not land",
+        stored
+            .holds
+            .iter()
+            .filter(|(v, h)| !h.is_empty() && !stored.landed.contains(*v))
+            .count(),
+    );
+    // the random seeds answer plans; a deferral card comes in the directed rg15 run
+    // (`rg15_the_person_accepts_a_deferral_card_before_the_approve`)
+    set(
+        "answered plan or deferral",
+        ok("plan_answer") + ok("accept_deferrals"),
+    );
+    set(
+        "compact with removed bytes",
+        run.iter()
+            .filter(|e| e.act == "m3_compact_real" && e.outcome == Met::Ok)
+            .filter(|e| {
+                e.reply
+                    .as_ref()
+                    .and_then(|r| r["removed_bytes"].as_u64())
+                    .is_some_and(|n| n > 0)
+            })
+            .count(),
+    );
+    set(
+        "org profile check of a held landing",
+        run.iter()
+            .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
+            .filter(|e| {
+                e.route
+                    .as_ref()
+                    .and_then(|a| a.observed_ref.as_deref())
+                    .is_some_and(|s| s.starts_with("landing:"))
+            })
+            .count(),
+    );
+    set(
+        "output link scan",
+        run.iter()
+            .filter(|e| e.act == "m3_publication_output" && e.outcome == Met::Ok)
+            .filter(|e| e.route.as_ref().is_some_and(|a| a.counts.links_checked > 0))
+            .count(),
+    );
+    w
+}
+
+/// The source of the test file `file` under `tests/`.
+fn test_source(file: &str) -> String {
+    let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(file);
+    std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
+}
+
+/// Plan Task 10: across the fixed seed set every required M3 path ran, through the swarm or (for
+/// the paths the swarm cannot hold) through the named area test. Every M3 route attempt met an
+/// outcome of its act's closed set, and each failure names the line that replays it.
+#[test]
+fn mg10_swarm_exercised_every_required_m3_scenario() {
+    let mut all: BTreeMap<&'static str, usize> = SWARM_WITNESSES.iter().map(|n| (*n, 0)).collect();
+    let mut failed = vec![];
+    for (seed, r) in runs() {
+        let o = match r {
+            Ok(o) => o,
+            Err(text) => {
+                failed.push(text.clone());
+                continue;
+            }
+        };
+        let w = swarm_witnesses(o);
+        eprintln!("swarm seed {seed}: M3 witnesses {w:?}");
+        for (k, n) in w {
+            *all.get_mut(k).expect("a listed witness") += n;
+        }
+        // every scheduled route left a trace: an attempt, or a visible gap with its reason
+        let scheduled = m3_scenarios(&Config::for_run(*seed));
+        for sc in &scheduled {
+            let trace = o.journal.iter().any(|e| {
+                sc.route.acts().contains(&e.act) && e.actor == format!("agent:a{}", sc.agent)
+            });
+            if !trace {
+                failed.push(format!(
+                    "RDY_QA_SWARM_SEEDS={seed}: scenario {} (agent a{}, step {}) left no entry",
+                    sc.route.name(),
+                    sc.agent,
+                    sc.step
+                ));
+            }
+        }
+        for e in o.journal.iter().filter(|e| is_route_act(e.act)) {
+            // the role route is proven by the authority area: its entries are visible gaps that
+            // carry no attempt, never a witness (ruling task-8 finding 1)
+            if matches!(e.act, "m3_wrong_role" | "m3_right_role") {
+                if e.outcome != Met::Skipped
+                    || e.route.is_some()
+                    || e.message.as_deref() != Some(COVERED_BY_AREA)
+                {
+                    failed.push(format!(
+                        "the role route ran in the swarm: {}",
+                        replay(*seed, e)
+                    ));
+                }
+                continue;
+            }
+            let fine = match (&e.outcome, &e.route) {
+                (Met::Skipped, None) => true,
+                (_, Some(a)) => a.is_allowed() && !a.is_pending(),
+                (_, None) => false,
+            };
+            if !fine {
+                failed.push(format!(
+                    "an outcome outside the closed set: {}",
+                    replay(*seed, e)
+                ));
+            }
+        }
+    }
+    eprintln!("swarm seeds: M3 witnesses {all:?}");
+    if std::env::var("RDY_QA_SWARM_SEEDS").is_err() {
+        let missing: Vec<&str> = all
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(k, _)| *k)
+            .collect();
+        if !missing.is_empty() {
+            let seeds: Vec<u64> = runs().iter().map(|(s, _)| *s).collect();
+            failed.push(format!(
+                "swarm seeds {seeds:?}: no run gave the M3 witness {missing:?}"
+            ));
+        }
+    }
+    for (witness, file, test) in AREA_WITNESSES {
+        if !test_source(file).contains(&format!("fn {test}()")) {
+            failed.push(format!(
+                "the witness {witness:?} names {test} in tests/{file}, which has no such test"
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// The person's queue in `st`, every card whole, as the swarm's person sees it with no session:
+/// each item's ref and card hash, and the refs that are not ready.
+fn queue_of(st: &ReadState) -> (Vec<(String, String)>, Vec<String>, usize) {
+    let p: Pending = st
+        .pending(&PendingQuery {
+            person: HUMAN.into(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .expect("read the person's queue");
+    (
+        p.items
+            .iter()
+            .map(|i| (i.r#ref.clone(), i.card_hash.clone()))
+            .collect(),
+        p.not_ready.iter().map(|n| n.r#ref.clone()).collect(),
+        p.omitted,
+    )
+}
+
+/// The landings of `st`'s canon chain, oldest first.
+fn chain(st: &ReadState) -> Vec<(Hash, LandingRecord)> {
+    let mut out = vec![];
+    let mut cur = st.canon_head();
+    while let Some(h) = cur {
+        let rec = st.reader().landing(&h).expect("read a landing");
+        cur = rec.prev;
+        out.push((h, rec));
+    }
+    out.reverse();
+    out
+}
+
+/// What the person saw before each journaled landing it approved through chat: the version
+/// (`P-x@n`) and the card hash, by landing id. A route answer keeps them in its attempt; a
+/// relayed `land` keeps them in the `land_card` read just before it.
+fn seen_cards(journal: &[Entry]) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    for (i, e) in journal.iter().enumerate() {
+        if let Some(a) = &e.route {
+            for l in route_records(e) {
+                if let (Some(r), Some(c)) = (&a.observed_ref, &a.card_hash) {
+                    out.insert(l, (r.clone(), c.clone()));
+                }
+            }
+            continue;
+        }
+        if e.act != "land" || e.outcome != Met::Ok || e.actor != "agent:relay" {
+            continue;
+        }
+        let (Some(pref), Some(l)) = (
+            e.block.as_deref(),
+            e.reply
+                .as_ref()
+                .and_then(|r| landing_fields(r)["landing"].as_str()),
+        ) else {
+            continue;
+        };
+        let card = journal[..i]
+            .iter()
+            .rev()
+            .find(|c| c.act == LAND_CARD && c.block.as_deref() == Some(pref))
+            .and_then(|c| c.reply.as_ref())
+            .and_then(|r| r["shown"]["card_hash"].as_str());
+        if let Some(c) = card {
+            out.insert(l.to_string(), (pref.to_string(), c.to_string()));
+        }
+    }
+    out
+}
+
+/// The temporal facts of landing `h` (record `rec`) of the closed copy `r`, with the snapshot
+/// before it rebuilt from the log: canon's chain is append-only, so the landings before `h` and
+/// the policy canon held at `h`'s base are read from the store that holds `h`. The pack and the
+/// gate config are the run's own (the swarm changes neither). Limit: the holds are read from
+/// the whole store, so a hold recorded after the landing also counts.
+fn rebuilt_temporal(
+    r: &Rdy,
+    st: &ReadState,
+    h: Hash,
+    rec: LandingRecord,
+    seen: Option<&(String, String)>,
+) -> Result<TemporalFacts, Violation> {
+    let fact = LandingFact::read_whole(st, h, rec.clone())?;
+    let fail = |what: String| Violation {
+        rule: "mg10_rebuild",
+        block: None,
+        detail: what,
+    };
+    let reader = st.reader();
+    let first_briefed = reader
+        .first_briefed_change()
+        .map_err(|e| fail(format!("the first briefed change: {e}")))?;
+    let mut since = vec![];
+    if let Some(a) = &fact.assessment {
+        let mut cur = rec.prev;
+        while let Some(l) = cur {
+            if Some(l) == a.base {
+                break;
+            }
+            let lr = reader
+                .landing(&l)
+                .map_err(|e| fail(format!("landing {}: {e}", l.short())))?;
+            let mut written = BTreeSet::new();
+            for c in &lr.changes {
+                let ch = reader
+                    .change(c)
+                    .map_err(|e| fail(format!("change {}: {e}", c.short())))?;
+                written.extend(ch.ops.iter().map(|op| op.block_id().clone()));
+            }
+            since.push((l, written));
+            cur = lr.prev;
+        }
+        since.reverse();
+    }
+    let live_policy = match rec.prev {
+        Some(prev) => {
+            let at = st
+                .materialized(&Scope::At(prev))
+                .map_err(|e| fail(format!("canon at {}: {e}", prev.short())))?;
+            rdy_engine::policy::live_policy(st, &at).map(|p| p.reference())
+        }
+        None => None,
+    };
+    let holds = match rec.approved_version {
+        Some(v) => holds_of(st, &v)?,
+        None => vec![],
+    };
+    let shown = match seen {
+        Some((pref, card)) => Some(SeenCard {
+            version: r
+                .resolve_proposal(pref)
+                .map_err(|e| fail(format!("resolve {pref}: {e}")))?
+                .version,
+            card_hash: Some(
+                card.parse()
+                    .map_err(|_| fail(format!("card hash {card} is not a hash")))?,
+            ),
+        }),
+        None => None,
+    };
+    Ok(TemporalFacts {
+        landing: fact,
+        first_briefed,
+        before_head: rec.prev,
+        since,
+        pack_digest: rdy_engine::readiness::assessment::pack_digest(st.pack()),
+        config_digest: rdy_engine::readiness::assessment::config_digest(&st.gate_config()),
+        live_policy,
+        holds,
+        shown,
+    })
+}
+
+/// Task 1's audit for every landing the swarm made, of the run and of the drain: the durable M3
+/// rules on the frozen copy and the drained project (`check_m3_in`), each landing after the seed
+/// an M3 landing, and the temporal rules (`check_temporal`) on the facts of each landing with
+/// the snapshot before it rebuilt from canon's chain. Each journaled card a person saw before a
+/// landing is the card and version that landing records (`m3_card`).
+#[test]
+fn mg10_every_landing_passes_the_m3_audit() {
+    each(|seed, o| {
+        let seen = seen_cards(&o.journal);
+        let mut audited = 0;
+        let mut carded = 0;
+        for (what, dir) in [
+            ("the frozen copy", &o.frozen),
+            ("the drained project", &o.dir),
+        ] {
+            let (_keep, copy) = copy_of(dir);
+            let r = Rdy::open(&copy).unwrap_or_else(|e| panic!("open {what}: {e}"));
+            let st = r.read();
+            let durable = check_m3_in(&st);
+            assert!(
+                durable.is_empty(),
+                "swarm seed {seed}: the M3 rules on {what}: {durable:#?}"
+            );
+            let facts = M3Facts::read(&st).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let m3: BTreeSet<String> = facts
+                .landings
+                .iter()
+                .map(|l| l.landing.to_string())
+                .collect();
+            let mut bad = vec![];
+            for (h, rec) in chain(&st) {
+                let id = h.to_string();
+                if o.seed_landings.contains(&id) {
+                    continue;
+                }
+                if !m3.contains(&id) {
+                    bad.push(format!("landing {} records no M3 field", h.short()));
+                }
+                let card = seen.get(&id);
+                carded += usize::from(card.is_some());
+                match rebuilt_temporal(&r, &st, h, rec, card) {
+                    Ok(t) => {
+                        bad.extend(
+                            check_temporal(&t)
+                                .into_iter()
+                                .map(|v| format!("{}: {}", v.rule, v.detail)),
+                        );
+                        // the card rule is not vacuous: another card than the one seen fails
+                        if let Some(s) = &t.shown {
+                            let mut other = t.clone();
+                            other.shown = Some(SeenCard {
+                                version: s.version,
+                                card_hash: Some(Hash::of(b"another card")),
+                            });
+                            if !check_temporal(&other).iter().any(|v| v.rule == "m3_card") {
+                                bad.push(format!(
+                                    "landing {}: a card the person did not see passes",
+                                    h.short()
+                                ));
+                            }
+                        }
+                    }
+                    Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
+                }
+                audited += 1;
+            }
+            drop(st);
+            r.close().expect("close the copy");
+            assert!(
+                bad.is_empty(),
+                "RDY_QA_SWARM_SEEDS={seed}: the M3 audit on {what}: {bad:#?}"
+            );
+        }
+        eprintln!("swarm seed {seed}: {audited} landings audited, {carded} with a journaled card");
+        assert!(audited > 0, "swarm seed {seed}: no landing was audited");
+        assert!(
+            carded > 0,
+            "swarm seed {seed}: no landing had a journaled card"
+        );
+    });
+}
+
+/// Each version a card showed before the kill (epoch 0) as `(ref, card hash, entry)`.
+fn shown_before_kill(o: &Outcome) -> Vec<(String, String, &Entry)> {
+    o.before_freeze()
+        .iter()
+        .filter(|e| e.act == LAND_CARD && e.epoch == 0 && e.outcome == Met::Ok)
+        .filter_map(|e| {
+            let s = &e.reply.as_ref()?["shown"];
+            Some((
+                s["ref"].as_str()?.to_string(),
+                s["card_hash"].as_str()?.to_string(),
+                e,
+            ))
+        })
+        .collect()
+}
+
+/// Each landing the run acknowledged before the freeze, with the entry that acknowledged it: an
+/// M3 route attempt's records, a person's or an agent's acknowledged `land` and an acknowledged
+/// UI answer. Every one of them records an M3 assessment or policy (`mg10_every_landing_...`).
+fn acknowledged_landings(o: &Outcome) -> Vec<(&Entry, String)> {
+    let mut out = vec![];
+    for e in o.before_freeze() {
+        out.extend(route_records(e).into_iter().map(|l| (e, l)));
+        if e.outcome != Met::Ok {
+            continue;
+        }
+        let landing = match e.act {
+            "land" => e
+                .reply
+                .as_ref()
+                .and_then(|r| landing_fields(r)["landing"].as_str())
+                .map(str::to_string),
+            "ui_answer" => e.ui.as_ref().and_then(|u| u.landing.clone()),
+            _ => None,
+        };
+        out.extend(landing.map(|l| (e, l)));
+    }
+    out
+}
+
+/// Plan Task 10: what an M3 route acknowledged survives the kill. Each landing an acknowledged
+/// attempt, approve or UI answer names (`acknowledged_landings`; the M3 routes run after the
+/// kill, so the landings acknowledged before it are the person's and the agents') is in canon's
+/// chain of the frozen copy (the state after the reconnect), the
+/// drained project and a reindexed copy of each. Each version a card showed before the kill
+/// still resolves after it, and one that did not land, has no newer version and whose view is
+/// open is still an item of the person's queue (or a not-ready version) after the reconnect.
+#[test]
+fn mg10_acknowledged_m3_records_survive_the_kill() {
+    let before_kill = std::cell::Cell::new(0);
+    let shown = std::cell::Cell::new(0);
+    each(|seed, o| {
+        let acked = acknowledged_landings(o);
+        assert!(
+            acked.iter().any(|(e, _)| e.route.is_some()),
+            "swarm seed {seed}: no M3 route acknowledged a record"
+        );
+        assert!(
+            acked.iter().any(|(e, _)| e.epoch == 0),
+            "swarm seed {seed}: no landing was acknowledged before the kill"
+        );
+        for (what, dir, reindex) in [
+            ("the frozen copy", &o.frozen, false),
+            ("the frozen copy, reindexed", &o.frozen, true),
+            ("the drained project", &o.dir, false),
+            ("the drained project, reindexed", &o.dir, true),
+        ] {
+            let (_keep, copy) = copy_of(dir);
+            let mut r = Rdy::open(&copy).unwrap_or_else(|e| panic!("open {what}: {e}"));
+            if reindex {
+                r.reindex()
+                    .unwrap_or_else(|e| panic!("reindex {what}: {e}"));
+            }
+            let st = r.read();
+            let held: BTreeSet<String> = chain(&st).iter().map(|(h, _)| h.to_string()).collect();
+            let lost: Vec<String> = acked
+                .iter()
+                .filter(|(_, l)| !held.contains(l))
+                .map(|(e, l)| format!("landing {l}: {}", replay(seed, e)))
+                .collect();
+            assert!(
+                lost.is_empty(),
+                "swarm seed {seed}: {what} lost acknowledged M3 landings: {lost:#?}"
+            );
+            if what != "the frozen copy" {
+                drop(st);
+                r.close().expect("close the copy");
+                continue;
+            }
+            // the queue after the reconnect keeps each card shown before the kill that is
+            // still open
+            let (items, not_ready, omitted) = queue_of(&st);
+            let landed: BTreeSet<Hash> = chain(&st)
+                .iter()
+                .filter_map(|(_, rec)| rec.approved_version)
+                .collect();
+            let mut missing = vec![];
+            for (pref, _card, e) in shown_before_kill(o) {
+                shown.set(shown.get() + 1);
+                let Ok(p) = r.resolve_proposal(&pref) else {
+                    missing.push(format!("{pref} no longer resolves: {}", replay(seed, e)));
+                    continue;
+                };
+                let stable = pref.split('@').next().unwrap_or(&pref);
+                let latest = r.resolve_proposal(stable).expect("the latest version");
+                let view = st.reader().proposal(&p.version).expect("the version").view;
+                let closed = st.view_show(&view).map_or(true, |v| v.head.closed);
+                if landed.contains(&p.version) || latest.n != p.n || closed || omitted > 0 {
+                    continue;
+                }
+                let queued = items.iter().any(|(r, _)| *r == pref) || not_ready.contains(&pref);
+                if !queued {
+                    missing.push(format!(
+                        "{pref} is open and unlanded but not in the queue after the reconnect: {}",
+                        replay(seed, e)
+                    ));
+                }
+            }
+            drop(st);
+            r.close().expect("close the copy");
+            assert!(missing.is_empty(), "swarm seed {seed}: {missing:#?}");
+        }
+        before_kill.set(before_kill.get() + acked.iter().filter(|(e, _)| e.epoch == 0).count());
+    });
+    eprintln!(
+        "swarm seeds: {} landings acknowledged before the kill, {} cards shown before it",
+        before_kill.get(),
+        shown.get()
+    );
+}
+
+/// What the reindex and the dump must keep of a closed store: the M3 projection of canon's
+/// landings and the person's queue.
+#[derive(Debug, PartialEq)]
+struct Kept {
+    facts: M3Facts,
+    queue: (Vec<(String, String)>, Vec<String>, usize),
+}
+
+fn kept(r: &Rdy) -> Kept {
+    let st = r.read();
+    Kept {
+        facts: M3Facts::read(&st).unwrap_or_else(|e| panic!("the M3 facts: {e:?}")),
+        queue: queue_of(&st),
+    }
+}
+
+/// Plan Task 10: a reindex keeps the M3 records and the pending items. On a copy of the frozen
+/// copy and of the drained project, the M3 projection of every landing (records, assessments,
+/// changes, seals) and the person's queue (each item's ref and card hash, the not-ready
+/// versions) are the same before the reindex, after it, after a reopen, and in a project loaded
+/// from a full dump; the reindex audit passes.
+#[test]
+fn mg10_reindex_preserves_m3_records_and_pending_items() {
+    each(|seed, o| {
+        for (what, dir) in [
+            ("the frozen copy", &o.frozen),
+            ("the drained project", &o.dir),
+        ] {
+            let (_keep, copy) = copy_of(dir);
+            let mut r = Rdy::open(&copy).unwrap_or_else(|e| panic!("open {what}: {e}"));
+            let first = kept(&r);
+            assert!(
+                !first.facts.landings.is_empty(),
+                "swarm seed {seed}: {what} holds no M3 landing"
+            );
+            r.reindex()
+                .unwrap_or_else(|e| panic!("reindex {what}: {e}"));
+            assert_eq!(
+                kept(&r),
+                first,
+                "swarm seed {seed}: {what} after the reindex"
+            );
+            let d = tempfile::tempdir().expect("a dump dir");
+            let file = d.path().join("all.rdydump");
+            r.read()
+                .dump(&file)
+                .unwrap_or_else(|e| panic!("dump {what}: {e}"));
+            r.close().expect("close the copy");
+            let r = Rdy::open(&copy).unwrap_or_else(|e| panic!("reopen {what}: {e}"));
+            assert_eq!(kept(&r), first, "swarm seed {seed}: {what} after a reopen");
+            r.close().expect("close the copy");
+            let loaded = d.path().join("loaded");
+            rdy_engine::load::load(&file, &loaded)
+                .unwrap_or_else(|e| panic!("load the dump of {what}: {e}"));
+            let r = Rdy::open(&loaded).unwrap_or_else(|e| panic!("open the load of {what}: {e}"));
+            assert_eq!(
+                kept(&r),
+                first,
+                "swarm seed {seed}: {what} loaded from its dump"
+            );
+            r.close().expect("close the load");
+            let reindexed = reindex_reproduces(&copy);
+            assert!(
+                reindexed.is_ok(),
+                "swarm seed {seed}: the reindex audit on {what}: {reindexed:#?}"
+            );
+        }
+    });
+}
+
+/// Each assessment a landing names, by landing id: its id and its method.
+fn assessments(st: &ReadState) -> BTreeMap<String, (Hash, u32)> {
+    chain(st)
+        .into_iter()
+        .filter_map(|(h, rec)| {
+            let id = rec.assessment?;
+            let a = st.reader().assessment(&id).ok()?;
+            Some((h.to_string(), (id, a.method)))
+        })
+        .collect()
+}
+
+/// Plan Task 10 (D-33JR0, D-KVQ7F): a stored assessment is the original measurement with its
+/// original method. Each assessment a landing names decodes to the bytes of its own id
+/// (`assessment_id`), after the swarm's real compact and in every later state; the drain's new
+/// versions and their new assessments replace none of them: every landing of the frozen copy
+/// names the same assessment, with the same method, in the drained project, after its reindex
+/// and in a project loaded from its dump.
+#[test]
+fn mg10_original_assessments_survive_new_methods_and_compact() {
+    let compacted = std::cell::Cell::new(0);
+    each(|seed, o| {
+        let compact = o
+            .before_freeze()
+            .iter()
+            .any(|e| e.act == "m3_compact_real" && e.outcome == Met::Ok);
+        compacted.set(compacted.get() + usize::from(compact));
+        let read = |dir: &std::path::Path, reindex: bool| {
+            let (_keep, copy) = copy_of(dir);
+            let mut r = Rdy::open(&copy).expect("open a copy");
+            if reindex {
+                r.reindex().expect("reindex a copy");
+            }
+            let st = r.read();
+            let facts = M3Facts::read(&st).unwrap_or_else(|e| panic!("the M3 facts: {e:?}"));
+            for l in &facts.landings {
+                if let (Some(id), Some(a)) = (l.record.assessment, &l.assessment) {
+                    assert_eq!(
+                        assessment_id(a),
+                        id,
+                        "swarm seed {seed}: landing {}'s assessment {} reads other bytes",
+                        l.landing.short(),
+                        id.short()
+                    );
+                }
+            }
+            let got = assessments(&st);
+            drop(st);
+            r.close().expect("close a copy");
+            got
+        };
+        let frozen = read(&o.frozen, false);
+        assert!(
+            !frozen.is_empty(),
+            "swarm seed {seed}: no landing of the run names an assessment"
+        );
+        for (what, got) in [
+            ("the drained project", read(&o.dir, false)),
+            ("the drained project, reindexed", read(&o.dir, true)),
+        ] {
+            for (l, want) in &frozen {
+                assert_eq!(
+                    got.get(l),
+                    Some(want),
+                    "swarm seed {seed}: landing {l}'s assessment in {what}"
+                );
+            }
+        }
+        let methods: BTreeSet<u32> = frozen.values().map(|(_, m)| *m).collect();
+        eprintln!(
+            "swarm seed {seed}: {} landed assessments, methods {methods:?}, compacted {compact}",
+            frozen.len()
+        );
+    });
+    if std::env::var("RDY_QA_SWARM_SEEDS").is_err() {
+        assert!(
+            compacted.get() > 0,
+            "no seed ran the real compact before the freeze"
+        );
+    }
+}
+
+/// The text of the subject claim the real compact's removal names in `seed`'s run (the claim of
+/// its slot: `project` writes "The blob-notes attachment number <n> stays as written.").
+fn removed_text(seed: u64) -> Option<String> {
+    let sc = m3_scenarios(&Config::for_run(seed))
+        .into_iter()
+        .find(|s| s.route == Route::RealCompact)?;
+    Some(format!(
+        "The blob-notes attachment number {} stays as written.",
+        sc.slot + 1
+    ))
+}
+
+/// Plan Task 10: the profile outputs the swarm produced pass the disclosure and link checks. Each
+/// seed's publication route checked canon and a held landing under the org profile and wrote
+/// the Markdown, HTML and site outputs of that landing; each output is there and not empty,
+/// every local link and anchor of it resolves (scanned again here, from the files), and an
+/// output of a landing at or after the removal's landing holds no byte of the removed text.
+#[test]
+fn mg10_profile_outputs_pass_disclosure_and_link_checks() {
+    let after_removal = std::cell::Cell::new(0);
+    each(|seed, o| {
+        let run = o.before_freeze();
+        let outputs: Vec<(usize, &Entry)> = run
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.act == "m3_publication_output")
+            .collect();
+        let checks: Vec<&Entry> = run
+            .iter()
+            .filter(|e| e.act == "m3_publication_check")
+            .collect();
+        if outputs.is_empty() && checks.is_empty() {
+            // the kill cut the route before its first call
+            return;
+        }
+        for e in &checks {
+            if let (Met::Ok, Some(v)) = (&e.outcome, &e.reply) {
+                let status = &v["references"]["status"];
+                assert!(
+                    status == "clear" || status == "warning",
+                    "an org check reads {status}: {}",
+                    replay(seed, e)
+                );
+            }
+        }
+        // the removal's landing, if the run made it before the outputs
+        let removal = run
+            .iter()
+            .position(|e| e.act == "m3_blob_remove" && !route_records(e).is_empty());
+        let canary = removed_text(seed);
+        for (at, e) in outputs {
+            let Some(a) = &e.route else { continue };
+            let Reply::Acknowledged { ack, .. } = &a.reply else {
+                continue;
+            };
+            let dir = std::path::Path::new(ack);
+            assert!(
+                dir.exists(),
+                "{} is gone: {}",
+                dir.display(),
+                replay(seed, e)
+            );
+            let files = if dir.is_dir() {
+                tree(dir)
+            } else {
+                let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                BTreeMap::from([(name, std::fs::read(dir).unwrap())])
+            };
+            assert!(
+                !files.is_empty(),
+                "{} is empty: {}",
+                dir.display(),
+                replay(seed, e)
+            );
+            let scan = scan_local_links(&files);
+            assert!(
+                scan.broken.is_empty(),
+                "broken local links {:?}: {}",
+                scan.broken,
+                replay(seed, e)
+            );
+            assert_eq!(
+                scan.checked,
+                a.counts.links_checked,
+                "the scan differs from the run's: {}",
+                replay(seed, e)
+            );
+            if let (Some(r), Some(text)) = (removal, &canary)
+                && r < at
+            {
+                after_removal.set(after_removal.get() + 1);
+                let held: Vec<&String> = files
+                    .iter()
+                    .filter(|(_, b)| b.windows(text.len()).any(|w| w == text.as_bytes()))
+                    .map(|(n, _)| n)
+                    .collect();
+                assert!(
+                    held.is_empty(),
+                    "outputs {held:?} hold the removed text {text:?}: {}",
+                    replay(seed, e)
+                );
+            }
+        }
+        // the dirs the run kept are the ones the journal names
+        for d in &o.m3_outputs {
+            assert!(d.is_dir(), "swarm seed {seed}: {} is gone", d.display());
+        }
+    });
+    eprintln!(
+        "swarm seeds: {} outputs scanned for the removed text after its removal",
+        after_removal.get()
     );
 }
