@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod packs;
 pub mod perf;
 pub mod platform;
+pub mod publication_scenario;
 pub mod reindex_check;
 pub mod release_install;
 pub mod release_notices;
