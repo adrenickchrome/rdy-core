@@ -390,10 +390,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             "the session op is answered by the daemon connection, not by dispatch",
             "send it once, first, on a ctl connection",
         )),
-        "status" => {
-            parse::<NoArgs>(op, args, "{}")?;
-            status(cx)
-        }
+        "status" => status(cx, parse(op, args, "{log_bytes?}")?),
         "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
         "log" => log(cx, parse(op, args, "{limit?, since?, verify?}")?),

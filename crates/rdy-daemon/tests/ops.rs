@@ -186,7 +186,10 @@ fn ctl2_status_reports_views_owners_seq_open_report_and_quarantine() {
     );
     let v = dispatch(&cx(&e, &s, d.path()), "status", json!({})).unwrap();
     assert_eq!(v["quarantine"].as_array().unwrap().len(), 2);
-    // mh7: the byte report joins the keys above
+    // a plain status never waits on the writer for a census
+    assert!(v.get("log_bytes").is_none(), "{v}");
+    // mh7: the byte report joins the keys above when asked for
+    let v = dispatch(&cx(&e, &s, d.path()), "status", json!({"log_bytes": true})).unwrap();
     assert!(v["log_bytes"].as_u64().unwrap() > 0, "{v}");
     assert_eq!(v["removed_bytes"], 0);
     let rows = v["by_kind"].as_array().unwrap();
@@ -848,9 +851,9 @@ fn hd3_wc_commit_refuses_an_op_with_an_unknown_field() {
 fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
     let (d, e) = project();
     let s = human();
-    let err = dispatch(&cx(&e, &s, d.path()), "status", json!({"verbos": true})).unwrap_err();
+    let err = dispatch(&cx(&e, &s, d.path()), "tags", json!({"verbos": true})).unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
-    assert_eq!(err.message, "status: unknown field \"verbos\"");
+    assert_eq!(err.message, "tags: unknown field \"verbos\"");
     assert_eq!(err.fix, "remove \"verbos\"; it takes no fields");
     let err = dispatch(&cx(&e, &s, d.path()), "log", json!({"limt": 5})).unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");

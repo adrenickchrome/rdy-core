@@ -281,7 +281,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Sign(a) => signing_cmd::sign(env, a),
         Cmd::Key { cmd } => signing_cmd::key(env, cmd),
         Cmd::Remote { cmd } => remote_cmd::remote(env, cmd),
-        Cmd::Status => read_cmd::status(env),
+        Cmd::Status => read_cmd::status(env, as_json),
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
         Cmd::Publication { cmd } => publication_cmd::publication(env, cmd),

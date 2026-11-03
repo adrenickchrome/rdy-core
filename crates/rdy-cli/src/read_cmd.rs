@@ -73,8 +73,14 @@ pub(crate) struct SuspectsArgs {
     scope: Option<String>,
 }
 
-pub(crate) fn status(env: &Env) -> Result<(Value, String), ErrorReply> {
-    let mut v = call(env, "status", json!({}))?;
+pub(crate) fn status(env: &Env, as_json: bool) -> Result<(Value, String), ErrorReply> {
+    // only --json reports the log's bytes (D-4YRQ4): the census waits for a running write
+    let args = if as_json {
+        json!({"log_bytes": true})
+    } else {
+        json!({})
+    };
+    let mut v = call(env, "status", args)?;
     let mut t = status_text(&v);
     wc::status::attach(env, &mut v, &mut t)?;
     Ok((v, t))
