@@ -803,6 +803,10 @@ impl Shared<'_> {
     /// A link from `from` to the block `id`, if the store resolves it; with no href when the
     /// block has no place on the site (it then reads as its label, unlinked).
     fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
+        // a decision outside a named profile's selection (D-7M0YF)
+        if self.site.drops(id) {
+            return Some(Link::dropped());
+        }
         let target = self.m.get(id)?;
         // a publication profile is off the site: a link to it leads to its doc and reads as it
         // (a removed profile still reads as the notice)
@@ -820,6 +824,7 @@ impl Shared<'_> {
                 title: String::new(),
                 key: crate::site::typed_key(b).map(String::from),
                 removed: target.is_redacted(),
+                dropped: false,
             });
         };
         Some(Link {
@@ -830,6 +835,7 @@ impl Shared<'_> {
             title: self.hover(self.site.destination(id).unwrap_or(b), &url),
             key: crate::site::typed_key(b).map(String::from),
             removed: target.is_redacted(),
+            dropped: false,
         })
     }
 
@@ -841,6 +847,9 @@ impl Shared<'_> {
         let Some(old) = self.old_site else {
             return self.link(from, id);
         };
+        if old.drops(id) {
+            return Some(Link::dropped());
+        }
         let target = old.m.get(id)?;
         let (id, b) = match crate::site::is_profile(target) {
             true => {
@@ -862,6 +871,7 @@ impl Shared<'_> {
             title,
             key: crate::site::typed_key(b).map(String::from),
             removed: target.is_redacted(),
+            dropped: false,
         })
     }
 

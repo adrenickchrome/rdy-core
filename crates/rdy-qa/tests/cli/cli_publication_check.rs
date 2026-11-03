@@ -125,7 +125,7 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
         assert_eq!(cli.to_string(), mcp.to_string(), "{profile} {against:?}");
     }
 
-    // the text: three lines, then the comparison
+    // the text: four lines, then the comparison
     let t = stdout(&s.rdy(&[
         "publication",
         "check",
@@ -136,10 +136,10 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
     ]));
     assert_eq!(
         t,
-        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 changed blocks outside docs, 0 attachment changes, 1 new references.\n"
+        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nLinks outside selection: 0.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 changed blocks outside docs, 0 attachment changes, 1 new references.\n"
     );
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "site"]));
-    assert_eq!(t.lines().count(), 3, "{t}");
+    assert_eq!(t.lines().count(), 4, "{t}");
     // a public profile that refers outside its selection is blocked, and the command succeeds
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "open"]));
     assert!(t.starts_with("Publication profile open: blocked.\n"), "{t}");

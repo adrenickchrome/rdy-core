@@ -111,7 +111,14 @@ pub fn plain_refs(
     form: Form,
     label: &dyn Fn(&RefSpan) -> String,
 ) -> String {
-    plain_refs_in(text, mode, form, &|span| display_or(span, label), false)
+    plain_refs_in(
+        text,
+        mode,
+        form,
+        &|span| display_or(span, label),
+        &|_| false,
+        false,
+    )
 }
 
 /// A reference's display text, else what `label` says.
@@ -124,14 +131,16 @@ fn display_or(span: &RefSpan, label: &dyn Fn(&RefSpan) -> String) -> String {
 
 /// As [`plain_refs`], but `words` is called for every reference, one with display text too, and
 /// says all it reads as: a reference to a removed block reads as the notice, whatever display
-/// text the author gave (D-3M81W).
+/// text the author gave (D-3M81W). `drop` says which references a named profile drops, with the
+/// parentheses they empty ([`prune`]).
 pub(crate) fn plain_refs_every(
     text: &str,
     mode: RefMode,
     form: Form,
     words: &dyn Fn(&RefSpan) -> String,
+    drop: &dyn Fn(&RefSpan) -> bool,
 ) -> String {
-    plain_refs_in(text, mode, form, words, false)
+    plain_refs_in(text, mode, form, words, drop, false)
 }
 
 /// Opens a code span in the text of [`plain_refs_coded`].
@@ -164,16 +173,19 @@ pub(crate) fn plain_refs_coded(
     mode: RefMode,
     form: Form,
     words: &dyn Fn(&RefSpan) -> String,
+    drop: &dyn Fn(&RefSpan) -> bool,
 ) -> String {
-    plain_refs_in(text, mode, form, words, true)
+    plain_refs_in(text, mode, form, words, drop, true)
 }
 
-/// `words` reads every reference, one with display text too.
+/// `words` reads every reference, one with display text too; `drop` says which a named profile
+/// drops.
 fn plain_refs_in(
     text: &str,
     mode: RefMode,
     form: Form,
     words: &dyn Fn(&RefSpan) -> String,
+    drop: &dyn Fn(&RefSpan) -> bool,
     coded: bool,
 ) -> String {
     let read = |t: &str, label_form: bool| {
@@ -184,7 +196,7 @@ fn plain_refs_in(
             parse_spans(&toks, false)
         };
         let mut out = String::new();
-        render_plain(&nodes, &refs, words, coded, None, &mut out);
+        render_plain(&nodes, &refs, words, drop, coded, None, &mut out);
         out
     };
     match form {
@@ -708,6 +720,74 @@ fn local_href(target: &str, ctx: &Ctx) -> Option<(String, bool)> {
     }
 }
 
+/// Whether `c` may stay alone in a pair of parentheses that dropped references leave: white
+/// space, a comma or a semicolon (D-7M0YF).
+fn filler(c: char) -> bool {
+    c.is_whitespace() || c == ',' || c == ';'
+}
+
+/// `nodes` as a named profile shows them (D-7M0YF): a reference that `drop` says the output
+/// drops shows nothing. When dropped references leave a pair of parentheses with only white
+/// space, commas or semicolons inside, the pair goes too, with the white space before it. Other
+/// parentheses stay as written. With no dropped reference, `nodes` is unchanged.
+fn prune(nodes: &[Node], refs: &[RefSpan], drop: &dyn Fn(&RefSpan) -> bool) -> Vec<Node> {
+    let dropped = |n: &Node| matches!(n, Node::Ref(k) if drop(&refs[*k]));
+    let mut out = nodes.to_vec();
+    let mut i = 0;
+    while i < out.len() {
+        if !dropped(&out[i]) {
+            i += 1;
+            continue;
+        }
+        // the text that opens the pair: only filler and dropped references between
+        let mut open = None;
+        for j in (0..i).rev() {
+            match &out[j] {
+                n if dropped(n) => {}
+                Node::Text(t) => {
+                    let kept = t.trim_end_matches(filler);
+                    if kept.ends_with('(') {
+                        open = Some((j, kept.len() - 1));
+                    }
+                    if !kept.is_empty() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        // the text that closes it, the same way
+        let mut close = None;
+        for (k, n) in out.iter().enumerate().skip(i + 1) {
+            match n {
+                n if dropped(n) => {}
+                Node::Text(t) => {
+                    let kept = t.trim_start_matches(filler);
+                    if kept.starts_with(')') {
+                        close = Some((k, t.len() - kept.len() + 1));
+                    }
+                    if !kept.is_empty() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let (Some((j, at)), Some((k, after))) = (open, close) else {
+            i += 1;
+            continue;
+        };
+        let (Node::Text(left), Node::Text(right)) = (&out[j], &out[k]) else {
+            unreachable!("the pair opens and closes in text");
+        };
+        let left = left[..at].trim_end().to_string();
+        let right = right[after..].to_string();
+        out.splice(j..=k, [Node::Text(left), Node::Text(right)]);
+        i = j + 2;
+    }
+    out
+}
+
 // ---- output -------------------------------------------------------------------------------
 
 /// What a reference reads as in words: the notice when its target is removed (whatever display
@@ -722,6 +802,8 @@ fn ref_words(span: &RefSpan, link: Option<&Link>, unavailable: &str) -> String {
         return d.clone();
     }
     match link {
+        // a decision outside a named profile's selection: no words of its own (D-7M0YF)
+        Some(l) if l.dropped => String::new(),
         Some(l) => match (&l.key, span.key_typed) {
             (Some(k), true) if !k.is_empty() => k.clone(),
             _ => l.label.clone(),
@@ -748,6 +830,7 @@ fn render_html(
     after: Option<char>,
     out: &mut String,
 ) {
+    let nodes = &prune(nodes, refs, &|span| crate::html::drops(span, ctx.link));
     for (i, n) in nodes.iter().enumerate() {
         let next = next_char(nodes, i, after);
         match n {
@@ -844,15 +927,18 @@ fn one_period(span: &RefSpan, mut words: String, next: Option<char>) -> String {
     words
 }
 
-/// `label` reads every reference, one with display text too.
+/// `label` reads every reference, one with display text too; `drop` says which references a
+/// named profile drops ([`prune`]).
 fn render_plain(
     nodes: &[Node],
     refs: &[RefSpan],
     label: &dyn Fn(&RefSpan) -> String,
+    drop: &dyn Fn(&RefSpan) -> bool,
     coded: bool,
     after: Option<char>,
     out: &mut String,
 ) {
+    let nodes = &prune(nodes, refs, drop);
     // with `coded`, only a code span writes a bare mark: authored text is escaped
     let push = |out: &mut String, t: &str| {
         if coded {
@@ -871,12 +957,14 @@ fn render_plain(
             }
             Node::Code(c) if coded => {
                 out.push(CODE_OPEN);
-                render_plain(c, refs, label, coded, None, out);
+                render_plain(c, refs, label, drop, coded, None, out);
                 out.push(CODE_CLOSE);
             }
-            Node::Code(c) => render_plain(c, refs, label, coded, None, out),
-            Node::Strong(c) | Node::Em(c) => render_plain(c, refs, label, coded, next, out),
-            Node::Link { children, .. } => render_plain(children, refs, label, coded, next, out),
+            Node::Code(c) => render_plain(c, refs, label, drop, coded, None, out),
+            Node::Strong(c) | Node::Em(c) => render_plain(c, refs, label, drop, coded, next, out),
+            Node::Link { children, .. } => {
+                render_plain(children, refs, label, drop, coded, next, out)
+            }
         }
     }
 }

@@ -398,6 +398,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
         keys(&v["references"]),
         [
             "excluded",
+            "links_outside",
             "missing",
             "omitted_rows",
             "rows",
@@ -483,5 +484,65 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
         E_BAD_INPUT,
         "Disclosure comparison requires the same audience.",
         "Choose a baseline with the same audience as the candidate profile.",
+    );
+}
+
+/// lo1 (D-44NMT): the report lists the link edges outside the selection apart from the reference
+/// rows. They have their own count, rows and omitted count, and they never set the status, a
+/// warning or the reference counts.
+#[test]
+fn lo1_report_lists_links_outside_apart_from_reference_rows() {
+    let (_dir, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$in", "fields": {"name": "in", "title": "In", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$ins", "parent": "$in", "fields": {"title": "Kept"}},
+            {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$outs", "parent": "$out", "fields": {"title": "Rulings"}},
+            {"op": "create", "type": "decision", "id": "$d", "parent": "$outs", "fields": {"statement": "The ruling.", "status": "proposed"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$ins", "body": "The claim has no ref.",
+                "links": {"decided_by": [{"target": "$d"}]}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (inside, admin) = (id(&w, "$in"), id(&w, "$admin"));
+    let (claim, decision) = (id(&w, "$c"), id(&w, "$d"));
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "publication_profile", "id": "$pf", "parent": admin,
+            "fields": {"key": "open", "title": "Open", "audience": "public", "select": [inside]}}]),
+    );
+    land(&mut r, "work");
+    let v = publication::check(&r.read(), "open", None, None).unwrap();
+    let refs = &v["references"];
+    assert_eq!(refs["status"], "clear", "{refs}");
+    assert_eq!(
+        (&refs["excluded"], &refs["missing"], &refs["total"]),
+        (&json!(0), &json!(0), &json!(0))
+    );
+    assert_eq!(refs["rows"], json!([]));
+    assert_eq!(v["warnings"], json!([]));
+    assert_eq!(
+        refs["links_outside"],
+        json!({
+            "count": 1,
+            "rows": [{
+                "source": claim,
+                "location": "/links/decided_by/0",
+                "target": decision,
+                "classification": "excluded",
+                "occurrences": 1,
+            }],
+            "omitted_rows": 0,
+        })
+    );
+    // the summary every surface shows carries the same object
+    let resolved = publication::resolve(&r.read(), &Scope::Canon, "open").unwrap();
+    assert_eq!(
+        publication::reference_summary(&resolved.references)["links_outside"],
+        refs["links_outside"]
     );
 }

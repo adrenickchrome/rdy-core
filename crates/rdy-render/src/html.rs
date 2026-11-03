@@ -38,6 +38,20 @@ pub struct Link {
     /// The target is removed content (D-3M81W): the reference reads as the notice, whatever
     /// display text the author gave it.
     pub removed: bool,
+    /// The target is a decision outside a named profile's selection (D-7M0YF): the reference
+    /// reads as the author's display words, or as nothing. Such a link has no href, label, title
+    /// or key.
+    pub dropped: bool,
+}
+
+impl Link {
+    /// The link of a reference to a decision outside a named profile's selection (D-7M0YF).
+    pub fn dropped() -> Link {
+        Link {
+            dropped: true,
+            ..Link::default()
+        }
+    }
 }
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
@@ -71,6 +85,7 @@ pub fn words_html(
         RefMode::Strict,
         inline::Form::Label,
         &|span| diagram_label(span, link, unavailable),
+        &|span| drops(span, link),
     ))
 }
 
@@ -108,10 +123,22 @@ fn diagram_label(
         return d.clone();
     }
     match target {
+        // a decision outside a named profile's selection: no words of its own (D-7M0YF)
+        Some(Link { dropped: true, .. }) => String::new(),
         Some(Link { key: Some(k), .. }) if span.key_typed && !k.is_empty() => k,
         Some(l) => l.label,
         None => unavailable.to_string(),
     }
+}
+
+/// Whether a named profile drops the reference `span` (D-7M0YF): its target is a decision outside
+/// the selection and the author gave no display words.
+pub(crate) fn drops(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> bool {
+    span.display.is_none()
+        && BlockId::parse(&span.token)
+            .ok()
+            .and_then(|id| link(&id))
+            .is_some_and(|l| l.dropped)
 }
 
 /// The diagram's resolved plain source, as the drawing reads it: each id-shaped `{{id}}` replaced

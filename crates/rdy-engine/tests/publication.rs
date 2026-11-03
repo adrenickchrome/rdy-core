@@ -617,21 +617,24 @@ fn pub4_selected_graph_has_no_excluded_endpoint() {
         rdy_graph::Graph::build_with(res.m.iter(), res.graph.tracking().clone()).induced(&keep);
     assert_eq!(res.graph, rebuilt);
     assert_eq!(**res.graph.tracking(), st.pack().tracking());
-    // the boundary-crossing references are reported, never followed
-    assert_eq!(res.references.status, CheckStatus::Warning);
+    // the boundary-crossing links are reported, never followed (D-44NMT), and the claim's ref
+    // to an excluded decision is dropped (D-7M0YF): neither counts
+    assert_eq!(res.references.status, CheckStatus::Clear);
+    assert!(res.references.rows.is_empty());
     let sources: BTreeSet<BlockId> = res
         .references
-        .rows
+        .links_outside
         .iter()
         .map(|r| r.source.clone())
         .collect();
     assert_eq!(sources, id_set(&[&dk1, &kc]));
     assert!(
         res.references
-            .rows
+            .links_outside
             .iter()
             .all(|r| r.target == dx1.to_string() && r.classification == Classification::Excluded)
     );
+    assert_eq!(res.references.dropped_decisions, id_set(&[&dx1]));
 }
 
 #[test]
@@ -717,11 +720,18 @@ fn pub4_references_count_occurrences_and_all_string_locations() {
     ]);
     let res = publication::resolve_in_for_tests(&st, &m, "pubsite").unwrap();
     use Classification::{Excluded, Missing};
+    // the link edges are links outside the selection (D-44NMT), not reference rows
+    assert_eq!(
+        res.references.links_outside,
+        vec![
+            row("c-ANCH1", "/links/a~1b~0c/0", "d-DR0P1", Excluded, 1),
+            row("c-ANCH1", "/links/depends_on/0", "D-M1SS2", Missing, 1),
+            row("c-ANCH1", "/links/see_also/1", "d-DR0P1", Excluded, 1),
+            row("c-ANCH1", "/links/see_also/2", "d-DR0P1", Excluded, 1),
+        ]
+    );
+    assert_eq!(res.references.links_outside_count, 4);
     let want = vec![
-        row("c-ANCH1", "/links/a~1b~0c/0", "d-DR0P1", Excluded, 1),
-        row("c-ANCH1", "/links/depends_on/0", "D-M1SS2", Missing, 1),
-        row("c-ANCH1", "/links/see_also/1", "d-DR0P1", Excluded, 1),
-        row("c-ANCH1", "/links/see_also/2", "d-DR0P1", Excluded, 1),
         row("c-ANCH1", "body", "d-DR0P1", Excluded, 1),
         row("cd-C0DE1", "/fields/lang", "d-DR0P1", Excluded, 1),
         row("dg-D1AG1", "/fields/alt", "d-M1SS1", Missing, 1),
@@ -739,9 +749,9 @@ fn pub4_references_count_occurrences_and_all_string_locations() {
         ),
     ];
     assert_eq!(res.references.rows, want);
-    assert_eq!(res.references.excluded_count, 14);
-    assert_eq!(res.references.missing_count, 3);
-    assert_eq!(res.references.blocked_count, 17);
+    assert_eq!(res.references.excluded_count, 11);
+    assert_eq!(res.references.missing_count, 2);
+    assert_eq!(res.references.blocked_count, 13);
     assert_eq!(res.references.status, CheckStatus::Warning);
     // the rows hold the source's own tokens, never a target's title, key or the display text
     let shown = format!("{:?}", res.references);
@@ -844,6 +854,200 @@ fn pub4_reference_policy_has_exact_text_and_no_target_labels() {
         assert!(!all.contains(leak), "{leak} in {all}");
     }
     assert!(!e.message.contains("d-DR0P1") && !w.message.contains("d-DR0P1"));
+}
+
+/// lo1 (D-44NMT): no output shows a link edge, so a link to an excluded target or to no block
+/// never sets the check's status. The report lists each such edge as a link outside the
+/// selection, with its own `/links/<kind>/<index>` location. A ref in the body or a field of a
+/// selected block still counts, beside the links.
+#[test]
+fn lo1_link_edges_outside_the_selection_never_set_the_status() {
+    let (_dir, r) = project();
+    let st = r.read();
+    let mut claim = blk("c-QNK01", "claim", Some("d-KEEP1"), "a");
+    claim = link(claim, "decided_by", "D-DR0P1");
+    claim = link(claim, "decided_by", "D-KEPT1");
+    claim = link(claim, "implements", "D-M1SS1");
+    claim = link(claim, "depends_on", "d-DR0P1");
+    let blocks = vec![
+        named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+        profile_block("pf-PBC01", "d-ADM1N", "pubsite", "public", &["d-KEEP1"]),
+        profile_block("pf-0RG01", "d-ADM1N", "orgsite", "org", &["d-KEEP1"]),
+        profile_block("pf-PBC02", "d-ADM1N", "bothsite", "public", &["d-B0TH1"]),
+        named(blk("d-KEEP1", "doc", None, "b"), "keep"),
+        claim,
+        blk("D-KEPT1", "decision", Some("d-KEEP1"), "b"),
+        named(blk("d-DR0P1", "doc", None, "c"), "drop"),
+        blk("D-DR0P1", "decision", Some("d-DR0P1"), "a"),
+        // a selected doc with a link edge and a body ref, both outside the selection
+        named(blk("d-B0TH1", "doc", None, "d"), "both"),
+        link(
+            with_body(
+                blk("c-B0TH1", "claim", Some("d-B0TH1"), "a"),
+                "Names {{d-DR0P1}}.",
+            ),
+            "decided_by",
+            "D-DR0P1",
+        ),
+    ];
+    let m = synth(blocks);
+    use Classification::{Excluded, Missing};
+    let links = vec![
+        row("c-QNK01", "/links/decided_by/0", "D-DR0P1", Excluded, 1),
+        row("c-QNK01", "/links/depends_on/0", "d-DR0P1", Excluded, 1),
+        row("c-QNK01", "/links/implements/0", "D-M1SS1", Missing, 1),
+    ];
+    for key in ["pubsite", "orgsite"] {
+        let res = publication::resolve_in_for_tests(&st, &m, key).unwrap();
+        let refs = &res.references;
+        assert_eq!(refs.status, CheckStatus::Clear, "{key}");
+        assert_eq!(
+            (refs.excluded_count, refs.missing_count, refs.blocked_count),
+            (0, 0, 0),
+            "{key}"
+        );
+        assert!(refs.rows.is_empty(), "{key}: {:?}", refs.rows);
+        assert_eq!(refs.links_outside, links, "{key}");
+        assert_eq!(refs.links_outside_count, 3, "{key}");
+        // links outside never block and never warn
+        assert!(res.require_output().is_ok(), "{key}");
+        assert!(
+            refs.warning().is_none() && refs.live_warning().is_none(),
+            "{key}"
+        );
+    }
+    // the body ref alone counts and blocks; the link edge stays a link outside
+    let both = publication::resolve_in_for_tests(&st, &m, "bothsite").unwrap();
+    let refs = &both.references;
+    assert_eq!(refs.status, CheckStatus::Blocked);
+    assert_eq!(
+        (refs.excluded_count, refs.missing_count, refs.blocked_count),
+        (1, 0, 1)
+    );
+    assert_eq!(
+        refs.rows,
+        vec![row("c-B0TH1", "body", "d-DR0P1", Excluded, 1)]
+    );
+    assert_eq!(
+        refs.links_outside,
+        vec![row(
+            "c-B0TH1",
+            "/links/decided_by/0",
+            "D-DR0P1",
+            Excluded,
+            1
+        )]
+    );
+    assert_eq!(refs.links_outside_count, 1);
+    assert_eq!(
+        both.require_output().unwrap_err().message,
+        "Public profile has 1 references outside its selection."
+    );
+}
+
+/// lo1 (D-44NMT): the disclosure comparison is not changed. A link edge that a candidate gains
+/// to a target outside the selection is still a new reference of the comparison.
+#[test]
+fn lo1_the_disclosure_comparison_keeps_new_link_edges() {
+    let (_dir, r) = project();
+    let st = r.read();
+    let blocks = |linked: bool| {
+        let mut claim = blk("c-QNK01", "claim", Some("d-KEEP1"), "a");
+        if linked {
+            claim = link(claim, "decided_by", "D-DR0P1");
+        }
+        synth(vec![
+            named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+            profile_block("pf-PBC01", "d-ADM1N", "pubsite", "public", &["d-KEEP1"]),
+            named(blk("d-KEEP1", "doc", None, "b"), "keep"),
+            claim,
+            named(blk("d-DR0P1", "doc", None, "c"), "drop"),
+            blk("D-DR0P1", "decision", Some("d-DR0P1"), "a"),
+        ])
+    };
+    let before = publication::resolve_in_for_tests(&st, &blocks(false), "pubsite").unwrap();
+    let after = publication::resolve_in_for_tests(&st, &blocks(true), "pubsite").unwrap();
+    assert_eq!(after.references.status, CheckStatus::Clear);
+    let d = publication::disclosure_diff(&before, &after).unwrap();
+    assert_eq!(
+        d.new_references,
+        vec![row(
+            "c-QNK01",
+            "/links/decided_by/0",
+            "D-DR0P1",
+            Classification::Excluded,
+            1
+        )]
+    );
+    assert_eq!(d.new_reference_count, 1);
+}
+
+/// lo2 (D-7M0YF): a ref to a decision outside the selection never counts, in any status, with
+/// or without display words, in the body or a field. A ref to a decision id that is no block
+/// still counts as missing, and a ref to an excluded block of another type still counts as
+/// excluded. A decision inside the selection resolves as before.
+#[test]
+fn lo2_refs_to_decisions_outside_the_selection_never_count() {
+    let (_dir, r) = project();
+    let st = r.read();
+    let decision = |id: &str, parent: &str, order: &str, status: &str| {
+        with_field(
+            with_field(
+                blk(id, "decision", Some(parent), order),
+                "status",
+                s(status),
+            ),
+            "key",
+            s(&format!("key-{}", &id[2..])),
+        )
+    };
+    let blocks = vec![
+        named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+        profile_block("pf-PBC01", "d-ADM1N", "pubsite", "public", &["d-KEEP1"]),
+        profile_block("pf-PBC02", "d-ADM1N", "missing", "public", &["d-M0RE1"]),
+        named(blk("d-KEEP1", "doc", None, "b"), "keep"),
+        with_body(
+            blk("p-REF01", "prose", Some("d-KEEP1"), "a"),
+            "Holds ({{D-DR0P1|@key}}, {{D-DR0P2|@key}}). Named {{D-DR0P1|the ruling}}, bare \
+             {{D-DR0P2}}, and kept {{D-KEPT1}}.",
+        ),
+        with_field(
+            blk("tb-TAB01", "table", Some("d-KEEP1"), "b"),
+            "rows",
+            FieldValue::List(vec![FieldValue::List(vec![s("Cell {{D-DR0P1}}")])]),
+        ),
+        decision("D-KEPT1", "d-KEEP1", "c", "accepted"),
+        named(blk("d-DR0P1", "doc", None, "c"), "drop"),
+        decision("D-DR0P1", "d-DR0P1", "a", "accepted"),
+        decision("D-DR0P2", "d-DR0P1", "b", "superseded"),
+        named(blk("d-M0RE1", "doc", None, "d"), "more"),
+        with_body(
+            blk("p-M0RE1", "prose", Some("d-M0RE1"), "a"),
+            "Gone ({{D-M1SS1|@key}}) and doc {{d-DR0P1}} and ruling {{D-DR0P1}}.",
+        ),
+    ];
+    let m = synth(blocks);
+    let res = publication::resolve_in_for_tests(&st, &m, "pubsite").unwrap();
+    let refs = &res.references;
+    assert_eq!(refs.status, CheckStatus::Clear, "{:?}", refs.rows);
+    assert_eq!(
+        (refs.excluded_count, refs.missing_count, refs.blocked_count),
+        (0, 0, 0)
+    );
+    assert!(refs.rows.is_empty(), "{:?}", refs.rows);
+    assert!(res.require_output().is_ok());
+    // a decision ref to no block counts as missing; another excluded type counts as excluded
+    let more = publication::resolve_in_for_tests(&st, &m, "missing").unwrap();
+    use Classification::{Excluded, Missing};
+    assert_eq!(
+        more.references.rows,
+        vec![
+            row("p-M0RE1", "body", "D-M1SS1", Missing, 1),
+            row("p-M0RE1", "body", "d-DR0P1", Excluded, 1),
+        ]
+    );
+    assert_eq!(more.references.blocked_count, 2);
+    assert_eq!(more.references.status, CheckStatus::Blocked);
 }
 
 /// Final fix round 1: the chosen profile's title and description become the output's own

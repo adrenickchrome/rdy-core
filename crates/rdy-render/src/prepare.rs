@@ -14,7 +14,7 @@ use rdy_graph::Graph;
 use rdy_model::redaction::BlockResidue;
 use rdy_model::{Block, BlockId, Hash, Op};
 use rdy_schema::Pack;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -79,6 +79,9 @@ pub(crate) struct ProfilePresentation {
     pub tag_redacted: bool,
     /// Which output the profile is shown in.
     pub presentation: Presentation,
+    /// The decisions outside the selection whose references the output drops (D-7M0YF), from
+    /// the reference check; a live review adds its base's.
+    pub dropped_decisions: BTreeSet<BlockId>,
 }
 
 /// Where a named profile is shown (D-CWC91, D-DK03K).

@@ -1291,7 +1291,7 @@ fn spv10_cli_check_reviews_without_widening_output() {
         t.starts_with("Publication profile preview: blocked.\n"),
         "{t}"
     );
-    assert_eq!(t.lines().count(), 3, "{t}");
+    assert_eq!(t.lines().count(), 4, "{t}");
     let (ok, v) = s.json(&[
         "--json",
         "publication",

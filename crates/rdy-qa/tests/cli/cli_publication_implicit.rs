@@ -105,7 +105,7 @@ fn pub12_check_names_the_implicit_profile_on_cli_and_mcp() {
         t.starts_with("Implicit publication profile (org): clear.\n"),
         "{t}"
     );
-    assert_eq!(t.lines().count(), 3, "{t}");
+    assert_eq!(t.lines().count(), 4, "{t}");
     assert!(
         t.lines()
             .nth(1)
@@ -113,6 +113,7 @@ fn pub12_check_names_the_implicit_profile_on_cli_and_mcp() {
         "{t}"
     );
     assert_eq!(t.lines().nth(2), Some("References outside selection: 0."));
+    assert_eq!(t.lines().nth(3), Some("Links outside selection: 0."));
     let t = stdout(&s.rdy(&[
         "publication",
         "check",

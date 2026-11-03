@@ -240,8 +240,9 @@ fn ndh4_a_governed_decision_keeps_its_subtree_and_an_affects_route_counts() {
     for left in ["t-TERM1", "t-TERM2", "d-0THER", "D-R00T1", "D-F01D1"] {
         assert!(!ids.contains(&bid(left)), "{left}: {ids:?}");
     }
+    // a link edge outside the selection is a link outside it, not a reference row (D-44NMT)
     assert!(
-        res.references.rows.contains(&ReferenceRow {
+        res.references.links_outside.contains(&ReferenceRow {
             source: bid("D-R00T2"),
             location: "/links/affects/1".into(),
             target: "t-TERM2".into(),
@@ -249,7 +250,7 @@ fn ndh4_a_governed_decision_keeps_its_subtree_and_an_affects_route_counts() {
             occurrences: 1,
         }),
         "{:?}",
-        res.references.rows
+        res.references.links_outside
     );
 }
 
@@ -593,11 +594,13 @@ fn ndh4_a_kept_decision_with_no_doc_keeps_the_blocks_outside_docs_it_links() {
         assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
         assert!(res.require_output().is_ok(), "{profile}");
     }
-    // one hop only: a kept finding's own link to a source with no doc stays a row
+    // one hop only: a kept finding's own link to a source with no doc stays a link outside the
+    // selection (D-44NMT)
     let res = publication::resolve_in_for_tests(&st, &linked(true), "pub").unwrap();
     assert!(!entry_ids(&res).contains(&bid("S-R00T1")));
+    assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
     assert_eq!(
-        res.references.rows,
+        res.references.links_outside,
         vec![ReferenceRow {
             source: bid("F-R00T1"),
             location: "/links/depends_on/0".into(),
