@@ -23,6 +23,117 @@ pub const DEADLINE: Duration = Duration::from_secs(30);
 /// The `protocolVersion` the client sends in its `initialize`.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// An eliciting session's whole exchange holds at most this many messages, both ways.
+pub const EXCHANGE_MAX_MESSAGES: usize = 256;
+/// An eliciting session's whole exchange holds at most this many bytes, both ways (each message
+/// line with its LF). The server's stdout and stderr together have the same cap.
+pub const EXCHANGE_MAX_BYTES: usize = 1 << 20;
+/// An eliciting session sends at most this many tool calls, retries included.
+pub const EXCHANGE_MAX_CALLS: usize = 32;
+/// How long the simulated person may take to answer one form: the server's own continuation
+/// bound. An answer at or past it is never sent.
+pub const CONTINUATION_BOUND: Duration = rdy_mcp::elicitation::EXPIRY;
+
+/// The protocol revision an eliciting session states, and how it states it: the QA
+/// initialization option of a bounded session.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Revision {
+    /// `initialize` with `version` and `capabilities` (2025-11-25 and 2025-06-18): the server
+    /// sends `elicitation/create` inside the call and waits for the answer.
+    Initialize {
+        version: String,
+        capabilities: Value,
+    },
+    /// No `initialize`: each request states `version`, `capabilities` and the client's info in
+    /// its `_meta` (2026-07-28). The server returns `input_required`, and the client retries
+    /// the call with the bound continuation.
+    Inline {
+        version: String,
+        capabilities: Value,
+    },
+}
+
+/// One message of an eliciting session's exchange, in the order it was sent or taken.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Exchanged {
+    /// A request the client sent: `initialize` or a tool call.
+    Request(Value),
+    /// A notification the client sent.
+    ClientNotification(Value),
+    /// The client's answer to a server request.
+    Response(Value),
+    /// A request from the server: a form.
+    ServerRequest(Value),
+    /// The server's response to a request of the client.
+    Reply(Value),
+    /// A notification from the server.
+    Notification(Value),
+}
+
+/// What the simulated person does with one form.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PersonAct {
+    /// The form's result (`{"action": ..., "content": ...}`): sent as the server request's
+    /// `result`, or as the `inputRequests` entry's response.
+    Answer(Value),
+    /// A JSON-RPC error object in place of the result of an in-call form. An `inputRequests`
+    /// entry has no error form, so there it is sent as the entry itself.
+    Error(Value),
+    /// The person leaves: the session is stopped and the call has no reply.
+    Leave,
+}
+
+/// The injected clock of an eliciting session.
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// An eliciting session's revision, its exchange so far and its clock.
+struct Eliciting {
+    revision: Revision,
+    exchange: Vec<Exchanged>,
+    bytes: usize,
+    clock: Clock,
+    /// True while an elicited call waits: a form request is taken only then.
+    asking: bool,
+}
+
+impl Eliciting {
+    /// Records `e` (one line of `len` bytes), sent or taken; false once either cap is passed.
+    fn record(&mut self, e: Exchanged, len: usize) -> bool {
+        let bytes = self.bytes.saturating_add(len + 1);
+        if self.exchange.len() >= EXCHANGE_MAX_MESSAGES || bytes > EXCHANGE_MAX_BYTES {
+            return false;
+        }
+        self.bytes = bytes;
+        self.exchange.push(e);
+        true
+    }
+}
+
+/// A message the client sends, by its shape.
+fn sent(v: &Value) -> Exchanged {
+    match (v.get("id").is_some(), v.get("method").is_some()) {
+        (true, true) => Exchanged::Request(v.clone()),
+        (false, _) => Exchanged::ClientNotification(v.clone()),
+        (true, false) => Exchanged::Response(v.clone()),
+    }
+}
+
+/// A message the server sent, which already passed [`message`], by its shape.
+fn taken(v: &Value) -> Exchanged {
+    match (v.get("id").is_some(), v.get("method").is_some()) {
+        (true, true) => Exchanged::ServerRequest(v.clone()),
+        (false, _) => Exchanged::Notification(v.clone()),
+        (true, false) => Exchanged::Reply(v.clone()),
+    }
+}
+
+/// What the client took while it waited for a response.
+enum Awaited {
+    Reply(Value),
+    /// A form request from the server.
+    Request(Value),
+}
+
 #[derive(Debug, Clone)]
 pub enum Reply {
     Ok(Value),
@@ -184,6 +295,8 @@ pub struct McpClient {
     /// A bounded session that was stopped: its group killed, its child reaped, its workers
     /// joined.
     stopped: bool,
+    /// An eliciting session's state; `None` for every other session, which records nothing.
+    eliciting: Option<Eliciting>,
 }
 
 impl Drop for McpClient {
@@ -437,13 +550,23 @@ fn initialize_result(r: &Value) -> bool {
 /// One line of a bounded session's stdout as a JSON-RPC 2.0 message the client accepts: a
 /// response (a number or string `id` and exactly one of `result` and `error`) or a
 /// notification (a string `method` and no `id`). A request from the server is refused: the
-/// client answers none. Anything else is [`McpFailure::Protocol`].
-fn message(line: &str) -> Result<Value, McpFailure> {
+/// client answers none, except a form (`elicitation/create` with a number or string `id` and
+/// object `params`) while an elicited call waits (`forms`). Anything else is
+/// [`McpFailure::Protocol`].
+fn message(line: &str, forms: bool) -> Result<Value, McpFailure> {
     let v: Value = serde_json::from_str(line).map_err(|_| McpFailure::Protocol)?;
     if !v.is_object() || v["jsonrpc"] != "2.0" {
         return Err(McpFailure::Protocol);
     }
     let response = match (v.get("id"), v.get("method")) {
+        (Some(id), Some(method)) => {
+            forms
+                && (id.is_number() || id.is_string())
+                && method == "elicitation/create"
+                && v.get("params").is_some_and(Value::is_object)
+                && v.get("result").is_none()
+                && v.get("error").is_none()
+        }
         (Some(id), None) => {
             (id.is_number() || id.is_string())
                 && v.get("result").is_some() != v.get("error").is_some()
@@ -638,6 +761,7 @@ impl McpClient {
             budget: DEADLINE,
             pid,
             stopped: false,
+            eliciting: None,
         })
     }
 
@@ -655,8 +779,32 @@ impl McpClient {
 
     /// [`McpClient::try_launch_bounded`], with the stopped session beside a failure (for tests).
     fn try_launch_inner(
+        command: Command,
+        max_output: usize,
+    ) -> Result<McpClient, (McpFailure, Option<Box<McpClient>>)> {
+        McpClient::try_launch_as(command, max_output, None)
+    }
+
+    /// A bounded session that scripts the person's side of an elicitation: it states
+    /// `revision`, takes the server's forms inside [`McpClient::try_call_elicited`] and records
+    /// its whole exchange ([`McpClient::exchange`]). Its caps are [`EXCHANGE_MAX_MESSAGES`],
+    /// [`EXCHANGE_MAX_BYTES`] (which also caps the server's stdout and stderr together) and
+    /// [`EXCHANGE_MAX_CALLS`]; passing one is [`McpFailure::OutputLimit`]. An
+    /// [`Revision::Initialize`] session sends that `initialize`; an [`Revision::Inline`] one
+    /// sends none. Its clock is the real one until [`McpClient::set_clock`].
+    pub fn try_launch_eliciting(
+        command: Command,
+        revision: Revision,
+    ) -> Result<McpClient, McpFailure> {
+        McpClient::try_launch_as(command, EXCHANGE_MAX_BYTES, Some(revision))
+            .map_err(|(failure, _)| failure)
+    }
+
+    /// The bounded session of `command`: as before with no `revision`, or eliciting.
+    fn try_launch_as(
         mut command: Command,
         max_output: usize,
+        revision: Option<Revision>,
     ) -> Result<McpClient, (McpFailure, Option<Box<McpClient>>)> {
         platform::own_process_group(&mut command);
         command.stderr(Stdio::piped());
@@ -667,9 +815,33 @@ impl McpClient {
         });
         let mut c = McpClient::spawn_session(command, true, Some(bound))
             .map_err(|_| (McpFailure::Io, None))?;
+        let initialize = match &revision {
+            None => Some((PROTOCOL_VERSION.to_string(), json!({}))),
+            Some(Revision::Initialize {
+                version,
+                capabilities,
+            }) => Some((version.clone(), capabilities.clone())),
+            Some(Revision::Inline { .. }) => None,
+        };
+        c.eliciting = revision.map(|revision| Eliciting {
+            revision,
+            exchange: Vec::new(),
+            bytes: 0,
+            clock: Arc::new(Instant::now),
+            asking: false,
+        });
+        let Some((version, capabilities)) = initialize else {
+            return Ok(c);
+        };
         let initialized = (|| {
             let id = c.next_id();
-            let v = c.try_request(&McpClient::initialize_request(id), id)?;
+            let request = if c.eliciting.is_some() {
+                json!({"jsonrpc": "2.0", "id": id, "method": "initialize",
+                    "params": {"protocolVersion": version, "capabilities": capabilities, "clientInfo": {"name": "rdy-qa", "version": "0"}}})
+            } else {
+                McpClient::initialize_request(id)
+            };
+            let v = c.try_request(&request, id)?;
             if v.get("error").is_some() || !initialize_result(&v["result"]) {
                 return Err(McpFailure::Protocol);
             }
@@ -685,19 +857,175 @@ impl McpClient {
         }
     }
 
+    /// `rdy mcp --project <s.dir>` as `s`'s human, for a bounded session: the proxy to the
+    /// project's daemon, which it starts if none runs.
+    pub fn proxy(s: &Served) -> Command {
+        McpClient::proxy_command(s.dir.path(), &s.env_pairs())
+    }
+
+    /// Replaces an eliciting session's clock, which times the person's answer to each form.
+    pub fn set_clock(&mut self, clock: Clock) {
+        if let Some(e) = self.eliciting.as_mut() {
+            e.clock = clock;
+        }
+    }
+
+    /// Every message an eliciting session sent and took, in order; empty for another session.
+    pub fn exchange(&self) -> &[Exchanged] {
+        self.eliciting.as_ref().map_or(&[], |e| &e.exchange)
+    }
+
+    /// The `tools/call` request `id` of `tool` with `args`, with `extra` beside them in its
+    /// params and, in an inline session, the client context in its `_meta`.
+    fn call_request(&self, id: u64, tool: &str, args: Value, extra: Option<&Value>) -> Value {
+        let mut params = json!({"name": tool, "arguments": args});
+        if let Some(Eliciting {
+            revision:
+                Revision::Inline {
+                    version,
+                    capabilities,
+                },
+            ..
+        }) = &self.eliciting
+        {
+            params["_meta"] = json!({
+                "io.modelcontextprotocol/protocolVersion": version,
+                "io.modelcontextprotocol/clientCapabilities": capabilities,
+                "io.modelcontextprotocol/clientInfo": {"name": "rdy-qa", "version": "0"},
+            });
+        }
+        if let Some(Value::Object(extra)) = extra {
+            for (k, v) in extra {
+                params[k] = v.clone();
+            }
+        }
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+    }
+
+    /// The next call's id, counted; an eliciting session refuses a call past its cap.
+    fn take_call(&mut self) -> Result<u64, McpFailure> {
+        if self.eliciting.is_some() && self.calls >= EXCHANGE_MAX_CALLS {
+            return Err(McpFailure::OutputLimit);
+        }
+        self.calls += 1;
+        Ok(self.next_id())
+    }
+
     /// Calls `tool` with `args` in a bounded session: the strict reply, or the failure, after
     /// which the session is stopped.
     pub fn try_call(&mut self, tool: &str, args: Value) -> Result<Reply, McpFailure> {
         let called = (|| {
-            let id = self.next_id();
-            self.calls += 1;
-            let v = self.try_request(
-                &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": args}}),
-                id,
-            )?;
+            let id = self.take_call()?;
+            let v = self.try_request(&self.call_request(id, tool, args, None), id)?;
             decode_reply(&v, true).ok_or(McpFailure::Protocol)
         })();
         called.map_err(|failure| self.fail(failure))
+    }
+
+    /// Calls `tool` with `args` in an eliciting session and lets `person` act on each form the
+    /// server asks, until the call ends: the strict final reply, or the failure, after which
+    /// the session is stopped.
+    ///
+    /// In the in-call flow, each `elicitation/create` the server sends while the call waits is
+    /// given to `person` whole, and the act is sent as that request's response. In the inline
+    /// flow, an `input_required` result gives `person` each `inputRequests` entry in key order,
+    /// and the client retries the same call with its `requestState` and the `inputResponses`.
+    /// The person's answer to a form must come within [`CONTINUATION_BOUND`] of the form on
+    /// the session's clock: one at or past it is [`McpFailure::Deadline`] and is never sent.
+    /// [`PersonAct::Leave`] stops the session at once: [`McpFailure::Io`], with no answer sent.
+    /// A session that is not eliciting is [`McpFailure::Io`].
+    pub fn try_call_elicited(
+        &mut self,
+        tool: &str,
+        args: Value,
+        person: &mut dyn FnMut(&Value) -> PersonAct,
+    ) -> Result<Reply, McpFailure> {
+        if self.eliciting.is_none() || self.stopped {
+            return Err(McpFailure::Io);
+        }
+        let called = self.elicited(tool, args, person);
+        if let Some(e) = self.eliciting.as_mut() {
+            e.asking = false;
+        }
+        called.map_err(|failure| self.fail(failure))
+    }
+
+    fn elicited(
+        &mut self,
+        tool: &str,
+        args: Value,
+        person: &mut dyn FnMut(&Value) -> PersonAct,
+    ) -> Result<Reply, McpFailure> {
+        let mut extra: Option<Value> = None;
+        loop {
+            let id = self.take_call()?;
+            let request = self.call_request(id, tool, args.clone(), extra.as_ref());
+            self.try_send(&request)?;
+            self.set_asking(true);
+            let v = loop {
+                match self.try_await(id)? {
+                    Awaited::Reply(v) => break v,
+                    Awaited::Request(req) => {
+                        let asked = self.now();
+                        let act = person(&req);
+                        let result = match act {
+                            PersonAct::Answer(r) => {
+                                json!({"jsonrpc": "2.0", "id": req["id"], "result": r})
+                            }
+                            PersonAct::Error(e) => {
+                                json!({"jsonrpc": "2.0", "id": req["id"], "error": e})
+                            }
+                            PersonAct::Leave => return Err(McpFailure::Io),
+                        };
+                        self.in_bound(asked)?;
+                        self.try_send(&result)?;
+                    }
+                }
+            };
+            self.set_asking(false);
+            let result = &v["result"];
+            if v.get("error").is_some() || result["resultType"] != "input_required" {
+                return decode_reply(&v, true).ok_or(McpFailure::Protocol);
+            }
+            let (Some(state), Some(requests)) = (
+                result["requestState"].as_str(),
+                result["inputRequests"].as_object(),
+            ) else {
+                return Err(McpFailure::Protocol);
+            };
+            let asked = self.now();
+            let mut responses = serde_json::Map::new();
+            for (key, req) in requests {
+                let entry = match person(req) {
+                    PersonAct::Answer(r) | PersonAct::Error(r) => r,
+                    PersonAct::Leave => return Err(McpFailure::Io),
+                };
+                responses.insert(key.clone(), entry);
+            }
+            self.in_bound(asked)?;
+            extra = Some(json!({"requestState": state, "inputResponses": responses}));
+        }
+    }
+
+    fn set_asking(&mut self, asking: bool) {
+        if let Some(e) = self.eliciting.as_mut() {
+            e.asking = asking;
+        }
+    }
+
+    /// The eliciting session's clock.
+    fn now(&self) -> Instant {
+        self.eliciting
+            .as_ref()
+            .map_or_else(Instant::now, |e| (e.clock)())
+    }
+
+    /// Whether an answer to a form asked at `asked` is still within [`CONTINUATION_BOUND`].
+    fn in_bound(&self, asked: Instant) -> Result<(), McpFailure> {
+        if self.now().saturating_duration_since(asked) >= CONTINUATION_BOUND {
+            return Err(McpFailure::Deadline);
+        }
+        Ok(())
     }
 
     /// Ends a bounded session: closes its stdin, waits at most `budget` for the server to
@@ -738,7 +1066,7 @@ impl McpClient {
         for incoming in self.lines.try_iter() {
             match incoming {
                 Incoming::Line(line) => {
-                    protocol |= !message(&line).is_ok_and(|v| leftover_ok(&v));
+                    protocol |= !message(&line, false).is_ok_and(|v| leftover_ok(&v));
                 }
                 Incoming::Invalid => protocol = true,
                 Incoming::Overflow => return Err(McpFailure::OutputLimit),
@@ -807,7 +1135,13 @@ impl McpClient {
 
     /// Writes one message as a line, waiting at most the session's budget for it to be taken.
     fn try_send(&mut self, v: &Value) -> Result<(), McpFailure> {
-        if self.writer.send(v.to_string()).is_err() {
+        let line = v.to_string();
+        if let Some(e) = self.eliciting.as_mut()
+            && !e.record(sent(v), line.len())
+        {
+            return Err(McpFailure::OutputLimit);
+        }
+        if self.writer.send(line).is_err() {
             return Err(McpFailure::Io);
         }
         match self.written.recv_timeout(self.budget) {
@@ -821,9 +1155,22 @@ impl McpClient {
     /// be a JSON-RPC 2.0 object: a response (set aside when it has another id) or a
     /// notification (kept).
     fn try_recv(&mut self, id: u64) -> Result<Value, McpFailure> {
-        if let Some(i) = self.pending.iter().position(|v| v["id"] == json!(id)) {
-            return Ok(self.pending.remove(i));
+        match self.try_await(id)? {
+            Awaited::Reply(v) => Ok(v),
+            // taken only while an elicited call waits, which reads with `try_await`
+            Awaited::Request(_) => Err(McpFailure::Protocol),
         }
+    }
+
+    /// [`McpClient::try_recv`], which also returns a form request from the server while an
+    /// elicited call waits. A response is matched by its `id` only, never a request's: the
+    /// server's request ids are its own. Each message taken is recorded in an eliciting
+    /// session's exchange.
+    fn try_await(&mut self, id: u64) -> Result<Awaited, McpFailure> {
+        if let Some(i) = self.pending.iter().position(|v| v["id"] == json!(id)) {
+            return Ok(Awaited::Reply(self.pending.remove(i)));
+        }
+        let forms = self.eliciting.as_ref().is_some_and(|e| e.asking);
         let end = Instant::now() + self.budget;
         loop {
             if self.bound.as_ref().is_some_and(|b| b.passed()) {
@@ -839,10 +1186,18 @@ impl McpClient {
                 }
                 Err(RecvTimeoutError::Timeout) => return Err(McpFailure::Deadline),
             };
-            let v = message(&line)?;
+            let v = message(&line, forms)?;
+            if let Some(e) = self.eliciting.as_mut()
+                && !e.record(taken(&v), line.len())
+            {
+                return Err(McpFailure::OutputLimit);
+            }
+            if v.get("method").is_some() && v.get("id").is_some() {
+                return Ok(Awaited::Request(v));
+            }
             if let Some(got) = v.get("id") {
                 if got == &json!(id) {
-                    return Ok(v);
+                    return Ok(Awaited::Reply(v));
                 }
                 self.pending.push(v);
             } else {
