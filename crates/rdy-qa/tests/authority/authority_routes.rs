@@ -1080,8 +1080,6 @@ fn rules_policy() -> Value {
 struct Policed {
     policy: String,
     rules: String,
-    s: String,
-    o: String,
     /// Accepted by `drafts`: a typo fix of claim x.
     draft: ProposalInfo,
     /// Accepted by `decides`: a payments decision on basis precedent.
@@ -1220,8 +1218,6 @@ fn policed(r: &mut Rdy) -> Policed {
     Policed {
         policy,
         rules,
-        s: get("$s"),
-        o: get("$o"),
         draft,
         decides,
         actor,
@@ -1942,8 +1938,6 @@ struct Holds {
     /// A typo fix of claim x with a `fail` meaning verdict: the person accepts the verdict.
     verdict: ProposalInfo,
     x: String,
-    m: String,
-    n: String,
 }
 
 fn holds_world(r: &mut Rdy) -> Holds {
@@ -1994,8 +1988,12 @@ fn holds_world(r: &mut Rdy) -> Holds {
         .created["$decision"]
         .clone();
     land(r, "one-way").unwrap();
-    write(r, "edit-z", json!([{"op": "update", "id": get("$z"), "body": "Z stands still."}]))
-        .unwrap();
+    write(
+        r,
+        "edit-z",
+        json!([{"op": "update", "id": get("$z"), "body": "Z stands still."}]),
+    )
+    .unwrap();
     land(r, "edit-z").unwrap();
     decide_in(
         r,
@@ -2015,8 +2013,12 @@ fn holds_world(r: &mut Rdy) -> Holds {
     let reaffirm = r
         .propose(&writer(), "reaffirm", "reaffirm", Some(TEST_SUMMARY))
         .unwrap();
-    write(r, "refused", json!([{"op": "update", "id": get("$m"), "body": "M holds 60 days."}]))
-        .unwrap();
+    write(
+        r,
+        "refused",
+        json!([{"op": "update", "id": get("$m"), "body": "M holds 60 days."}]),
+    )
+    .unwrap();
     let answers = [PlanAnswerInput {
         item: item_display(&item_hash(
             &BlockId::parse(&get("$m")).unwrap(),
@@ -2045,7 +2047,14 @@ fn holds_world(r: &mut Rdy) -> Holds {
         ),
         "$q",
     );
-    verdict_on(r, &rdy_engine::Scope::Inflight, &q, &spec.c, "agent:r", true);
+    verdict_on(
+        r,
+        &rdy_engine::Scope::Inflight,
+        &q,
+        &spec.c,
+        "agent:r",
+        true,
+    );
     let advised = agent_version(r, "advised");
     let x = BlockId::parse(&get("$x")).unwrap();
     put_j(r, "verdict", upd(&x, "X holds, now."), j_typo());
@@ -2058,8 +2067,6 @@ fn holds_world(r: &mut Rdy) -> Holds {
         advised,
         verdict,
         x: get("$x"),
-        m: get("$m"),
-        n: get("$n"),
     }
 }
 
@@ -2122,7 +2129,10 @@ fn mg5_later_refusals_block_every_approval_route() {
         // the approve cards the person saw before each later refusal
         let shown: Vec<Shown> = [&w.rejected, &w.refused, &w.reaffirm, &w.advised, &w.verdict]
             .iter()
-            .map(|v| p.shown(route, &v.r#ref).unwrap_or_else(|| panic!("{route:?} {}", v.r#ref)))
+            .map(|v| {
+                p.shown(route, &v.r#ref)
+                    .unwrap_or_else(|| panic!("{route:?} {}", v.r#ref))
+            })
             .collect();
         // each refusal, as the person gives it through the route
         let q = p.mcp_queue();
@@ -2131,7 +2141,10 @@ fn mg5_later_refusals_block_every_approval_route() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|i| i["kind"] == kind && (i["batch"] == batch || i["ref"] == format!("defer:{batch}")))
+                .find(|i| {
+                    i["kind"] == kind
+                        && (i["batch"] == batch || i["ref"] == format!("defer:{batch}"))
+                })
                 .unwrap_or_else(|| panic!("no {kind} beside {batch}: {q:#}"))["ref"]
                 .as_str()
                 .unwrap()
@@ -2153,7 +2166,10 @@ fn mg5_later_refusals_block_every_approval_route() {
         let before = p.log();
         // the issue each hold puts on its version, ids as `<id>`
         let want: [(&str, &str); 5] = [
-            ("E_VALIDATION", "D-<id> was rejected; drop or revise it, then propose again"),
+            (
+                "E_VALIDATION",
+                "D-<id> was rejected; drop or revise it, then propose again",
+            ),
             ("E_VALIDATION", "the deferrals of P-<id>@1 were refused"),
             ("E_VALIDATION", "D-<id>'s re-affirmation was rejected"),
             ("E_BLOCKING_TENSION", ""),
@@ -2162,10 +2178,11 @@ fn mg5_later_refusals_block_every_approval_route() {
                 "meaning_preservation verdict <hash> is accepted as blocking for P-<id>@1",
             ),
         ];
-        for ((v, card), (issue, message)) in [&w.rejected, &w.refused, &w.reaffirm, &w.advised, &w.verdict]
-            .iter()
-            .zip(&shown)
-            .zip(want)
+        for ((v, card), (issue, message)) in
+            [&w.rejected, &w.refused, &w.reaffirm, &w.advised, &w.verdict]
+                .iter()
+                .zip(&shown)
+                .zip(want)
         {
             let (code, e) = p.answer(route, card, "approve").refused();
             // the elicited route binds the card before it asks the person: a version that is
@@ -2222,7 +2239,6 @@ fn mg5_later_refusals_block_every_approval_route() {
         for n in [&news[0], &news[2], &news[3]] {
             assert!(p.shown(route, &n.r#ref).is_none(), "{route:?}: still held");
         }
-        let _ = (&w.m, &w.n);
     }
 }
 
@@ -2242,7 +2258,9 @@ fn set_gate(p: &Project, gate: &str, extra: &str) {
     p.s.stop();
     std::fs::write(
         p.dir().join(".rdy.yaml"),
-        format!("pack: rdy-standard\ncoverage:\n  gate: {gate}\n{extra}serve:\n  idle_timeout: 60\n"),
+        format!(
+            "pack: rdy-standard\ncoverage:\n  gate: {gate}\n{extra}serve:\n  idle_timeout: 60\n"
+        ),
     )
     .unwrap();
 }
@@ -2260,7 +2278,9 @@ fn gate_seed(r: &mut Rdy) -> Vec<String> {
     }
     let w = write(r, "seed", json!(ops)).unwrap();
     land(r, "seed").unwrap();
-    (0..6).map(|k| w.created[&format!("$s{k}")].clone()).collect()
+    (0..6)
+        .map(|k| w.created[&format!("$s{k}")].clone())
+        .collect()
 }
 
 /// The coverage cases: a name, whether `no_lower` refuses it, and the ops agent:<name> writes
@@ -2268,23 +2288,47 @@ fn gate_seed(r: &mut Rdy) -> Vec<String> {
 /// linked checkout does not hold.
 fn gate_cases(s: &[String]) -> Vec<(&'static str, bool, Value)> {
     vec![
-        ("question", true, json!([{"op": "create", "type": "question", "parent": s[0], "fields": {"prompt": "Is X enough?"}}])),
-        ("unapplied", true, json!([{"op": "create", "type": "decision", "parent": s[1],
-            "fields": {"statement": "Ideas stay short", "status": "proposed"}}])),
-        ("new_page", true, json!([
-            {"op": "create", "type": "doc", "id": "$m", "fields": {"name": "more", "title": "More", "doc_type": "overview"}},
-            {"op": "create", "type": "section", "id": "$t", "parent": "$m", "fields": {"title": "Open"}},
-            {"op": "create", "type": "question", "parent": "$t", "fields": {"prompt": "Is more enough?"}}
-        ])),
-        ("no_content", false, json!([{"op": "create", "type": "decision", "parent": s[2],
-            "fields": {"statement": "Ideas stay long", "status": "proposed", "needs_content": false}}])),
-        ("claim", false, json!([{"op": "create", "type": "claim", "parent": s[3], "body": "A bare claim."}])),
-        ("source", false, json!([
-            {"op": "create", "type": "source", "id": "$x", "parent": s[4],
-             "fields": {"title": "Release nine", "kind": "release", "locator": "v9"}},
-            {"op": "create", "type": "claim", "parent": s[4], "body": "Release nine ships it.",
-             "links": {"reflects": ["$x"]}}
-        ])),
+        (
+            "question",
+            true,
+            json!([{"op": "create", "type": "question", "parent": s[0], "fields": {"prompt": "Is X enough?"}}]),
+        ),
+        (
+            "unapplied",
+            true,
+            json!([{"op": "create", "type": "decision", "parent": s[1],
+            "fields": {"statement": "Ideas stay short", "status": "proposed"}}]),
+        ),
+        (
+            "new_page",
+            true,
+            json!([
+                {"op": "create", "type": "doc", "id": "$m", "fields": {"name": "more", "title": "More", "doc_type": "overview"}},
+                {"op": "create", "type": "section", "id": "$t", "parent": "$m", "fields": {"title": "Open"}},
+                {"op": "create", "type": "question", "parent": "$t", "fields": {"prompt": "Is more enough?"}}
+            ]),
+        ),
+        (
+            "no_content",
+            false,
+            json!([{"op": "create", "type": "decision", "parent": s[2],
+            "fields": {"statement": "Ideas stay long", "status": "proposed", "needs_content": false}}]),
+        ),
+        (
+            "claim",
+            false,
+            json!([{"op": "create", "type": "claim", "parent": s[3], "body": "A bare claim."}]),
+        ),
+        (
+            "source",
+            false,
+            json!([
+                {"op": "create", "type": "source", "id": "$x", "parent": s[4],
+                 "fields": {"title": "Release nine", "kind": "release", "locator": "v9"}},
+                {"op": "create", "type": "claim", "parent": s[4], "body": "Release nine ships it.",
+                 "links": {"reflects": ["$x"]}}
+            ]),
+        ),
     ]
 }
 
@@ -2356,7 +2400,16 @@ fn mg5_coverage_gate_excludes_machine_facts_and_ungrounded_content() {
                 .issues
                 .iter()
                 .filter(|i| i.code == "E_COVERAGE_LOWERED")
-                .map(|i| i.message.split(" lowers coverage of ").nth(1).unwrap_or("").split(" from ").next().unwrap().to_string())
+                .map(|i| {
+                    i.message
+                        .split(" lowers coverage of ")
+                        .nth(1)
+                        .unwrap_or("")
+                        .split(" from ")
+                        .next()
+                        .unwrap()
+                        .to_string()
+                })
                 .collect();
             if refused {
                 assert!(!v.ready, "{gate} {name}");
@@ -2402,6 +2455,352 @@ fn card_text(r: &Rdy, r#ref: &str) -> String {
         .find(|i| i.r#ref == r#ref)
         .unwrap_or_else(|| panic!("{ref} is queued"))
         .card
+}
+
+// ---------------------------------------------------------------- elicitation and the local UI
+
+/// The 2026-07-28 flow: no `initialize`, the client context in each request.
+fn inline() -> Revision {
+    Revision::Inline {
+        version: "2026-07-28".into(),
+        capabilities: json!({"elicitation": {"form": {}}}),
+    }
+}
+
+/// `.rdy/local.yaml` of the project: the person, then `extra`; the daemon restarts on the next
+/// command.
+fn local_config(p: &Project, extra: &str) {
+    p.s.stop();
+    std::fs::write(
+        p.dir().join(".rdy/local.yaml"),
+        format!("actor: {PERSON}\n{extra}"),
+    )
+    .unwrap();
+}
+
+/// A GET or POST of the approval UI's paths that the listener at `base` answers as ordinary
+/// paths: 404 pages naming no UI, and the plain 405 for the answer POST.
+#[track_caller]
+fn assert_no_ui(url: &str, what: &str) {
+    let authority = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let base = format!("http://{authority}");
+    for path in ["/~ui/", "/~ui/item/P-abc@1"] {
+        let r = http::get(&format!("{base}{path}"));
+        assert_eq!(r.status, 404, "{what}: GET {path}");
+        let page = String::from_utf8_lossy(&r.body);
+        for needle in ["~ui", "approval", "ui-card", "<form"] {
+            assert!(!page.contains(needle), "{what}: {path} names {needle:?}");
+        }
+    }
+    let addr: std::net::SocketAddr = authority.parse().unwrap();
+    let post = http::raw(addr, &http::ui_answer_request(&authority, &[("ref", "r")]));
+    assert_eq!(post.status, 405, "{what}: POST {}", post.head);
+}
+
+#[test]
+fn mg5_elicitation_fallback_and_local_ui_keep_their_boundaries() {
+    use rdy_qa::mcp::{CONTINUATION_BOUND, Clock};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    let (p, (_, [v1, v2])) = Project::new(|r| {
+        let made = ready(r);
+        // a publication profile of the spec doc, for a profile-only listener
+        let ids = write(
+            r,
+            "admin",
+            json!([{"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}]),
+        )
+        .unwrap()
+        .created;
+        write(
+            r,
+            "admin",
+            json!([{"op": "create", "type": "publication_profile", "parent": ids["$admin"],
+                    "fields": {"key": "guide", "title": "Guide book", "description": "About it.",
+                               "audience": "org", "select": [made.0.doc.to_string()]}}]),
+        )
+        .unwrap();
+        land(r, "admin").unwrap();
+        made
+    });
+    let card = p.shown(Route::Relayed, &v1.r#ref).unwrap();
+    let ask = json!({"ref": card.r#ref, "card_hash": card.card_hash, "elicit": true});
+    let before = p.log();
+
+    // a client with no form capability: elicitation is unavailable, and the relay path stays
+    let mut c = p.agent();
+    let e = c.call("rdy_answer", ask.clone());
+    assert_eq!(e.code(), Some("E_ELICITATION_UNAVAILABLE"), "{e:?}");
+    drop(c);
+    assert_eq!(p.log(), before);
+    assert_eq!(
+        p.shown(Route::Relayed, &v1.r#ref),
+        Some(card.clone()),
+        "unmoved"
+    );
+
+    // declined and cancelled forms, in both flows, write nothing
+    for (revision, action) in [
+        (in_call(), "decline"),
+        (in_call(), "cancel"),
+        (inline(), "decline"),
+        (inline(), "cancel"),
+    ] {
+        let mut c = McpClient::try_launch_eliciting(McpClient::proxy(&p.s), revision).unwrap();
+        assert!(
+            c.try_call(
+                "rdy_session",
+                json!({"actor": RELAY, "run": "r1", "role": "writer"})
+            )
+            .unwrap()
+            .is_ok()
+        );
+        let mut person = |_: &Value| PersonAct::Answer(json!({"action": action}));
+        let v = c
+            .try_call_elicited("rdy_answer", ask.clone(), &mut person)
+            .unwrap()
+            .ok();
+        let state = if action == "decline" {
+            "declined"
+        } else {
+            "cancelled"
+        };
+        assert_eq!(v, json!({"state": state}), "{action}");
+        drop(c);
+        assert_eq!(p.log(), before, "{action}");
+        assert_eq!(
+            p.shown(Route::Relayed, &v1.r#ref),
+            Some(card.clone()),
+            "{action}"
+        );
+    }
+    // a continuation past its bound is never answered: the client sends nothing
+    let mut c = McpClient::try_launch_eliciting(McpClient::proxy(&p.s), inline()).unwrap();
+    assert!(
+        c.try_call(
+            "rdy_session",
+            json!({"actor": RELAY, "run": "r1", "role": "writer"})
+        )
+        .unwrap()
+        .is_ok()
+    );
+    let base = Instant::now();
+    let at = Arc::new(Mutex::new(base));
+    let clock = Arc::clone(&at);
+    let clock: Clock = Arc::new(move || *clock.lock().unwrap());
+    c.set_clock(clock);
+    let mut late = |_: &Value| {
+        *at.lock().unwrap() = base + CONTINUATION_BOUND + Duration::from_secs(1);
+        PersonAct::Answer(json!({"action": "accept", "content": {"choice": "approve"}}))
+    };
+    let got = c.try_call_elicited("rdy_answer", ask.clone(), &mut late);
+    assert!(matches!(got, Err(McpFailure::Deadline)), "{got:?}");
+    drop(c);
+    assert_eq!(p.log(), before, "an expired continuation");
+    assert_eq!(p.shown(Route::Relayed, &v1.r#ref), Some(card.clone()));
+    // the binding holds before any form: a card that is not the one shown is refused, fresh
+    let mut c = p.eliciting();
+    let mut never = |req: &Value| panic!("no form for a moved card: {req}");
+    let wrong = json!({"ref": card.r#ref, "card_hash": "0".repeat(64), "elicit": true});
+    let r = c
+        .try_call_elicited("rdy_answer", wrong, &mut never)
+        .unwrap();
+    let (code, e) = mcp_outcome(r).refused();
+    assert_eq!(code, "E_PROPOSAL_MOVED", "{e:#}");
+    assert_eq!(
+        e["message"],
+        format!("{} changed since it was shown", card.r#ref)
+    );
+    assert_eq!(e["fix"], "show the person the fresh card and ask again");
+    let fresh = corrected_of(Route::Elicited, &e).expect("the fresh card");
+    assert_eq!(
+        (&fresh.r#ref, &fresh.card_hash),
+        (&card.r#ref, &card.card_hash),
+        "{e:#}"
+    );
+    drop(c);
+    assert_eq!(p.log(), before);
+    // (the role holds on the elicited route as on every route: mg5_roles_route_and_enforce_...)
+
+    // the local UI never asks an agent to sign: with signing always it refuses, E_NO_AGENT
+    local_config(
+        &p,
+        "signing:\n  key: null\n  agent_key: null\n  sign: always\n  allowed_signers: null\n",
+    );
+    let (code, e) = p
+        .show_and_answer(Route::Ui, &v1.r#ref, "approve")
+        .1
+        .refused();
+    assert_eq!(code, "E_NO_AGENT", "{e:#}");
+    let page = e["page"].as_str().unwrap();
+    for text in [
+        "the SSH agent could not sign: the local UI has no agent socket".to_string(),
+        format!(
+            "run rdy approve {} in a terminal to sign this approval",
+            v1.r#ref
+        ),
+    ] {
+        assert!(
+            page.contains(&rdy_render::escape(&text).to_string()),
+            "{text}: {page}"
+        );
+    }
+    assert_eq!(e["status"], 403);
+    assert_eq!(p.log(), before, "nothing written");
+    local_config(&p, "");
+
+    // with serve.ui off the listener has no approval UI, and a form post writes nothing
+    local_config(&p, "serve:\n  ui: false\n");
+    assert_no_ui(&p.site(), "serve.ui off");
+    assert_eq!(p.log(), before);
+    local_config(&p, "");
+    // a profile's pages, on the full listener, link and hold no approval UI
+    let guide = p.cli_ok(&["site", "--profile", "guide"]);
+    let url = guide["url"].as_str().unwrap();
+    assert!(url.contains("/~profile/guide/"), "{url}");
+    let page = http::get(url);
+    assert_eq!(page.status, 200, "{url}");
+    let text = String::from_utf8_lossy(&page.body);
+    for needle in ["/~ui/", "<form", "card_hash"] {
+        assert!(!text.contains(needle), "the profile page names {needle:?}");
+    }
+    // a static render holds no approval UI
+    let out = tempfile::tempdir().unwrap();
+    let site = out.path().join("site");
+    p.cli_ok(&["render", "--out", site.to_str().unwrap()]);
+    for f in walk(&site) {
+        let bytes = std::fs::read(&f).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("/~ui/"), "{} names the UI", f.display());
+    }
+    // the UI is back on the full listener, and the person's form lands the version
+    let row = p.land_via(Route::Ui, &v1.r#ref);
+    assert_eq!(provenance(&row)["evidence"]["kind"], "card");
+    let _ = v2;
+}
+
+/// Every file under `dir`.
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                todo.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- disputes
+
+#[test]
+fn mg5_disputes_record_the_route_without_blocking_the_next_landing() {
+    let (p, (_, [v1, v2])) = Project::new(ready);
+    let landed = p.land_via(Route::Relayed, &v1.r#ref);
+    let landing = landed["landing"].as_str().unwrap().to_string();
+    let count = p.log().len();
+
+    // an agent alone cannot open one: the person's words are required
+    let mut c = p.agent();
+    let e = c.call(
+        "rdy_dispute",
+        json!({"op": "open", "landing": landing, "reason": "It dropped a rule."}),
+    );
+    assert_eq!(e.code(), Some("E_PERMISSION"), "{e:?}");
+    // relayed: the person's dispute, with the agent as relay and an ANSWER of the evidence
+    let relayed = c
+        .call(
+            "rdy_dispute",
+            json!({"op": "open", "landing": landing, "reason": "It dropped a rule.",
+                   "evidence": "Dispute that landing.", "question": "Dispute it?",
+                   "session_ref": "chat-1"}),
+        )
+        .ok();
+    drop(c);
+    assert_eq!(relayed["dispute"]["state"], "open", "{relayed:#}");
+    assert_eq!(
+        relayed["dispute"]["opened_by"]["actor"], PERSON,
+        "{relayed:#}"
+    );
+    assert_eq!(
+        relayed["relayed_by"],
+        json!({"actor": RELAY, "run": "r1"}),
+        "{relayed:#}"
+    );
+    assert_eq!(
+        relayed["answer"].as_str().map(str::len),
+        Some(64),
+        "the relay's ANSWER record: {relayed:#}"
+    );
+    // local: the person's own dispute, through the CLI's record path, with no ANSWER
+    let local = p.cli_ok(&["dispute", "open", &landing, "--reason", "It reads wrong."]);
+    assert_eq!(
+        local["dispute"]["opened_by"],
+        json!({"actor": PERSON, "run": "cli"}),
+        "{local:#}"
+    );
+    assert!(local.get("answer").is_none(), "{local:#}");
+    assert!(
+        local.get("relayed_by").is_none_or(Value::is_null),
+        "{local:#}"
+    );
+
+    // the disputes write no landing, and the disputed landing stays as it landed
+    let log = p.log();
+    assert_eq!(log.len(), count, "a dispute is no landing");
+    let row = log
+        .iter()
+        .find(|r| r["landing"] == landing.as_str())
+        .unwrap();
+    assert_eq!(row["dispute"]["state"], "open", "{row:#}");
+    assert_eq!(
+        row["dispute"]["disputes"].as_array().map(Vec::len),
+        Some(2),
+        "{row:#}"
+    );
+    assert_eq!(common(row), {
+        let mut c = common(&landed);
+        c["dispute"] = row["dispute"].clone();
+        c
+    });
+    assert_eq!(
+        provenance(row),
+        provenance(&landed),
+        "no ratification changes it"
+    );
+
+    // the next landing is not blocked, and carries no dispute
+    let next = p.land_via(Route::CliApprove, &v2.r#ref);
+    assert_eq!(next["dispute"], json!({"state": "none", "disputes": []}));
+    // the person upholds the relayed dispute with that landing as its correction
+    let id = relayed["dispute"]["id"].as_str().unwrap();
+    let mut c = p.agent();
+    let v = c
+        .call(
+            "rdy_dispute",
+            json!({"op": "resolve", "dispute": id, "outcome": "upheld",
+                   "correction": next["landing"], "evidence": "Yes, that fixes it.",
+                   "session_ref": "chat-1"}),
+        )
+        .ok();
+    assert_eq!(v["dispute"]["state"], "upheld", "{v:#}");
+    assert_eq!(
+        v["dispute"]["resolution"]["correction"], next["landing"],
+        "{v:#}"
+    );
+    assert_eq!(v["answer"].as_str().map(str::len), Some(64), "{v:#}");
+    drop(c);
+    assert_eq!(p.log().len(), count + 1, "only the correction landed");
 }
 
 /// Found by this task (mg5): an open removal request's card goes stale when any unrelated view
