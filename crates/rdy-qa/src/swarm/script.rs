@@ -1024,6 +1024,236 @@ pub fn script(cfg: &Config) -> Script {
     }
 }
 
+/// One of the four small independent subjects the M3 routes act on (gate and authority,
+/// elicitation, publication, a removed blob). Each is a folder, a doc, a section and
+/// `SUBJECT_CLAIMS` claims in the swarm project (`project::SubjectSeed`); a route owns one claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Subject {
+    Gate,
+    Elicitation,
+    Publication,
+    RemovedBlob,
+}
+
+/// How many claims each subject holds: the most routes any subject carries.
+pub const SUBJECT_CLAIMS: usize = 3;
+
+impl Subject {
+    /// Every subject, in seed order.
+    pub const ALL: [Subject; 4] = [
+        Subject::Gate,
+        Subject::Elicitation,
+        Subject::Publication,
+        Subject::RemovedBlob,
+    ];
+
+    /// The snake_case name of the subject.
+    pub fn name(self) -> &'static str {
+        match self {
+            Subject::Gate => "gate",
+            Subject::Elicitation => "elicitation",
+            Subject::Publication => "publication",
+            Subject::RemovedBlob => "removed_blob",
+        }
+    }
+}
+
+/// A forced M3 scenario. The closed list; each is described, not executed, by `Scenario`.
+/// Task 8 runs each at its scheduled actor step. Not an `Act` variant, so no exhaustive match
+/// over `Act` changes (G2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Route {
+    /// An agent relays the person's answer to a card (`rdy_pending`, then `rdy_answer`).
+    RelayedAnswer,
+    /// An actor of the wrong role answers a card and is refused; then an actor of the right role
+    /// answers it.
+    WrongThenRightRole,
+    /// A card is elicited under both elicitation revisions.
+    ElicitationRevisions,
+    /// The person declines an elicited card; the agent then relays the answer.
+    DeclineThenRelay,
+    /// A card moves between the read and the answer; the old hash is refused.
+    MovedCard,
+    /// A publication is checked, then its output is produced.
+    PublicationCheckOutput,
+    /// A blob is removed, then `rdy_compact {dry_run: false}` runs for real.
+    RealCompact,
+}
+
+impl Route {
+    /// Every route, in the order a script schedules them.
+    pub const ALL: [Route; 7] = [
+        Route::RelayedAnswer,
+        Route::WrongThenRightRole,
+        Route::ElicitationRevisions,
+        Route::DeclineThenRelay,
+        Route::MovedCard,
+        Route::PublicationCheckOutput,
+        Route::RealCompact,
+    ];
+
+    /// The snake_case name of the route.
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::RelayedAnswer => "relayed_answer",
+            Route::WrongThenRightRole => "wrong_then_right_role",
+            Route::ElicitationRevisions => "elicitation_revisions",
+            Route::DeclineThenRelay => "decline_then_relay",
+            Route::MovedCard => "moved_card",
+            Route::PublicationCheckOutput => "publication_check_output",
+            Route::RealCompact => "real_compact",
+        }
+    }
+
+    /// The subject the route acts on, and the claim of it the route owns (`0..SUBJECT_CLAIMS`).
+    pub fn subject(self) -> (Subject, usize) {
+        match self {
+            Route::RelayedAnswer => (Subject::Gate, 0),
+            Route::WrongThenRightRole => (Subject::Gate, 1),
+            Route::MovedCard => (Subject::Gate, 2),
+            Route::ElicitationRevisions => (Subject::Elicitation, 0),
+            Route::DeclineThenRelay => (Subject::Elicitation, 1),
+            Route::PublicationCheckOutput => (Subject::Publication, 0),
+            Route::RealCompact => (Subject::RemovedBlob, 0),
+        }
+    }
+
+    /// The journal act names the route's attempts carry, in order. `journal::allowed` holds the
+    /// closed refusal set of each.
+    pub fn acts(self) -> &'static [&'static str] {
+        match self {
+            Route::RelayedAnswer => &["m3_relay_answer"],
+            Route::WrongThenRightRole => &["m3_wrong_role", "m3_right_role"],
+            Route::ElicitationRevisions => &["m3_elicit_first_rev", "m3_elicit_second_rev"],
+            Route::DeclineThenRelay => &["m3_elicit_decline", "m3_relay_after_decline"],
+            Route::MovedCard => &["m3_moved_card"],
+            Route::PublicationCheckOutput => &["m3_publication_check", "m3_publication_output"],
+            Route::RealCompact => &["m3_blob_remove", "m3_compact_real"],
+        }
+    }
+
+    /// Whether the route needs the simulated person's answer.
+    pub fn needs_person(self) -> bool {
+        matches!(
+            self,
+            Route::RelayedAnswer
+                | Route::ElicitationRevisions
+                | Route::DeclineThenRelay
+                | Route::MovedCard
+                | Route::RealCompact
+        )
+    }
+
+    /// Whether the route needs a second actor (a reviewer) two steps after the first.
+    pub fn needs_partner(self) -> bool {
+        self == Route::WrongThenRightRole
+    }
+}
+
+/// The most calls a forced scenario may make before it fails by name (plan addition).
+pub const M3_MAX_CALLS: usize = 32;
+/// The most protocol messages one scenario's transcript may hold.
+pub const M3_MAX_MESSAGES: usize = 256;
+/// The most bytes one scenario's transcript may hold.
+pub const M3_MAX_BYTES: usize = 1 << 20;
+/// The gap in steps between a scenario's first actor and its partner: the pacing then waits
+/// until the first actor's whole step is done.
+pub const M3_PARTNER_GAP: usize = 2;
+
+/// The salt of `m3_scenarios`' draw.
+const M3_SALT: u64 = 0x6d33_726f;
+
+/// One scheduled M3 scenario: who runs it, at which step, and its bounds. The descriptor sits
+/// beside `Script`; the actor runs the scenario after the act it draws at `step`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scenario {
+    pub route: Route,
+    pub subject: Subject,
+    /// The claim of the subject's seed the route owns.
+    pub slot: usize,
+    /// The writer that runs the scenario.
+    pub agent: usize,
+    pub step: usize,
+    /// The reviewer and the step of the second actor, for a route with a partner.
+    pub partner: Option<(usize, usize)>,
+    /// The simulated person answers in this scenario.
+    pub person: bool,
+    /// At most this many calls; the next one fails the run by the scenario's name.
+    pub max_calls: usize,
+}
+
+/// The steps no M3 scenario takes: the forced advice sequence's own steps.
+fn m3_reserved(cfg: &Config) -> Vec<usize> {
+    advice_steps(cfg)
+        .map(|a| vec![a.claim, a.review, a.propose])
+        .unwrap_or_default()
+}
+
+/// The forced M3 scenarios of `cfg`: a pure function of it, with a draw of its own, so every
+/// act of `script` stays as it was. A script that holds the forced check sequences holds each
+/// route once. A scenario comes after the kill, so the seeded kill does not cut it, and never on
+/// a step of the forced advice sequence. `Vec::new()` for a script too short for them.
+pub fn m3_scenarios(cfg: &Config) -> Vec<Scenario> {
+    if advice_steps(cfg).is_none() {
+        return Vec::new();
+    }
+    let reserved = m3_reserved(cfg);
+    let from = cfg.kill_at.map_or(cfg.steps / 2, |k| k + 1);
+    let steps: Vec<usize> = (from..cfg.steps.saturating_sub(1))
+        .filter(|s| !reserved.contains(s))
+        .collect();
+    let writers: Vec<usize> = (0..cfg.agents).filter(|&i| !cfg.is_reviewer(i)).collect();
+    let reviewers: Vec<usize> = (0..cfg.agents).filter(|&i| cfg.is_reviewer(i)).collect();
+    if writers.is_empty() || reviewers.is_empty() || steps.is_empty() {
+        return Vec::new();
+    }
+    let mut rng = Rng::new(cfg.seed ^ M3_SALT);
+    let mut used: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for route in Route::ALL {
+        let pool: Vec<usize> = if route == Route::RealCompact {
+            vec![0]
+        } else {
+            writers.clone()
+        };
+        let mut spots: Vec<(usize, usize)> = Vec::new();
+        for &a in &pool {
+            for &s in &steps {
+                if used.contains(&(a, s)) {
+                    continue;
+                }
+                if route.needs_partner() && !steps.contains(&(s + M3_PARTNER_GAP)) {
+                    continue;
+                }
+                spots.push((a, s));
+            }
+        }
+        assert!(
+            !spots.is_empty(),
+            "a script of {} steps has no free step for {}",
+            cfg.steps,
+            route.name()
+        );
+        let (agent, step) = spots[rng.below(spots.len())];
+        used.insert((agent, step));
+        let partner = route
+            .needs_partner()
+            .then(|| (reviewers[rng.below(reviewers.len())], step + M3_PARTNER_GAP));
+        let (subject, slot) = route.subject();
+        out.push(Scenario {
+            route,
+            subject,
+            slot,
+            agent,
+            step,
+            partner,
+            person: route.needs_person(),
+            max_calls: M3_MAX_CALLS,
+        });
+    }
+    out
+}
+
 /// The person's act that lands direct (`rdy approve` with no relay, the CLI parity path; final
 /// review M4): the even act at the middle of the script, before the tail.
 pub fn direct_land_at(len: usize) -> usize {

@@ -8,9 +8,11 @@
 //! The agents are code, not models. Each agent runs a script that is a pure function of the
 //! seed (`script`). No real-agent trial is planned (F1 "Scripted only", D-VF4RH).
 //!
-//! - `script`: the closed lists of acts and the seeded generator.
-//! - `journal`: what each actor did and saw, and the closed table of allowed refusals.
-//! - `project`: the served `rdy-qa` project the actors act on, with one stable doc per area.
+//! - `script`: the closed lists of acts, the seeded generator and the forced M3 scenarios
+//!   (`m3_scenarios`: descriptors beside the script, run at their steps by the actors).
+//! - `journal`: what each actor did and saw, the M3 route attempts (an attempt, a refusal, an
+//!   interruption and an acknowledgement stay distinct), and the closed table of allowed refusals.
+//! - `project`: the served `rdy-qa` project the actors act on, with one stable doc per area and four small M3 subjects.
 //! - `agent`: the scripted agents, each a thread with its own `rdy mcp` proxy process.
 //! - `people`: the person, acting through a relaying agent and the closed list of commands.
 //! - `run`: one run: the actors, the kill and restart, the freeze and the drain.
