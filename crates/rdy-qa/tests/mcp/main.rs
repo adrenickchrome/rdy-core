@@ -22,6 +22,7 @@ mod mcp_elicitation;
 mod mcp_everyday;
 mod mcp_export;
 mod mcp_golden;
+mod mcp_grounded;
 mod mcp_history;
 mod mcp_hub_auth;
 mod mcp_hub_keys;
