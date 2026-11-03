@@ -284,13 +284,27 @@ fn mg1_landing_binds_the_assessed_version_and_shown_card() {
     // the wrong version
     let version = with(&|l| l.record.approved_version = Some(other("v")));
     assert!(rules(&version).contains(&"m3_version"), "{version:?}");
-    // the wrong assessment: not of the version's newest record, and not these bytes
+    // the wrong assessment: not these bytes; and, observed at the landing, not the version's
+    // newest record (history may hold an older one: a released fixture does)
     let wrong = with(&|l| l.record.assessment = Some(other("a")));
+    assert_eq!(rules(&wrong), vec!["m3_assessment"], "{wrong:?}");
+    let mut t = f.t.clone();
+    t.landing.record.assessment = Some(other("a"));
+    let observed_wrong = check_temporal(&t);
     assert_eq!(
-        rules(&wrong),
+        rules(&observed_wrong),
         vec!["m3_assessment", "m3_assessment"],
-        "{wrong:?}"
+        "{observed_wrong:?}"
     );
+    let older = with(&|l| l.bound_assessment = Some(other("newer")));
+    assert_eq!(
+        older,
+        vec![],
+        "history keeps an older assessment of the version"
+    );
+    let mut t = f.t.clone();
+    t.landing.bound_assessment = Some(other("newer"));
+    assert_eq!(rules(&check_temporal(&t)), vec!["m3_assessment"]);
     // a later method cannot rewrite the old measurement's bytes
     let method = with(&|l| l.assessment.as_mut().unwrap().method += 1);
     assert_eq!(rules(&method), vec!["m3_assessment"], "{method:?}");

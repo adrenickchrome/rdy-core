@@ -607,8 +607,9 @@ fn briefing_rule(l: &LandingFact, first_briefed: Option<Location>) -> Vec<Violat
 }
 
 /// `m3_version` and `m3_assessment`: the assessment the landing names assesses the approved
-/// version, is the newest one of that version before the landing, and keeps its bytes (a later
-/// method cannot rewrite them).
+/// version and keeps its bytes (a later method cannot rewrite them). That it is the version's
+/// newest assessment is the temporal audit's rule: the store accepts an older one of the version,
+/// and a released fixture holds one.
 fn binding_rule(l: &LandingFact) -> Vec<Violation> {
     let mut out = vec![];
     let Some(h) = l.record.assessment else {
@@ -656,18 +657,6 @@ fn binding_rule(l: &LandingFact) -> Vec<Violation> {
                 h.short(),
                 now.short(),
                 a.method
-            ),
-        ));
-    }
-    if l.bound_assessment != Some(h) {
-        out.push(v(
-            "m3_assessment",
-            None,
-            format!(
-                "landing {name} names assessment {}, but the newest assessment of {} before it is {}",
-                h.short(),
-                version.short(),
-                l.bound_assessment.map_or("none".to_string(), |b| b.short())
             ),
         ));
     }
@@ -1136,7 +1125,8 @@ pub fn holds_of(st: &ReadState, version: &Hash) -> Result<Vec<Hold>, Violation> 
 /// The temporal rules on projection `t`, then the durable rules on its landing.
 ///
 /// `m3_snapshot`: `before` is the canon the landing read. `m3_assessment`: a landing under the
-/// current contract names an assessment, except a re-affirmation card's. `m3_fresh`: no landing
+/// current contract names an assessment, except a re-affirmation card's, and it is the approved
+/// version's newest one before the landing. `m3_fresh`: no landing
 /// since the assessment's base wrote a block of its reach, and the pack, the gate config and the
 /// live policy are the ones it was judged under. `m3_hold`: no person act held the version.
 /// `m3_card`: the person saw the approved version, and the card a card approval names.
@@ -1165,6 +1155,20 @@ pub fn check_temporal(t: &TemporalFacts) -> Vec<Violation> {
         )),
         None => {}
         Some(a) => {
+            // the approval binds the version's newest assessment (a fresh one after a moved card)
+            if let Some(h) = rec.assessment
+                && l.bound_assessment != Some(h)
+            {
+                out.push(v(
+                    "m3_assessment",
+                    None,
+                    format!(
+                        "landing {name} names assessment {}, but the newest assessment of its version before it is {}",
+                        h.short(),
+                        l.bound_assessment.map_or("none".to_string(), |b| b.short())
+                    ),
+                ));
+            }
             let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
             for (since, written) in &t.since {
                 let hit: Vec<String> = written
