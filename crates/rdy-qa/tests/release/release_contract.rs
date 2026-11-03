@@ -1477,6 +1477,9 @@ struct Rich {
     batch: rdy_qa::intake::Batch,
     /// nb4: a prose block with a located unlinked mention, so a briefing of it lists the text.
     mention: String,
+    /// A claim that names the same term unlinked: since D-KVQ7F a prose mention is no issue, so
+    /// only a normative block still raises the located unlinked-mention issue (`text?` member).
+    claim_mention: String,
     /// nb8 (TASK-978 X2, D-YXBXH): the doc `crowd-0` that holds `mention`, so a block created in
     /// it has `mention` as its one baseline section neighbor; and claims `k1` and `k2` of doc
     /// `crowd-1`, so an edit of `k1` has `k2` as its one section neighbor.
@@ -1525,6 +1528,10 @@ fn rich_project() -> Rich {
         json!({"op": "create", "type": "prose", "id": "$ask", "parent": "$c0",
         "body": "Who keeps the Ledger?"}),
     );
+    ops.push(
+        json!({"op": "create", "type": "claim", "id": "$cm", "parent": "$c2",
+        "body": "The Ledger keeps the balances."}),
+    );
     for k in ["$k1", "$k2"] {
         ops.push(
             json!({"op": "create", "type": "claim", "id": k, "parent": "$c1",
@@ -1533,8 +1540,9 @@ fn rich_project() -> Rich {
     }
     let crowded =
         rdy_qa::fixtures::write(&mut r, "crowd", Value::Array(ops)).expect("write the crowd");
-    let (mention, crowd, k1) = (
+    let (mention, claim_mention, crowd, k1) = (
         crowded.created["$ask"].clone(),
+        crowded.created["$cm"].clone(),
         crowded.created["$c0"].clone(),
         crowded.created["$k1"].clone(),
     );
@@ -1549,6 +1557,7 @@ fn rich_project() -> Rich {
         dir,
         batch,
         mention,
+        claim_mention,
         crowd,
         k1,
     }
@@ -2002,6 +2011,7 @@ fn cli_runtime() -> Value {
         ("show landing", vec!["show", "tag:v1.0.0"]),
         ("brief", vec!["brief", &a]),
         ("brief", vec!["brief", &rich.mention]),
+        ("brief", vec!["brief", &rich.claim_mention]),
         ("plan", vec!["plan", "--proposal", &proposal]),
         ("config", vec!["config"]),
         ("view ls", vec!["view", "ls"]),
@@ -2292,7 +2302,10 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_diff", json!({"from": "batch"})),
         ("rdy_query", json!({"filter": "type = claim"})),
         ("rdy_brief", json!({"ids": [a]})),
-        ("rdy_brief", json!({"ids": [rich.mention.clone()]})),
+        (
+            "rdy_brief",
+            json!({"ids": [rich.mention.clone(), rich.claim_mention.clone()]}),
+        ),
         ("rdy_view", json!({"op": "list"})),
         ("rdy_view", json!({"op": "show", "name": "batch"})),
         (

@@ -683,18 +683,22 @@ fn nb11_cli_and_rdy_pending_render_the_same_words_and_routes() {
             .to_string()
     };
     let words = format!("medium: unlinked_mention on {n} (\"ledger service\")");
-    let route = format!(
-        "1 listed, 0 omitted: {n} same_entity {a} [live] via text: Entries are append-only"
-    );
+    let route = "0 listed by link, 1 found by text, 0 omitted";
     let batch = item(&cli, &pref);
     assert_eq!(fact(batch, "Confidence"), words);
     assert_eq!(fact(batch, "Related decisions"), route);
+    for card in cli["items"].as_array().unwrap() {
+        let text = card["card"].as_str().unwrap();
+        assert!(!text.contains("Entries are append-only"), "{text}");
+    }
     // `rdy pending` prints the cards that carry both lines
     let (ok, out) = text(&s.rdy(&["pending"]));
     assert!(ok, "{out}");
     assert!(out.contains("(\"ledger service\")"), "{out}");
+    assert!(out.contains(route), "{out}");
     assert!(
-        out.contains(&format!("{n} same_entity {a} [live] via text")),
+        !out.contains(&format!("{n} same_entity {a} [live] via text")),
         "{out}"
     );
+    assert!(!out.contains("Entries are append-only"), "{out}");
 }

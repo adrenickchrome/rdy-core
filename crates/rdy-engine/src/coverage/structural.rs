@@ -382,7 +382,7 @@ pub(crate) fn named_in(pack: &Pack, lex: &Lexicon, b: &Block) -> Vec<BlockId> {
 }
 
 /// One block's structural entry and the entities its text names, by the closed table (ledger
-/// Q2): `None` for a block that is absent or presentational (not scored). Reads only local
+/// Q2; D-KVQ7F: only a normative block's mentions add Grounded checks): `None` for a block that is absent or presentational (not scored). Reads only local
 /// queries: the block's own edges, its children, its doc's subtree for `unlinked_doc`, the
 /// incoming edges of the entities it describes, the blocks its `reflects` links name, and (nb4)
 /// a doc's level, counted once per context.
@@ -418,8 +418,10 @@ pub(crate) fn entry_of(
             ));
         }
     }
-    // every scored block's mentions are listed (a fact sheet's neighbourhood); only a block
-    // that can link has a Grounded check per mention
+    // every scored block's mentions are listed (a fact sheet's neighbourhood); only a normative
+    // block that can link has a Grounded check per mention (D-KVQ7F): an informative block's
+    // unlinked mention stays a suggestion, a search fact and a neighbour, and scores nothing
+    let normative = is_normative(cx.pack, b);
     let can_link = link_kind_for(cx.pack, b).is_some();
     for located in cx.lex.mentions_located(b) {
         let mention = &located.mention;
@@ -429,7 +431,7 @@ pub(crate) fn entry_of(
         let linked = can_link && tied(cx.g, id, &entity);
         // an unlinked mention of a deprecated entity is no linking gap: the deprecated reference
         // tension reports it, and its fix is to reword (D-S46DE; final review I4)
-        if can_link && (linked || !cx.deprecated(&entity)) {
+        if normative && can_link && (linked || !cx.deprecated(&entity)) {
             e.check(Dimension::Grounded);
             if !linked {
                 let name =

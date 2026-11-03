@@ -32,7 +32,7 @@
           "Rules"
         ],
         "id": "c-WKHEZ",
-        "side": "canon@70b11c7f96828e51a184357cddc74f79cd25911c40c27ebe24a4e5e7ca4f7a3e",
+        "side": "canon@d18e33043cc57b59371d31b90e8f1cb17603a00cfc3b1c98cdef179f0eec42e6",
         "text": [
           {
             "field": "body",
@@ -58,7 +58,7 @@
       ]
     }
   },
-  "case_hash": "9aff1459c55e5e0fbe5d5489dbd66cdf0961ceabbd89ac1de8b8542ee9314c8e",
+  "case_hash": "ee350198955e0f2e09ec000451db66c9630e12e30d89238c389a84a4c2378553",
   "kind": "tension",
   "lease_expires_at": "2025-10-09T09:03:20Z",
   "request": "rq-e6db2a9b28b7"

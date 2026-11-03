@@ -99,7 +99,8 @@ pub struct Answer {
     pub relayed_by: Option<ActorRun>,
     /// The person's words and where they came from, with a relay.
     pub relay_evidence: Option<RelayEvidence>,
-    /// How the relay got the answer: `card` or `text`; None for a local answer.
+    /// How the answer arrived: a relay records `card` or `text`; a local answer records none,
+    /// `card` (the approver UI) or `elicited` (an MCP client asked the person).
     pub evidence_kind: Option<EvidenceKind>,
     /// The person's note: 1 to 2000 characters when present.
     pub note: Option<String>,

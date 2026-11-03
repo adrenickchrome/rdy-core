@@ -139,7 +139,9 @@ fn di12_rdy_pending_returns_the_batch_and_its_exceptions() {
     let on_batch = related(&batch);
     assert_eq!(on_batch.len(), 1, "{batch}");
     assert!(
-        on_batch[0].starts_with(&format!("1 listed, 0 omitted: {row}")),
+        on_batch[0].starts_with(&format!(
+            "1 listed by link, 0 found by text, 0 omitted: {row}"
+        )),
         "{on_batch:?}"
     );
     for card in exceptions(&v, &b.r#ref) {
@@ -151,7 +153,9 @@ fn di12_rdy_pending_returns_the_batch_and_its_exceptions() {
             .starts_with(&format!("{}@", b.against))
         {
             assert!(
-                shown[0].starts_with(&format!("1 listed, 0 omitted: {row}")),
+                shown[0].starts_with(&format!(
+                    "1 listed by link, 0 found by text, 0 omitted: {row}"
+                )),
                 "{shown:?}"
             );
         } else {
@@ -1068,15 +1072,13 @@ fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
             .to_string()
     };
     let batch = item_of(&v, &pv.r#ref);
-    let row = format!("{n} same_entity {a} [live] via text: Entries are append-only");
+    let counts = "0 listed by link, 1 found by text, 0 omitted";
+    let text_row = format!("{n} same_entity {a} [live] via text");
     assert_eq!(
         fact(&batch, "Confidence"),
         format!("medium: unlinked_mention on {n} (\"ledger service\")")
     );
-    assert_eq!(
-        fact(&batch, "Related decisions"),
-        format!("1 listed, 0 omitted: {row}")
-    );
+    assert_eq!(fact(&batch, "Related decisions"), counts);
     let confirm = exceptions(&v, &pv.r#ref)
         .into_iter()
         .find(|i| {
@@ -1085,10 +1087,7 @@ fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
                 .is_some_and(|r| r.starts_with(&format!("{n}@")))
         })
         .expect("the one_way decision's confirm card");
-    assert_eq!(
-        fact(&confirm, "Related decisions"),
-        format!("1 listed, 0 omitted: {row}")
-    );
+    assert_eq!(fact(&confirm, "Related decisions"), counts);
     // the card text shows both, and every key of an item is still there
     assert!(
         batch["card"]
@@ -1096,7 +1095,12 @@ fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
             .unwrap()
             .contains("(\"ledger service\")")
     );
-    assert!(confirm["card"].as_str().unwrap().contains(&row));
+    for card in [&batch, &confirm] {
+        let text = card["card"].as_str().unwrap();
+        assert!(text.contains(counts), "{text}");
+        assert!(!text.contains(&text_row), "{text}");
+        assert!(!text.contains("Entries are append-only"), "{text}");
+    }
     for item in [&batch, &confirm] {
         let mut keys: Vec<&str> = item
             .as_object()
