@@ -419,7 +419,7 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
     let mut refused: Option<Res> = None;
     for again in [false, true] {
         let card = match m3::show_card(link, pref) {
-            m3::Shown::Card(c) => c,
+            m3::Shown::Card(c) => *c,
             m3::Shown::Absent {
                 not_ready,
                 past_cap,
@@ -432,6 +432,7 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
                         "evidence": format!("Approve {pref}."),
                         "question": format!("Land {pref}?"), "session_ref": RELAY_RUN});
                     let res = link.raw("land", "rdy_answer", args);
+                    let e = with_refusal(link, e, &res);
                     let res = link.finish(e, "land", res, |en, v| {
                         en.reply = Some(v.clone());
                     });
@@ -447,7 +448,7 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
             }
             m3::Shown::Lost => return Relayed::Lost,
         };
-        let Some(option) = m3::choose(&card, "approve") else {
+        let Some(option) = m3::choose(&card, m3::APPROVE) else {
             link.fail(
                 "land",
                 &format!("the card of {pref} offers no approve: {:?}", card.options),
@@ -462,7 +463,8 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
             "evidence": words, "question": format!("Land {pref}?"), "session_ref": RELAY_RUN});
         let res = link.raw("land", "rdy_answer", args);
         let moved = matches!(&res, Res::Refused(code, _) if code == "E_PROPOSAL_MOVED");
-        let res = link.finish(e.clone(), "land", res, |en, v| {
+        let refusal = with_refusal(link, e.clone(), &res);
+        let res = link.finish(refusal, "land", res, |en, v| {
             en.reply = Some(v.clone());
         });
         if !moved || again {
@@ -471,6 +473,15 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
         refused = Some(res);
     }
     unreachable!("the second answer returns")
+}
+
+/// Entry `e`, holding the whole tool error as its `reply` when `res` is a refusal: the journal
+/// keeps the raw tool reply, a refusal's issues too (ruling task-8, finding 2).
+fn with_refusal(link: &mut Link, mut e: Entry, res: &Res) -> Entry {
+    if matches!(res, Res::Refused(..)) {
+        e.reply = link.last_error.clone();
+    }
+    e
 }
 
 impl Person {

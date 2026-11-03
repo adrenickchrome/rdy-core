@@ -2177,15 +2177,17 @@ fn vw2_the_closed_table_lets_a_land_meet_e_view_closed() {
 /// Diagnosis pin (M3a Task 6, D-TX3KH; D-ME2HD and O12 keep E_STALE_BASE at landing): a0 and
 /// a1 append a claim under one section from one base, so both claims hold one order key. a0
 /// proposes, then a1 proposes and edits its own claim again. a0 lands first; a1's version then
-/// needs a new order key for a claim its view changed after the proposal, and the landing is
-/// refused with the order-key E_STALE_BASE. a1 proposes again and that version lands.
+/// needs a new order key for a claim its view changed after the proposal. Both lanes refuse it
+/// (ruling task-8, finding 2): the chat lane's `rdy_answer` with `E_PROPOSAL_NOT_READY`, whose
+/// issue names the stale order key, and the CLI parity lane's direct approve with the order-key
+/// E_STALE_BASE. a1 proposes again and that version lands through the chat path.
 #[test]
 fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_lands() {
     const SEED: u64 = 23;
     let cfg = Config {
         seed: SEED,
         agents: 2,
-        steps: 8,
+        steps: 10,
         kill_at: None,
     };
     let read = |n| Act::Read {
@@ -2196,23 +2198,25 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
         contra: None,
         source: false,
     };
-    let mut a0 = vec![read(0); 8];
+    let mut a0 = vec![read(0); 10];
     a0[0] = create();
     a0[1] = Act::Propose;
-    let mut a1 = vec![read(1); 8];
+    let mut a1 = vec![read(1); 10];
     a1[0] = create();
     a1[2] = Act::Propose;
     a1[3] = Act::Write {
         target: Pick::Own(0),
         stable: true,
     };
-    a1[7] = Act::Propose;
-    // the person's act j runs after step 2(j + 1): it lands after steps 4, 6 and 8, and a1
-    // proposes again at step 7, after the landing due at step 6
+    a1[9] = Act::Propose;
+    // the person's act j runs after step 2(j + 1): a0 lands after step 4; a1's first version
+    // meets the chat lane after step 6 and the CLI parity lane after step 8; a1 proposes again
+    // at step 9, and that version lands through the chat path after step 10
     let person = vec![
         PersonAct::Tensions,
         PersonAct::Land { relayed: true },
         PersonAct::Land { relayed: true },
+        PersonAct::Land { relayed: false },
         PersonAct::Land { relayed: true },
     ];
     let s = Script {
@@ -2225,17 +2229,22 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
         Err(text) => panic!("{text}"),
     };
     let run = o.before_freeze();
-    let stale = run.iter().find(|e| {
-        e.act == "land"
-            && e.view.as_deref() == Some("a1")
-            && e.outcome == Met::Refused("E_STALE_BASE".into())
-    });
-    let stale = stale.unwrap_or_else(|| {
-        panic!(
-            "swarm seed {SEED}: a1's first version met no stale order key:\n{}",
-            lines(run)
-        )
-    });
+    let a1_lands = |actor: &str| -> Vec<&Entry> {
+        run.iter()
+            .filter(|e| e.act == "land" && e.view.as_deref() == Some("a1") && e.actor == actor)
+            .collect()
+    };
+    // the CLI parity lane: the order-key E_STALE_BASE
+    let cli = a1_lands("human:qa");
+    let stale = cli
+        .iter()
+        .find(|e| e.outcome == Met::Refused("E_STALE_BASE".into()))
+        .unwrap_or_else(|| {
+            panic!(
+                "swarm seed {SEED}: a1's first version met no stale order key on the CLI lane:\n{}",
+                lines(run)
+            )
+        });
     assert!(
         stale
             .message
@@ -2243,10 +2252,35 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
             .is_some_and(|m| m.contains("needs a new order key")),
         "{stale:#?}"
     );
+    // the chat lane, on the same version: not ready, and its issue is the stale order key
+    let chat = a1_lands("agent:relay");
+    let not_ready = chat
+        .iter()
+        .find(|e| e.outcome == Met::Refused("E_PROPOSAL_NOT_READY".into()))
+        .unwrap_or_else(|| {
+            panic!(
+                "swarm seed {SEED}: a1's first version met no chat refusal:\n{}",
+                lines(run)
+            )
+        });
+    assert_eq!(not_ready.block, stale.block, "one version, both lanes");
+    // the journal keeps the whole tool error: its issues are the version's readiness issues
+    let issues = not_ready
+        .reply
+        .as_ref()
+        .and_then(|r| r["issues"].as_array())
+        .unwrap_or_else(|| panic!("the refusal's issues are journaled: {not_ready:#?}"));
     assert!(
-        run.iter()
-            .any(|e| e.act == "land" && e.view.as_deref() == Some("a1") && e.outcome == Met::Ok),
-        "swarm seed {SEED}: a1's later version did not land:\n{}",
+        issues.iter().any(|i| i["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("needs a new order key"))),
+        "the chat refusal's issue is not the stale order key: {not_ready:#?}"
+    );
+    // the later version lands through the chat path
+    assert!(
+        chat.iter()
+            .any(|e| e.outcome == Met::Ok && e.block != stale.block),
+        "swarm seed {SEED}: a1's later version did not land through the chat path:\n{}",
         lines(run)
     );
     assert!(

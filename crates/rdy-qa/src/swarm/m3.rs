@@ -25,7 +25,9 @@
 //! The routes:
 //! - `RelayedAnswer`: the agent relays the person's words with `rdy_answer` on the card shown.
 //! - `WrongThenRightRole`: not run. The swarm has one person in one daemon, so no second person
-//!   can hold the card's policy role (`NOT_BUILT`); a `Skipped` entry keeps the gap visible.
+//!   can hold the card's policy role. The authority area proves the route
+//!   (`mg5_roles_route_and_enforce_the_same_person`); a `Skipped` entry of each act says so
+//!   (`COVERED_BY_AREA`) and is never counted as a witness.
 //! - `ElicitationRevisions`: one version answered through an eliciting client of each revision
 //!   (2025-11-25 in-call, 2026-07-28 inline); the accepted answer lands as `local`.
 //! - `DeclineThenRelay`: the person declines the elicited card, which stays open; a separate
@@ -57,8 +59,10 @@ use std::sync::Arc;
 pub const LAND_CARD: &str = "land_card";
 /// The act of a scenario's setup call.
 pub const M3_FIXTURE: &str = "m3_fixture";
-/// Why `WrongThenRightRole` is not run.
-pub const NOT_BUILT: &str = "not run: the swarm has one person in one daemon, so no second person holds the card's policy role";
+/// Why `WrongThenRightRole` is not run in the swarm, and where its route is proven (ruling
+/// task-8, finding 1). A `Skipped` entry is never a witness.
+pub const COVERED_BY_AREA: &str =
+    "wrong-role route: one swarm person; proven by mg5_roles_route_and_enforce_the_same_person";
 /// The chat session the person speaks in.
 const SESSION_REF: &str = "chat";
 /// The publication profile the publication route checks: every doc, audience org.
@@ -86,23 +90,123 @@ impl M3Hooks {
     }
 }
 
-/// A card as the person's queue showed it.
+/// The word an approval's label begins with, as the card shows it: the person looks for it.
+pub const APPROVE: &str = "Approve";
+/// The first line of each removal request's section on a card.
+pub use rdy_engine::pending::card::REMOVAL_HEADING as REMOVAL_SECTION;
+/// What a cut card says where it left lines out.
+const CUT: &str = " cut; rdy_pending with a larger max_tokens shows them)";
+
+/// A card as the person's queue showed it: the whole item, and what the person reads of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub r#ref: String,
     pub card_hash: String,
+    pub title: String,
+    /// The card's text at the largest budget: what the person reads.
+    pub text: String,
     /// The option ids, in the card's order.
     pub options: Vec<String>,
+    /// The option labels, in the card's order.
+    pub labels: Vec<String>,
     /// The id of the option the card recommends, if one.
     pub recommended: Option<String>,
     /// Whether the same read listed the version's deferral card (`defer:<P-x@n>`), which the
     /// person accepts before the approval (D-AAQ9Z).
     pub deferral: bool,
+    /// The queue item whole, as `rdy_pending` gave it.
+    pub item: Value,
+}
+
+/// `text` with every run of white space as one space, as the card renders a value.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+impl Card {
+    /// Whether the text the person reads is the whole card of the item (fix round 1, finding
+    /// 4): its first line names the ref and title, nothing is cut, the summary, every option's
+    /// numbered label and each of its consequences stand in it, and a removal card shows each
+    /// request's section with its warnings. What is missing, if anything.
+    pub fn complete(&self) -> Result<(), String> {
+        let t = &self.text;
+        if t.trim().is_empty() {
+            return Err(format!("{}: the card has no text", self.r#ref));
+        }
+        let head = format!("{}  {}", self.r#ref, one_line(&self.title));
+        if !t.lines().next().is_some_and(|l| l.starts_with(&head)) {
+            return Err(format!("the first line is not {head:?}: {t}"));
+        }
+        if t.contains(CUT) {
+            return Err(format!("the card is cut: {t}"));
+        }
+        let flat = one_line(t);
+        if let Some(summary) = self.item["summary"].as_str().map(one_line)
+            && !summary.is_empty()
+            && !flat.contains(&summary)
+        {
+            return Err(format!("the summary {summary:?} is not shown: {t}"));
+        }
+        if self.options.is_empty() {
+            return Err(format!("the card offers no option: {t}"));
+        }
+        let opts = self.item["options"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        for (n, o) in opts.iter().enumerate() {
+            let label = one_line(o["label"].as_str().unwrap_or_default());
+            let line = format!("  {}. {label}", n + 1);
+            if label.is_empty() || !t.lines().any(|l| l.starts_with(&line)) {
+                return Err(format!(
+                    "the option {label:?} is not numbered {}: {t}",
+                    n + 1
+                ));
+            }
+            for c in o["consequences"].as_array().into_iter().flatten() {
+                let c = one_line(c.as_str().unwrap_or_default());
+                if !flat.contains(&c) {
+                    return Err(format!("the consequence {c:?} is not shown: {t}"));
+                }
+            }
+        }
+        let requests = self.item["removal"].as_array().map_or(0, Vec::len);
+        if requests > 0 {
+            let sections = t.lines().filter(|l| *l == REMOVAL_SECTION).count();
+            if sections < requests {
+                return Err(format!(
+                    "{requests} removal requests, {sections} sections shown: {t}"
+                ));
+            }
+            for w in [
+                rdy_engine::W_REDACTION_COPIES_MESSAGE,
+                rdy_engine::W_REDACTION_QUOTES_MESSAGE,
+                rdy_engine::W_REDACTION_REUSE_MESSAGE,
+            ] {
+                if !t.contains(w) {
+                    return Err(format!("the warning {w:?} is not shown: {t}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The card as the `land_card` entry journals it: everything the person was shown.
+    fn shown(&self) -> Value {
+        let options: Vec<Value> = self
+            .options
+            .iter()
+            .zip(&self.labels)
+            .map(|(id, label)| json!({"id": id, "label": label}))
+            .collect();
+        json!({"ref": self.r#ref, "card_hash": self.card_hash, "title": self.title,
+            "card": self.text, "options": options, "recommended": self.recommended,
+            "deferral": self.deferral, "item": self.item})
+    }
 }
 
 /// What a read of the person's queue showed of one version.
 pub(crate) enum Shown {
-    Card(Card),
+    Card(Box<Card>),
     /// No card of the version: `not_ready` when the queue lists it as not ready, `past_cap` when
     /// the queue leaves items out past its cap.
     Absent {
@@ -117,13 +221,14 @@ pub(crate) enum Shown {
 fn card_in(q: &Value, pref: &str) -> Option<Card> {
     let i = q["items"].as_array()?.iter().find(|i| i["ref"] == pref)?;
     let options = i["options"].as_array()?;
+    let field = |o: &Value, k: &str| o[k].as_str().unwrap_or_default().to_string();
     Some(Card {
         r#ref: i["ref"].as_str()?.to_string(),
         card_hash: i["card_hash"].as_str()?.to_string(),
-        options: options
-            .iter()
-            .filter_map(|o| o["id"].as_str().map(str::to_string))
-            .collect(),
+        title: field(i, "title"),
+        text: field(i, "card"),
+        options: options.iter().map(|o| field(o, "id")).collect(),
+        labels: options.iter().map(|o| field(o, "label")).collect(),
         recommended: options
             .iter()
             .find(|o| o["recommended"] == true)
@@ -132,6 +237,7 @@ fn card_in(q: &Value, pref: &str) -> Option<Card> {
             .as_array()?
             .iter()
             .any(|i| i["ref"] == format!("defer:{pref}")),
+        item: i.clone(),
     })
 }
 
@@ -150,13 +256,13 @@ pub(crate) fn show_card(link: &mut Link, pref: &str) -> Shown {
         let past_cap = v["omitted"].as_u64().unwrap_or(0) > 0;
         en.reply = Some(json!({
             "via": "rdy_pending",
-            "shown": card.as_ref().map(|c| json!({"ref": c.r#ref, "card_hash": c.card_hash,
-                "options": c.options, "recommended": c.recommended, "deferral": c.deferral})),
+            "shown": card.as_ref().map(Card::shown),
+            "warnings": v["warnings"],
             "not_ready": not_ready,
             "past_cap": past_cap,
         }));
         shown = Some(match card {
-            Some(c) => Shown::Card(c),
+            Some(c) => Shown::Card(Box::new(c)),
             None => Shown::Absent {
                 not_ready,
                 past_cap,
@@ -164,19 +270,38 @@ pub(crate) fn show_card(link: &mut Link, pref: &str) -> Shown {
         });
     });
     match res {
-        Res::Ok(_) => shown.expect("an Ok read fills it"),
+        Res::Ok(_) => {
+            let shown = shown.expect("an Ok read fills it");
+            // the person answers only a card shown whole (fix round 1, finding 4)
+            if let Shown::Card(c) = &shown
+                && let Err(why) = c.complete()
+            {
+                link.fail(
+                    LAND_CARD,
+                    &format!("the card of {pref} is not whole: {why}"),
+                );
+            }
+            shown
+        }
         Res::Lost => Shown::Lost,
         // the table allows no refusal of the read: `finish` failed the run
         Res::Refused(..) => unreachable!("a refused queue read fails the run"),
     }
 }
 
-/// The simulated person's choice of `want` on `card`: only an option the card offers.
-pub(crate) fn choose(card: &Card, want: &str) -> Option<String> {
-    card.options
-        .iter()
-        .any(|o| o == want)
-        .then(|| want.to_string())
+/// The simulated person's choice on `card`: the option whose label, numbered in the text the
+/// person read, begins with `word`. Its id is the id of the option of that number, and only when
+/// that option's label is the one the text shows: the choice follows the card as presented,
+/// never an id the person was not shown.
+pub(crate) fn choose(card: &Card, word: &str) -> Option<String> {
+    let mut lines = card.text.lines().skip_while(|l| *l != "Options").skip(1);
+    let (n, shown) = lines.find_map(|l| {
+        let (n, rest) = l.strip_prefix("  ")?.split_once(". ")?;
+        let n: usize = n.parse().ok()?;
+        rest.starts_with(word).then(|| (n, rest.to_string()))
+    })?;
+    let label = one_line(card.labels.get(n.checked_sub(1)?)?);
+    (label.starts_with(word) && shown.starts_with(&label)).then(|| card.options[n - 1].clone())
 }
 
 /// The version number of a ref `P-x@n`.
@@ -249,7 +374,7 @@ pub(crate) fn run(
     };
     match sc.route {
         Route::RelayedAnswer => c.relayed(),
-        Route::WrongThenRightRole => c.not_built(),
+        Route::WrongThenRightRole => c.covered_by_area(),
         Route::ElicitationRevisions => c.revisions(),
         Route::DeclineThenRelay => c.decline_then_relay(),
         Route::MovedCard => c.moved(),
@@ -462,7 +587,7 @@ impl Ctx<'_> {
                 }
                 Shown::Card(c) => {
                     self.bound();
-                    return Some(c);
+                    return Some(*c);
                 }
                 Shown::Absent { not_ready, .. } => {
                     let why = format!("no card of {pref} (not ready: {not_ready})");
@@ -482,7 +607,7 @@ impl Ctx<'_> {
         let Some(card) = self.card(act, pref) else {
             return false;
         };
-        let Some(option) = choose(&card, "approve") else {
+        let Some(option) = choose(&card, APPROVE) else {
             self.gap(act, Some(pref), "the card offers no approve");
             return false;
         };
@@ -600,9 +725,9 @@ impl Ctx<'_> {
         );
     }
 
-    fn not_built(&mut self) {
+    fn covered_by_area(&mut self) {
         for act in self.sc.route.acts() {
-            self.gap(act, None, NOT_BUILT);
+            self.gap(act, None, COVERED_BY_AREA);
         }
     }
 
@@ -626,7 +751,7 @@ impl Ctx<'_> {
             let Some(card) = self.card(act, &pref) else {
                 return;
             };
-            if choose(&card, "approve").is_none() {
+            if choose(&card, APPROVE).is_none() {
                 self.gap(act, Some(&pref), "the card offers no approve");
                 return;
             }
@@ -699,7 +824,7 @@ impl Ctx<'_> {
             return;
         };
         let card = match show_card(self.link, &old) {
-            Shown::Card(c) => c,
+            Shown::Card(c) => *c,
             Shown::Absent { not_ready, .. } => {
                 self.gap(
                     "m3_moved_card",
@@ -720,7 +845,7 @@ impl Ctx<'_> {
         }
         // the answer on the card the person saw, which the newer version moved
         let act = "m3_moved_card";
-        let Some(option) = choose(&card, "approve") else {
+        let Some(option) = choose(&card, APPROVE) else {
             self.gap(act, Some(&old), "the card offers no approve");
             return;
         };
@@ -912,5 +1037,141 @@ impl Ctx<'_> {
         self.fixture(None, "rdy_compact", json!({"dry_run": true}), |en, v| {
             en.reply = Some(v.clone());
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PREF: &str = "P-7f3a@2";
+
+    /// A queue item as `rdy_pending` gives it at the largest budget: the text and the fields
+    /// the text renders.
+    fn item() -> Value {
+        let card = format!(
+            "{PREF}  Guest mode                                              approve\n\n\
+             Summary (agent:planner)\n  Lets a visitor read a shared doc without an account.\n\n\
+             Facts (computed)\n  Changes         2 docs, 3 blocks\n\n\
+             Options\n  1. Approve {PREF}                              recommended\n     \
+             Lands the proposal in canon.\n     Why recommended: no exception.\n  2. Reject\n     \
+             Closes it."
+        );
+        json!({
+            "ref": PREF, "kind": "approve", "title": "Guest mode",
+            "summary": "Lets a visitor read a shared doc without an account.",
+            "options": [
+                {"id": "approve", "label": format!("Approve {PREF}"),
+                 "consequences": ["Lands the proposal in canon."], "recommended": true,
+                 "reason": "no exception."},
+                {"id": "reject", "label": "Reject", "consequences": ["Closes it."]},
+            ],
+            "card": card, "card_hash": "ab12",
+        })
+    }
+
+    fn queue(i: Value) -> Value {
+        json!({"items": [i]})
+    }
+
+    #[test]
+    fn a_whole_card_is_presented_with_its_labels() {
+        let c = card_in(&queue(item()), PREF).expect("the card");
+        assert_eq!(c.complete(), Ok(()));
+        assert_eq!(c.title, "Guest mode");
+        assert!(c.text.starts_with(PREF));
+        assert_eq!(c.options, ["approve", "reject"]);
+        assert_eq!(c.labels, [format!("Approve {PREF}"), "Reject".to_string()]);
+        assert_eq!(c.recommended.as_deref(), Some("approve"));
+        assert_eq!(c.item, item());
+    }
+
+    #[test]
+    fn a_card_with_no_text_is_not_complete() {
+        let mut i = item();
+        i["card"] = json!("");
+        let c = card_in(&queue(i), PREF).expect("the card");
+        assert!(c.complete().is_err());
+    }
+
+    #[test]
+    fn a_card_whose_text_leaves_out_an_option_label_is_not_complete() {
+        let mut i = item();
+        let text = i["card"]
+            .as_str()
+            .unwrap()
+            .replace("  2. Reject", "  2. Close");
+        i["card"] = json!(text);
+        let c = card_in(&queue(i), PREF).expect("the card");
+        let why = c.complete().expect_err("a label left out");
+        assert!(why.contains("Reject"), "{why}");
+    }
+
+    #[test]
+    fn a_card_of_another_version_or_title_is_not_complete() {
+        let mut i = item();
+        i["title"] = json!("Host mode");
+        let c = card_in(&queue(i), PREF).expect("the card");
+        assert!(c.complete().is_err());
+    }
+
+    #[test]
+    fn a_cut_card_is_not_complete() {
+        let mut i = item();
+        let text = i["card"].as_str().unwrap().replace(
+            "  Changes         2 docs, 3 blocks",
+            "  (1 facts cut; rdy_pending with a larger max_tokens shows them)",
+        );
+        i["card"] = json!(text);
+        let c = card_in(&queue(i), PREF).expect("the card");
+        assert!(c.complete().is_err());
+    }
+
+    #[test]
+    fn a_summary_or_consequence_the_text_leaves_out_is_not_complete() {
+        let mut i = item();
+        i["summary"] = json!("Something the card does not say.");
+        assert!(card_in(&queue(i), PREF).unwrap().complete().is_err());
+        let mut i = item();
+        i["options"][1]["consequences"] = json!(["Deletes everything."]);
+        assert!(card_in(&queue(i), PREF).unwrap().complete().is_err());
+    }
+
+    #[test]
+    fn a_removal_card_must_show_each_request_and_its_warnings() {
+        let mut i = item();
+        i["removal"] = json!([{"request": "aa"}]);
+        let c = card_in(&queue(i.clone()), PREF).unwrap();
+        assert!(c.complete().is_err(), "no removal section");
+        let text = format!(
+            "{}\n\n{REMOVAL_SECTION}\n  {}\n  {}\n  {}",
+            i["card"].as_str().unwrap(),
+            rdy_engine::W_REDACTION_COPIES_MESSAGE,
+            rdy_engine::W_REDACTION_QUOTES_MESSAGE,
+            rdy_engine::W_REDACTION_REUSE_MESSAGE
+        );
+        i["card"] = json!(text);
+        assert_eq!(card_in(&queue(i), PREF).unwrap().complete(), Ok(()));
+    }
+
+    #[test]
+    fn the_person_chooses_by_the_numbered_label_the_card_shows() {
+        let c = card_in(&queue(item()), PREF).unwrap();
+        assert_eq!(choose(&c, APPROVE).as_deref(), Some("approve"));
+        assert_eq!(choose(&c, "Reject").as_deref(), Some("reject"));
+        assert_eq!(choose(&c, "Later"), None);
+        // an id whose label the text does not number is never chosen
+        let mut i = item();
+        let text = i["card"]
+            .as_str()
+            .unwrap()
+            .replace("  1. Approve", "  1. Apprvoe");
+        i["card"] = json!(text);
+        assert_eq!(choose(&card_in(&queue(i), PREF).unwrap(), APPROVE), None);
+        // the number on the card, not the id's place in a list the person never saw
+        let mut i = item();
+        let opts = i["options"].as_array().unwrap().clone();
+        i["options"] = json!([opts[1], opts[0]]);
+        assert_eq!(choose(&card_in(&queue(i), PREF).unwrap(), APPROVE), None);
     }
 }

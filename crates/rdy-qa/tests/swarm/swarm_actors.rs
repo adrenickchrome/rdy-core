@@ -1261,11 +1261,24 @@ fn mg8_primary_person_lands_through_rdy_answer() {
     assert_eq!(cards.len(), 1, "{:#?}", j.entries());
     let shown = cards[0].reply.as_ref().expect("the card read")["shown"].clone();
     assert_eq!(shown["ref"], json!(pref), "{shown}");
+    // the whole card the person saw is journaled: its text, the item as the queue gave it, and
+    // each option's label as numbered in the text (fix round 1, finding 4)
+    let text = shown["card"].as_str().expect("the card's text");
+    assert!(text.starts_with(&format!("{pref}  ")), "{text}");
+    assert_eq!(shown["item"]["card"], json!(text), "{shown}");
+    assert_eq!(shown["item"]["card_hash"], shown["card_hash"], "{shown}");
+    assert!(!text.contains(" cut; rdy_pending"), "a cut card: {text}");
+    let options = shown["options"].as_array().expect("the options");
+    let approve = options
+        .iter()
+        .position(|o| o["id"] == "approve")
+        .unwrap_or_else(|| panic!("no approve: {shown}"));
+    let label = options[approve]["label"].as_str().expect("a label");
+    assert!(label.starts_with("Approve"), "{label}");
     assert!(
-        shown["options"]
-            .as_array()
-            .is_some_and(|o| o.iter().any(|x| x == "approve")),
-        "{shown}"
+        text.lines()
+            .any(|l| l.starts_with(&format!("  {}. {label}", approve + 1))),
+        "the label is not numbered in the text: {text}"
     );
     let hash = shown_hash(&cards[0]).expect("the hash shown");
     let land = of(&j, "agent:relay", "land");
@@ -1516,14 +1529,22 @@ fn mg8_policy_refusal_does_not_become_a_person_approval() {
     assert_eq!(row["assurance"], "relayed", "{row:#}");
     assert_eq!(row["approved_by"], "human:qa", "{row:#}");
     assert_eq!(row["relayed_by"]["actor"], "agent:relay", "{row:#}");
-    // the wrong-role route: a visible gap, never a silent pass
+    // the wrong-role route: a visible gap, never a silent pass and never a witness. The
+    // authority area proves it (ruling task-8, finding 1: one swarm person; the route is
+    // `mg5_roles_route_and_enforce_the_same_person`)
     run_m3(&p, &cfg, 1, &[Route::WrongThenRightRole], &j, &g, None);
     for act in Route::WrongThenRightRole.acts() {
         let e = of(&j, "agent:a1", act);
         assert_eq!(e.len(), 1, "{act}: {:#?}", j.entries());
         assert_eq!(e[0].outcome, Outcome::Skipped, "{e:?}");
-        assert_eq!(e[0].message.as_deref(), Some(m3::NOT_BUILT), "{e:?}");
+        assert_eq!(e[0].message.as_deref(), Some(m3::COVERED_BY_AREA), "{e:?}");
+        assert!(e[0].route.is_none(), "a skip is no attempt: {e:?}");
     }
+    assert!(
+        m3::COVERED_BY_AREA.contains("mg5_roles_route_and_enforce_the_same_person"),
+        "{}",
+        m3::COVERED_BY_AREA
+    );
     assert_eq!(log(&p).len(), before.len() + 1);
 }
 
@@ -1586,6 +1607,25 @@ fn mg8_publication_and_compact_run_on_the_shared_daemon() {
     let removed = attempts(&j, "m3_blob_remove");
     assert_eq!(removed.len(), 1, "{:#?}", j.entries());
     assert_eq!(removed[0].outcome, Outcome::Ok, "{:?}", removed[0]);
+    // the removal card the person saw is journaled whole, its mandatory lines and warnings too
+    let entries = j.entries();
+    let remove_at = pos(&j, |e| e.act == "m3_blob_remove" && e.route.is_some())[0];
+    let card = entries[..remove_at]
+        .iter()
+        .rfind(|c| c.act == LAND_CARD && c.block == removed[0].block)
+        .expect("the removal card shown");
+    let text = card.reply.as_ref().unwrap()["shown"]["card"]
+        .as_str()
+        .expect("the card's text")
+        .to_string();
+    for line in [
+        "Content removal",
+        rdy_engine::W_REDACTION_COPIES_MESSAGE,
+        rdy_engine::W_REDACTION_QUOTES_MESSAGE,
+        rdy_engine::W_REDACTION_REUSE_MESSAGE,
+    ] {
+        assert!(text.contains(line), "{line:?} not shown: {text}");
+    }
     let r = row(&p, &acked(&removed[0]));
     assert_eq!(r["assurance"], "relayed", "{r:#}");
     let compact = attempts(&j, "m3_compact_real");
