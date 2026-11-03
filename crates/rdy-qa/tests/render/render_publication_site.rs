@@ -1405,3 +1405,91 @@ fn pub6_redacted_selected_content_keeps_only_the_notice() {
         );
     }
 }
+
+/// lo2 (D-7M0YF): in a profiled output, a ref to a decision outside the selection with display
+/// words reads as the words; with none it reads as nothing, and a pair of parentheses left with
+/// only white space, commas or semicolons goes with the space before it. The page, the search
+/// index, the llms files and a Markdown export read alike. Other refs outside the selection, and
+/// authored parentheses, are unchanged. A public profile with only such refs is clear. The source
+/// site keeps every citation.
+#[test]
+fn lo2_profiled_outputs_drop_decision_refs_outside_the_selection() {
+    let (_dir, mut r) = tiny();
+    let ids = put(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$reg", "fields": {"name": "register", "title": "Register", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$rs", "parent": "$reg", "fields": {"title": "Rulings"}},
+            {"op": "create", "type": "decision", "id": "$d1", "parent": "$rs", "fields": {"statement": "DECISIONCANARY one.", "status": "proposed", "key": "rule-one"}},
+            {"op": "create", "type": "decision", "id": "$d2", "parent": "$rs", "fields": {"statement": "DECISIONCANARY two.", "status": "proposed", "key": "rule-two"}},
+            {"op": "create", "type": "prose", "id": "$hp", "parent": "$rs", "body": "Hidden prose."},
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$gs", "parent": "$guide", "fields": {"title": "Use"}},
+            {"op": "create", "type": "prose", "parent": "$gs", "body": "The rule holds ({{$d1|@key}}, {{$d2|@key}}). Named {{$d1|the first rule}} stays. Spaced ( {{$d1}} ;  ) too. Call f() as written."},
+            {"op": "create", "type": "doc", "id": "$mixed", "fields": {"name": "mixed", "title": "Mixed", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$mixed", "body": "Mixed ({{$hp}}; {{$d1|@key}}) stays."}
+        ]),
+    );
+    land(&mut r, "w1").unwrap();
+    profiles(
+        &mut r,
+        &[
+            ("guidepub", "public", vec![&ids["$guide"]]),
+            ("mixedorg", "org", vec![&ids["$mixed"]]),
+        ],
+    );
+    let st = r.read();
+    let resolved =
+        rdy_engine::publication::resolve(&st, &Scope::Canon, "guidepub").expect("resolve");
+    assert_eq!(resolved.references.blocked_count, 0);
+
+    let s = site(&st, "canon", "guidepub");
+    let want = "The rule holds. Named the first rule stays. Spaced too. Call f() as written.";
+    let guide = page(&s, "guide.html");
+    assert!(guide.contains(&format!("<p>{want}</p>")), "{guide}");
+    assert!(page(&s, "search-index.json").contains(want), "search");
+    assert!(page(&s, "llms-full.txt").contains(want), "llms-full");
+    for word in [
+        UNAVAILABLE,
+        "DECISIONCANARY",
+        "rule-one",
+        "rule-two",
+        &ids["$d1"].to_string(),
+        &ids["$d2"].to_string(),
+    ] {
+        assert_absent(&s, word);
+    }
+    // a Markdown export reads the same words
+    let out = tempfile::tempdir().unwrap();
+    let md = out.path().join("guide-md");
+    rdy_render::print::export_profile(
+        &st,
+        "canon",
+        "guidepub",
+        &md,
+        rdy_render::print::Format::Md,
+        None,
+    )
+    .expect("export");
+    let all: String = tree(&md)
+        .into_values()
+        .map(|b| String::from_utf8(b).unwrap())
+        .collect();
+    assert!(all.contains(want), "{all}");
+    assert!(!all.contains(UNAVAILABLE), "{all}");
+
+    // another ref outside the selection keeps its words, so its parentheses stay
+    let s = site(&st, "canon", "mixedorg");
+    let mixed = page(&s, "mixed.html");
+    assert!(
+        mixed.contains(&format!(">Mixed ({UNAVAILABLE}; ) stays.</p>")),
+        "{mixed}"
+    );
+
+    // the source site keeps every citation
+    let full = build_site(&st, &Scope::Canon, rdy_render::Mode::Static).unwrap();
+    let source = page(&full, "guide.html");
+    assert!(source.contains(">rule-one</a>"), "{source}");
+    assert!(source.contains(">the first rule</a>"), "{source}");
+}

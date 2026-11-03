@@ -18,7 +18,7 @@ use rdy_engine::{
     E_BAD_INPUT, E_NOT_FOUND, Materialized, RdyError, ReadState, Scope, VersionPosition,
     parse_version,
 };
-use rdy_model::Hash;
+use rdy_model::{BlockId, Hash};
 use rdy_schema::Pack;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -151,13 +151,15 @@ pub(crate) fn prepare_selected(
         profile: chosen,
         m,
         graph,
+        references,
         ..
     } = resolved;
+    let dropped = references.dropped_decisions;
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
     let pack = inputs.pack.clone();
-    let (site_name, description) = profile_words(&chosen, &m, &pack, inputs);
-    let site = Site::with_unavailable(&m, &pack, &site_name, Some(inline::UNAVAILABLE));
+    let (site_name, description) = profile_words(&chosen, &m, &pack, inputs, &dropped);
+    let site = Site::for_profile(&m, &pack, &site_name, &dropped);
     // an entry stays only when every side is selected and has a page: an excluded side's text,
     // count or existence never reaches the page
     let disagreements: Vec<disagree::Disagreement> = disagreements(inputs)?
@@ -204,6 +206,7 @@ pub(crate) fn prepare_selected(
             tag_name,
             tag_redacted,
             presentation: Presentation::Output,
+            dropped_decisions: dropped,
         }),
         menu_url: None,
         diagram_cache: None,
@@ -213,18 +216,20 @@ pub(crate) fn prepare_selected(
 /// The title and description a profile's output shows, read through the selected state `m`: the
 /// implicit profile shows the captured source title, an explicit one its own. Their references
 /// read through the selection, as every other text does: display words kept, else the target's
-/// label, else `unavailable reference` (the profile's own doc need not be selected).
+/// label, else `unavailable reference` (the profile's own doc need not be selected). A ref to a
+/// decision in `dropped` reads as its display words, or as nothing (D-7M0YF).
 pub(crate) fn profile_words(
     chosen: &ResolvedProfile,
     m: &Materialized,
     pack: &Pack,
     inputs: &RenderInputs,
+    dropped: &BTreeSet<BlockId>,
 ) -> (String, Option<String>) {
     let (title, description) = match chosen.id {
         Some(_) => (chosen.title.as_str(), chosen.description.as_deref()),
         None => (inputs.title.as_str(), inputs.description.as_deref()),
     };
-    let words = Site::with_unavailable(m, pack, "", Some(inline::UNAVAILABLE));
+    let words = Site::for_profile(m, pack, "", dropped);
     (
         words.as_written(title),
         description.map(|d| words.as_written(d)),

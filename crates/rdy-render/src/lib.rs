@@ -1510,11 +1510,16 @@ fn with_shared<R>(
         Some(_) => inline::UNAVAILABLE,
         None => html::UNRESOLVED,
     };
-    let mut site = Site::with_unavailable(
+    let dropped = profile
+        .as_ref()
+        .map(|p| p.dropped_decisions.clone())
+        .unwrap_or_default();
+    let mut site = Site::with_words(
         m,
         &pack,
         &site_name,
         profile.as_ref().map(|_| inline::UNAVAILABLE),
+        dropped.clone(),
     );
     site.set_disagreements(disagreements);
     // a static site is written as files: two siblings that would be one file refuse before
@@ -1537,7 +1542,7 @@ fn with_shared<R>(
     // a named profile's review base: the words only it holds read through its selected state
     let old_site = old
         .as_deref()
-        .map(|o| Site::with_unavailable(o, &pack, &site_name, Some(inline::UNAVAILABLE)));
+        .map(|o| Site::for_profile(o, &pack, &site_name, &dropped));
     // the review marks on the pages read only a base a scope names (the task-8 ruling)
     let review = listed.as_ref().filter(|_| review_marks);
     let header = match &profile {

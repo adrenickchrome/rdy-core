@@ -754,7 +754,13 @@ mod tests {
     const INS: &str = INS_OPEN;
 
     fn coded(t: &str) -> String {
-        crate::inline::plain_refs_coded(t, RefMode::Strict, Form::Spans, &|_| String::new())
+        crate::inline::plain_refs_coded(
+            t,
+            RefMode::Strict,
+            Form::Spans,
+            &|_| String::new(),
+            &|_| false,
+        )
     }
 
     fn para(old: &str, new: &str) -> String {

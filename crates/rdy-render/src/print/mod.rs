@@ -360,11 +360,15 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         diagram_cache,
     } = prepared;
     let m: &rdy_engine::Materialized = &m;
-    let mut site = Site::with_unavailable(
+    let mut site = Site::with_words(
         m,
         &pack,
         &site_name,
         profile.as_ref().map(|_| crate::inline::UNAVAILABLE),
+        profile
+            .as_ref()
+            .map(|p| p.dropped_decisions.clone())
+            .unwrap_or_default(),
     );
     site.set_disagreements(disagreements);
     // the Markdown tree writes a file per page: two siblings that would be one file refuse every

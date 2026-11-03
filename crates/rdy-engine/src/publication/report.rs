@@ -130,9 +130,12 @@ fn reference_row(r: &super::ReferenceRow) -> Value {
 }
 
 /// The report's `references` object of `r`: its status, counts, its first [`REPORT_ROWS`] rows
-/// and how many rows were left out. Every surface that shows a reference check uses it.
+/// and how many rows were left out, then `links_outside` (D-44NMT): the count of link edges
+/// outside the selection, their first rows and how many were left out. Every surface that shows
+/// a reference check uses it.
 pub fn reference_summary(r: &ReferenceReport) -> Value {
     let (rows, omitted_rows) = listed(&r.rows, reference_row);
+    let (link_rows, omitted_link_rows) = listed(&r.links_outside, reference_row);
     json!({
         "status": r.status.as_str(),
         "excluded": r.excluded_count,
@@ -140,6 +143,11 @@ pub fn reference_summary(r: &ReferenceReport) -> Value {
         "total": r.blocked_count,
         "rows": rows,
         "omitted_rows": omitted_rows,
+        "links_outside": {
+            "count": r.links_outside_count,
+            "rows": link_rows,
+            "omitted_rows": omitted_link_rows,
+        },
     })
 }
 

@@ -373,6 +373,10 @@ fn link_in<'a>(
     from: &'a str,
 ) -> impl Fn(&BlockId) -> Option<Link> + 'a {
     move |id| {
+        // a decision outside a named profile's selection (D-7M0YF)
+        if site.drops(id) {
+            return Some(Link::dropped());
+        }
         let b = m.get(id)?;
         Some(Link {
             // a block with no place on the site reads as its label, unlinked
@@ -381,6 +385,7 @@ fn link_in<'a>(
             title: String::new(),
             key: crate::site::typed_key(b).map(String::from),
             removed: b.is_redacted(),
+            dropped: false,
         })
     }
 }

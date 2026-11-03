@@ -274,6 +274,10 @@ pub struct Site<'a> {
     /// label, summary, description and search text reads it in place of its source wording.
     /// None for a source output.
     unavailable: Option<&'static str>,
+    /// The decisions outside a named profile's selection whose references the output drops
+    /// (D-7M0YF): such a reference reads as its display words, or as nothing. Empty for a source
+    /// output.
+    dropped_decisions: BTreeSet<BlockId>,
     /// Test hook: how many times `doc_of` was asked.
     #[cfg(test)]
     doc_calls: std::cell::Cell<usize>,
@@ -291,6 +295,19 @@ impl<'a> Site<'a> {
         pack: &Pack,
         project: &str,
         unavailable: Option<&'static str>,
+    ) -> Site<'a> {
+        Site::with_words(m, pack, project, unavailable, BTreeSet::new())
+    }
+
+    /// [`Site::with_unavailable`], with the decisions outside a named profile's selection whose
+    /// references the site drops (D-7M0YF). The site reads them before it works out any words
+    /// (its anchors are among the first), so they are set here.
+    pub(crate) fn with_words(
+        m: &'a Materialized,
+        pack: &Pack,
+        project: &str,
+        unavailable: Option<&'static str>,
+        dropped_decisions: BTreeSet<BlockId>,
     ) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
@@ -444,6 +461,7 @@ impl<'a> Site<'a> {
             urls: RefCell::default(),
             docs: RefCell::default(),
             unavailable,
+            dropped_decisions,
             #[cfg(test)]
             doc_calls: Default::default(),
         };
@@ -683,6 +701,31 @@ impl<'a> Site<'a> {
         self.terms = groups.iter().flat_map(|g| g.terms.clone()).collect();
         self.term_anchors = term_anchors;
         self.term_groups = groups;
+    }
+
+    /// A named profile's site of `m` ([`Site::with_unavailable`] with [`inline::UNAVAILABLE`]),
+    /// which drops each reference to a decision in `dropped` that `m` lacks (D-7M0YF).
+    pub(crate) fn for_profile(
+        m: &'a Materialized,
+        pack: &Pack,
+        project: &str,
+        dropped: &BTreeSet<BlockId>,
+    ) -> Site<'a> {
+        Site::with_words(m, pack, project, Some(inline::UNAVAILABLE), dropped.clone())
+    }
+
+    /// Whether the output drops a reference to `id` (D-7M0YF): a named profile's site lacks the
+    /// block, and it is a decision outside the selection.
+    pub(crate) fn drops(&self, id: &BlockId) -> bool {
+        self.unavailable.is_some()
+            && self.m.get(id).is_none()
+            && self.dropped_decisions.contains(id)
+    }
+
+    /// Whether the output drops the reference `span` with the parentheses it empties: it has no
+    /// display words and [`Site::drops`] its target.
+    fn drops_ref(&self, span: &rdy_model::RefSpan) -> bool {
+        span.display.is_none() && BlockId::parse(&span.token).is_ok_and(|id| self.drops(&id))
     }
 
     /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
@@ -1091,9 +1134,13 @@ impl<'a> Site<'a> {
         depth: usize,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs_every(text, mode, form, &|span| {
-            self.ref_text(span, depth, unresolved)
-        })
+        inline::plain_refs_every(
+            text,
+            mode,
+            form,
+            &|span| self.ref_text(span, depth, unresolved),
+            &|span| self.drops_ref(span),
+        )
     }
 
     /// As [`Site::plain`], but each code span of `text` stands between the code marks
@@ -1106,7 +1153,13 @@ impl<'a> Site<'a> {
         form: Form,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs_coded(text, mode, form, &|span| self.ref_text(span, 0, unresolved))
+        inline::plain_refs_coded(
+            text,
+            mode,
+            form,
+            &|span| self.ref_text(span, 0, unresolved),
+            &|span| self.drops_ref(span),
+        )
     }
 
     /// What a reference reads as in plain words: the notice when its target is removed, whatever
@@ -1147,6 +1200,8 @@ impl<'a> Site<'a> {
                 Some(k) => k.to_string(),
                 None => self.label_at(t, depth + 1),
             },
+            // a decision outside a named profile's selection: no words of its own (D-7M0YF)
+            None if self.drops_ref(span) => String::new(),
             None => match self.unavailable {
                 Some(words) => words.to_string(),
                 None => unresolved(&span.token),

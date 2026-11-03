@@ -16,8 +16,7 @@ use crate::prepare::{self, FigureBlobs, History, Presentation};
 use crate::render_input::capture_inputs;
 use crate::site::Site;
 use crate::{
-    Budget, Mode, NotFoundOut, Slots, build_site_from, inline, publication, review, scope_warnings,
-    version,
+    Budget, Mode, NotFoundOut, Slots, build_site_from, publication, review, scope_warnings, version,
 };
 use rdy_engine::diff::diff_states;
 use rdy_engine::publication::{
@@ -127,6 +126,11 @@ fn prepare_within(
         Some(b) => selected_in(st, b, &profile)?,
         None => None,
     };
+    // the decisions whose references either side drops (D-7M0YF)
+    let old_dropped = old
+        .as_ref()
+        .map(|o| o.references.dropped_decisions.clone())
+        .unwrap_or_default();
 
     // the old and new figures together, bounded before any of their bytes is read; then the
     // current side's bytes, with no output gate (D-CWC91)
@@ -165,10 +169,15 @@ fn prepare_within(
         tag_redacted,
     )?;
     prepared.diagram_cache = Some(st.reader().diagram_cache());
+    let mut dropped = BTreeSet::new();
+    if let Some(p) = prepared.profile.as_mut() {
+        p.dropped_decisions.extend(old_dropped);
+        dropped = p.dropped_decisions.clone();
+    }
     let title = prepared.site_name.clone();
     let pack = prepared.pack.clone();
     let m = Arc::clone(&prepared.m);
-    let site = Site::with_unavailable(&m, &pack, &title, Some(inline::UNAVAILABLE));
+    let site = Site::for_profile(&m, &pack, &title, &dropped);
 
     // the review against the selected base
     let mut hist = History::empty();
@@ -176,7 +185,7 @@ fn prepare_within(
         let listed = review::between_states(&old_m, &m);
         let reviewed = prepare::reviewed_of(st, &scope, listed.changed_blocks())?;
         if let Some(r) = &reviewed {
-            let old_site = Site::with_unavailable(&old_m, &pack, &title, Some(inline::UNAVAILABLE));
+            let old_site = Site::for_profile(&old_m, &pack, &title, &dropped);
             let diff = base.as_ref().map(|_| diff_states(&old_m, &m));
             let sides = Sides {
                 from: &old_m,
@@ -271,8 +280,8 @@ fn prepare_within(
             Scope::Canon => Arc::clone(&m),
             _ => selected_projected(st, &source, &Scope::Canon, &profile)?,
         };
-        let to_site = Site::with_unavailable(&to, &pack, &title, Some(inline::UNAVAILABLE));
-        let from_site = Site::with_unavailable(&from, &pack, &title, Some(inline::UNAVAILABLE));
+        let to_site = Site::for_profile(&to, &pack, &title, &dropped);
+        let from_site = Site::for_profile(&from, &pack, &title, &dropped);
         let rv = review::between_states(&from, &to);
         let diff = diff_states(&from, &to);
         let sides = Sides {

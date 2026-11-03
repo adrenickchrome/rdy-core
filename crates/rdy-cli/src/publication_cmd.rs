@@ -28,10 +28,13 @@ pub(crate) enum PublicationCmd {
     },
 }
 
-/// The ten array names of the report that a row cut can leave rows out of: the count of rows
-/// left out, summed.
+/// The arrays of the report that a row cut can leave rows out of, link rows too: the count of
+/// rows left out, summed.
 fn omitted_any(v: &Value) -> bool {
-    let top = num(&v["selection"]["omitted_entries"]) + num(&v["references"]["omitted_rows"]);
+    let refs = &v["references"];
+    let top = num(&v["selection"]["omitted_entries"])
+        + num(&refs["omitted_rows"])
+        + num(&refs["links_outside"]["omitted_rows"]);
     let diff: u64 = v["disclosure"]["omitted"]
         .as_object()
         .map_or(0, |o| o.values().map(num).sum());
@@ -69,6 +72,10 @@ fn check_text(v: &Value, asked: &str) -> String {
         format!(
             "References outside selection: {}.",
             num(&v["references"]["total"])
+        ),
+        format!(
+            "Links outside selection: {}.",
+            num(&v["references"]["links_outside"]["count"])
         ),
     ];
     let d = &v["disclosure"];
@@ -142,6 +149,21 @@ mod tests {
     }
 
     #[test]
+    fn lo1_the_links_outside_line_follows_the_references_line() {
+        let mut v = report(false, 0);
+        v["references"]["links_outside"] = json!({"count": 844, "rows": [], "omitted_rows": 0});
+        assert_eq!(
+            check_text(&v, "site"),
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 844."
+        );
+        // a link row that the report leaves out is an omitted row
+        v["references"]["links_outside"]["omitted_rows"] = json!(644);
+        assert!(check_text(&v, "site").ends_with(
+            "\nLinks outside selection: 844.\nSome rows are omitted. Counts include every row."
+        ));
+    }
+
+    #[test]
     fn pub12_the_implicit_profile_is_named_by_its_audience() {
         let mut v = report(true, 0);
         v["profile"] = json!({"id": null, "version": null, "key": null, "audience": "org"});
@@ -160,14 +182,14 @@ mod tests {
     }
 
     #[test]
-    fn pub9_the_text_has_three_lines_and_a_comparison_with_full_counts() {
+    fn pub9_the_text_has_four_lines_and_a_comparison_with_full_counts() {
         assert_eq!(
             check_text(&report(false, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3."
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0."
         );
         assert_eq!(
             check_text(&report(true, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 3 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 3 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
         );
         assert!(
             check_text(&report(false, 1), "site")

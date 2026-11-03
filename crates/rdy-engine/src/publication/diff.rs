@@ -353,17 +353,21 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         })
         .collect();
 
-    // references: positive occurrence deltas per (source, location, target, classification)
+    // references: positive occurrence deltas per (source, location, target, classification);
+    // the link edges outside the selection count here as before (D-44NMT leaves the comparison
+    // as it was)
     let b_refs: BTreeMap<RefKey<'_>, u64> = before
         .references
         .rows
         .iter()
+        .chain(&before.references.links_outside)
         .map(|r| (ref_key(r), r.occurrences))
         .collect();
     let mut new_references: Vec<ReferenceRow> = after
         .references
         .rows
         .iter()
+        .chain(&after.references.links_outside)
         .filter_map(|r| {
             let was = b_refs.get(&ref_key(r)).copied().unwrap_or(0);
             (r.occurrences > was).then(|| ReferenceRow {

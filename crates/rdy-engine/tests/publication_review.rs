@@ -411,6 +411,7 @@ fn hpb8_reference_summary_matches_report_projection() {
             keys,
             [
                 "excluded",
+                "links_outside",
                 "missing",
                 "omitted_rows",
                 "rows",

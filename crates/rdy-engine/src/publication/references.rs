@@ -1,11 +1,17 @@
-//! The reference check of a selection (D-0VCQ5): every reference and link in a selected block
-//! whose target lies outside the selection, counted per occurrence, under the audience's fixed
-//! policy. The rows hold only the source's own id, location and token, never a target's text.
+//! The reference check of a selection (D-0VCQ5): every reference in a selected block whose
+//! target lies outside the selection, counted per occurrence, under the audience's fixed policy.
+//! The rows hold only the source's own id, location and token, never a target's text.
+//!
+//! The check counts what an output can show (D-44NMT). No output shows a link edge, so a link
+//! to a target outside the selection is a link outside it: the report lists it apart, and it
+//! never sets the status. A profiled output drops a reference to a decision outside the
+//! selection (D-7M0YF), so that reference never counts either.
 
 use super::select::{Limits, PublicationWarning, limit};
 use crate::error::*;
 use crate::keys::Keys;
 use crate::materialize::Materialized;
+use rdy_model::decision::DECISION;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
 use rdy_schema::publication::Audience;
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,7 +67,16 @@ pub struct ReferenceRow {
 }
 
 /// Every reference that leaves the selection, sorted by (source, location, target,
-/// classification), with the occurrence counts. `blocked_count` is the sum of both counts.
+/// classification), with the occurrence counts. `blocked_count` is the sum of both counts, and
+/// only the two counts set the status.
+///
+/// `links_outside` lists each link edge whose target lies outside the selection, sorted the same
+/// way, at its `/links/{escaped kind}/{index}` location (D-44NMT). `links_outside_count` is the
+/// sum of their occurrences. They never block and never warn.
+///
+/// `dropped_decisions` holds, in id order, each decision outside the selection that a reference
+/// names by id (D-7M0YF). That reference is no row and no count: a profiled output shows its
+/// display words, or nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReferenceReport {
     pub status: CheckStatus,
@@ -69,6 +84,9 @@ pub struct ReferenceReport {
     pub missing_count: u64,
     pub blocked_count: u64,
     pub rows: Vec<ReferenceRow>,
+    pub links_outside_count: u64,
+    pub links_outside: Vec<ReferenceRow>,
+    pub dropped_decisions: BTreeSet<BlockId>,
 }
 
 /// The fix of `E_PUBLICATION_REFERENCE`.
@@ -211,8 +229,15 @@ impl Budget {
 trait Visit {
     fn budget(&mut self) -> &mut Budget;
 
-    /// One reference or link occurrence from `b` to `token`, at the location `at` gives.
-    fn occur(&mut self, b: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError>;
+    /// One reference occurrence (`link` false) or link occurrence (`link` true) from `b` to
+    /// `token`, at the location `at` gives.
+    fn occur(
+        &mut self,
+        b: &Block,
+        token: &str,
+        link: bool,
+        at: &dyn Fn() -> String,
+    ) -> Result<(), RdyError>;
 }
 
 /// Checks one body or string value against the text bounds, then visits its references.
@@ -225,7 +250,7 @@ fn walk_text<V: Visit>(
 ) -> Result<(), RdyError> {
     v.budget().text(text)?;
     for span in ref_spans(text, mode) {
-        v.occur(b, &span.token, at)?;
+        v.occur(b, &span.token, false, at)?;
     }
     Ok(())
 }
@@ -296,7 +321,7 @@ fn walk_block<V: Visit>(v: &mut V, b: &Block) -> Result<(), RdyError> {
     }
     for (kind, links) in &b.links {
         for (i, l) in links.iter().enumerate() {
-            v.occur(b, l.target.as_str(), &|| {
+            v.occur(b, l.target.as_str(), true, &|| {
                 format!("/links/{}/{i}", escape(kind))
             })?;
         }
@@ -339,6 +364,8 @@ struct Scan<'a> {
     /// The source's keys, built on the first key-shaped token.
     keys: Option<Keys>,
     rows: BTreeMap<(BlockId, String, String, Classification), u64>,
+    links: BTreeMap<(BlockId, String, String, Classification), u64>,
+    dropped: BTreeSet<BlockId>,
 }
 
 impl Scan<'_> {
@@ -360,6 +387,13 @@ impl Scan<'_> {
         } else {
             Some(Classification::Excluded)
         }
+    }
+
+    /// The decision outside the selection that `token` names by id, if it does (D-7M0YF).
+    fn outside_decision(&self, token: &str) -> Option<BlockId> {
+        let id = BlockId::parse(token).ok()?;
+        let b = self.source.block(&id)?;
+        (b.block_type == DECISION && !self.keep.contains(&id)).then_some(id)
     }
 
     fn by_id(&self, id: &BlockId) -> Option<Classification> {
@@ -393,16 +427,33 @@ impl Visit for Scan<'_> {
         &mut self.budget
     }
 
-    /// Counts one occurrence; one whose target lies outside the selection is a row.
-    fn occur(&mut self, b: &Block, token: &str, at: &dyn Fn() -> String) -> Result<(), RdyError> {
+    /// Counts one occurrence whose target lies outside the selection: a link is a link
+    /// outside, a reference to a decision is dropped, and any other reference is a row.
+    fn occur(
+        &mut self,
+        b: &Block,
+        token: &str,
+        link: bool,
+        at: &dyn Fn() -> String,
+    ) -> Result<(), RdyError> {
         self.budget.occurrence()?;
         let Some(class) = self.classify(token) else {
             return Ok(());
         };
+        if !link
+            && class == Classification::Excluded
+            && let Some(id) = self.outside_decision(token)
+        {
+            self.dropped.insert(id);
+            return Ok(());
+        }
         let location = at();
         self.budget.row(&location, token)?;
-        *self
-            .rows
+        let rows = match link {
+            true => &mut self.links,
+            false => &mut self.rows,
+        };
+        *rows
             .entry((b.id.clone(), location, token.to_string(), class))
             .or_default() += 1;
         Ok(())
@@ -421,7 +472,13 @@ impl Visit for Resources {
 
     /// Counts one occurrence. Whether it is a row, and so has its location and token bounded,
     /// depends on the state that holds its target, which these blocks alone do not give.
-    fn occur(&mut self, _: &Block, _: &str, _: &dyn Fn() -> String) -> Result<(), RdyError> {
+    fn occur(
+        &mut self,
+        _: &Block,
+        _: &str,
+        _: bool,
+        _: &dyn Fn() -> String,
+    ) -> Result<(), RdyError> {
         self.budget.occurrence()
     }
 }
@@ -484,6 +541,8 @@ pub(crate) fn scan<'a>(
         budget: Budget::new(l),
         keys: None,
         rows: BTreeMap::new(),
+        links: BTreeMap::new(),
+        dropped: BTreeSet::new(),
     };
     for b in selected {
         walk_block(&mut s, b)?;
@@ -495,22 +554,16 @@ pub(crate) fn scan<'a>(
     let rows: Vec<ReferenceRow> = s
         .rows
         .into_iter()
-        .map(
-            |((source, location, target, classification), occurrences)| {
-                match classification {
-                    Classification::Excluded => excluded_count += occurrences,
-                    Classification::Missing => missing_count += occurrences,
-                }
-                ReferenceRow {
-                    source,
-                    location,
-                    target,
-                    classification,
-                    occurrences,
-                }
-            },
-        )
+        .map(|(k, occurrences)| {
+            match k.3 {
+                Classification::Excluded => excluded_count += occurrences,
+                Classification::Missing => missing_count += occurrences,
+            }
+            row_of(k, occurrences)
+        })
         .collect();
+    let links_outside_count = s.links.values().sum();
+    let links_outside = s.links.into_iter().map(|(k, n)| row_of(k, n)).collect();
     let blocked_count = excluded_count + missing_count;
     let status = match (blocked_count, audience) {
         (0, _) => CheckStatus::Clear,
@@ -523,5 +576,22 @@ pub(crate) fn scan<'a>(
         missing_count,
         blocked_count,
         rows,
+        links_outside_count,
+        links_outside,
+        dropped_decisions: s.dropped,
     })
+}
+
+/// The row of one (source, location, target, classification) key and its occurrences.
+fn row_of(
+    (source, location, target, classification): (BlockId, String, String, Classification),
+    occurrences: u64,
+) -> ReferenceRow {
+    ReferenceRow {
+        source,
+        location,
+        target,
+        classification,
+        occurrences,
+    }
 }
