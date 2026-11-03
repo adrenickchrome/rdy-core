@@ -527,6 +527,18 @@ pub fn failing_seeds(output: &str) -> Vec<String> {
 /// What the perf table's tail column is.
 pub const TAIL_NOTE: &str = "p95 is the run at index floor(0.95 x runs) in sorted order (the slowest run when there are 20 runs or fewer). A spec target stated as p99 is checked against this column.";
 
+/// The rule the perf verdicts apply (FW-PF3 D-PACK3), printed under the perf table.
+pub const PERF_RULE_NOTE: &str = "Rule (FW-PF3, D-PACK3): a row with a spec target fails when its median is at least 2x its baseline, or when the class baseline lacks it; a spec ceiling fails on p95 in every mode; a row with no spec target or a proposed target is recorded and never fails on its time. On a machine class with no baseline nothing passes.";
+
+/// A perf row's Delta cell: the change from the baseline median and the ratio, or `-` with no
+/// baseline.
+fn delta_cell(v: &Verdict) -> String {
+    match (v.delta_pct, v.baseline_ms) {
+        (Some(d), Some(b)) => format!("{d:+.0}% ({:.2}x)", v.median_ms / b),
+        _ => "-".into(),
+    }
+}
+
 fn mark(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
 }
@@ -601,7 +613,7 @@ pub fn markdown(r: &Report) -> String {
                 v.p95_ms,
                 v.runs,
                 v.baseline_ms.map_or("-".into(), |b| format!("{b:.3}")),
-                v.delta_pct.map_or("-".into(), |d| format!("{d:+.0}%")),
+                delta_cell(v),
                 v.status.label(),
                 v.spec_target.as_deref().unwrap_or("-")
             );
@@ -616,6 +628,18 @@ pub fn markdown(r: &Report) -> String {
             n(Status::NotCompared),
             n(Status::Regressed),
             n(Status::OverCeiling),
+        );
+        let class = |v: &&Verdict| crate::perf::target_class(&v.op);
+        let informational = r
+            .perf
+            .iter()
+            .filter(|v| class(v).is_some_and(|c| c.informational()))
+            .count();
+        let unclassified = r.perf.iter().filter(|v| class(v).is_none()).count();
+        let _ = writeln!(
+            s,
+            "\n{PERF_RULE_NOTE}\n\n{} targeted, {informational} with no spec target or a proposed target, {unclassified} unclassified.",
+            r.perf.len() - informational - unclassified,
         );
     }
 
@@ -1328,7 +1352,8 @@ mod tests {
             p95_ms: 1.0,
             runs: 20,
         };
-        let mut perf = compare(None, &[mk("log_full")], Mode::Compare);
+        // a targeted row: one with no spec target is recorded, not unbaselined (FW-PF3)
+        let mut perf = compare(None, &[mk("last_changes_doc")], Mode::Compare);
         perf.extend(not_compared(&[mk("history_100")]));
         let r = Report {
             revision: "r".into(),
@@ -1347,7 +1372,7 @@ mod tests {
         };
         let md = markdown(&r);
         assert!(
-            md.contains("| log_full | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
+            md.contains("| last_changes_doc | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
             "{md}"
         );
         assert!(
