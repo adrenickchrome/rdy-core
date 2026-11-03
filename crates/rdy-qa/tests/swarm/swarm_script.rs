@@ -1016,6 +1016,10 @@ fn mg7_m3_scenarios_fit_both_tiers() {
             assert_eq!((s.subject, s.slot), s.route.subject(), "{at}");
         }
     }
+    // the wrong-role route scripts explicit person answers: the card's policy role applies to the
+    // person, so the route needs the simulated person as well as a partner
+    assert!(Route::WrongThenRightRole.needs_person());
+    assert!(Route::WrongThenRightRole.needs_partner());
     // the draw is its own: the agents' and the person's scripts are those of the seed alone
     let a = script(&Config::fast(9));
     let _ = m3_scenarios(&Config::fast(9));

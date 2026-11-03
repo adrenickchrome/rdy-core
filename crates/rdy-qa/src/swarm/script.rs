@@ -1065,8 +1065,10 @@ impl Subject {
 pub enum Route {
     /// An agent relays the person's answer to a card (`rdy_pending`, then `rdy_answer`).
     RelayedAnswer,
-    /// An actor of the wrong role answers a card and is refused; then an actor of the right role
-    /// answers it.
+    /// A card is answered with an explicit scripted person answer whose role is wrong, and is
+    /// refused; then it is answered with one whose role is the card's required person role. The
+    /// roles are the person's (the card's policy role), not the relaying agent's writer or
+    /// reviewer role, so the route needs the simulated person.
     WrongThenRightRole,
     /// A card is elicited under both elicitation revisions.
     ElicitationRevisions,
@@ -1137,6 +1139,7 @@ impl Route {
         matches!(
             self,
             Route::RelayedAnswer
+                | Route::WrongThenRightRole
                 | Route::ElicitationRevisions
                 | Route::DeclineThenRelay
                 | Route::MovedCard
