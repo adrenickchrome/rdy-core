@@ -2485,9 +2485,10 @@ impl Version {
     /// for no decisions): the related list a briefing of them gives, read in the proposal's
     /// candidate at the canon it was proposed on (this version's own build while canon is still
     /// there, else the proposal's scope), cut to one cap of 20 rows. The value is
-    /// `{n} listed, {m} omitted: {row}; {row}`, each row `{for} {relation} {decision} [{status}]
-    /// via {via}: {summary}`, or `none`; the whole fact is cut as every stored fact is, so the
-    /// counts lead. A list that cannot be read is `not worked out ({code})`.
+    /// `{l} listed by link, {t} found by text, {o} omitted: {row}; {row}`, each link row
+    /// `{for} {relation} {decision} [{status}] via link: {summary}` (text rows are only counted,
+    /// over the rows kept by the caps; omitted rows have no route), or `none`; the whole fact is
+    /// cut as every stored fact is, so the counts lead. A list that cannot be read is `not worked out ({code})`.
     fn related_facts(&self, st: &ReadState, ids: &[BlockId]) -> Vec<Fact> {
         if ids.is_empty() {
             return vec![];
@@ -2528,10 +2529,16 @@ impl Version {
             omitted += rows.len() - RELATED_CAP;
             rows.truncate(RELATED_CAP);
         }
-        if rows.is_empty() {
+        if rows.is_empty() && omitted == 0 {
             return Ok("none".to_string());
         }
-        let listed: Vec<String> = rows
+        // D-KVQ7F: only link rows are listed. Text rows are counted, one per retained row (a
+        // pair under two anchors is two rows). The omitted count stays as `related_in` and the
+        // aggregate cut gave it: those rows have no route here and are never guessed.
+        let (linked, text): (Vec<_>, Vec<_>) = rows
+            .iter()
+            .partition(|r| r.via == crate::related::RelatedVia::Link);
+        let listed: Vec<String> = linked
             .iter()
             .map(|r| {
                 let summary = BlockId::parse(&r.decision)
@@ -2550,11 +2557,16 @@ impl Version {
                 )
             })
             .collect();
-        Ok(format!(
-            "{} listed, {omitted} omitted: {}",
-            rows.len(),
-            listed.join("; ")
-        ))
+        let counts = format!(
+            "{} listed by link, {} found by text, {omitted} omitted",
+            linked.len(),
+            text.len()
+        );
+        if listed.is_empty() {
+            Ok(counts)
+        } else {
+            Ok(format!("{counts}: {}", listed.join("; ")))
+        }
     }
 
     /// The Base fact: the canon the version was proposed on, and whether canon is still there.
