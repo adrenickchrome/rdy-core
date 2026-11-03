@@ -4748,18 +4748,24 @@ fn nb10_kill_and_reconnect_preserve_neighbor_answers() {
 // ---- mg10 (M3 gate, Task 10): the M3 routes ran, every landing passes the M3 audit, and the
 // M3 records and queue items survive the kill, the reindex, the dump and the follower ----
 
+use rdy_engine::check::verdicts::{VERDICT_ITEM, parse_accept_option};
 use rdy_engine::pending::CARD_MAX_TOKENS;
 use rdy_engine::pending::queue::{Pending, PendingQuery};
 use rdy_model::LandingRecord;
+use rdy_model::assessment::{AssessmentSeverity, AssessmentTensionStatus};
+use rdy_model::{Answer, AnswerAct, SemanticTension, decision};
 use rdy_qa::invariants::Violation;
 use rdy_qa::m3_audit::{
-    LandingFact, M3Facts, Shown as SeenCard, TemporalFacts, assessment_id, check_m3_in,
-    check_temporal, holds_of,
+    Hold, HoldKind, LandingFact, M3Facts, Shown as SeenCard, TemporalFacts, assessment_id,
+    check_m3_in, check_temporal, holds_of,
 };
 use rdy_qa::publication_scenario::{scan_local_links, tree};
+use rdy_qa::report::AREA_PROVEN_WITNESSES;
 use rdy_qa::swarm::journal::Reply;
 use rdy_qa::swarm::m3::{COVERED_BY_AREA, LAND_CARD};
 use rdy_qa::swarm::script::{Route, m3_scenarios};
+use rdy_store::redaction::StoredFrame;
+use rdy_store::segment::Location;
 
 /// The code an entry met, as a replay line prints it.
 fn code_of(e: &Entry) -> String {
@@ -4804,8 +4810,8 @@ fn route_records(e: &Entry) -> Vec<String> {
     }
 }
 
-/// The witnesses the swarm itself must give, across the fixed seed set (plan Task 10). A route
-/// whose evidence comes from another area is in `AREA_WITNESSES`, never here.
+/// The witnesses the swarm itself must give, across the fixed seed set (plan Task 10). A witness
+/// another area proves is in `report::AREA_PROVEN_WITNESSES`, never here.
 const SWARM_WITNESSES: [&str; 13] = [
     "relayed landing",
     "policy landing",
@@ -4820,43 +4826,6 @@ const SWARM_WITNESSES: [&str; 13] = [
     "compact with removed bytes",
     "org profile check of a held landing",
     "output link scan",
-];
-
-/// The witnesses another area proves, each by the test that proves it: (witness, test file under
-/// `tests/`, test). The swarm has one person in one daemon and no public profile, so these paths
-/// cannot run inside it (ruling task-8 finding 1 for the role route; task-8 report concern 3 for
-/// the profile paths). Each named test must exist; the area's own run proves it passes.
-const AREA_WITNESSES: [(&str, &str, &str); 6] = [
-    (
-        "refused wrong-role answer",
-        "authority/authority_routes.rs",
-        "mg5_roles_route_and_enforce_the_same_person",
-    ),
-    (
-        "public blocked check",
-        "publication/publication_m3.rs",
-        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
-    ),
-    (
-        "org warning",
-        "publication/publication_m3.rs",
-        "mg6_check_matches_visible_refs_and_reports_hidden_links",
-    ),
-    (
-        "hidden-link-only pass",
-        "publication/publication_m3.rs",
-        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
-    ),
-    (
-        "dropped outside decision citation",
-        "publication/publication_m3.rs",
-        "mg6_check_matches_visible_refs_and_reports_hidden_links",
-    ),
-    (
-        "excluded canary scan",
-        "publication/publication_m3.rs",
-        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
-    ),
 ];
 
 /// How many times one seed's run (before the freeze, except the store's own policy landings and
@@ -4979,6 +4948,19 @@ fn swarm_witnesses(o: &Outcome) -> BTreeMap<&'static str, usize> {
     w
 }
 
+/// How many org profile checks of a held landing read `warning`.
+fn org_warnings(o: &Outcome) -> usize {
+    o.before_freeze()
+        .iter()
+        .filter(|e| e.act == "m3_publication_check" && e.outcome == Met::Ok)
+        .filter(|e| {
+            e.reply
+                .as_ref()
+                .is_some_and(|v| v["references"]["status"] == "warning")
+        })
+        .count()
+}
+
 /// The source of the test file `file` under `tests/`.
 fn test_source(file: &str) -> String {
     let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4987,8 +4969,9 @@ fn test_source(file: &str) -> String {
     std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
 }
 
-/// Plan Task 10: across the fixed seed set every required M3 path ran, through the swarm or (for
-/// the paths the swarm cannot hold) through the named area test. Every M3 route attempt met an
+/// Plan Task 10 (as rulings task-8 and task-10 finding 1 amend it): across the fixed seed set the
+/// swarm gave every witness of `SWARM_WITNESSES`, and each area-proven witness still names an
+/// existing area test (a guard only; the area run proves it). Every M3 route attempt met an
 /// outcome of its act's closed set, and each failure names the line that replays it.
 #[test]
 fn mg10_swarm_exercised_every_required_m3_scenario() {
@@ -5003,7 +4986,10 @@ fn mg10_swarm_exercised_every_required_m3_scenario() {
             }
         };
         let w = swarm_witnesses(o);
-        eprintln!("swarm seed {seed}: M3 witnesses {w:?}");
+        eprintln!(
+            "swarm seed {seed}: M3 witnesses {w:?}, org warnings {}",
+            org_warnings(o)
+        );
         for (k, n) in w {
             *all.get_mut(k).expect("a listed witness") += n;
         }
@@ -5064,7 +5050,11 @@ fn mg10_swarm_exercised_every_required_m3_scenario() {
             ));
         }
     }
-    for (witness, file, test) in AREA_WITNESSES {
+    // A guard against a rename or a deletion of the area test each area-proven witness names
+    // (rulings task-8 and task-10 finding 1). It is not swarm evidence and proves no execution:
+    // the gate's area run executes that test, and the gate report lists each such witness as
+    // area-proven, not exercised under swarm concurrency.
+    for (witness, file, test) in AREA_PROVEN_WITNESSES {
         if !test_source(file).contains(&format!("fn {test}()")) {
             failed.push(format!(
                 "the witness {witness:?} names {test} in tests/{file}, which has no such test"
@@ -5145,16 +5135,248 @@ fn seen_cards(journal: &[Entry]) -> BTreeMap<String, (String, String)> {
     out
 }
 
-/// The temporal facts of landing `h` (record `rec`) of the closed copy `r`, with the snapshot
-/// before it rebuilt from the log: canon's chain is append-only, so the landings before `h` and
-/// the policy canon held at `h`'s base are read from the store that holds `h`. The pack and the
-/// gate config are the run's own (the swarm changes neither). Limit: the holds are read from
-/// the whole store, so a hold recorded after the landing also counts.
+/// The answers and semantic tension versions of a closed copy's log, each at its log location,
+/// in log order. With them the person acts recorded before any log position are read at that
+/// position, never from the final state: a later answer to an item replaces the earlier one in
+/// the store's ref (`answer_of`), so a hold the person later answered over would be lost.
+struct LogAt {
+    answers: Vec<(Location, Answer)>,
+    tensions: Vec<(Location, SemanticTension)>,
+}
+
+impl LogAt {
+    fn read(st: &ReadState) -> LogAt {
+        let reader = st.reader();
+        let mut found = vec![];
+        let origin = Location {
+            segment: 0,
+            offset: 0,
+        };
+        reader
+            .for_each_record_from(origin, st.seq(), |loc, f, _| {
+                // a frame a redaction removed holds no record to read (`visit_before` skips it)
+                if let StoredFrame::Present { kind, hash, .. } = f {
+                    let k = rdy_store::codec::logical_kind(kind);
+                    if k == kinds::ANSWER || k == kinds::TENSION {
+                        found.push((loc, k, hash));
+                    }
+                }
+                Ok(())
+            })
+            .expect("walk the log");
+        let mut log = LogAt {
+            answers: vec![],
+            tensions: vec![],
+        };
+        for (loc, k, h) in found {
+            if k == kinds::ANSWER {
+                let a: Answer = reader.get_typed(k, &h).expect("read an answer");
+                // a snooze is the person's own pending state (`pending/<person>/<item>`)
+                if a.act != AnswerAct::Later {
+                    log.answers.push((loc, a));
+                }
+            } else {
+                log.tensions
+                    .push((loc, reader.get_typed(k, &h).expect("read a tension")));
+            }
+        }
+        log
+    }
+
+    /// The latest answer to `item` before `at`: what the ref `answer/<item>` named there.
+    fn answer_before(&self, item: &str, at: Location) -> Option<&Answer> {
+        self.answers
+            .iter()
+            .rev()
+            .find(|(l, a)| *l < at && a.item == item)
+            .map(|(_, a)| a)
+    }
+
+    /// How many answers a later answer to the same item replaced.
+    fn replaced(&self) -> usize {
+        let mut seen = BTreeSet::new();
+        self.answers
+            .iter()
+            .rev()
+            .filter(|(_, a)| !seen.insert(a.item.clone()))
+            .count()
+    }
+
+    /// Each pair's latest semantic tension version before `at`.
+    fn tensions_before(&self, at: Location) -> BTreeMap<Hash, &SemanticTension> {
+        let mut out = BTreeMap::new();
+        for (l, t) in &self.tensions {
+            if *l < at {
+                out.insert(t.key, t);
+            }
+        }
+        out
+    }
+}
+
+/// `P-<stable short>@<n>` of version `version` (`m3_audit`'s `version_ref`).
+fn version_ref_of(st: &ReadState, version: &Hash) -> String {
+    let reader = st.reader();
+    let p = reader.proposal(version).expect("read a proposal");
+    let mut n = 1;
+    let mut cur = p.prev;
+    while let Some(prev) = cur {
+        n += 1;
+        cur = reader.proposal(&prev).expect("read a proposal").prev;
+    }
+    format!("P-{}@{n}", p.stable.unwrap_or(*version).short())
+}
+
+/// The person acts recorded before log position `at` that hold version `version`: Task 1's
+/// `holds_of`, read at `at` (canon at `head`, canon's head there) instead of on the final
+/// state. The five later refusals: a rejected decision, a rejected one_way re-affirmation and
+/// refused deferrals (each the latest answer to its item before `at`), an accepted advice (the
+/// latest version before `at` of a semantic tension the version's assessment lists as open
+/// advisory is blocking) and an accepted check verdict before `at`.
+fn holds_at(
+    st: &ReadState,
+    log: &LogAt,
+    version: &Hash,
+    at: Location,
+    head: Option<Hash>,
+) -> Result<Vec<Hold>, Violation> {
+    let fail = |what: String| Violation {
+        rule: "mg10_rebuild",
+        block: None,
+        detail: what,
+    };
+    let reader = st.reader();
+    let p = reader
+        .proposal(version)
+        .map_err(|e| fail(format!("proposal {}: {e}", version.short())))?;
+    let pref = version_ref_of(st, version);
+    let answered =
+        |item: &str, act: AnswerAct| log.answer_before(item, at).is_some_and(|a| a.act == act);
+    let mut out = vec![];
+    let mut last: BTreeMap<BlockId, Option<rdy_model::Block>> = BTreeMap::new();
+    for c in &p.changes {
+        let ch = reader
+            .change(c)
+            .map_err(|e| fail(format!("change {}: {e}", c.short())))?;
+        for op in ch.ops {
+            match op {
+                Op::Create { block } | Op::Update { block, .. }
+                    if block.block_type == decision::DECISION =>
+                {
+                    last.insert(block.id.clone(), Some(block));
+                }
+                op => {
+                    if let Some(b) = last.get_mut(op.block_id()) {
+                        *b = None;
+                    }
+                }
+            }
+        }
+    }
+    let canon = match head {
+        Some(h) => Some(
+            st.materialized(&Scope::At(h))
+                .map_err(|e| fail(format!("canon at {}: {e}", h.short())))?,
+        ),
+        None => None,
+    };
+    for (id, b) in last {
+        let Some(b) = b else { continue };
+        let item = format!("{id}@{}", b.version_hash().short());
+        if decision::status(&b) == Some(decision::DecisionStatus::Proposed) {
+            if answered(&item, AnswerAct::RejectDecision) {
+                out.push(Hold {
+                    kind: HoldKind::RejectedDecision,
+                    item,
+                });
+            }
+        } else if !rdy_model::engine_fields::reaffirmed_causes(
+            canon.as_ref().and_then(|c| c.get(&id)),
+            &b,
+        )
+        .is_empty()
+            && b.field_str("reversibility") == Some("one_way")
+            && answered(&item, AnswerAct::RejectReaffirm)
+        {
+            out.push(Hold {
+                kind: HoldKind::RejectedReaffirm,
+                item,
+            });
+        }
+    }
+    let defer = format!("defer:{pref}");
+    if answered(&defer, AnswerAct::RefuseDeferrals) {
+        out.push(Hold {
+            kind: HoldKind::RefusedDeferrals,
+            item: defer,
+        });
+    }
+    if let Some(a) = reader
+        .assessment_of_proposal(version, at)
+        .map_err(|e| fail(format!("the assessment of {}: {e}", version.short())))?
+    {
+        let a = reader
+            .assessment(&a)
+            .map_err(|e| fail(format!("assessment {}: {e}", a.short())))?;
+        let advisory: Vec<BTreeSet<&BlockId>> = a
+            .tensions
+            .iter()
+            .filter(|t| {
+                t.kind == "semantic"
+                    && t.severity == AssessmentSeverity::Advisory
+                    && t.status == AssessmentTensionStatus::Open
+            })
+            .map(|t| t.blocks.iter().collect())
+            .collect();
+        let accepted = log.tensions_before(at).values().any(|t| {
+            let blocks: BTreeSet<&BlockId> = t.items.iter().map(|i| &i.block).collect();
+            t.blocking && advisory.contains(&blocks)
+        });
+        if accepted {
+            out.push(Hold {
+                kind: HoldKind::AcceptedAdvice,
+                item: format!("advice:{pref}"),
+            });
+        }
+    }
+    let mut verdicts = vec![];
+    reader
+        .for_each_verdict_answer(at, |_, a| {
+            if let Some((review, v)) = a.option.as_deref().and_then(parse_accept_option)
+                && v == *version
+                && a.item == format!("{VERDICT_ITEM}{review}")
+            {
+                verdicts.push(a.item);
+            }
+            Ok(())
+        })
+        .map_err(|e| fail(format!("the verdict answers: {e}")))?;
+    verdicts.sort();
+    verdicts.dedup();
+    out.extend(verdicts.into_iter().map(|item| Hold {
+        kind: HoldKind::AcceptedVerdict,
+        item,
+    }));
+    Ok(out)
+}
+
+/// The temporal facts of landing `h` (record `rec`) of the closed copy `r`, every input read at
+/// log position `at` (the landing's own location, for the audit): canon's head there (the last
+/// landing of canon's chain before `at`, which the chain's log order gives,
+/// `landing_location`), the landings since the assessment's base on that head's chain, the policy
+/// canon held at that head, and the person acts recorded before `at` (`holds_at`). The pack and
+/// the gate config are the run's own (the swarm changes neither). `m3_snapshot` compares that
+/// head with the record's `prev`, so it fails when the landing did not read the canon of its own
+/// log position.
+#[allow(clippy::too_many_arguments)]
 fn rebuilt_temporal(
     r: &Rdy,
     st: &ReadState,
+    log: &LogAt,
+    landings: &[(Hash, LandingRecord, Location)],
     h: Hash,
     rec: LandingRecord,
+    at: Location,
     seen: Option<&(String, String)>,
 ) -> Result<TemporalFacts, Violation> {
     let fact = LandingFact::read_whole(st, h, rec.clone())?;
@@ -5167,16 +5389,15 @@ fn rebuilt_temporal(
     let first_briefed = reader
         .first_briefed_change()
         .map_err(|e| fail(format!("the first briefed change: {e}")))?;
+    let before: Vec<&(Hash, LandingRecord, Location)> =
+        landings.iter().filter(|(_, _, l)| *l < at).collect();
+    let before_head = before.last().map(|(l, _, _)| *l);
     let mut since = vec![];
     if let Some(a) = &fact.assessment {
-        let mut cur = rec.prev;
-        while let Some(l) = cur {
-            if Some(l) == a.base {
+        for (l, lr, _) in before.iter().rev() {
+            if Some(*l) == a.base {
                 break;
             }
-            let lr = reader
-                .landing(&l)
-                .map_err(|e| fail(format!("landing {}: {e}", l.short())))?;
             let mut written = BTreeSet::new();
             for c in &lr.changes {
                 let ch = reader
@@ -5184,22 +5405,21 @@ fn rebuilt_temporal(
                     .map_err(|e| fail(format!("change {}: {e}", c.short())))?;
                 written.extend(ch.ops.iter().map(|op| op.block_id().clone()));
             }
-            since.push((l, written));
-            cur = lr.prev;
+            since.push((*l, written));
         }
         since.reverse();
     }
-    let live_policy = match rec.prev {
-        Some(prev) => {
-            let at = st
-                .materialized(&Scope::At(prev))
-                .map_err(|e| fail(format!("canon at {}: {e}", prev.short())))?;
-            rdy_engine::policy::live_policy(st, &at).map(|p| p.reference())
+    let live_policy = match before_head {
+        Some(head) => {
+            let canon = st
+                .materialized(&Scope::At(head))
+                .map_err(|e| fail(format!("canon at {}: {e}", head.short())))?;
+            rdy_engine::policy::live_policy(st, &canon).map(|p| p.reference())
         }
         None => None,
     };
     let holds = match rec.approved_version {
-        Some(v) => holds_of(st, &v)?,
+        Some(v) => holds_at(st, log, &v, at, before_head)?,
         None => vec![],
     };
     let shown = match seen {
@@ -5218,7 +5438,7 @@ fn rebuilt_temporal(
     Ok(TemporalFacts {
         landing: fact,
         first_briefed,
-        before_head: rec.prev,
+        before_head,
         since,
         pack_digest: rdy_engine::readiness::assessment::pack_digest(st.pack()),
         config_digest: rdy_engine::readiness::assessment::config_digest(&st.gate_config()),
@@ -5228,17 +5448,56 @@ fn rebuilt_temporal(
     })
 }
 
-/// Task 1's audit for every landing the swarm made, of the run and of the drain: the durable M3
-/// rules on the frozen copy and the drained project (`check_m3_in`), each landing after the seed
-/// an M3 landing, and the temporal rules (`check_temporal`) on the facts of each landing with
-/// the snapshot before it rebuilt from canon's chain. Each journaled card a person saw before a
-/// landing is the card and version that landing records (`m3_card`).
+/// The landing each journaled `land` or `land_found` entry first names, with the base its view
+/// read on just before it landed (the run reads it through the relay, `run::before_land`).
+fn journaled_bases(journal: &[Entry]) -> BTreeMap<Hash, Option<Hash>> {
+    let mut out = BTreeMap::new();
+    for e in journal
+        .iter()
+        .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == run::LAND_FOUND)
+    {
+        if let Some(l) = e
+            .reply
+            .as_ref()
+            .and_then(|r| landing_fields(r)["landing"].as_str())
+            && let Ok(h) = l.parse::<Hash>()
+        {
+            out.entry(h)
+                .or_insert_with(|| e.base.as_deref().and_then(|b| b.parse().ok()));
+        }
+    }
+    out
+}
+
+/// Task 1's audit for every landing the swarm made, of the run and of the drain:
+/// - the durable M3 rules on the frozen copy and the drained project (`check_m3_in`), and each
+///   landing after the seed an M3 landing;
+/// - the temporal rules (`check_temporal`) on the facts of each landing, every input read at the
+///   landing's own log position (`rebuilt_temporal`, `holds_at`), never from the final state;
+/// - the landing audit (`landing_audit::audit`) on the evidence the run captured at the landing:
+///   the blocking rule on canon's blocking tensions read just before and just after it
+///   (`run::after_land`, the run's `violations`), the conflict rule on the base its view read on
+///   just before it (`journaled_bases`), and the alternative rule on the choices of the landings
+///   before it.
+///
+/// Each journaled card a person saw before a landing is the card and version that landing
+/// records (`m3_card`). Negative witnesses: the facts read at the next landing's position fail
+/// `m3_snapshot`, and another card fails `m3_card`. The holds read at the log's end equal Task
+/// 1's `holds_of` on the final state.
 #[test]
 fn mg10_every_landing_passes_the_m3_audit() {
     each(|seed, o| {
+        assert!(
+            o.violations.is_empty(),
+            "RDY_QA_SWARM_SEEDS={seed}: the blocking rule at a landing: {:#?}",
+            o.violations
+        );
         let seen = seen_cards(&o.journal);
+        let bases = journaled_bases(&o.journal);
         let mut audited = 0;
         let mut carded = 0;
+        let mut snapshots = 0;
+        let mut replaced = 0;
         for (what, dir) in [
             ("the frozen copy", &o.frozen),
             ("the drained project", &o.dir),
@@ -5257,42 +5516,108 @@ fn mg10_every_landing_passes_the_m3_audit() {
                 .iter()
                 .map(|l| l.landing.to_string())
                 .collect();
+            let log = LogAt::read(&st);
+            replaced = replaced.max(log.replaced());
+            let landings: Vec<(Hash, LandingRecord, Location)> = chain(&st)
+                .into_iter()
+                .map(|(h, rec)| {
+                    let at = st
+                        .reader()
+                        .landing_location(&h)
+                        .expect("a landing's location");
+                    (h, rec, at)
+                })
+                .collect();
             let mut bad = vec![];
-            for (h, rec) in chain(&st) {
+            let mut settled: BTreeMap<Hash, String> = BTreeMap::new();
+            for (i, (h, rec, at)) in landings.iter().enumerate() {
+                let (h, at) = (*h, *at);
                 let id = h.to_string();
-                if o.seed_landings.contains(&id) {
-                    continue;
-                }
-                if !m3.contains(&id) {
-                    bad.push(format!("landing {} records no M3 field", h.short()));
-                }
-                let card = seen.get(&id);
-                carded += usize::from(card.is_some());
-                match rebuilt_temporal(&r, &st, h, rec, card) {
-                    Ok(t) => {
-                        bad.extend(
-                            check_temporal(&t)
-                                .into_iter()
-                                .map(|v| format!("{}: {}", v.rule, v.detail)),
-                        );
-                        // the card rule is not vacuous: another card than the one seen fails
-                        if let Some(s) = &t.shown {
-                            let mut other = t.clone();
-                            other.shown = Some(SeenCard {
-                                version: s.version,
-                                card_hash: Some(Hash::of(b"another card")),
-                            });
-                            if !check_temporal(&other).iter().any(|v| v.rule == "m3_card") {
-                                bad.push(format!(
-                                    "landing {}: a card the person did not see passes",
-                                    h.short()
-                                ));
+                let seeded = o.seed_landings.contains(&id);
+                if !seeded {
+                    if !m3.contains(&id) {
+                        bad.push(format!("landing {} records no M3 field", h.short()));
+                    }
+                    let card = seen.get(&id);
+                    carded += usize::from(card.is_some());
+                    let rebuild = |at, card| {
+                        rebuilt_temporal(&r, &st, &log, &landings, h, rec.clone(), at, card)
+                    };
+                    match rebuild(at, card) {
+                        Ok(t) => {
+                            bad.extend(
+                                check_temporal(&t)
+                                    .into_iter()
+                                    .map(|v| format!("{}: {}", v.rule, v.detail)),
+                            );
+                            // the card rule is not vacuous: another card than the one seen fails
+                            if let Some(s) = &t.shown {
+                                let mut other = t.clone();
+                                other.shown = Some(SeenCard {
+                                    version: s.version,
+                                    card_hash: Some(Hash::of(b"another card")),
+                                });
+                                if !check_temporal(&other).iter().any(|v| v.rule == "m3_card") {
+                                    bad.push(format!(
+                                        "landing {}: a card the person did not see passes",
+                                        h.short()
+                                    ));
+                                }
                             }
                         }
+                        Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
                     }
-                    Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
+                    // the snapshot rule is not vacuous: the facts read at the next landing's log
+                    // position are not the canon this landing read
+                    if let Some((next, _, next_at)) = landings.get(i + 1) {
+                        match rebuild(*next_at, None) {
+                            Ok(t) if check_temporal(&t).iter().any(|v| v.rule == "m3_snapshot") => {
+                                snapshots += 1
+                            }
+                            Ok(_) => bad.push(format!(
+                                "landing {}: the facts read after landing {} still pass m3_snapshot",
+                                h.short(),
+                                next.short()
+                            )),
+                            Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
+                        }
+                    }
+                    // the reading at a position agrees with Task 1's reader at the log's end
+                    if let Some(v) = rec.approved_version {
+                        let head = landings.last().map(|(l, _, _)| *l);
+                        match (holds_at(&st, &log, &v, st.seq(), head), holds_of(&st, &v)) {
+                            (Ok(a), Ok(b)) if a == b => {}
+                            (a, b) => bad.push(format!(
+                                "landing {}: the holds read at the log's end {a:?} are not holds_of's {b:?}",
+                                h.short()
+                            )),
+                        }
+                    }
+                    // the landing audit's conflict and alternative rules, on the evidence of the
+                    // landing's own time
+                    let landed =
+                        landed_of(&r, &h).unwrap_or_else(|err| panic!("landing {h}: {err}"));
+                    bad.extend(
+                        alt_unchosen(&st, &landed, &settled)
+                            .into_iter()
+                            .map(|v| format!("{}: {}", v.rule, v.detail)),
+                    );
+                    match bases.get(&h) {
+                        Some(Some(base)) => bad.extend(
+                            conflicts_at(&st, &landed, Some(*base))
+                                .into_iter()
+                                .map(|v| format!("{}: {}", v.rule, v.detail)),
+                        ),
+                        _ => bad.push(format!(
+                            "landing {}: no journaled land entry names it with the base its view read on",
+                            h.short()
+                        )),
+                    }
+                    audited += 1;
                 }
-                audited += 1;
+                if let Some(c) = &rec.chosen {
+                    settled.insert(c.set, c.member.clone());
+                }
             }
             drop(st);
             r.close().expect("close the copy");
@@ -5301,8 +5626,14 @@ fn mg10_every_landing_passes_the_m3_audit() {
                 "RDY_QA_SWARM_SEEDS={seed}: the M3 audit on {what}: {bad:#?}"
             );
         }
-        eprintln!("swarm seed {seed}: {audited} landings audited, {carded} with a journaled card");
+        eprintln!(
+            "swarm seed {seed}: {audited} landings audited, {carded} with a journaled card, {snapshots} snapshot negatives, {replaced} answers replaced by a later answer"
+        );
         assert!(audited > 0, "swarm seed {seed}: no landing was audited");
+        assert!(
+            snapshots > 0,
+            "swarm seed {seed}: no landing's later facts failed m3_snapshot"
+        );
         assert!(
             carded > 0,
             "swarm seed {seed}: no landing had a journaled card"

@@ -515,6 +515,47 @@ pub struct Report {
     pub guarded: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
+/// finding 1 and task-10 finding 1): (witness, test file under `tests/`, test). The swarm has one
+/// person in one daemon and checks only the implicit org profile, so these paths are proven by
+/// the named area test, which the gate's area run executes. They are never swarm counts: the
+/// report lists each one with `AREA_PROVEN_NOTE`.
+pub const AREA_PROVEN_WITNESSES: [(&str, &str, &str); 6] = [
+    (
+        "refused wrong-role answer",
+        "authority/authority_routes.rs",
+        "mg5_roles_route_and_enforce_the_same_person",
+    ),
+    (
+        "public blocked check",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "org warning",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "hidden-link-only pass",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "dropped outside decision citation",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "excluded canary scan",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+];
+
+/// What the report says of each `AREA_PROVEN_WITNESSES` row.
+pub const AREA_PROVEN_NOTE: &str = "area-proven; not exercised under swarm concurrency";
+
 /// Lines of proptest output that name a minimal failing input.
 pub fn failing_seeds(output: &str) -> Vec<String> {
     output
@@ -650,6 +691,17 @@ pub fn markdown(r: &Report) -> String {
         }
     }
 
+    let _ = writeln!(
+        s,
+        "\n## Area-proven witnesses\n\nThe named area test proves each of these, and this gate's area run executes it. They are not swarm counts.\n"
+    );
+    for (witness, file, test) in AREA_PROVEN_WITNESSES {
+        let _ = writeln!(
+            s,
+            "- {witness}: `{test}` (tests/{file}): {AREA_PROVEN_NOTE}"
+        );
+    }
+
     let _ = writeln!(s, "\n## Failing seeds\n");
     if r.failing_seeds.is_empty() {
         let _ = writeln!(s, "None.");
@@ -722,8 +774,38 @@ pub fn baseline_drift(base: &Baseline, measured: &[Measure]) -> Vec<String> {
     notes
 }
 
+/// One `AREA_PROVEN_WITNESSES` row as the JSON report writes it.
+#[derive(Serialize)]
+struct AreaProven {
+    witness: &'static str,
+    test: &'static str,
+    file: String,
+    note: &'static str,
+}
+
+/// The JSON report: the report's fields, then the `AREA_PROVEN_WITNESSES` rows as `area_proven`.
+#[derive(Serialize)]
+struct JsonReport<'a> {
+    #[serde(flatten)]
+    report: &'a Report,
+    area_proven: Vec<AreaProven>,
+}
+
 pub fn json(r: &Report) -> String {
-    serde_json::to_string_pretty(r).expect("report serializes")
+    let area_proven = AREA_PROVEN_WITNESSES
+        .iter()
+        .map(|(witness, file, test)| AreaProven {
+            witness,
+            test,
+            file: format!("tests/{file}"),
+            note: AREA_PROVEN_NOTE,
+        })
+        .collect();
+    serde_json::to_string_pretty(&JsonReport {
+        report: r,
+        area_proven,
+    })
+    .expect("report serializes")
 }
 
 #[cfg(test)]
@@ -1526,6 +1608,47 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Ruling task-10 finding 1: the gate report lists each area-proven witness on its own line,
+    /// with the test that proves it and the stated gap, in Markdown and JSON, whatever the areas
+    /// show, and never as a count.
+    #[test]
+    fn mg10_gate_report_states_each_area_proven_witness_gap() {
+        let want = [
+            "refused wrong-role answer",
+            "public blocked check",
+            // the swarm's org checks read `clear` on every fixed seed (task-10 fix round 1)
+            "org warning",
+            "hidden-link-only pass",
+            "dropped outside decision citation",
+            "excluded canary scan",
+        ];
+        for w in want {
+            assert!(
+                AREA_PROVEN_WITNESSES.iter().any(|(n, _, _)| *n == w),
+                "{w} is not listed: {AREA_PROVEN_WITNESSES:?}"
+            );
+        }
+        let r = report_of(vec![]);
+        let md = markdown(&r);
+        assert!(md.contains("\n## Area-proven witnesses\n"), "{md}");
+        let js: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        let rows = js["area_proven"].as_array().expect("an area_proven list");
+        assert_eq!(rows.len(), AREA_PROVEN_WITNESSES.len());
+        for ((witness, file, test), row) in AREA_PROVEN_WITNESSES.iter().zip(rows) {
+            let line = format!("- {witness}: `{test}` (tests/{file}): {AREA_PROVEN_NOTE}");
+            assert!(md.contains(&line), "{line} in {md}");
+            assert_eq!(
+                row,
+                &serde_json::json!({
+                    "witness": witness,
+                    "test": test,
+                    "file": format!("tests/{file}"),
+                    "note": AREA_PROVEN_NOTE,
+                }),
+            );
+        }
     }
 
     /// Plan Task 10: the gate report names each M3 area and its guards. On the real tree, the
