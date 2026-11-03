@@ -40,10 +40,11 @@ use super::agent::{
     self, AgentHooks, AgentReport, KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of,
 };
 use super::journal::{Entry, InboxRead, Journal, Outcome as Met};
+use super::m3::M3Hooks;
 use super::oracle::{self, copy_tree};
-use super::people::{self, Hooks, Queue};
+use super::people::{self, Hooks, Queue, landing_fields};
 use super::project::{self, CLAIMS_PER_AREA, SeedBlocks, SwarmProject};
-use super::script::{ADVICE_VIEW_SUFFIX, AREAS, Config, Script, script};
+use super::script::{ADVICE_VIEW_SUFFIX, AREAS, Config, Script, m3_scenarios, script};
 use crate::daemon::{Served, human_command, short_tempdir_in};
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
@@ -111,6 +112,8 @@ pub struct Outcome {
     pub violations: Vec<String>,
     /// The person's queue when its acts ended: the proposals it never landed, oldest first.
     pub queued: Vec<String>,
+    /// The directories the M3 publication scenarios wrote their outputs to (G3), for the oracle.
+    pub m3_outputs: Vec<PathBuf>,
     /// Holds `frozen`.
     _frozen_dir: tempfile::TempDir,
 }
@@ -220,7 +223,7 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     })
 }
 
-/// After a landing (`reply`, the `rdy approve` reply): the relay reads canon's blocking tensions
+/// After a landing (`reply`, the landing act's reply, read by `landing_fields`): the relay reads canon's blocking tensions
 /// again, and each one the landing put into canon is a violation. A read the kill cuts is made
 /// again on the restarted daemon: whoever lands (the person, or an agent under the policy) holds
 /// the landing turn, so canon has not moved. A second loss fails the run (the check is never left out).
@@ -230,16 +233,21 @@ pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: 
         None => canon_blocking(link)
             .unwrap_or_else(|| link.fail("tensions", "lost the daemon twice after a landing")),
     };
-    let landing = reply["landing"].as_str().unwrap_or("?");
+    let landing = landing_fields(reply)["landing"].as_str().unwrap_or("?");
     let mut w = watch.lock().unwrap_or_else(PoisonError::into_inner);
     for t in oracle::new_blocking_canon(&before.canon, &after) {
         w.push(format!("landing {landing}: it put tension {t} into canon"));
     }
 }
 
-/// The run of `cfg` with the scripts its seed gives.
+/// The run of `cfg` with the scripts its seed gives, and its forced M3 scenarios
+/// (`m3_scenarios`), each run by its writer after the act of its step (G3).
 pub fn run(cfg: &Config) -> Outcome {
-    run_script(cfg, script(cfg))
+    let m3 = M3Hooks {
+        scenarios: m3_scenarios(cfg),
+        before_call: None,
+    };
+    run_scripted(cfg, script(cfg), m3)
 }
 
 /// Waits until `progress` (the step every agent has reached) is `target` or more. Past
@@ -382,7 +390,7 @@ fn pacer(
             entries
                 .iter()
                 .filter(|e| e.act == "land" && e.outcome == Met::Ok)
-                .filter_map(|e| e.reply.as_ref()?["chosen"]["member"].as_str())
+                .filter_map(|e| landing_fields(e.reply.as_ref()?)["chosen"]["member"].as_str())
                 .map(str::to_string),
         );
         for e in entries {
@@ -443,10 +451,15 @@ fn stop(served: &Served, seed: u64) {
     }
 }
 
-/// The run of `cfg` with the scripts `s` (a directed run passes its own).
+/// The run of `cfg` with the scripts `s` (a directed run passes its own), and no M3 scenario.
 pub fn run_script(cfg: &Config, s: Script) -> Outcome {
+    run_scripted(cfg, s, M3Hooks::default())
+}
+
+/// `run_script`, with the M3 scenarios `m3`.
+fn run_scripted(cfg: &Config, s: Script, m3: M3Hooks) -> Outcome {
     let journal = Journal::new();
-    match catch_unwind(AssertUnwindSafe(|| run_with(cfg, s, &journal))) {
+    match catch_unwind(AssertUnwindSafe(|| run_with(cfg, s, &journal, m3))) {
         Ok(o) => o,
         Err(p) => {
             let text = p
@@ -486,7 +499,7 @@ fn tail(journal: &[Entry]) -> String {
     )
 }
 
-fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
+fn run_with(cfg: &Config, s: Script, journal: &Journal, m3: M3Hooks) -> Outcome {
     let journal = journal.clone();
     let p = project::build(cfg);
     let at = Where::of(&p);
@@ -507,6 +520,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
             let hooks = AgentHooks {
                 pace: Some(agent_pacer(cfg, &progress, &person_done, s.person.len())),
                 watch: Some(watch.clone()),
+                m3: m3.clone(),
             };
             agent::spawn_paced(
                 &p,
@@ -633,8 +647,13 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     let landings = journal
         .iter()
         .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == LAND_FOUND)
-        .filter_map(|e| e.reply.as_ref()?["landing"].as_str().map(str::to_string))
+        .filter_map(|e| {
+            landing_fields(e.reply.as_ref()?)["landing"]
+                .as_str()
+                .map(str::to_string)
+        })
         .collect();
+    let m3_outputs = reports.iter().flat_map(|r| r.m3_outputs.clone()).collect();
     let violations = watch.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let SwarmProject {
         served,
@@ -652,6 +671,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         served,
         violations,
         queued,
+        m3_outputs,
         _frozen_dir: frozen_dir,
     }
 }

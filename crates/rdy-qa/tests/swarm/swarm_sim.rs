@@ -23,6 +23,7 @@ use rdy_qa::landing_audit::{alt_unchosen, chosen_members, conflicts_at, landed_o
 use rdy_qa::reindex_check::reindex_reproduces;
 use rdy_qa::swarm::journal::{Entry, Outcome as Met, allowed};
 use rdy_qa::swarm::oracle::{self, copy_of};
+use rdy_qa::swarm::people::landing_fields;
 use rdy_qa::swarm::run::{self, Outcome};
 use rdy_qa::swarm::script::{Act, Config, PersonAct, Pick, Script};
 use rdy_store::kinds;
@@ -212,7 +213,7 @@ fn bound_include(o: &Outcome) -> bool {
             .reply
             .as_ref()
             .filter(|_| e.act == "land" || e.act == run::LAND_FOUND)
-            .and_then(|r| r["landing"].as_str())
+            .and_then(|r| landing_fields(r)["landing"].as_str())
         else {
             continue;
         };
@@ -275,7 +276,7 @@ fn coverage(o: &Outcome) -> Coverage {
         let (Some(view), Some(reply)) = (e.view.as_deref(), e.reply.as_ref()) else {
             continue;
         };
-        match reply.get("chosen").filter(|c| !c.is_null()) {
+        match landing_fields(reply).get("chosen").filter(|c| !c.is_null()) {
             Some(c) => {
                 if c["member"] == view {
                     won.insert(view);
@@ -294,9 +295,11 @@ fn coverage(o: &Outcome) -> Coverage {
         lost: run.iter().any(|e| e.outcome == Met::Lost),
         landings: landed.len(),
         chose: landed.iter().any(|e| {
-            e.reply
-                .as_ref()
-                .is_some_and(|r| r.get("chosen").is_some_and(|c| !c.is_null()))
+            e.reply.as_ref().is_some_and(|r| {
+                landing_fields(r)
+                    .get("chosen")
+                    .is_some_and(|c| !c.is_null())
+            })
         }),
         kinds,
         opened: run.iter().any(|e| {
@@ -626,7 +629,10 @@ fn sg5_no_landing_chose_no_alternative_or_crossed_a_conflict() {
             .iter()
             .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == run::LAND_FOUND)
         {
-            if let Some(l) = e.reply.as_ref().and_then(|r| r["landing"].as_str())
+            if let Some(l) = e
+                .reply
+                .as_ref()
+                .and_then(|r| landing_fields(r)["landing"].as_str())
                 && let Ok(h) = l.parse::<Hash>()
             {
                 named.entry(h).or_insert(e);
@@ -945,7 +951,7 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
         // the set a landing entry chose, by canon's landing records
         let chose = |x: &Entry| -> Option<&(Hash, String)> {
             let landed = (x.act == "land" && x.outcome == Met::Ok) || x.act == run::LAND_FOUND;
-            let l = x.reply.as_ref()?["landing"].as_str()?;
+            let l = landing_fields(x.reply.as_ref()?)["landing"].as_str()?;
             if landed { chosen_by.get(l) } else { None }
         };
         for (k, e) in o.journal.iter().enumerate() {
@@ -2510,8 +2516,8 @@ fn rg15_every_live_view_drains_through_the_gate() {
         let mut look: Vec<(String, String)> = vec![];
         for (k, e) in o.journal.iter().enumerate() {
             let landing = match (e.act, &e.outcome, e.reply.as_ref()) {
-                ("land", Met::Ok, Some(r)) => r["landing"].as_str(),
-                (run::LAND_FOUND, _, Some(r)) => r["landing"].as_str(),
+                ("land", Met::Ok, Some(r)) => landing_fields(r)["landing"].as_str(),
+                (run::LAND_FOUND, _, Some(r)) => landing_fields(r)["landing"].as_str(),
                 _ => None,
             };
             let (Some(l), Some(pref)) = (landing, e.block.as_deref()) else {
@@ -2870,7 +2876,7 @@ fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
         "the landed ref left the queue"
     );
     // the seal holds the deferred item under the accepting answer
-    let l = landed[0].reply.as_ref().unwrap()["landing"]
+    let l = landing_fields(landed[0].reply.as_ref().unwrap())["landing"]
         .as_str()
         .unwrap()
         .to_string();
@@ -3001,7 +3007,7 @@ fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
     assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
     assert!(queue.lock().unwrap().is_empty(), "{:?}", queue.lock());
     // the seal holds each answered item confirmed
-    let l = landed[0].reply.as_ref().unwrap()["landing"]
+    let l = landing_fields(landed[0].reply.as_ref().unwrap())["landing"]
         .as_str()
         .unwrap()
         .to_string();
@@ -4625,7 +4631,11 @@ fn nb10_kill_and_reconnect_preserve_neighbor_answers() {
             .iter()
             .filter(|x| (x.act == "land" && x.outcome == Met::Ok) || x.act == run::LAND_FOUND)
             .find(|x| x.block.as_deref() == Some(pref.as_str()))
-            .and_then(|x| x.reply.as_ref()?["landing"].as_str().map(str::to_string))
+            .and_then(|x| {
+                landing_fields(x.reply.as_ref()?)["landing"]
+                    .as_str()
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| {
                 panic!(
                     "swarm seed {SEED}: {pref} never landed:\n{}",

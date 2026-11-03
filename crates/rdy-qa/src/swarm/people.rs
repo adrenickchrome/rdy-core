@@ -1,11 +1,17 @@
 //! The simulated person. The person acts through a relaying agent session (`agent:relay`, run
-//! `chat`, role `reviewer`) for every act that has a tool (FW-UX1, D-KQ4CA; F5, D-VF4RH). The
+//! `chat`, role `reviewer`) for every act that has a tool (FW-UX1, D-KQ4CA; F5, D-VF4RH). A
+//! relayed landing is chat first (M3 gate G3): the relay reads the queue (`rdy_pending`, the
+//! cards whole, a `land_card` entry that names the card it showed), the simulated person
+//! chooses `approve` on that card in words of its own, and the relay sends them with
+//! `rdy_answer` and the card's hash (a `land` entry whose `reply` is the tool's whole reply;
+//! `landing_fields` reads its landing). A card that moved before the answer
+//! (`E_PROPOSAL_MOVED`) is read and shown again, and the person chooses again once. A version
+//! with no card in the queue is not answered: the `land` entry is `Skipped` and names it. The
 //! command line is the fallback, and only for this closed list:
 //!
-//! - `rdy approve`, relayed (`--relayed-by agent:relay`, the path FW-B9 gives; no MCP tool
-//!   approves in M2) and, about one landing in five, direct (CLI parity);
+//! - `rdy approve`, direct, about one landing in five (CLI parity);
 //! - before a direct approve, `rdy pending` and the answer that accepts the version's deferral
-//!   card, `rdy answer defer:<P-x@n> o1` (D-AAQ9Z, CLI parity; before a relayed approve the
+//!   card, `rdy answer defer:<P-x@n> o1` (D-AAQ9Z, CLI parity; before a relayed answer the
 //!   relay reads the queue with `rdy_pending` and relays the answer with `rdy_answer`);
 //! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and, for the
 //!   human's view `work`, which no agent may act in, `rdy plan --view work` and the answers to
@@ -23,11 +29,11 @@
 //!
 //! ap13 (D-ZWP7Q "Disputes"): on a seeded draw of 1 in 8 of its steps (`dispute_draw`), after the
 //! step's act, the person resolves `dismissed` one dispute it opened on an earlier step, if one is
-//! open (`rdy dispute resolve`), and opens a dispute on a landing drawn from the seed's landings
-//! and those the journal names (`rdy dispute open`). Both are direct commands of the person:
-//! `dispute_open` entries name the landing in `block`, `dispute_resolve` entries the dispute, and
-//! each `reply` is the command's. A queued proposal that an agent already landed under the
-//! policy (an `Ok` `land` entry names it) leaves the queue unlanded.
+//! open, and opens a dispute on a landing drawn from the seed's landings and those the journal
+//! names. Both go through the relay's `rdy_dispute` with the person's words (G3: the tool is the
+//! default): `dispute_open` entries name the landing in `block`, `dispute_resolve` entries the
+//! dispute, and each `reply` is the tool's. A queued proposal that an agent already landed under
+//! the policy (an `Ok` `land` entry names it) leaves the queue unlanded.
 //!
 //! ui11 (D-6M0AF, D-WPE4R): the person's `UiAnswer` answers over real HTTP on the local approval
 //! pages of the daemon's site, whose origin `rdy site` reports; the relay's open session keeps the
@@ -42,6 +48,7 @@ use super::agent::{
     labels_of, spell,
 };
 use super::journal::{CheckFacts, Entry, Journal, Outcome, Skip, UiFacts};
+use super::m3;
 use super::project::{
     CHECKS_PACK, CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject, imported_tree, run_parent,
 };
@@ -63,8 +70,8 @@ use std::time::Duration;
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// The actor a direct command journals as (the user config `Served` writes names it).
 const HUMAN: &str = "human:qa";
-/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor alone; the
-/// relay records the session's run (D-PWB82).
+/// The relay: the relaying agent's own actor alone; the relay records the session's run
+/// (D-PWB82).
 const RELAY: &str = RELAY_ACTOR;
 /// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
 const RELAY_ACTOR: &str = "agent:relay";
@@ -222,6 +229,19 @@ fn json_of(text: &str) -> Value {
         .unwrap_or_else(|_| Value::String(text.trim().to_string()))
 }
 
+/// The landing fields of a landing act's reply, as the journal keeps it (G3): `rdy_answer`
+/// nests them under `landing` (`{act, assurance, landing: {landing, approved, assurance,
+/// chosen, ...}}`); `rdy approve` and `rdy_land` give them at the top, and a `land_found`
+/// entry names `{landing}`. The reply itself is never rewritten: this reads the part that holds
+/// them.
+pub fn landing_fields(reply: &Value) -> &Value {
+    if reply["landing"].is_object() {
+        &reply["landing"]
+    } else {
+        reply
+    }
+}
+
 /// `rdy --project <dir> --json <args>` on `link`'s project, as the person, or as the relaying
 /// agent (`RDY_ACTOR=agent:relay`, `RDY_RUN=chat`) when `relay`. A command the daemon died under,
 /// or could not start for, is `Lost`.
@@ -349,7 +369,9 @@ pub(crate) fn found_in(
     let named = landing.as_deref().is_some_and(|l| {
         link.journal.entries().iter().any(|x| {
             ((x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND)
-                && x.reply.as_ref().is_some_and(|r| r["landing"] == l)
+                && x.reply
+                    .as_ref()
+                    .is_some_and(|r| landing_fields(r)["landing"] == l)
         })
     });
     if let (Some(l), false, true) = (&landing, named, refused) {
@@ -370,6 +392,69 @@ pub(crate) fn found_in(
         run::after_land(link, w, before, &json!({"landing": l}));
     }
     true
+}
+
+/// What the relay's chat landing of a version met (G3).
+pub(crate) enum Relayed {
+    /// The person answered a card they were shown: the answer's result, journaled.
+    Answered(Res),
+    /// The queue lists no card of the version: nothing was answered. `waits` when the queue
+    /// says it is not ready or leaves cards out past its cap.
+    Absent { waits: bool },
+    /// The daemon died under the queue read; the link has reconnected.
+    Lost,
+}
+
+/// The relay's chat landing of `pref` (G3): the relay reads the queue whole (`m3::show_card`, a
+/// `land_card` entry), the simulated person chooses `approve` on the card shown, in words of its
+/// own, and the relay sends them with `rdy_answer` and that card's hash. `e` is the `land`
+/// entry; its `reply` is the tool's whole reply. A card that moved before the answer
+/// (`E_PROPOSAL_MOVED`) is read and shown again, and the person chooses again: once, so a
+/// second move leaves the refusal standing. With no card shown nothing is answered, and the
+/// `land` entry is `Skipped` with `{shown: false, waits}`.
+pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
+    let mut refused: Option<Res> = None;
+    for again in [false, true] {
+        let card = match m3::show_card(link, pref) {
+            m3::Shown::Card(c) => Some(c),
+            m3::Shown::Absent { waits } => {
+                if let Some(res) = refused {
+                    return Relayed::Answered(res);
+                }
+                let mut e = e;
+                e.epoch = link.epoch;
+                e.outcome = Outcome::Skipped;
+                e.reply = Some(json!({"shown": false, "waits": waits}));
+                link.journal.record(e);
+                return Relayed::Absent { waits };
+            }
+            m3::Shown::Lost => return Relayed::Lost,
+        };
+        let card = card.expect("a card");
+        let Some(option) = m3::choose(&card, "approve") else {
+            link.fail(
+                "land",
+                &format!("the card of {pref} offers no approve: {:?}", card.options),
+            );
+        };
+        let words = if again {
+            format!("Approve {pref}, as it reads now.")
+        } else {
+            format!("Approve {pref}.")
+        };
+        let args = json!({"ref": card.r#ref, "option": option, "card_hash": card.card_hash,
+            "evidence": words, "question": format!("Land {pref}?"), "session_ref": RELAY_RUN});
+        let res = link.raw("land", "rdy_answer", args);
+        let moved = matches!(&res, Res::Refused(code, _) if code == "E_PROPOSAL_MOVED");
+        let res = link.finish(e.clone(), "land", res, |en, v| {
+            en.reply = Some(v.clone());
+        });
+        if !moved || again {
+            return Relayed::Answered(res);
+        }
+        refused = Some(res);
+    }
+    unreachable!("the second answer returns")
 }
 
 impl Person {
@@ -477,29 +562,42 @@ impl Person {
                 .insert(0, pref);
             return;
         }
-        let evidence = format!("Approve {pref}.");
-        let question = format!("Land {pref}?");
-        let args: Vec<&str> = if relayed {
-            vec![
-                "approve",
-                &pref,
-                "--relayed-by",
-                RELAY,
-                "--evidence",
-                &evidence,
-                "--question",
-                &question,
-                "--session",
-                "chat",
-            ]
+        let res = if relayed {
+            match relay_land(&mut self.link, e, &pref) {
+                Relayed::Answered(res) => res,
+                // the daemon died under the queue read: the proposal waits at the head
+                Relayed::Lost => {
+                    self.queue
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(0, pref);
+                    return;
+                }
+                Relayed::Absent { waits } => {
+                    // no card to answer: a version that is not ready, or one past the queue's
+                    // cap, waits behind the others. Any other landed already or is gone (a newer
+                    // version, a closed view): the read of it tells, and a landing no entry
+                    // names fails the run, as after E_ALREADY_LANDED. Its ref is dead.
+                    match before {
+                        Some(b) if !waits => {
+                            self.found(&pref, b, true);
+                        }
+                        _ => self
+                            .queue
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(pref),
+                    }
+                    return;
+                }
+            }
         } else {
-            vec!["approve", &pref]
+            // the direct approve is the person's (CLI parity)
+            let res = self.cli_as("land", &["approve", &pref], false);
+            self.link.finish(e, "land", res, |en, v| {
+                en.reply = Some(v.clone());
+            })
         };
-        // the relay runs as the agent itself; the direct approve is the person's
-        let res = self.cli_as("land", &args, relayed);
-        let res = self.link.finish(e, "land", res, |en, v| {
-            en.reply = Some(v.clone());
-        });
         let found = match (before, &res) {
             (Some(b), Res::Ok(v)) => {
                 if let Some(w) = &self.hooks.watch {
@@ -540,27 +638,37 @@ impl Person {
 
     /// On a drawn step (`dispute_draw`): resolves `dismissed` the oldest dispute the person opened
     /// on an earlier step, if one is open, then opens a dispute on a landing drawn from the seed's
-    /// landings and the journal's. Both are the person's direct commands. A dispute shows and
-    /// never blocks (D-ZWP7Q), so neither takes a turn.
+    /// landings and the journal's. Both are the person's acts through the relay's `rdy_dispute`,
+    /// with the person's words (G3: the tool by default). A dispute shows and never blocks
+    /// (D-ZWP7Q); each holds an act turn, as every other write of an actor does, so no write
+    /// runs inside the M3 removal window (`m3`).
     fn disputes(&mut self) {
         let step = self.link.step;
         if !dispute_draw(self.link.at.seed, step) {
             return;
         }
+        let gate = self.link.gate.clone();
+        let _act = gate.act_turn();
         if let Some(at) = self.disputes.iter().position(|(_, s)| *s < step) {
             let (id, _) = self.disputes.remove(at);
-            let mut e = self.entry(HUMAN, "dispute_resolve");
+            let mut e = self.entry(RELAY, "dispute_resolve");
             e.block = Some(id.clone());
-            let args = ["dispute", "resolve", id.as_str(), "--outcome", "dismissed"];
-            let res = self.cli("dispute_resolve", &args);
-            self.link.finish(e, "dispute_resolve", res, |en, v| {
-                en.reply = Some(v.clone());
-            });
+            let args = json!({"op": "resolve", "dispute": id, "outcome": "dismissed",
+                "evidence": format!("Dismiss the dispute {id}."),
+                "question": format!("Dismiss the dispute {id}?"),
+                "session_ref": RELAY_RUN});
+            self.link
+                .exec(e, "dispute_resolve", "rdy_dispute", args, |en, v| {
+                    en.reply = Some(v.clone());
+                });
         }
         let mut landings = self.seed_landings.clone();
         for x in self.link.journal.entries() {
             let landed = (x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND;
-            if let Some(l) = x.reply.as_ref().and_then(|r| r["landing"].as_str())
+            if let Some(l) = x
+                .reply
+                .as_ref()
+                .and_then(|r| landing_fields(r)["landing"].as_str())
                 && landed
                 && !landings.iter().any(|y| y == l)
             {
@@ -570,21 +678,18 @@ impl Person {
         let pick = agent::seeded(self.link.at.seed, DISPUTE ^ 1, step as u64) as usize;
         let landing = landings[pick % landings.len()].clone();
         let reason = format!("The person disputes this landing at step {}.", spell(step));
-        let mut e = self.entry(HUMAN, "dispute_open");
+        let mut e = self.entry(RELAY, "dispute_open");
         e.block = Some(landing.clone());
-        let args = [
-            "dispute",
-            "open",
-            landing.as_str(),
-            "--reason",
-            reason.as_str(),
-        ];
-        let res = self.cli("dispute_open", &args);
+        let args = json!({"op": "open", "landing": landing, "reason": reason,
+            "evidence": format!("Dispute the landing {landing}."),
+            "question": format!("Dispute the landing {landing}?"),
+            "session_ref": RELAY_RUN});
         let mut opened = None;
-        self.link.finish(e, "dispute_open", res, |en, v| {
-            en.reply = Some(v.clone());
-            opened = v["dispute"]["id"].as_str().map(str::to_string);
-        });
+        self.link
+            .exec(e, "dispute_open", "rdy_dispute", args, |en, v| {
+                en.reply = Some(v.clone());
+                opened = v["dispute"]["id"].as_str().map(str::to_string);
+            });
         if let Some(id) = opened {
             self.disputes.push((id, step));
         }

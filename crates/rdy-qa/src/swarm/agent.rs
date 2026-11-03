@@ -55,6 +55,7 @@
 //!   both propose with `propose` entries whose reply holds the version's readiness
 //!   (`{ready, issues, warnings}`). A check act that finds no subject is `Skipped`.
 use super::journal::{CheckFacts, Entry, InboxRead, Journal, Outcome, Skip, allowed};
+use super::m3::{self, M3Hooks};
 use super::project::{FIXTURE_KEY, FIXTURE_RULE, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
 use super::script::{
@@ -226,6 +227,8 @@ pub struct AgentReport {
     pub persisted: Option<String>,
     /// The range of its last inbox read (`InboxRead::range`).
     pub range: u32,
+    /// The directories the M3 publication scenario wrote its outputs to (`m3`), for the oracle.
+    pub m3_outputs: Vec<PathBuf>,
 }
 
 /// What a call met.
@@ -272,6 +275,8 @@ pub(crate) struct Link {
     /// The whole error object of the last call the daemon refused (its `issues`, `corrected`):
     /// the drain resolves an agent's refused `rdy_land` from it.
     pub last_error: Option<Value>,
+    /// How many tool calls the link has sent: an M3 scenario counts its own against its bound.
+    pub calls: usize,
 }
 
 /// The text of a caught panic.
@@ -308,6 +313,7 @@ impl Link {
             step: 0,
             recovered: false,
             last_error: None,
+            calls: 0,
         }
     }
 
@@ -366,6 +372,7 @@ impl Link {
 
     /// One tool call, with nothing journaled.
     pub fn raw(&mut self, act: &str, tool: &str, args: Value) -> Res {
+        self.calls += 1;
         let c = &mut self.client;
         let started = Instant::now();
         match catch_unwind(AssertUnwindSafe(|| c.call_within(tool, args, CALL_BUDGET))) {
@@ -477,6 +484,12 @@ impl Link {
             self.recover();
         }
         res
+    }
+
+    /// The session's run and role, as `connect` opened it: a second connection of the same actor
+    /// (an eliciting client, `m3`) opens the same session.
+    pub fn session(&self) -> (&str, &'static str) {
+        (&self.run, self.role)
     }
 
     /// The `Entry` of an act at the current step.
@@ -736,6 +749,11 @@ pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
     let gate = link.gate.clone();
     let _turn = gate.plan_turn();
+    answer_plan_held(link, view);
+}
+
+/// `answer_plan` for a caller that already holds the plan turn (the M3 removal window, `m3`).
+pub(crate) fn answer_plan_held(link: &mut Link, view: &str) {
     let mut read = PlanRead::default();
     let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
     loop {
@@ -909,7 +927,7 @@ pub fn scratch_only_draw(seed: u64, i: usize, n: usize) -> bool {
 }
 
 /// ap13: the justification of every scratch write: an editorial `clarify`.
-fn scratch_editorial() -> Value {
+pub(crate) fn scratch_editorial() -> Value {
     json!({"class": "clarify", "reason": "swarm: scratch note"})
 }
 
@@ -1044,6 +1062,27 @@ pub(crate) type Pace = Arc<dyn Fn(usize) + Send + Sync>;
 pub(crate) struct AgentHooks {
     pub pace: Option<Pace>,
     pub watch: Option<Watch>,
+    /// The forced M3 scenarios of the run (`script::m3_scenarios`): the agent runs each one
+    /// scheduled for it after the act of its step (`m3::run`).
+    pub m3: M3Hooks,
+}
+
+/// Starts agent `i` as `spawn` does, with the forced M3 scenarios `m3` (each runs after the act of
+/// its step when it names this agent) and no pace: a test runs a scenario this way.
+pub fn spawn_m3(
+    p: &SwarmProject,
+    cfg: &Config,
+    i: usize,
+    acts: Vec<Act>,
+    journal: Journal,
+    gate: Arc<KillGate>,
+    m3: M3Hooks,
+) -> JoinHandle<AgentReport> {
+    let hooks = AgentHooks {
+        m3,
+        ..AgentHooks::default()
+    };
+    spawn_paced(p, cfg, i, acts, journal, gate, hooks)
 }
 
 /// `spawn`, with the run's `hooks`: a wait before each step (a run keeps its agents within a
@@ -1090,6 +1129,21 @@ pub(crate) fn spawn_paced(
             if a.link.take_recovered() {
                 a.resume = true;
                 a.resync();
+            }
+            for sc in hooks.m3.at(i, step) {
+                let watch = a.watch.clone();
+                m3::run(
+                    &mut a.link,
+                    &a.seed,
+                    &sc,
+                    watch.as_ref(),
+                    &hooks.m3,
+                    &mut a.report,
+                );
+                if a.link.take_recovered() {
+                    a.resume = true;
+                    a.resync();
+                }
             }
         }
         a.report.last_cursor = a.last_cursor.clone();
