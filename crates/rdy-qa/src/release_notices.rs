@@ -75,7 +75,8 @@ pub const MSG_FORMAT_MOVE: &str = "release sources: release notes do not name th
 /// The published releases, oldest first: each version with the dump format and store format it
 /// writes. The changes part of a release's notes covers everything since the newest row before
 /// it (D-7PQEF). A release adds its row once it is published.
-pub const RELEASED: &[(&str, u32, u32)] = &[("0.17.0", 3, 16), ("0.20.0", 3, 18)];
+pub const RELEASED: &[(&str, u32, u32)] =
+    &[("0.17.0", 3, 16), ("0.20.0", 3, 18), ("0.25.0", 3, 18)];
 /// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
 pub const CHANGES_GROUPS: [&str; 5] = [
     "### New features",
@@ -2562,6 +2563,26 @@ mod tests {
             Some(("0.17.0", 3, 16))
         );
         assert_eq!(previous_release("0.17.0", RELEASED), None);
+    }
+
+    /// The published 0.25.0 row is the previous release of later versions (POST-LAUNCH 149), and
+    /// the notes of the next release name the move to feature-based stores.
+    #[test]
+    fn rn35_published_025_is_the_previous_release() {
+        assert_eq!(
+            previous_release("0.35.0", RELEASED),
+            Some(("0.25.0", 3, 18))
+        );
+        assert_eq!(
+            previous_release("0.25.0", RELEASED),
+            Some(("0.20.0", 3, 18))
+        );
+        assert_eq!(
+            release_format_move_line("0.35.0").expect("ok").as_deref(),
+            Some(
+                "- **Breaking: the store format moves from 18 to feature-based stores (dump pair (3, 18) to dump format 4).** rdy 0.35.0 refuses a store made by rdy 0.25.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.25.0, then `rdy load <file> <dir>` with rdy 0.35.0, into a directory with no store."
+            )
+        );
     }
 
     /// The changes part (D-7PQEF): in place after Try it and before Feedback, with known groups
