@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod intake;
 pub mod invariants;
 pub mod landing_audit;
+pub mod m3_audit;
 pub mod mcp;
 pub mod packs;
 pub mod perf;
