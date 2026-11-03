@@ -13,6 +13,7 @@ mod gate_grounded;
 mod gate_identity;
 mod gate_import_policy;
 mod gate_intake_e2e;
+mod gate_m3_reach;
 mod gate_neighbor_cards;
 mod gate_neighbors;
 mod gate_plan;
