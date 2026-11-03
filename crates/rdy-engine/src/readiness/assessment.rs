@@ -26,8 +26,10 @@ use rdy_schema::{Issue, Pack, Severity};
 use rdy_store::{codec, kinds};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The computation version of the record.
-pub const METHOD: u32 = 1;
+/// The computation version of the record. 2 (D-KVQ7F): Grounded counts a mention check only on a
+/// normative block, so the same content scores differently from a method-1 record, which is
+/// read as stored and never recomputed.
+pub const METHOD: u32 = 2;
 /// The most tension rows a record keeps; the rest are counted in `tensions_omitted` (O9).
 pub const MAX_TENSION_ROWS: usize = 1_000;
 /// The most suspect rows a record keeps; the rest are counted in `suspects_omitted` (O9).
@@ -768,6 +770,10 @@ mod tests {
         assert_eq!(a.scope.proposal, pref().version);
         assert_eq!(a.base, Some(h(8_000)));
         assert_eq!(a.method, METHOD);
+        assert_eq!(
+            a.method, 2,
+            "D-KVQ7F: Grounded counts only normative mentions"
+        );
         assert_eq!(a.pack.name, f.pack.name);
         assert_eq!(a.pack.version, f.pack.version);
         assert_eq!(a.pack.digest, pack_digest(&f.pack));

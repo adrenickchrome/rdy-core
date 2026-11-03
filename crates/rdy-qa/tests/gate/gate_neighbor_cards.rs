@@ -6,6 +6,7 @@
 use crate::gate_check_verdicts::{REASON, meaning_verdict};
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::NEIGHBOR_EDGE;
 use rdy_engine::engine::Local;
 use rdy_engine::neighbors::neighbors_in;
@@ -188,6 +189,17 @@ fn same_entity_rows(for_: &BlockId, list: &[(&BlockId, &str, &str, &str)]) -> Ve
         .collect()
 }
 
+/// The `(linked, text)` counts a `Related decisions` value leads with, read from its head; the
+/// value must say `omitted` omitted rows.
+fn split_counts(value: &str, omitted: usize) -> (usize, usize) {
+    let rest = value.split(" listed by link, ").collect::<Vec<_>>();
+    assert_eq!(rest.len(), 2, "{value}");
+    let linked: usize = rest[0].parse().unwrap();
+    let (text, tail) = rest[1].split_once(" found by text, ").expect(value);
+    assert!(tail.starts_with(&format!("{omitted} omitted")), "{value}");
+    (linked, text.parse().unwrap())
+}
+
 /// Lands a decision `statement` on the entity in its own view: canon moves on.
 fn land_decision_on(w: &mut World, view: &str, statement: &str) -> BlockId {
     let d = decide_in(&mut w.r, view, decision(&w.s, statement, &[&w.e], false));
@@ -321,12 +333,19 @@ fn nb11_everyday_removes_only_unlinked_card_inference() {
         format!("medium: unlinked_mention on {c} (\"Stores\")")
     );
     let card = confirm_of(&w.r, &n);
-    assert!(
-        fact(&card, "Related decisions").contains("via text"),
-        "{}",
-        fact(&card, "Related decisions")
+    // n names the entity: a, b and the proposed l are found by text, none listed by link
+    assert_eq!(
+        fact(&card, "Related decisions"),
+        "0 listed by link, 3 found by text, 0 omitted"
     );
-    assert!(fact(&approve_item(&w.r, &pd.r#ref), "Related decisions").contains("via text"));
+    // the batch: l is tied to a (one linked row); the five other pairs are counted text rows
+    assert_eq!(
+        fact(&approve_item(&w.r, &pd.r#ref), "Related decisions"),
+        format!(
+            "1 listed by link, 5 found by text, 0 omitted: {}",
+            row(&_l, "same_entity", &w.a, "live", "link", A_STATEMENT)
+        )
+    );
 
     // everyday on the term and the entity, landed
     put_j(
@@ -345,14 +364,14 @@ fn nb11_everyday_removes_only_unlinked_card_inference() {
         fact(&conf, "Confidence")
     );
     // the text-only decision lists nothing: its words do not count; the tied decision still
-    // lists the tied one and nothing by text
+    // lists the tied one and counts nothing by text
     let card = confirm_of(&w.r, &n2);
     assert_eq!(fact(&card, "Related decisions"), "none");
     let batch = fact(&approve_item(&w.r, &pd2.r#ref), "Related decisions").to_string();
     assert_eq!(
         batch,
         format!(
-            "1 listed, 0 omitted: {}",
+            "1 listed by link, 0 found by text, 0 omitted: {}",
             row(&l2, "same_entity", &w.a, "live", "link", A_STATEMENT)
         ),
         "{batch}"
@@ -386,7 +405,7 @@ fn nb11_everyday_removes_only_unlinked_card_inference() {
 #[test]
 fn nb11_decision_and_batch_cards_show_the_related_list() {
     let mut w = world();
-    let (a, b) = (w.a.clone(), w.b.clone());
+    let a = w.a.clone();
     // two decisions on the entity: n1 is tied to it, n2 names it
     let n1_statement = "Entries are signed";
     let n2_statement = "The ledger service stores signatures";
@@ -395,22 +414,10 @@ fn nb11_decision_and_batch_cards_show_the_related_list() {
     let p = propose(&mut w.r, "a");
     let batch = approve_item(&w.r, &p.r#ref);
 
-    let r1 = same_entity_rows(
-        &n1,
-        &[
-            (&a, "live", "link", A_STATEMENT),
-            (&b, "live", "text", B_STATEMENT),
-            (&n2, "proposed", "text", n2_statement),
-        ],
-    );
-    let r2 = same_entity_rows(
-        &n2,
-        &[
-            (&a, "live", "text", A_STATEMENT),
-            (&b, "live", "text", B_STATEMENT),
-            (&n1, "proposed", "text", n1_statement),
-        ],
-    );
+    // n1 is tied to a: one linked row and two counted text rows; n2 only names the entity: three
+    // counted text rows
+    let r1 = same_entity_rows(&n1, &[(&a, "live", "link", A_STATEMENT)]);
+    let r2: Vec<String> = vec![];
     // one aggregate fact on the batch card, after Decisions and before Supersedes: anchors in id
     // order, each with its rows
     assert_eq!(count_of(&batch, "Related decisions"), 1);
@@ -420,21 +427,31 @@ fn nb11_decision_and_batch_cards_show_the_related_list() {
         &n[at..at + 3],
         ["Decisions", "Related decisions", "Supersedes"]
     );
-    let mut anchors = vec![(n1.clone(), r1.clone()), (n2.clone(), r2.clone())];
-    anchors.sort_by(|x, y| x.0.cmp(&y.0));
-    let joined: Vec<String> = anchors.into_iter().flat_map(|(_, rows)| rows).collect();
     assert_eq!(
         fact(&batch, "Related decisions"),
-        format!("6 listed, 0 omitted: {}", joined.join("; "))
+        format!(
+            "1 listed by link, 5 found by text, 0 omitted: {}",
+            r1.join("; ")
+        )
     );
+    assert!(!fact(&batch, "Related decisions").contains(B_STATEMENT));
+    let _ = &w.b;
     // each decision confirm card: its own rows, one fact, last
-    for (d, rows) in [(&n1, &r1), (&n2, &r2)] {
+    for (d, linked, rows) in [(&n1, 1, &r1), (&n2, 0, &r2)] {
         let card = confirm_of(&w.r, d);
         assert_eq!(count_of(&card, "Related decisions"), 1, "{:#?}", card.facts);
         assert_eq!(card.facts.last().unwrap().name, "Related decisions");
+        let tail = if rows.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", rows.join("; "))
+        };
         assert_eq!(
             fact(&card, "Related decisions"),
-            format!("3 listed, 0 omitted: {}", rows.join("; "))
+            format!(
+                "{linked} listed by link, {} found by text, 0 omitted{tail}",
+                3 - linked
+            )
         );
         assert!(card.card.contains("Related decisions"), "{}", card.card);
     }
@@ -477,13 +494,21 @@ fn nb11_decision_and_batch_cards_show_the_related_list() {
     let item = approve_item(&w.r, &p.r#ref);
     let value = fact(&item, "Related decisions");
     // each of the 22 anchors sees the 21 others and the two canon decisions: 23, cut to 20
-    let head = format!("20 listed, {} omitted: ", 22 * 3 + (22 * 20 - 20));
+    // the omitted count is unchanged; the 20 retained rows are split by route
+    let omitted = 22 * 3 + (22 * 20 - 20);
+    let (l, t) = split_counts(value, omitted);
+    assert_eq!(l + t, 20, "{}", &value[..value.len().min(120)]);
+    let head = format!("{l} listed by link, {t} found by text, {omitted} omitted");
     assert!(
         value.starts_with(&head),
         "{}",
-        &value[..value.len().min(80)]
+        &value[..value.len().min(120)]
     );
-    assert_eq!(value[head.len()..].split("; ").count(), 20);
+    if l > 0 {
+        assert_eq!(value[head.len() + 2..].split("; ").count(), l);
+    } else {
+        assert_eq!(value, head);
+    }
 }
 
 #[test]
@@ -514,7 +539,7 @@ fn nb11_approve_facts_are_stored_and_old_cards_do_not_recompute() {
             .card
             .facts
             .iter()
-            .any(|l| l.starts_with("Related decisions: 2 listed")),
+            .any(|l| l == "Related decisions: 0 listed by link, 2 found by text, 0 omitted"),
         "{:#?}",
         record.card.facts
     );
@@ -570,10 +595,11 @@ fn nb11_card_hash_binds_related_rows_beyond_the_text_budget() {
         "a",
         decision(&w.s, "Entries are signed", &[&w.e], true),
     );
+    // n2 is tied to the entity too, so its row is listed by link with its summary
     let n2 = decide_in(
         &mut w.r,
         "a",
-        decision(&w.s, "The ledger service stores signatures", &[], false),
+        decision(&w.s, "The ledger service stores signatures", &[&w.e], false),
     );
     let p1 = propose(&mut w.r, "a");
     let card1 = confirm_of(&w.r, &n1);
@@ -616,7 +642,8 @@ fn nb11_card_hash_binds_related_rows_beyond_the_text_budget() {
         assert_eq!(card_hash(item).to_string(), item.card_hash);
     }
 
-    // an edit of a row within the bounded fact: n2's statement still names the entity
+    // an edit of a row within the bounded fact: n2's statement still names the entity and n2 is
+    // still tied to it
     put(
         &mut w.r,
         "a",
@@ -694,11 +721,12 @@ fn nb11_long_words_and_related_rows_fit_existing_fact_bounds() {
     let line = format!("Related decisions: {}", fact(&item, "Related decisions"));
     assert!(line.len() <= 4096, "{} bytes", line.len());
     assert!(line.ends_with("..."), "the row tail is cut: {line}");
-    assert!(
-        line.starts_with("Related decisions: 20 listed, "),
-        "the counts lead: {}",
-        &line[..60]
-    );
+    // 20 rows are kept, split by route (the canon decision that only names the entity may be
+    // among them); the omitted count is the one it was
+    let value = fact(&item, "Related decisions");
+    let (linked, text) = split_counts(value, 21 * 2 + (21 * 20 - 20));
+    assert_eq!(linked + text, 20, "the counts lead: {}", &line[..90]);
+    assert!(linked >= 19, "{}", &line[..90]);
     // the stored card holds the same bounded line
     let record = stored(&w.r, &p);
     assert_eq!(record.card.facts, lines(&item));
@@ -789,4 +817,411 @@ fn nb11_m3d_accepted_verdict_and_source_rules_survive() {
         "the verdict moved the hash"
     );
     let _ = n;
+}
+
+// ---- mi2 (D-KVQ7F): link rows are listed, text rows are counted ----
+
+/// An empty project with doc `notes`, section `Ideas` and entity `Ledger service`, landed.
+struct Mini {
+    _dir: tempfile::TempDir,
+    r: Rdy,
+    s: BlockId,
+    e: BlockId,
+}
+
+fn mini() -> Mini {
+    let (dir, mut r) = rdy_qa::fixtures::project();
+    let w = put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}}
+        ]),
+        j_typo(),
+    );
+    land(&mut r, "seed").unwrap();
+    let id = |k: &str| BlockId::parse(&w.created[k]).unwrap();
+    Mini {
+        s: id("$s"),
+        e: id("$e"),
+        _dir: dir,
+        r,
+    }
+}
+
+impl Mini {
+    /// A decision in `view`: tied to the entity, or only naming it in its statement.
+    fn dec(&mut self, view: &str, statement: &str, tied: bool, one_way: bool) -> BlockId {
+        let e = self.e.clone();
+        let affects: Vec<&BlockId> = if tied { vec![&e] } else { vec![] };
+        decide_in(
+            &mut self.r,
+            view,
+            decision(&self.s, statement, &affects, one_way),
+        )
+    }
+
+    /// Lands one decision as canon.
+    fn seed(&mut self, statement: &str, tied: bool) -> BlockId {
+        let d = self.dec("seed2", statement, tied, false);
+        land(&mut self.r, "seed2").unwrap();
+        d
+    }
+}
+
+/// The briefing rows of `ids` in view `view`: `(related_decisions, omitted)` as JSON.
+fn briefed(r: &Rdy, view: &str, ids: &[&BlockId]) -> (Vec<serde_json::Value>, usize) {
+    let b = r
+        .read()
+        .brief(
+            &Scope::View(view.into()),
+            &Coverage {
+                ids: ids.iter().map(|b| b.to_string()).collect(),
+                path: None,
+            },
+            None,
+        )
+        .unwrap();
+    let v = serde_json::to_value(&b).unwrap();
+    (
+        v["related_decisions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+        v["related_decisions_omitted"].as_u64().unwrap_or(0) as usize,
+    )
+}
+
+/// Both cards of a version with the confirm anchor `n` and the batch: their related facts.
+fn related_on_cards(m: &mut Mini, view: &str, n: &BlockId) -> (String, String) {
+    let p = propose(&mut m.r, view);
+    let batch = fact(&approve_item(&m.r, &p.r#ref), "Related decisions").to_string();
+    let confirm = fact(&confirm_of(&m.r, n), "Related decisions").to_string();
+    (confirm, batch)
+}
+
+#[test]
+fn mi2_cards_list_links_and_count_text() {
+    // link only: both ends tied
+    let mut m = mini();
+    let a1 = m.seed("Entries are append-only", true);
+    let n = m.dec("v", "Entries are signed", true, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    let linked = row(
+        &n,
+        "same_entity",
+        &a1,
+        "live",
+        "link",
+        "Entries are append-only",
+    );
+    let want = format!("1 listed by link, 0 found by text, 0 omitted: {linked}");
+    assert_eq!(confirm, want);
+    assert_eq!(batch, want);
+
+    // text only: nothing is tied; the anchor and the canon decision only name the entity
+    let mut m = mini();
+    m.seed("The ledger service keeps entries", false);
+    let n = m.dec("v", "The ledger service signs entries", false, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    assert_eq!(confirm, "0 listed by link, 1 found by text, 0 omitted");
+    assert_eq!(batch, confirm);
+    assert!(!confirm.contains("keeps entries"), "{confirm}");
+
+    // mixed: one end named is text, both ends tied is link; the tail lists the link row only
+    let mut m = mini();
+    let a1 = m.seed("Entries are append-only", true);
+    m.seed("The ledger service keeps entries", false);
+    let n = m.dec("v", "Entries are signed", true, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    let linked = row(
+        &n,
+        "same_entity",
+        &a1,
+        "live",
+        "link",
+        "Entries are append-only",
+    );
+    let want = format!("1 listed by link, 1 found by text, 0 omitted: {linked}");
+    assert_eq!(confirm, want);
+    assert_eq!(batch, want);
+
+    // the anchor only names the entity while the canon decision is tied: one end named, text
+    let mut m = mini();
+    m.seed("Entries are append-only", true);
+    let n = m.dec("v", "The ledger service signs entries", false, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    assert_eq!(confirm, "0 listed by link, 1 found by text, 0 omitted");
+    assert_eq!(batch, confirm);
+
+    // empty
+    let mut m = mini();
+    let n = m.dec("v", "Entries are signed", true, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    assert_eq!(confirm, "none");
+    assert_eq!(batch, "none");
+
+    // several anchors in one batch; a repeated decision is counted once per anchor row
+    let mut m = mini();
+    let t1 = m.seed("The ledger service keeps entries", false);
+    let n1 = m.dec("v", "The ledger service signs entries", false, true);
+    let n2 = m.dec("v", "The ledger service seals entries", false, true);
+    let (c1, batch) = related_on_cards(&mut m, "v", &n1);
+    // four rows: n1-t1, n1-n2, n2-t1, n2-n1; t1 stands in two of them
+    assert_eq!(batch, "0 listed by link, 4 found by text, 0 omitted");
+    assert_eq!(c1, "0 listed by link, 2 found by text, 0 omitted");
+    assert_eq!(
+        fact(&confirm_of(&m.r, &n2), "Related decisions"),
+        "0 listed by link, 2 found by text, 0 omitted"
+    );
+    // a briefing still returns the text rows and the unchanged omitted count
+    let (rows, omitted) = briefed(&m.r, "v", &[&n1, &n2]);
+    let text_rows = rows.iter().filter(|r| r["via"] == "text").count();
+    assert_eq!((rows.len(), text_rows, omitted), (4, 4, 0), "{rows:?}");
+    assert!(rows.iter().any(|r| r["decision"] == t1.to_string()));
+
+    // anchors with linked rows list them in anchor order, then row order
+    let mut m = mini();
+    let a1 = m.seed("Entries are append-only", true);
+    let n1 = m.dec("v", "Entries are signed", true, true);
+    let n2 = m.dec("v", "Entries are sealed", true, true);
+    let (_, batch) = related_on_cards(&mut m, "v", &n1);
+    let mut want_rows = vec![];
+    let mut anchors = vec![
+        (n1.clone(), n2.clone(), "Entries are sealed"),
+        (n2.clone(), n1.clone(), "Entries are signed"),
+    ];
+    anchors.sort_by(|x, y| x.0.cmp(&y.0));
+    for (n, other, text) in anchors {
+        let mut rows = vec![
+            (a1.clone(), "live", "Entries are append-only"),
+            (other, "proposed", text),
+        ];
+        rows.sort_by(|x, y| x.0.cmp(&y.0));
+        for (d, status, t) in rows {
+            want_rows.push(row(&n, "same_entity", &d, status, "link", t));
+        }
+    }
+    assert_eq!(
+        batch,
+        format!(
+            "4 listed by link, 0 found by text, 0 omitted: {}",
+            want_rows.join("; ")
+        )
+    );
+}
+
+#[test]
+fn mi2_related_counts_keep_existing_caps() {
+    // 20 rows fit: 10 tied and 10 named; 21 rows cut one, whichever route it had
+    for total in [20usize, 21] {
+        let mut m = mini();
+        for i in 0..total {
+            // text first, as the statements are made; the order of the rows is the engine's
+            let tied = i % 2 == 0;
+            m.seed(&format!("Class {i} is kept by the ledger service"), tied);
+        }
+        let n = m.dec("v", "Entries are signed", true, true);
+        let (rows, omitted) = briefed_after_propose(&mut m, "v", &n);
+        assert_eq!(rows.len() + omitted, total, "{total}");
+        let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+        let link: Vec<String> = rows
+            .iter()
+            .filter(|r| r["via"] == "link")
+            .map(|r| {
+                row(
+                    &n,
+                    "same_entity",
+                    &BlockId::parse(r["decision"].as_str().unwrap()).unwrap(),
+                    r["status"].as_str().unwrap(),
+                    "link",
+                    r["statement"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        let text = rows.iter().filter(|r| r["via"] == "text").count();
+        let want = format!(
+            "{} listed by link, {text} found by text, {omitted} omitted: {}",
+            link.len(),
+            link.join("; ")
+        );
+        assert_eq!(confirm, want, "{total}");
+        assert_eq!(batch, want, "{total}");
+        // omitted rows are neither printed nor guessed: the tail holds only the linked rows
+        assert_eq!(confirm.split("; ").count(), link.len());
+        assert_eq!(omitted, total - 20.min(total));
+        // text comes before link somewhere in the engine's order
+        let first_link = rows.iter().position(|r| r["via"] == "link");
+        let last_text = rows.iter().rposition(|r| r["via"] == "text");
+        if let (Some(f), Some(l)) = (first_link, last_text) {
+            assert!(f != l);
+        }
+    }
+
+    // all-text retained rows: 21 named decisions; 20 are counted, one is omitted, none printed
+    let mut m = mini();
+    for i in 0..21 {
+        m.seed(&format!("Class {i} is kept by the ledger service"), false);
+    }
+    let n = m.dec("v", "The ledger service signs entries", false, true);
+    let (confirm, batch) = related_on_cards(&mut m, "v", &n);
+    assert_eq!(confirm, "0 listed by link, 20 found by text, 1 omitted");
+    assert_eq!(batch, confirm);
+
+    // several anchors: 22 tied decisions in one version, each sees the 21 others; each is cut to
+    // 20 (1 omitted each), then the aggregate is cut to one 20. Counts are over the retained set
+    let mut m = mini();
+    let mut ds = vec![];
+    for i in 0..22 {
+        ds.push(m.dec("many", &format!("Entry class {i} is kept"), true, false));
+    }
+    let p = propose(&mut m.r, "many");
+    let value = fact(&approve_item(&m.r, &p.r#ref), "Related decisions").to_string();
+    let refs: Vec<&BlockId> = ds.iter().collect();
+    let (rows, omitted) = briefed(&m.r, "many", &refs);
+    assert_eq!(rows.len(), 20);
+    assert_eq!(omitted, 22 + (22 * 20 - 20), "{omitted}");
+    assert!(
+        value.starts_with(&format!(
+            "20 listed by link, 0 found by text, {omitted} omitted: "
+        )),
+        "{}",
+        &value[..value.len().min(120)]
+    );
+    let head = format!("20 listed by link, 0 found by text, {omitted} omitted: ");
+    assert_eq!(
+        value[head.len()..].split("; ").count(),
+        20,
+        "no omitted row becomes a printed row"
+    );
+
+    // long summaries: 20 linked rows with long text fit the bound, the counts lead, the tail is
+    // cut and the cut tail does not change the counts
+    let mut m = mini();
+    let long = "x".repeat(10);
+    for i in 0..20 {
+        let d = DecisionInput {
+            statement: format!("{long} {} {i}", "数据库 ".repeat(30)),
+            ..decision(&m.s, &format!("Long {i}"), &[&m.e.clone()], false)
+        };
+        decide_in(&mut m.r, "seed2", d);
+    }
+    land(&mut m.r, "seed2").unwrap();
+    let n = m.dec("v", "Entries are signed", true, true);
+    let (confirm, _) = related_on_cards(&mut m, "v", &n);
+    let line = format!("Related decisions: {confirm}");
+    assert!(line.len() <= 4096, "{} bytes", line.len());
+    assert!(line.ends_with("..."), "the tail is cut");
+    assert!(
+        confirm.starts_with("20 listed by link, 0 found by text, 0 omitted: "),
+        "the counts are not invented after the cut: {}",
+        &confirm[..80]
+    );
+}
+
+/// The briefing rows of `n` in the proposal view `view` (proposed first, as the card is).
+fn briefed_after_propose(m: &mut Mini, view: &str, n: &BlockId) -> (Vec<serde_json::Value>, usize) {
+    briefed(&m.r, view, &[n])
+}
+
+#[test]
+fn mi2_text_summary_is_not_a_card_fact() {
+    // n1 is tied; n2 only names the entity. Editing n2's words changes no card fact.
+    let mut m = mini();
+    let n1 = m.dec("v", "Entries are signed", true, true);
+    let n2 = m.dec("v", "The ledger service stores signatures", false, false);
+    let p1 = propose(&mut m.r, "v");
+    let card1 = confirm_of(&m.r, &n1);
+    let batch1 = approve_item(&m.r, &p1.r#ref);
+    assert_eq!(
+        fact(&card1, "Related decisions"),
+        "0 listed by link, 1 found by text, 0 omitted"
+    );
+    put(
+        &mut m.r,
+        "v",
+        json!([{"op": "update", "id": n2.to_string(),
+                "fields": {"statement": "The ledger service stores every signature"}}]),
+    );
+    let p2 = propose(&mut m.r, "v");
+    assert_ne!(p2.r#ref, p1.r#ref, "n2 changed, so the batch did");
+    let card2 = confirm_of(&m.r, &n1);
+    let batch2 = approve_item(&m.r, &p2.r#ref);
+    assert_eq!(card2.r#ref, card1.r#ref);
+    for (a, b) in [(&card1, &card2), (&batch1, &batch2)] {
+        assert_eq!(
+            fact(a, "Related decisions"),
+            fact(b, "Related decisions"),
+            "the text row's words are no card fact"
+        );
+    }
+    assert_eq!(
+        card1.facts, card2.facts,
+        "so no fact of the confirm card moves"
+    );
+    // the hash may still move on other card parts (the plan binding of the edit); the related
+    // fact adds nothing to it, as its bytes are the same
+
+    // a linked row's summary is in the fact and in the hash
+    let mut m = mini();
+    let n1 = m.dec("v", "Entries are signed", true, true);
+    let n2 = m.dec("v", "The ledger service stores signatures", true, false);
+    let p1 = propose(&mut m.r, "v");
+    let card1 = confirm_of(&m.r, &n1);
+    assert!(
+        fact(&card1, "Related decisions").contains("stores signatures"),
+        "{}",
+        fact(&card1, "Related decisions")
+    );
+    let batch1 = approve_item(&m.r, &p1.r#ref);
+    put(
+        &mut m.r,
+        "v",
+        json!([{"op": "update", "id": n2.to_string(),
+                "fields": {"statement": "The ledger service stores every signature"}}]),
+    );
+    let p2 = propose(&mut m.r, "v");
+    let card2 = confirm_of(&m.r, &n1);
+    assert_ne!(
+        fact(&card1, "Related decisions"),
+        fact(&card2, "Related decisions")
+    );
+    assert_ne!(card1.card_hash, card2.card_hash);
+    assert_ne!(batch1.card_hash, approve_item(&m.r, &p2.r#ref).card_hash);
+
+    // a changed retained text count moves the fact and the hash
+    let mut m = mini();
+    let n1 = m.dec("v", "Entries are signed", true, true);
+    m.dec("v", "The ledger service stores signatures", false, false);
+    let p1 = propose(&mut m.r, "v");
+    let card1 = confirm_of(&m.r, &n1);
+    let batch1 = approve_item(&m.r, &p1.r#ref);
+    m.dec("v", "The ledger service seals signatures", false, false);
+    let p2 = propose(&mut m.r, "v");
+    let card2 = confirm_of(&m.r, &n1);
+    assert_eq!(
+        fact(&card1, "Related decisions"),
+        "0 listed by link, 1 found by text, 0 omitted"
+    );
+    assert_eq!(
+        fact(&card2, "Related decisions"),
+        "0 listed by link, 2 found by text, 0 omitted"
+    );
+    assert_ne!(card1.card_hash, card2.card_hash);
+    assert_ne!(batch1.card_hash, approve_item(&m.r, &p2.r#ref).card_hash);
+
+    // stored approve facts stay as stored: a fresh record holds the new form, and reopening the
+    // store does not recompute it
+    let record = stored(&m.r, &p2);
+    // the batch holds three anchors: six text rows
+    let line = "Related decisions: 0 listed by link, 6 found by text, 0 omitted";
+    assert!(
+        record.card.facts.iter().any(|l| l == line),
+        "{:#?}",
+        record.card.facts
+    );
+    m.r.invalidate();
+    assert_eq!(stored(&m.r, &p2), record);
 }

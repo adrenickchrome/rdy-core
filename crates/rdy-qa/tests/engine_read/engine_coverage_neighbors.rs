@@ -553,7 +553,13 @@ fn nb4_everyday_and_dismissal_carry_preserve_scores() {
         same(r, &v, name);
     };
     r.read().coverage_issues(&v).unwrap();
-    assert!(mentioned(&r, "$c1") && mentioned(&r, "$p"));
+    assert!(mentioned(&r, "$c1"));
+    assert!(!mentioned(&r, "$p"), "prose has no mention check (D-KVQ7F)");
+    assert_eq!(
+        entry(&r, &v, &c["$p"]).checks[0],
+        1,
+        "the content check only"
+    );
     step(
         &mut r,
         "everyday true",
@@ -642,13 +648,47 @@ fn nb4_everyday_and_dismissal_carry_preserve_scores() {
     .unwrap();
     r.read().coverage_issues(&v).unwrap();
     same(&r, &v, "restored");
-    assert!(mentioned(&r, "$p"));
+    assert!(!mentioned(&r, "$p"), "a prose mention scores nothing");
+    assert_eq!(entry(&r, &v, &c["$p"]).checks[0], 1);
     step(
         &mut r,
         "a body edit after the restore",
         json!([{"op": "update", "id": c["$p"], "body": "Our Ledger is small and kept."}]),
     );
-    assert!(mentioned(&r, "$p"));
+    assert!(!mentioned(&r, "$p"));
+    assert_eq!(entry(&r, &v, &c["$p"]).checks[0], 1);
+
+    // the claim keeps its mention check through a dismissal and its restore
+    let before = entry(&r, &v, &c["$c1"]);
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c["$c1"],
+        &c["$t"],
+        MentionVerdict::Dismiss,
+        "a passing word",
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    same(&r, &v, "claim dismissed");
+    assert!(!mentioned(&r, "$c1"));
+    assert_eq!(
+        entry(&r, &v, &c["$c1"]).checks,
+        before.checks,
+        "settled, not removed"
+    );
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c["$c1"],
+        &c["$t"],
+        MentionVerdict::Restore,
+        "it needs a link",
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    same(&r, &v, "claim restored");
+    assert!(mentioned(&r, "$c1"));
 }
 
 #[test]
@@ -687,10 +727,13 @@ fn nb4_intrinsic_coverage_keeps_m3d_source_rules() {
     };
     let (i1, s1, doc1, roll1) = read(&r);
     // the new Complete issues and the mention are intrinsic
-    for code in [IssueCode::QuestionAsProse, IssueCode::UnlinkedMention] {
+    for code in [IssueCode::QuestionAsProse, IssueCode::UntiedContent] {
         assert!(codes(&i1).contains(&code), "{code:?}: {:?}", i1.issues);
         assert!(codes(&s1).contains(&code), "{code:?}: {:?}", s1.issues);
     }
+    // D-KVQ7F: a prose mention scores nothing
+    assert!(!codes(&i1).contains(&IssueCode::UnlinkedMention));
+    assert!(!codes(&s1).contains(&IssueCode::UnlinkedMention));
     assert!(codes(&doc1).contains(&IssueCode::CrowdedLevel));
     assert!(!codes(&i1).contains(&IssueCode::SourceNotFound));
     assert!(
@@ -720,13 +763,7 @@ fn nb4_intrinsic_coverage_keeps_m3d_source_rules() {
         .filter(|i| i.code != IssueCode::SourceNotFound)
         .collect();
     assert_eq!(shown, s2.issues.iter().collect::<Vec<_>>());
-    // the mention's text is the same in both
-    let text = |e: &BlockEntry| {
-        e.issues
-            .iter()
-            .find(|i| i.code == IssueCode::UnlinkedMention)
-            .and_then(|i| i.text.clone())
-    };
-    assert!(text(&i1).is_some());
-    assert_eq!(text(&i1), text(&s1));
+    // no mention issue and no located text on the prose block, in either view
+    assert!(i1.issues.iter().all(|i| i.text.is_none()));
+    assert!(s1.issues.iter().all(|i| i.text.is_none()));
 }
