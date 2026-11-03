@@ -342,6 +342,17 @@ fn mg9_deterministic_stages_never_run_an_agent_check() {
 
 // ---------------------------------------------------------------- 2. the eight cases
 
+/// One row of the eight-case table: the check, its subject, whether its author runs it, the
+/// stored subject (blocks, version, whether it names code), the verdict and the cited block.
+type Case<'a> = (
+    &'a str,
+    Value,
+    bool,
+    (Vec<BlockId>, Option<Hash>, bool),
+    &'a str,
+    BlockId,
+);
+
 #[test]
 fn mg9_all_eight_cases_keep_their_subject_and_review_contract() {
     let (dir, mut r) = project();
@@ -425,14 +436,7 @@ fn mg9_all_eight_cases_keep_their_subject_and_review_contract() {
     // a version subject stores the blocks its recipe selects, known here from the writes: the
     // one editorial edit, the one implementing claim, the one decision that refines another
     let of_version = |b: Vec<BlockId>| (b, Some(version), false);
-    let cases: Vec<(
-        &str,
-        Value,
-        bool,
-        (Vec<BlockId>, Option<Hash>, bool),
-        &str,
-        BlockId,
-    )> = vec![
+    let cases: Vec<Case> = vec![
         (
             "contradiction",
             json!([s.c.to_string(), s.a.to_string()]),
