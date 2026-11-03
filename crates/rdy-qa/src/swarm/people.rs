@@ -398,8 +398,8 @@ pub(crate) fn found_in(
 pub(crate) enum Relayed {
     /// The person answered a card they were shown: the answer's result, journaled.
     Answered(Res),
-    /// The queue lists no card of the version: nothing was answered. `waits` when the queue
-    /// says it is not ready or leaves cards out past its cap.
+    /// The queue lists no card of the version and nothing was answered. `waits` when the queue
+    /// leaves items out past its cap.
     Absent { waits: bool },
     /// The daemon died under the queue read; the link has reconnected.
     Lost,
@@ -410,17 +410,34 @@ pub(crate) enum Relayed {
 /// own, and the relay sends them with `rdy_answer` and that card's hash. `e` is the `land`
 /// entry; its `reply` is the tool's whole reply. A card that moved before the answer
 /// (`E_PROPOSAL_MOVED`) is read and shown again, and the person chooses again: once, so a
-/// second move leaves the refusal standing. With no card shown nothing is answered, and the
-/// `land` entry is `Skipped` with `{shown: false, waits}`.
+/// second move leaves the refusal standing. A version the queue lists as not ready has no card:
+/// the person asks for it in words of its own, and the relay sends them as a text answer
+/// (`kind: text`, no card hash), which the gate refuses as it refuses every approval of a
+/// version that is not ready (`E_PROPOSAL_NOT_READY`). Any other version with no card shown is
+/// not answered, and the `land` entry is `Skipped` with `{shown: false, waits}`.
 pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
     let mut refused: Option<Res> = None;
     for again in [false, true] {
         let card = match m3::show_card(link, pref) {
             m3::Shown::Card(c) => c,
-            m3::Shown::Absent { waits } => {
+            m3::Shown::Absent {
+                not_ready,
+                past_cap,
+            } => {
                 if let Some(res) = refused {
                     return Relayed::Answered(res);
                 }
+                if not_ready {
+                    let args = json!({"ref": pref, "option": "approve", "kind": "text",
+                        "evidence": format!("Approve {pref}."),
+                        "question": format!("Land {pref}?"), "session_ref": RELAY_RUN});
+                    let res = link.raw("land", "rdy_answer", args);
+                    let res = link.finish(e, "land", res, |en, v| {
+                        en.reply = Some(v.clone());
+                    });
+                    return Relayed::Answered(res);
+                }
+                let waits = past_cap;
                 let mut e = e;
                 e.epoch = link.epoch;
                 e.outcome = Outcome::Skipped;

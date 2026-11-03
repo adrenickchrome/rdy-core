@@ -1439,7 +1439,9 @@ fn lines(entries: &[Entry]) -> String {
                 e.message.as_deref().unwrap_or(""),
                 e.reply
                     .as_ref()
-                    .and_then(|r| r.get("chosen").or_else(|| r.get("alternatives")))
+                    .and_then(|r| landing_fields(r)
+                        .get("chosen")
+                        .or_else(|| r.get("alternatives")))
                     .map(ToString::to_string)
                     .unwrap_or_default()
             )
@@ -1517,7 +1519,7 @@ fn sg5_an_included_change_bound_to_the_winner_lands_after_the_choice() {
     let chose = |e: &Entry| {
         e.reply
             .as_ref()
-            .and_then(|r| r.get("chosen"))
+            .and_then(|r| landing_fields(r).get("chosen"))
             .filter(|c| !c.is_null())
             .and_then(|c| c["member"].as_str().map(str::to_string))
     };
@@ -1673,7 +1675,7 @@ fn sg5_the_drain_lands_an_open_sets_bound_member_before_the_view_that_waits_on_i
     let chosen = |e: &Entry| {
         e.reply
             .as_ref()
-            .and_then(|r| r.get("chosen"))
+            .and_then(|r| landing_fields(r).get("chosen"))
             .and_then(|c| c["member"].as_str().map(str::to_string))
     };
     let choice = drain[first..]

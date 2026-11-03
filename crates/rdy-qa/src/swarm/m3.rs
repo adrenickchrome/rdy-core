@@ -13,7 +13,7 @@
 //! - A setup call (a write, a propose, a removal request, a log read, a compact snapshot) is an
 //!   `M3_FIXTURE` entry naming its view; no refusal is allowed for it.
 //! - Every read of the person's queue that shows a card before an answer is a `LAND_CARD` entry
-//!   naming the version, whose `reply` holds `{via, shown, waits}`: the card's ref, hash, options
+//!   naming the version, whose `reply` holds `{via, shown, not_ready, past_cap}`: the card's ref, hash, options
 //!   and recommended option as the queue gave them. A new card is read and shown before every
 //!   answer, the second answer of a moved card too.
 //! - A landing an answer made is found and audited as every other is (`people::found_in`): a
@@ -103,10 +103,11 @@ pub struct Card {
 /// What a read of the person's queue showed of one version.
 pub(crate) enum Shown {
     Card(Card),
-    /// No card of the version: `waits` when the queue lists it as not ready or leaves cards out
-    /// past its cap.
+    /// No card of the version: `not_ready` when the queue lists it as not ready, `past_cap` when
+    /// the queue leaves items out past its cap.
     Absent {
-        waits: bool,
+        not_ready: bool,
+        past_cap: bool,
     },
     /// The daemon died under the read; the link has reconnected.
     Lost,
@@ -146,16 +147,20 @@ pub(crate) fn show_card(link: &mut Link, pref: &str) -> Shown {
         let not_ready = v["not_ready"]
             .as_array()
             .is_some_and(|n| n.iter().any(|x| x["ref"] == pref));
-        let waits = not_ready || v["omitted"].as_u64().unwrap_or(0) > 0;
+        let past_cap = v["omitted"].as_u64().unwrap_or(0) > 0;
         en.reply = Some(json!({
             "via": "rdy_pending",
             "shown": card.as_ref().map(|c| json!({"ref": c.r#ref, "card_hash": c.card_hash,
                 "options": c.options, "recommended": c.recommended, "deferral": c.deferral})),
-            "waits": waits,
+            "not_ready": not_ready,
+            "past_cap": past_cap,
         }));
         shown = Some(match card {
             Some(c) => Shown::Card(c),
-            None => Shown::Absent { waits },
+            None => Shown::Absent {
+                not_ready,
+                past_cap,
+            },
         });
     });
     match res {
@@ -459,8 +464,8 @@ impl Ctx<'_> {
                     self.bound();
                     return Some(c);
                 }
-                Shown::Absent { waits } => {
-                    let why = format!("no card of {pref} (waits {waits})");
+                Shown::Absent { not_ready, .. } => {
+                    let why = format!("no card of {pref} (not ready: {not_ready})");
                     self.gap(act, Some(pref), &why);
                     return None;
                 }
@@ -695,11 +700,11 @@ impl Ctx<'_> {
         };
         let card = match show_card(self.link, &old) {
             Shown::Card(c) => c,
-            Shown::Absent { waits } => {
+            Shown::Absent { not_ready, .. } => {
                 self.gap(
                     "m3_moved_card",
                     Some(&old),
-                    &format!("no card (waits {waits})"),
+                    &format!("no card (not ready: {not_ready})"),
                 );
                 return;
             }
@@ -784,18 +789,18 @@ impl Ctx<'_> {
     }
 
     fn publication(&mut self) {
-        let out = run_parent().join(format!(
-            "m3-pub-s{}-{}-{}",
-            self.link.at.seed,
-            self.me(),
-            self.link.step
-        ));
-        if let Err(e) = std::fs::create_dir_all(&out) {
-            self.link.fail(
-                "m3_publication_output",
-                &format!("cannot make {}: {e}", out.display()),
-            );
-        }
+        // a directory of its own under the process's run directory, kept for the oracle: two runs
+        // of one seed in one process (the follower's and the sim's) never share it
+        let out = tempfile::Builder::new()
+            .prefix(&format!("m3pub-s{}-{}-", self.link.at.seed, self.me()))
+            .tempdir_in(run_parent())
+            .map(tempfile::TempDir::keep)
+            .unwrap_or_else(|e| {
+                self.link.fail(
+                    "m3_publication_output",
+                    &format!("cannot make its directory: {e}"),
+                )
+            });
         self.report.m3_outputs.push(out.clone());
         // the check of canon while the agents work
         let check = json!({"profile": PROFILE, "scope": "canon"});
