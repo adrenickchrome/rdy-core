@@ -512,7 +512,70 @@ pub(crate) fn run_session() -> Vec<(String, String)> {
         "rdy_import--reader",
         rdy_import(&mut reader, p(json!({"dir": dir, "view": "rdr"}))),
     );
+
+    // mh7 (D-4YRQ4): the compact reports. They come last: the removal below adds frames no
+    // reply above may see. The allocation counts are injected, so the files' real blocks never
+    // reach a golden, and a punch that the file system does not support is a successful reply
+    // with a note.
+    remove_a_block(&eng);
+    let _hooks = CompactHooks;
+    rdy_store::compact::on_allocation(Some(Box::new(|seg| Some(Ok(8192 * (u64::from(seg) + 1))))));
+    out.ok(
+        "rdy_compact--dry-run",
+        rdy_compact(&mut a, p(json!({"dry_run": true}))),
+    );
+    rdy_store::pio::on_punch(Some(Box::new(|_, _| {
+        Some(Ok(rdy_store::pio::Punch::Unsupported))
+    })));
+    out.ok(
+        "rdy_compact--unsupported",
+        rdy_compact(&mut a, p(json!({"dry_run": false}))),
+    );
     out.0
+}
+
+/// Removes the compact hooks when the session ends, also when it panics.
+struct CompactHooks;
+impl Drop for CompactHooks {
+    fn drop(&mut self) {
+        rdy_store::pio::on_punch(None);
+        rdy_store::compact::on_allocation(None);
+    }
+}
+
+/// A landed block and the person's approved removal of it: the log holds a removed span.
+fn remove_a_block(eng: &Arc<Local>) {
+    use rdy_engine::engine::Engine;
+    use rdy_engine::redaction::RedactInput;
+    use rdy_qa::fixtures::approver;
+    use rdy_qa::tensions::{ag, created};
+    eng.write(Box::new(|r| {
+        let w = write(
+            r,
+            "gone",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "gone", "title": "Gone", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The launch code is ZEBRA-7731."}
+            ]),
+        )?;
+        land(r, "gone")?;
+        let rq = ag("rq");
+        r.redact_in(
+            &rq,
+            "rq",
+            RedactInput {
+                targets: vec![created(&w, "$p").to_string()],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: false,
+            },
+        )?;
+        let proposal = r.propose(&rq, "rq", "Remove the code", Some("Removes a leaked code."))?;
+        r.land(&approver(), &proposal.id)?;
+        r.seal_open()?;
+        Ok(Value::Null)
+    }))
+    .expect("the removal lands");
 }
 
 /// A format-3 export tree at `out`: doc `imported` with a section by agent:a (run r1) at 100 and
@@ -716,4 +779,57 @@ fn sg7_the_golden_set_names_every_m2_tool() {
             "no golden for the list {name}"
         );
     }
+}
+
+/// mh7: the compact goldens. A dry run and a real run on a file system that cannot punch both
+/// succeed, with the six report fields and, in every by_kind row, the four child keys with the
+/// kind's name. The unsupported reply says so in its one note and punched nothing.
+#[test]
+fn mh7_compact_goldens_keep_failures_successful() {
+    check_goldens("rdy_compact");
+    let read = |name: &str| -> Value {
+        let text = std::fs::read_to_string(golden_dir().join(format!("{name}.json"))).unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let (dry, unsupported) = (
+        read("rdy_compact--dry-run"),
+        read("rdy_compact--unsupported"),
+    );
+    for v in [&dry, &unsupported] {
+        assert!(v.get("code").is_none(), "a successful reply: {v}");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "by_kind",
+                "log_bytes",
+                "notes",
+                "on_disk_bytes",
+                "punched_bytes",
+                "removed_bytes"
+            ]
+        );
+        assert_eq!(v["punched_bytes"], 0);
+        assert!(v["removed_bytes"].as_u64().unwrap() > 0);
+        for row in v["by_kind"].as_array().unwrap() {
+            let row_keys: Vec<&str> = row
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(row_keys, ["bytes", "kind", "name", "removed_bytes"]);
+            assert!(!row["name"].as_str().unwrap().is_empty());
+        }
+    }
+    assert_eq!(dry["notes"], json!([]));
+    assert_eq!(
+        unsupported["notes"],
+        json!([
+            "hole punching is not supported for 2 removed spans; they keep their disk space, and their content stays removed"
+        ])
+    );
+    // the injected allocation: 8192 bytes per segment, before and after
+    assert_eq!(dry["on_disk_bytes"], unsupported["on_disk_bytes"]);
+    assert_eq!(dry["by_kind"], unsupported["by_kind"]);
 }

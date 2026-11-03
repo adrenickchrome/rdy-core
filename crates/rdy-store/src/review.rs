@@ -58,6 +58,7 @@ impl Store {
     /// `StoreError::Refused`. The same review again
     /// is an idempotent retry: it returns the id and writes nothing.
     pub fn put_dismissal(&mut self, r: &Review) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let (id, frames) = self.dismissal_frames(r)?;
         if let Some(items) = frames {
             self.write(items)?;
@@ -108,6 +109,7 @@ impl Store {
         reviews: &[Review],
         mut a: rdy_model::Answer,
     ) -> Result<(Vec<Hash>, Hash), StoreError> {
+        self.ensure_writable()?;
         if reviews.is_empty() {
             return Err(StoreError::Refused(
                 "an answered dismissal names at least one review".into(),
@@ -138,6 +140,7 @@ impl Store {
     /// `Restore`. The ref is rewritten by each review (FW-CV4: reversible); a review the ref
     /// already holds is an idempotent retry: it returns the id and writes nothing.
     pub fn put_mention_review(&mut self, r: &Review) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let name = match (&r.subject, r.verdict) {
             (ReviewSubject::Mention { block, entity }, Verdict::Dismiss | Verdict::Restore) => {
                 mention_ref(block, entity)
@@ -172,6 +175,7 @@ impl Store {
         r: &Review,
         t: Option<&SemanticTension>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
+        self.ensure_writable()?;
         let (key, items) = match (&r.subject, r.verdict) {
             (ReviewSubject::Pair { key, items }, Verdict::Tension | Verdict::NoTension) => {
                 (*key, items)
@@ -252,6 +256,7 @@ impl Store {
         &mut self,
         ts: &[SemanticTension],
     ) -> Result<Vec<Hash>, StoreError> {
+        self.ensure_writable()?;
         let mut seen = BTreeSet::new();
         let mut items = vec![];
         let mut refs = vec![];

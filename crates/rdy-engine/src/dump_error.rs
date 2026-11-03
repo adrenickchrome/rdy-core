@@ -8,6 +8,8 @@ use std::path::Path;
 const LOAD_CHAIN_FIX: &str = "pass the full dump, then each increment in chain order";
 const EXPORT_CHAIN_FIX: &str =
     "follow the newest file of this store's chain, or start a new chain with rdy dump";
+const FOLLOW_CHAIN: &str =
+    "follow the source's increments in chain order from the follower's saved end";
 const STOP_FIX: &str = "name a landing, a tag or a batch end that the dump chain holds";
 
 /// The name an export error gives the previous dump: its path, or `previous dump` where the
@@ -26,6 +28,103 @@ fn export(message: String) -> RdyError {
 
 fn stop(message: String) -> RdyError {
     RdyError::new(E_LOAD_STOP, message, STOP_FIX)
+}
+
+/// An increment given to a follower's seed.
+pub fn seed_increment() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "a follower is seeded from a full dump, not an increment",
+        "seed the follower from a full dump of the source store",
+    )
+}
+
+/// A dump whose store is not the one this rdy writes, given to a follower's seed.
+pub fn seed_store_format() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "this dump's store format differs from the one this rdy writes",
+        "seed the follower from a dump that this rdy's store format wrote",
+    )
+}
+
+/// A read of a follower whose log is ahead of its mark.
+pub fn follower_unfinished() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the follower has an unfinished increment",
+        "retry the same increment before reading the follower",
+    )
+}
+
+/// `error`, one of the chain loader's mismatches, on the follow path: its code and message, with
+/// the follow's fix.
+pub(crate) fn for_follow(mut error: RdyError) -> RdyError {
+    error.fix = FOLLOW_CHAIN.to_string();
+    error
+}
+
+/// A full dump given to a follower's follow.
+pub fn follow_full_dump() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "a follower takes one increment, not a full dump",
+        "seed a new follower from this full dump, or follow the next increment of the chain",
+    )
+}
+
+/// An increment that does not continue a follower's saved chain.
+pub fn follow_saved_chain() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the increment does not continue the follower's saved chain",
+        FOLLOW_CHAIN,
+    )
+}
+
+/// A log past the mark that is not what the increment holds there.
+pub fn follow_written_prefix() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the follower's written prefix differs from the increment",
+        crate::error::FOLLOWER_SEED,
+    )
+}
+
+/// A listed project file that differs from its saved hash.
+pub fn follow_local_files() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the follower's project files differ from its saved source files",
+        crate::error::FOLLOWER_SEED,
+    )
+}
+
+/// An increment whose bytes changed between the check and the append.
+pub fn follow_changed_input() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the increment changed while it was read",
+        "retry the same increment",
+    )
+}
+
+/// A follow's work bound: `limit` of `unit`.
+pub fn follow_limit(limit: u64, unit: &str) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("the follower increment exceeds {limit} {unit}"),
+        "start a new chain with a full dump and seed a new follower",
+    )
+}
+
+/// A follow of a store that is no follower.
+pub fn not_a_follower() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "this store is not a follower",
+        "seed a follower and open it with Follower::open",
+    )
 }
 
 /// A stop selector that is not spelled `landing:<hash>`, `tag:<name>` or `pos:<segment>.<offset>`.

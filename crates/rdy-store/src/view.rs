@@ -656,6 +656,7 @@ impl Store {
         pinned: bool,
         by: &Provenance,
     ) -> Result<ViewHead, StoreError> {
+        self.ensure_writable()?;
         if self.view_head(name)?.is_some() {
             return Err(exists(name));
         }
@@ -692,6 +693,7 @@ impl Store {
         owner: Option<Owner>,
         by: &Provenance,
     ) -> Result<ViewHead, StoreError> {
+        self.ensure_writable()?;
         let src = self
             .view_head(from)?
             .ok_or_else(|| StoreError::UnknownView(from.to_string()))?;
@@ -782,6 +784,7 @@ impl Store {
         ops: Vec<ViewOpKind>,
         by: &Provenance,
     ) -> Result<ViewHead, StoreError> {
+        self.ensure_writable()?;
         let (items, new_head, _) = self.view_append_frames(name, ops, by)?;
         self.write(items)?;
         Ok(new_head)
@@ -799,6 +802,7 @@ impl Store {
         by: &Provenance,
         a: Answer,
     ) -> Result<(Vec<ViewHead>, Hash), StoreError> {
+        self.ensure_writable()?;
         if appends.is_empty() {
             return Err(StoreError::Decode("view_append_answered: no views".into()));
         }
@@ -941,6 +945,7 @@ impl Store {
         changes: &[Change],
         by: &Provenance,
     ) -> Result<(Hash, Vec<Hash>), StoreError> {
+        self.ensure_writable()?;
         if changes.is_empty() {
             return Err(StoreError::Decode(
                 "view_replay_prepared: no changes".into(),

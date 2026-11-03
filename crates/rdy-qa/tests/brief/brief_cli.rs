@@ -224,6 +224,7 @@ fn cbrf1_the_brief_op_answers_for_a_path_and_edit_block_cites_its_token() {
         let hello = rdy_daemon::Hello {
             rdy: rdy_daemon::PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: rdy_daemon::Proto::Ctl,
             cwd: s.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))

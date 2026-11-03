@@ -30,6 +30,7 @@ fn info() -> DaemonInfo {
     DaemonInfo {
         pid: std::process::id(),
         version: "t".into(),
+        build: BUILD.into(),
         started_at: std::time::Instant::now(),
         sessions: Sessions::default(),
         connections: Arc::new(AtomicUsize::new(1)),
@@ -40,7 +41,9 @@ fn info() -> DaemonInfo {
 /// A served ctl connection over an in-memory duplex: (client end, the serve task).
 fn serve(info: DaemonInfo) -> (DuplexStream, tokio::task::JoinHandle<std::io::Result<()>>) {
     let (client, server) = tokio::io::duplex(1 << 20);
-    let session = info.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+    let session = info
+        .sessions
+        .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
     let (r, w) = tokio::io::split(server);
     let h = tokio::spawn(serve_ctl(r, w, session, Arc::new(Echo), info));
     (client, h)
@@ -268,7 +271,9 @@ async fn ctl1_an_oversized_line_drains_pipelined_input_before_the_close() {
     let mut r: &[u8] = &input;
     let mut out: Vec<u8> = Vec::new();
     let i = info();
-    let session = i.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+    let session = i
+        .sessions
+        .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
     serve_ctl(&mut r, &mut out, session, Arc::new(Echo), i)
         .await
         .unwrap();
@@ -299,7 +304,9 @@ async fn reload1_a_reply_carries_the_handlers_notice() {
     let served = |handler: Arc<dyn Handler>| {
         let info = info();
         let (client, server) = tokio::io::duplex(1 << 20);
-        let session = info.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+        let session = info
+            .sessions
+            .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
         let (r, w) = tokio::io::split(server);
         tokio::spawn(serve_ctl(r, w, session, handler, info));
         client

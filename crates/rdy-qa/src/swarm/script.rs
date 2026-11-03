@@ -150,6 +150,9 @@ pub enum Act {
     ReviewAll,
     /// The forced advice sequence: `rdy_propose` of the view `a<i>-adv`.
     AdviceProposal,
+    /// `rdy_compact {dry_run: false}` (D-4YRQ4): frees the disk space of removed payloads. It
+    /// appends no frame; the journal keeps the report.
+    Compact,
 }
 
 /// The suffix of the view of the forced advice sequence (`a<i>-adv`).
@@ -183,7 +186,7 @@ pub enum HoldStep {
 
 impl Act {
     /// Every act name, in the order of the variants.
-    pub const ALL_NAMES: [&'static str; 22] = [
+    pub const ALL_NAMES: [&'static str; 23] = [
         "brief",
         "write",
         "write_no_brief",
@@ -206,6 +209,7 @@ impl Act {
         "check_run",
         "check_request",
         "check_submit",
+        "compact",
     ];
 
     /// The snake_case name of the variant.
@@ -236,6 +240,7 @@ impl Act {
             Act::AdviceClaim { .. } => "create",
             Act::ReviewAll => "review_next",
             Act::AdviceProposal => "propose",
+            Act::Compact => "compact",
         }
     }
 }
@@ -956,6 +961,10 @@ pub fn script(cfg: &Config) -> Script {
             required.push(Act::Inbox { ack: true });
             if cfg.agents >= 2 && me < 2 {
                 required.push(Act::AltCreate { with: 1 - me });
+            }
+            // writer 0 compacts once (D-4YRQ4); last, so the draws above keep their steps
+            if me == 0 {
+                required.push(Act::Compact);
             }
             let quarter = cfg.steps / 4;
             // the second claim comes after the first member's landing (its proposal is due by

@@ -89,6 +89,7 @@ impl Store {
     /// decision C, 2026-10-12), so an ack writes only the cursor. An ack that changes nothing
     /// writes nothing (ledger O5).
     pub fn put_inbox(&mut self, sub: &InboxSub) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         let name = inbox_ref(&sub.actor, sub.run.as_deref());
         if let Some(m) = invalid(&name, sub) {
             return Err(StoreError::Refused(m));

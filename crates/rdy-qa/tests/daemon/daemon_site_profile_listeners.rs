@@ -1578,6 +1578,7 @@ fn hello(dir: &Path) -> Hello {
     Hello {
         rdy: PROTO_VERSION,
         version: "t".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: dir.into(),
         project: RunDir::of_project(dir).project_id().unwrap(),

@@ -1,8 +1,8 @@
 //! The store handle and its captured read snapshot.
 
 use rdy_engine::{
-    CarriedWarning, ChainEnd, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy,
-    RdyError, ReadState, parse_version,
+    CarriedWarning, ChainEnd, CompactReport, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine,
+    FsckReport, Local, Rdy, RdyError, ReadState, parse_version,
 };
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::OpenPolicy;
@@ -106,6 +106,15 @@ impl StoreHandle {
         self.local.inspect(|rdy| rdy.fsck())
     }
 
+    /// Frees the disk space of the store's removed payloads and reports the log's bytes
+    /// (D-4YRQ4). It runs under the lock, so a write through this handle waits for it, and it
+    /// appends no batch and publishes nothing: no frame moves and every read stays the same. A
+    /// file system that cannot punch is a note in the report, not an error. A follower or a
+    /// read-only store refuses.
+    pub fn compact(&self) -> Result<CompactReport, RdyError> {
+        self.local.inspect(|rdy| rdy.compact(false))
+    }
+
     /// The carried-removal warnings (`W_STOP_BEFORE_REDACTION`) of the store now, in the log's
     /// order: one per carried record while a span of it still holds its payload (D-QF2HQ). It
     /// captures one state under the lock and derives them from the log and the current mask,
@@ -118,35 +127,7 @@ impl StoreHandle {
     /// A read snapshot: the published state, the identity, the canon head and every `tag/*` ref,
     /// all taken together under the store's lock, so no write falls between them.
     pub fn snapshot(&self) -> Result<Snapshot, RdyError> {
-        self.local.inspect(|rdy| {
-            let state = rdy.read();
-            let reader = state.reader();
-            let Some(repo_id) = reader.repo_id()? else {
-                // a store with no repo id fails the meta check with its own text
-                reader.check_meta()?;
-                return Err(RdyError::new(
-                    E_INTERNAL,
-                    "the store has no repo id",
-                    "report this as a bug in rdy",
-                ));
-            };
-            let identity = Identity {
-                repo_id,
-                origin: reader.origin()?,
-            };
-            let tags = reader
-                .tags()?
-                .into_iter()
-                .map(|(name, hash, tag)| (name, (hash, tag)))
-                .collect();
-            let canon = state.canon_head();
-            Ok(Snapshot {
-                state,
-                identity,
-                canon,
-                tags,
-            })
-        })
+        self.local.inspect(|rdy| snapshot_of(rdy.read()))
     }
 
     /// Takes the batch files `batches` of one upload for the publication `target` into this
@@ -195,6 +176,37 @@ impl StoreHandle {
     pub fn close(self) -> Result<(), RdyError> {
         self.local.close()
     }
+}
+
+/// The snapshot of the captured `state`: its identity, canon head and every `tag/*` ref, all read
+/// through its own reader.
+pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
+    let reader = state.reader();
+    let Some(repo_id) = reader.repo_id()? else {
+        // a store with no repo id fails the meta check with its own text
+        reader.check_meta()?;
+        return Err(RdyError::new(
+            E_INTERNAL,
+            "the store has no repo id",
+            "report this as a bug in rdy",
+        ));
+    };
+    let identity = Identity {
+        repo_id,
+        origin: reader.origin()?,
+    };
+    let tags = reader
+        .tags()?
+        .into_iter()
+        .map(|(name, hash, tag)| (name, (hash, tag)))
+        .collect();
+    let canon = state.canon_head();
+    Ok(Snapshot {
+        state,
+        identity,
+        canon,
+        tags,
+    })
 }
 
 /// A read snapshot. Its tag refs are the ones captured with it: a later write never changes

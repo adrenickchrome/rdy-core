@@ -20,7 +20,7 @@ pub use diff::{
 };
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
-pub use report::{REPORT_BYTES, REPORT_ROWS, check, reference_summary};
+pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
 pub use select::{
     AttachmentEntry, DocEntry, IMPLICIT_ORG, Limits, ProfileFacts, PublicationWarning, Resolved,
     ResolvedProfile, SelectionEntry, blob_reads_for_tests, check_stable_selector, limits,

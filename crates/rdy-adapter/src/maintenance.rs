@@ -56,6 +56,14 @@ pub fn load_chain(
     rdy_engine::load::load_chain(files, dir, stop)
 }
 
+/// Seeds a follower of the source of the full dump `dump` in `dir`, a directory that does not
+/// exist or is empty (D-AA4FD), and returns its chain end. The dump must be of the dump format and
+/// store this rdy writes. The new log is the source's, byte for byte, and its private mark is
+/// durable before the store takes its place. A refused or failed seed leaves `dir` as it was.
+pub fn seed_follower(dump: &Path, dir: &Path) -> Result<ChainEnd, RdyError> {
+    rdy_engine::follower::seed(dump, dir)
+}
+
 /// The upgrade plan of the closed store of the project or holder at `root`, as `rdy upgrade
 /// --dry-run` lists it. It opens no store, takes no lock and writes nothing.
 pub fn inspect_store(root: &Path) -> Result<UpgradePlan, RdyError> {

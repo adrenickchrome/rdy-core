@@ -338,6 +338,7 @@ fn hello_for(cwd: &std::path::Path) -> Hello {
     Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: cwd.to_path_buf(),
         project: RunDir::of_project(cwd).project_id().unwrap(),
@@ -575,7 +576,7 @@ async fn start1_into_stream_after_reading_past_a_reply_is_a_bug() {
         let mut line = String::new();
         s.read_line(&mut line).await.unwrap();
         s.get_mut()
-            .write_all(b"{\"status\":\"ready\",\"version\":\"1\",\"session\":1}\n")
+            .write_all(b"{\"status\":\"ready\",\"version\":\"1\",\"build\":\"0123456789abcdef\",\"session\":1}\n")
             .await
             .unwrap();
         line.clear();

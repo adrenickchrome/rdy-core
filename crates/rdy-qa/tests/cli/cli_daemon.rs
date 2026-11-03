@@ -38,11 +38,16 @@ fn cli2_text_output_is_unchanged_and_status_reports_the_open() {
     assert!(text.starts_with("created doc wallets/tx (d-"), "{text}");
     let out = s.rdy(&["status"]);
     let text = String::from_utf8_lossy(&out.stdout);
-    // ec10: the repo line follows the pack line (O34)
-    assert!(text.starts_with("pack rdy-standard\nrepo "), "{text}");
+    // ec10: the repo line follows the pack line (O34); the daemon line sits between them
+    let daemon = format!(
+        "pack rdy-standard\ndaemon: rdy {} build {}\nrepo ",
+        env!("CARGO_PKG_VERSION"),
+        rdy_daemon::BUILD
+    );
+    assert!(text.starts_with(&daemon), "{text}");
     assert!(
         text.lines()
-            .nth(2)
+            .nth(3)
             .is_some_and(|l| l.starts_with("canon: ")),
         "{text}"
     );

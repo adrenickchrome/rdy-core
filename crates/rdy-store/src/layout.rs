@@ -38,6 +38,11 @@ pub fn open_project_store_locked_with_policy(
     Store::open_locked_with_policy(&rdy_dir.join(STORE_DIR), lock, policy)
 }
 
+/// Opens the follower store whose `.rdy` directory is `rdy_dir` (see `Store::open_follower`).
+pub fn open_follower_store(rdy_dir: &Path) -> Result<Store, StoreError> {
+    Store::open_follower(&rdy_dir.join(STORE_DIR))
+}
+
 /// Creates the store of a new project (rdy init), durably (dur1); see `Store::create`.
 pub fn create_project_store(rdy_dir: &Path) -> Result<Store, StoreError> {
     Store::create(&rdy_dir.join(STORE_DIR))

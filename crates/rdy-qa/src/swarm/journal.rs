@@ -280,7 +280,7 @@ pub fn allowed(act: &str, code: &str) -> bool {
         // write's E_STALE_BASE (ruling task-15 F3; the propose binds no plan then, and the
         // landing refuses the version as not ready)
         "plan" | "version_plan" => &["E_CONFLICT_UNRESOLVED"],
-        // intent, review_next, tensions, inbox, read, brief, and the plan answers, the queue
+        // intent, review_next, tensions, inbox, read, brief, compact, and the plan answers, the queue
         // read and the deferral acceptance (plan_answer, pending, accept_deferrals), and a check
         // run or request (check_run, check_request), and a UI fixture's own writes (ui_fixture,
         // ui_site): no refusal is allowed.

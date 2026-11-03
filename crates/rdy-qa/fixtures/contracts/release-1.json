@@ -296,6 +296,26 @@
             ]
           }
         },
+        "compact": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
+            "log_bytes": "number",
+            "notes": [],
+            "on_disk_bytes": "number",
+            "punched_bytes": "number",
+            "removed_bytes": "number"
+          }
+        },
         "config": {
           "exits": [
             0
@@ -425,10 +445,19 @@
           ],
           "stdout": {
             "alt_sets": "number",
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
             "frames": "number",
             "intents": "number",
             "landed_changes": "number",
             "landings": "number",
+            "log_bytes": "number",
             "open_report": {
               "catch_up_commits": "number",
               "caught_up_frames": "number",
@@ -438,6 +467,7 @@
               "unclean_shutdown": "bool"
             },
             "quarantine": [],
+            "removed_bytes": "number",
             "reviews": "number",
             "transitions": "number",
             "unlogged_moves": "number",
@@ -1473,6 +1503,14 @@
             0
           ],
           "stdout": {
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
             "coverage": {
               "dimensions": {
                 "complete": "number",
@@ -1487,7 +1525,9 @@
               "score": "number",
               "similar_kinds": []
             },
+            "daemon": "null",
             "landings": "number",
+            "log_bytes": "number",
             "open_report": {
               "catch_up_commits": "number",
               "caught_up_frames": "number",
@@ -1498,6 +1538,7 @@
             },
             "pack": "string",
             "quarantine": [],
+            "removed_bytes": "number",
             "repo_id": "string",
             "seq": {
               "offset": "number",
@@ -10657,6 +10698,77 @@
         {
           "args": [
             {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "dry_run",
+              "long": "dry-run",
+              "num_args": "0",
+              "value_names": [
+                "DRY_RUN"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "dry_run"
+              ],
+              "id": "CompactArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "compact",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
               "action": "set",
               "id": "dir",
               "index": 1,
@@ -14333,6 +14445,7 @@
       "E_SIG_OBJECT_MISMATCH": "\"E_SIG_OBJECT_MISMATCH\"",
       "E_SITE": "\"E_SITE\"",
       "E_STALE_BASE": "\"E_STALE_BASE\"",
+      "E_STORE_FOLLOWER": "\"E_STORE_FOLLOWER\"",
       "E_STORE_FORMAT": "\"E_STORE_FORMAT\"",
       "E_STORE_READ_ONLY": "\"E_STORE_READ_ONLY\"",
       "E_STREAM_PURPOSE": "\"E_STREAM_PURPOSE\"",
@@ -14373,6 +14486,7 @@
       "E_WC_SUPPORTING": "\"E_WC_SUPPORTING\"",
       "W_BRIEF_STALE": "\"W_BRIEF_STALE\"",
       "W_CARD_WORDS": "\"W_CARD_WORDS\"",
+      "W_DAEMON_BUILD": "\"W_DAEMON_BUILD\"",
       "W_DIAGRAM_FAILED": "\"W_DIAGRAM_FAILED\"",
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
@@ -14399,6 +14513,11 @@
       "W_WC_KEPT": "\"W_WC_KEPT\"",
       "W_WC_UNSTAGED_MOVE": "\"W_WC_UNSTAGED_MOVE\"",
       "W_WC_UNTRACKED": "\"W_WC_UNTRACKED\""
+    },
+    "daemon_build_warning": {
+      "code": "W_DAEMON_BUILD",
+      "fix": "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
+      "message": "the running daemon is another build of rdy 1.2.3 (0123456789abcdef); this client is build fedcba9876543210"
     },
     "envelope": {
       "code": "string",
@@ -14523,6 +14642,11 @@
         "close them, or rdy serve --stop"
       ],
       [
+        "W_DAEMON_BUILD",
+        "the running daemon is another build of rdy <version> (<daemon build>); this client is build <build>",
+        "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop"
+      ],
+      [
         "E_DAEMON_GONE",
         "the daemon closed mid-request",
         "check rdy_overview or rdy status; a write may or may not have committed; it is not retried"
@@ -14601,6 +14725,11 @@
         "E_STORE_FORMAT",
         "this rdy does not open the store as it is: an older or newer store format, an unknown store feature, an invalid feature manifest, or a store that needs an upgrade",
         "follow the refusal's fix: open the project with the rdy it names, dump and load, or run rdy upgrade"
+      ],
+      [
+        "E_STORE_FOLLOWER",
+        "this store is a read-only follower of <repo id>",
+        "write through the source store"
       ],
       [
         "E_STORE_READ_ONLY",
@@ -14953,6 +15082,11 @@
         "follow the warning's own fix"
       ]
     ],
+    "follower_refusal": {
+      "code": "E_STORE_FOLLOWER",
+      "fix": "write through the source store",
+      "message": "this store is a read-only follower of <repo id>"
+    },
     "redaction_warning": {
       "copies": "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.",
       "inventory": "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.",
@@ -15430,6 +15564,7 @@
       "W_RULE_CHECK",
       "E_DAEMON_START",
       "E_DAEMON_VERSION",
+      "W_DAEMON_BUILD",
       "E_DAEMON_GONE",
       "E_BRIEF_REQUIRED",
       "E_BRIEF_STALE",
@@ -15446,6 +15581,7 @@
       "W_DIAGRAM_FAILED",
       "E_DUMP",
       "E_STORE_FORMAT",
+      "E_STORE_FOLLOWER",
       "E_STORE_READ_ONLY",
       "E_UPGRADE_MOVED",
       "E_UPGRADE_BACKUP",
@@ -15822,6 +15958,23 @@
               "via": "string"
             }
           ]
+        }
+      },
+      "rdy_compact": {
+        "ok": {
+          "by_kind": [
+            {
+              "bytes": "number",
+              "kind": "number",
+              "name": "string",
+              "removed_bytes": "number"
+            }
+          ],
+          "log_bytes": "number",
+          "notes": [],
+          "on_disk_bytes": "number",
+          "punched_bytes": "number",
+          "removed_bytes": "number"
         }
       },
       "rdy_context": {
@@ -16412,6 +16565,7 @@
             "score": "number",
             "similar_kinds": []
           },
+          "daemon": "null",
           "open_report": {
             "catch_up_commits": "number",
             "caught_up_frames": "number",
@@ -17500,6 +17654,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_STORE_FOLLOWER": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_STORE_FORMAT": {
               "fix": "string",
               "when": "string"
@@ -17609,6 +17767,10 @@
               "when": "string"
             },
             "W_CONFIG_UNKNOWN": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_DAEMON_BUILD": {
               "fix": "string",
               "when": "string"
             },
@@ -18378,6 +18540,7 @@
       "rdy_auth",
       "rdy_brief",
       "rdy_clone",
+      "rdy_compact",
       "rdy_context",
       "rdy_coverage",
       "rdy_decide",
@@ -18893,6 +19056,22 @@
           "required": [
             "dir"
           ],
+          "type": "object"
+        }
+      },
+      "rdy_compact": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "dry_run": {
+              "description": "true: report bytes without punching holes. Default false.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },

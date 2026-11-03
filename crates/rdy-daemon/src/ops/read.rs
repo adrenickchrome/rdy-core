@@ -95,7 +95,16 @@ fn status_words(status: &Value) -> Option<String> {
     })
 }
 
-pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StatusArgs {
+    /// Adds the byte report. It walks the log on the writer, so it waits for a write; a plain
+    /// status stays a read of the published state.
+    #[serde(default)]
+    log_bytes: bool,
+}
+
+pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let landings = st.landings()?.len();
     let canon = st.version_position(&Scope::Canon)?;
@@ -134,6 +143,7 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     };
     let mut v = json!({
         "pack": st.pack().name,
+        "daemon": cx.engine.daemon_identity().map(|(v, b)| format!("rdy {v} build {b}")),
         "landings": landings,
         "suspects": suspects,
         "version_position": canon,
@@ -155,6 +165,17 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     }
     if !carried.is_empty() {
         v["redaction_warnings"] = to_json(&carried);
+    }
+    // the byte report: one serialized census, so no write lands inside it (D-4YRQ4)
+    if a.log_bytes {
+        let bytes = cx.engine.read_serialized(Box::new(|r| {
+            let mut v = json!({});
+            super::project::add_log_bytes(&mut v, r)?;
+            Ok(v)
+        }))?;
+        if let (Some(into), Value::Object(from)) = (v.as_object_mut(), bytes) {
+            into.extend(from);
+        }
     }
     Ok(v)
 }

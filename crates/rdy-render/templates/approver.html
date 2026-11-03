@@ -47,7 +47,7 @@
 {% if ui.notice %}<p class="ui-notice" role="status">{{ ui.notice }}</p>{% endif %}
 {% if not ui.items %}<p class="ui-empty">{{ ui.empty }}</p>{% endif %}
 {% for v in ui.items %}<article class="ui-item" data-ref="{{ v.item.ref }}">
-{{ card(v, 2, v.question, v.question) }}
+{{ card(v, 2, v.question, v.question) }}{% if v.answered %}<p class="ui-notice">{{ v.answered }}</p>{% endif %}
 {% if not v.question %}{{ answer_form(v, loop.index, none) }}{% endif %}
 </article>
 {% endfor %}
@@ -56,7 +56,7 @@
 {% elif ui.page == "item" %}
 {% if ui.refusal %}{{ ui.refusal }}{% endif %}
 <article class="ui-item" data-ref="{{ ui.item.item.ref }}">
-{{ card(ui.item, 1, not ui.form, not ui.form) }}
+{{ card(ui.item, 1, not ui.form, not ui.form) }}{% if ui.item.answered %}<p class="ui-notice">{{ ui.item.answered }}</p>{% endif %}
 {% if ui.brief_html %}<section class="ui-briefing"><h2>{{ ui.briefing_heading }}</h2>{{ ui.brief_html }}</section>{% endif %}
 {% if ui.form %}{{ answer_form(ui.item, 1, ui.brief) }}{% endif %}
 </article>

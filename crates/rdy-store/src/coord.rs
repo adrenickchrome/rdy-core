@@ -50,6 +50,7 @@ pub(crate) fn key_hash(key: &str, prefix: &str, what: &str) -> Result<Hash, Stor
 impl Store {
     /// Writes an intent version and moves `intent/<stable>` to it, in one batch.
     pub fn put_intent(&mut self, i: &Intent) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         self.put_versioned(
             INTENT_REF,
             "intent",
@@ -61,6 +62,7 @@ impl Store {
 
     /// Writes an alternative set version and moves `alt/<stable>` to it, in one batch.
     pub fn put_alt_set(&mut self, s: &AltSet) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         self.put_versioned(
             ALT_REF,
             "alternative set",
@@ -81,6 +83,7 @@ impl Store {
         reason: &str,
         by: &Provenance,
     ) -> Result<AltWrite, StoreError> {
+        self.ensure_writable()?;
         let (kind, bytes) = crate::codec::item_new(kinds::ALT_SET, next);
         let id = Hash::of(&bytes);
         let name = self.chain_check(ALT_REF, "alternative set", next.stable, next.prev, id)?;

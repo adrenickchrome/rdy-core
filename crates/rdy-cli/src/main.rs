@@ -11,6 +11,7 @@ mod alt_cmd;
 mod auth_cmd;
 mod brief_cmd;
 mod brief_text;
+mod compact_cmd;
 mod config_cmd;
 mod conn;
 #[cfg(test)]
@@ -209,6 +210,9 @@ enum Cmd {
     Reindex,
     Fsck(project_cmd::FsckArgs),
     // the about is given in full: a doc comment would lose its closing period
+    #[command(about = "Free disk space used by removed payloads. The chat path is rdy_compact.")]
+    Compact(compact_cmd::CompactArgs),
+    // the about is given in full: a doc comment would lose its closing period
     #[command(about = "Inspect or upgrade this project's store.")]
     Upgrade(upgrade_cmd::UpgradeArgs),
     /// Run the MCP server over stdio.
@@ -277,7 +281,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Sign(a) => signing_cmd::sign(env, a),
         Cmd::Key { cmd } => signing_cmd::key(env, cmd),
         Cmd::Remote { cmd } => remote_cmd::remote(env, cmd),
-        Cmd::Status => read_cmd::status(env),
+        Cmd::Status => read_cmd::status(env, as_json),
         Cmd::Show(a) => read_cmd::show(env, a),
         Cmd::New { what } => edit_cmd::new(env, what),
         Cmd::Publication { cmd } => publication_cmd::publication(env, cmd),
@@ -323,6 +327,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Clone(a) => dump_cmd::clone(env, a, cli.project),
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
+        Cmd::Compact(a) => compact_cmd::compact(env, a),
         Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) => {
             unreachable!("handled in main")
         }

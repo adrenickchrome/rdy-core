@@ -162,6 +162,7 @@ impl Store {
     /// append the TRANSITION last. A pre-seal preview reads through
     /// `Store::redaction_preview_reader`.
     pub fn land_atomic(&mut self, req: LandRequest) -> Result<LandOutcome, StoreError> {
+        self.ensure_writable()?;
         let prepared = self.prepare_land(req)?;
         self.commit_land(prepared, &[])
     }
@@ -799,6 +800,7 @@ impl Store {
         prepared: PreparedLanding,
         signatures: &[Signature],
     ) -> Result<LandOutcome, StoreError> {
+        self.ensure_writable()?;
         let PreparedLanding {
             mut items,
             applies,

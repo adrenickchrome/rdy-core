@@ -40,6 +40,10 @@ pub trait Engine: Send + Sync {
     /// What opening the store did.
     fn open_report(&self) -> OpenReport;
     fn root(&self) -> PathBuf;
+    /// The version and build of the daemon that serves this engine; `None` without a daemon.
+    fn daemon_identity(&self) -> Option<(String, String)> {
+        None
+    }
     /// The project's briefing registry (one per open project).
     fn briefs(&self) -> Arc<BriefRegistry>;
     /// The project's lease registry for review requests (one per open project).

@@ -8,6 +8,7 @@ use rdy_daemon::Shared;
 use rdy_daemon::site::ensure_profile_site;
 use rdy_daemon::site::guard::{Refusal, refusal};
 use rdy_daemon::site::http::{CSP, UI_CSP};
+use rdy_engine::answer::answered_in_view;
 use rdy_engine::check::api::{ReviewRequest, run_review};
 use rdy_engine::engine::{Engine, RenderRequest, with_writer_result};
 use rdy_engine::pending::{CARD_MAX_TOKENS, Item, ItemKind, Pending, PendingQuery};
@@ -157,6 +158,64 @@ impl Site {
 
 pub(crate) fn body(r: &http::Response) -> String {
     String::from_utf8_lossy(&r.body).into_owned()
+}
+
+/// KNOWN-ISSUES 547: a question answered in a view keeps its card, its hash and its form, and its
+/// pages say so below the card. The line goes when the decision leaves the view, and never names
+/// another person's answer.
+#[test]
+fn ui9_an_answered_question_says_so_below_its_unmoved_card() {
+    let (dir, it, _section) = question_world();
+    let s = Site::start(dir, &actor(PERSON));
+    let before = s.card(&it);
+    let (page, form) = s.form(&it);
+    assert!(!body(&page).contains("You answered this"));
+    assert!(!body(&s.get("/~ui/")).contains("You answered this"));
+    assert_eq!(s.answer(&form, "o1").status, 303);
+
+    let st = s.engine().read();
+    let answer = answers_of(&st).remove(0);
+    let change = st.reader().change(&answer.targets[0]).unwrap();
+    let decision = change
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            rdy_model::Op::Create { block } => Some(block.id.clone()),
+            _ => None,
+        })
+        .expect("the decision");
+    let found = answered_in_view(&st, PERSON, &before).unwrap().unwrap();
+    assert_eq!(found.view, "work");
+    assert_eq!(found.decision, decision.to_string());
+    assert!(
+        answered_in_view(&st, "human:someone-else", &before)
+            .unwrap()
+            .is_none(),
+        "another person's answer is not yours"
+    );
+    drop(st);
+    let line = esc(&format!(
+        "You answered this in view work: {decision}. It lands with that view's next proposal. Another answer records a second decision."
+    ));
+    let after = s.card(&it);
+    assert_eq!(after.card_hash, before.card_hash, "the line moves no hash");
+    assert_eq!(after.card, before.card, "the line is not in the card");
+    let (page, again) = s.form(&it);
+    let text = body(&page);
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+    assert!(!after.card.contains("You answered this"));
+    assert_eq!(again.card_hash, before.card_hash, "the form stays");
+    let queue = body(&s.get("/~ui/"));
+    assert_eq!(queue.matches(&line).count(), 1, "{queue}");
+
+    // the decision's view is gone: the question waits with no line
+    s.on(|r| {
+        let me = Session::human(PERSON.to_string(), Role::Approver)?;
+        r.view_close(&me, &["work".to_string()], "dropped")
+            .map(|_| ())
+    });
+    assert!(!body(&s.form(&it).0).contains("You answered this"));
+    assert!(!body(&s.get("/~ui/")).contains("You answered this"));
 }
 
 fn item_path(r: &str) -> String {

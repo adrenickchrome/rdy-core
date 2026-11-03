@@ -971,6 +971,53 @@ fn msw20_a_change_bound_in_two_open_sets_names_both_and_says_to_exclude_it() {
     );
 }
 
+/// TASK-1096: a change that is bound in one open set and also lost a chosen set cannot land by
+/// choosing, and the choice cannot be undone: the fix says so. The code and message stay.
+#[test]
+fn msw20_a_change_that_also_lost_a_chosen_set_is_not_sent_to_choose() {
+    let (_d, mut r) = project();
+    let (lost, section, b, _b2, _dec) = chosen_a(&mut r);
+    r.view_include(&writer(), "c", std::slice::from_ref(&b))
+        .unwrap();
+    claim_in(&mut r, "e", &section, "alt E");
+    let open = r
+        .alt_create(&writer(), "S2", None, &[m("p", "c"), m("q", "e")])
+        .unwrap()
+        .id;
+    r.view_include(&writer(), "g", std::slice::from_ref(&b))
+        .unwrap();
+    let e = r.propose(&writer(), "g", "g", None).unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert_eq!(
+        e.message,
+        format!("change {} is {open} member p's alternative", short(&b))
+    );
+    assert_eq!(
+        e.fix,
+        format!(
+            "exclude {} from view g (rdy view exclude) and propose without it; it also lost {lost}, so choosing c will not land it",
+            short(&b)
+        )
+    );
+}
+
+/// TASK-1096: with no losing binding the fix stays as it was.
+#[test]
+fn msw20_a_change_bound_in_one_open_set_alone_keeps_its_fix() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    r.alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    r.view_include(&writer(), "g", std::slice::from_ref(&a))
+        .unwrap();
+    let e = r.propose(&writer(), "g", "g", None).unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert_eq!(e.fix, "propose from a to choose it");
+}
+
 #[test]
 fn msw20_a_losing_members_pre_set_change_is_refused_from_a_non_member_view() {
     let (_d, mut r) = project();

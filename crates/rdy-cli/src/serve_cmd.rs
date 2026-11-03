@@ -177,6 +177,7 @@ fn ctl_hello(env: &Env, run: &RunDir) -> Option<Hello> {
     Some(Hello {
         rdy: PROTO_VERSION,
         version: VERSION.to_string(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: env.cwd.clone(),
         project,
@@ -287,6 +288,7 @@ fn reuse(rt: &tokio::runtime::Runtime, client: Client, profile: &str, as_json: b
             return ExitCode::FAILURE;
         }
     };
+    crate::conn::warn_other_build(&client);
     let mut client = client.with_agent(Arc::new(CallerAgent::from_env()));
     let out = rt.block_on(async {
         client
@@ -400,6 +402,7 @@ fn start_detached(env: &Env) -> Result<String, ErrorReply> {
         &run,
         start_options(&env.project, &env.cwd, Proto::Ctl),
     ))?;
+    crate::conn::warn_other_build(&client);
     client.close();
     let pid = std::fs::read_to_string(run.pid_file())
         .map_err(|e| io_error(e, "look at .rdy/run/daemon.log"))?;
@@ -418,6 +421,7 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: VERSION.to_string(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: env.cwd.clone(),
         project,

@@ -133,6 +133,7 @@ fn proxy1_stdin_eof_ends_the_proxy_cleanly_and_frees_the_daemon_session() {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))

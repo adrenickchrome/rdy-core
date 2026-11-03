@@ -95,6 +95,7 @@ impl Rdy {
     /// directory there that holds anything is refused and left as it was. Nothing else is
     /// written: no config, pack directory or settings.
     pub fn create_holder(root: &Path, repo_id: RepoId) -> Result<Rdy, RdyError> {
+        crate::config_levels::refuse_follower(root)?;
         let dot = root.join(".rdy");
         rdy_store::fsutil::create_dir_durable(&dot).map_err(io)?;
         let store = Store::create_holder(&dot.join(layout::STORE_DIR), repo_id)?;

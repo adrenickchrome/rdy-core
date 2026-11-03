@@ -1,5 +1,6 @@
 //! ERROR_ROWS: the error code table that rdy_schema reports.
 
+use super::common::W_DAEMON_BUILD;
 use rdy_engine::*;
 
 /// `rdy_schema`'s error rows: `(code, when, fix)`.
@@ -120,6 +121,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "close them, or rdy serve --stop",
     ),
     (
+        W_DAEMON_BUILD,
+        "the running daemon is another build of rdy <version> (<daemon build>); this client is build <build>",
+        "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
+    ),
+    (
         "E_DAEMON_GONE",
         "the daemon closed mid-request",
         "check rdy_overview or rdy status; a write may or may not have committed; it is not retried",
@@ -198,6 +204,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         E_STORE_FORMAT,
         "this rdy does not open the store as it is: an older or newer store format, an unknown store feature, an invalid feature manifest, or a store that needs an upgrade",
         "follow the refusal's fix: open the project with the rdy it names, dump and load, or run rdy upgrade",
+    ),
+    (
+        E_STORE_FOLLOWER,
+        "this store is a read-only follower of <repo id>",
+        "write through the source store",
     ),
     (
         E_STORE_READ_ONLY,

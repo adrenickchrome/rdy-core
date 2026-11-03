@@ -555,7 +555,7 @@ fn ui5_role_override_is_local_to_one_concurrent_call() {
             .get(&("agent:k".into(), Some("k1".into())))
             .unwrap()
             .role,
-        Role::Writer
+        Some(Role::Writer)
     );
     assert!(one.session.as_ref().is_some_and(|s| s.role == Role::Writer));
     // rdy_session saves its role and view; a one-call role does not

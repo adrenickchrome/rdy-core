@@ -2,7 +2,7 @@
 //! `start.lock`.
 
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
-use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
+use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION, valid_build};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
@@ -200,12 +200,21 @@ async fn read_hello_reply(stream: &mut sys::Stream) -> io::Result<HelloReply> {
             ));
         }
     }
-    serde_json::from_slice(&line).map_err(|e| {
+    let reply: HelloReply = serde_json::from_slice(&line).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("an unreadable hello reply: {e}"),
         )
-    })
+    })?;
+    if let HelloReply::Ready { build, .. } = &reply
+        && !valid_build(build)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("an unreadable hello reply: the build {build:?} is no build id"),
+        ));
+    }
+    Ok(reply)
 }
 
 /// A connection past its hello: a session of the daemon.
@@ -214,6 +223,8 @@ pub struct Client {
     stream: BufReader<sys::Stream>,
     session: SessionId,
     version: String,
+    /// The daemon's build, from its `ready` reply: not this client's own.
+    build: String,
     next_id: u64,
     /// Set once the connection is closed or out of step; every later `ctl` is `E_DAEMON_GONE`.
     gone: bool,
@@ -224,11 +235,12 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(stream: sys::Stream, session: SessionId, version: String) -> Client {
+    fn new(stream: sys::Stream, session: SessionId, version: String, build: String) -> Client {
         Client {
             stream: BufReader::new(stream),
             session,
             version,
+            build,
             next_id: 1,
             gone: false,
             notice: None,
@@ -258,6 +270,11 @@ impl Client {
     /// The daemon's version, from its `ready` reply.
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// The daemon's build, from its `ready` reply.
+    pub fn build(&self) -> &str {
+        &self.build
     }
 
     /// The `notice` of the last reply (a reloaded or invalid pack), taken: a second call is
@@ -420,8 +437,12 @@ impl Pending {
                 };
             match reply {
                 HelloReply::Starting { progress: p } => progress(&p),
-                HelloReply::Ready { version, session } => {
-                    return Ok(Client::new(self.stream, session, version));
+                HelloReply::Ready {
+                    version,
+                    build,
+                    session,
+                } => {
+                    return Ok(Client::new(self.stream, session, version, build));
                 }
                 HelloReply::Refused { error } => return Err(Waited::Failed(error)),
                 HelloReply::Exiting { version } => {
@@ -536,9 +557,11 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
 /// What a first hello reply means.
 fn attempt(run: &RunDir, stream: sys::Stream, reply: HelloReply) -> Attempt {
     match reply {
-        HelloReply::Ready { version, session } => {
-            Attempt::Ready(Client::new(stream, session, version))
-        }
+        HelloReply::Ready {
+            version,
+            build,
+            session,
+        } => Attempt::Ready(Client::new(stream, session, version, build)),
         HelloReply::Starting { progress } => Attempt::Starting(Pending {
             stream,
             run: run.clone(),
@@ -728,6 +751,8 @@ pub type SpawnFn = Box<dyn FnMut(&RunDir) -> io::Result<Spawned> + Send>;
 pub struct StartOptions {
     /// This client's rdy version, sent in the hello.
     pub version: String,
+    /// This client's build id, sent in the hello.
+    pub build: String,
     pub proto: Proto,
     pub cwd: PathBuf,
     pub start_timeout: Duration,
@@ -738,10 +763,11 @@ pub struct StartOptions {
 }
 
 impl StartOptions {
-    /// `DEFAULT_START_TIMEOUT` and no progress callback.
+    /// This binary's build, `DEFAULT_START_TIMEOUT` and no progress callback.
     pub fn new(version: String, proto: Proto, cwd: PathBuf, spawn: SpawnFn) -> StartOptions {
         StartOptions {
             version,
+            build: crate::BUILD.to_string(),
             proto,
             cwd,
             start_timeout: DEFAULT_START_TIMEOUT,
@@ -830,6 +856,7 @@ fn stopping(e: &ErrorReply) -> bool {
 pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client, ErrorReply> {
     let StartOptions {
         version,
+        build,
         proto,
         cwd,
         start_timeout,
@@ -840,6 +867,7 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     let progress: &mut (dyn FnMut(&str) + Send) = &mut *progress;
     let mut start = Start {
         version: &version,
+        build: &build,
         proto,
         cwd: &cwd,
         start_timeout,
@@ -856,6 +884,7 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
 /// One `connect_or_start` try.
 struct Start<'a> {
     version: &'a str,
+    build: &'a str,
     proto: Proto,
     cwd: &'a Path,
     start_timeout: Duration,
@@ -866,8 +895,9 @@ struct Start<'a> {
 
 impl Start<'_> {
     async fn once(&mut self, run: &RunDir) -> Result<Client, ErrorReply> {
-        let (version, proto, cwd, start_timeout, deadline) = (
+        let (version, build, proto, cwd, start_timeout, deadline) = (
             self.version,
+            self.build,
             self.proto,
             self.cwd,
             self.start_timeout,
@@ -879,6 +909,7 @@ impl Start<'_> {
         let hello_of = |project| Hello {
             rdy: PROTO_VERSION,
             version: version.to_string(),
+            build: build.to_string(),
             proto,
             cwd: cwd.to_path_buf(),
             project,

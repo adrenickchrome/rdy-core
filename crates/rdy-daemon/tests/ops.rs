@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 62);
+    assert_eq!(OPS.len(), 63);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -64,6 +64,8 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
         ["new_finding", "new_source"],
         "rf5: new_finding then new_source follow new_profile"
     );
+    let fsck = OPS.iter().position(|o| *o == "fsck").unwrap();
+    assert_eq!(OPS[fsck + 1], "compact", "mh7: compact follows fsck");
     let render = OPS.iter().position(|o| *o == "render").unwrap();
     assert_eq!(
         OPS[render + 1],
@@ -184,6 +186,20 @@ fn ctl2_status_reports_views_owners_seq_open_report_and_quarantine() {
     );
     let v = dispatch(&cx(&e, &s, d.path()), "status", json!({})).unwrap();
     assert_eq!(v["quarantine"].as_array().unwrap().len(), 2);
+    // a plain status never waits on the writer for a census
+    assert!(v.get("log_bytes").is_none(), "{v}");
+    // mh7: the byte report joins the keys above when asked for
+    let v = dispatch(&cx(&e, &s, d.path()), "status", json!({"log_bytes": true})).unwrap();
+    assert!(v["log_bytes"].as_u64().unwrap() > 0, "{v}");
+    assert_eq!(v["removed_bytes"], 0);
+    let rows = v["by_kind"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{v}");
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["bytes"].as_u64().unwrap())
+            .sum::<u64>(),
+        v["log_bytes"].as_u64().unwrap()
+    );
 }
 
 #[test]
@@ -449,6 +465,13 @@ fn ctl2_import_reindex_and_fsck_run_and_fsck_reports_the_open() {
     assert!(f["frames"].as_u64().unwrap() > 0);
     assert_eq!(f["open_report"]["index_rebuilt"], false);
     assert_eq!(f["quarantine"], json!([]));
+    // mh7: the byte report joins the result
+    assert!(f["log_bytes"].as_u64().unwrap() > 0, "{f}");
+    assert_eq!(f["removed_bytes"], 0);
+    assert!(
+        f["by_kind"].as_array().is_some_and(|r| !r.is_empty()),
+        "{f}"
+    );
     assert_eq!(
         dispatch(&c, "status", json!({})).unwrap()["landings"],
         1,
@@ -828,9 +851,9 @@ fn hd3_wc_commit_refuses_an_op_with_an_unknown_field() {
 fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
     let (d, e) = project();
     let s = human();
-    let err = dispatch(&cx(&e, &s, d.path()), "status", json!({"verbos": true})).unwrap_err();
+    let err = dispatch(&cx(&e, &s, d.path()), "tags", json!({"verbos": true})).unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
-    assert_eq!(err.message, "status: unknown field \"verbos\"");
+    assert_eq!(err.message, "tags: unknown field \"verbos\"");
     assert_eq!(err.fix, "remove \"verbos\"; it takes no fields");
     let err = dispatch(&cx(&e, &s, d.path()), "log", json!({"limt": 5})).unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
@@ -1760,4 +1783,37 @@ fn rf12_the_trace_op_is_strict_and_reads_the_engine() {
     let err = dispatch(&c, "trace", json!({"id": id, "scope": "nope"})).unwrap_err();
     assert_eq!(err.code, "E_NOT_FOUND", "{err}");
     assert_eq!(log_end(), before, "a trace writes nothing");
+}
+
+/// mh7: the `compact` op takes `{dry_run?}` and nothing else, refuses a reader before it reads,
+/// and reports the same fields for a dry run and a real run.
+#[test]
+fn mh7_the_compact_op_is_strict_and_guards_the_role() {
+    let (d, e) = project();
+    let human = human();
+    doc(&e, "a");
+    let c = cx(&e, &human, d.path());
+    for args in [
+        json!({"dry_runn": true}),
+        json!({"dry_run": "yes"}),
+        json!([]),
+    ] {
+        let err = dispatch(&c, "compact", args.clone()).unwrap_err();
+        assert_eq!(err.code, rdy_engine::E_BAD_INPUT, "{args}: {err}");
+    }
+    let reader = Session {
+        role: rdy_model::Role::Reader,
+        ..human.clone()
+    };
+    let err = dispatch(&cx(&e, &reader, d.path()), "compact", json!({})).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PERMISSION);
+    assert_eq!(err.message, "role Reader cannot compact");
+    assert_eq!(err.fix, "start the session as a writer");
+    let dry = dispatch(&c, "compact", json!({"dry_run": true})).unwrap();
+    let real = dispatch(&c, "compact", json!({})).unwrap();
+    let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&dry), keys(&real));
+    assert_eq!(dry["punched_bytes"], 0);
+    assert_eq!(dry["log_bytes"], real["log_bytes"]);
+    assert_eq!(dry["by_kind"], real["by_kind"]);
 }

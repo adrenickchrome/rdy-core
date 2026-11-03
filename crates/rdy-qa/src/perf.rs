@@ -6252,6 +6252,7 @@ async fn daemon_ready(proj: &std::path::Path) -> Client {
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "perf".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: proj.to_path_buf(),
         project: rdy_daemon::RunDir::of_project(std::path::Path::new(&proj))
@@ -6551,6 +6552,7 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "perf".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Mcp,
         cwd: proj.to_path_buf(),
         project: rdy_daemon::RunDir::of_project(std::path::Path::new(&proj))

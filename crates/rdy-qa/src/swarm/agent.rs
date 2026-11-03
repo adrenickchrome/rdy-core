@@ -1262,6 +1262,7 @@ impl Agent {
             Act::AdviceClaim { first, area } => self.advice_claim(*first, area),
             Act::ReviewAll => self.review_all(),
             Act::AdviceProposal => self.advice_proposal(),
+            Act::Compact => self.compact(),
         }
         // a version the policy accepts the agent lands in the landing turn, which waits for
         // every read turn: its own ends first
@@ -2469,6 +2470,19 @@ impl Agent {
             }
             _ => {}
         }
+    }
+
+    /// `rdy_compact {dry_run: false}` through the real MCP link; the journal keeps the whole
+    /// report. The act has no permitted refusal: only the seeded kill may cut the call.
+    fn compact(&mut self) {
+        let e = self.link.entry("compact");
+        self.link.exec(
+            e,
+            "compact",
+            "rdy_compact",
+            json!({"dry_run": false}),
+            |en, v| en.reply = Some(v.clone()),
+        );
     }
 
     fn read_act(&mut self, target: &Pick) {

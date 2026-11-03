@@ -1572,6 +1572,21 @@ fn linked_alts(
                 .to_string()
         };
         if bindings.len() == 1 {
+            // the choice cannot be undone, so never send a person to make it for nothing
+            let lost: BTreeSet<String> = losing_bindings(heads, id, c)
+                .iter()
+                .map(|(stable, _, _)| alt_label(stable))
+                .collect();
+            let fix = if lost.is_empty() {
+                format!("propose from {} to choose it", broken.member)
+            } else {
+                format!(
+                    "exclude {} from view {view} (rdy view exclude) and propose without it; it also lost {}, so choosing {} will not land it",
+                    id.short(),
+                    lost.into_iter().collect::<Vec<_>>().join(", "),
+                    broken.member
+                )
+            };
             return Err(RdyError::new(
                 E_ALT_MEMBER,
                 format!(
@@ -1580,7 +1595,7 @@ fn linked_alts(
                     alt_label(&broken.set),
                     label(broken)
                 ),
-                format!("propose from {} to choose it", broken.member),
+                fix,
             ));
         }
         let named: Vec<String> = bindings
@@ -1605,30 +1620,7 @@ fn linked_alts(
     let losers: Vec<Vec<(&Hash, &AltSet, &str)>> = ids
         .iter()
         .zip(changes)
-        .map(|(id, c)| {
-            let mut out = Vec::new();
-            for (stable, (_, set)) in &heads.settled_alts {
-                let Some(binds) = heads.alt_binds.get(stable) else {
-                    continue;
-                };
-                let Some(ch) = binds.chosen.as_ref() else {
-                    continue;
-                };
-                let linked = c
-                    .links
-                    .alternative
-                    .as_ref()
-                    .filter(|a| a.set == *stable)
-                    .map(|a| a.member.as_str());
-                let fixed = binds.bound.get(id).map(String::as_str);
-                for loser in [linked, fixed].into_iter().flatten() {
-                    if loser != ch.member && set.members.iter().any(|m| m.view == loser) {
-                        out.push((stable, set, loser));
-                    }
-                }
-            }
-            out
-        })
+        .map(|(id, c)| losing_bindings(heads, id, c))
         .collect();
     if losers.iter().all(Vec::is_empty) {
         return Ok(());
@@ -1681,6 +1673,36 @@ fn linked_alts(
         }
     }
     Ok(())
+}
+
+/// Change `id`'s losing bindings in chosen sets: (set, set record, losing member).
+fn losing_bindings<'a>(
+    heads: &'a crate::read_state::CoordHeads,
+    id: &Hash,
+    c: &'a Change,
+) -> Vec<(&'a Hash, &'a AltSet, &'a str)> {
+    let mut out = Vec::new();
+    for (stable, (_, set)) in &heads.settled_alts {
+        let Some(binds) = heads.alt_binds.get(stable) else {
+            continue;
+        };
+        let Some(ch) = binds.chosen.as_ref() else {
+            continue;
+        };
+        let linked = c
+            .links
+            .alternative
+            .as_ref()
+            .filter(|a| a.set == *stable)
+            .map(|a| a.member.as_str());
+        let fixed = binds.bound.get(id).map(String::as_str);
+        for loser in [linked, fixed].into_iter().flatten() {
+            if loser != ch.member && set.members.iter().any(|m| m.view == loser) {
+                out.push((stable, set, loser));
+            }
+        }
+    }
+    out
 }
 
 /// msw20: whether `changes` create a decision that releases a loser when the choice recorded

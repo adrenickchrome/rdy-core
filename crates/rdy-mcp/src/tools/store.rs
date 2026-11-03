@@ -48,6 +48,13 @@ pub struct CloneParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CompactParams {
+    /// true: report bytes without punching holes. Default false.
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StreamCheckParams {
     /// The batch file: absolute, or relative to the project directory. A name of - is an ordinary file name.
     pub file: String,
@@ -194,4 +201,12 @@ pub fn rdy_upgrade(st: &mut McpState, p: UpgradeParams) -> Result<Value, RdyErro
         .engine
         .upgrade(rdy_engine::maintenance::UpgradeRequest { dry_run })?;
     Ok(rdy_engine::maintenance::report_json(&report))
+}
+
+/// `rdy_compact` (D-4YRQ4, D-KQ4CA): frees the disk space of removed payloads through the
+/// engine's shared guard and report (`rdy_engine::run_compact`). A session is required, as for
+/// `rdy_dump`; a dry run reports the same fields and punches nothing.
+pub fn rdy_compact(st: &mut McpState, p: CompactParams) -> Result<Value, RdyError> {
+    let s = session(st)?;
+    rdy_engine::run_compact(&*st.engine, &s, p.dry_run.unwrap_or(false))
 }

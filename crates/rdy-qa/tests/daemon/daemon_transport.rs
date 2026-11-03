@@ -412,6 +412,7 @@ fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: dir.path().into(),
         project: run.project_id().expect("the project's .rdy"),

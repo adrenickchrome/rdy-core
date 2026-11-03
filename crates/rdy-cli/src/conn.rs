@@ -156,6 +156,7 @@ pub(crate) fn start_options(project: &Path, cwd: &Path, proto: Proto) -> StartOp
     let spawn_project = project.to_path_buf();
     StartOptions {
         version: VERSION.to_string(),
+        build: rdy_daemon::BUILD.to_string(),
         proto,
         cwd: cwd.to_path_buf(),
         start_timeout: serve_config(project).start_timeout,
@@ -174,6 +175,18 @@ pub(crate) fn start_options(project: &Path, cwd: &Path, proto: Proto) -> StartOp
     }
 }
 
+/// W_DAEMON_BUILD (D-CCC6E) on stderr, once, after `ready` and before the op's result: the daemon
+/// that answered is this version and another build.
+pub(crate) fn warn_other_build(client: &Client) {
+    if client.version() == VERSION && client.build() != rdy_daemon::BUILD {
+        eprintln!(
+            "W_DAEMON_BUILD: the running daemon is another build of rdy {VERSION} ({}); this client is build {}\nfix: close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
+            client.build(),
+            rdy_daemon::BUILD
+        );
+    }
+}
+
 /// An open session on the project: the store opened in this process (`--no-daemon`), or a
 /// connection to the project's daemon.
 pub(crate) enum Conn {
@@ -187,7 +200,7 @@ pub(crate) enum Conn {
     /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
     /// the notice the `session` reply carried, printed with the first op's.
     Daemon {
-        client: Client,
+        client: Box<Client>,
         rt: tokio::runtime::Runtime,
         pending: Option<String>,
     },
@@ -226,6 +239,7 @@ impl Conn {
                 let mut c = connect_or_start(&run_dir, opts)
                     .await?
                     .with_agent(Arc::new(CallerAgent::from_env()));
+                warn_other_build(&c);
                 c.ctl("session", json!({"actor": actor, "run": run}))
                     .await?;
                 Ok::<Client, ErrorReply>(c)
@@ -234,7 +248,7 @@ impl Conn {
             let pending = client.take_notice();
             Ok(Conn::Daemon {
                 rt,
-                client,
+                client: Box::new(client),
                 pending,
             })
         }
@@ -269,7 +283,7 @@ impl Conn {
     pub(crate) fn close(self) {
         match self {
             Conn::Direct { local, .. } => close_local(*local),
-            Conn::Daemon { client, .. } => client.close(),
+            Conn::Daemon { client, .. } => (*client).close(),
         }
     }
 }

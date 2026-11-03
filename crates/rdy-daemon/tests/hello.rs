@@ -21,6 +21,7 @@ async fn hello1_a_ready_daemon_answers_ready_with_the_session_id() {
     let v = parsed(&first);
     assert_eq!(v["status"], "ready");
     assert_eq!(v["version"], "0.1.0");
+    assert_eq!(v["build"], BUILD);
     assert_eq!(v["session"], 1);
     let v = ctl(&mut r, 1, "echo", json!({"a": 1})).await;
     assert_eq!(v["ok"]["session"], 1);
@@ -337,7 +338,9 @@ async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
     let (_, first) = connect_with(&d.run, &hello("2", "ctl", other.path())).await;
     assert_eq!(parsed(&first)["error"]["code"], "E_DAEMON_START");
     // no project at all is not a hello
-    let line = json!({"rdy": 1, "version": "1", "proto": "ctl", "cwd": d.dir.path()}).to_string();
+    let line =
+        json!({"rdy": 1, "version": "1", "build": BUILD, "proto": "ctl", "cwd": d.dir.path()})
+            .to_string();
     let (_, first) = connect_with(&d.run, &(line + "\n")).await;
     assert_eq!(parsed(&first)["error"]["code"], "E_BAD_INPUT");
     assert_eq!(d.handle.sessions().len(), 0);

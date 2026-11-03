@@ -58,6 +58,14 @@ pub(crate) struct Context {
 /// file fails the open before the store is locked. `.rdy.yaml` with no store is refused in the
 /// words every path uses, after the config's and the pack's own errors.
 fn project_context(project: &Path) -> Result<Context, RdyError> {
+    crate::config_levels::refuse_follower(project)?;
+    let context = project_file_context(project)?;
+    crate::config_levels::require_project(project)?;
+    Ok(context)
+}
+
+/// The context in the project files at `project`, whatever store stands beside them.
+fn project_file_context(project: &Path) -> Result<Context, RdyError> {
     let sources = match read_sources(project) {
         Ok(s) => s,
         Err(e) => {
@@ -67,7 +75,6 @@ fn project_context(project: &Path) -> Result<Context, RdyError> {
     };
     let config = parse_config(project, &sources.config, sources.local.as_deref())?;
     let (pack, lineage) = load_pack_from(&sources.packs, &config.pack)?;
-    crate::config_levels::require_project(project)?;
     Ok(Context {
         pack,
         lineage,
@@ -78,6 +85,7 @@ fn project_context(project: &Path) -> Result<Context, RdyError> {
 
 impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
+        crate::config_levels::refuse_follower(project)?;
         let dot = project.join(".rdy");
         let config = project.join(crate::config_levels::PROJECT_FILE);
         // init never touches an existing .rdy.yaml: without a store beside it, the refusal is
@@ -200,6 +208,15 @@ impl Rdy {
         }
     }
 
+    /// The context of a follower's project or holder (`mode`), whose store is already open and
+    /// checked: as [`Rdy::context_of`], past the ordinary open's follower refusal.
+    pub(crate) fn follower_context(project: &Path, mode: StoreMode) -> Result<Context, RdyError> {
+        match mode {
+            StoreMode::Holder => crate::holder::holder_context(),
+            StoreMode::Project => project_file_context(project),
+        }
+    }
+
     /// [`Rdy::open_locked`] with `context`, resolved by the caller for `mode` before it wrote
     /// anything (an upgrade: a project that cannot open is refused before its backup). A store
     /// of another mode is the adapter refusal of [`Rdy::open`] or [`Rdy::open_holder`].
@@ -314,6 +331,37 @@ impl Rdy {
         mut store: Store,
         context: Context,
     ) -> Result<Rdy, RdyError> {
+        // plan M2e2 (D-Z0EMP): every write joins the open batch, and `publish` seals it with
+        // the batch's tension and suspect moves last: one marker, one sync
+        store.set_held(true)?;
+        Ok(Rdy::over_store(project, store, context))
+    }
+
+    /// The handle over a follower's `store`: the same handle, with the read-only publication a
+    /// follower's access gets. A failure of the first state's preparation gives the store back,
+    /// with its lock, so the owner can retry.
+    #[allow(clippy::result_large_err)] // the store comes back whole, with its lock
+    pub(crate) fn from_follower_store(
+        project: &Path,
+        mut store: Store,
+        context: Context,
+    ) -> Result<Rdy, (RdyError, Store)> {
+        if let Err(e) = store.set_held(true) {
+            return Err((e.into(), store));
+        }
+        let r = Rdy::over_store(project, store, context);
+        let failed = r.read().error.clone();
+        match failed {
+            None => Ok(r),
+            Some(e) => {
+                let Rdy { store, .. } = r;
+                Err((e, store))
+            }
+        }
+    }
+
+    /// [`Rdy::from_store`] past the held-batch setup.
+    fn over_store(project: &Path, mut store: Store, context: Context) -> Rdy {
         let Context {
             pack,
             lineage,
@@ -322,9 +370,6 @@ impl Rdy {
         } = context;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());
-        // plan M2e2 (D-Z0EMP): every write joins the open batch, and `publish` seals it with
-        // the batch's tension and suspect moves last: one marker, one sync
-        store.set_held(true)?;
         let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
         let EpochCaches {
@@ -409,7 +454,7 @@ impl Rdy {
             full_publish_panics: 0,
         };
         r.invalidate();
-        Ok(r)
+        r
     }
 
     pub fn root(&self) -> &Path {

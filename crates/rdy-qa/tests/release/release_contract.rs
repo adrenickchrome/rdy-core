@@ -1990,6 +1990,7 @@ fn cli_runtime() -> Value {
         ("pending", vec!["pending"]),
         ("coverage", vec!["coverage"]),
         ("fsck", vec!["fsck"]),
+        ("compact", vec!["compact", "--dry-run"]),
         ("upgrade", vec!["upgrade"]),
         ("show", vec!["show", &a]),
         ("show", vec!["show", &doc]),
@@ -2283,6 +2284,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_plan", json!({"proposal": b.r#ref})),
         ("rdy_key_show", json!({})),
         ("rdy_upgrade", json!({"dry_run": true})),
+        ("rdy_compact", json!({"dry_run": true})),
         ("rdy_context", json!({"id": a})),
         ("rdy_impact", json!({"id": a})),
         ("rdy_trace", json!({"id": a})),
@@ -3092,6 +3094,26 @@ fn mcp_row() -> Value {
 
 // ---- errors and warnings ----
 
+/// The refusal a normal open of a seeded follower gets, with its repo id named by the row's word.
+fn follower_refusal() -> Value {
+    let d = tempfile::tempdir().expect("a directory");
+    let r = rdy_engine::Rdy::init(&d.path().join("p"), "rdy-standard").expect("a project");
+    let dump = d.path().join("p.rdydump");
+    r.read().dump(&dump).expect("a dump");
+    let repo = r.store().repo_id().expect("a repo id").expect("a repo id");
+    r.close().expect("a close");
+    let follower = d.path().join("f");
+    rdy_engine::follower::seed(&dump, &follower).expect("a seed");
+    let e = rdy_engine::Rdy::open(&follower)
+        .err()
+        .expect("a follower refuses a normal open");
+    json!({
+        "code": e.code,
+        "message": e.message.replace(&repo.to_string(), "<repo id>"),
+        "fix": e.fix,
+    })
+}
+
 /// Every `E_` and `W_` code constant in the sources, and every `_FIX` and `_MESSAGE` template
 /// constant, by scanning the crates' source text.
 fn errors_row() -> Value {
@@ -3157,6 +3179,13 @@ fn errors_row() -> Value {
         "templates": templates,
         "error_rows": rows,
         "envelope": envelope,
+        "follower_refusal": follower_refusal(),
+        "daemon_build_warning": rdy_mcp::server::DaemonBuildWarning {
+            version: "1.2.3".into(),
+            daemon_build: "0123456789abcdef".into(),
+            client_build: "fedcba9876543210".into(),
+        }
+        .to_json(),
         "redaction_warning": {
             "copies": rdy_engine::W_REDACTION_COPIES_MESSAGE,
             "inventory": rdy_engine::W_REDACTION_INVENTORY_MESSAGE,
@@ -4172,7 +4201,12 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     // the earlier commands, in order, and the new one
-    let earlier: Vec<&str> = top.iter().copied().filter(|n| *n != "review").collect();
+    // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`)
+    let earlier: Vec<&str> = top
+        .iter()
+        .copied()
+        .filter(|n| *n != "review" && *n != "compact")
+        .collect();
     assert_eq!(earlier, COMMANDS_BEFORE_CK9);
     let review = tree["subcommands"]
         .as_array()
@@ -4730,6 +4764,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/brief/stdout/lineage",
     "cli/brief/stdout/suspects",
     "cli/brief/stdout/will_go_stale[]/states",
+    "cli/compact/stdout/notes",
     "cli/coverage/stdout/kinds",
     "cli/coverage/stdout/similar_kinds",
     "cli/diff/stdout/entries[]/fields",
@@ -4809,6 +4844,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_brief/ok/lineage",
     "mcp/rdy_brief/ok/suspects",
     "mcp/rdy_brief/ok/will_go_stale[]/states",
+    "mcp/rdy_compact/ok/notes",
     "mcp/rdy_context/ok/children",
     "mcp/rdy_context/ok/suspects",
     "mcp/rdy_context/refused/issues",
@@ -5057,5 +5093,115 @@ fn ok14_probe_shapes_merge_every_array_element() {
     assert_eq!(
         shape(&json!([[], [{"k": 1}], null])),
         json!([{"|null": [{"k": "number"}]}])
+    );
+}
+
+/// mh7 (D-4YRQ4, D-KQ4CA): the compact change adds exactly one tool, one CLI command and the byte
+/// keys, and takes nothing away. The tool takes `dry_run` and nothing else; the report has six
+/// keys, and a row of `by_kind` four; `rdy status --json` and `rdy fsck` gain `log_bytes`,
+/// `removed_bytes` and `by_kind`. The daemon op is pinned by `ctl2_ops_are_named_and_an_unknown_op_names_them`
+/// alone, since this fixture has no daemon op member.
+#[test]
+fn mh7_new_surfaces_preserve_the_release_contract() {
+    let fixture = read_fixture();
+    let mcp = &fixture["mcp"];
+    // 57 tools before; one more, and the earlier ones stay
+    let names: Vec<&str> = mcp["tool_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 58);
+    assert!(names.contains(&"rdy_compact"));
+    for kept in [
+        "rdy_upgrade",
+        "rdy_dump",
+        "rdy_load",
+        "rdy_clone",
+        "rdy_stream_check",
+    ] {
+        assert!(names.contains(&kept), "{kept}");
+    }
+    let schema = &mcp["tools"]["rdy_compact"]["input_schema"];
+    assert_eq!(schema["additionalProperties"], json!(false));
+    assert_eq!(
+        shape_keys(&schema["properties"]),
+        ["dry_run"],
+        "one property"
+    );
+    assert_eq!(
+        schema["properties"]["dry_run"]["description"],
+        "true: report bytes without punching holes. Default false."
+    );
+    // the report: six keys, and four in a row (sorted here; the report serializes them in the
+    // order the decision lists: log, removed, punched, on-disk, by kind, notes)
+    let report = &mcp["result_fields"]["rdy_compact"]["ok"];
+    assert_eq!(
+        shape_keys(report),
+        [
+            "by_kind",
+            "log_bytes",
+            "notes",
+            "on_disk_bytes",
+            "punched_bytes",
+            "removed_bytes"
+        ]
+    );
+    assert_eq!(
+        shape_keys(&report["by_kind"][0]),
+        ["bytes", "kind", "name", "removed_bytes"]
+    );
+    // the command: one flag of its own, and the earlier ones stay
+    let tree = &fixture["cli"]["tree"];
+    let top: Vec<&str> = tree["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        top.len(),
+        COMMANDS_BEFORE_CK9.len() + 2,
+        "review and compact"
+    );
+    for kept in COMMANDS_BEFORE_CK9 {
+        assert!(top.contains(&kept), "{kept}");
+    }
+    let compact = tree["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "compact")
+        .expect("the compact command");
+    assert_eq!(own_args(compact), ["dry_run"]);
+    assert_eq!(compact["subcommands"], json!([]));
+    // status and fsck gain the byte keys and keep the keys they had
+    let runtime = &fixture["cli"]["runtime"]["probes"];
+    for (label, kept) in [
+        ("status", ["landings", "open_report", "quarantine", "seq"]),
+        ("fsck", ["frames", "landings", "open_report", "quarantine"]),
+    ] {
+        let stdout = &runtime[label]["stdout"];
+        let keys = shape_keys(stdout);
+        for key in ["log_bytes", "removed_bytes", "by_kind"]
+            .iter()
+            .chain(&kept)
+        {
+            assert!(
+                keys.iter().any(|k| k == key),
+                "{label} lacks {key}: {keys:?}"
+            );
+        }
+        assert_eq!(
+            shape_keys(&stdout["by_kind"][0]),
+            ["bytes", "kind", "name", "removed_bytes"],
+            "{label}"
+        );
+    }
+    // the compact command's own probe
+    assert_eq!(
+        shape_keys(&runtime["compact"]["stdout"]),
+        shape_keys(report)
     );
 }

@@ -27,6 +27,7 @@ pub struct SessionInfo {
     pub id: SessionId,
     pub proto: Proto,
     pub version: String,
+    pub build: String,
     pub cwd: PathBuf,
     pub peer_uid: u32,
     pub connected_at_ms: u64,
@@ -60,6 +61,7 @@ impl Sessions {
         &self,
         proto: Proto,
         version: String,
+        build: String,
         cwd: PathBuf,
         peer_uid: u32,
     ) -> SessionInfo {
@@ -72,6 +74,7 @@ impl Sessions {
             id,
             proto,
             version,
+            build,
             cwd,
             peer_uid,
             connected_at_ms,

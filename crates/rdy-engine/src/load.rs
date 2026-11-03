@@ -61,6 +61,7 @@ use crate::wc::ignore::IGNORE_FILE;
 use rdy_model::Hash;
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpItem, DumpReader, DumpRefusal, Frame};
 use rdy_store::dump_chain::DumpKind;
+use rdy_store::follower::FollowerMark;
 use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
@@ -207,7 +208,7 @@ pub fn load_chain(
         let f = open_dump(file)?;
         return load_from(file, BufReader::new(f), project, None);
     }
-    crate::load_chain::load_verified(&plan, project)
+    crate::load_chain::load_verified(&plan, project, crate::load_chain::LoadPurpose::Ordinary)
 }
 
 /// A step that runs after the open of step 7, under the load's lock and before `fsck`: a
@@ -312,7 +313,7 @@ pub(crate) fn load_opened<R: Read>(
         if holder && !files.is_empty() {
             return Err(holder_files());
         }
-        let placed = place(project, &files, &absent, &mut made, after_open)?;
+        let placed = place(project, &files, &absent, &mut made, after_open, None)?;
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format,
@@ -356,13 +357,15 @@ pub(crate) struct Placed {
 /// Steps 5 to 7 of a load whose ingest has finished `.rdy/store.loading`: writes each of the
 /// dump's project files `files` that step 2 found `absent`, takes the store's lock, renames the
 /// store into place, then opens it, runs `after_open`, `fsck` and the counts (`check`). The
-/// caller undoes `made` on a failure.
+/// caller undoes `made` on a failure. A follower's seed gives its `mark`: it is durable under that
+/// lock before the rename, so no placed store lacks it, and the open is the follower's.
 pub(crate) fn place(
     project: &Path,
     files: &[(String, Vec<u8>)],
     absent: &[String],
     made: &mut Made,
     after_open: Option<AfterOpen>,
+    mark: Option<&FollowerMark>,
 ) -> Result<Placed, RdyError> {
     let carried: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
     let mut written = Vec::new();
@@ -384,6 +387,10 @@ pub(crate) fn place(
     }
     let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
     made.lock = Some(lock.clone());
+    if let Some(mark) = mark {
+        rdy_store::follower::write_seed_mark(&loading, &lock, mark)
+            .map_err(|e| target_error(&loading, e))?;
+    }
     place_fault(PlaceFault::Rename)
         .and_then(|()| std::fs::rename(&loading, &store))
         .map_err(|e| io_at(&loading, e))?;
@@ -392,7 +399,7 @@ pub(crate) fn place(
         .and_then(|()| sync_dir(&dot))
         .map_err(|e| io_at(&dot, e))?;
     // step 7: the index build, fsck and the counts
-    let (fsck, tags, views) = check(project, &carried, &lock, made, after_open)?;
+    let (fsck, tags, views) = check(project, &carried, &lock, made, after_open, mark.is_some())?;
     Ok(Placed {
         written,
         kept,
@@ -409,6 +416,7 @@ pub(crate) fn check_target(
     project: &Path,
     files: &[(String, Vec<u8>)],
 ) -> Result<Vec<String>, RdyError> {
+    crate::config_levels::refuse_follower(project)?;
     inside_rdy(project)?;
     let dot = project.join(".rdy");
     if std::fs::symlink_metadata(dot.join(STORE_DIR)).is_ok() {
@@ -695,9 +703,15 @@ fn check(
     lock: &StoreLock,
     made: &mut Made,
     after_open: Option<AfterOpen>,
+    follower: bool,
 ) -> Result<(FsckReport, usize, usize), RdyError> {
     let fails = |e: RdyError| fails_fsck(project, carried, e);
-    let mut r = match Rdy::open_locked(project, lock) {
+    let opened = if follower {
+        crate::follower::open_locked(project, lock)
+    } else {
+        Rdy::open_locked(project, lock)
+    };
+    let mut r = match opened {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             made.keep = true;
@@ -938,7 +952,7 @@ fn loading_exists(loading: &Path) -> RdyError {
 }
 
 /// An i/o error at `path`, named.
-fn io_at(path: &Path, e: std::io::Error) -> RdyError {
+pub(crate) fn io_at(path: &Path, e: std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
         format!("{}: {e}", path.display()),

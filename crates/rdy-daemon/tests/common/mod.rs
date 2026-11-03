@@ -85,7 +85,17 @@ pub fn hello(version: &str, proto: &str, cwd: &Path) -> String {
     let project = RunDir::of_project(cwd)
         .project_id()
         .expect("the project's .rdy");
-    json!({"rdy": 1, "version": version, "proto": proto, "cwd": cwd, "project": project})
+    json!({"rdy": 1, "version": version, "build": BUILD, "proto": proto, "cwd": cwd, "project": project})
+        .to_string()
+        + "\n"
+}
+
+/// A `ctl` hello line of `version` and `build` from a client in the project at `cwd`.
+pub fn hello_built(version: &str, build: &str, cwd: &Path) -> String {
+    let project = RunDir::of_project(cwd)
+        .project_id()
+        .expect("the project's .rdy");
+    json!({"rdy": 1, "version": version, "build": build, "proto": "ctl", "cwd": cwd, "project": project})
         .to_string()
         + "\n"
 }

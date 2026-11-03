@@ -2,7 +2,9 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, CloneParams, DumpParams, LoadParams, StreamCheckParams, UpgradeParams};
+use crate::tools::{
+    self, CloneParams, CompactParams, DumpParams, LoadParams, StreamCheckParams, UpgradeParams,
+};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = store_router, vis = "pub(crate)")]
@@ -33,6 +35,13 @@ impl RdyServer {
     )]
     async fn rdy_upgrade(&self, Parameters(p): Parameters<UpgradeParams>) -> CallToolResult {
         self.run("rdy_upgrade", p, tools::rdy_upgrade).await
+    }
+
+    #[tool(
+        description = "Free disk space used by removed payloads without changing the log. Set dry_run to true to report bytes without punching holes. Requires a writer session."
+    )]
+    async fn rdy_compact(&self, Parameters(p): Parameters<CompactParams>) -> CallToolResult {
+        self.run("rdy_compact", p, tools::rdy_compact).await
     }
 
     #[tool(

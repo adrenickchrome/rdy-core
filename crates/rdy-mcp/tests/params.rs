@@ -114,6 +114,49 @@ fn ls7_rdy_site_refuses_an_unknown_key() {
     assert_eq!(code, "E_BAD_INPUT");
 }
 
+/// mh7: `rdy_compact` takes `dry_run` and nothing else. A close key names it, and a non-boolean
+/// uses the shape error `rdy_upgrade` gives for its own `dry_run`, whose parser is the same.
+#[test]
+fn mh7_rdy_compact_takes_dry_run_and_nothing_else() {
+    let swap = |t: (String, String, String)| {
+        (
+            t.0,
+            t.1.replace("rdy_upgrade", "rdy_compact"),
+            t.2.replace("rdy_upgrade", "rdy_compact"),
+        )
+    };
+    for args in [
+        json!({"dry_runn": true}),
+        json!({"dry_run": true, "dir": "x"}),
+        json!({"dry_run": "yes"}),
+        json!({"dry_run": 1}),
+        json!({"dry_run": ["true"]}),
+    ] {
+        assert_eq!(
+            refusal::<CompactParams>("rdy_compact", args.clone()),
+            swap(refusal::<UpgradeParams>("rdy_upgrade", args.clone())),
+            "{args}"
+        );
+    }
+    let (code, message, fix) = refusal::<CompactParams>("rdy_compact", json!({"dry_runn": true}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert_eq!(message, "rdy_compact: unknown parameter \"dry_runn\"");
+    assert!(fix.contains("dry_run"), "{fix}");
+    for (args, want) in [
+        (json!({}), None),
+        (json!({"dry_run": null}), None),
+        (json!({"dry_run": false}), Some(false)),
+        (json!({"dry_run": true}), Some(true)),
+    ] {
+        let p = rdy_mcp::params::parse_params::<CompactParams>(
+            "rdy_compact",
+            args.as_object().unwrap().clone(),
+        )
+        .unwrap();
+        assert_eq!(p.dry_run, want, "{args}");
+    }
+}
+
 /// dl7: `rdy_dump` takes `out` and `after` (hc8) and nothing else.
 #[test]
 fn dl7_rdy_dump_refuses_an_unknown_key() {
@@ -387,7 +430,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 69 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 70 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `PlanAnswerSpecParams`, `PlanGroupParams`,
@@ -403,6 +446,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         AuthParams,
         BriefParams,
         CloneParams,
+        CompactParams,
         CoverageParams,
         DecideParams,
         DiffParams,

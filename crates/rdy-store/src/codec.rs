@@ -427,7 +427,7 @@ fn kind_name(kind: u8) -> String {
 
 /// The refusal (E_STORE_FORMAT) of a stored frame of raw kind `raw` and payload `payload` whose
 /// encoding this rdy does not read: a compatible feature never authorizes guessing an encoding.
-fn unknown_encoding(raw: u8, payload: &[u8]) -> StoreError {
+pub(crate) fn unknown_encoding(raw: u8, payload: &[u8]) -> StoreError {
     let version = if raw & VERSIONED == 0 {
         0
     } else {

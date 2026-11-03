@@ -63,6 +63,7 @@ use crate::redaction_io;
 use crate::segment::{HEADER, Location, SegmentLog};
 use crate::store::{MAX_BLOB_BYTES, encode};
 use rdy_model::{Hash, RepoId};
+use std::borrow::BorrowMut;
 use std::path::{Path, PathBuf};
 
 /// The directory of the log inside a store directory.
@@ -84,10 +85,15 @@ struct PendingDrop {
     released: bool,
 }
 
-/// A new store directory that takes a dump's batches in log order.
-pub struct Ingest {
+/// A new store directory that takes a dump's batches in log order; or, through
+/// [`Ingest::appending`], a follower's existing log that takes a checked increment's batches at
+/// its sealed end.
+pub struct Ingest<L = SegmentLog> {
     dir: PathBuf,
-    log: SegmentLog,
+    log: L,
+    /// Whether this ingest continues an existing log (a follow): its first batch is no log's
+    /// first batch.
+    appending: bool,
     batches: u64,
     frames: u64,
     /// Whether an ingested frame set `meta/repo_id`.
@@ -175,6 +181,7 @@ impl Ingest {
     /// must not exist: an existing `dir` is `StoreError::Io` of kind `AlreadyExists`, and
     /// nothing is written into it.
     pub fn create(dir: &Path) -> Result<Ingest, StoreError> {
+        crate::follower::refuse_follower(dir)?;
         std::fs::create_dir(dir)?;
         let parent = match dir.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
@@ -189,6 +196,7 @@ impl Ingest {
         Ok(Ingest {
             dir: dir.to_path_buf(),
             log,
+            appending: false,
             batches: 0,
             frames: 0,
             has_repo_id: false,
@@ -204,6 +212,88 @@ impl Ingest {
             features: None,
             used: Vec::new(),
         })
+    }
+
+    /// Checks every dropped frame's authorization against the complete log (see `batch`): a
+    /// refusal is `StoreError::Dump`, and no `FORMAT` is written, so nothing opens the directory.
+    /// Then makes the new log durable: one sync of the log, then of `segments/`. Then writes
+    /// `FORMAT`, the mirror of the features the log holds (`upgrade`'s; without `upgrade`, the
+    /// last features ref ingested, else the baseline), and syncs the store directory. Writes no
+    /// index.
+    pub fn finish(mut self) -> Result<IngestReport, StoreError> {
+        self.check_drops()?;
+        self.log.sync()?;
+        sync_dir(&self.dir.join(SEGMENTS_DIR))?;
+        let features = match self.features.take() {
+            Some(f) => f,
+            None => match &self.features_ref {
+                Some(v) => format::decode_features(v)?,
+                None => format::baseline_features(),
+            },
+        };
+        format::write_format_file(&self.dir, &features)?;
+        sync_dir(&self.dir)?;
+        Ok(IngestReport {
+            batches: self.batches,
+            frames: self.frames,
+            end: self.log.end(),
+        })
+    }
+}
+
+impl<'l> Ingest<&'l mut SegmentLog> {
+    /// An ingest that continues `log`, the sealed log of the follower at `dir` (D-AA4FD): each
+    /// batch keeps the source place, frame hash, marker, drop authorization and first-use checks
+    /// of [`Ingest::batch_with_plan`]. `mode` and `rules` are the log's own so far. It runs no
+    /// upgrade, makes no repo id and writes no origin, carried or features batch: every byte
+    /// comes from the source. [`Ingest::finish_append`] is its last check.
+    pub(crate) fn appending(
+        log: &'l mut SegmentLog,
+        dir: &Path,
+        mode: StoreMode,
+        rules: RefRules,
+    ) -> Ingest<&'l mut SegmentLog> {
+        Ingest {
+            dir: dir.to_path_buf(),
+            log,
+            appending: true,
+            batches: 0,
+            frames: 0,
+            has_repo_id: true,
+            has_apply: false,
+            pending: Vec::new(),
+            unauthorized: 0,
+            rules: Some(rules),
+            mode,
+            has_carried: false,
+            carried_done: true,
+            upgraded: true,
+            features_ref: None,
+            features: None,
+            used: Vec::new(),
+        }
+    }
+
+    /// The last check of an append: the log keeps the source's manifest `m`, and every dropped
+    /// frame is authorized against the complete log. It syncs nothing and writes no `FORMAT`.
+    pub(crate) fn finish_append(&mut self, m: &StoreFeatures) -> Result<(), StoreError> {
+        self.keep_manifest(m)?;
+        self.check_drops()
+    }
+
+    /// The source batches and data frames this ingest appended.
+    pub(crate) fn appended(&self) -> (u64, u64) {
+        (self.batches, self.frames)
+    }
+}
+
+impl<L: BorrowMut<SegmentLog>> Ingest<L> {
+    fn log(&self) -> &SegmentLog {
+        self.log.borrow()
+    }
+
+    fn log_mut(&mut self) -> &mut SegmentLog {
+        self.log.borrow_mut()
     }
 
     /// Appends batch `n` of the dump at its source place, then its marker, and notes whether the
@@ -283,11 +373,11 @@ impl Ingest {
             }
         }
         self.check_refs(b)?;
-        let end = self.log.end();
+        let end = self.log().end();
         if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
-            self.log.roll()?;
+            self.log_mut().roll()?;
         }
-        let end = self.log.end();
+        let end = self.log().end();
         if end != b.start {
             return Err(dump_error(format!(
                 "batch {n} starts at segment {} offset {}, and the log ends at segment {} offset {}",
@@ -316,7 +406,7 @@ impl Ingest {
             };
             match zeroed.as_ref().unwrap_or(f) {
                 Frame::Present { kind, payload, .. } => {
-                    let (_, hash) = self.log.append_unrolled(*kind, payload)?;
+                    let (_, hash) = self.log_mut().append_unrolled(*kind, payload)?;
                     hashes.push(hash);
                     self.uses(format::required_features(*kind, payload));
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
@@ -353,7 +443,7 @@ impl Ingest {
                     }
                     // the header keeps the raw kind; the pending record names the logical kind,
                     // as the authorization's holes do (`crate::codec`)
-                    let loc = self.log.append_dropped(*kind, hash, *len)?;
+                    let loc = self.log_mut().append_dropped(*kind, hash, *len)?;
                     if *kind & crate::codec::VERSIONED != 0 {
                         self.uses(vec![format::registered(format::FEATURE_OBJECT_ENCODING)]);
                     }
@@ -372,7 +462,7 @@ impl Ingest {
         if digest != b.digest {
             return Err(dump_error(format!("batch {n} does not match its digest")));
         }
-        self.log
+        self.log_mut()
             .append_marker_digest(b.start, hashes.len() as u32, digest)?;
         self.has_repo_id |= sets_repo_id;
         if let Some(r) = &mut self.rules {
@@ -399,7 +489,7 @@ impl Ingest {
     /// are removable). `b`'s tags count for later batches only once `batch` takes it
     /// (`commit_batch`).
     fn check_refs(&mut self, b: &DumpBatch) -> Result<(), StoreError> {
-        let first = self.batches == 0;
+        let first = self.batches == 0 && !self.appending;
         if first {
             self.rules = None;
         }
@@ -554,15 +644,17 @@ impl Ingest {
     /// a project's is `redaction_io::bootstrap`, or `bootstrap_sealed` when `sealed`.
     fn bootstrap(&self, sealed: bool) -> Result<redaction_io::Authorization, StoreError> {
         match (self.mode, sealed) {
-            (StoreMode::Holder, _) => crate::redaction_import::bootstrap_holder(self.log.readers()),
-            (StoreMode::Project, true) => redaction_io::bootstrap_sealed(self.log.readers()),
-            (StoreMode::Project, false) => redaction_io::bootstrap(self.log.readers()),
+            (StoreMode::Holder, _) => {
+                crate::redaction_import::bootstrap_holder(self.log().readers())
+            }
+            (StoreMode::Project, true) => redaction_io::bootstrap_sealed(self.log().readers()),
+            (StoreMode::Project, false) => redaction_io::bootstrap(self.log().readers()),
         }
     }
 
     /// The end of the log so far.
     pub fn end(&self) -> Location {
-        self.log.end()
+        self.log().end()
     }
 
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
@@ -597,19 +689,7 @@ impl Ingest {
         self.upgraded = true;
         let from = match from {
             DumpStore::Features(m) => {
-                format::check_writable(m)?;
-                if self
-                    .features_ref
-                    .as_ref()
-                    .is_some_and(|v| *v != m.to_json())
-                {
-                    return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
-                }
-                // a valid dump's manifest names every feature its records use (D-1HDVA)
-                if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
-                    return Err(dump_error(feature_not_named(&f.name)));
-                }
-                self.features = Some(m.clone());
+                self.keep_manifest(m)?;
                 return Ok(false);
             }
             DumpStore::Legacy(n) => *n,
@@ -622,7 +702,7 @@ impl Ingest {
         }
         // the baseline, and every feature the ingested records use (their first use)
         let features = format::baseline_features().merged(&self.used);
-        let start = self.log.end();
+        let start = self.log().end();
         let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
         if !self.has_repo_id {
             refs.push((
@@ -647,11 +727,37 @@ impl Ingest {
                 (kinds::REF_UPDATE, encode(&update))
             })
             .collect();
-        let placed = self.log.append_frames(&frames, false)?;
-        self.log
+        let placed = self.log_mut().append_frames(&frames, false)?;
+        self.log_mut()
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         self.features = Some(features);
         Ok(true)
+    }
+
+    /// The source-only end of a follower's seed (D-AA4FD): the log keeps the manifest `m`, and
+    /// nothing is appended. The manifest passes the checks of a feature store's `upgrade`.
+    pub fn keep_source_manifest(&mut self, m: &StoreFeatures) -> Result<(), StoreError> {
+        self.upgraded = true;
+        self.keep_manifest(m)
+    }
+
+    /// The checks of a feature store's manifest `m`, which the store keeps: this rdy may write
+    /// it, it is the log's own, and it names every feature the ingested records use.
+    fn keep_manifest(&mut self, m: &StoreFeatures) -> Result<(), StoreError> {
+        format::check_writable(m)?;
+        if self
+            .features_ref
+            .as_ref()
+            .is_some_and(|v| *v != m.to_json())
+        {
+            return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
+        }
+        // a valid dump's manifest names every feature its records use (D-1HDVA)
+        if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
+            return Err(dump_error(feature_not_named(&f.name)));
+        }
+        self.features = Some(m.clone());
+        Ok(())
     }
 
     /// Appends the carried records of a stopped load as one sealed batch after the source prefix
@@ -695,7 +801,7 @@ impl Ingest {
         for r in records {
             encoded.push(crate::redaction_carried::check_bounds(r)?);
         }
-        let mut c = redaction_io::collect(self.log.readers())?;
+        let mut c = redaction_io::collect(self.log().readers())?;
         // the residues the log does not hold yet, once each, by residue hash, each within the
         // record bound
         let mut missing: std::collections::BTreeMap<Hash, (u8, Vec<u8>)> = Default::default();
@@ -742,47 +848,21 @@ impl Ingest {
                 .into_iter()
                 .map(|b| crate::codec::frame_latest(kinds::REDACTION_CARRIED, b)),
         );
-        let start = self.log.end();
+        let start = self.log().end();
         let after = c.push_batch(start, &frames)?;
         match self.mode {
             StoreMode::Holder => {
-                crate::redaction_import::holder_of(&c, self.log.readers(), start, after)?;
+                crate::redaction_import::holder_of(&c, self.log().readers(), start, after)?;
             }
             StoreMode::Project => {
-                redaction_io::sealed_of(&c, self.log.readers(), after)?;
+                redaction_io::sealed_of(&c, self.log().readers(), after)?;
             }
         }
-        let placed = self.log.append_frames(&frames, false)?;
-        self.log
+        let placed = self.log_mut().append_frames(&frames, false)?;
+        self.log_mut()
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         self.has_carried = true;
         self.carried_done = true;
         Ok(())
-    }
-
-    /// Checks every dropped frame's authorization against the complete log (see `batch`): a
-    /// refusal is `StoreError::Dump`, and no `FORMAT` is written, so nothing opens the directory.
-    /// Then makes the new log durable: one sync of the log, then of `segments/`. Then writes
-    /// `FORMAT`, the mirror of the features the log holds (`upgrade`'s; without `upgrade`, the
-    /// last features ref ingested, else the baseline), and syncs the store directory. Writes no
-    /// index.
-    pub fn finish(mut self) -> Result<IngestReport, StoreError> {
-        self.check_drops()?;
-        self.log.sync()?;
-        sync_dir(&self.dir.join(SEGMENTS_DIR))?;
-        let features = match self.features.take() {
-            Some(f) => f,
-            None => match &self.features_ref {
-                Some(v) => format::decode_features(v)?,
-                None => format::baseline_features(),
-            },
-        };
-        format::write_format_file(&self.dir, &features)?;
-        sync_dir(&self.dir)?;
-        Ok(IngestReport {
-            batches: self.batches,
-            frames: self.frames,
-            end: self.log.end(),
-        })
     }
 }

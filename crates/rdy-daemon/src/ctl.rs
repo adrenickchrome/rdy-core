@@ -96,6 +96,7 @@ impl CtlReply {
 pub struct DaemonInfo {
     pub pid: u32,
     pub version: String,
+    pub build: String,
     pub started_at: Instant,
     pub sessions: Sessions,
     pub connections: Arc<AtomicUsize>,
@@ -376,6 +377,7 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 let v = json!({
                     "pid": info.pid,
                     "version": info.version,
+                    "build": info.build,
                     "sessions": info.sessions.len(),
                     "connections": info.connections.load(Ordering::SeqCst),
                     "uptime_ms": info.started_at.elapsed().as_millis() as u64,

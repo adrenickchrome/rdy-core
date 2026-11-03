@@ -27,6 +27,12 @@ use std::sync::{Arc, Mutex};
 
 const TOOL: &str = "rdy_answer";
 
+/// Where an elicited call stands: asking for the person's input, or its final value.
+enum Step {
+    Input(InputRequiredResult),
+    Done(Value),
+}
+
 /// What a valid terminal response leads to.
 enum Settled {
     /// The reply of a form that writes nothing.
@@ -72,24 +78,36 @@ impl RdyServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> CallToolResponse {
-        match self.elicited(request, context).await {
-            Ok(response) => response,
-            Err(e) => result(Err(e)).into(),
-        }
+        let out = match self.elicited(request, context).await {
+            // not a tool result: the exchange's final result carries any warning
+            Ok(Step::Input(asked)) => return CallToolResponse::InputRequired(asked),
+            Ok(Step::Done(v)) => Ok(v),
+            Err(e) => Err(e),
+        };
+        result(self.warned(out).await).into()
+    }
+
+    /// `out`, the final result of an elicited answer, with the build warning it is owed.
+    async fn warned(&self, out: Result<Value, RdyError>) -> Result<Value, RdyError> {
+        self.blocking(TOOL, false, move |st| {
+            claims::take_build_warning(st);
+            claims::deliver_build_warning(st, out)
+        })
+        .await
     }
 
     async fn elicited(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, RdyError> {
+    ) -> Result<Step, RdyError> {
         let args = request.arguments.unwrap_or_default();
         if request.request_state.is_some() || request.input_responses.is_some() {
             let terminal = elicitation::parse_responses(request.input_responses.as_ref());
             let v = self
                 .continued(args, request.request_state, terminal)
                 .await?;
-            return Ok(result(Ok(v)).into());
+            return Ok(Step::Done(v));
         }
         let route = elicitation::route(
             context.protocol_version().as_ref(),
@@ -115,12 +133,12 @@ impl RdyServer {
                 let v = self
                     .in_call(bound, &item, handle, enum_names, context)
                     .await?;
-                Ok(result(Ok(v)).into())
+                Ok(Step::Done(v))
             }
             _ => {
                 let request =
                     InputRequest::Elicitation(ElicitRequest::new(elicitation::form(&item, false)));
-                Ok(CallToolResponse::InputRequired(InputRequiredResult::new(
+                Ok(Step::Input(InputRequiredResult::new(
                     Some([(ANSWER_KEY.to_string(), request)].into_iter().collect()),
                     Some(handle),
                 )))

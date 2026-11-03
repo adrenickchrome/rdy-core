@@ -19,7 +19,8 @@ use crate::site::http::{Response, content_type, ui_response};
 use crate::site::live::LiveSite;
 use crate::site::ui_request::Form;
 use rdy_engine::answer::{
-    Presentation, PresentedAnswer, presented_item, presented_question_brief, run_presented_answer,
+    Presentation, PresentedAnswer, answered_in_view, presented_item, presented_question_brief,
+    run_presented_answer,
 };
 use rdy_engine::config_levels::human_actor_for_env;
 use rdy_engine::pending::{CARD_MAX_TOKENS, PendingQuery};
@@ -109,7 +110,7 @@ fn refused(sh: &Shared, person: Option<&str>, e: &RdyError) -> Response {
         _ => None,
     };
     let page = match &fresh {
-        Some(item) => item_page(&st, item, None, Some(e), None),
+        Some(item) => item_page(&st, item, None, Some(e), None, None),
         None => refusal_page(&st, e),
     };
     sent(&st, status_of(e.code), page)
@@ -136,7 +137,16 @@ fn pending_with(sh: &Shared, person: &str, notice: Option<&str>, live: bool) -> 
     match queue {
         Ok(q) => {
             let url = live.then(|| events(&st));
-            let page = pending_page(&st, &q, notice, url.as_deref());
+            let answered: Result<Vec<_>, RdyError> = q
+                .items
+                .iter()
+                .filter_map(|i| answered_in_view(&st, person, i).transpose())
+                .collect();
+            let answered = match answered {
+                Ok(a) => a,
+                Err(e) => return refused(sh, Some(person), &e),
+            };
+            let page = pending_page(&st, &q, notice, url.as_deref(), &answered);
             sent(&st, 200, page)
         }
         Err(e) => refused(sh, Some(person), &e),
@@ -162,8 +172,19 @@ pub(crate) fn item(sh: &Shared, reference: &str) -> Outcome {
         Ok(b) => b,
         Err(e) => return Outcome::Done(refused(sh, Some(&person), &e)),
     };
+    let answered = match answered_in_view(&st, &person, &found) {
+        Ok(a) => a,
+        Err(e) => return Outcome::Done(refused(sh, Some(&person), &e)),
+    };
     let url = events(&st);
-    let page = item_page(&st, &found, briefing.as_ref(), None, Some(&url));
+    let page = item_page(
+        &st,
+        &found,
+        briefing.as_ref(),
+        None,
+        Some(&url),
+        answered.as_ref(),
+    );
     Outcome::Done(sent(&st, 200, page))
 }
 

@@ -159,6 +159,7 @@ fn hello(root: &Path, run: &RunDir) -> Option<Hello> {
     Some(Hello {
         rdy: PROTO_VERSION,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        build: crate::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: root.to_path_buf(),
         project,

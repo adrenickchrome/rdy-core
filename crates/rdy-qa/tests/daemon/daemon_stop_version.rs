@@ -26,6 +26,7 @@ fn hello(run: &RunDir, version: &str, cwd: &std::path::Path) -> Hello {
     Hello {
         rdy: PROTO_VERSION,
         version: version.into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: cwd.to_path_buf(),
         project: run.project_id().unwrap(),

@@ -211,6 +211,7 @@ fn apply_with(
     registry: Option<&[UpgradeStep]>,
 ) -> Result<UpgradeReport, RdyError> {
     let dir = store_dir(root);
+    rdy_store::follower::refuse_follower(&dir)?;
     let lock = StoreLock::take(&dir)?;
     let plan = plan_with(root, registry)?;
     refuse_read_only(&plan)?;

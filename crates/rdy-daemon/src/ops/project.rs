@@ -18,6 +18,12 @@ pub(super) struct FsckArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct CompactArgs {
+    dry_run: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CheckArgs {
     path: String,
     pack: Option<String>,
@@ -151,6 +157,8 @@ pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
             r.ensure_writable()?;
         }
         let mut v = to_json(&r.fsck()?);
+        // the byte report joins the result in the same serialized read (D-4YRQ4)
+        add_log_bytes(&mut v, r)?;
         if verbose {
             v["signature_states"] = rdy_engine::signing_read::signature_states(&r.read())?;
         }
@@ -169,4 +177,18 @@ pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
     v["open_report"] = open_report_json(&cx.engine.open_report());
     v["quarantine"] = json!(quarantine(&cx.engine.root()));
     Ok(v)
+}
+
+/// Adds the log's byte report (`log_bytes`, `removed_bytes`, `by_kind`) to the object `v`.
+pub(super) fn add_log_bytes(v: &mut Value, r: &rdy_engine::Rdy) -> Result<(), RdyError> {
+    if let (Some(into), Value::Object(from)) = (v.as_object_mut(), to_json(&r.log_bytes()?)) {
+        into.extend(from);
+    }
+    Ok(())
+}
+
+/// `compact`: the shared writer guard and report (`rdy_engine::run_compact`); `dry_run` reports
+/// the same fields and punches nothing.
+pub(super) fn compact(cx: &OpContext, a: CompactArgs) -> Result<Value, RdyError> {
+    rdy_engine::run_compact(cx.engine, cx.session, a.dry_run.unwrap_or(false))
 }

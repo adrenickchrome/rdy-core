@@ -395,6 +395,7 @@ impl Store {
     /// canon's for an empty unpinned view (the floating read rule), so the check agrees with the
     /// float catch-up that moves such a view onto canon in the same batch.
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let state = match self.view_head(name)? {
             Some(h) if !h.pinned && h.len == 0 => self.canon_state()?,
             _ => self.view_state(name)?,
@@ -413,6 +414,7 @@ impl Store {
         change: Change,
         current: &StateSnapshot,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         self.commit_to_view_with(name, change, &|id| current.blocks.get(id).copied())
     }
 
@@ -428,6 +430,7 @@ impl Store {
         change: Change,
         current: &dyn Fn(&BlockId) -> Option<Hash>,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         self.commit_to_view_resolving(name, change, current, &[], None)
     }
 
@@ -454,6 +457,7 @@ impl Store {
         conflicts: &[Conflict],
         claim: Option<Owner>,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let committer = change.provenance.clone();
         let ids = self.commit_many(name, vec![change], current, conflicts, claim, &committer)?;
         Ok(ids[0])
@@ -477,6 +481,7 @@ impl Store {
         claim: Option<Owner>,
         committer: &Provenance,
     ) -> Result<Vec<Hash>, StoreError> {
+        self.ensure_writable()?;
         if changes.is_empty() {
             return Ok(vec![]);
         }
@@ -748,6 +753,7 @@ impl Store {
     /// `proposal/<id>` (the latest version, itself) and `open/<view>` (its stable id, itself) in
     /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let changes = self.included(view)?.as_ref().clone();
         self.propose_changes(view, title, None, by, changes, None)
     }
@@ -765,6 +771,7 @@ impl Store {
         changes: Vec<Hash>,
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
         let id = proposal_hash(&p);
         self.write_version(&p, id)
@@ -784,6 +791,7 @@ impl Store {
         alternative: Option<AltChoice>,
         a: Answer,
     ) -> Result<(Hash, Hash), StoreError> {
+        self.ensure_writable()?;
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
         let id = proposal_hash(&p);
         self.write_version_answered(&p, id, a)
@@ -793,6 +801,7 @@ impl Store {
     /// the first version's id and `prev` the version it follows, and moves `proposal/<stable>` to
     /// it. Returns the new version's id.
     pub fn propose_version(&mut self, prev: &Hash, add: &[Hash]) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let mut p = self.proposal(prev)?;
         p.changes.extend_from_slice(add);
         let (next, stable) = self.linked_next(prev, p)?;
@@ -812,6 +821,7 @@ impl Store {
         by: Provenance,
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let p = self.next_of(prev, changes, title, summary, by, alternative)?;
         let (next, stable) = self.linked_next(prev, p)?;
         self.write_version(&next, stable)
@@ -831,6 +841,7 @@ impl Store {
         alternative: Option<AltChoice>,
         a: Answer,
     ) -> Result<(Hash, Hash), StoreError> {
+        self.ensure_writable()?;
         let p = self.next_of(prev, changes, title, summary, by, alternative)?;
         let (next, stable) = self.linked_next(prev, p)?;
         self.write_version_answered(&next, stable, a)
@@ -1057,6 +1068,7 @@ impl Store {
     /// [`Store::bind_assessment`]: the version it assesses, like every object it names, must be
     /// held (`NotFound` otherwise). Returns its hash.
     pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let item = crate::codec::item_new(kinds::ASSESSMENT, a);
         let id = Hash::of(&item.1);
         self.check_carried::<Assessment>(&item, &[])?;
@@ -1124,6 +1136,7 @@ impl Store {
     /// failed write writes nothing.
     /// Returns what it wrote.
     pub fn commit_propose(&mut self, prepared: PreparedProposal) -> Result<Proposed, StoreError> {
+        self.ensure_writable()?;
         let PreparedProposal {
             items,
             version,
@@ -1273,6 +1286,7 @@ impl Store {
     /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change, no
     /// chosen alternative and no relay. Returns the landing id.
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         Ok(self
             .land_atomic(LandRequest {
                 proposal: *proposal,
@@ -1291,6 +1305,7 @@ impl Store {
     ///
     /// Writes `tag` and the ref `tag/<name>` → its hash in one atomic write.
     pub fn put_tag(&mut self, tag: &Tag) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let prepared = self.prepare_tag(tag, None)?;
         Ok(self.commit_tag(prepared, &[])?.0)
     }
@@ -1299,6 +1314,7 @@ impl Store {
     /// D-DGCH7): the tag and its ref, then `a` with `targets` set to the tag, and its ref. The
     /// tag is encoded as `put_tag` encodes it (D-F0904). Returns the tag's id and the answer's.
     pub fn put_tag_answered(&mut self, tag: &Tag, a: Answer) -> Result<(Hash, Hash), StoreError> {
+        self.ensure_writable()?;
         let prepared = self.prepare_tag(tag, Some(a))?;
         let (id, answer) = self.commit_tag(prepared, &[])?;
         Ok((id, answer.expect("an answered tag writes its answer")))
@@ -1336,6 +1352,7 @@ impl Store {
         prepared: PreparedTag,
         signatures: &[Signature],
     ) -> Result<(Hash, Option<Hash>), StoreError> {
+        self.ensure_writable()?;
         let PreparedTag {
             mut items,
             hash,

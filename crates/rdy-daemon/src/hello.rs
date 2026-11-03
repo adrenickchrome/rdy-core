@@ -3,7 +3,7 @@
 use crate::error::{E_BAD_INPUT, ErrorReply};
 use crate::layout::ProjectId;
 use crate::session::{Proto, SessionId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -16,12 +16,16 @@ pub const MAX_HELLO_BYTES: usize = 4096;
 /// How long a new connection has to send its hello.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `{"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}`. Unknown fields
-/// are ignored: later versions may add some.
+/// `{"rdy":1,"version":"…","build":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}`.
+/// Unknown fields are ignored: later versions may add some.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub rdy: u32,
     pub version: String,
+    /// The client's build id. A missing or wrong-typed value reads as empty: the daemon's build
+    /// step refuses it, after the version rule, so it is no general malformed hello.
+    #[serde(default, deserialize_with = "lenient_build")]
+    pub build: String,
     pub proto: Proto,
     pub cwd: PathBuf,
     /// The client's project: its `.rdy` identity (`RunDir::project_id`). A daemon refuses a
@@ -34,10 +38,45 @@ pub struct Hello {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum HelloReply {
-    Starting { progress: String },
-    Ready { version: String, session: SessionId },
-    Refused { error: ErrorReply },
-    Exiting { version: String },
+    Starting {
+        progress: String,
+    },
+    Ready {
+        version: String,
+        build: String,
+        session: SessionId,
+    },
+    Refused {
+        error: ErrorReply,
+    },
+    Exiting {
+        version: String,
+    },
+}
+
+/// Whether `build` is a build id: 16 lowercase hexadecimal digits.
+pub fn valid_build(build: &str) -> bool {
+    build.len() == 16
+        && build
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A hello's build: any value that is not a string reads as empty.
+fn lenient_build<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => s,
+        _ => String::new(),
+    })
+}
+
+/// The refusal of a hello whose build is missing, of the wrong type or malformed.
+pub(crate) fn bad_build() -> ErrorReply {
+    ErrorReply::new(
+        E_BAD_INPUT,
+        "the hello build must be 16 lowercase hexadecimal digits",
+        "send the build id from this rdy binary",
+    )
 }
 
 const SEND_HELLO_FIRST: &str = "send the hello line first";
@@ -45,7 +84,7 @@ const SEND_HELLO_FIRST: &str = "send the hello line first";
 fn not_a_hello() -> ErrorReply {
     ErrorReply::new(
         E_BAD_INPUT,
-        r#"the first line must be a hello: {"rdy":1,"version":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}"#,
+        r#"the first line must be a hello: {"rdy":1,"version":"…","build":"…","proto":"ctl"|"mcp","cwd":"…","project":"dev:ino"}"#,
         SEND_HELLO_FIRST,
     )
 }
