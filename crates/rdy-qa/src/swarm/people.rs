@@ -416,7 +416,7 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
     let mut refused: Option<Res> = None;
     for again in [false, true] {
         let card = match m3::show_card(link, pref) {
-            m3::Shown::Card(c) => Some(c),
+            m3::Shown::Card(c) => c,
             m3::Shown::Absent { waits } => {
                 if let Some(res) = refused {
                     return Relayed::Answered(res);
@@ -430,7 +430,6 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
             }
             m3::Shown::Lost => return Relayed::Lost,
         };
-        let card = card.expect("a card");
         let Some(option) = m3::choose(&card, "approve") else {
             link.fail(
                 "land",

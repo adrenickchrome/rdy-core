@@ -223,8 +223,8 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     })
 }
 
-/// After a landing (`reply`, the landing act's reply, read by `landing_fields`): the relay reads canon's blocking tensions
-/// again, and each one the landing put into canon is a violation. A read the kill cuts is made
+/// After a landing (`reply`, the landing act's reply, read by `landing_fields`): the relay reads
+/// canon's blocking tensions again, and each one the landing put into canon is a violation. A read the kill cuts is made
 /// again on the restarted daemon: whoever lands (the person, or an agent under the policy) holds
 /// the landing turn, so canon has not moved. A second loss fails the run (the check is never left out).
 pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: &Value) {
