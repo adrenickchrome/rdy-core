@@ -699,6 +699,15 @@ class SecretAllowlists(unittest.TestCase):
                     self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/src/hub.rs', value, line))
                     self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/tests/other.rs', value, line))
 
+    def test_contract_domain_label_is_allowlisted_in_its_file_only(self):
+        path = 'crates/rdy-qa/tests/release/release_contract.rs'
+        value = 'rdy-tension-vkey-2'
+        line = next(line for line in (ROOT / path).read_text().splitlines() if value in line)
+        self.assertTrue(allowlisted(self.config, path, value, line))
+        self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/src/tensions.rs', value, line))
+        self.assertFalse(allowlisted(self.config, path, value + 'x', line))
+        self.assertFalse(allowlisted(self.config, path, REALISTIC_B64, line))
+
     def test_a_secret_beside_a_fingerprint_comment_is_not_allowlisted(self):
         fingerprint = re.search(r'key SHA256:([A-Za-z0-9+/]{43})',
                                 (ROOT / FINGERPRINT_FILES[0]).read_text()).group(0)

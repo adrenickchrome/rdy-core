@@ -35,3 +35,14 @@ targetRules = ["generic-api-key"]
 regexes = [
   '''^(?:0123456789abcdef(?:0123)?|abcdef0123456789)$''',
 ]
+
+[[allowlists]]
+description = "The tension vkey domain label pinned by the release contract test. A fixed public label, not a key. Both the file and the exact value must match."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(?:^|/)crates/rdy-qa/tests/release/release_contract\.rs$''',
+]
+regexes = [
+  '''^rdy-tension-vkey-2$''',
+]

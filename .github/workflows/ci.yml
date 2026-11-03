@@ -58,7 +58,7 @@ jobs:
     # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only:
     # it never blocks a merge. The summary goes to the run page; the HTML report is an artifact.
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     continue-on-error: true
     permissions:
       contents: read
