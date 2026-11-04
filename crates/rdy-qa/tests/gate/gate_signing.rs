@@ -1761,20 +1761,27 @@ fn sig8_recommended_answers_preserve_order_and_removal_prescan() {
 
 /// A proposal made after a removal request writes an assessment that names the removed block: a
 /// new carrier, so the request's report changes and the request is stale (D-6B1W1; ruling
-/// task-10 Amendment 1, item 1).
+/// task-10 Amendment 1, item 1). The stale request refuses only its own card: the queue stays
+/// readable, with the new proposal's card (TASK-1233, p-3FBMK).
 #[test]
 fn rg10_a_proposal_after_the_request_makes_the_request_stale() {
-    let (p, _, _) = removal_project();
-    let _ = p.proposal();
-    let e =
+    let (p, removal, _) = removal_project();
+    let (_, other) = p.proposal();
+    let q =
         p.e.read()
             .pending(&PendingQuery {
                 person: PERSON.into(),
                 session_ref: None,
                 max_tokens: CARD_MAX_TOKENS,
             })
-            .unwrap_err();
-    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
+            .unwrap();
+    let card = q.items.iter().find(|i| i.r#ref == other).unwrap();
+    assert_eq!(card.card_hash.len(), 64, "{card:?}");
+    let stale = q.items.iter().find(|i| i.removal.is_some()).unwrap();
+    assert_eq!(stale.card_hash, "", "{stale:?}");
+    let shown = p.e.read().proposal_show(&removal).unwrap();
+    let e = shown.removal_card_error.expect("the removal card refuses");
+    assert_eq!(e.code, E_REDACTION_STALE, "{e:?}");
 }
 
 #[test]
