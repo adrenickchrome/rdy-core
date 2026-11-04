@@ -475,6 +475,203 @@ pub(crate) fn relay_land(link: &mut Link, e: Entry, pref: &str) -> Relayed {
     unreachable!("the second answer returns")
 }
 
+/// The act of each queue item the person works down before a scripted M3 card that is past the
+/// queue's cap (deep-drain ruling, finding 2). Each entry names the item (`block`); its reply
+/// names the card it was worked down for (`for`), the route's act and what the approval met.
+pub const WORK_DOWN: &str = "m3_work_down";
+/// The most items a work-down may answer beyond the overflow its first queue read counted.
+pub const WORK_DOWN_MARGIN: usize = 8;
+
+/// The person's relayed approval of the queued version `pref` through the usual route, as
+/// `Person::land` makes it: the reads before the landing, the deferral card first, the card read
+/// and the answer (`relay_land`), then the audit of a landing. What it met, in words for the
+/// journal; `None` when the daemon died under a read.
+fn approve_relayed(link: &mut Link, watch: Option<&Watch>, pref: &str) -> Option<String> {
+    let mut e = Entry::new(RELAY_ACTOR, link.step, "land", Outcome::Ok);
+    e.epoch = link.epoch;
+    e.block = Some(pref.to_string());
+    let before = run::before_land(link, pref)?;
+    e.view = Some(before.view.clone());
+    e.base.clone_from(&before.base);
+    if !accept_deferrals(link, RELAY_ACTOR, pref, true) {
+        return None;
+    }
+    let met = match relay_land(link, e, pref) {
+        Relayed::Answered(Res::Ok(v)) => {
+            if let Some(w) = watch {
+                run::after_land(link, w, before, &v);
+            }
+            "landed".to_string()
+        }
+        Relayed::Answered(Res::Lost) => {
+            let landed = found_in(link, watch, pref, before, false);
+            format!("cut; landed: {landed}")
+        }
+        Relayed::Answered(Res::Refused(code, _)) if code == "E_ALREADY_LANDED" => {
+            found_in(link, watch, pref, before, true);
+            code
+        }
+        Relayed::Answered(Res::Refused(code, _)) => code,
+        Relayed::Absent { waits } => format!("no card (past the cap: {waits})"),
+        Relayed::Lost => return None,
+    };
+    Some(met)
+}
+
+/// The person's dismissal of the blocking tension of queue item `item` (its label, `tn-…`),
+/// through the route of `Person::dismiss`: the relay lists the blocking tensions that involve the
+/// item's first block and dismisses the tension, with a reason in the person's words, when it has
+/// a change side of a writer agent (D-DAFWP: the relay wrote none of its sides). What it met, in
+/// words for the journal; `None` when the daemon died under a call.
+fn dismiss_relayed(link: &mut Link, item: &Value) -> Option<String> {
+    let label = item["ref"].as_str().unwrap_or_default().to_string();
+    let block = item["facts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|f| f["name"] == "Blocks")
+        .and_then(|f| f["value"].as_str())
+        .and_then(|v| v.split(", ").next())
+        .map(str::to_string);
+    let mut args = json!({"severity": "blocking", "max_tokens": 100_000});
+    if let Some(b) = &block {
+        args["involving"] = json!(b);
+    }
+    let e = Entry::new(RELAY_ACTOR, link.step, "tensions", Outcome::Ok);
+    let mut e = e;
+    e.epoch = link.epoch;
+    let res = link.exec(e, "tensions", "rdy_tensions", args, |en, v| {
+        en.seen = labels_of(&v["tensions"]);
+    });
+    let Res::Ok(v) = res else { return None };
+    if v.get("omitted").is_some() {
+        link.fail("dismiss", "got a reply cut for its budget");
+    }
+    let by_writer = v["tensions"].as_array().into_iter().flatten().any(|t| {
+        t["id"] == label.as_str()
+            && t["sides"].as_array().into_iter().flatten().any(|s| {
+                s["change"].is_string()
+                    && s["actor"]
+                        .as_str()
+                        .is_some_and(|a| a.starts_with("agent:a"))
+            })
+    });
+    if !by_writer {
+        return Some("not dismissed: no change side of a writer agent".to_string());
+    }
+    let mut e = Entry::new(RELAY_ACTOR, link.step, "dismiss", Outcome::Ok);
+    e.epoch = link.epoch;
+    e.block = Some(label.clone());
+    let reason = format!("work-down dismissal {}", link.step);
+    let res = link.exec(
+        e,
+        "dismiss",
+        "rdy_resolve",
+        json!({"tension": label, "dismiss": {"reason": reason}}),
+        |_, _| {},
+    );
+    match res {
+        Res::Ok(_) => Some("dismissed".to_string()),
+        Res::Refused(code, _) => Some(code),
+        Res::Lost => None,
+    }
+}
+
+/// Before a scripted M3 card route whose card of `pref` is past the queue's cap (deep-drain
+/// ruling, finding 2): the person works down the oldest items of the queue, one at a time and
+/// each through the usual person route, until the queue lists `pref`: a blocking tension's
+/// `resolve` item (they come first) is dismissed as `Person::dismiss` dismisses
+/// (`dismiss_relayed`), and a batch's `approve` item is approved by the relay
+/// (`approve_relayed`). Other items are left as they are.
+/// The caller holds the landing turn. Each item is tried once and journaled as a [`WORK_DOWN`]
+/// entry; the work-down is bounded by the overflow of its first read plus [`WORK_DOWN_MARGIN`].
+/// The cap and the queue's ranking stay as they are. A card that still does not fit within the
+/// bound, or a queue with no older approval left to try, fails the run with `act`'s name. The
+/// number of items worked down.
+pub(crate) fn work_down(link: &mut Link, watch: Option<&Watch>, pref: &str, act: &str) -> usize {
+    let mut tried: Vec<String> = vec![];
+    let mut bound = None;
+    loop {
+        let mut e = link.entry("pending");
+        e.block = Some(pref.to_string());
+        e.reply = Some(json!({"via": "rdy_pending", "work_down_for": pref}));
+        let mut queue = None;
+        let args =
+            json!({"session_ref": RELAY_RUN, "max_tokens": rdy_engine::pending::CARD_MAX_TOKENS});
+        let res = link.exec(e, "pending", "rdy_pending", args, |_, v| {
+            queue = Some(v.clone());
+        });
+        let Some(q) = queue else {
+            // the daemon died under the read: the caller's next read tells
+            let _ = res;
+            return tried.len();
+        };
+        let items = q["items"].as_array().cloned().unwrap_or_default();
+        let omitted = q["omitted"].as_u64().unwrap_or(0) as usize;
+        if omitted == 0 || items.iter().any(|i| i["ref"] == pref) {
+            return tried.len();
+        }
+        let bound = *bound.get_or_insert(omitted + WORK_DOWN_MARGIN);
+        if tried.len() >= bound {
+            link.fail(
+                act,
+                &format!(
+                    "the card of {pref} is still past the queue's cap after the person worked \
+                     down {} items (bound {bound}): {tried:?}",
+                    tried.len()
+                ),
+            );
+        }
+        let next = items
+            .iter()
+            .filter(|i| {
+                let r = i["ref"].as_str().unwrap_or_default();
+                let approve = i["kind"] == "approve" && r.starts_with("P-");
+                let blocking =
+                    i["kind"] == "resolve" && i["blocking"] == true && r.starts_with("tn-");
+                (approve || blocking) && !tried.iter().any(|t| t == r)
+            })
+            .cloned()
+            .next();
+        let Some(next) = next else {
+            let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+            for i in &items {
+                *kinds
+                    .entry(i["kind"].as_str().unwrap_or("?").to_string())
+                    .or_default() += 1;
+            }
+            let head: Vec<String> = items
+                .iter()
+                .take(6)
+                .map(|i| format!("{} {}", i["kind"], i["ref"]))
+                .collect();
+            link.fail(
+                act,
+                &format!(
+                    "the card of {pref} is past the queue's cap and no older approval or blocking \
+                     tension is left to work down (tried {tried:?}; the listed kinds {kinds:?}, {omitted} omitted; \
+                     first {head:?})"
+                ),
+            );
+        };
+        let next_ref = next["ref"].as_str().unwrap_or_default().to_string();
+        tried.push(next_ref.clone());
+        let met = if next["kind"] == "approve" {
+            approve_relayed(link, watch, &next_ref)
+        } else {
+            dismiss_relayed(link, &next)
+        };
+        let mut w = Entry::new(&link.actor, link.step, WORK_DOWN, Outcome::Ok);
+        w.epoch = link.epoch;
+        w.reply = Some(json!({"for": pref, "act": act, "met": met}));
+        w.block = Some(next_ref);
+        link.journal.record(w);
+        if met.is_none() {
+            return tried.len();
+        }
+    }
+}
+
 /// Entry `e`, holding the whole tool error as its `reply` when `res` is a refusal: the journal
 /// keeps the raw tool reply, a refusal's issues too (ruling task-8, finding 2).
 fn with_refusal(link: &mut Link, mut e: Entry, res: &Res) -> Entry {
