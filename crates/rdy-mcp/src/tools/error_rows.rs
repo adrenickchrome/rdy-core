@@ -507,6 +507,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "take the landed side of a conflict (rdy view resolve <view> <id> --landed; rdy_view {op: \"resolve\", block, landed: true}), or write a new decision that supersedes or revokes it. For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.",
     ),
     (
+        W_AS_BUILT_OVERRIDE,
+        "a content block's own planned or since, or planned: true on its nearest section or doc, differs from the planned or since status its decided_by and implements decisions derive",
+        "follow the warning's own fix",
+    ),
+    (
         E_HELD_BY_READER,
         "the project store is still open in this process through a read state of an earlier open",
         HELD_BY_READER_FIX,
@@ -519,11 +524,6 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         W_PUBLICATION_REFERENCE,
         "an org profile has references outside its selection, or a live public profile has blocked references",
-        "follow the warning's own fix",
-    ),
-    (
-        W_AS_BUILT_OVERRIDE,
-        "a content block's own planned or since, or planned: true on its nearest section or doc, differs from the planned or since status its decided_by and implements decisions derive",
         "follow the warning's own fix",
     ),
 ];
