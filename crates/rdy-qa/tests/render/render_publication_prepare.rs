@@ -275,6 +275,10 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// version (`proposal:<id>`), and the id hashes `canon_at`, canon's head, whose landing records
 /// now seal the review project's neighbor items; the site bytes of the same scope, which carry
 /// no id, kept their digests.
+/// Re-taken for the as-built plan's Task 1 (FW-AB1): a new decision records `built: planned`, so
+/// the review project's decision record, canon's head and the version's hash move; only the
+/// proposal scope's `proposal:<id>` text changed. Its site bytes, and every other scope, kept
+/// their digests.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -309,11 +313,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "a89716dfc4a25792a0e34517b515d9a6562b5ae9f4704c50a1e5babaaf7bac9d",
-            "a7bcc13704d0fa1c8b8bb6b2333839d7b357fe8cdb1158ad64847d9b49609a27",
-            "e6dc9056af666e5c8b93858b2d974bd336e7925d88aa8a35c7f3947c7f12e2cf",
-            "300ad1f829f4da3e602ce2c1f537fde3515a3f04751c440517af159538295dca",
-            "8c7acef8c44754da015df6cb66163fe8ed0b1cf40fd17b612d6d69e88b47e5b4",
+            "21a0e7a1b47210a6c35803d31cb7b133130632f5691411eab8eeb517373c7717",
+            "24bcf22d078203d5aa9a35c16eb934481f9cc86bf5ff225ae5065517e1ce77d7",
+            "ec9c15d14f9417037d8b6d1217bb980c82a3cf1041d024f72106e2d4c0c5a0e0",
+            "e18f873cbfeee89327a44d550e46ce21f0cb8142541c0ad83eff7712739b8a34",
+            "66eabd5504d54b7457ba5885a2d2b590da2efa22e71f26de85d9f8861435e58c",
         ],
     ),
 ];
