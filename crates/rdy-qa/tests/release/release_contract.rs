@@ -4766,6 +4766,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// neighbor row carries `values` (`[]` for a created or deleted cause), so the neighbor rows'
 /// member is not optional, and the probes' neighbor causes state no literal, so it is empty;
 /// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
+/// ab1 (FW-AB1): `rdy_schema` lists the content fields `planned` (bool) and `since` (str), which
+/// have no enum values, so their `values` are empty.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4912,6 +4914,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_revoke/ok/suggestions",
     "mcp/rdy_schema/ok/checks?/agent[]/stages",
     "mcp/rdy_schema/ok/children?",
+    "mcp/rdy_schema/ok/fields?/planned/values",
+    "mcp/rdy_schema/ok/fields?/since/values",
     "mcp/rdy_supersede/ok/consequences",
     "mcp/rdy_supersede/ok/on_change/checks",
     "mcp/rdy_supersede/ok/on_change/resolved",
