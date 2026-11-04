@@ -624,15 +624,14 @@ pub(crate) fn work_down(link: &mut Link, watch: Option<&Watch>, pref: &str, act:
         }
         let next = items
             .iter()
-            .filter(|i| {
+            .find(|i| {
                 let r = i["ref"].as_str().unwrap_or_default();
                 let approve = i["kind"] == "approve" && r.starts_with("P-");
                 let blocking =
                     i["kind"] == "resolve" && i["blocking"] == true && r.starts_with("tn-");
                 (approve || blocking) && !tried.iter().any(|t| t == r)
             })
-            .cloned()
-            .next();
+            .cloned();
         let Some(next) = next else {
             let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
             for i in &items {
