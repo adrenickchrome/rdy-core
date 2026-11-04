@@ -58,6 +58,7 @@ pub mod import_api;
 mod import_facts;
 pub mod inbox;
 pub mod inflight;
+pub mod instructions_config;
 pub mod intent;
 mod io;
 mod keys;

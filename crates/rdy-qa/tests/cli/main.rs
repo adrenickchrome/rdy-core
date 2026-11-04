@@ -22,6 +22,7 @@ mod cli_hub_auth;
 mod cli_hub_config;
 mod cli_hub_keys;
 mod cli_inbox;
+mod cli_instruction_config;
 mod cli_intake;
 mod cli_intents;
 mod cli_keys;

@@ -231,6 +231,7 @@ fn choice_list(choices: &[&str]) -> String {
 const PROJECT_ONLY: &[Level] = &[Level::Project];
 const ANY: &[Level] = &[Level::Local, Level::Project, Level::User];
 const PERSON: &[Level] = &[Level::Local, Level::User];
+const USER_ONLY: &[Level] = &[Level::User];
 
 /// Every key the levels know, in the order `rdy config` lists them (R-P6).
 pub const KEY_LEVELS: &[KeyRule] = &[
@@ -406,6 +407,13 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::Any,
         default: None,
     },
+    // where the person's instructions live (AIN): an absolute path, used as written
+    KeyRule {
+        key: crate::instructions_config::PERSON_KEY,
+        levels: USER_ONLY,
+        ty: Ty::Any,
+        default: None,
+    },
 ];
 
 /// The static site's base path (D-94BT2), by its dotted key.
@@ -554,13 +562,11 @@ fn remove_path(map: &mut Mapping, path: &str) {
 }
 
 /// The user config of the environment: `$XDG_CONFIG_HOME/rdy/config.yaml`, else
-/// `$HOME/.config/rdy/config.yaml`.
+/// `$HOME/.config/rdy/config.yaml`; on Windows `%APPDATA%` replaces the home rule (D-FPKPS).
 pub fn user_file_from_env() -> Option<PathBuf> {
-    let xdg = std::env::var_os("XDG_CONFIG_HOME");
-    let home = std::env::var_os("HOME");
-    user_file_of(
-        xdg.as_deref().map(Path::new),
-        home.as_deref().map(Path::new),
+    crate::instructions_config::user_config_path(
+        crate::instructions_config::Platform::HOST,
+        &crate::instructions_config::PathEnv::from_process(),
     )
 }
 
@@ -1158,6 +1164,31 @@ fn user_path_warnings(map: &mut Mapping, user_file: Option<&Path>) -> Vec<Issue>
     )]
 }
 
+/// The warning for a user-config `instructions.person` that is not an absolute path (relative,
+/// blank, `~` or not text): rdy ignores it and the default place applies. The value is removed
+/// from `map`, so no origin row names it. The path is used as written: no tilde or environment
+/// variable is expanded.
+fn person_warnings(map: &mut Mapping, user_file: Option<&Path>) -> Vec<Issue> {
+    let key = crate::instructions_config::PERSON_KEY;
+    let bad = get_path(map, key).is_some_and(|v| !crate::instructions_config::usable_person(v));
+    if !bad {
+        return Vec::new();
+    }
+    remove_path(map, key);
+    let file = file_name(Level::User, user_file);
+    vec![config_warning(
+        format!("{key} in {file} must be an absolute path; rdy ignores it"),
+        format!("set {key} to an absolute project path in {file}"),
+    )]
+}
+
+/// The settings of the user config at `user_file` alone, for a read that runs before any project
+/// exists. It reads no project or local file. File refusals (`E_CONFIG`, `E_LIMIT`, `E_IO`) and
+/// the type check of the selected actor stay as `inspect` has them; key mistakes warn.
+pub fn user_only(user_file: Option<&Path>) -> Result<Effective, RdyError> {
+    build(None, user_file, Read::Inspect, None)
+}
+
 /// The warning for a winning `signing.agent_key` that names the same key as the winning
 /// `signing.key`, from the merged settings. The agent value is removed from `merged`, so no lower
 /// level answers instead; its origin stays for `--show-origin`. The selectors are compared by
@@ -1315,6 +1346,7 @@ fn build(
         warnings.extend(range_warnings(map));
         if *level == Level::User {
             warnings.extend(user_path_warnings(map, user_file));
+            warnings.extend(person_warnings(map, user_file));
         }
     }
     let mut merged = files
