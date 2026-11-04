@@ -5224,8 +5224,8 @@ fn mh7_new_surfaces_preserve_the_release_contract() {
         .collect();
     assert_eq!(
         top.len(),
-        COMMANDS_BEFORE_CK9.len() + 2,
-        "review and compact"
+        COMMANDS_BEFORE_CK9.len() + 4,
+        "review, compact, and ain5's instructions and setup"
     );
     for kept in COMMANDS_BEFORE_CK9 {
         assert!(top.contains(&kept), "{kept}");
