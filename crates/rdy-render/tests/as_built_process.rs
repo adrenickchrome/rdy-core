@@ -339,9 +339,7 @@ fn ab5_captured_stream_and_direct_artifacts_match() {
             assert!(a.files.values().any(|f| *f == p.figure), "{what}");
             assert_eq!(text.contains(HIDDEN), !hides, "{what}");
             // hidden source ids never reach an artifact; a marked block shows `Planned`
-            for ph in ["$dp"] {
-                assert!(!text.contains(&p.id(ph)), "{what}: {ph}");
-            }
+            assert!(!text.contains(&p.id("$dp")), "{what}: the decision");
             // the reference doc shows the since label unless the profile turns it off
             assert_eq!(
                 text.contains("since 1.2.0"),
