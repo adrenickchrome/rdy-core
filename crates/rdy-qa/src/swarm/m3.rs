@@ -43,6 +43,7 @@
 //!   are taken in the landing turn; the real compact runs while the agents work.
 use super::agent::{AgentReport, Link, Res, answer_plan, answer_plan_held, scratch_editorial};
 use super::journal::{Entry, Outcome, RouteAttempt, RouteCounts, Via};
+use super::oracle::copy_tree;
 use super::people::{self, accept_deferrals, landing_fields};
 use super::project::{SeedBlocks, run_parent};
 use super::run::{self, Before, Watch};
@@ -50,6 +51,7 @@ use super::script::{Route, Scenario};
 use crate::mcp::{DEADLINE, McpClient, PersonAct, Reply, Revision};
 use crate::publication_scenario::{scan_local_links, tree};
 use rdy_engine::pending::CARD_MAX_TOKENS;
+use rdy_store::layout::STORE_DIR;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -978,6 +980,13 @@ impl Ctx<'_> {
             // the removal window: no other act runs from the request to its landing (TASK-1233)
             let _landing = gate.landing_turn();
             let _plan = gate.plan_turn();
+            // one copy of the project's log before the request, kept for the oracle: the drained
+            // log holds the removed payloads zeroed, so a landing before the removal is audited
+            // on the log cut before it with these payloads (the window keeps every landing out
+            // of the copy's tail)
+            if self.report.pre_removal.is_none() {
+                self.report.pre_removal = Some(self.pre_removal_copy());
+            }
             // the person asks for the note's removal; the agent records the request
             let args = json!({"targets": [claim], "reason_class": "retraction",
                 "reason": "The person asks to remove this note.", "view": view});
@@ -1028,6 +1037,35 @@ impl Ctx<'_> {
             // the snapshot after
             self.snapshot();
         }
+    }
+
+    /// A copy of the project's log (its store's `segments`, the only part a cut reads; the rest
+    /// changes under the live daemon) in a directory of its own under the process's run
+    /// directory, kept for the oracle (two runs of one seed in one process never share it).
+    fn pre_removal_copy(&self) -> PathBuf {
+        let made = tempfile::Builder::new()
+            .prefix(&format!("m3pre-s{}-{}-", self.link.at.seed, self.me()))
+            .tempdir_in(run_parent())
+            .map(tempfile::TempDir::keep);
+        let to = made
+            .map(|d| d.join("segments"))
+            .map_err(|e| e.to_string())
+            .and_then(|to| {
+                let log = self
+                    .link
+                    .at
+                    .dir
+                    .join(".rdy")
+                    .join(STORE_DIR)
+                    .join("segments");
+                copy_tree(&log, &to).map(|()| to).map_err(|e| e.to_string())
+            });
+        to.unwrap_or_else(|e| {
+            self.link.fail(
+                "m3_blob_remove",
+                &format!("cannot copy the project before the removal: {e}"),
+            )
+        })
     }
 
     /// `rdy_compact {dry_run: true}` in the landing turn: a snapshot of what compaction counts.

@@ -5635,15 +5635,74 @@ fn cut_log(project: &std::path::Path, cut: Location) {
     }
 }
 
+/// Writes back into the cut project `project` the payload of every frame before `cut` that a
+/// removal whose apply the cut leaves out zeroed (`LogAt::zeroed`), from `kept`: the copy of the
+/// log the real compact took before its removal request (`Outcome::pre_removal`). A frame never
+/// moves and its header stays (D-4YRQ4), so each payload goes back at its own place; the
+/// project's log is then, byte for byte, the log as it was just before `cut`. The count of
+/// frames restored.
+fn restore_removed(
+    project: &std::path::Path,
+    kept: &std::path::Path,
+    log: &LogAt,
+    cut: Location,
+) -> usize {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let segments = project
+        .join(".rdy")
+        .join(rdy_store::layout::STORE_DIR)
+        .join("segments");
+    // a frame header: length, kind and hash (the store's `segment::HEADER`)
+    let header: u64 = 4 + 1 + 32;
+    let mut n = 0;
+    for (loc, _) in log
+        .zeroed
+        .iter()
+        .filter(|(l, apply)| *l < cut && !apply.is_some_and(|a| a < cut))
+    {
+        let at = rdy_store::segment::seg_path(&segments, loc.segment);
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&at)
+            .expect("open a cut segment");
+        let mut len = [0u8; 4];
+        f.seek(SeekFrom::Start(loc.offset))
+            .and_then(|_| f.read_exact(&mut len))
+            .expect("read a removed frame's header");
+        let mut payload = vec![0u8; u32::from_le_bytes(len) as usize];
+        let mut k = std::fs::File::open(rdy_store::segment::seg_path(kept, loc.segment))
+            .expect("open a kept segment");
+        k.seek(SeekFrom::Start(loc.offset + header))
+            .and_then(|_| k.read_exact(&mut payload))
+            .expect("read a removed payload from the kept log");
+        assert!(
+            payload.iter().any(|b| *b != 0),
+            "the kept log holds the frame at {loc:?} zeroed: it was copied after the removal"
+        );
+        f.seek(SeekFrom::Start(loc.offset + header))
+            .and_then(|_| f.write_all(&payload))
+            .expect("restore a removed payload");
+        n += 1;
+    }
+    n
+}
+
 /// What `prefix_audits` found for one seed.
 #[derive(Default)]
 struct PrefixAudit {
+    /// The drained project's landings after the seed: every one is to be audited.
+    landings: usize,
     /// Landings audited on the state their log held just before them.
     audited: usize,
     /// Of those, the landings whose facts rebuilt from the log alone (`rebuilt_temporal`) equal
     /// Task 1's `TemporalFacts::read` on the held state.
     matched: usize,
-    /// Landings whose log prefix holds a frame a later removal zeroed (it cannot be opened).
+    /// Landings whose log prefix holds a frame a later removal zeroed, audited on the cut log
+    /// with those payloads written back from the kept copy (`restore_removed`).
+    restored: usize,
+    /// Landings whose log prefix holds a frame a later removal zeroed and that no kept copy
+    /// restores (it cannot be opened).
     unreadable: Vec<String>,
     /// The landing tensions (`landing_tensions` of the approved version's changes) the blocking
     /// rule read on those states.
@@ -5654,16 +5713,19 @@ struct PrefixAudit {
 /// Task 1's whole audit, `audit_m3`, of each landing of the drained project `dir` after the
 /// seed, on a held `before`: the project with its log cut at the first frame of the landing's
 /// batch (`cut_log`), which is the state the gate read, since a landing is one batch. `after` is
-/// the drained project. So the temporal rules read canon, the assessments, the answers and the
+/// the drained project. A cut that keeps a frame a later removal zeroed gets that frame's payload
+/// back from `kept`, the log the real compact copied before its removal request
+/// (`restore_removed`). So the temporal rules read canon, the assessments, the answers and the
 /// tension records of the landing's own time, and the landing audit applies its three rules:
 /// `blocking_landed` (every landing tension open and blocking with every side in canon or the
 /// landing), `conflict_landed` on the view's effective base then, and `alt_unchosen`. The cut
 /// state's canon must be the ref history's head there (`LogAt::head_before`) and must not hold
-/// the landing. The landings are cut latest first, on one copy. A cut that keeps a frame a later
-/// removal zeroed is not readable (the frame is an unauthorized hole there,
+/// the landing. The landings are cut latest first, on one copy. Without `kept`, a cut that keeps
+/// a frame a later removal zeroed is not readable (the frame is an unauthorized hole there,
 /// `LogAt::prefix_readable`); such a landing is listed in `unreadable`.
 fn prefix_audits(
     dir: &std::path::Path,
+    kept: Option<&std::path::Path>,
     seed_landings: &[String],
     journal: &[Entry],
 ) -> PrefixAudit {
@@ -5680,16 +5742,26 @@ fn prefix_audits(
         if seed_landings.contains(&id) {
             continue;
         }
+        out.landings += 1;
         let Some(start) = log.batch_start(*at) else {
             out.bad
                 .push(format!("landing {}: no batch holds it", h.short()));
             continue;
         };
-        if !log.prefix_readable(start) {
-            out.unreadable.push(h.short());
-            continue;
-        }
         cut_log(&cut, start);
+        if !log.prefix_readable(start) {
+            let Some(kept) = kept else {
+                out.unreadable.push(h.short());
+                continue;
+            };
+            if restore_removed(&cut, kept, &log, start) == 0 {
+                out.bad.push(format!(
+                    "landing {}: its cut is not readable and restores no payload",
+                    h.short()
+                ));
+            }
+            out.restored += 1;
+        }
         let before = match Rdy::open(&cut) {
             Ok(b) => b,
             Err(e) => {
@@ -5794,9 +5866,10 @@ fn journaled_bases(journal: &[Entry]) -> BTreeMap<Hash, Option<Hash>> {
 /// - Task 1's whole audit, `audit_m3`, on a held before state: the log cut just before the
 ///   landing's batch (`prefix_audits`). This applies the landing audit's complete blocking rule,
 ///   its conflict rule and its alternative rule to the state the gate read. There, the facts
-///   rebuilt from the log alone must equal `TemporalFacts::read` on the held state. A landing
-///   before the run's removal has no such state: the cut keeps a frame the removal zeroed later,
-///   an unauthorized hole there. Those landings are listed;
+///   rebuilt from the log alone must equal `TemporalFacts::read` on the held state. For a
+///   landing before the run's removal the cut keeps a frame the removal zeroed later; its payload
+///   comes back from the log the real compact copied before its removal request
+///   (`Outcome::pre_removal`). Every drained landing after the seed is audited so;
 /// - for every landing, the conflict rule on the base its view read just before it
 ///   (`journaled_bases`), the alternative rule on the choices of the landings before it, and the
 ///   run's own check of canon's blocking tensions just before and just after it (`run::after_land`,
@@ -5958,15 +6031,22 @@ fn mg10_every_landing_passes_the_m3_audit() {
                 "RDY_QA_SWARM_SEEDS={seed}: the M3 audit on {what}: {bad:#?}"
             );
         }
-        let held = prefix_audits(&o.dir, &o.seed_landings, &o.journal);
+        let held = prefix_audits(
+            &o.dir,
+            o.pre_removal.as_deref(),
+            &o.seed_landings,
+            &o.journal,
+        );
         assert!(
             held.bad.is_empty(),
             "RDY_QA_SWARM_SEEDS={seed}: Task 1's audit on the log before each landing: {:#?}",
             held.bad
         );
         eprintln!(
-            "swarm seed {seed}: {audited} landings audited, {carded} with a journaled card, {snapshots} snapshot negatives, {skips} skipped-prev negatives, {replaced} answers replaced by a later answer; audit_m3 on the log before the landing: {} landings, {} with equal rebuilt facts, {} landing tensions read, {} before the removal (not readable: {:?})",
+            "swarm seed {seed}: {audited} landings audited, {carded} with a journaled card, {snapshots} snapshot negatives, {skips} skipped-prev negatives, {replaced} answers replaced by a later answer; audit_m3 on the log before the landing: {} of {} drained landings ({} before the removal, on the kept log), {} with equal rebuilt facts, {} landing tensions read, {} not readable: {:?}",
             held.audited,
+            held.landings,
+            held.restored,
             held.matched,
             held.tensions,
             held.unreadable.len(),
@@ -5976,6 +6056,12 @@ fn mg10_every_landing_passes_the_m3_audit() {
         assert!(
             snapshots > 0,
             "swarm seed {seed}: no landing's later facts failed m3_snapshot"
+        );
+        // complete coverage: every landing after the seed, the ones before the removal included
+        assert_eq!(
+            held.audited, held.landings,
+            "swarm seed {seed}: {} of {} drained landings audited on the log before them (not readable: {:?})",
+            held.audited, held.landings, held.unreadable
         );
         assert!(
             held.audited > 0,

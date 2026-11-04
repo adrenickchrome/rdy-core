@@ -114,6 +114,11 @@ pub struct Outcome {
     pub queued: Vec<String>,
     /// The directories the M3 publication scenarios wrote their outputs to (G3), for the oracle.
     pub m3_outputs: Vec<PathBuf>,
+    /// The copy of the project's log (its segments) the real compact took in its removal window,
+    /// before the removal request, kept for the oracle: it holds the payloads the removal zeroed,
+    /// so a landing before the removal is audited on the log cut before it with those payloads.
+    /// `None` when the run made no removal request.
+    pub pre_removal: Option<PathBuf>,
     /// Holds `frozen`.
     _frozen_dir: tempfile::TempDir,
 }
@@ -654,6 +659,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal, m3: M3Hooks) -> Outcome 
         })
         .collect();
     let m3_outputs = reports.iter().flat_map(|r| r.m3_outputs.clone()).collect();
+    let pre_removal = reports.iter().find_map(|r| r.pre_removal.clone());
     let violations = watch.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let SwarmProject {
         served,
@@ -672,6 +678,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal, m3: M3Hooks) -> Outcome 
         violations,
         queued,
         m3_outputs,
+        pre_removal,
         _frozen_dir: frozen_dir,
     }
 }

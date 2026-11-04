@@ -229,6 +229,9 @@ pub struct AgentReport {
     pub range: u32,
     /// The directories the M3 publication scenario wrote its outputs to (`m3`), for the oracle.
     pub m3_outputs: Vec<PathBuf>,
+    /// The copy of the project's log (its segments) the real compact took in its removal window,
+    /// before the removal request (`m3`): it holds the payloads the removal zeroed.
+    pub pre_removal: Option<PathBuf>,
 }
 
 /// What a call met.
