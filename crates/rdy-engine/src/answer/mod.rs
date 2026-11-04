@@ -839,9 +839,16 @@ pub(crate) fn next_of(st: &ReadState, person: &str, by: &Answerer) -> Option<Str
     next_in(st, person, session_ref_of(by))
 }
 
-/// The chat session of `by`'s relay, if any.
+/// The chat session of `by`: its relay's `session_ref`, or for a local elicited answer the
+/// caller's run (the session a local elicited Later snoozes, D-WPE4R).
 fn session_ref_of(by: &Answerer) -> Option<String> {
-    by.relay.as_ref().map(|r| r.evidence.session_ref.clone())
+    if let Some(r) = &by.relay {
+        return Some(r.evidence.session_ref.clone());
+    }
+    by.presented
+        .as_ref()
+        .filter(|p| p.source == presented::Presentation::Elicited)
+        .and_then(|p| p.caller.run.clone())
 }
 
 /// The first item of `person`'s queue as chat session `session_ref` sees it.

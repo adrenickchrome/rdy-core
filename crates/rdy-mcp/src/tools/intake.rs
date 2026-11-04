@@ -96,11 +96,12 @@ pub fn evidence_kind(kind: Option<&str>) -> Result<Option<EvidenceKind>, RdyErro
 /// words. Relay those facts with the card.
 pub fn rdy_pending(st: &mut McpState, p: PendingParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
-    session(st)?;
+    let s = session(st)?;
     let person = human_actor_for_env(&st.engine.root())?;
+    // with no session_ref the caller's run is the chat session: an elicited Later is its snooze
     let q = st.engine.read().pending(&PendingQuery {
         person,
-        session_ref: p.session_ref,
+        session_ref: p.session_ref.or(s.run),
         max_tokens: p.max_tokens.unwrap_or(CARD_DEFAULT_TOKENS),
     })?;
     Ok(serde_json::to_value(q).expect("the queue serializes"))
