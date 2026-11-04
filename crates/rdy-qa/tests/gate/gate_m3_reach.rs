@@ -280,7 +280,6 @@ fn mg9_rule_reach_includes_coverage_inputs() {
 }
 
 #[test]
-#[ignore = "KNOWN-ISSUES row 162 (L3/I7): below the fix bar; open M3 gap, exit checklist"]
 fn mg9_rule_reach_detects_a_new_key_holder() {
     // row 162: a doc's key gets a `-2` suffix when another doc already holds it. A version adds a
     // stable doc whose key is free at its assessment; a competing version lands a doc with the
@@ -379,4 +378,160 @@ fn mg9_rule_reach_includes_unlinked_duplicate_partners() {
         j_typo(),
     );
     race(&mut r, 166, &p1, "a2", (select, require));
+}
+
+/// The card facts the stored assessment of `p` keeps, as `<name>: <value>` lines.
+fn stored_facts(r: &Rdy, p: &ProposalInfo) -> Vec<String> {
+    let st = r.read();
+    let h = st
+        .reader()
+        .assessment_of_proposal(&p.id.parse().unwrap(), st.seq())
+        .unwrap()
+        .unwrap_or_else(|| panic!("{} stores an assessment", p.r#ref));
+    st.reader().assessment(&h).unwrap().card.facts
+}
+
+/// The approve card of `p` that the pending queue shows: its fact names and its hash.
+fn shown_card(r: &Rdy, p: &ProposalInfo) -> (Vec<String>, String) {
+    let item = r
+        .read()
+        .pending(&rdy_engine::pending::PendingQuery {
+            person: rdy_qa::intake::PERSON.into(),
+            session_ref: None,
+            max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+        })
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|i| i.r#ref == p.r#ref)
+        .unwrap_or_else(|| panic!("{} has an approve card", p.r#ref));
+    (
+        item.facts.iter().map(|f| f.name.to_string()).collect(),
+        item.card_hash,
+    )
+}
+
+#[test]
+fn ab10_a_key_that_lands_as_written_adds_no_keys_fact() {
+    // TASK-1277: the `Keys` fact is present only when the landing projection assigns a key the
+    // version's own changes do not write. A doc whose key is free, and a doc whose clash propose
+    // already re-keyed (its view writes the `-2` key), both land as written: no fact, the card's
+    // facts are today's, and the landing compares against that and lands.
+    let names = |facts: &[String]| -> Vec<String> {
+        facts
+            .iter()
+            .map(|f| f.split_once(": ").map_or(f.clone(), |(n, _)| n.to_string()))
+            .collect()
+    };
+    let today = [
+        "Changes",
+        "Justification",
+        "Decisions",
+        "Supersedes",
+        "Re-affirms",
+        "Reversibility",
+        "Consequences",
+        "Change plan",
+        "Tensions",
+        "Coverage",
+        "Confidence",
+        "Base",
+        "Exceptions",
+        "Policy",
+    ];
+    for rules in [
+        rule("titled", "type = doc", "fields.title = O"),
+        "  []\n".to_string(),
+    ] {
+        let (_d, mut r) = mg9_project(&rules);
+        // k1's doc takes the key first, so k2's propose re-keys its doc to `-2`
+        for (view, path) in [
+            ("k1", "engineering-handbook/onboarding/overview"),
+            ("k2", "product-handbook/onboarding/overview"),
+        ] {
+            r.new_doc(&ag(view), view, path, None, Some("O")).unwrap();
+        }
+        let p1 = propose_as(&mut r, "k1");
+        approve(&mut r, &p1).unwrap_or_else(|e| panic!("{rules}: k1 lands: {e:#?}"));
+        let p2 = propose_as(&mut r, "k2");
+        assert!(p2.ready, "{rules}: {:#?}", p2.issues);
+        assert_eq!(p2.keys.len(), 1, "{rules}: propose re-keys: {:?}", p2.keys);
+        let facts = stored_facts(&r, &p2);
+        assert_eq!(names(&facts), today, "{rules}: {facts:#?}");
+        let (shown, hash) = shown_card(&r, &p2);
+        assert_eq!(shown, today, "{rules}: the shown card is the stored one");
+        let st = r.read();
+        let h = st
+            .reader()
+            .assessment_of_proposal(&p2.id.parse().unwrap(), st.seq())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            st.reader().assessment(&h).unwrap().card.hash.to_string(),
+            hash,
+            "{rules}: the shown hash is the stored one"
+        );
+        let l = approve(&mut r, &p2).unwrap_or_else(|e| panic!("{rules}: k2 lands: {e:#?}"));
+        assert!(l.keys.is_empty(), "{rules}: lands as written: {:?}", l.keys);
+    }
+}
+
+#[test]
+fn ab10_a_key_a_competing_landing_shifts_refuses_once_with_a_keys_fact() {
+    // TASK-1265, TASK-1277 with no pack rule: k2's doc key is free when it is proposed; k1 lands
+    // a doc with the same key first. The approval of k2 refuses with the key in the message and
+    // a fresh card whose `Keys` fact, right after Decisions, shows the `-2` key; the next
+    // approval lands it.
+    let (_d, mut r) = mg9_project("  []\n");
+    let mut docs = vec![];
+    for (view, path) in [
+        ("k2", "product-handbook/onboarding/overview"),
+        ("k1", "engineering-handbook/onboarding/overview"),
+    ] {
+        r.new_doc(&ag(view), view, path, None, Some("O")).unwrap();
+        let st = r.read();
+        let m = st.materialized(&Scope::View(view.into())).unwrap();
+        let d = m
+            .iter()
+            .find(|b| b.block_type == "doc" && b.field_str("title") == Some("O"))
+            .unwrap();
+        docs.push((d.id.to_string(), d.field_str("key").unwrap().to_string()));
+    }
+    let (mine, key) = docs[0].clone();
+    let p2 = propose_as(&mut r, "k2");
+    assert!(p2.keys.is_empty(), "the key is free: {:?}", p2.keys);
+    let p1 = propose_as(&mut r, "k1");
+    let l1 = approve(&mut r, &p1).unwrap();
+    let head = r.read().canon_head();
+    let e = approve(&mut r, &p2).unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:#?}");
+    assert_eq!(
+        e.message,
+        format!(
+            "proposal {} moved: landing {} changed the key of {mine} ({key} to {key}-2) after its assessment",
+            p2.r#ref,
+            &l1.landing[..12]
+        )
+    );
+    assert_eq!(
+        e.fix,
+        format!(
+            "review the fresh card in corrected and approve {} again",
+            p2.r#ref
+        )
+    );
+    assert_eq!(r.read().canon_head(), head, "nothing landed");
+    let facts = stored_facts(&r, &p2);
+    let at = facts
+        .iter()
+        .position(|f| f.starts_with("Decisions: "))
+        .unwrap();
+    assert_eq!(facts[at + 1], format!("Keys: {mine} {key}-2"), "{facts:#?}");
+    let l2 = approve(&mut r, &p2).unwrap_or_else(|e| panic!("the fresh card lands: {e:#?}"));
+    assert_eq!(
+        l2.keys.get(&mine),
+        Some(&format!("{key}-2")),
+        "{:?}",
+        l2.keys
+    );
 }

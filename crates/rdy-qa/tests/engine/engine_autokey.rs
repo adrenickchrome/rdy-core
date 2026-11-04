@@ -537,6 +537,16 @@ fn rkey1_a_clash_that_appears_after_the_proposal_is_re_derived_at_landing() {
         pb.keys
     );
     r.land(&approver(), &pa.id).unwrap();
+    // TASK-1265, TASK-1277: the key shifted after b's assessment, so the first approval refuses
+    // with a fresh card; the next one lands the re-derived key
+    let e = r.land_report(&approver(), &pb.id).unwrap_err();
+    assert_eq!(e.code, "E_PROPOSAL_MOVED", "{e:#?}");
+    assert!(
+        e.message
+            .contains(&format!("changed the key of {db} (guide to guide-2)")),
+        "{}",
+        e.message
+    );
     let l = r.land_report(&approver(), &pb.id).unwrap();
     assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
     assert_eq!(l.keys[&db], "guide-2");
@@ -822,6 +832,15 @@ fn rkey1_a_land_time_re_key_does_not_take_a_key_the_view_holds() {
         p.keys
     );
     r.land(&approver(), &pa.id).unwrap();
+    // TASK-1265, TASK-1277: the key shifted after the assessment; the fresh card lands
+    let e = r.land_report(&approver(), &p.id).unwrap_err();
+    assert_eq!(e.code, "E_PROPOSAL_MOVED", "{e:#?}");
+    assert!(
+        e.message
+            .contains(&format!("changed the key of {m} (manual to manual-3)")),
+        "{}",
+        e.message
+    );
     let l = r.land_report(&approver(), &p.id).unwrap();
     assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
     assert_eq!(l.keys[&m], "manual-3");
