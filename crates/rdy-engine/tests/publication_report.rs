@@ -501,7 +501,7 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
             {"op": "create", "type": "section", "id": "$ins", "parent": "$in", "fields": {"title": "Kept"}},
             {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$outs", "parent": "$out", "fields": {"title": "Rulings"}},
-            {"op": "create", "type": "decision", "id": "$d", "parent": "$outs", "fields": {"statement": "The ruling.", "status": "proposed"}},
+            {"op": "create", "type": "decision", "id": "$d", "parent": "$outs", "fields": {"statement": "The ruling.", "status": "proposed", "built": "1.0.0"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$ins", "body": "The claim has no ref.",
                 "links": {"decided_by": [{"target": "$d"}]}},
             {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
