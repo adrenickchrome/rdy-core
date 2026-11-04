@@ -4254,11 +4254,12 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     // the earlier commands, in order, and the new one
-    // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`)
+    // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`;
+    // ain5 added `instructions` and `setup`: their pin is `ok14_cli_contract_from_clap_is_complete`)
     let earlier: Vec<&str> = top
         .iter()
         .copied()
-        .filter(|n| *n != "review" && *n != "compact")
+        .filter(|n| !["review", "compact", "instructions", "setup"].contains(n))
         .collect();
     assert_eq!(earlier, COMMANDS_BEFORE_CK9);
     let review = tree["subcommands"]
@@ -4806,6 +4807,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// neighbor row carries `values` (`[]` for a created or deleted cause), so the neighbor rows'
 /// member is not optional, and the probes' neighbor causes state no literal, so it is empty;
 /// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
+/// ain4/ain5: the instruction probes run with a home of their own and a project with no
+/// instruction set, so `instructions` and `menu` are empty, and the unknown load refusal
+/// states no issue rows.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4826,6 +4830,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/inbox/stdout/entries",
+    "cli/instructions/stdout/instructions",
+    "cli/instructions/stdout/menu",
     "cli/log/stdout[]/dispute/disputes",
     "cli/log/stdout[]/rebased_from",
     "cli/new doc/stdout/consequences",
@@ -4921,6 +4927,9 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_import/ok/on_change/tensions",
     "mcp/rdy_import/ok/related_decisions",
     "mcp/rdy_import/ok/suggestions",
+    "mcp/rdy_instructions unknown load/refused/issues",
+    "mcp/rdy_instructions/ok/instructions",
+    "mcp/rdy_instructions/ok/menu",
     "mcp/rdy_log landing/ok/diff/entries[]/fields",
     "mcp/rdy_log landing/ok/diff/entries[]/links",
     "mcp/rdy_log landing/ok/diff/entries[]/repinned",
@@ -5158,14 +5167,14 @@ fn ok14_probe_shapes_merge_every_array_element() {
 fn mh7_new_surfaces_preserve_the_release_contract() {
     let fixture = read_fixture();
     let mcp = &fixture["mcp"];
-    // 57 tools before; one more, and the earlier ones stay
+    // 57 tools before; one more (and ain4's rdy_instructions), and the earlier ones stay
     let names: Vec<&str> = mcp["tool_names"]
         .as_array()
         .unwrap()
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 58);
+    assert_eq!(names.len(), 59);
     assert!(names.contains(&"rdy_compact"));
     for kept in [
         "rdy_upgrade",

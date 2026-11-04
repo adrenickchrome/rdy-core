@@ -29,6 +29,7 @@
         "load": "replaces a project from a dump; the dump_load row covers it",
         "mcp": "starts the MCP server; the mcp row covers it",
         "new finding": "needs a finding pack",
+        "new instruction": "writes an instruction; cli_instructions pins its replies",
         "new profile": "needs a publication profile",
         "new source": "needs a source file",
         "pack": "checks a pack file; the schema_packs row covers it",
@@ -49,6 +50,7 @@
         "render-stream": "renders a stream file",
         "repin": "needs a pinned reference to move",
         "serve": "starts a daemon",
+        "setup": "writes CLAUDE.md and AGENTS.md; cli_instruction_setup pins its replies",
         "sign": "needs a signing key",
         "site": "starts or reads the live site",
         "stream": "checks a stream file; the sync row covers it",
@@ -284,6 +286,7 @@
               }
             ],
             "recorded": "bool",
+            "reminder": "string",
             "suspects": [],
             "will_go_stale": [
               {
@@ -509,6 +512,16 @@
             "entries": [],
             "more": "bool",
             "started": "bool"
+          }
+        },
+        "instructions": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "hint": "string",
+            "instructions": [],
+            "menu": []
           }
         },
         "intent list": {
@@ -1538,6 +1551,7 @@
             },
             "pack": "string",
             "quarantine": [],
+            "reminder": "string",
             "removed_bytes": "number",
             "repo_id": "string",
             "seq": {
@@ -1916,7 +1930,7 @@
       }
     },
     "tree": {
-      "about": "A system for keeping decisions and documentation consistent while agents change them.",
+      "about": "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
       "args": [
         {
           "action": "set_true",
@@ -9312,6 +9326,121 @@
               "args": [
                 {
                   "action": "set",
+                  "id": "parent",
+                  "long": "parent",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "PARENT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "text",
+                  "long": "text",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "applies_to",
+                  "long": "applies-to",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SELECTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "DECISION"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "locked",
+                  "long": "locked",
+                  "num_args": "0",
+                  "value_names": [
+                    "LOCKED"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "applies_to",
+                    "locked",
+                    "parent",
+                    "reason",
+                    "text"
+                  ],
+                  "id": "Instruction",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "instruction",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
                   "id": "title",
                   "long": "title",
                   "num_args": "1",
@@ -10895,6 +11024,123 @@
             }
           ],
           "name": "mcp",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "append",
+              "id": "load",
+              "long": "load",
+              "num_args": "1..",
+              "value_names": [
+                "ID"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "load"
+              ],
+              "id": "InstructionsArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "instructions",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "name": "setup",
           "subcommands": []
         },
         {
@@ -15122,12 +15368,14 @@
       "ACTOR_UNBOUND_MESSAGE": "\"the session actor is not a hub actor\"",
       "AGENT_NOT_APPROVER_FIX": "\"tags are the person's acts: ask the person to run the command\"",
       "AGENT_NOT_RELAYING_FIX": "\"ask the person, then pass --relayed-by <your actor> --evidence \\\"<their words>\\\" --question \\\"<what you asked>\\\"\"",
+      "AMBIGUOUS_FIX": "\"use the layer-qualified id from the rdy_instructions menu\"",
       "ATTESTED_BY_FIX": "\"name who ruled and under whose mandate in attested_by\"",
       "ATTESTED_BY_MESSAGE": "\"field \\\"attested_by\\\" is required for authority_basis delegated\"",
       "BAD_KEY_FIX": "\"pass a public key line or its SHA256 fingerprint\"",
       "BAD_KEY_MESSAGE": "\"key is not a public key or SHA256 fingerprint\"",
       "BAD_LABEL_FIX": "\"change label, or leave it out\"",
       "BAD_LABEL_MESSAGE": "\"label must contain 1 to 64 characters without edge whitespace or control characters\"",
+      "BAD_LOAD_FIX": "\"call rdy_instructions and pass ids from its menu\"",
       "BAD_MACHINE_NAME_FIX": "\"change machine_name\"",
       "BAD_MACHINE_NAME_MESSAGE": "\"machine_name must contain 1 to 64 characters without edge whitespace or control characters\"",
       "BAD_REF_FIX": "\"give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \\\"text\\\"\"",
@@ -15180,6 +15428,8 @@
       "NAME_DOC_FIX": "\"pass doc: rdy_policy {op: \\\"init\\\", doc} / rdy policy init --doc <doc>\"",
       "NEIGHBOR_ENTITY_FIX": "\"update the block for the removed values\"",
       "NEIGHBOR_SECTION_FIX": "\"a block in its section changed: check that it still holds, and update it if not; no repin is needed\"",
+      "NOT_FOUND_FIX": "\"call rdy_instructions and load an id from its menu\"",
+      "NOT_REGULAR_FIX": "\"replace it with a regular file, then run rdy setup again\"",
       "NO_AGENT_FIX": "\"check SSH_AUTH_SOCK and the configured key, then try again\"",
       "NO_CODE_FIX": "\"set code_paths, then repin it with code: true\"",
       "NO_HOME_MESSAGE": "\"No home directory is available; set instructions.person to an absolute project path in user config.\"",
@@ -15968,6 +16218,7 @@
               "doc": "string"
             }
           ],
+          "reminder": "string",
           "suspects": [],
           "will_go_stale": [
             {
@@ -16368,6 +16619,24 @@
           "started?": "bool"
         }
       },
+      "rdy_instructions": {
+        "ok": {
+          "hint": "string",
+          "instructions": [],
+          "menu": []
+        }
+      },
+      "rdy_instructions unknown load": {
+        "refusal_codes": [
+          "E_NOT_FOUND"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
       "rdy_intent list": {
         "ok": {
           "intents": [
@@ -16600,6 +16869,7 @@
             "name": "string",
             "repo_id": "string"
           },
+          "reminder": "string",
           "session": {
             "actor": "string",
             "view": "string"
@@ -18575,6 +18845,7 @@
       "rdy_impact",
       "rdy_import",
       "rdy_inbox",
+      "rdy_instructions",
       "rdy_intent",
       "rdy_key_bind",
       "rdy_key_retire",
@@ -19668,6 +19939,25 @@
               "description": "A cursor from an earlier rdy_inbox reply; default: the saved cursor.",
               "type": [
                 "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "rdy_instructions": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "load": {
+              "description": "Rulesets to load, by their menu ids (project:<doc-id> or person:<doc-id>); a bare doc id loads when only one layer holds it. Required rules arrive without asking.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
                 "null"
               ]
             }
@@ -24451,6 +24741,7 @@
           "lineage": [],
           "neighbors": [],
           "neighbors_by_doc": [],
+          "reminder": "string",
           "suspects": [],
           "will_go_stale": []
         },
