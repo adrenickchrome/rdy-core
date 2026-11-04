@@ -6,7 +6,6 @@ use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::Command;
 
 /// The generated page's marker on its html element.
 const MARKER: &str = "<html lang=\"en\" data-rdy-kind=\"not-found\">";
@@ -46,7 +45,7 @@ fn render(project: &Path, out: &Path, extra: &[&str]) -> (bool, String, String) 
         out.to_str().unwrap(),
     ];
     args.extend_from_slice(extra);
-    let o = Command::new(rdy_bin())
+    let o = rdy_qa::fixtures::rdy_command()
         .args(&args)
         .env("RDY_ACTOR", "human:qa")
         .envs(env)

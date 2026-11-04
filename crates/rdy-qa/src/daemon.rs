@@ -417,7 +417,7 @@ pub struct Served {
 /// or `RDY_NO_DAEMON` from this process, and `env` (a user config, as `Served::env_pairs`
 /// gives). Worker threads build their commands here so the shell's session never leaks in.
 pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
-    let mut cmd = Command::new(crate::fixtures::rdy_bin());
+    let mut cmd = crate::fixtures::rdy_command();
     cmd.arg("--project")
         .arg(dir)
         .args(args)

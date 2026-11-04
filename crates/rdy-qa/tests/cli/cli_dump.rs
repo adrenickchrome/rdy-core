@@ -259,7 +259,7 @@ fn one_line(text: &str) -> String {
 
 #[test]
 fn dl7_rdy_load_help_gives_the_in_place_move_in_order() {
-    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["load", "--help"])
         .output()
         .unwrap();

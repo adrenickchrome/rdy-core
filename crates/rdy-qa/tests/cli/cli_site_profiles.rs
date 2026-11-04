@@ -209,7 +209,7 @@ fn closed(url: &str) {
 
 /// Help text with every run of whitespace made one space (clap wraps it).
 fn help(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new(rdy_qa::fixtures::rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(args)
         .current_dir(dir)
         .output()

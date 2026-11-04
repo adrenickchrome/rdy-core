@@ -3,10 +3,9 @@
 //! the file. rdy init writes .rdy.yaml and no .gitignore (founder ruling).
 use rdy_engine::config_levels::{PROJECT_FILE, effective};
 use rdy_engine::*;
-use rdy_qa::fixtures::{human_env, rdy_bin};
+use rdy_qa::fixtures::human_env;
 use rdy_qa::wc::{json, ok, put, seeded};
 use std::path::Path;
-use std::process::Command;
 
 const NO_RDY_YAML_FIX: &str = "create .rdy.yaml in the project directory with the line `pack: rdy-standard` (or the pack this project uses)";
 
@@ -17,7 +16,7 @@ const NO_STORE_FIX: &str =
 /// is closed, so `rdy mcp` ends at once).
 fn rdy_daemon_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let (_cfg, env) = human_env("human:qa");
-    Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
@@ -31,7 +30,7 @@ fn rdy_daemon_in(cwd: &Path, args: &[&str]) -> std::process::Output {
 /// `rdy <args>` run in `cwd` with no --project flag, as human:qa, with no daemon.
 fn rdy_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let (_cfg, env) = human_env("human:qa");
-    Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
@@ -101,7 +100,7 @@ fn mfb1_the_cli_names_the_missing_rdy_yaml_before_starting_a_daemon() {
     std::fs::remove_file(d.path().join(".rdy.yaml")).unwrap();
     let sub = d.path().join("guides/deep");
     std::fs::create_dir_all(&sub).unwrap();
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     let (_cfg, env) = human_env("human:qa");
     let out = cmd
         .args(["--json", "status"])
@@ -257,7 +256,7 @@ fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
     let bare = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let (_cfg, env) = human_env("human:qa");
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .arg("mcp")
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")

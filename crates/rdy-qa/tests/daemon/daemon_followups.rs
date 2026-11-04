@@ -277,7 +277,7 @@ fn msw15_a_relative_project_under_a_long_path_starts_its_daemon() {
     drop(Rdy::init(&project, "rdy-standard").unwrap());
     let (_cfg, env) = rdy_qa::fixtures::human_env("human:qa");
     let rdy = |args: &[&str]| {
-        std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+        rdy_qa::fixtures::rdy_command()
             .current_dir(&deep)
             .args(["--project", "p"])
             .args(args)

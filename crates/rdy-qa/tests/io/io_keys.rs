@@ -92,7 +92,7 @@ fn skel1_the_cli_prints_import_warnings() {
     drop(_r);
     let t = tree("");
     // direct mode: no test leaves a detached daemon behind
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .current_dir(d.path())
         .args(["--no-daemon", "import"])
         .arg(t.path())

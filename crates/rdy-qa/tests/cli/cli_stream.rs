@@ -5,7 +5,7 @@ use rdy_engine::Rdy;
 use rdy_engine::stream_check::check_batch;
 use rdy_model::{BlockId, Hash, RepoId, StateSnapshot};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
+use rdy_qa::fixtures::output_within_stdin;
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
 use rdy_store::kinds;
@@ -126,7 +126,7 @@ impl Scratch {
     /// stdin is fed and the output drained on threads, and a child still running at the budget
     /// is killed and reaped.
     fn rdy(&self, args: &[&str], stdin: Option<&[u8]>) -> Output {
-        let mut cmd = Command::new(rdy_bin());
+        let mut cmd = rdy_qa::fixtures::rdy_command();
         cmd.args(args)
             .current_dir(self.dir.path())
             .env_remove("RDY_ACTOR")

@@ -19,7 +19,7 @@ fn wcwt1_add_ls_commit_inside_and_rm() {
     assert_eq!(v[0]["name"], "side");
     assert_eq!(v[0]["view"], "side");
     let run = |args: &[&str]| {
-        Command::new(rdy_qa::fixtures::rdy_bin())
+        rdy_qa::fixtures::rdy_command()
             .args(args)
             .current_dir(&dir)
             .env_remove("RDY_ACTOR")
@@ -131,7 +131,7 @@ fn msw10_a_damaged_worktree_pointer_is_an_error_not_the_main_copy() {
     let side = at(&s, "side");
     ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
     std::fs::write(side.join(".rdy-worktree"), "project: [\n").unwrap();
-    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+    let o = rdy_qa::fixtures::rdy_command()
         .args(["--json", "status"])
         .current_dir(&side)
         .env_remove("RDY_ACTOR")
@@ -180,7 +180,7 @@ fn json_in(
     dir: &std::path::Path,
     args: &[&str],
 ) -> (bool, serde_json::Value) {
-    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+    let o = rdy_qa::fixtures::rdy_command()
         .arg("--json")
         .args(args)
         .current_dir(dir)

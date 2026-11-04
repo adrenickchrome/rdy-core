@@ -12,13 +12,13 @@ use rdy_qa::every_kind::add_carried_fixture_records;
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::Arc;
 
 /// `rdy --project <dir> <args>` in this process (`RDY_NO_DAEMON`), as the person.
 fn cli(dir: &Path, args: &[&str]) -> Output {
     let (_cfg, env) = human_env("human:qa");
-    Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .arg("--project")
         .arg(dir)
         .args(args)

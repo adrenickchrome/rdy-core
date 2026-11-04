@@ -8,7 +8,7 @@
 //! the CLI get the same rules. Every person here lives in an isolated home.
 use rdy_engine::instructions::create_hint;
 use rdy_qa::daemon::short_tempdir;
-use rdy_qa::fixtures::{output_within, rdy_bin};
+use rdy_qa::fixtures::output_within;
 use rdy_qa::instructions::{REMINDER, Set, World, author};
 use rdy_qa::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
@@ -37,7 +37,7 @@ const BUDGET: Duration = Duration::from_secs(120);
 
 /// The environment of a process of `w` started with no project, in `cwd`.
 fn command(w: &World, cwd: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")

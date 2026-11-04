@@ -1063,7 +1063,7 @@ fn edit_with_script(s: &Served, id: &str, body: &str) -> std::process::Output {
     let script = s.dir.path().join("ed.sh");
     std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
     rdy_qa::platform::set_mode(&script, 0o755).unwrap();
-    std::process::Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(["--project"])
         .arg(s.dir.path())
         .args(["--json", "edit", id])

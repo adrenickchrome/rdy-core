@@ -17,14 +17,13 @@ use rdy_engine::hub_types::Origin;
 use rdy_engine::{Rdy, now_ms};
 use rdy_model::Hash;
 use rdy_qa::daemon::short_tempdir;
-use rdy_qa::fixtures::rdy_bin;
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, exposed, exposed_outputs};
 use rdy_qa::platform::{SocketAgent, set_mode};
 use rdy_qa::signing::{QaAgent, TestKey};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
@@ -410,7 +409,7 @@ impl Side {
     /// daemon ran): the log is complete, and the project is still there.
     fn stop_daemon(&self) -> String {
         let home = self.home.path().to_string_lossy().into_owned();
-        let o = Command::new(rdy_bin())
+        let o = rdy_qa::fixtures::rdy_command()
             .env_clear()
             .env("XDG_CONFIG_HOME", &home)
             .env("HOME", &home)
@@ -444,7 +443,7 @@ fn runtime(p: &std::path::Path) -> bool {
 
 impl Drop for Side {
     fn drop(&mut self) {
-        let _ = Command::new(rdy_bin())
+        let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
             .arg("--project")
             .arg(self.proj.path())
@@ -459,7 +458,7 @@ impl Drop for Side {
 /// `rdy --json --project <p> <args>` as the person of `side`, with nothing else of this process.
 fn cli(side: &Side, args: &[&str]) -> Value {
     let home = side.home.path().to_string_lossy().into_owned();
-    let o: Output = Command::new(rdy_bin())
+    let o: Output = rdy_qa::fixtures::rdy_command()
         .env_clear()
         .env("XDG_CONFIG_HOME", &home)
         .env("HOME", &home)

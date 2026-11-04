@@ -1,10 +1,9 @@
 //! The preview contract (PRE task 2): the human version output carries the preview mark, the
 //! public README states the preview policy and one trust state, and the public tree names no
 //! private project.
-use rdy_qa::fixtures::{output_within, rdy_bin};
+use rdy_qa::fixtures::output_within;
 use regex::Regex;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 const HEADLINE: &str = "Your intent, ready for anyone who needs it.";
@@ -54,7 +53,9 @@ fn read(rel: &str) -> String {
 fn run(args: &[&str]) -> (Option<i32>, String, String) {
     let cwd = tempfile::tempdir().unwrap();
     let out = output_within(
-        Command::new(rdy_bin()).args(args).current_dir(cwd.path()),
+        rdy_qa::fixtures::rdy_command()
+            .args(args)
+            .current_dir(cwd.path()),
         Duration::from_secs(60),
     )
     .unwrap_or_else(|e| panic!("rdy {args:?}: {e}"));

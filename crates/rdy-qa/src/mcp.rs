@@ -5,7 +5,6 @@
 //! form for a release check: it never panics, caps everything the server writes and returns a
 //! [`McpFailure`].
 use crate::daemon::Served;
-use crate::fixtures::rdy_bin;
 use crate::platform;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -600,7 +599,7 @@ impl McpClient {
 
     /// `rdy mcp --no-daemon --project <project>`: the in-process stdio server, no daemon.
     pub fn start_with_env(project: &Path, env: &[(&str, &str)]) -> McpClient {
-        let mut cmd = Command::new(rdy_bin());
+        let mut cmd = crate::fixtures::rdy_command();
         cmd.args(["mcp", "--no-daemon", "--project"])
             .arg(project)
             .envs(env.iter().copied())
@@ -629,7 +628,7 @@ impl McpClient {
     /// `start_with_env` with the child's stderr kept, for a check of everything the server
     /// writes ([`McpClient::finish`]).
     pub fn start_capturing(project: &Path, env: &[(&str, &str)]) -> McpClient {
-        let mut cmd = Command::new(rdy_bin());
+        let mut cmd = crate::fixtures::rdy_command();
         cmd.args(["mcp", "--no-daemon", "--project"])
             .arg(project)
             .envs(env.iter().copied())
@@ -655,7 +654,7 @@ impl McpClient {
     }
 
     fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
-        let mut cmd = Command::new(rdy_bin());
+        let mut cmd = crate::fixtures::rdy_command();
         cmd.args(["mcp", "--project"])
             .arg(dir)
             .env_remove("RDY_ACTOR")

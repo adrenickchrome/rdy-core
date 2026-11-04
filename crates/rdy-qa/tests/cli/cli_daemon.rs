@@ -87,7 +87,7 @@ fn cli2_no_daemon_opens_the_store_directly_and_is_locked_while_a_daemon_runs() {
         v["fix"].as_str().unwrap().contains("rdy serve --stop"),
         "{v}"
     );
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["--project"])
         .arg(s.dir.path())
         .args(["--json", "status"])
@@ -236,7 +236,7 @@ fn cli2_edit_goes_through_the_daemon() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["--project"])
         .arg(s.dir.path())
         .args(["--json", "edit", &id])
@@ -301,7 +301,7 @@ fn editor_script(s: &Served, body: &str) -> std::path::PathBuf {
 
 /// `rdy --project <dir> --json edit <id>` with `EDITOR=script`, as the human.
 fn edit_with(s: &Served, script: &std::path::Path, id: &str) -> std::process::Output {
-    std::process::Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(["--project"])
         .arg(s.dir.path())
         .args(["--json", "edit", id])
@@ -320,7 +320,7 @@ fn cli2_a_relative_project_starts_the_daemon() {
     let parent = s.dir.path().parent().unwrap();
     let name = s.dir.path().file_name().unwrap().to_str().unwrap();
     for project in [name.to_string(), format!("./{name}")] {
-        let out = std::process::Command::new(rdy_bin())
+        let out = rdy_qa::fixtures::rdy_command()
             .args(["--project", &project, "--json", "status"])
             .current_dir(parent)
             .env_remove("RDY_ACTOR")

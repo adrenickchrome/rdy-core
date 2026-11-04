@@ -4,11 +4,11 @@
 //! text, which stays as it was. A repeat changes nothing. A link or any other file that is not a
 //! regular file is refused before either file is written, and its target is never touched.
 use rdy_qa::daemon::short_tempdir;
-use rdy_qa::fixtures::{output_within, rdy_bin};
+use rdy_qa::fixtures::output_within;
 use rdy_qa::instructions::World;
 use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::Duration;
 
 const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_instructions and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
@@ -17,7 +17,7 @@ const NOT_REGULAR_FIX: &str = "replace it with a regular file, then run rdy setu
 
 /// `rdy <args>` in `cwd`, with no `--project` unless `args` names one, as the world's human.
 fn rdy_at(w: &World, cwd: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")

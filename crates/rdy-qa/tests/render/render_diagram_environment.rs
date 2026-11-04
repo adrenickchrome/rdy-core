@@ -4,7 +4,6 @@ use rdy_qa::fixtures::*;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The six variables the pinned diagram crate reads at run time.
 const MMDFLUX_ENVIRONMENT: [&str; 6] = [
@@ -149,7 +148,7 @@ fn render(
     config: &[(String, String)],
     set: &[(&str, &std::ffi::OsStr)],
 ) -> (BTreeMap<String, Vec<u8>>, Vec<u8>) {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--no-daemon", "--project"])
         .arg(project)
         .args(["render", "--out"])

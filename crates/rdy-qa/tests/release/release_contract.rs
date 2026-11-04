@@ -29,7 +29,7 @@ use rdy_model::{
     Verdict,
     signature::{StatementKind, StatementSource, statement},
 };
-use rdy_qa::fixtures::{output_within, project, rdy_bin};
+use rdy_qa::fixtures::{output_within, project};
 use rdy_schema::{PackSet, TensionKind, TensionSeverity};
 use rdy_store::format::{
     FeatureClass, MANIFEST_VERSION, MAX_FEATURES, MAX_MANIFEST_BYTES, REF_STORE_FEATURES,
@@ -41,7 +41,6 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 /// The thirteen rows of the inventory, sorted: the surfaces of D-TXFHR. The tests pin this list.
@@ -943,7 +942,7 @@ fn store_row() -> Value {
 
 /// Runs the release binary in `dir` without a daemon; returns its exit value, stdout and stderr.
 fn rdy_in(dir: &Path, env: &[(String, String)], args: &[&str]) -> (i32, String, String) {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--no-daemon", "--project"])
         .arg(dir)
         .args(args)
@@ -1699,7 +1698,7 @@ fn agent_cli_probe(
 ) -> Value {
     let mut a = vec!["--json"];
     a.extend_from_slice(args);
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--no-daemon", "--project"])
         .arg(dir)
         .args(&a)

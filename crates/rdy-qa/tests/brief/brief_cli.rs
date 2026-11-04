@@ -18,7 +18,7 @@ fn script(s: &Served, name: &str, body: &str) -> PathBuf {
 
 /// `rdy --project <dir> [--json] edit <id>` as the human, with `EDITOR=editor`.
 fn edit(s: &Served, editor: &Path, id: &str, json: bool) -> std::process::Output {
-    let mut cmd = std::process::Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.arg("--project").arg(s.dir.path());
     if json {
         cmd.arg("--json");
@@ -185,7 +185,7 @@ fn cbrf1_rdy_edit_in_a_fresh_view_briefs_it_as_a_write_target() {
         "sed -i.bak 's/A holds./A holds in fresh./' \"$1\"\n",
     );
     let id = spec.a.to_string();
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .arg("--project")
         .arg(s.dir.path())
         .args(["--json", "edit", &id, "--view", "fresh"])
@@ -349,7 +349,7 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
         "{e}"
     );
     assert!(e["saved_edit"].is_string(), "the edit is kept: {e}");
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .arg("--project")
         .arg(s.dir.path())
         .args(["--json", "edit", &dec, "--reason", "re-sliced into M2d2"])
