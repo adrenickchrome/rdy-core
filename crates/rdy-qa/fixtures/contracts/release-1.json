@@ -181,6 +181,15 @@
             "base": {
               "blocks": [
                 {
+                  "as_built?": {
+                    "derived": {
+                      "since": "null",
+                      "status": "string"
+                    },
+                    "override": "null",
+                    "since": "null",
+                    "status": "string"
+                  },
                   "id": "string",
                   "version": "string"
                 }
@@ -1358,6 +1367,15 @@
             "areas": [
               "string"
             ],
+            "as_built?": {
+              "derived": {
+                "since": "null",
+                "status": "string"
+              },
+              "override": "null",
+              "since": "null",
+              "status": "string"
+            },
             "block_type": "string",
             "body": "string",
             "children": [
@@ -13831,9 +13849,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "0da4c5446848ec90191eb7783abcea81214c34d792c6181c0eecab2c924d0f91"
+              "d8f4096211e6e238392732c5de39e36b5ad9aef15f22f1d14cd4384c700c1acf"
             ],
-            "line": "P-0da4c5446848@1 waits for an answer; read rdy_pending"
+            "line": "P-d8f4096211e6@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -13853,46 +13871,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "84d9314eda392ba17f4d259e0a28c9aec34723ecf4865063e7de821f7cfb6b36"
+              "1078d0106d4cb2b0d5ef345fcb7432ed57bdc4fc151c09495bafa2caa387d613"
             ],
-            "line": "P-84d9314eda39@1 waits for an answer; read rdy_pending"
+            "line": "P-1078d0106d4c@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "224611649bfde9911634bb0ac1cb1056e051c3ce5de3164773851094a5d7d1d1",
-              "84d9314eda392ba17f4d259e0a28c9aec34723ecf4865063e7de821f7cfb6b36"
+              "ca9b2b6a5d9000b13e72dda8f5d71e684a1f035f2805bf2e3ab6ea12e1140640",
+              "1078d0106d4cb2b0d5ef345fcb7432ed57bdc4fc151c09495bafa2caa387d613"
             ],
-            "line": "landing 224611649bfd of view work changed 1 blocks in your areas (payments)"
+            "line": "landing ca9b2b6a5d90 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "224611649bfde9911634bb0ac1cb1056e051c3ce5de3164773851094a5d7d1d1",
+              "ca9b2b6a5d9000b13e72dda8f5d71e684a1f035f2805bf2e3ab6ea12e1140640",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 224611649bfd with 1 conflicts"
+            "line": "your view a rebased onto landing ca9b2b6a5d90 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "5d6c538ce974e6fe3605cbf0b37b389df1e42718c129ed95477c6d5f7c996d6d",
+              "a3d07a0c1c5ffd3435918886aea1401ab98207b8712286890954b9c48d6d238e",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 5d6c538ce974 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 224611649bfd"
+            "line": "tension a3d07a0c1c5f replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing ca9b2b6a5d90"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-0c766370def6",
+        "tn-05682a5c6c6e",
         "tn-26128692ed56",
-        "tn-5d6c538ce974"
+        "tn-a3d07a0c1c5f"
       ],
       "tensions": {
-        "tn-0c766370def6": "open",
+        "tn-05682a5c6c6e": "open",
         "tn-26128692ed56": "open",
-        "tn-5d6c538ce974": "open"
+        "tn-a3d07a0c1c5f": "open"
       },
       "transitions": 3
     },
@@ -14484,6 +14502,7 @@
       "E_WC_STALE": "\"E_WC_STALE\"",
       "E_WC_STORE_ONLY": "\"E_WC_STORE_ONLY\"",
       "E_WC_SUPPORTING": "\"E_WC_SUPPORTING\"",
+      "W_AS_BUILT_OVERRIDE": "\"W_AS_BUILT_OVERRIDE\"",
       "W_BRIEF_STALE": "\"W_BRIEF_STALE\"",
       "W_CARD_WORDS": "\"W_CARD_WORDS\"",
       "W_DAEMON_BUILD": "\"W_DAEMON_BUILD\"",
@@ -15035,6 +15054,11 @@
         "E_COVERAGE_LOWERED",
         "the version lowers a page's or the corpus's coverage",
         "see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes"
+      ],
+      [
+        "W_AS_BUILT_OVERRIDE",
+        "a content block's own planned or since, or planned: true on its nearest section or doc, differs from the planned or since status its decided_by and implements decisions derive",
+        "follow the warning's own fix"
       ],
       [
         "E_PLAN_ITEM",
@@ -15643,6 +15667,7 @@
       "E_PLAN_OPEN",
       "E_POLICY_HUMAN",
       "E_COVERAGE_LOWERED",
+      "W_AS_BUILT_OVERRIDE",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -15846,6 +15871,15 @@
           "base": {
             "blocks": [
               {
+                "as_built?": {
+                  "derived": {
+                    "since": "null",
+                    "status": "string"
+                  },
+                  "override": "null",
+                  "since": "null",
+                  "status": "string"
+                },
                 "id": "string",
                 "version": "string"
               }
@@ -15982,6 +16016,15 @@
           "areas": [
             "string"
           ],
+          "as_built": {
+            "derived": {
+              "since": "null",
+              "status": "string"
+            },
+            "override": "null",
+            "since": "null",
+            "status": "string"
+          },
           "block_type": "string",
           "body": "string",
           "children": [],
@@ -16890,6 +16933,17 @@
       },
       "rdy_read": {
         "ok": {
+          "as_built": {
+            "<id>": {
+              "derived": {
+                "since": "null",
+                "status": "string"
+              },
+              "override": "null",
+              "since": "null",
+              "status": "string"
+            }
+          },
           "format": "string",
           "id": "string",
           "text": "string"
@@ -17758,6 +17812,10 @@
               "fix": "string",
               "when": "string"
             },
+            "W_AS_BUILT_OVERRIDE": {
+              "fix": "string",
+              "when": "string"
+            },
             "W_BRIEF_STALE": {
               "fix": "string",
               "when": "string"
@@ -17878,7 +17936,18 @@
             "parent": "string",
             "type": "string"
           },
-          "fields?": {},
+          "fields?": {
+            "planned": {
+              "kind": "string",
+              "required": "bool",
+              "values": []
+            },
+            "since": {
+              "kind": "string",
+              "required": "bool",
+              "values": []
+            }
+          },
           "filter?": "string",
           "inbox?": "string",
           "intents?": "string",
@@ -17952,6 +18021,9 @@
             {
               "class": "string",
               "prefix": "string",
+              "tracking?": [
+                "string"
+              ],
               "traits": [
                 "string"
               ],
@@ -22375,6 +22447,16 @@
               "kind": "str",
               "required": true,
               "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "a",
@@ -22419,7 +22501,18 @@
           "body": "required",
           "children": [],
           "class": null,
-          "fields": {},
+          "fields": {
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            }
+          },
           "prefix": "c",
           "tracking": [],
           "traits": [
@@ -22433,6 +22526,16 @@
           "class": null,
           "fields": {
             "lang": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
               "kind": "str",
               "required": false,
               "values": []
@@ -22463,6 +22566,16 @@
               "kind": "str",
               "required": true,
               "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "m",
@@ -22475,7 +22588,18 @@
           "body": "required",
           "children": [],
           "class": null,
-          "fields": {},
+          "fields": {
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            }
+          },
           "prefix": "k",
           "tracking": [],
           "traits": [
@@ -22506,6 +22630,11 @@
                 "elimination",
                 "none"
               ]
+            },
+            "built": {
+              "kind": "str",
+              "required": false,
+              "values": []
             },
             "confirmation": {
               "kind": "str",
@@ -22599,7 +22728,9 @@
             }
           },
           "prefix": "D",
-          "tracking": [],
+          "tracking": [
+            "built"
+          ],
           "traits": [
             "normative"
           ]
@@ -22621,6 +22752,16 @@
                 "mermaid",
                 "d2"
               ]
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "dg",
@@ -22680,6 +22821,11 @@
               "required": true,
               "values": []
             },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "title": {
               "kind": "str",
               "required": true,
@@ -22716,6 +22862,16 @@
               "kind": "str",
               "required": true,
               "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "en",
@@ -22728,7 +22884,18 @@
           "body": "required",
           "children": [],
           "class": null,
-          "fields": {},
+          "fields": {
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            }
+          },
           "prefix": "e",
           "tracking": [],
           "traits": [
@@ -22753,6 +22920,16 @@
             "media_type": {
               "kind": "str",
               "required": true,
+              "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
               "values": []
             }
           },
@@ -22793,6 +22970,16 @@
             "name": {
               "kind": "str",
               "required": true,
+              "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
               "values": []
             },
             "steps": {
@@ -22861,6 +23048,16 @@
               "kind": "str",
               "required": true,
               "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "i",
@@ -22879,6 +23076,11 @@
               "kind": "bool",
               "required": false,
               "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "n",
@@ -22891,7 +23093,18 @@
           "body": "required",
           "children": [],
           "class": null,
-          "fields": {},
+          "fields": {
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            }
+          },
           "prefix": "p",
           "tracking": [],
           "traits": [
@@ -22916,10 +23129,26 @@
               "required": false,
               "values": []
             },
+            "planned": {
+              "kind": "enum",
+              "required": false,
+              "values": [
+                "hide",
+                "mark"
+              ]
+            },
             "select": {
               "kind": "list",
               "required": true,
               "values": []
+            },
+            "since": {
+              "kind": "enum",
+              "required": false,
+              "values": [
+                "show",
+                "off"
+              ]
             },
             "title": {
               "kind": "str",
@@ -22996,6 +23225,11 @@
           "children": [],
           "class": null,
           "fields": {
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "priority": {
               "kind": "enum",
               "required": false,
@@ -23004,6 +23238,11 @@
                 "should",
                 "may"
               ]
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "r",
@@ -23050,6 +23289,16 @@
                 "stable",
                 "deprecated"
               ]
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             },
             "title": {
               "kind": "str",
@@ -23114,9 +23363,19 @@
               "required": false,
               "values": []
             },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "rows": {
               "kind": "list",
               "required": true,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
               "values": []
             }
           },
@@ -23145,6 +23404,16 @@
               "kind": "str",
               "required": true,
               "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
+              "values": []
             }
           },
           "prefix": "t",
@@ -23171,6 +23440,16 @@
             "name": {
               "kind": "str",
               "required": true,
+              "values": []
+            },
+            "planned": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
+            "since": {
+              "kind": "str",
+              "required": false,
               "values": []
             },
             "unit": {
