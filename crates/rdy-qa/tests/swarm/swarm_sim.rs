@@ -4987,8 +4987,15 @@ fn mg10_swarm_exercised_every_required_m3_scenario() {
             }
         };
         let w = swarm_witnesses(o);
+        // the queue items the person worked down before an M3 card past the cap (deep-drain
+        // ruling, finding 2)
+        let worked = o
+            .journal
+            .iter()
+            .filter(|e| e.act == rdy_qa::swarm::people::WORK_DOWN)
+            .count();
         eprintln!(
-            "swarm seed {seed}: M3 witnesses {w:?}, org warnings {}",
+            "swarm seed {seed}: M3 witnesses {w:?}, org warnings {}, work-down items {worked}",
             org_warnings(o)
         );
         for (k, n) in w {
