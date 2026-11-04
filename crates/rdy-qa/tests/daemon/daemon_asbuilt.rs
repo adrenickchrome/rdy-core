@@ -315,3 +315,28 @@ fn ab5_live_scopes_refresh_after_built_only_landings() {
     let again = build(&sh, &canon_hide);
     assert!(page(&again).contains(PLAN));
 }
+
+/// A review route under a marking profile compares each side's displayed status: a built value
+/// changed only on a decision outside the selection turns the block's `Planned` marker off, and
+/// the review lists the block as edited though the selected block is the same on both sides.
+#[test]
+fn ab5_review_counts_a_status_only_change_under_a_marking_profile() {
+    let w = world();
+    let sh = shared(&w.h);
+    let view_mark = profile(ScopeRef::View("later".into()), "mark");
+    let b = build(&sh, &view_mark);
+    let body = page(&b);
+    assert!(body.contains(PLAN), "the block is shown on both sides");
+    assert!(
+        !body.contains(">Planned</span>"),
+        "the new side ships the block"
+    );
+    assert!(
+        body.contains("chg-label chg-edited") && body.contains("1 change"),
+        "the status change counts as an edit"
+    );
+    // the same compare through the proposal route
+    let prop_mark = profile(ScopeRef::Proposal(w.ids["prop"].clone()), "mark");
+    let prop_page = page(&build(&sh, &prop_mark));
+    assert!(prop_page.contains("chg-label chg-edited") && prop_page.contains("1 change"));
+}
