@@ -892,7 +892,7 @@ fn ab3_a_confirm_silences_the_warning_until_its_inputs_change() {
 /// the confirming landing left it.
 #[test]
 fn ab3_a_built_change_with_no_seal_brings_the_warning_back() {
-    let (dir, mut r) = project();
+    let (_dir, mut r) = project();
     let seed = write(
         &mut r,
         "seed",
