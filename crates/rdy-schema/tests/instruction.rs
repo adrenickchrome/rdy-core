@@ -146,7 +146,8 @@ fn ain1_instruction_is_a_normative_doc_asset_in_every_pack() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["applies_to", "locked", "owner"]
+        // As-built (D-WJ0SJ, TASK-1325) gives every content type planned and since
+        vec!["applies_to", "locked", "owner", "planned", "since"]
     );
     let redefine = |what: &str| {
         SchemaError::Invalid(format!(
