@@ -949,6 +949,23 @@ pub async fn serve_stdio(project: PathBuf, agent: Arc<dyn SigningAgent>) -> anyh
     serve_stdio_with(project, agent, |_| {}).await
 }
 
+/// [`serve_stdio`] with `person` as the engine's reader of the person layer (ain5): the host
+/// that runs `rdy mcp --no-daemon` gives its direct reader, so `rdy_instructions` reads a meta
+/// project that is another project.
+pub async fn serve_stdio_with_person(
+    project: PathBuf,
+    agent: Arc<dyn SigningAgent>,
+    person: Arc<dyn rdy_engine::instructions::PersonHost>,
+) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    tokio::task::spawn_blocking(move || {
+        rt.block_on(serve_stdio_inner(project, agent, Some(person), |_| {}))
+    })
+    .await?
+}
+
 /// [`serve_stdio`], calling `inspect` with the session's server once it is made, before it
 /// serves: a test seam that shows which signer the session got.
 #[doc(hidden)]
@@ -960,16 +977,23 @@ pub async fn serve_stdio_with(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project, agent, inspect)))
-        .await?
+    tokio::task::spawn_blocking(move || {
+        rt.block_on(serve_stdio_inner(project, agent, None, inspect))
+    })
+    .await?
 }
 
 async fn serve_stdio_inner(
     project: PathBuf,
     agent: Arc<dyn SigningAgent>,
+    person: Option<Arc<dyn rdy_engine::instructions::PersonHost>>,
     inspect: impl FnOnce(&RdyServer),
 ) -> anyhow::Result<()> {
-    let local = Arc::new(Local::open(&project)?);
+    let local = Local::open(&project)?;
+    let local = Arc::new(match person {
+        Some(host) => local.with_person_host(host),
+        None => local,
+    });
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
         let _ = pump_lines(
