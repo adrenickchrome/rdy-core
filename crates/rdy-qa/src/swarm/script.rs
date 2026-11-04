@@ -650,8 +650,9 @@ pub fn check_plan(cfg: &Config) -> Option<CheckPlan> {
     })
 }
 
-/// The person's odd act that edits the working copy in a script with forced UI acts.
-const EARLY_EDIT: usize = 5;
+/// The person's odd act that edits the working copy in a script with forced UI acts. The run puts
+/// its version ahead of the queue (`run::pacer`), so a landing reads its plan and approves it.
+pub const EARLY_EDIT: usize = 5;
 
 /// The person's acts of the forced UI sequences (D-6M0AF): each an index into `Script::person`.
 /// Both are odd acts, and both are due before the first step a run can kill the daemon at: an

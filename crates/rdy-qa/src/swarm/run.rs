@@ -44,7 +44,9 @@ use super::m3::M3Hooks;
 use super::oracle::{self, copy_tree};
 use super::people::{self, Hooks, Queue, landing_fields};
 use super::project::{self, CLAIMS_PER_AREA, SeedBlocks, SwarmProject};
-use super::script::{ADVICE_VIEW_SUFFIX, AREAS, Config, Script, m3_scenarios, script};
+use super::script::{
+    ADVICE_VIEW_SUFFIX, AREAS, Config, EARLY_EDIT, PersonAct, Script, m3_scenarios, script, ui_plan,
+};
 use crate::daemon::{Served, human_command, short_tempdir_in};
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
@@ -354,13 +356,30 @@ fn enqueue(q: &mut Vec<String>, r: String, place: Place, ranks: &mut BTreeMap<St
     q.insert(at, r);
 }
 
+/// Moves the person's version `r` (queued at the back by its `wc_propose`) to right after the
+/// queued first claims, before every other proposal. `ranks` is read, not changed.
+fn work_first(q: &mut Vec<String>, r: &str, ranks: &BTreeMap<String, Place>) {
+    let Some(from) = q.iter().position(|x| x == r) else {
+        return;
+    };
+    let moved = q.remove(from);
+    let at = q
+        .iter()
+        .take_while(|x| ranks.get(version_of(x).0) == Some(&Place::FirstClaim))
+        .count();
+    q.insert(at, moved);
+}
+
 /// The person's pace: before act `k` of `len`, it waits until every agent has reached step
 /// `(k + 1) * steps / len`, then queues the agents' proposals made since its last act (it reads
 /// the journal from a cursor). The queue holds the latest version of each proposal, oldest
 /// proposal first, except that a proposal of the view of a contradiction pair's first marked
 /// claim goes first (the pair is reviewable only once that claim has landed, ruling task-4.2),
 /// and a proposal that chooses a member or a set winner's later work goes right after the queued
-/// first claims (`enqueue`).
+/// first claims (`enqueue`). The version of the person's forced working-copy edit
+/// (`script::EARLY_EDIT`) goes right after the queued first claims too (`work_first`), so the
+/// next landings read its plan and approve it in every seed (rg15): from the back of the queue,
+/// the run often ended first.
 fn pacer(
     cfg: &Config,
     s: &Script,
@@ -376,6 +395,10 @@ fn pacer(
         .enumerate()
         .map(|(k, (a, _))| format!("a{a}-k{}", agent::spell(k)))
         .collect();
+    // the person's forced working-copy edit, when the script holds it
+    let early_edit = (ui_plan(cfg).is_some()
+        && s.person.get(EARLY_EDIT) == Some(&PersonAct::WcEdit))
+    .then_some(EARLY_EDIT);
     let (progress, journal, queue) = (progress.clone(), journal.clone(), queue.clone());
     let queued: Mutex<BTreeSet<String>> = Mutex::default();
     // how far the pacer has read the journal, and the views that won a set by a landing so far
@@ -399,6 +422,12 @@ fn pacer(
                 .map(str::to_string),
         );
         for e in entries {
+            if e.act == "wc_propose" && e.outcome == Met::Ok && Some(e.step) == early_edit {
+                if let Some(r) = e.block.as_deref() {
+                    work_first(&mut q, r, &ranks);
+                }
+                continue;
+            }
             if e.act != "propose" || e.outcome != Met::Ok || !e.actor.starts_with("agent:a") {
                 continue;
             }
