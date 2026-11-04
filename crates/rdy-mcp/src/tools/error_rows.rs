@@ -256,6 +256,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "show the fresh card and ask again",
     ),
     (
+        rdy_schema::instruction::W_INSTRUCTION_SELECTOR,
+        "an instruction's area:<name> selector names an area the pack lacks; the instruction is written and the selector matches nothing",
+        "define area <name> in the pack, or correct the selector",
+    ),
+    (
         "W_CARD_WORDS",
         "a decision or question lacks its card words, or they are too long",
         "add a short title, a one-line why and, for a question, two to four options",

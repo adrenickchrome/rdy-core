@@ -29,6 +29,7 @@ mod mcp_hub_keys;
 mod mcp_import;
 mod mcp_inbox;
 mod mcp_inbox_session;
+mod mcp_instruction_schema;
 mod mcp_instructions;
 mod mcp_intake;
 mod mcp_intents;
