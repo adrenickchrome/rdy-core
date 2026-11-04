@@ -10,6 +10,7 @@
 //! D-45RG6, O21), on its recorded canon: those of its landing form there, and its in-flight
 //! forms, each open until the author answers it; and the canon tensions on blocks it writes that
 //! its landing form no longer has, which the version's change resolves (`updated`).
+use crate::as_built::{AsBuilt, Resolver, affected};
 use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
@@ -22,10 +23,11 @@ use crate::lexicon::Lexicon;
 use crate::tensions::{Tension, TensionSeverity, TensionStatus, judged_on_the_net_change};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph, edges_of};
-use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
+use rdy_model::decision::{DECIDED_BY, DECISION, IMPLEMENTS, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::{REAFFIRMED, reaffirmed_causes};
 use rdy_model::plan::{MAX_SEALED_ITEMS, PlanAct, PlanHead, PlanKind, PlanOutcome, item_hash};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Tracking};
+use rdy_schema::as_built::BUILT_FIELD;
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -41,6 +43,12 @@ const CODE_EDGE: &str = "implements";
 
 /// The edge of every tension item.
 pub const TENSION_EDGE: &str = "tension";
+
+/// The edge of every as-built confirm item (D-YAY1G): a computed label, never a stored link kind.
+pub const BUILT_EDGE: &str = "built";
+
+/// The domain prefix of [`built_cause_hash`].
+pub const BUILT_CONFIRM_DOMAIN: &[u8] = b"rdy-asbuilt-confirm-1\0";
 
 /// The fix of [`limit_error`].
 const LIMIT_FIX: &str = "split the change into smaller proposals";
@@ -897,6 +905,17 @@ pub(crate) fn compute_in(
             limit,
         )
     })?;
+    // D-YAY1G: the as-built confirm items, from the built delta beside the content one
+    as_built_items(
+        st,
+        sides,
+        &touched,
+        &t,
+        &mut hash_or_deleted,
+        &stable_of,
+        &mut items,
+        limit,
+    )?;
     // O5: a tension item's subject is the tension's id, its cause the tension's first involved
     // block, and an answer keeps the tension's vkey, so it lapses when the tension changes. An
     // open one waits for the author's answer (D-45RG6); one the version resolves is updated.
@@ -959,6 +978,171 @@ pub(crate) fn compute_in(
         reaffirms: !acknowledged.is_empty() || !reaffirmed.is_empty(),
         tensions,
     })
+}
+
+/// The stored `built` of decision `b` as authored: `None` when absent, not a string, or the
+/// version's content was removed.
+fn built_raw(b: &Block) -> Option<&str> {
+    if b.is_redacted() {
+        return None;
+    }
+    match b.fields.get(BUILT_FIELD)? {
+        FieldValue::Str(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// The cause hash of an as-built item whose cause is a decision (D-YAY1G): BLAKE3 of
+/// [`BUILT_CONFIRM_DOMAIN`], the 32 raw bytes of the decision's content hash `content`, and its
+/// stored `built`: byte 0 when absent, else byte 1, the u32 little-endian UTF-8 byte length and
+/// the exact string. A second `built` edit, even to an equal version spelled another way, gives
+/// another hash; an edit of a tracking field other than `built` gives the same one. A string
+/// past the length a u32 counts has no stored form, so it hashes as absent.
+pub fn built_cause_hash(content: &Hash, built: Option<&str>) -> Hash {
+    let mut bytes = BUILT_CONFIRM_DOMAIN.to_vec();
+    bytes.extend_from_slice(&content.0);
+    match built.and_then(|b| u32::try_from(b.len()).ok().map(|n| (b, n))) {
+        None => bytes.push(0),
+        Some((b, n)) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&n.to_le_bytes());
+            bytes.extend_from_slice(b.as_bytes());
+        }
+    }
+    Hash::of(&bytes)
+}
+
+/// The decisions whose stored `built` the version changes: in both states, a decision in both,
+/// with another stored string (or one added or removed). A new or a deleted decision is none.
+fn built_changed(sides: &Sides) -> BTreeSet<BlockId> {
+    let (base, fin) = (&sides.base, &sides.fin);
+    sides
+        .written
+        .iter()
+        .filter(|id| match (base.m.get(id), fin.m.get(id)) {
+            (Some(a), Some(b)) => {
+                a.block_type == DECISION && b.block_type == DECISION && built_raw(a) != built_raw(b)
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+/// The direct `decided_by` and `implements` targets of `b`, each once.
+fn direct_decisions(b: &Block) -> BTreeSet<BlockId> {
+    [DECIDED_BY, IMPLEMENTS]
+        .iter()
+        .flat_map(|k| b.links.get(*k).into_iter().flatten())
+        .map(|l| l.target.clone())
+        .collect()
+}
+
+/// D-YAY1G: the as-built confirm items of a version, from the built delta beside the content
+/// one. A block whose override disagrees with its decisions after the version (the warning's
+/// rule) gets one item for each cause the version gives it: the block itself when the version
+/// changes it, the block that holds its override when the version changes that one, and each
+/// decision it cites directly whose `built` the version changes. The item's subject is the
+/// override's holder (the nearest section or doc with `planned: true` for an inherited one), so
+/// the children of one holder with one cause share one item. It is open: a reasoned confirm or
+/// a defer answers it, and no repin closes it. A block whose override disagreed before the
+/// version and agrees after (the version removed the override, the citation or the mismatch,
+/// or deleted the block) gets the same items, closed as `updated`. Entity reach, neighbors and
+/// code never give one. Each item is admitted to `items` as it is made ([`admit_built`]), so
+/// the first one past `limit` stops the walk.
+#[allow(clippy::too_many_arguments)]
+fn as_built_items(
+    st: &ReadState,
+    sides: &Sides,
+    touched: &BTreeSet<BlockId>,
+    t: &Tracking,
+    subject_hash: &mut dyn FnMut(&BlockId) -> Hash,
+    stable_of: &dyn Fn(&BlockId) -> bool,
+    items: &mut BTreeMap<Hash, PlanCandidate>,
+    limit: usize,
+) -> Result<(), RdyError> {
+    let (base, fin) = (&sides.base, &sides.fin);
+    let changed = built_changed(sides);
+    let trigger: BTreeSet<BlockId> = touched.iter().chain(&changed).cloned().collect();
+    if trigger.is_empty() {
+        return Ok(());
+    }
+    let candidates: BTreeSet<BlockId> = affected(&fin.m, &fin.g, &trigger)
+        .into_iter()
+        .chain(affected(&base.m, &base.g, &trigger))
+        .collect();
+    let (rf, rb) = (
+        Resolver::new(st.pack(), &fin.m),
+        Resolver::new(st.pack(), &base.m),
+    );
+    for x in &candidates {
+        let after = rf.status(x).filter(AsBuilt::mismatch);
+        let before = rb.status(x).filter(AsBuilt::mismatch);
+        // after the version first, so an open item merges over a closed one of the same id
+        for (s, m, close) in [
+            (after, &fin.m, None),
+            (before, &base.m, Some(PlanOutcome::Updated)),
+        ] {
+            let Some(s) = s else { continue };
+            let Some(holder) = s.owner.and_then(|o| BlockId::parse(&o.block).ok()) else {
+                continue;
+            };
+            let mut causes: Vec<BlockId> = vec![];
+            if touched.contains(x) {
+                causes.push(x.clone());
+            }
+            if holder != *x && touched.contains(&holder) {
+                causes.push(holder.clone());
+            }
+            if let Some(b) = m.get(x) {
+                causes.extend(
+                    direct_decisions(b)
+                        .into_iter()
+                        .filter(|d| changed.contains(d)),
+                );
+            }
+            let subject = holder.to_string();
+            for cause in causes {
+                let cause_hash = match fin.m.get(&cause) {
+                    Some(d) if changed.contains(&cause) => {
+                        built_cause_hash(&d.content_hash_with(t), built_raw(d))
+                    }
+                    _ => subject_hash(&cause),
+                };
+                let c = PlanCandidate {
+                    id: item_hash(&cause, &subject, PlanKind::Confirm),
+                    kind: PlanKind::Confirm,
+                    subject: subject.clone(),
+                    cause,
+                    edge: BUILT_EDGE.to_string(),
+                    subject_hash: Some(subject_hash(&holder)),
+                    cause_hash,
+                    close,
+                    stable: stable_of(&holder),
+                };
+                admit_built(items, c, limit)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Adds the as-built item `c` (D-YAY1G): a new one as [`admit`] does; over an item of the same
+/// id (a normal confirm, or another as-built one) it keeps one item with edge `built` and the
+/// stricter freshness, the cause hash that binds the decision's `built` too, and it is closed
+/// only when both are.
+fn admit_built(
+    items: &mut BTreeMap<Hash, PlanCandidate>,
+    c: PlanCandidate,
+    limit: usize,
+) -> Result<(), RdyError> {
+    if let Some(had) = items.get_mut(&c.id) {
+        had.edge = BUILT_EDGE.to_string();
+        had.cause_hash = c.cause_hash;
+        had.close = had.close.and(c.close);
+        return Ok(());
+    }
+    admit(items, c, limit)
 }
 
 /// The decisions the version creates: written, absent from the baseline, a decision after.
@@ -2449,5 +2633,42 @@ mod tests {
             close_of(&p, A, S, PlanKind::Reaffirm),
             Some(PlanOutcome::Updated)
         );
+    }
+
+    /// ab3 (D-YAY1G): the as-built items count against the one item bound: the first one past
+    /// it refuses the whole plan.
+    #[test]
+    fn ab3_as_built_items_count_against_the_item_cap() {
+        let (_d, r) = project();
+        let st = r.read();
+        let d = |built: &str| text(decision(D1, "Ship it.", "accepted"), "built", built);
+        let planned = |i: &str| {
+            link(
+                field(claim(i, "Planned."), "planned", FieldValue::Bool(true)),
+                "decided_by",
+                D1,
+                None,
+            )
+        };
+        let base = [d("1.0.0"), planned(P), planned(Q)];
+        let fin = [d("2.0.0"), planned(P), planned(Q)];
+        let t = Tracking::new(BTreeMap::from([(
+            DECISION.to_string(),
+            BTreeSet::from([BUILT_FIELD.to_string()]),
+        )]));
+        let sides = sides_with(&st, t, &base, &fin);
+        let all = compute_in(&st, &sides, None, 2).unwrap();
+        assert_eq!(rows(&all), {
+            let mut want = vec![
+                (D1.to_string(), P.to_string(), PlanKind::Confirm, None),
+                (D1.to_string(), Q.to_string(), PlanKind::Confirm, None),
+            ];
+            want.sort_by_key(|(c, s, k, _)| item_hash(&id(c), s, *k));
+            want
+        });
+        assert!(all.items.iter().all(|i| i.edge == BUILT_EDGE));
+        let e = compute_in(&st, &sides, None, 1).unwrap_err();
+        assert_eq!(e.code, E_LIMIT);
+        assert_eq!(e.message, "change plan exceeds 1 plan items");
     }
 }

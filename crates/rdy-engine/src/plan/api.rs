@@ -703,6 +703,74 @@ pub(crate) fn live_rows(
     (rows, counts, notes)
 }
 
+/// The items of proposal version `version`'s plan, from its recorded canon and changes: with its
+/// bound plan's HEADs against its chain's first HEADs, and that plan (its id and answers); with
+/// no bound plan (O19), the HEADs captured once as both ends and no answers (so no lapse).
+fn proposal_computed(
+    st: &ReadState,
+    version: &Hash,
+) -> Result<(ComputedPlan, Option<Hash>, Vec<PlanAnswer>), RdyError> {
+    let reader = st.reader();
+    let p = reader.proposal(version)?;
+    let bound = reader.plan_of_proposal(version, st.seq())?;
+    let (heads, first, answers) = match bound {
+        Some(h) => {
+            let plan = reader.plan(&h)?;
+            let first = match plan.stable {
+                Some(s) => reader.plan(&s)?.heads,
+                None => plan.heads.clone(),
+            };
+            (plan.heads, first, plan.answers)
+        }
+        None => {
+            let heads = capture_heads(st)?;
+            (heads.clone(), heads, vec![])
+        }
+    };
+    let fixed = compute::fixed_tensions(st, version)?;
+    let computed = compute::compute(
+        st,
+        &p.view,
+        &p.changes,
+        p.canon_at,
+        fixed.as_ref(),
+        &heads,
+        &first,
+    )?;
+    Ok((computed, bound, answers))
+}
+
+/// D-YAY1G: the subjects of the open as-built items (edge `built`) of the live plan of `scope`,
+/// as its rows read them: a view's plan, or a proposal version's. Any other scope has no live
+/// plan and gives none; no plan is computed for it.
+pub(crate) fn open_built_subjects(
+    st: &ReadState,
+    scope: &Scope,
+) -> Result<BTreeSet<String>, RdyError> {
+    let (computed, answers) = match scope {
+        Scope::View(v) => {
+            let vp = ViewPlan::read(st, v)?;
+            let answers = vp.prior().to_vec();
+            (vp.computed, answers)
+        }
+        Scope::Proposal(v) => {
+            let (computed, _, answers) = proposal_computed(st, v)?;
+            (computed, answers)
+        }
+        _ => return Ok(BTreeSet::new()),
+    };
+    let (rows, _, _) = live_rows(&computed, &answers);
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| match row {
+            PlanRow::Live(i) if i.state == ItemState::Open && i.edge == compute::BUILT_EDGE => {
+                Some(i.subject)
+            }
+            _ => None,
+        })
+        .collect())
+}
+
 /// The state a sealed outcome counts as.
 fn sealed_state(o: PlanOutcome) -> ItemState {
     match o {
@@ -825,33 +893,7 @@ impl ReadState {
     /// captured once as both ends and no answers (so no lapse).
     fn proposal_plan(&self, text: &str) -> Result<PlanReply, RdyError> {
         let pref = crate::gate::resolve_in(self, text)?;
-        let reader = self.reader();
-        let p = reader.proposal(&pref.version)?;
-        let bound = reader.plan_of_proposal(&pref.version, self.seq())?;
-        let (heads, first, answers) = match bound {
-            Some(h) => {
-                let plan = reader.plan(&h)?;
-                let first = match plan.stable {
-                    Some(s) => reader.plan(&s)?.heads,
-                    None => plan.heads.clone(),
-                };
-                (plan.heads, first, plan.answers)
-            }
-            None => {
-                let heads = capture_heads(self)?;
-                (heads.clone(), heads, vec![])
-            }
-        };
-        let fixed = compute::fixed_tensions(self, &pref.version)?;
-        let computed = compute::compute(
-            self,
-            &p.view,
-            &p.changes,
-            p.canon_at,
-            fixed.as_ref(),
-            &heads,
-            &first,
-        )?;
+        let (computed, bound, answers) = proposal_computed(self, &pref.version)?;
         Ok(reply(
             format!("proposal:{pref}"),
             bound,

@@ -2,7 +2,9 @@
 //! it is cached, and when an override warns.
 mod common;
 
-use rdy_engine::as_built::{AS_BUILT_FIX_NO_ITEM, AsBuilt, Derived, Override, Resolver, Status};
+use rdy_engine::as_built::{
+    AS_BUILT_FIX_NO_ITEM, AS_BUILT_FIX_OPEN_ITEM, AsBuilt, Derived, Override, Resolver, Status,
+};
 use rdy_engine::*;
 use rdy_model::redaction::RedactedBlockIdentity;
 use rdy_model::{Block, BlockId, EditorialClass, FieldValue, Hash, Justification, Link, Op, Role};
@@ -745,7 +747,9 @@ fn ab2_override_warnings_follow_the_recorded_ruling() {
         ]),
     );
     let c = |k: &str| w.created[k].clone();
-    let fix = AS_BUILT_FIX_NO_ITEM.to_string();
+    // ab3 (D-YAY1G): every warning here is in a view whose plan has an open as-built item for
+    // the override's holder, so the fix names that item
+    let fix = AS_BUILT_FIX_OPEN_ITEM.to_string();
     let row = |at: &str, eff: &str, der: &str| {
         (
             at.to_string(),

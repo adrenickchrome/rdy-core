@@ -13,21 +13,28 @@
 //! leaves that hash unchanged.
 //!
 //! [`ReadState::as_built_warnings`] is the one warning function. Write, read, context and brief
-//! call it.
+//! call it. It gives the open-item fix while the scope's plan asks about the override, and
+//! leaves out a warning that a sealed, reasoned confirm silences, until the override's holder
+//! or the `built` of a cited decision changes (D-YAY1G). It reads that from the seals of the
+//! scope's landing chain and stores nothing.
 
 use crate::error::W_AS_BUILT_OVERRIDE;
 use crate::materialize::Materialized;
+use crate::plan::compute::BUILT_EDGE;
+use crate::read_state::memo::Slots;
 use crate::{RdyError, ReadState, Scope};
 use rdy_graph::{EdgeKind, Graph};
-use rdy_model::{Block, BlockId, FieldValue, decision, tree};
+use rdy_model::plan::{PlanAct, PlanAnswer, PlanKind, PlanOutcome, SealedItem};
+use rdy_model::{Block, BlockId, FieldValue, Hash, decision, tree};
 use rdy_schema::as_built::{
     BUILT_FIELD, Built, PLANNED_FIELD, SINCE_FIELD, is_content_type, parse_built, version_of,
 };
 use rdy_schema::{Issue, Pack, Severity};
 use semver::Version;
 use serde::Serialize;
-use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 
 /// The most as-built warnings one reply carries. The report arrays of a publication check have
 /// the same cap.
@@ -331,28 +338,285 @@ impl ReadState {
     }
 
     /// The one as-built warning function (D-YAY1G): a `W_AS_BUILT_OVERRIDE` for each of `rows`
-    /// whose override disagrees with its decisions, in the order given, at most
-    /// [`MAX_AS_BUILT_WARNINGS`]. `rows` are statuses in `scope`.
+    /// whose override disagrees with its decisions and is not silenced, in the order given, at
+    /// most [`MAX_AS_BUILT_WARNINGS`]. `rows` are statuses in `scope`.
+    ///
+    /// A reasoned confirm of the override's as-built plan item, sealed when its version landed,
+    /// silences the warning on the override's holder and on each block under it whose mismatch
+    /// comes from that override ([`ReadState::silenced`]), unless the scope's own plan has an
+    /// open as-built item for the holder. The fix is [`AS_BUILT_FIX_OPEN_ITEM`] in a view or a
+    /// proposal version whose plan has an open as-built item for the holder, else
+    /// [`AS_BUILT_FIX_NO_ITEM`]. A plan is computed only for a view or a proposal version, and
+    /// only when a block disagrees; never for canon, a tag or a landing.
     pub fn as_built_warnings(
         &self,
-        _scope: &Scope,
+        scope: &Scope,
         rows: &[(BlockId, AsBuilt)],
     ) -> Result<Vec<Issue>, RdyError> {
-        Ok(rows
-            .iter()
-            .filter(|(_, s)| s.mismatch())
-            .take(MAX_AS_BUILT_WARNINGS)
-            .map(|(id, s)| Issue {
-                severity: Severity::Warning,
-                code: W_AS_BUILT_OVERRIDE,
-                block: Some(id.clone()),
-                message: format!(
-                    "Block {id} has override status {}, but its decisions derive {}.",
-                    s.label(),
-                    s.derived.label()
-                ),
-                fix: AS_BUILT_FIX_NO_ITEM.to_string(),
+        let mismatched: Vec<&(BlockId, AsBuilt)> =
+            rows.iter().filter(|(_, s)| s.mismatch()).collect();
+        if mismatched.is_empty() {
+            return Ok(vec![]);
+        }
+        // an open item in the scope's own plan asks about the override again: it warns
+        let open = open_subjects(self, scope);
+        let seals = self.override_seals(scope)?;
+        let mut kept = Vec::with_capacity(mismatched.len().min(MAX_AS_BUILT_WARNINGS));
+        if seals.by_subject.is_empty() {
+            kept.extend(mismatched.into_iter().take(MAX_AS_BUILT_WARNINGS));
+        } else {
+            let m = self.materialized(scope)?;
+            let r = Resolver::new(self.pack(), &m);
+            let mut held: HashMap<String, bool> = HashMap::new();
+            for row in mismatched {
+                if kept.len() == MAX_AS_BUILT_WARNINGS {
+                    break;
+                }
+                let Some(holder) = row.1.owner.as_ref().map(|o| o.block.clone()) else {
+                    continue;
+                };
+                let silent = match held.get(&holder) {
+                    Some(s) => *s,
+                    None => {
+                        let s =
+                            !open.contains(&holder) && self.silenced(&holder, &seals, &m, &r)?;
+                        held.insert(holder, s);
+                        s
+                    }
+                };
+                if !silent {
+                    kept.push(row);
+                }
+            }
+        }
+        Ok(kept
+            .into_iter()
+            .map(|(id, s)| {
+                let held_open = s.owner.as_ref().is_some_and(|o| open.contains(&o.block));
+                Issue {
+                    severity: Severity::Warning,
+                    code: W_AS_BUILT_OVERRIDE,
+                    block: Some(id.clone()),
+                    message: format!(
+                        "Block {id} has override status {}, but its decisions derive {}.",
+                        s.label(),
+                        s.derived.label()
+                    ),
+                    fix: if held_open {
+                        AS_BUILT_FIX_OPEN_ITEM
+                    } else {
+                        AS_BUILT_FIX_NO_ITEM
+                    }
+                    .to_string(),
+                }
             })
             .collect())
     }
+
+    /// The landing whose chain `scope` reads: canon's head (also for the in-flight scope), the
+    /// landing a view or a proposal version reads on, or the landing an as-of read names.
+    fn chain_head(&self, scope: &Scope) -> Result<Option<Hash>, RdyError> {
+        Ok(match scope {
+            Scope::Canon | Scope::Inflight => self.canon_head(),
+            Scope::View(v) => self.effective_base(v),
+            Scope::At(h) => Some(*h),
+            Scope::Proposal(v) => self.proposal_base(v)?,
+        })
+    }
+
+    /// What the seals of `scope`'s landing chain say about each override holder: one pass over
+    /// the chain (newest first, within [`crate::history_facts::MAX_LANDINGS`]), kept per state
+    /// and chain head.
+    fn override_seals(&self, scope: &Scope) -> Result<Arc<OverrideSeals>, RdyError> {
+        let head = self.chain_head(scope)?;
+        let Some(top) = head else {
+            return Ok(Arc::default());
+        };
+        SEALS.get_or_try((self.memo.id, head), || {
+            let reader = self.reader();
+            let mut chain = vec![];
+            crate::history_facts::walk_heads(
+                &[top],
+                |h| Ok(reader.landing(h)?.prev),
+                |h| {
+                    chain.push(h);
+                    false
+                },
+            )?;
+            let mut out = OverrideSeals::default();
+            for landing in chain {
+                let Some(p) = reader.plan_of_landing(&landing, self.seq())? else {
+                    continue;
+                };
+                let plan = reader.plan(&p)?;
+                let Some(seal) = &plan.seal else { continue };
+                let mut subjects: BTreeMap<&str, Vec<&SealedItem>> = BTreeMap::new();
+                for i in &seal.items {
+                    if i.edge == BUILT_EDGE && i.kind == PlanKind::Confirm {
+                        subjects.entry(i.subject.as_str()).or_default().push(i);
+                    }
+                }
+                for (subject, items) in subjects {
+                    // the newest seal that holds an as-built item for the subject decides
+                    if out.by_subject.contains_key(subject) {
+                        continue;
+                    }
+                    let confirmed = confirmed_hash(&items, &plan.answers);
+                    out.by_subject.insert(
+                        subject.to_string(),
+                        SealedOverride {
+                            landing: seal.landing,
+                            subject: confirmed,
+                        },
+                    );
+                }
+            }
+            Ok(Arc::new(out))
+        })
+    }
+
+    /// Whether the warnings that `holder`'s override gives are silenced in the state `m` of a
+    /// scope (D-YAY1G): the newest seal of the scope's chain that holds an as-built item for it
+    /// confirmed every such item with a reason, `holder` keeps the content those answers bound,
+    /// and no decision that a silenced block cites directly has another `built` than the
+    /// confirming landing left it (read at `Scope::At` that landing). The silenced blocks are
+    /// `holder` and the blocks under it whose mismatch comes from its override.
+    fn silenced(
+        &self,
+        holder: &str,
+        seals: &OverrideSeals,
+        m: &Materialized,
+        r: &Resolver<'_>,
+    ) -> Result<bool, RdyError> {
+        let Some(SealedOverride {
+            landing,
+            subject: Some(bound),
+        }) = seals.by_subject.get(holder)
+        else {
+            return Ok(false);
+        };
+        let Ok(hid) = BlockId::parse(holder) else {
+            return Ok(false);
+        };
+        let Some(hb) = m.get(&hid) else {
+            return Ok(false);
+        };
+        if hb.content_hash_with(self.reader().tracking()) != *bound {
+            return Ok(false);
+        }
+        let at = self.materialized(&Scope::At(*landing))?;
+        let mut todo = vec![hid.clone()];
+        let mut seen = HashSet::from([hid]);
+        while let Some(y) = todo.pop() {
+            for c in m.children(Some(&y)) {
+                if seen.insert(c.id.clone()) {
+                    todo.push(c.id.clone());
+                }
+            }
+            let from_holder = r
+                .status(&y)
+                .is_some_and(|s| s.mismatch() && s.owner.is_some_and(|o| o.block == holder));
+            if !from_holder {
+                continue;
+            }
+            let Some(b) = m.get(&y) else { continue };
+            for kind in [decision::DECIDED_BY, decision::IMPLEMENTS] {
+                for link in b.links.get(kind).into_iter().flatten() {
+                    if built_text(m.get(&link.target)) != built_text(at.get(&link.target)) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The fix of `W_AS_BUILT_OVERRIDE` while an open as-built plan item asks about the override
+/// (D-YAY1G).
+pub const AS_BUILT_FIX_OPEN_ITEM: &str =
+    "Confirm the as-built plan item with a reason, or remove the override.";
+
+/// The newest seal of one landing chain that holds an as-built item for each override holder,
+/// by the holder's id.
+#[derive(Default)]
+struct OverrideSeals {
+    by_subject: HashMap<String, SealedOverride>,
+}
+
+/// One holder's newest seal: its landing, and the holder's content hash its answers bound when
+/// every as-built item for the holder that needed an answer is confirmed with a reason (`None`
+/// otherwise: a deferred or open one, or no confirm at all).
+struct SealedOverride {
+    landing: Hash,
+    subject: Option<Hash>,
+}
+
+/// The subject hash the confirm answers of `items` (one subject's as-built items in one seal)
+/// bound, when each item the version did not close itself is confirmed by an answer with a
+/// reason, and at least one is, all with one subject hash. `answers` are sorted by item.
+fn confirmed_hash(items: &[&SealedItem], answers: &[PlanAnswer]) -> Option<Hash> {
+    let mut bound: Option<Hash> = None;
+    for i in items {
+        match i.outcome {
+            // the version itself removed the override, the citation or the mismatch
+            PlanOutcome::Updated => continue,
+            PlanOutcome::Confirmed => {}
+            _ => return None,
+        }
+        // a plan's answers are sorted by item, as the landing's outcome read takes them
+        let a = &answers[answers.binary_search_by(|a| a.item.cmp(&i.id)).ok()?];
+        if a.act != PlanAct::Confirm || a.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+            return None;
+        }
+        let h = a.subject?;
+        if bound.is_some_and(|b| b != h) {
+            return None;
+        }
+        bound = Some(h);
+    }
+    bound
+}
+
+/// The stored `built` of a decision as authored, `None` for no decision, a removed version or
+/// no string.
+fn built_text(b: Option<&Block>) -> Option<&str> {
+    let b = b.filter(|b| b.block_type == decision::DECISION)?;
+    match fields_of(b)?.get(BUILT_FIELD)? {
+        FieldValue::Str(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// The seals of each (state, chain head) a warning read, for the last few states.
+static SEALS: LazyLock<Slots<(u64, Option<Hash>), Arc<OverrideSeals>>> =
+    LazyLock::new(Slots::default);
+
+thread_local! {
+    /// Set while this thread reads a live plan for the fix text: a read the plan's own
+    /// computation makes gives the no-item fix rather than computing the plan again.
+    static IN_PLAN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The open as-built subjects of each (state, scope) a warning read, for the last few: a read
+/// or a briefing asks once per block.
+static OPEN: LazyLock<Slots<(u64, Scope), Arc<BTreeSet<String>>>> = LazyLock::new(Slots::default);
+
+/// The subjects of the open as-built items of `scope`'s live plan, kept per state and scope;
+/// none for any scope but a view or a proposal version, when the plan cannot be read (the fix
+/// then names no item), or while this thread computes a plan already.
+fn open_subjects(st: &ReadState, scope: &Scope) -> Arc<BTreeSet<String>> {
+    if !matches!(scope, Scope::View(_) | Scope::Proposal(_)) || IN_PLAN.with(Cell::get) {
+        return Arc::default();
+    }
+    let key = (st.memo.id, scope.clone());
+    if let Some(open) = OPEN.get(&key) {
+        return open;
+    }
+    IN_PLAN.with(|c| c.set(true));
+    let open = crate::plan::api::open_built_subjects(st, scope).unwrap_or_default();
+    IN_PLAN.with(|c| c.set(false));
+    let open = Arc::new(open);
+    OPEN.put(key, Arc::clone(&open));
+    open
 }

@@ -2,7 +2,7 @@
 //! as-built status and the same override warnings. Source tools see planned content whole and
 //! take no profile.
 use rdy_engine::RdyError;
-use rdy_engine::as_built::AS_BUILT_FIX_NO_ITEM;
+use rdy_engine::as_built::AS_BUILT_FIX_OPEN_ITEM;
 use rdy_mcp::tools::*;
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
@@ -63,11 +63,13 @@ fn warnings(v: &Value) -> BTreeSet<(String, String, String)> {
         .collect()
 }
 
+/// ab3 (D-YAY1G): every read here is in view `work`, whose plan has an open as-built item for
+/// each override's holder, so the fix names that item.
 fn warning(block: &str, eff: &str, der: &str) -> (String, String, String) {
     (
         block.to_string(),
         format!("Block {block} has override status {eff}, but its decisions derive {der}."),
-        AS_BUILT_FIX_NO_ITEM.to_string(),
+        AS_BUILT_FIX_OPEN_ITEM.to_string(),
     )
 }
 
