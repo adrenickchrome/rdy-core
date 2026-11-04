@@ -503,6 +503,8 @@ fn ain4_tool_inputs_are_closed_and_reader_calls_write_no_content() {
         (code.as_str(), message.as_str()),
         ("E_LIMIT", "instructions exceed 1024 load ids (found 1025)")
     );
+    // every refusal leaves the reminder owed
+    assert_eq!(c.call("rdy_overview", json!({})).ok()["reminder"], REMINDER);
     // a reader's complete call writes nothing to either project
     let mut m = w.mcp(md.path());
     assert!(

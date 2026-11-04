@@ -3,7 +3,11 @@
 //! It never opens meta's store, so meta's writer stays the one writer; each read is of one
 //! state, and a later landing is seen by the next call. The meta project read as this project
 //! is read once, as the person layer. A missing meta project is an empty person layer with the
-//! creation hint; a broken one is a visible refusal. Every person lives in an isolated home.
+//! creation hint; a broken one is a visible refusal. A direct run's reader opens an unused meta
+//! store itself and reads a held one through its daemon. Every person lives in an isolated home.
+use rdy_daemon::instructions::PersonReader;
+use rdy_engine::engine::{Engine, Local};
+use rdy_engine::instructions::{self, Caller, LoadRequest};
 use rdy_qa::instructions::{REMINDER, Set, World, author};
 use rdy_qa::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
@@ -25,6 +29,27 @@ const META_SETS: &[Set] = &[Set {
     lead: Some("My rules in every project."),
     rules: &[(&["all"], "Answer in British English.")],
 }];
+
+/// One instructions call of a direct run on the project at `dir`, as `agent:direct`: the
+/// project's store in this process, the person layer read by a direct reader in `w`'s home.
+fn direct(w: &World, dir: &Path) -> Value {
+    let (platform, env) = w.path_env();
+    let host = PersonReader::direct(env!("CARGO_PKG_VERSION")).with_env(platform, env);
+    let local = Local::open(dir).expect("open the project");
+    let caller = Caller {
+        actor: "agent:direct".into(),
+        run: Some("d1".into()),
+    };
+    let reply = instructions::deliver(
+        Some((&local.read(), &local.root())),
+        &LoadRequest::default(),
+        &caller,
+        Some(&host),
+    )
+    .expect("a direct read");
+    local.close().expect("close the project");
+    serde_json::to_value(reply).unwrap()
+}
 
 fn session(c: &mut McpClient, actor: &str, run: &str, role: &str) {
     let s = c.call(
@@ -95,6 +120,17 @@ fn ain4_meta_reads_share_its_daemon_and_never_reopen_its_writer() {
     let a1 = author(p1.path(), "Small changes keep review cheap", PROJECT_SETS);
     let a2 = author(p2.path(), "Small changes keep review cheap", PROJECT_SETS);
     w.person(md.path());
+    // a direct run opens the unused meta store itself, and closes it
+    let p3 = w.project();
+    let a3 = author(p3.path(), "Small changes keep review cheap", PROJECT_SETS);
+    let expected = |a: &rdy_qa::instructions::Authored| {
+        [
+            row(&a.rules[0][0], "project"),
+            row(&ma.rules[0][0], "person"),
+        ]
+    };
+    assert_eq!(rows(&direct(&w, p3.path())), expected(&a3));
+    assert!(w.daemon_pid(md.path()).is_none(), "no daemon was started");
     // meta's daemon runs, with a writer session on it, before any project reads it
     let mut mw = w.mcp(md.path());
     session(&mut mw, "agent:meta", "m1", "writer");
@@ -136,6 +172,9 @@ fn ain4_meta_reads_share_its_daemon_and_never_reopen_its_writer() {
     assert_eq!(w.daemon_pid(md.path()), Some(meta_pid));
     let held = rdy_engine::Rdy::open(md.path()).map(drop).unwrap_err();
     assert_eq!(held.code, "E_LOCKED", "{held:?}");
+    // a direct run finds the store held, and reads it through that daemon
+    assert_eq!(rows(&direct(&w, p3.path())), expected(&a3));
+    assert_eq!(w.daemon_pid(md.path()), Some(meta_pid));
     // a later landing through meta's writer is seen by the next read
     let late = land_rule(&w, md.path(), &mut mw, "late", &ma.decision);
     let mut c = w.mcp(p1.path());
