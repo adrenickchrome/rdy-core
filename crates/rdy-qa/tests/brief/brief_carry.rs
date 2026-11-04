@@ -4,6 +4,7 @@ use rdy_graph::Graph;
 use rdy_model::BlockId;
 use rdy_qa::fixtures::*;
 use serde_json::json;
+use std::sync::Arc;
 
 // a copy of rdy_qa::edit_loop::spec_doc: this file was written beside Task 1
 
@@ -73,7 +74,11 @@ fn assert_carried(r: &Rdy, scope: &Scope, what: &str) {
         "{what}: the graph was seeded by the publish, not built by this read"
     );
     let carried = st.graph(scope).unwrap();
-    let rebuilt = Graph::build_from(st.materialized(scope).unwrap().iter());
+    // a rebuild the way the read state builds one: with the pack's tracking fields (trk1)
+    let rebuilt = Graph::build_with(
+        st.materialized(scope).unwrap().iter(),
+        Arc::new(st.pack().tracking()),
+    );
     assert!(
         *carried == rebuilt,
         "{what}: the carried graph differs from a rebuild"
