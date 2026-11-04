@@ -7,6 +7,7 @@ mod wc_checkout;
 mod wc_commit;
 mod wc_figures;
 mod wc_ignore;
+mod wc_instruction;
 mod wc_layout;
 mod wc_new_check;
 mod wc_plan;

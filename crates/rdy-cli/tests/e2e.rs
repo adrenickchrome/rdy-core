@@ -69,6 +69,9 @@ fn rdy(dir: &std::path::Path, args: &[&str]) -> Value {
         .current_dir(dir)
         .env("RDY_ACTOR", "human:founder")
         .env("XDG_CONFIG_HOME", cfg.path())
+        .env("HOME", cfg.path())
+        .env("USERPROFILE", cfg.path())
+        .env("APPDATA", cfg.path())
         .output()
         .unwrap();
     assert!(
@@ -89,6 +92,9 @@ fn agent_over_mcp_then_human_approves() {
         .args(["--no-daemon", "mcp"])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", cfg.path())
+        .env("HOME", cfg.path())
+        .env("USERPROFILE", cfg.path())
+        .env("APPDATA", cfg.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

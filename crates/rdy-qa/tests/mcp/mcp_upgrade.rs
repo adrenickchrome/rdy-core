@@ -13,7 +13,7 @@ use rdy_mcp::params::parse_params;
 use rdy_mcp::tools::{ERROR_ROWS, McpState, UpgradeParams, rdy_upgrade};
 use rdy_model::Role;
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::{project, rdy_bin};
+use rdy_qa::fixtures::project;
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::error::UpgradeFailure;
 use rdy_store::format::{
@@ -320,7 +320,7 @@ fn ok11_upgrade_mcp_cli_json_and_errors_match() {
 
     // the CLI prints the same JSON for the same project, and its text
     let cli = |args: &[&str]| {
-        let out = std::process::Command::new(rdy_bin())
+        let out = rdy_qa::fixtures::rdy_command()
             .arg("--project")
             .arg(dir.path())
             .args(args)

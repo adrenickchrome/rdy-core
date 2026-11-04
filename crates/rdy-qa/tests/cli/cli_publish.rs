@@ -29,7 +29,7 @@ use rdy_engine::hub_types::{Origin, Secret, SystemHubClock};
 use rdy_engine::{Rdy, Session, now_ms};
 use rdy_model::Role;
 use rdy_qa::daemon::short_tempdir;
-use rdy_qa::fixtures::{approver, land, rdy_bin, write};
+use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::mcp::{McpClient, Reply as McpReply};
 use rdy_qa::platform::set_mode;
 use rdy_render::publish::PublicationRenderer;
@@ -542,7 +542,7 @@ impl Proj {
 
 impl Drop for Proj {
     fn drop(&mut self) {
-        let _ = Command::new(rdy_bin())
+        let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
             .arg("--project")
             .arg(self.dir.path())
@@ -574,7 +574,7 @@ fn kit() -> Kit {
 /// `rdy --project <p> <args>` as the person of `home`, with `extra` variables and nothing else
 /// of this process.
 fn command(p: &Path, home: &Home, extra: &[(&str, &str)], args: &[&str]) -> Command {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.env_clear()
         .envs(home.env())
         .envs(extra.iter().copied())

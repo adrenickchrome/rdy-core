@@ -334,7 +334,7 @@ fn landing_ack(v: &Value) -> (String, Vec<String>) {
 /// `rdy mcp --project <dir>` as the person's environment: a bounded session's proxy to the
 /// project's daemon.
 fn proxy(dir: &Path, env: &[(String, String)]) -> Command {
-    let mut cmd = Command::new(crate::fixtures::rdy_bin());
+    let mut cmd = crate::fixtures::rdy_command();
     cmd.args(["mcp", "--project"])
         .arg(dir)
         .env_remove("RDY_ACTOR")

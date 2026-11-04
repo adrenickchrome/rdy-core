@@ -1,4 +1,5 @@
 use crate::glob::Glob;
+use crate::instruction;
 use crate::pack::*;
 use crate::policy;
 use crate::publication;
@@ -270,6 +271,8 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
             "lifecycle",
             f(FieldKind::Enum, false, &["draft", "stable", "deprecated"]),
         ),
+        // ain1 (D-8X04F): `required: true` makes the doc's instructions a required ruleset
+        (instruction::REQUIRED_FIELD, instruction::required_field()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -309,6 +312,9 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
         .chain(tree::OUTSIDE_DOC_TYPES)
         .map(str::to_string)
         .collect();
+    // ain1 (D-4W1ZR): the instruction, a child of the doc and of a section, placed before the
+    // doc's profile and policy
+    instruction::inject(pack);
     // A publication profile (D-KDFZ3): one closed definition, a direct child of a doc only.
     pack.block_types.insert(
         publication::PROFILE_TYPE.to_string(),
@@ -554,9 +560,16 @@ struct Extension {
     core: BTreeMap<String, FieldDef>,
     /// Whether a pack may repeat a core field exactly; a folder's may not be named at all.
     repeat_core: bool,
+    /// Whether a pack may give the type body rule `b`.
+    body_ok: fn(BodyRule) -> bool,
 }
 
-fn extensions() -> [Extension; 3] {
+/// The body rule a pack may give a type whose core body is optional: anything but required.
+fn optional_body(b: BodyRule) -> bool {
+    b != BodyRule::Required
+}
+
+fn extensions() -> [Extension; 4] {
     [
         Extension {
             ty: tree::FOLDER,
@@ -564,6 +577,7 @@ fn extensions() -> [Extension; 3] {
             trait_ok: |t| t == Trait::Structural,
             core: folder_core(),
             repeat_core: false,
+            body_ok: optional_body,
         },
         Extension {
             ty: supporting::FINDING,
@@ -571,6 +585,7 @@ fn extensions() -> [Extension; 3] {
             trait_ok: supporting::trait_allowed,
             core: supporting::finding_core(),
             repeat_core: true,
+            body_ok: optional_body,
         },
         Extension {
             ty: supporting::SOURCE,
@@ -578,13 +593,23 @@ fn extensions() -> [Extension; 3] {
             trait_ok: supporting::trait_allowed,
             core: supporting::source_core(),
             repeat_core: true,
+            body_ok: optional_body,
+        },
+        // ain1: an instruction's body is required; a pack that names no body rule gets it
+        Extension {
+            ty: instruction::INSTRUCTION,
+            prefix: instruction::INSTRUCTION_PREFIX,
+            trait_ok: instruction::trait_allowed,
+            core: instruction::core(),
+            repeat_core: true,
+            body_ok: |b| b != BodyRule::Forbidden,
         },
     ]
 }
 
-/// A pack may add optional fields to `folder`, `finding` and `source`, nothing else: checked in
-/// the order prefix, children, body, traits, then fields in key order. Its class is forced, so it
-/// is not checked.
+/// A pack may add optional fields to `folder`, `finding`, `source` and `instruction`, nothing
+/// else: checked in the order prefix, children, body, traits, then fields in key order. Its class
+/// is forced, so it is not checked.
 fn check_extension(pack: &Pack, ext: &Extension) -> Result<(), SchemaError> {
     let Some(def) = pack.block_types.get(ext.ty) else {
         return Ok(());
@@ -601,7 +626,7 @@ fn check_extension(pack: &Pack, ext: &Extension) -> Result<(), SchemaError> {
     if !def.children.is_empty() {
         return refuse("children");
     }
-    if def.body == BodyRule::Required {
+    if !(ext.body_ok)(def.body) {
         return refuse("body");
     }
     if !def.traits.iter().all(|t| (ext.trait_ok)(*t)) {

@@ -462,7 +462,7 @@ fn fmt3_the_cli_shows_re_create_it_for_an_m1_project() {
     let before = tree(&rdy);
     // the direct path: a daemon would add .rdy/run and report the refusal from its log
     let (_cfg, env) = human_env("human:qa");
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["--no-daemon", "status"])
         .current_dir(p.path())
         .env("RDY_ACTOR", "human:qa")

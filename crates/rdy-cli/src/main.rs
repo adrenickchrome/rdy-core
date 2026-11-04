@@ -24,6 +24,7 @@ mod dump_cmd;
 mod edit_cmd;
 mod history_text;
 mod inbox_cmd;
+mod instructions_cmd;
 mod intake_cmd;
 mod intent_cmd;
 mod land_cmd;
@@ -40,6 +41,7 @@ mod render_stream_cmd;
 mod review_cmd;
 mod search_cmd;
 mod serve_cmd;
+mod setup_cmd;
 mod signing_cmd;
 mod site_cmd;
 mod stream_cmd;
@@ -65,7 +67,8 @@ const VERSION_TEXT: &str = if PREVIEW {
 #[command(
     name = "rdy",
     version = VERSION_TEXT,
-    about = "A system for keeping decisions and documentation consistent while agents change them."
+    about = "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
+    long_about = "Your intent, ready for anyone who needs it.\n\nrdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents."
 )]
 struct Cli {
     /// Print machine-readable JSON.
@@ -215,8 +218,18 @@ enum Cmd {
     // the about is given in full: a doc comment would lose its closing period
     #[command(about = "Inspect or upgrade this project's store.")]
     Upgrade(upgrade_cmd::UpgradeArgs),
-    /// Run the MCP server over stdio.
+    /// Run the MCP server over stdio. With no project and no working-copy pointer, it serves the
+    /// meta project; with no meta project either, only rdy_session and rdy_instructions.
     Mcp,
+    /// Print the instructions for agents, as rdy_instructions gives them: the required rules of
+    /// the project and the meta project in full, the rulesets you load, and the menu of every
+    /// ruleset with its estimated tokens. Only landed rules are given. The chat path is
+    /// rdy_instructions.
+    Instructions(instructions_cmd::InstructionsArgs),
+    /// Write the three-line stub that tells agents to call rdy_instructions into CLAUDE.md and
+    /// AGENTS.md of the project root (or the current directory outside a project), before your
+    /// own text. A file that has the stub is left alone.
+    Setup,
     /// Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a
     /// checkout, with no path or a path in the working tree, it lints the working copy against
     /// the bound view; the working copy carries no format number. A new entry needs no id, and a
@@ -266,7 +279,7 @@ enum Cmd {
     Wc(wc::WcCmd),
 }
 
-fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
+fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorReply> {
     let as_json = cli.json;
     match cli.cmd {
         Cmd::Config(a) => config_cmd::run(&env.project, a.show_origin),
@@ -275,7 +288,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init(a) => project_cmd::init(env, a, cli.project),
-        Cmd::Mcp => serve_cmd::mcp(env),
+        Cmd::Mcp => serve_cmd::mcp(env, projectless),
+        Cmd::Instructions(a) => instructions_cmd::run(env, a, projectless),
         Cmd::Pack { cmd } => project_cmd::pack(env, cmd),
         Cmd::Keys { cmd } => project_cmd::keys(env, cmd),
         Cmd::Sign(a) => signing_cmd::sign(env, a),
@@ -328,7 +342,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
         Cmd::Compact(a) => compact_cmd::compact(env, a),
-        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) => {
+        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) | Cmd::Setup => {
             unreachable!("handled in main")
         }
     }
@@ -405,6 +419,43 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // ain5: `rdy setup` writes in the project root, or here outside every project
+    if let Cmd::Setup = cli.cmd {
+        let out = setup_cmd::root(cli.project.as_deref(), &cwd).and_then(|r| setup_cmd::setup(&r));
+        return match out {
+            Ok((v, text)) => {
+                if as_json {
+                    println!("{v}");
+                } else {
+                    println!("{text}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                print_error(&e, as_json);
+                ExitCode::FAILURE
+            }
+        };
+    }
+    // ain5: with no --project, `rdy mcp` and `rdy instructions` take the nearest project, else
+    // the meta project, else none; an explicit project and every other command are as before
+    let mut projectless = false;
+    let project = match &cli.cmd {
+        Cmd::Mcp | Cmd::Instructions(_) if cli.project.is_none() => {
+            match instructions_cmd::select(&cwd) {
+                Ok(instructions_cmd::Selected::Project(p)) => p,
+                Ok(instructions_cmd::Selected::Projectless) => {
+                    projectless = true;
+                    project
+                }
+                Err(e) => {
+                    print_error(&e, as_json);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => project,
+    };
     let place = located
         .filter(|p| same(&p.project, &project))
         .unwrap_or_else(|| Place::main(&project));
@@ -433,7 +484,7 @@ fn main() -> ExitCode {
     // the config warnings print once per process on stderr; `rdy config --show-origin` and
     // `rdy status` carry them in their own output
     let own_warnings = match &cli.cmd {
-        Cmd::Status | Cmd::Mcp => true,
+        Cmd::Status | Cmd::Mcp | Cmd::Instructions(_) => true,
         Cmd::Config(a) => a.show_origin && !as_json,
         // key show prints them after its three lines; bind, retire and revoke print them as
         // every other command does
@@ -442,7 +493,7 @@ fn main() -> ExitCode {
         } => !as_json,
         _ => false,
     };
-    match run(cli, &env) {
+    match run(cli, &env, projectless) {
         Ok((v, text)) => {
             if !own_warnings {
                 for w in rdy_engine::config_levels::config_warnings_for_env(&env.project) {

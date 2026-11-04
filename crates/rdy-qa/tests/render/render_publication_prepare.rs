@@ -282,6 +282,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// the review project's decision record, canon's head and the version's hash move; only the
 /// proposal scope's `proposal:<id>` text changed. Its site bytes, and every other scope, kept
 /// their digests.
+/// Re-taken for the instruction block type (ain1): it moves the pack's digest, so the version's
+/// hash moves again. Only `proposal:<id>` changed in the model, the HTML, both Markdown layouts
+/// and the PDF text; the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",

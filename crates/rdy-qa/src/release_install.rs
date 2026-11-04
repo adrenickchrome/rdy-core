@@ -1828,7 +1828,11 @@ fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), Inst
             .env_remove("RDY_RUN")
             .env_remove("RDY_NO_DAEMON")
             .env("PATH", &path)
-            .env("XDG_CONFIG_HOME", &config);
+            .env("XDG_CONFIG_HOME", &config)
+            // ain: the scratch root is the home, so no real meta project is read
+            .env("HOME", &root)
+            .env("USERPROFILE", &root)
+            .env("APPDATA", &config);
         platform::start_in_dir(&mut cmd, &start).map_err(|_| stage)?;
         Ok(cmd)
     };

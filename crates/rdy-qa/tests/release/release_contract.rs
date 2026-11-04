@@ -29,7 +29,7 @@ use rdy_model::{
     Verdict,
     signature::{StatementKind, StatementSource, statement},
 };
-use rdy_qa::fixtures::{output_within, project, rdy_bin};
+use rdy_qa::fixtures::{output_within, project};
 use rdy_schema::{PackSet, TensionKind, TensionSeverity};
 use rdy_store::format::{
     FeatureClass, MANIFEST_VERSION, MAX_FEATURES, MAX_MANIFEST_BYTES, REF_STORE_FEATURES,
@@ -41,7 +41,6 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 /// The thirteen rows of the inventory, sorted: the surfaces of D-TXFHR. The tests pin this list.
@@ -943,7 +942,7 @@ fn store_row() -> Value {
 
 /// Runs the release binary in `dir` without a daemon; returns its exit value, stdout and stderr.
 fn rdy_in(dir: &Path, env: &[(String, String)], args: &[&str]) -> (i32, String, String) {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--no-daemon", "--project"])
         .arg(dir)
         .args(args)
@@ -1699,7 +1698,7 @@ fn agent_cli_probe(
 ) -> Value {
     let mut a = vec!["--json"];
     a.extend_from_slice(args);
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--no-daemon", "--project"])
         .arg(dir)
         .args(&a)
@@ -1923,6 +1922,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("pack", "checks a pack file; the schema_packs row covers it"),
     ("plan confirm", "needs an open plan item"),
     ("new finding", "needs a finding pack"),
+    (
+        "new instruction",
+        "writes an instruction; cli_instructions pins its replies",
+    ),
     ("new profile", "needs a publication profile"),
     ("new source", "needs a source file"),
     ("plan defer", "needs an open plan item"),
@@ -1953,6 +1956,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("render-stream", "renders a stream file"),
     ("repin", "needs a pinned reference to move"),
     ("serve", "starts a daemon"),
+    (
+        "setup",
+        "writes CLAUDE.md and AGENTS.md; cli_instruction_setup pins its replies",
+    ),
     ("sign", "needs a signing key"),
     ("site", "starts or reads the live site"),
     ("stream", "checks a stream file; the sync row covers it"),
@@ -2130,6 +2137,13 @@ fn cli_runtime() -> Value {
     }
     p("undo", &["undo"]);
     p("inbox", &["inbox"]);
+    // ain5: the instructions, with a home of its own, so no real person layer is read
+    let home = tempfile::tempdir().expect("a home");
+    let home_text = home.path().to_string_lossy().into_owned();
+    let mut home_env = env.clone();
+    home_env.push(("HOME".to_string(), home_text.clone()));
+    home_env.push(("USERPROFILE".to_string(), home_text));
+    cli_probe(&mut seen, dir, &home_env, "instructions", &["instructions"]);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2853,6 +2867,32 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"dir": tree_dir, "view": "rdr"}),
     );
     drop(rdr);
+    // ain4: the instructions, with a home of its own, so no real person layer is read; a load
+    // id that no layer holds is refused
+    let home = tempfile::tempdir().expect("a home");
+    let mut ins = McpClient::start_isolated(dir, home.path());
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_session",
+        "rdy_session",
+        session("ins", "writer"),
+    );
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_instructions",
+        "rdy_instructions",
+        json!({}),
+    );
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_instructions",
+        "rdy_instructions unknown load",
+        json!({"load": ["project:d-ZZZZZ"]}),
+    );
+    drop(ins);
     elicitation_probes(seen);
     let _ = (doc, a);
 }
@@ -4214,11 +4254,12 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     // the earlier commands, in order, and the new one
-    // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`)
+    // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`;
+    // ain5 added `instructions` and `setup`: their pin is `ok14_cli_contract_from_clap_is_complete`)
     let earlier: Vec<&str> = top
         .iter()
         .copied()
-        .filter(|n| *n != "review" && *n != "compact")
+        .filter(|n| !["review", "compact", "instructions", "setup"].contains(n))
         .collect();
     assert_eq!(earlier, COMMANDS_BEFORE_CK9);
     let review = tree["subcommands"]
@@ -4768,6 +4809,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
 /// ab1 (FW-AB1): `rdy_schema` lists the content fields `planned` (bool) and `since` (str), which
 /// have no enum values, so their `values` are empty.
+/// ain4/ain5: the instruction probes run with a home of their own and a project with no
+/// instruction set, so `instructions` and `menu` are empty, and the unknown load refusal
+/// states no issue rows.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4788,6 +4832,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/inbox/stdout/entries",
+    "cli/instructions/stdout/instructions",
+    "cli/instructions/stdout/menu",
     "cli/log/stdout[]/dispute/disputes",
     "cli/log/stdout[]/rebased_from",
     "cli/new doc/stdout/consequences",
@@ -4883,6 +4929,9 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_import/ok/on_change/tensions",
     "mcp/rdy_import/ok/related_decisions",
     "mcp/rdy_import/ok/suggestions",
+    "mcp/rdy_instructions unknown load/refused/issues",
+    "mcp/rdy_instructions/ok/instructions",
+    "mcp/rdy_instructions/ok/menu",
     "mcp/rdy_log landing/ok/diff/entries[]/fields",
     "mcp/rdy_log landing/ok/diff/entries[]/links",
     "mcp/rdy_log landing/ok/diff/entries[]/repinned",
@@ -5122,14 +5171,14 @@ fn ok14_probe_shapes_merge_every_array_element() {
 fn mh7_new_surfaces_preserve_the_release_contract() {
     let fixture = read_fixture();
     let mcp = &fixture["mcp"];
-    // 57 tools before; one more, and the earlier ones stay
+    // 57 tools before; one more (and ain4's rdy_instructions), and the earlier ones stay
     let names: Vec<&str> = mcp["tool_names"]
         .as_array()
         .unwrap()
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 58);
+    assert_eq!(names.len(), 59);
     assert!(names.contains(&"rdy_compact"));
     for kept in [
         "rdy_upgrade",
@@ -5179,8 +5228,8 @@ fn mh7_new_surfaces_preserve_the_release_contract() {
         .collect();
     assert_eq!(
         top.len(),
-        COMMANDS_BEFORE_CK9.len() + 2,
-        "review and compact"
+        COMMANDS_BEFORE_CK9.len() + 4,
+        "review, compact, and ain5's instructions and setup"
     );
     for kept in COMMANDS_BEFORE_CK9 {
         assert!(top.contains(&kept), "{kept}");

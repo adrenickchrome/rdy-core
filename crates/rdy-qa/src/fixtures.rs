@@ -45,10 +45,16 @@ fn human_env_of(actor: &str, dir: tempfile::TempDir) -> (tempfile::TempDir, Vec<
         format!("actor: {actor}\n"),
     )
     .expect("config");
-    let env = vec![(
-        "XDG_CONFIG_HOME".to_string(),
-        dir.path().to_string_lossy().into_owned(),
-    )];
+    // ain: an empty home of its own, so no process reads or starts the real meta project
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    let env = vec![
+        ("XDG_CONFIG_HOME".to_string(), text(dir.path())),
+        ("HOME".to_string(), text(&home)),
+        ("USERPROFILE".to_string(), text(&home)),
+        ("APPDATA".to_string(), text(&home.join("AppData"))),
+    ];
     (dir, env)
 }
 
@@ -300,6 +306,31 @@ pub fn rdy_bin() -> PathBuf {
         bin.display()
     );
     bin
+}
+
+/// An empty home for every `rdy` this process starts with no home of its own: it holds no
+/// `.rdy/meta` and no `.config`, so no test reads or starts the real person layer or user
+/// config. It lives as long as the process.
+pub fn empty_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("rdyhome")
+            .tempdir()
+            .expect("an empty home")
+    })
+    .path()
+}
+
+/// `Command::new(rdy_bin())` with `HOME`, `USERPROFILE` and `APPDATA` in the [`empty_home`]:
+/// the way every test starts `rdy`. A later `env` or `envs` of the caller wins.
+pub fn rdy_command() -> Command {
+    let home = empty_home();
+    let mut cmd = Command::new(rdy_bin());
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("APPDATA", home.join("AppData"));
+    cmd
 }
 
 /// Runs `cmd` as `Command::output` does (stdin null, stdout and stderr captured), but kills it

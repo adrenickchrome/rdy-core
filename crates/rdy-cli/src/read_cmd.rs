@@ -83,6 +83,10 @@ pub(crate) fn status(env: &Env, as_json: bool) -> Result<(Value, String), ErrorR
     let mut v = call(env, "status", args)?;
     let mut t = status_text(&v);
     wc::status::attach(env, &mut v, &mut t)?;
+    // ain5: the reminder, last, while it is owed
+    if let Some(r) = v[rdy_engine::instructions::REMINDER_KEY].as_str() {
+        t.push_str(&format!("\n{r}"));
+    }
     Ok((v, t))
 }
 

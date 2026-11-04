@@ -15,8 +15,8 @@ use rdy_model::{
     AltChoice, Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op,
     RefMode, decision, order_between, ref_spans,
 };
-use rdy_schema::supporting;
 use rdy_schema::{Issue, Pack, TypeClass, has_errors, skeleton_gaps, validate_block};
+use rdy_schema::{instruction, supporting};
 use rdy_store::Conflict;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -2735,6 +2735,7 @@ fn build_ops(
         }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         let mut found = validate_block(pack, block, parent);
+        instruction_reason_targets(&ov, block, &mut found);
         name_unknown_evidence_key(block, &mut found);
         if let Some(names) = supplied.get(&block.id) {
             crate::decision_fields::merge_set(block, names, &mut found);
@@ -2798,6 +2799,54 @@ fn build_ops(
         code_repins,
         reflects,
     ))
+}
+
+/// ain1 (D-4W1ZR): an instruction's `decided_by` links name decisions, as the write's final
+/// overlay holds them; a link to any other block is the missing-reason error. A link with no
+/// target in the overlay is refused before this, with `E_UNKNOWN_REF`, and an empty or missing
+/// link list is the schema's own check.
+fn instruction_reason_targets(ov: &Overlay, block: &Block, issues: &mut Vec<Issue>) {
+    if block.block_type != instruction::INSTRUCTION {
+        return;
+    }
+    let names_other = block
+        .links
+        .get(decision::DECIDED_BY)
+        .into_iter()
+        .flatten()
+        .any(|l| {
+            ov.get(&l.target)
+                .is_some_and(|t| t.block_type != decision::DECISION)
+        });
+    if names_other {
+        issues.push(instruction::reason_issue(block));
+    }
+}
+
+/// ain1 (D-4W1ZR): the `W_INSTRUCTION_SELECTOR` warnings of the instructions that `ops` create
+/// or edit (a move, rebalance or repin changes no selector), in op order, then selector order.
+fn instruction_warnings(pack: &Pack, m: &Materialized, ops: &[Op]) -> Vec<Issue> {
+    let mut out = vec![];
+    for op in ops {
+        let block = match op {
+            Op::Create { block } => block,
+            Op::Update { block, .. } => {
+                let edited = m.get(&block.id).is_none_or(|was| {
+                    was.block_type != block.block_type
+                        || was.fields != block.fields
+                        || was.body != block.body
+                        || was.links != block.links
+                });
+                if !edited {
+                    continue;
+                }
+                block
+            }
+            Op::Delete { .. } => continue,
+        };
+        out.extend(instruction::selector_warnings(pack, block));
+    }
+    out
 }
 
 /// A create of a decision, a finding or a source with no parent goes to the decision home, or to the project root when the project names none (D-X3136).
@@ -3489,6 +3538,7 @@ impl Rdy {
             reflected.as_ref().map_or(&no_code, |r| &r.code),
         )?;
         refuse_removed_content(&self.store, &ops)?;
+        let selector_warnings = instruction_warnings(&self.pack, &m, &ops);
         // nb9 (O9): the receipt of the blocks this write creates, built on the candidate before
         // anything is appended; it is registered only once the write is published
         let receipt = crate::brief::created_record(&self.pack, &m, || st.graph(&scope), &ops)?;
@@ -3567,6 +3617,7 @@ impl Rdy {
         }
         warnings.extend(brief_warnings);
         warnings.extend(code_warnings);
+        warnings.extend(selector_warnings);
         // ab2 (D-YAY1G): the as-built override warnings of the written blocks, the blocks that
         // cite a written decision and the blocks under a written section or doc
         {

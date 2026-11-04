@@ -3,7 +3,6 @@ use rdy_engine::*;
 use rdy_mcp::tools::*;
 use rdy_qa::fixtures::*;
 use serde_json::json;
-use std::process::Command;
 
 fn seeded() -> (tempfile::TempDir, Rdy, String, String) {
     let (d, mut r) = project();
@@ -57,7 +56,7 @@ fn scope1_mcp_and_cli_reads_refuse_an_unknown_view() {
     let (dir, r, doc, landing) = seeded();
     drop(r);
     let (_cfg, env) = human_env("human:qa");
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["--no-daemon", "show", doc.as_str(), "--scope", "nope"])
         .current_dir(dir.path())
         .envs(env)

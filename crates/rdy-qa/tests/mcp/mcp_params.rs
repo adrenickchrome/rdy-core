@@ -213,7 +213,9 @@ fn hd7_every_tool_publishes_a_closed_schema() {
 fn hd7_every_tool_accepts_its_documented_parameters() {
     let (dir, r) = project();
     drop(r);
-    let mut c = McpClient::start(dir.path());
+    // rdy_instructions reads the person layer: never the real home's
+    let home = tempfile::tempdir().unwrap();
+    let mut c = McpClient::start_isolated(dir.path(), home.path());
     c.call(
         "rdy_session",
         json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),

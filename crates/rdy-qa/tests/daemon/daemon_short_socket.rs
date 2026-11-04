@@ -143,7 +143,7 @@ fn df3_every_spelling_of_a_long_project_path_reaches_one_socket() {
     // a relative --project from the project's parent's parent reaches it
     let grand = project.parent().unwrap().parent().unwrap();
     let relative = project.strip_prefix(grand).unwrap();
-    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .current_dir(grand)
         .arg("--project")
         .arg(relative)

@@ -12,6 +12,7 @@ mod engine_demo_write;
 mod engine_eff;
 mod engine_gate;
 mod engine_gate_state;
+mod engine_instruction_write;
 mod engine_keys;
 mod engine_keys_assign;
 mod engine_merge;

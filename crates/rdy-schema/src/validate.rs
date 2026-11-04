@@ -1,4 +1,5 @@
 use crate::glob::Glob;
+use crate::instruction;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use crate::policy;
 use crate::publication;
@@ -184,7 +185,11 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     };
     for (name, v) in &block.fields {
         if name == "key" {
-            // `key` is an engine field on every type, never listed per type.
+            // `key` is an engine field on every type, never listed per type; an instruction has
+            // none (its own check below says so)
+            if block.block_type == instruction::INSTRUCTION {
+                continue;
+            }
             match v.as_str() {
                 None => out.push(err(
                     block,
@@ -482,6 +487,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     if is_policy && !projection {
         policy::check_values(pack, block, &mut out);
     }
+    instruction::check_values(block, projection, &mut out);
     out
 }
 

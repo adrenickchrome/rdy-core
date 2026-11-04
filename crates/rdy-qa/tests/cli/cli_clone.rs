@@ -88,7 +88,7 @@ fn check_text(text: &str, project: &str, repo: &str, origin: &str) {
 /// `rdy <args>` run in `cwd` as a person, as `human_command` builds it but without its
 /// `--project`.
 fn bare(cwd: &Path, env: &[(String, String)], args: &[&str]) -> Command {
-    let mut cmd = Command::new(rdy_qa::fixtures::rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")

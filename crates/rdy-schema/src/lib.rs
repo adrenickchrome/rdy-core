@@ -1,6 +1,7 @@
 pub mod as_built;
 pub mod filter;
 mod glob;
+pub mod instruction;
 mod pack;
 pub mod policy;
 pub mod publication;

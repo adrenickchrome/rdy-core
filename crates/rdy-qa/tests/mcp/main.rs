@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod mcp;
 mod mcp_accept;
+mod mcp_agent_instructions;
 mod mcp_alts;
 mod mcp_asbuilt_plan;
 mod mcp_asbuilt_reads;
@@ -32,6 +33,8 @@ mod mcp_hub_keys;
 mod mcp_import;
 mod mcp_inbox;
 mod mcp_inbox_session;
+mod mcp_instruction_schema;
+mod mcp_instruction_startup;
 mod mcp_instructions;
 mod mcp_intake;
 mod mcp_intents;

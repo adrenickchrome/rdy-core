@@ -13,7 +13,7 @@ use rdy_engine::hub_config::{
 };
 use rdy_engine::hub_types::{Origin, Secret};
 use rdy_model::Hash;
-use rdy_qa::fixtures::{project, rdy_bin};
+use rdy_qa::fixtures::project;
 use rdy_qa::mcp::{McpClient, Reply as McpReply};
 use rdy_qa::platform::set_mode;
 use serde_json::{Value, json};
@@ -174,7 +174,7 @@ impl Home {
 
     /// `rdy <args>` in `cwd` with this home's environment only, and `extra` on top.
     fn command(&self, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
-        let mut cmd = Command::new(rdy_bin());
+        let mut cmd = rdy_qa::fixtures::rdy_command();
         cmd.env_clear()
             .envs(self.env())
             .envs(extra.iter().copied())

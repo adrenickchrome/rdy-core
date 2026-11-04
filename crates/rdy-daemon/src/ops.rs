@@ -24,6 +24,7 @@ mod diff;
 mod dispute;
 mod dump;
 mod edit;
+mod instructions;
 mod intake;
 mod land;
 mod plan;
@@ -46,7 +47,11 @@ use clone::clone;
 use diff::{diff, query};
 use dispute::dispute;
 use dump::dump;
-use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
+use edit::{
+    edit_block, keys_assign, new_doc, new_finding, new_folder, new_instruction, new_profile,
+    new_source,
+};
+use instructions::instructions;
 use intake::{answer, pending};
 use land::{approve, land, propose, tag};
 use plan::{plan, reaffirm, repin};
@@ -113,6 +118,7 @@ pub const OPS: &[&str] = &[
     "tags",
     "block",
     "brief",
+    "instructions",
     "search",
     "diff",
     "query",
@@ -128,6 +134,7 @@ pub const OPS: &[&str] = &[
     "new_profile",
     "new_finding",
     "new_source",
+    "new_instruction",
     "keys_assign",
     "edit_block",
     "propose",
@@ -166,6 +173,24 @@ pub const OPS: &[&str] = &[
     "key_revoke",
     "publish",
 ];
+
+/// ain5: the ops whose successful replies carry the reminder while it is owed, the CLI's
+/// overview (`status`) and its briefings (`brief`), as `rdy_overview` and `rdy_brief` carry it.
+pub const REMINDER_OPS: &[&str] = &["status", "brief"];
+
+/// Puts the reminder last on `out`, the reply of `op`, when `op` is one of [`REMINDER_OPS`] and
+/// the reminder is `owed`. It is part of the reply only, never of a briefing's facts or token.
+pub fn with_reminder(op: &str, out: &mut Value, owed: bool) {
+    if owed
+        && REMINDER_OPS.contains(&op)
+        && let Some(m) = out.as_object_mut()
+    {
+        m.insert(
+            rdy_engine::instructions::REMINDER_KEY.into(),
+            Value::String(rdy_engine::instructions::REMINDER.into()),
+        );
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -458,6 +483,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             cx,
             parse(op, args, "{title, kind, locator, version?, parent?, view?}")?,
         ),
+        "new_instruction" => new_instruction(
+            cx,
+            parse(
+                op,
+                args,
+                "{parent, text, applies_to, reason, locked?, view?}",
+            )?,
+        ),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
             cx,
@@ -612,6 +645,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
         }
+        "instructions" => instructions(cx, parse(op, args, "{load?, part?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

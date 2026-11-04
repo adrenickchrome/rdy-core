@@ -1,6 +1,8 @@
 # rdy
 
-A system for keeping decisions and documentation consistent while agents change them.
+Your intent, ready for anyone who needs it.
+
+rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.
 
 **rdy keeps your product decisions and docs consistent while AI agents change them.** Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 

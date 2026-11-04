@@ -430,7 +430,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 70 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 71 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `PlanAnswerSpecParams`, `PlanGroupParams`,
@@ -459,6 +459,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         IdParams,
         ImportParams,
         InboxParams,
+        InstructionsParams,
         IntentParams,
         KeyBindParams,
         KeyRetireParams,

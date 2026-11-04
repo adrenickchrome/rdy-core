@@ -21,7 +21,7 @@ use rdy_qa::platform::{RecordingAgent, SocketAgent};
 use rdy_qa::signing::{QaAgent, TestKey, sign_record};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::Arc;
 
 /// A public key no test agent holds (a test key; no private half is in the repo).
@@ -144,7 +144,7 @@ fn approval_of(r: &Rdy, subject: Hash, source: Hash) -> Signature {
 /// `SSH_AUTH_SOCK` set to `sock` or removed.
 fn cli(dir: &Path, sock: Option<&Path>, args: &[&str]) -> Output {
     let (_cfg, env) = human_env("human:qa");
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.arg("--project")
         .arg(dir)
         .args(args)

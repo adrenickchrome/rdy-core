@@ -53,11 +53,20 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             if let Some(fields) = supporting_example(&t) {
                 example = json!({"op": "create", "type": t, "fields": fields});
             }
+            // ain1: an instruction's example is a valid write with its selectors and reason
+            if t == rdy_schema::instruction::INSTRUCTION {
+                example = instruction_example();
+            }
             let mut out = json!({"type": t, "prefix": def.prefix, "class": pack.class_of(&t).as_str(), "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
             out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
                 out["name_rules"] = json!(NAME_RULES);
+            }
+            if t == rdy_schema::instruction::INSTRUCTION {
+                out["instruction"] = json!(INSTRUCTION_DOC);
+                out["required_doc"] =
+                    json!({"rule": REQUIRED_DOC_RULE, "example": required_doc_example()});
             }
             // trk1: fields that stay writable on an accepted or rejected decision
             if !def.tracking.is_empty() {

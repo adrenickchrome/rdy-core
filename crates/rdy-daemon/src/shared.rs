@@ -231,6 +231,16 @@ impl Engine for DaemonEngine {
         self.0.pack_error_lock().clone()
     }
 
+    /// The person layer through the meta project's own daemon (ain4), as this daemon's version.
+    fn person_host(&self) -> Option<Arc<dyn rdy_engine::instructions::PersonHost>> {
+        let version = self
+            .0
+            .identity
+            .get()
+            .map_or(env!("CARGO_PKG_VERSION"), |(v, _)| v.as_str());
+        Some(Arc::new(crate::instructions::PersonReader::daemon(version)))
+    }
+
     /// The full site's link for a source or profile target, and the profile-only listener's
     /// (bound on the first ask, reused after) for [`SiteTarget::ProfileOnly`]. The profile-only
     /// link carries the listener's own LAN diagnostic; the reply words it for the build's title.

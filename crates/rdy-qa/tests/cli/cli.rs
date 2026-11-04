@@ -1,12 +1,11 @@
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::*;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// `rdy <args>` against the served project as the human; a command that names its own
 /// `--project` runs in the project directory with the human's environment and no other flags.
 fn rdy(s: &Served, args: &[&str]) -> (bool, String, String) {
     let out: Output = if args.contains(&"--project") {
-        Command::new(rdy_bin())
+        rdy_qa::fixtures::rdy_command()
             .args(args)
             .current_dir(s.dir.path())
             .env_remove("RDY_ACTOR")
