@@ -4,7 +4,7 @@
 use rdy_engine::engine::Local;
 use rdy_engine::*;
 use rdy_mcp::tools::{self, McpState};
-use rdy_model::{BlockId, EditorialClass, FieldValue, Justification};
+use rdy_model::{BlockId, EditorialClass, Justification};
 use rdy_qa::fixtures::*;
 use serde_json::{Value, from_value, json};
 use std::path::Path;
@@ -267,14 +267,8 @@ fn ab1_create_defaults_once_and_tracking_keeps_history() {
     r.reindex().unwrap();
     check(&r);
     // a block the pack lists without built is untouched: unversioned input stays absent
-    assert!(matches!(
-        r.read()
-            .block(&Scope::Canon, &id(&section))
-            .unwrap()
-            .fields
-            .get("built"),
-        None::<&FieldValue>
-    ));
+    let section_block = r.read().block(&Scope::Canon, &id(&section)).unwrap();
+    assert!(!section_block.fields.contains_key("built"));
 }
 
 fn created_id(res: &WriteResult, key: &str) -> BlockId {
