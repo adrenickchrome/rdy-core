@@ -10,6 +10,7 @@
 
 mod diff;
 mod references;
+mod release;
 mod report;
 mod select;
 mod source;

@@ -759,7 +759,7 @@ fn mg6_profile_identity_survives_reindex_dump_and_clone() {
         for profile in ["pubp", "orgp"] {
             for scope in [None, Some("tag:v1.0.0")] {
                 out.push(
-                    publication::check(&r.read(), profile, scope, None)
+                    publication::check(&r.read(), profile, scope, None, None)
                         .unwrap_or_else(|e| panic!("check {profile}: {e}")),
                 );
             }

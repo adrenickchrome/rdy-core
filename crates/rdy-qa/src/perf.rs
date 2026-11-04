@@ -6840,7 +6840,7 @@ fn m3_publication_check(
     st.materialized(&Scope::Canon).expect("warm");
     out.push(measure_timed("publication_check", runs, |_| {
         let s = Instant::now();
-        let v = rdy_engine::publication::check(&st, "m3-open", None, None).expect("check");
+        let v = rdy_engine::publication::check(&st, "m3-open", None, None, None).expect("check");
         let took = s.elapsed();
         let refs = &v["references"];
         let count = |x: &serde_json::Value| x.as_u64().expect("a count") as usize;

@@ -137,11 +137,14 @@ pub struct PublicationCheckParams {
     pub scope: Option<String>,
     /// A baseline to compare with: canon, tag:<name> or landing:<hash>. It must hold the same profile id and audience. Omit it for no comparison.
     pub against: Option<String>,
+    /// The product version this candidate ships as, such as 1.2.0 or 2.0.0-rc.1 (one leading v is allowed; no +build). Omit it for no release check. Content that is since a later version, and decisions built in one, block the result. Against never supplies it.
+    pub release: Option<String>,
 }
 
 /// `rdy_publication_check`: the check of a profile, in one read state. A session is required;
-/// every role may inspect, because the check reads source and writes nothing. A blocked policy
-/// result is a success: the caller reads `references.status` and relays `warnings`.
+/// every role may inspect, because the check reads source and writes nothing. A blocked result
+/// is a success: the caller reads the aggregate `status` and relays `warnings`; it authorizes
+/// nothing.
 pub fn rdy_publication_check(
     st: &mut McpState,
     p: PublicationCheckParams,
@@ -157,6 +160,7 @@ pub fn rdy_publication_check(
         &p.profile,
         p.scope.as_deref(),
         p.against.as_deref(),
+        p.release.as_deref(),
         reserve,
     )
 }

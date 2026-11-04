@@ -25,6 +25,9 @@ pub(crate) enum PublicationCmd {
         /// A baseline to compare with: canon, tag:<name> or landing:<hash>. Same profile id and audience.
         #[arg(long)]
         against: Option<String>,
+        /// The product version this candidate ships as, such as 1.2.0. Shown content and decisions that ship in a later version make the result blocked, which still exits 0. Omit it for no release check.
+        #[arg(long)]
+        release: Option<String>,
     },
 }
 
@@ -34,7 +37,8 @@ fn omitted_any(v: &Value) -> bool {
     let refs = &v["references"];
     let top = num(&v["selection"]["omitted_entries"])
         + num(&refs["omitted_rows"])
-        + num(&refs["links_outside"]["omitted_rows"]);
+        + num(&refs["links_outside"]["omitted_rows"])
+        + num(&v["release"]["omitted_rows"]);
     let diff: u64 = v["disclosure"]["omitted"]
         .as_object()
         .map_or(0, |o| o.values().map(num).sum());
@@ -50,7 +54,7 @@ fn full_count(d: &Value, name: &str) -> u64 {
 /// implicit profile (an `id` that is null) is named by its audience; a profile block by its key.
 fn check_text(v: &Value, asked: &str) -> String {
     let p = &v["profile"];
-    let status = text(&v["references"]["status"]);
+    let status = text(&v["status"]);
     let first = if p.get("id").is_some_and(Value::is_null) {
         format!(
             "Implicit publication profile ({}): {status}.",
@@ -78,6 +82,18 @@ fn check_text(v: &Value, asked: &str) -> String {
             num(&v["references"]["links_outside"]["count"])
         ),
     ];
+    let rel = &v["release"];
+    if rel.is_object() {
+        lines.push(format!("Release: {}.", text(&rel["version"])));
+        lines.push(format!(
+            "Blocks after release: {}.",
+            num(&rel["blocks_later"])
+        ));
+        lines.push(format!(
+            "Decisions after release: {}.",
+            num(&rel["decisions_later"])
+        ));
+    }
     let d = &v["disclosure"];
     if d.is_object() {
         let changed = if d["profile_changed"].as_bool().unwrap_or(false) {
@@ -115,11 +131,12 @@ pub(crate) fn publication(env: &Env, cmd: PublicationCmd) -> Result<(Value, Stri
         profile,
         scope,
         against,
+        release,
     } = cmd;
     let v = call(
         env,
         "publication_check",
-        json!({"profile": profile, "scope": scope, "against": against}),
+        json!({"profile": profile, "scope": scope, "against": against, "release": release}),
     )?;
     let t = check_text(&v, &profile);
     Ok((v, t))
@@ -133,6 +150,7 @@ mod tests {
         json!({
             "profile": {"key": "site"},
             "selection": {"blocks": 7, "docs": 2, "folders": 1, "omitted_entries": 0},
+            "status": "warning",
             "references": {"status": "warning", "total": 3, "omitted_rows": omitted},
             "disclosure": against.then(|| json!({
                 "profile_changed": true,

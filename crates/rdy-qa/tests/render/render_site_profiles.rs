@@ -638,7 +638,7 @@ fn spv4_live_public_warns_while_output_still_refuses() {
     // intro's section also homes the decision that governs setup's prose: its link edge is a
     // link outside the selection, which never counts (D-44NMT)
     for (key, n) in [("pubzero", 1), ("pubfig", 1)] {
-        let check = rdy_engine::publication::check(&st, key, Some("canon"), None).unwrap();
+        let check = rdy_engine::publication::check(&st, key, Some("canon"), None, None).unwrap();
         assert_eq!(check["references"]["status"], "blocked", "{key}");
         let message = format!("Public profile has {n} references outside its selection.");
         for target in [profile(ScopeRef::Canon, key), only(key)] {

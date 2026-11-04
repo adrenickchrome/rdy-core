@@ -282,7 +282,14 @@ fn hpb8_comparison_hides_removed_names_by_version() {
     assert!(shown.contains("renamed-visible"));
 
     // the public report: no removed name anywhere, lowercase sorted requests, identities
-    let v = publication::check(&r.read(), "site", Some("tag:v2.0.0"), Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(
+        &r.read(),
+        "site",
+        Some("tag:v2.0.0"),
+        Some("tag:v1.0.0"),
+        None,
+    )
+    .unwrap();
     let text = v.to_string();
     for word in SENTINELS.iter().chain([&OLD_NAME]) {
         assert!(!text.contains(word), "{word} in {text}");
@@ -396,7 +403,7 @@ fn hpb8_reference_summary_matches_report_projection() {
         let resolved = resolve(&r, "canon", "site");
         let summary = publication::reference_summary(&resolved.references);
         for against in [None, Some("canon")] {
-            let v = publication::check(&r.read(), "site", None, against).unwrap();
+            let v = publication::check(&r.read(), "site", None, against, None).unwrap();
             assert_eq!(summary, v["references"], "{n} {against:?}");
             // the same keys in the same order, byte for byte
             assert_eq!(summary.to_string(), v["references"].to_string());

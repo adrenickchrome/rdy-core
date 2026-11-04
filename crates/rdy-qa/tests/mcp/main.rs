@@ -6,6 +6,7 @@ mod mcp_accept;
 mod mcp_alts;
 mod mcp_asbuilt_plan;
 mod mcp_asbuilt_reads;
+mod mcp_asbuilt_release;
 mod mcp_cadence;
 mod mcp_carried_warning;
 mod mcp_check_tools;

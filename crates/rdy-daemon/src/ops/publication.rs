@@ -12,9 +12,16 @@ pub(super) struct CheckArgs {
     profile: String,
     scope: Option<String>,
     against: Option<String>,
+    release: Option<String>,
 }
 
 pub(super) fn publication_check(cx: &OpContext, a: CheckArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
-    rdy_engine::publication::check(&st, &a.profile, a.scope.as_deref(), a.against.as_deref())
+    rdy_engine::publication::check(
+        &st,
+        &a.profile,
+        a.scope.as_deref(),
+        a.against.as_deref(),
+        a.release.as_deref(),
+    )
 }

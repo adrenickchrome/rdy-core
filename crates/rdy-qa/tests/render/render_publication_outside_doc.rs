@@ -132,7 +132,7 @@ fn ndh4_a_decision_under_a_root_question_is_published_without_the_question() {
     assert!(ids.contains(&did), "{ids:?}");
     assert!(!ids.contains(&qid), "{ids:?}");
 
-    let v = rdy_engine::publication::check(&st, "site", None, None)
+    let v = rdy_engine::publication::check(&st, "site", None, None, None)
         .unwrap_or_else(|e| panic!("check: {e}"));
     let entries = v["selection"]["entries"].as_array().unwrap();
     assert!(entries.iter().any(|e| e["id"] == json!(dec)), "{v}");
@@ -307,7 +307,7 @@ fn ndh4_a_public_profile_keeps_the_root_blocks_its_root_decisions_link() {
         assert_eq!(b.parent, None, "{id} sits at the root");
     }
 
-    let v = rdy_engine::publication::check(&st, "pubp", None, None)
+    let v = rdy_engine::publication::check(&st, "pubp", None, None, None)
         .unwrap_or_else(|e| panic!("check: {e}"));
     assert_eq!(v["references"]["status"], json!("clear"), "{v}");
     let entries = v["selection"]["entries"].as_array().unwrap();

@@ -862,7 +862,7 @@ fn pub6_profile_metadata_references_count_in_the_check() {
         ("metap", "/fields/title", "blocked"),
         ("metao", "/fields/description", "warning"),
     ] {
-        let v = rdy_engine::publication::check(&st, key, Some("canon"), None).unwrap();
+        let v = rdy_engine::publication::check(&st, key, Some("canon"), None, None).unwrap();
         let refs = &v["references"];
         assert_eq!(refs["status"], status, "{key}: {v}");
         assert_eq!(
@@ -881,7 +881,7 @@ fn pub6_profile_metadata_references_count_in_the_check() {
             assert!(!text.contains(leak), "{leak} in {key}: {text}");
         }
     }
-    let v = rdy_engine::publication::check(&st, "cleanp", Some("canon"), None).unwrap();
+    let v = rdy_engine::publication::check(&st, "cleanp", Some("canon"), None, None).unwrap();
     assert_eq!(v["references"]["status"], "clear", "{v}");
     // the public profile refuses before anything is written; the org profile warns
     let out = dir.path().join("metap-site");
