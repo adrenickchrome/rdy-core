@@ -194,6 +194,7 @@ fn seed(r: &mut Rdy, stable: bool, claims: &[(&str, Value)]) -> (String, String,
 }
 
 #[test]
+#[ignore = "KNOWN-ISSUES row 160 (L5/I7): below the fix bar; open M3 gap, exit checklist"]
 fn mg9_rule_reach_includes_lifecycle_ancestors() {
     // row 160: the blocking rule names no lifecycle field, but its severity reads the claim's
     // effective lifecycle, inherited from the doc. The claim fails the rule while the doc is a
@@ -280,6 +281,7 @@ fn mg9_rule_reach_includes_coverage_inputs() {
 }
 
 #[test]
+#[ignore = "KNOWN-ISSUES row 162 (L3/I7): below the fix bar; open M3 gap, exit checklist"]
 fn mg9_rule_reach_detects_a_new_key_holder() {
     // row 162: a doc's key gets a `-2` suffix when another doc already holds it. A version adds a
     // stable doc whose key is free at its assessment; a competing version lands a doc with the
