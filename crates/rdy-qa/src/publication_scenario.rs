@@ -216,8 +216,11 @@ pub fn seed(dir: &Path) -> Scenario {
             {"op": "create", "type": "decision", "id": "$decOut", "fields": {"statement": "OUTDECCANARY ruling.", "status": "proposed", "key": "out-rule"}},
             {"op": "create", "type": "question", "id": "$qOut", "fields": {"prompt": "OUTQCANARY question?"}},
             {"op": "create", "type": "question", "id": "$qHop", "fields": {"prompt": "HOPQCANARY question?"}},
+            // shipped in the tagged release, so the claim it governs stays shown under `pubp`: a
+            // new decision defaults to `built: planned`, and a public profile hides what it governs
+            // (D-WJ0SJ)
             {"op": "create", "type": "decision", "id": "$decSel",
-             "fields": {"statement": "SELDECCANARY ruling.", "status": "proposed", "key": "sel-rule"},
+             "fields": {"statement": "SELDECCANARY ruling.", "status": "proposed", "key": "sel-rule", "built": "1.0.0"},
              "links": {"answers": [{"target": "$qHop"}]}},
             // the second selected doc
             {"op": "create", "type": "doc", "id": "$b", "fields": {"name": "bravo", "title": "Bravo guide", "doc_type": "page"}},
