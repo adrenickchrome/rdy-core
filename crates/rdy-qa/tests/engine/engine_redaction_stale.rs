@@ -370,3 +370,60 @@ fn fr8_the_erasure_set_is_unchanged_by_the_trim() {
         );
     }
 }
+
+// The m3gate deep-drain finding (swarm seed 1, deep tier): after a removal request is recorded,
+// a later proposal of a view whose change was written before the request makes the request
+// stale. The change updates a claim that the secret's change also wrote, so it depends on that
+// change; it does not write, name or quote the secret. The freshness check lists the new
+// proposal as a record that references the content, and the report hash moves (p-EYDH3: "An
+// unrelated write does not."; TASK-1237: a later record counts only through what changes the
+// removed content). In the swarm, agent a5 proposed its view `a5` again (`P-…@2`, version 1
+// was made before the request) one step after the request; the drain's landing of the removal
+// was then `E_REDACTION_STALE`. fr9 and fr10 pin the canon result and stay ignored until the
+// engine fix lands; fr11 is their control.
+
+/// [`project`], where view `dep` updates the claim the secret's change also wrote before the
+/// request, and nothing proposes it yet.
+fn project_with_dep() -> P {
+    project_with(|r, other| {
+        write(
+            r,
+            "dep",
+            json!([{"op": "update", "id": other, "body": "O holds, still."}]),
+        );
+        None
+    })
+}
+
+#[test]
+#[ignore = "product defect: a later unrelated propose or fork stales a removal request (m3gate deep drain, swarm seed 1)"]
+fn fr9_a_later_proposal_of_an_earlier_unrelated_change_keeps_it_fresh() {
+    let mut p = project_with_dep();
+    // after the request: the view proposes the change it wrote before it
+    p.r.propose(&writer(), "dep", "Claim", Some("Updates the claim."))
+        .unwrap();
+    assert_lands(
+        &mut p,
+        "after a later proposal of an earlier unrelated change",
+    );
+}
+
+#[test]
+#[ignore = "product defect: a later unrelated propose or fork stales a removal request (m3gate deep drain, swarm seed 1)"]
+fn fr10_a_later_fork_of_a_view_with_an_earlier_unrelated_change_keeps_it_fresh() {
+    let mut p = project_with_dep();
+    // after the request: the view is forked; the fork holds the earlier change and adds nothing
+    p.r.view_fork(&writer(), "dep", "dep-fork").unwrap();
+    assert_lands(&mut p, "after a later fork of an earlier unrelated change");
+}
+
+#[test]
+fn fr11_the_later_proposal_and_fork_are_unrelated_to_the_secret() {
+    // the control of fr9 and fr10: with no later proposal or fork, the earlier change in `dep`
+    // leaves the request fresh, so the change alone is not what stales it
+    let mut p = project_with_dep();
+    assert_lands(
+        &mut p,
+        "with the earlier change and nothing after the request",
+    );
+}
