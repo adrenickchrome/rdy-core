@@ -2858,10 +2858,9 @@ fn removal_world(r: &mut Rdy) -> (ProposalInfo, ProposalInfo, String, String) {
 /// another view whose assessment names neither the removed block, its payload nor a quarantine
 /// name does not make an open removal request stale ("An unrelated write does not."). The
 /// queue stays readable, the removal card is the one the person saw, and the person can land
-/// it. Built, the whole queue fails with `E_REDACTION_STALE`; the bounded fix lands on main
-/// first and the orchestrator removes the ignore before the gate closes.
+/// it. Before rdy 0.38.0 the whole queue failed with `E_REDACTION_STALE`; the bounded fix
+/// (fix/redaction-stale, 60b66e83) made it pass.
 #[test]
-#[ignore = "bounded fix: fix/redaction-stale (TASK-1233)"]
 fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
     let (p, (other, redact, _, o2)) = Project::new(removal_world);
     let seen = p
@@ -2893,9 +2892,8 @@ fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
 /// the request stale. The queue still reads whole on every route and keeps the stale item, so it
 /// is not lost silently; showing its card and answering it, on every route, refuse with the
 /// canon `E_REDACTION_STALE` and land nothing; every other item stays readable and answerable.
-/// No new code, field or tool. Ignored with its pair until the bounded fix lands.
+/// No new code, field or tool. Passes since the bounded fix (rdy 0.38.0, 60b66e83).
 #[test]
-#[ignore = "bounded fix: fix/redaction-stale (TASK-1233)"]
 fn mg5_a_write_naming_the_removed_block_refuses_only_the_removal_card() {
     let (p, (other, redact, secret, _)) = Project::new(removal_world);
     let seen = p
