@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-const ABOUT: &str =
-    "A system for keeping decisions and documentation consistent while agents change them.";
+const HEADLINE: &str = "Your intent, ready for anyone who needs it.";
+const ABOUT: &str = "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.";
 const RELEASES: &str = "https://github.com/adrenickchrome/rdy-core/releases";
 const ISSUES: &str = "https://github.com/adrenickchrome/rdy-core/issues";
 const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
@@ -650,4 +650,24 @@ fn pre2_public_tree_names_no_private_project() {
     );
     assert!(fast.contains("sudo rm -rf /usr/share/dotnet"));
     assert!(fast.contains("df -h /"));
+}
+
+#[test]
+fn ain6_public_words_match_the_approved_description() {
+    let (code, help, stderr) = run(&["--help"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        help.starts_with(&format!("{HEADLINE}\n\n{ABOUT}\n")),
+        "{help}"
+    );
+    let readme = read("README.md");
+    let top: Vec<_> = readme.lines().take(6).collect();
+    assert!(top.contains(&HEADLINE) && top.contains(&ABOUT), "{top:?}");
+    let agents = read("AGENTS.md");
+    let top: Vec<_> = agents.lines().take(6).collect();
+    assert!(top.contains(&HEADLINE) && top.contains(&ABOUT), "{top:?}");
+    for f in [&readme, &agents] {
+        assert!(!f.contains("consistent while agents change them"));
+    }
+    assert!(readme.contains("rdy computes. Agents write. People decide."));
 }

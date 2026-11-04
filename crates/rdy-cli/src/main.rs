@@ -65,7 +65,8 @@ const VERSION_TEXT: &str = if PREVIEW {
 #[command(
     name = "rdy",
     version = VERSION_TEXT,
-    about = "A system for keeping decisions and documentation consistent while agents change them."
+    about = "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
+    long_about = "Your intent, ready for anyone who needs it.\n\nrdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents."
 )]
 struct Cli {
     /// Print machine-readable JSON.
