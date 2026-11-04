@@ -9537,6 +9537,15 @@
                   ]
                 },
                 {
+                  "action": "set",
+                  "id": "release",
+                  "long": "release",
+                  "num_args": "1",
+                  "value_names": [
+                    "RELEASE"
+                  ]
+                },
+                {
                   "action": "set_true",
                   "defaults": [
                     "false"
@@ -9585,6 +9594,7 @@
                   "args": [
                     "against",
                     "profile",
+                    "release",
                     "scope"
                   ],
                   "id": "Check",
