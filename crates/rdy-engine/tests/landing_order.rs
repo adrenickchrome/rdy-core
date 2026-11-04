@@ -462,6 +462,16 @@ fn ok6_acceptance_and_key_rekey_share_one_update() {
         .into_iter()
         .map(|x| (x.clone(), block(&r, &view("b"), x)))
         .collect();
+    // TASK-1265, TASK-1277: the key shifted after b's assessment, so the first approval refuses
+    // with a fresh card; the next one lands
+    let e = approve(&mut r, &pb).unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:#?}");
+    assert!(
+        e.message
+            .contains(&format!("changed the key of {db} (guide to ")),
+        "{}",
+        e.message
+    );
     let l = approve(&mut r, &pb).unwrap();
     assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
     let new_key = l.keys[&db].clone();
