@@ -2571,7 +2571,8 @@ fn gating_open(counts: &Value) -> Vec<String> {
 /// `version_plan` entry naming it), and that read shows no open item that gates or warns. From
 /// the drained store, each landing's seal holds no open item but a code item, and each item it
 /// seals as deferred names the answer that accepted the deferral. Some seed lands an item an
-/// agent answered.
+/// agent answered. Some seed reads a work version's plan before an approve: the run puts the
+/// version of the person's forced working-copy edit (`script::EARLY_EDIT`) ahead of the queue.
 #[test]
 fn rg15_every_live_view_drains_through_the_gate() {
     let answered = std::cell::Cell::new(0usize);
