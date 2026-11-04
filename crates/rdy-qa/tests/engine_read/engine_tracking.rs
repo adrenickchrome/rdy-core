@@ -207,7 +207,11 @@ fn trk1_tracking_fields_show_in_rdy_schema_and_show() {
     let ctx = r.read().context(&Scope::Canon, &id(&dec)).unwrap();
     assert_eq!(
         ctx.tracking,
-        vec!["disposition".to_string(), "trigger".to_string()]
+        vec![
+            "built".to_string(),
+            "disposition".to_string(),
+            "trigger".to_string()
+        ]
     );
     let v = serde_json::to_value(r.read().context(&Scope::Canon, &id(&claim)).unwrap()).unwrap();
     assert!(
@@ -225,7 +229,7 @@ fn trk1_tracking_fields_show_in_rdy_schema_and_show() {
         from_value(json!({"block_type": "decision"})).unwrap(),
     )
     .unwrap();
-    assert_eq!(s["tracking"], json!(["disposition", "trigger"]));
+    assert_eq!(s["tracking"], json!(["built", "disposition", "trigger"]));
     let s =
         rdy_mcp::tools::rdy_schema(&mut st, from_value(json!({"block_type": "claim"})).unwrap())
             .unwrap();
@@ -237,7 +241,7 @@ fn trk1_tracking_fields_show_in_rdy_schema_and_show() {
         .iter()
         .find(|t| t["type"] == "decision")
         .unwrap();
-    assert_eq!(d["tracking"], json!(["disposition", "trigger"]));
+    assert_eq!(d["tracking"], json!(["built", "disposition", "trigger"]));
 }
 
 /// Final-review fix round 1: `rdy edit`'s write (`edit_block_with`, which `edit_yaml` calls)

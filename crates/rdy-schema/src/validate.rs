@@ -476,6 +476,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     if profile && !projection {
         publication::check_values(block, &mut out);
     }
+    if !projection {
+        crate::as_built::check_values(pack, block, &mut out);
+    }
     if is_policy && !projection {
         policy::check_values(pack, block, &mut out);
     }

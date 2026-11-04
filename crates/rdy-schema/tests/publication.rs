@@ -2,7 +2,7 @@
 //! every pack. Generic validation checks it; a few value checks and a typed parse sit on top.
 use rdy_model::redaction::RedactedBlockIdentity;
 use rdy_model::{Block, BlockId, CROCKFORD, FieldValue, Hash, Link, StateSnapshot, hash_of};
-use rdy_schema::publication::{self, Audience, ProfileFields};
+use rdy_schema::publication::{self, Audience, PlannedSetting, ProfileFields, SinceSetting};
 use rdy_schema::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -148,7 +148,9 @@ fn pub1_profile_schema_is_closed_and_pack_independent() {
     let want: BTreeMap<String, FieldDef> = [
         ("audience", f(FieldKind::Enum, true, &["org", "public"])),
         ("description", f(FieldKind::Str, false, &[])),
+        ("planned", f(FieldKind::Enum, false, &["hide", "mark"])),
         ("select", f(FieldKind::List, true, &[])),
+        ("since", f(FieldKind::Enum, false, &["show", "off"])),
         ("title", f(FieldKind::Str, true, &[])),
         ("trail", f(FieldKind::Bool, false, &[])),
     ]
@@ -271,6 +273,8 @@ fn pub1_profile_fields_have_exact_bounds_and_defaults() {
                 BlockId::parse("fd-F0DR1").unwrap()
             ],
             trail: false,
+            planned: PlannedSetting::Hide,
+            since: None,
         }
     );
     let org = parse(&with(profile(), "audience", s("org"))).unwrap();
@@ -282,6 +286,34 @@ fn pub1_profile_fields_have_exact_bounds_and_defaults() {
     ))
     .unwrap();
     assert!(!org_off.trail);
+    // planned defaults by audience; an explicit value wins; since stays absent unless written
+    assert_eq!(org.planned, PlannedSetting::Mark);
+    assert_eq!(org.since, None);
+    let marked = parse(&with(profile(), "planned", s("mark"))).unwrap();
+    assert_eq!(marked.planned, PlannedSetting::Mark);
+    let hidden = parse(&with(
+        with(profile(), "audience", s("org")),
+        "planned",
+        s("hide"),
+    ))
+    .unwrap();
+    assert_eq!(hidden.planned, PlannedSetting::Hide);
+    let shown = parse(&with(profile(), "since", s("show"))).unwrap();
+    assert_eq!(shown.since, Some(SinceSetting::Show));
+    let off = parse(&with(profile(), "since", s("off"))).unwrap();
+    assert_eq!(off.since, Some(SinceSetting::Off));
+    // the profile values are enums: a boolean override value is refused, not read
+    assert_eq!(
+        rows(&check(
+            &p,
+            &with(profile(), "planned", FieldValue::Bool(true))
+        )),
+        vec![row(
+            "E_FIELD_KIND",
+            "field \"planned\" must be Enum",
+            "write planned as a enum value"
+        )]
+    );
     let public_on = parse(&with(profile(), "trail", FieldValue::Bool(true))).unwrap();
     assert!(public_on.trail);
     assert_eq!(serde_json::to_string(&Audience::Org).unwrap(), "\"org\"");
@@ -545,7 +577,7 @@ fn pub1_profile_uses_generic_validation_codes_and_text() {
         vec![row(
             "E_FIELD_UNKNOWN",
             "type publication_profile has no field \"titel\"",
-            "remove it, or use one of: audience, description, select, title, trail"
+            "remove it, or use one of: audience, description, planned, select, since, title, trail"
         )]
     );
 
@@ -553,7 +585,9 @@ fn pub1_profile_uses_generic_validation_codes_and_text() {
     for (field, v, kind_dbg, kind) in [
         ("audience", FieldValue::Int(1), "Enum", "enum"),
         ("description", FieldValue::Int(1), "Str", "str"),
+        ("planned", FieldValue::Bool(true), "Enum", "enum"),
         ("select", s("d-D0C22"), "List", "list"),
+        ("since", FieldValue::Int(1), "Enum", "enum"),
         ("title", FieldValue::Bool(true), "Str", "str"),
         ("trail", s("yes"), "Bool", "bool"),
     ] {

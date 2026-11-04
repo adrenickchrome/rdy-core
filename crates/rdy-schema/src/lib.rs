@@ -1,3 +1,4 @@
+pub mod as_built;
 pub mod filter;
 mod glob;
 mod pack;

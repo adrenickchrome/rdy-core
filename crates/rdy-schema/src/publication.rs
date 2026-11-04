@@ -48,6 +48,51 @@ impl Audience {
     pub fn default_trail(self) -> bool {
         self == Audience::Org
     }
+
+    /// The planned setting of a profile that sets none: mark for an org, hide for the public.
+    pub fn default_planned(self) -> PlannedSetting {
+        match self {
+            Audience::Org => PlannedSetting::Mark,
+            Audience::Public => PlannedSetting::Hide,
+        }
+    }
+}
+
+/// What a profile does with planned content (D-WJ0SJ): `hide` leaves it out of the render, `mark`
+/// renders it with the "Planned" marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlannedSetting {
+    Hide,
+    Mark,
+}
+
+impl PlannedSetting {
+    /// The field value: `hide` or `mark`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlannedSetting::Hide => "hide",
+            PlannedSetting::Mark => "mark",
+        }
+    }
+}
+
+/// Whether a profile shows a block's `since` version as a quiet pill (D-WJ0SJ): `show` or `off`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SinceSetting {
+    Show,
+    Off,
+}
+
+impl SinceSetting {
+    /// The field value: `show` or `off`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SinceSetting::Show => "show",
+            SinceSetting::Off => "off",
+        }
+    }
 }
 
 /// The fields of a valid publication profile. `select` keeps the author's order; selection
@@ -60,6 +105,11 @@ pub struct ProfileFields {
     pub audience: Audience,
     pub select: Vec<BlockId>,
     pub trail: bool,
+    /// The planned setting: the profile's own, else the audience's default.
+    pub planned: PlannedSetting,
+    /// The since setting, as written. `None` when the profile sets none: the default depends on
+    /// the doc type of each block's doc, so the renderer applies it.
+    pub since: Option<SinceSetting>,
 }
 
 fn field(kind: FieldKind, required: bool, values: &[&str]) -> FieldDef {
@@ -82,7 +132,15 @@ pub(crate) fn type_def() -> BlockTypeDef {
                 field(FieldKind::Enum, true, &["org", "public"]),
             ),
             ("description".to_string(), field(FieldKind::Str, false, &[])),
+            (
+                "planned".to_string(),
+                field(FieldKind::Enum, false, &["hide", "mark"]),
+            ),
             ("select".to_string(), field(FieldKind::List, true, &[])),
+            (
+                "since".to_string(),
+                field(FieldKind::Enum, false, &["show", "off"]),
+            ),
             ("title".to_string(), field(FieldKind::Str, true, &[])),
             ("trail".to_string(), field(FieldKind::Bool, false, &[])),
         ]),
@@ -237,6 +295,18 @@ pub fn parse(
         Some(FieldValue::Bool(b)) => *b,
         Some(_) => return Err(not_a_profile(block)),
     };
+    let planned = match block.field_str("planned") {
+        None => audience.default_planned(),
+        Some("hide") => PlannedSetting::Hide,
+        Some("mark") => PlannedSetting::Mark,
+        Some(_) => return Err(not_a_profile(block)),
+    };
+    let since = match block.field_str("since") {
+        None => None,
+        Some("show") => Some(SinceSetting::Show),
+        Some("off") => Some(SinceSetting::Off),
+        Some(_) => return Err(not_a_profile(block)),
+    };
     let (Some(key), Some(title), Some(select)) = (text("key"), text("title"), select) else {
         return Err(not_a_profile(block));
     };
@@ -247,5 +317,7 @@ pub fn parse(
         audience,
         select,
         trail,
+        planned,
+        since,
     })
 }
