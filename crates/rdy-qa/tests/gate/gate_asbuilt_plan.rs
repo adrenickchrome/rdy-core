@@ -117,6 +117,9 @@ fn warns(r: &Rdy, scope: &Scope, ids: &[&String]) -> Vec<(String, String)> {
     out
 }
 
+/// One sealed as-built item: its kind, edge, outcome and deferral answer.
+type SealedRow = (PlanKind, String, PlanOutcome, Option<Hash>);
+
 #[test]
 fn ab3_plan_survives_propose_land_reopen_and_dump() {
     let (dir, mut r) = project();
@@ -274,7 +277,7 @@ fn ab3_plan_survives_propose_land_reopen_and_dump() {
     confirm_exceptions(&mut r, &approver(), &p2.r#ref);
     let landing = h(&r.land(&approver(), &p2.id).unwrap());
     let (seal_id, sealed) = seal(&r, &landing);
-    let items: BTreeMap<(String, String), (PlanKind, String, PlanOutcome, Option<Hash>)> = sealed
+    let items: BTreeMap<(String, String), SealedRow> = sealed
         .seal
         .as_ref()
         .unwrap()
