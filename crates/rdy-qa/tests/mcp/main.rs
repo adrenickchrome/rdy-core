@@ -36,6 +36,8 @@ mod mcp_landing_tree;
 mod mcp_log;
 mod mcp_log_assessment;
 mod mcp_log_landing;
+mod mcp_m3_gate_client;
+mod mcp_m3_gate_reads;
 mod mcp_mentions;
 mod mcp_neighbors_plan;
 mod mcp_params;

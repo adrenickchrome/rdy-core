@@ -26,6 +26,7 @@ mod io_keys;
 mod io_link_keys;
 mod io_load;
 mod io_load_limit;
+mod io_m3_gate_records;
 mod io_onboarding;
 mod io_plan_metadata;
 mod io_publication;

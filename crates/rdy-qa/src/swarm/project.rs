@@ -1,6 +1,6 @@
 //! The swarm's project: a served `rdy-qa` project with one stable doc per area, seeded in-process
 //! before any daemon runs, landed and closed.
-use super::script::{AREAS, Config};
+use super::script::{AREAS, Config, SUBJECT_CLAIMS, Subject};
 use crate::daemon::Served;
 use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{land, parse_test_ops, write, writer};
@@ -184,9 +184,35 @@ pub struct SeedBlocks {
     pub sections: Vec<String>,
     pub claims: Vec<String>,
     pub decisions: Vec<String>,
+    /// The four M3 subjects, in the order of `Subject::ALL` (G2).
+    pub subjects: Vec<SubjectSeed>,
 }
 
+/// One small independent subject of the M3 routes: its own folder, doc and section, and
+/// `SUBJECT_CLAIMS` claims, one for each route that acts on it.
+#[derive(Debug, Clone)]
+pub struct SubjectSeed {
+    pub subject: Subject,
+    pub doc: String,
+    pub section: String,
+    pub claims: Vec<String>,
+}
+
+/// Each subject's folder and doc name, and the word its claims carry. The words differ from the
+/// area docs' and from each other, so no seed pair reads as one claim twice.
+const SUBJECT_DOCS: [(&str, &str, &str); 4] = [
+    ("gatework", "authority-notes", "approval"),
+    ("elicitwork", "elicit-notes", "prompt"),
+    ("pubwork", "publish-notes", "profile"),
+    ("blobwork", "blob-notes", "attachment"),
+];
+
 impl SeedBlocks {
+    /// The seed of `subject`.
+    pub fn subject(&self, subject: Subject) -> &SubjectSeed {
+        &self.subjects[subject as usize]
+    }
+
     /// The seed block a `Pick::Seed(n)` names: the first two claims of each area, area by area
     /// (`n` is taken modulo `SEED_BLOCKS`). Returns its id and its area index.
     pub fn pick(&self, n: usize) -> (&str, usize) {
@@ -210,7 +236,7 @@ pub const DOC_PATHS: [&str; 3] = ["wallets/ledger", "identity/accounts", "terms/
 const CLAIM_WORDS: [&str; CLAIMS_PER_AREA] = ["first", "second", "third", "fourth"];
 
 /// Builds the project: pack `rdy-qa-checks` (`rdy-qa` with the rule fixture), then for each area a
-/// folder and a stable doc holding one section with four claims, one accepted decision and one term, landed in one landing. Then the
+/// folder and a stable doc holding one section with four claims, one accepted decision and one term, landed in one landing. The four M3 subjects (`SUBJECT_DOCS`) land in the same landing, as draft docs. Then the
 /// authority policy under the first doc, with its one rule `SWARM_RULE` (`authority_policy`).
 pub fn build(cfg: &Config) -> SwarmProject {
     let served = Served::new_in(run_parent());
@@ -249,6 +275,28 @@ pub fn build(cfg: &Config) -> SwarmProject {
             "body": format!("A {term} is a record the {doc} keeps.")}),
         );
     }
+    for (n, (folder, doc, word)) in SUBJECT_DOCS.iter().enumerate() {
+        ops.push(
+            json!({"op": "create", "type": "folder", "id": format!("$mf{n}"),
+            "fields": {"name": folder, "title": folder}}),
+        );
+        ops.push(
+            json!({"op": "create", "type": "doc", "id": format!("$md{n}"),
+            "parent": format!("$mf{n}"),
+            "fields": {"name": doc, "title": doc, "doc_type": "overview"}}),
+        );
+        ops.push(
+            json!({"op": "create", "type": "section", "id": format!("$ms{n}"),
+            "parent": format!("$md{n}"), "fields": {"title": "Notes"}}),
+        );
+        for j in 0..SUBJECT_CLAIMS {
+            ops.push(
+                json!({"op": "create", "type": "claim", "id": format!("$mc{n}{j}"),
+                "parent": format!("$ms{n}"),
+                "body": format!("The {doc} {word} number {} stays as written.", j + 1)}),
+            );
+        }
+    }
     let w = write(&mut r, "work", Value::Array(ops)).expect("seed the swarm project");
     let id = |name: String| w.created[&name].clone();
     let mut seed = SeedBlocks {
@@ -256,6 +304,18 @@ pub fn build(cfg: &Config) -> SwarmProject {
         sections: Vec::new(),
         claims: Vec::new(),
         decisions: Vec::new(),
+        subjects: Subject::ALL
+            .iter()
+            .enumerate()
+            .map(|(n, subject)| SubjectSeed {
+                subject: *subject,
+                doc: id(format!("$md{n}")),
+                section: id(format!("$ms{n}")),
+                claims: (0..SUBJECT_CLAIMS)
+                    .map(|j| id(format!("$mc{n}{j}")))
+                    .collect(),
+            })
+            .collect(),
     };
     for (k, (_, doc, _)) in DOCS.iter().enumerate() {
         seed.docs.push(id(format!("$d{k}")));

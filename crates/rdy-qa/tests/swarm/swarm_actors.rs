@@ -3,12 +3,16 @@
 //! and checks the journal and the store. The kill and the restart belong to the run (sg5).
 use rdy_qa::mcp::McpClient;
 use rdy_qa::swarm::agent::{self, AgentReport, KillGate};
-use rdy_qa::swarm::journal::{Entry, Journal, Outcome, Skip};
+use rdy_qa::swarm::journal::{Entry, Journal, Outcome, Reply, Skip};
+use rdy_qa::swarm::m3::{self, CallHook, LAND_CARD, M3_FIXTURE, M3Hooks};
 use rdy_qa::swarm::people;
 use rdy_qa::swarm::project::{self, SwarmProject};
-use rdy_qa::swarm::script::{Act, Config, PersonAct, Pick, script};
-use serde_json::json;
+use rdy_qa::swarm::script::{
+    Act, Config, M3_MAX_CALLS, PersonAct, Pick, Route, Scenario, UiStep, script,
+};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -316,9 +320,13 @@ fn sg4_the_relay_lands_a_proposal_with_a_relayed_approval() {
     let land = of(&j, "agent:relay", "land");
     assert_eq!(land.len(), 1, "{:#?}", j.entries());
     assert_eq!(land[0].outcome, Outcome::Ok, "{:?}", land[0]);
-    let reply = land[0].reply.as_ref().expect("the approve reply");
+    // the journal keeps the real `rdy_answer` result; its landing fields sit under `landing`
+    let reply = land[0].reply.as_ref().expect("the answer's reply");
+    assert_eq!(reply["act"], "approve", "{reply}");
     assert_eq!(reply["assurance"], "relayed", "{reply}");
-    assert_eq!(reply["approved"], json!(report.proposals[0]));
+    let landed = people::landing_fields(reply);
+    assert_eq!(landed["assurance"], "relayed", "{reply}");
+    assert_eq!(landed["approved"], json!(report.proposals[0]), "{reply}");
     assert!(
         queue.lock().unwrap().is_empty(),
         "the landed ref left the queue"
@@ -326,7 +334,7 @@ fn sg4_the_relay_lands_a_proposal_with_a_relayed_approval() {
     // the log shows the landing, relayed by the person's agent
     let (ok, log) = p.served.json(&["--json", "log"]);
     assert!(ok, "{log}");
-    assert_eq!(log[0]["landing"], reply["landing"], "{log}");
+    assert_eq!(log[0]["landing"], landed["landing"], "{log}");
     assert_eq!(log[0]["assurance"], "relayed", "{log}");
     assert_eq!(log[0]["relayed_by"]["actor"], "agent:relay", "{log}");
 }
@@ -1124,4 +1132,606 @@ fn sg4_a_choice_after_a_scratch_only_draw_holds_its_decision() {
         reply["policy"]["verdict"].is_string(),
         "the choosing version is not ready: {reply:#}"
     );
+}
+
+// ---------------------------------------------------------------- mg8: chat across the M3 routes
+
+/// The scenario of `route` for agent `agent` at step 0, as `m3_scenarios` describes one.
+fn scenario(route: Route, agent: usize) -> Scenario {
+    let (subject, slot) = route.subject();
+    Scenario {
+        route,
+        subject,
+        slot,
+        agent,
+        step: 0,
+        partner: None,
+        person: route.needs_person(),
+        max_calls: M3_MAX_CALLS,
+    }
+}
+
+/// Agent `i` reads a seed block at step 0, then runs the scenarios of `routes`.
+fn run_m3(
+    p: &SwarmProject,
+    cfg: &Config,
+    i: usize,
+    routes: &[Route],
+    j: &Journal,
+    g: &Arc<KillGate>,
+    hook: Option<CallHook>,
+) -> AgentReport {
+    let m3 = M3Hooks {
+        scenarios: routes.iter().map(|r| scenario(*r, i)).collect(),
+        before_call: hook,
+    };
+    let read = vec![Act::Read {
+        target: Pick::Seed(0),
+    }];
+    agent::spawn_m3(p, cfg, i, read, j.clone(), g.clone(), m3)
+        .join()
+        .unwrap_or_else(|e| panic!("agent {i} panicked: {e:?}"))
+}
+
+/// The route attempts of `act`, in order.
+fn attempts(j: &Journal, act: &str) -> Vec<Entry> {
+    j.entries()
+        .into_iter()
+        .filter(|e| e.act == act && e.route.is_some())
+        .collect()
+}
+
+/// Where the entries that `f` picks sit in the journal, in order (two entries may be equal, so
+/// a check of order reads positions, never an entry's first match).
+fn pos(j: &Journal, f: impl Fn(&Entry) -> bool) -> Vec<usize> {
+    j.entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| f(e))
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// The card hash an `Ok` `land_card` entry showed.
+fn shown_hash(e: &Entry) -> Option<String> {
+    e.reply.as_ref()?["shown"]["card_hash"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The log, newest first.
+fn log(p: &SwarmProject) -> Vec<Value> {
+    let (ok, v) = p.served.json(&["--json", "log"]);
+    assert!(ok, "{v}");
+    v.as_array()
+        .or_else(|| v["landings"].as_array())
+        .unwrap_or_else(|| panic!("a log: {v}"))
+        .clone()
+}
+
+/// The log row of landing `l`.
+fn row(p: &SwarmProject, l: &str) -> Value {
+    log(p)
+        .into_iter()
+        .find(|r| r["landing"] == l)
+        .unwrap_or_else(|| panic!("no log row of {l}"))
+}
+
+/// The landing an acknowledged attempt names.
+fn acked(e: &Entry) -> String {
+    match &e.route.as_ref().expect("an attempt").reply {
+        Reply::Acknowledged { ack, records } => {
+            assert_eq!(records, &vec![ack.clone()], "{e:?}");
+            ack.clone()
+        }
+        other => panic!("not acknowledged: {other:?} in {e:?}"),
+    }
+}
+
+/// G3: the person's relayed landing reads the queue, shows the version's card, and sends the
+/// person's words with `rdy_answer` and that card's hash. The log stores card evidence with the
+/// hash shown (a command-line relay stores text) and the words quoted.
+#[test]
+fn mg8_primary_person_lands_through_rdy_answer() {
+    let (p, cfg, j, g) = rig(2);
+    let report = run(
+        &p,
+        &cfg,
+        0,
+        vec![
+            Act::Brief {
+                target: Pick::Seed(0),
+            },
+            Act::Write {
+                target: Pick::Seed(0),
+                stable: true,
+            },
+            Act::Propose,
+        ],
+        &j,
+        &g,
+    );
+    let pref = report.proposals[0].clone();
+    let queue = Arc::new(Mutex::new(vec![pref.clone()]));
+    run_person(&p, vec![PersonAct::Land { relayed: true }], &j, &queue, &g);
+    let cards: Vec<Entry> = of(&j, "agent:relay", LAND_CARD)
+        .into_iter()
+        .filter(|e| e.block.as_deref() == Some(pref.as_str()))
+        .collect();
+    assert_eq!(cards.len(), 1, "{:#?}", j.entries());
+    let shown = cards[0].reply.as_ref().expect("the card read")["shown"].clone();
+    assert_eq!(shown["ref"], json!(pref), "{shown}");
+    // the whole card the person saw is journaled: its text, the item as the queue gave it, and
+    // each option's label as numbered in the text (fix round 1, finding 4)
+    let text = shown["card"].as_str().expect("the card's text");
+    assert!(text.starts_with(&format!("{pref}  ")), "{text}");
+    assert_eq!(shown["item"]["card"], json!(text), "{shown}");
+    assert_eq!(shown["item"]["card_hash"], shown["card_hash"], "{shown}");
+    assert!(!text.contains(" cut; rdy_pending"), "a cut card: {text}");
+    let options = shown["options"].as_array().expect("the options");
+    let approve = options
+        .iter()
+        .position(|o| o["id"] == "approve")
+        .unwrap_or_else(|| panic!("no approve: {shown}"));
+    let label = options[approve]["label"].as_str().expect("a label");
+    assert!(label.starts_with("Approve"), "{label}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with(&format!("  {}. {label}", approve + 1))),
+        "the label is not numbered in the text: {text}"
+    );
+    let hash = shown_hash(&cards[0]).expect("the hash shown");
+    let land = of(&j, "agent:relay", "land");
+    assert_eq!(land.len(), 1, "{:#?}", j.entries());
+    assert_eq!(land[0].outcome, Outcome::Ok, "{:?}", land[0]);
+    let card_at = pos(&j, |e| e.act == LAND_CARD);
+    let land_at = pos(&j, |e| e.act == "land");
+    assert!(card_at[0] < land_at[0], "the card came first");
+    let reply = land[0].reply.as_ref().expect("the answer's reply");
+    assert_eq!(reply["act"], "approve", "{reply}");
+    let l = people::landing_fields(reply)["landing"]
+        .as_str()
+        .expect("a landing")
+        .to_string();
+    let r = row(&p, &l);
+    assert_eq!(r["approved"], json!(pref), "{r:#}");
+    assert_eq!(r["assurance"], "relayed", "{r:#}");
+    assert_eq!(r["relayed_by"]["actor"], "agent:relay", "{r:#}");
+    assert_eq!(r["evidence"]["kind"], "card", "{r:#}");
+    assert_eq!(r["evidence"]["card_hash"], json!(hash), "{r:#}");
+    assert_eq!(
+        r["relay_evidence"]["quoted"],
+        json!(format!("Approve {pref}.")),
+        "{r:#}"
+    );
+    assert!(queue.lock().unwrap().is_empty());
+}
+
+/// G3: a card that moved after the person saw it is refused on its old hash and lands
+/// nothing; the new card is read and shown before the next answer, which names the new hash.
+#[test]
+fn mg8_stale_card_is_presented_again_before_answer() {
+    let (p, cfg, j, g) = rig(2);
+    let landings = log(&p).len();
+    run_m3(&p, &cfg, 0, &[Route::MovedCard], &j, &g, None);
+    let tries = attempts(&j, "m3_moved_card");
+    assert_eq!(tries.len(), 2, "{:#?}", j.entries());
+    let (stale, fresh) = (&tries[0], &tries[1]);
+    let (a, b) = (stale.route.as_ref().unwrap(), fresh.route.as_ref().unwrap());
+    assert_eq!(
+        stale.outcome,
+        Outcome::Refused("E_PROPOSAL_MOVED".into()),
+        "{stale:?}"
+    );
+    assert_ne!(a.observed_ref, b.observed_ref, "{a:?} {b:?}");
+    assert_ne!(a.card_hash, b.card_hash, "{a:?} {b:?}");
+    assert_eq!(fresh.outcome, Outcome::Ok, "{fresh:?}");
+    // each answer names the hash of a card read and shown just before it
+    let entries = j.entries();
+    let cards = pos(&j, |e| e.act == LAND_CARD);
+    let tried = pos(&j, |e| e.act == "m3_moved_card" && e.route.is_some());
+    for t in &tried {
+        let shown = cards
+            .iter()
+            .rfind(|c| *c < t && entries[**c].block == entries[*t].block)
+            .unwrap_or_else(|| panic!("no card shown before {:?}", entries[*t]));
+        assert_eq!(
+            shown_hash(&entries[*shown]).as_ref(),
+            entries[*t].route.as_ref().unwrap().card_hash.as_ref(),
+            "{:?}",
+            entries[*t]
+        );
+    }
+    let fresh_card = cards
+        .iter()
+        .find(|c| entries[**c].block == fresh.block)
+        .expect("the new card");
+    assert!(tried[0] < *fresh_card, "shown after the refusal");
+    // one landing: the new version, on the new card; the moved one never lands
+    let l = acked(fresh);
+    let rows = log(&p);
+    assert_eq!(rows.len(), landings + 1, "{rows:#?}");
+    let r = row(&p, &l);
+    assert_eq!(r["approved"].as_str(), b.observed_ref.as_deref(), "{r:#}");
+    assert_eq!(r["evidence"]["card_hash"].as_str(), b.card_hash.as_deref());
+    assert!(
+        rows.iter()
+            .all(|r| r["approved"].as_str() != a.observed_ref.as_deref()),
+        "{rows:#?}"
+    );
+    let found = of(&j, "agent:a0", "land_found");
+    assert!(
+        found.iter().any(
+            |e| e.reply.as_ref().is_some_and(|x| x["landing"] == l.as_str()) && e.base.is_some()
+        ),
+        "{found:#?}"
+    );
+}
+
+/// G3: the person answers through the eliciting client in both built revisions (local,
+/// elicited evidence), declines once (nothing is recorded and the card stays open), and a
+/// separate scripted answer is relayed after the decline. The local approval pages are the
+/// simulated person's lane alone: no agent answers through them.
+#[test]
+fn mg8_elicitation_and_ui_use_the_real_person_lanes() {
+    let (p, cfg, j, g) = rig(2);
+    let landings = log(&p).len();
+    run_m3(
+        &p,
+        &cfg,
+        0,
+        &[Route::ElicitationRevisions, Route::DeclineThenRelay],
+        &j,
+        &g,
+        None,
+    );
+    for act in ["m3_elicit_first_rev", "m3_elicit_second_rev"] {
+        let t = attempts(&j, act);
+        assert_eq!(t.len(), 1, "{act}: {:#?}", j.entries());
+        assert_eq!(t[0].outcome, Outcome::Ok, "{act}: {:?}", t[0]);
+        let counts = t[0].route.as_ref().unwrap().counts;
+        assert!(
+            counts.requests >= 1 && counts.answers == counts.requests,
+            "{act}: {counts:?}"
+        );
+        let r = row(&p, &acked(&t[0]));
+        assert_eq!(r["assurance"], "local", "{act}: {r:#}");
+        assert_eq!(r["evidence"]["kind"], "elicited", "{act}: {r:#}");
+        assert!(r["relayed_by"].is_null(), "{act}: {r:#}");
+    }
+    // the decline is an answer that records nothing
+    let declined = attempts(&j, "m3_elicit_decline");
+    assert_eq!(declined.len(), 1, "{:#?}", j.entries());
+    assert_eq!(declined[0].outcome, Outcome::Ok, "{:?}", declined[0]);
+    assert_eq!(
+        declined[0].reply,
+        Some(json!({"state": "declined"})),
+        "{:?}",
+        declined[0]
+    );
+    assert_eq!(
+        declined[0].route.as_ref().unwrap().reply,
+        Reply::Acknowledged {
+            ack: "declined".into(),
+            records: vec![]
+        }
+    );
+    // the card stays open and is shown again; the separate answer is relayed on it
+    let after = attempts(&j, "m3_relay_after_decline");
+    assert_eq!(after.len(), 1, "{:#?}", j.entries());
+    assert_eq!(after[0].outcome, Outcome::Ok, "{:?}", after[0]);
+    let entries = j.entries();
+    let decline_at = pos(&j, |e| e.act == "m3_elicit_decline")[0];
+    let again = entries[decline_at..]
+        .iter()
+        .find(|c| c.act == LAND_CARD && c.block == declined[0].block)
+        .expect("the card read again after the decline");
+    assert!(shown_hash(again).is_some(), "{again:?}");
+    let pref = declined[0].block.clone().unwrap();
+    let r = row(&p, &acked(&after[0]));
+    assert_eq!(r["approved"], json!(pref), "{r:#}");
+    assert_eq!(r["assurance"], "relayed", "{r:#}");
+    assert_eq!(
+        r["relay_evidence"]["quoted"],
+        json!(format!("I have read {pref} now. Land it.")),
+        "{r:#}"
+    );
+    assert_eq!(log(&p).len(), landings + 3, "two elicited, one relayed");
+    // the local UI: the person's page answer lands, and only the person's driver answers there
+    let queue = Arc::new(Mutex::new(Vec::new()));
+    run_person(
+        &p,
+        vec![PersonAct::UiAnswer {
+            step: UiStep::Drawn,
+        }],
+        &j,
+        &queue,
+        &g,
+    );
+    let ui: Vec<Entry> = j
+        .entries()
+        .into_iter()
+        .filter(|e| e.act == "ui_answer")
+        .collect();
+    assert!(!ui.is_empty(), "{:#?}", j.entries());
+    for e in &ui {
+        assert_eq!(e.actor, "human:qa", "{e:?}");
+        assert_eq!(e.ui.as_ref().map(|u| u.status), Some(303), "{e:?}");
+    }
+}
+
+/// G3: an agent's `rdy_land` of a version its policy does not accept is refused
+/// (`E_POLICY_HUMAN`), lands nothing and answers nothing for the person: the card stays as it
+/// was. Only the person's own answer lands it, as a relayed approval, not a policy landing.
+/// The wrong-role route is not run in the swarm (one person in one daemon); it says so.
+#[test]
+fn mg8_policy_refusal_does_not_become_a_person_approval() {
+    let (p, cfg, j, g) = rig(2);
+    let report = run(
+        &p,
+        &cfg,
+        0,
+        vec![
+            Act::Brief {
+                target: Pick::Seed(0),
+            },
+            Act::Write {
+                target: Pick::Seed(0),
+                stable: true,
+            },
+            Act::Propose,
+        ],
+        &j,
+        &g,
+    );
+    let pref = report.proposals[0].clone();
+    assert!(
+        of(&j, "agent:a0", "land").is_empty(),
+        "a stable edit is outside the policy's rule"
+    );
+    let before = log(&p);
+    let mut r = relay(&p);
+    let card = |r: &mut McpClient| {
+        let q = r.call("rdy_pending", json!({"session_ref": "chat"})).ok();
+        q["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["ref"] == pref.as_str())
+            .map(|i| i["card_hash"].clone())
+    };
+    let shown = card(&mut r).expect("the person's card");
+    let mut a0 = McpClient::start_proxy(&p.served);
+    a0.call(
+        "rdy_session",
+        json!({"actor": "agent:a0", "run": "a0", "role": "writer"}),
+    )
+    .ok();
+    let refused = a0.call("rdy_land", json!({"proposal": pref}));
+    assert_eq!(refused.code(), Some("E_POLICY_HUMAN"), "{refused:?}");
+    drop(a0);
+    assert_eq!(log(&p), before, "the refusal landed nothing");
+    assert_eq!(
+        card(&mut r),
+        Some(shown),
+        "no answer was recorded on the card"
+    );
+    drop(r);
+    let queue = Arc::new(Mutex::new(vec![pref.clone()]));
+    run_person(&p, vec![PersonAct::Land { relayed: true }], &j, &queue, &g);
+    let land = of(&j, "agent:relay", "land");
+    assert_eq!(land.len(), 1, "{:#?}", j.entries());
+    let l = people::landing_fields(land[0].reply.as_ref().unwrap())["landing"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = row(&p, &l);
+    assert_eq!(row["assurance"], "relayed", "{row:#}");
+    assert_eq!(row["approved_by"], "human:qa", "{row:#}");
+    assert_eq!(row["relayed_by"]["actor"], "agent:relay", "{row:#}");
+    // the wrong-role route: a visible gap, never a silent pass and never a witness. The
+    // authority area proves it (ruling task-8, finding 1: one swarm person; the route is
+    // `mg5_roles_route_and_enforce_the_same_person`)
+    run_m3(&p, &cfg, 1, &[Route::WrongThenRightRole], &j, &g, None);
+    for act in Route::WrongThenRightRole.acts() {
+        let e = of(&j, "agent:a1", act);
+        assert_eq!(e.len(), 1, "{act}: {:#?}", j.entries());
+        assert_eq!(e[0].outcome, Outcome::Skipped, "{e:?}");
+        assert_eq!(e[0].message.as_deref(), Some(m3::COVERED_BY_AREA), "{e:?}");
+        assert!(e[0].route.is_none(), "a skip is no attempt: {e:?}");
+    }
+    assert!(
+        m3::COVERED_BY_AREA.contains("mg5_roles_route_and_enforce_the_same_person"),
+        "{}",
+        m3::COVERED_BY_AREA
+    );
+    assert_eq!(log(&p).len(), before.len() + 1);
+}
+
+/// G3: while another agent writes on the same daemon, the publication route checks canon,
+/// then checks and writes every output of a held landing scope (kept for the oracle, every
+/// local link resolving), and the compact route removes the subject's claim on the person's
+/// approval and runs a real compact that counts the removed payload.
+#[test]
+fn mg8_publication_and_compact_run_on_the_shared_daemon() {
+    let (p, cfg, j, g) = rig(2);
+    let other = agent::spawn(&p, &cfg, 1, write_script(6), j.clone(), g.clone());
+    let report = run_m3(
+        &p,
+        &cfg,
+        0,
+        &[Route::PublicationCheckOutput, Route::RealCompact],
+        &j,
+        &g,
+        None,
+    );
+    other.join().expect("agent 1 runs");
+    let writes: Vec<Entry> = of(&j, "agent:a1", "write");
+    assert!(
+        writes.iter().filter(|e| e.outcome == Outcome::Ok).count() >= 1,
+        "{writes:#?}"
+    );
+    let checks = attempts(&j, "m3_publication_check");
+    assert_eq!(checks.len(), 2, "{:#?}", j.entries());
+    assert!(
+        checks.iter().all(|e| e.outcome == Outcome::Ok),
+        "{checks:#?}"
+    );
+    assert_eq!(checks[0].block.as_deref(), Some("canon"));
+    assert!(
+        checks[1]
+            .block
+            .as_deref()
+            .is_some_and(|s| s.starts_with("landing:")),
+        "{:?}",
+        checks[1]
+    );
+    let outputs = attempts(&j, "m3_publication_output");
+    assert_eq!(outputs.len(), 3, "{:#?}", j.entries());
+    assert!(
+        outputs.iter().all(|e| e.outcome == Outcome::Ok),
+        "{outputs:#?}"
+    );
+    assert!(outputs.iter().all(|e| e.block == checks[1].block));
+    let links: usize = outputs
+        .iter()
+        .map(|e| e.route.as_ref().unwrap().counts.links_checked)
+        .sum();
+    assert!(links > 0, "{outputs:#?}");
+    assert_eq!(report.m3_outputs.len(), 1, "{report:?}");
+    assert!(
+        std::fs::read_dir(&report.m3_outputs[0]).is_ok_and(|mut d| d.next().is_some()),
+        "the outputs stay for the oracle"
+    );
+    // the person's removal, approved on its card, then the real compact
+    let removed = attempts(&j, "m3_blob_remove");
+    assert_eq!(removed.len(), 1, "{:#?}", j.entries());
+    assert_eq!(removed[0].outcome, Outcome::Ok, "{:?}", removed[0]);
+    // the removal card the person saw is journaled whole, its mandatory lines and warnings too
+    let entries = j.entries();
+    let remove_at = pos(&j, |e| e.act == "m3_blob_remove" && e.route.is_some())[0];
+    let card = entries[..remove_at]
+        .iter()
+        .rfind(|c| c.act == LAND_CARD && c.block == removed[0].block)
+        .expect("the removal card shown");
+    let text = card.reply.as_ref().unwrap()["shown"]["card"]
+        .as_str()
+        .expect("the card's text")
+        .to_string();
+    for line in [
+        "Content removal",
+        rdy_engine::W_REDACTION_COPIES_MESSAGE,
+        rdy_engine::W_REDACTION_QUOTES_MESSAGE,
+        rdy_engine::W_REDACTION_REUSE_MESSAGE,
+    ] {
+        assert!(text.contains(line), "{line:?} not shown: {text}");
+    }
+    let r = row(&p, &acked(&removed[0]));
+    assert_eq!(r["assurance"], "relayed", "{r:#}");
+    let compact = attempts(&j, "m3_compact_real");
+    assert_eq!(compact.len(), 1, "{:#?}", j.entries());
+    assert_eq!(compact[0].outcome, Outcome::Ok, "{:?}", compact[0]);
+    let report = compact[0].reply.as_ref().expect("the compact report");
+    assert!(
+        report["removed_bytes"].as_u64().is_some_and(|b| b > 0),
+        "{report}"
+    );
+    assert_eq!(compact[0].route.as_ref().unwrap().counts.removals, 1);
+    // the snapshots before and after it
+    let snapshots: Vec<Entry> = of(&j, "agent:a0", M3_FIXTURE)
+        .into_iter()
+        .filter(|e| {
+            e.reply
+                .as_ref()
+                .is_some_and(|r| r.get("removed_bytes").is_some())
+        })
+        .collect();
+    assert_eq!(snapshots.len(), 2, "{snapshots:#?}");
+    let snaps = pos(&j, |e| {
+        e.act == M3_FIXTURE
+            && e.reply
+                .as_ref()
+                .is_some_and(|r| r.get("removed_bytes").is_some())
+    });
+    let real = pos(&j, |e| e.act == "m3_compact_real")[0];
+    assert!(snaps[0] < real && real < snaps[1], "{snaps:?} {real}");
+}
+
+/// G3: the kill cuts an answer whose landing the daemon made: the client never reads the
+/// reply. The agent reconnects through the normal proxy and session, reads whether the
+/// version landed, finds the landing, and never sends the answer again.
+#[test]
+fn mg8_reconnect_rebuilds_the_session_without_replaying_an_ack() {
+    let cfg = cfg(2);
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::with_kill()));
+    let (asked, wait) = mpsc::channel::<()>();
+    let (go, gone) = mpsc::channel::<()>();
+    let (asked, gone) = (Mutex::new(asked), Mutex::new(gone));
+    let hook: CallHook = Arc::new(move |_, act| {
+        if act == "m3_relay_answer" {
+            asked.lock().unwrap().send(()).unwrap();
+            gone.lock().unwrap().recv().unwrap();
+        }
+    });
+    let m3 = M3Hooks {
+        scenarios: vec![scenario(Route::RelayedAnswer, 0)],
+        before_call: Some(hook),
+    };
+    let read = vec![Act::Read {
+        target: Pick::Seed(0),
+    }];
+    let h = agent::spawn_m3(&p, &cfg, 0, read, j.clone(), g.clone(), m3);
+    wait.recv().expect("the scenario reaches its answer");
+    // the card the agent showed is answered and lands; then the daemon dies before the agent's
+    // own call is read
+    let card = of(&j, "agent:a0", LAND_CARD).pop().expect("the card shown");
+    let pref = card.block.clone().unwrap();
+    let mut r = relay(&p);
+    let v = r
+        .call(
+            "rdy_answer",
+            json!({"ref": pref, "option": "approve", "card_hash": shown_hash(&card),
+                "evidence": "Yes, land it.", "question": "Land it?", "session_ref": "chat"}),
+        )
+        .ok();
+    let l = people::landing_fields(&v)["landing"]
+        .as_str()
+        .expect("a landing")
+        .to_string();
+    drop(r);
+    g.killing();
+    p.served.kill9();
+    g.restarted();
+    go.send(()).unwrap();
+    h.join().expect("the agent recovers");
+    let tries = attempts(&j, "m3_relay_answer");
+    assert_eq!(
+        tries.len(),
+        1,
+        "no answer is sent again: {:#?}",
+        j.entries()
+    );
+    assert_eq!(tries[0].outcome, Outcome::Lost, "{:?}", tries[0]);
+    assert_eq!(tries[0].route.as_ref().unwrap().reply, Reply::Interrupted);
+    // the agent read the state on the restarted daemon and matched the landing
+    let found = of(&j, "agent:a0", "land_found");
+    let named: Vec<&Entry> = found
+        .iter()
+        .filter(|e| e.reply.as_ref().is_some_and(|x| x["landing"] == l.as_str()))
+        .collect();
+    assert_eq!(named.len(), 1, "{found:#?}");
+    assert_eq!(named[0].epoch, 1, "{:?}", named[0]);
+    assert!(named[0].base.is_some(), "{:?}", named[0]);
+    let lost_at = pos(&j, |e| e.act == "m3_relay_answer")[0];
+    let found_at = pos(&j, |e| {
+        e.act == "land_found" && e.reply.as_ref().is_some_and(|x| x["landing"] == l.as_str())
+    })[0];
+    assert!(lost_at < found_at);
+    let rows: Vec<Value> = log(&p)
+        .into_iter()
+        .filter(|r| r["approved"] == pref.as_str())
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["landing"], l.as_str());
 }

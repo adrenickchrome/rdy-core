@@ -1,9 +1,11 @@
 //! sg3: a swarm script is a pure function of its seed; it covers every act; outcomes are a closed table.
-use rdy_qa::swarm::journal::{Outcome, allowed};
+use rdy_qa::swarm::journal::{Entry, Outcome, Reply, RouteAttempt, RouteCounts, Via, allowed};
+use rdy_qa::swarm::project;
 use rdy_qa::swarm::script::{
     Act, CHECK_MIN_STEPS, Config, EXCLUDE_STEP, HoldStep, INCLUDE_SOURCE_STEP, INCLUDE_STEP,
-    MIN_STEPS, PersonAct, RuleStep, UiStep, advice_steps, check_plan, direct_land_at, include_plan,
-    person_weights, reviewer_weights, script, ui_plan, writer_weights,
+    M3_MAX_BYTES, M3_MAX_CALLS, M3_MAX_MESSAGES, M3_PARTNER_GAP, MIN_STEPS, PersonAct, Route,
+    RuleStep, SUBJECT_CLAIMS, Subject, UiStep, advice_steps, check_plan, direct_land_at,
+    include_plan, m3_scenarios, person_weights, reviewer_weights, script, ui_plan, writer_weights,
 };
 use std::collections::BTreeSet;
 
@@ -922,4 +924,239 @@ fn nb10_swarm_grouping_needs_no_new_act_or_outcome() {
     assert!(allowed("plan", "E_CONFLICT_UNRESOLVED"));
     assert!(!allowed("plan", "E_PLAN_ITEM"));
     assert!(!allowed("version_plan", "E_PLAN_ITEM"));
+}
+
+/// Every fast and deep config of seeds 1 to 20.
+fn both_tiers() -> impl Iterator<Item = Config> {
+    (1..=20).flat_map(|seed| [Config::fast(seed), Config::deep(seed)])
+}
+
+/// mg7 (G2): every fast and deep seed forces every M3 route once, with no draw to leave one out.
+/// The seeded project holds a small independent subject for each, and each route owns a claim.
+#[test]
+fn mg7_seeded_scripts_force_every_m3_route() {
+    for cfg in both_tiers() {
+        let sc = m3_scenarios(&cfg);
+        let routes: Vec<Route> = sc.iter().map(|s| s.route).collect();
+        assert_eq!(routes, Route::ALL.to_vec(), "seed {} {cfg:?}", cfg.seed);
+        let subjects: BTreeSet<Subject> = sc.iter().map(|s| s.subject).collect();
+        assert_eq!(subjects, Subject::ALL.into_iter().collect(), "{cfg:?}");
+        // no two routes share a claim of one subject
+        let slots: BTreeSet<(Subject, usize)> = sc.iter().map(|s| (s.subject, s.slot)).collect();
+        assert_eq!(slots.len(), Route::ALL.len(), "{cfg:?}");
+        assert!(sc.iter().all(|s| s.slot < SUBJECT_CLAIMS), "{cfg:?}");
+        // the scenarios are a pure function of the config
+        assert_eq!(sc, m3_scenarios(&cfg), "{cfg:?}");
+    }
+    // the compact route belongs to writer 0, which holds the compact act
+    for cfg in both_tiers() {
+        let real = m3_scenarios(&cfg)
+            .into_iter()
+            .find(|s| s.route == Route::RealCompact)
+            .expect("the compact route");
+        assert_eq!(real.agent, 0, "{cfg:?}");
+    }
+    // a script too short for the forced sequences holds no scenario
+    let short = Config {
+        seed: 3,
+        agents: 4,
+        steps: 24,
+        kill_at: None,
+    };
+    assert!(m3_scenarios(&short).is_empty());
+    // the scripts themselves keep their acts: the descriptors add no act and no person act
+    assert_eq!(Act::ALL_NAMES.len(), 23);
+    // the project seeds one subject each, with a distinct claim per route
+    let p = project::build(&Config::fast(1));
+    assert_eq!(p.seed.subjects.len(), Subject::ALL.len());
+    let mut ids = BTreeSet::new();
+    for subject in Subject::ALL {
+        let seed = p.seed.subject(subject);
+        assert_eq!(seed.subject, subject);
+        assert_eq!(seed.claims.len(), SUBJECT_CLAIMS);
+        for id in seed.claims.iter().chain([&seed.doc, &seed.section]) {
+            assert!(!id.is_empty() && ids.insert(id.clone()), "{subject:?} {id}");
+        }
+    }
+    assert_eq!(ids.len(), Subject::ALL.len() * (SUBJECT_CLAIMS + 2));
+}
+
+/// mg7 (G2): a scenario fits the run: after the kill, inside the steps, off the advice steps, on
+/// a writer, with a reviewer two steps later where it needs one; and within the bounds.
+#[test]
+fn mg7_m3_scenarios_fit_both_tiers() {
+    assert_eq!(M3_MAX_CALLS, 32);
+    assert_eq!((M3_MAX_MESSAGES, M3_MAX_BYTES), (256, 1 << 20));
+    for cfg in both_tiers() {
+        let advice = advice_steps(&cfg).expect("an advice sequence");
+        let reserved = [advice.claim, advice.review, advice.propose];
+        let kill = cfg.kill_at.expect("a kill");
+        let mut used = BTreeSet::new();
+        for s in m3_scenarios(&cfg) {
+            let at = format!("seed {} {:?}", cfg.seed, s.route);
+            assert!(!cfg.is_reviewer(s.agent) && s.agent < cfg.agents, "{at}");
+            assert!(
+                s.step > kill && s.step + 1 < cfg.steps,
+                "{at}: step {}",
+                s.step
+            );
+            assert!(!reserved.contains(&s.step), "{at}");
+            assert!(used.insert((s.agent, s.step)), "{at}: a taken step");
+            assert_eq!(s.max_calls, M3_MAX_CALLS, "{at}");
+            assert_eq!(s.person, s.route.needs_person(), "{at}");
+            match s.partner {
+                Some((reviewer, step)) => {
+                    assert!(s.route.needs_partner(), "{at}");
+                    assert!(cfg.is_reviewer(reviewer), "{at}");
+                    assert_eq!(step, s.step + M3_PARTNER_GAP, "{at}");
+                    assert!(step + 1 < cfg.steps && !reserved.contains(&step), "{at}");
+                }
+                None => assert!(!s.route.needs_partner(), "{at}"),
+            }
+            assert_eq!((s.subject, s.slot), s.route.subject(), "{at}");
+        }
+    }
+    // the wrong-role route scripts explicit person answers: the card's policy role applies to the
+    // person, so the route needs the simulated person as well as a partner
+    assert!(Route::WrongThenRightRole.needs_person());
+    assert!(Route::WrongThenRightRole.needs_partner());
+    // the draw is its own: the agents' and the person's scripts are those of the seed alone
+    let a = script(&Config::fast(9));
+    let _ = m3_scenarios(&Config::fast(9));
+    assert_eq!(format!("{a:?}"), format!("{:?}", script(&Config::fast(9))));
+}
+
+fn attempt(route: Route, act: &'static str) -> RouteAttempt {
+    RouteAttempt::begin(route, act, "agent:a2", "r1", Via::Tool("rdy_answer")).expect("an act")
+}
+
+/// mg7 (G2): a begun attempt has no reply and is never journaled; an interruption, a refusal
+/// and an acknowledgement are three states that map to three outcomes.
+#[test]
+fn mg7_journal_cannot_confuse_attempt_with_acknowledgement() {
+    let begun = attempt(Route::RelayedAnswer, "m3_relay_answer")
+        .observed("c-ABCDE", "P-x@1")
+        .shown("a".repeat(64).as_str(), "approve")
+        .counted(RouteCounts {
+            pages: 2,
+            requests: 1,
+            answers: 1,
+            ..RouteCounts::default()
+        });
+    assert!(begun.is_pending() && !begun.is_acknowledged() && !begun.is_interrupted());
+    assert_eq!(begun.refusal(), None);
+    assert!(!begun.is_allowed());
+    assert!(
+        Entry::from_route(4, begun.clone()).is_none(),
+        "nothing before a reply"
+    );
+    // an act of another route is not an attempt of this one
+    assert!(
+        RouteAttempt::begin(Route::MovedCard, "m3_relay_answer", "a", "r", Via::Cli("x")).is_none()
+    );
+    // an empty acknowledgement is no acknowledgement
+    assert!(begun.clone().acknowledged("", vec![]).is_none());
+
+    let acked = begun
+        .clone()
+        .acknowledged("ack-1", vec!["a-1".into()])
+        .expect("an acknowledgement");
+    let refused = begun.clone().refused("E_PROPOSAL_MOVED");
+    let lost = begun.clone().interrupted();
+    assert!(acked.is_acknowledged() && !refused.is_acknowledged() && !lost.is_acknowledged());
+    assert_eq!(refused.refusal(), Some("E_PROPOSAL_MOVED"));
+    assert_eq!(lost.refusal(), None);
+    assert_ne!(acked.reply, refused.reply);
+    assert_ne!(refused.reply, lost.reply);
+    assert_ne!(acked.reply, lost.reply);
+    assert!(acked.is_allowed() && refused.is_allowed() && lost.is_allowed());
+    assert!(!begun.refused("E_INTERNAL").is_allowed());
+
+    let ok = Entry::from_route(4, acked).expect("a journaled attempt");
+    assert_eq!(ok.outcome, Outcome::Ok);
+    let no = Entry::from_route(4, refused).expect("a journaled refusal");
+    assert_eq!(no.outcome, Outcome::Refused("E_PROPOSAL_MOVED".into()));
+    let gone = Entry::from_route(4, lost).expect("a journaled interruption");
+    assert_eq!(gone.outcome, Outcome::Lost);
+    // the entry keeps every fact the attempt had
+    let a = ok.route.expect("the attempt");
+    assert_eq!((a.actor.as_str(), a.run.as_str()), ("agent:a2", "r1"));
+    assert_eq!(a.via, Via::Tool("rdy_answer"));
+    assert_eq!(a.observed_ref.as_deref(), Some("c-ABCDE"));
+    assert_eq!(a.observed_version.as_deref(), Some("P-x@1"));
+    assert_eq!(a.option.as_deref(), Some("approve"));
+    assert_eq!(
+        (a.counts.pages, a.counts.requests, a.counts.answers),
+        (2, 1, 1)
+    );
+    assert_eq!(
+        a.reply,
+        Reply::Acknowledged {
+            ack: "ack-1".into(),
+            records: vec!["a-1".into()]
+        }
+    );
+    assert_eq!(ok.act, "m3_relay_answer");
+}
+
+/// mg7 (G2): each new act has its own closed refusal set; any other code, and any act the table
+/// does not know, is refused.
+#[test]
+fn mg7_outcomes_are_closed_for_each_new_act() {
+    let sets: [(&str, &[&str]); 13] = [
+        ("m3_relay_answer", &["E_PROPOSAL_MOVED", "E_ITEM_MOVED"]),
+        ("m3_wrong_role", &["E_PERMISSION"]),
+        ("m3_right_role", &["E_PROPOSAL_MOVED"]),
+        ("m3_elicit_first_rev", &["E_PROPOSAL_MOVED"]),
+        ("m3_elicit_second_rev", &["E_PROPOSAL_MOVED"]),
+        ("m3_elicit_decline", &[]),
+        ("m3_relay_after_decline", &["E_PROPOSAL_MOVED"]),
+        ("m3_moved_card", &["E_PROPOSAL_MOVED"]),
+        ("m3_publication_check", &["E_PUBLICATION_REFERENCE"]),
+        ("m3_publication_output", &["E_PUBLICATION_REFERENCE"]),
+        (
+            "m3_blob_remove",
+            &[
+                "E_REDACTION_HUMAN",
+                "E_REDACTION_PENDING",
+                "E_REDACTION_STALE",
+            ],
+        ),
+        ("m3_compact_real", &[]),
+        ("m3_unlisted", &[]),
+    ];
+    let probe = [
+        "E_PROPOSAL_MOVED",
+        "E_ITEM_MOVED",
+        "E_PERMISSION",
+        "E_PUBLICATION_REFERENCE",
+        "E_REDACTION_HUMAN",
+        "E_REDACTION_PENDING",
+        "E_REDACTION_STALE",
+        "E_INTERNAL",
+        "E_BAD_INPUT",
+        "E_STALE_BASE",
+        "E_LIMIT",
+        "E_DAEMON_GONE",
+        "E_ELICITATION_UNAVAILABLE",
+    ];
+    for (act, codes) in sets {
+        for code in probe {
+            assert_eq!(allowed(act, code), codes.contains(&code), "{act} {code}");
+        }
+    }
+    // the sets cover exactly the acts the routes name
+    let named: BTreeSet<&str> = Route::ALL.iter().flat_map(|r| r.acts()).copied().collect();
+    let tabled: BTreeSet<&str> = sets
+        .iter()
+        .map(|(a, _)| *a)
+        .filter(|a| *a != "m3_unlisted")
+        .collect();
+    assert_eq!(named, tabled);
+    // an attempt is allowed a refusal only by its own act's set
+    let wrong = attempt(Route::WrongThenRightRole, "m3_wrong_role");
+    assert!(wrong.clone().refused("E_PERMISSION").is_allowed());
+    assert!(!wrong.refused("E_PROPOSAL_MOVED").is_allowed());
+    // the earlier tables are unchanged
+    assert!(allowed("ui_answer", "E_PROPOSAL_MOVED") && !allowed("ui_answer", "E_PERMISSION"));
 }

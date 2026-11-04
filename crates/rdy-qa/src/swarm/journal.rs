@@ -1,6 +1,7 @@
 //! The swarm journal: one entry per act, and the closed table of refusals an act may meet
 //! (ledger O3). The journal keeps what each reader saw, so a check can compare it with the
 //! logged moves (FW-IB2, D-Z0EMP).
+use super::script::Route;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// What an act met.
@@ -104,6 +105,163 @@ pub struct UiFacts {
     pub landing: Option<String>,
 }
 
+/// How an M3 route attempt was made: an MCP tool or a CLI command (the person's explicit CLI
+/// fallback lane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    Tool(&'static str),
+    Cli(&'static str),
+}
+
+/// What an M3 route attempt met. `Pending` is the only state before a reply; the other three are
+/// closed and distinct: a transport interruption is neither a refusal nor an acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// The call is sent and no reply came. Never journaled.
+    Pending,
+    /// The transport broke with the call in flight; the daemon may or may not have acted.
+    Interrupted,
+    /// The daemon replied with this error code.
+    Refused { code: String },
+    /// The daemon replied with success: its acknowledgement and the record ids the reply named.
+    Acknowledged { ack: String, records: Vec<String> },
+}
+
+/// What a route attempt consumed or checked, as counts the reply gave.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RouteCounts {
+    pub pages: usize,
+    pub requests: usize,
+    pub answers: usize,
+    pub removals: usize,
+    pub profile_refs: usize,
+    pub links_checked: usize,
+}
+
+/// One attempted M3 route act (G2): who tried it, by which tool or CLI command, what the actor
+/// observed and was shown, and what the daemon replied. The reply is set only by `acknowledged`,
+/// `refused` or `interrupted`, from the reply: the attempt never holds a computed success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteAttempt {
+    pub route: Route,
+    /// One of `route.acts()`.
+    pub act: &'static str,
+    pub actor: String,
+    pub run: String,
+    pub via: Via,
+    /// The ref and version the actor observed before the act.
+    pub observed_ref: Option<String>,
+    pub observed_version: Option<String>,
+    /// The card hash shown to the person and the option chosen.
+    pub card_hash: Option<String>,
+    pub option: Option<String>,
+    pub reply: Reply,
+    pub counts: RouteCounts,
+}
+
+impl RouteAttempt {
+    /// Starts an attempt, with no reply yet. `None` when `act` is not an act of `route`.
+    pub fn begin(
+        route: Route,
+        act: &'static str,
+        actor: &str,
+        run: &str,
+        via: Via,
+    ) -> Option<RouteAttempt> {
+        route.acts().contains(&act).then(|| RouteAttempt {
+            route,
+            act,
+            actor: actor.to_string(),
+            run: run.to_string(),
+            via,
+            observed_ref: None,
+            observed_version: None,
+            card_hash: None,
+            option: None,
+            reply: Reply::Pending,
+            counts: RouteCounts::default(),
+        })
+    }
+
+    /// The ref and version the actor observed.
+    pub fn observed(mut self, r: &str, version: &str) -> RouteAttempt {
+        self.observed_ref = Some(r.to_string());
+        self.observed_version = Some(version.to_string());
+        self
+    }
+
+    /// The card hash shown and the option chosen.
+    pub fn shown(mut self, card_hash: &str, option: &str) -> RouteAttempt {
+        self.card_hash = Some(card_hash.to_string());
+        self.option = Some(option.to_string());
+        self
+    }
+
+    /// The counts of what the act consumed and checked.
+    pub fn counted(mut self, counts: RouteCounts) -> RouteAttempt {
+        self.counts = counts;
+        self
+    }
+
+    /// The daemon acknowledged. `None` for an empty acknowledgement: a reply without one is no
+    /// acknowledgement.
+    pub fn acknowledged(mut self, ack: &str, records: Vec<String>) -> Option<RouteAttempt> {
+        if ack.is_empty() {
+            return None;
+        }
+        self.reply = Reply::Acknowledged {
+            ack: ack.to_string(),
+            records,
+        };
+        Some(self)
+    }
+
+    /// The daemon refused with `code`.
+    pub fn refused(mut self, code: &str) -> RouteAttempt {
+        self.reply = Reply::Refused {
+            code: code.to_string(),
+        };
+        self
+    }
+
+    /// The transport broke with the call in flight.
+    pub fn interrupted(mut self) -> RouteAttempt {
+        self.reply = Reply::Interrupted;
+        self
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.reply == Reply::Pending
+    }
+
+    pub fn is_acknowledged(&self) -> bool {
+        matches!(self.reply, Reply::Acknowledged { .. })
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.reply == Reply::Interrupted
+    }
+
+    /// The refusal code, when the daemon refused.
+    pub fn refusal(&self) -> Option<&str> {
+        match &self.reply {
+            Reply::Refused { code } => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Whether the closed table allows this attempt's outcome: an acknowledgement and an
+    /// interruption always, a refusal only when `allowed` lists its code for the act, a pending
+    /// attempt never.
+    pub fn is_allowed(&self) -> bool {
+        match &self.reply {
+            Reply::Pending => false,
+            Reply::Interrupted | Reply::Acknowledged { .. } => true,
+            Reply::Refused { code } => allowed(self.act, code),
+        }
+    }
+}
+
 /// One journaled act.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -138,6 +296,8 @@ pub struct Entry {
     pub check: Option<CheckFacts>,
     /// Set on a `ui_answer`.
     pub ui: Option<UiFacts>,
+    /// Set on an M3 route attempt (`Entry::from_route`).
+    pub route: Option<RouteAttempt>,
 }
 
 impl Entry {
@@ -163,7 +323,24 @@ impl Entry {
             target: None,
             check: None,
             ui: None,
+            route: None,
         }
+    }
+
+    /// The entry of an M3 route attempt. `None` while the attempt is pending: nothing is
+    /// journaled before a reply. An acknowledgement is `Ok`, a refusal is `Refused` with its
+    /// code, an interruption is `Lost`; the three never map to each other.
+    pub fn from_route(step: usize, attempt: RouteAttempt) -> Option<Entry> {
+        let outcome = match &attempt.reply {
+            Reply::Pending => return None,
+            Reply::Interrupted => Outcome::Lost,
+            Reply::Refused { code } => Outcome::Refused(code.clone()),
+            Reply::Acknowledged { .. } => Outcome::Ok,
+        };
+        let mut e = Entry::new(&attempt.actor, step, attempt.act, outcome);
+        e.block = attempt.observed_ref.clone();
+        e.route = Some(attempt);
+        Some(e)
     }
 }
 
@@ -275,6 +452,20 @@ pub fn allowed(act: &str, code: &str) -> bool {
         // D-6M0AF: the forced moved card's old hash; a policy landing of an imported status
         "ui_answer" => &["E_PROPOSAL_MOVED"],
         "ui_policy_land" => &["E_POLICY_HUMAN"],
+        // G2, the M3 routes: each act has its own closed set. The wrong-role act is the one that
+        // meets E_PERMISSION; an elicited decline is an answer, never a refusal
+        "m3_relay_answer" => &["E_PROPOSAL_MOVED", "E_ITEM_MOVED"],
+        "m3_wrong_role" => &["E_PERMISSION"],
+        "m3_right_role" | "m3_elicit_first_rev" | "m3_elicit_second_rev" | "m3_moved_card" => {
+            &["E_PROPOSAL_MOVED"]
+        }
+        "m3_relay_after_decline" => &["E_PROPOSAL_MOVED"],
+        "m3_publication_check" | "m3_publication_output" => &["E_PUBLICATION_REFERENCE"],
+        "m3_blob_remove" => &[
+            "E_REDACTION_HUMAN",
+            "E_REDACTION_PENDING",
+            "E_REDACTION_STALE",
+        ],
         // a view or a version whose changes conflict with canon has no change plan until the
         // conflict is resolved: its read refuses with E_CONFLICT_UNRESOLVED, never with a
         // write's E_STALE_BASE (ruling task-15 F3; the propose binds no plan then, and the
@@ -283,7 +474,8 @@ pub fn allowed(act: &str, code: &str) -> bool {
         // intent, review_next, tensions, inbox, read, brief, compact, and the plan answers, the queue
         // read and the deferral acceptance (plan_answer, pending, accept_deferrals), and a check
         // run or request (check_run, check_request), and a UI fixture's own writes (ui_fixture,
-        // ui_site): no refusal is allowed.
+        // ui_site), an elicited decline and a real compact (m3_elicit_decline, m3_compact_real):
+        // no refusal is allowed.
         _ => &[],
     };
     codes.contains(&code)

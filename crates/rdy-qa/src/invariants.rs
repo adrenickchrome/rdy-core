@@ -44,8 +44,9 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
-/// `check` on canon, then on every open view, all from one snapshot of `r`, then `r.fsck()`
-/// once and the `logged` rule (`reindex_check::logged`): every violation together.
+/// `check` on canon, then on every open view, all from one snapshot of `r`, then the durable M3
+/// rules on that snapshot (`m3_audit::check_m3_in`), then `r.fsck()` once and the `logged` rule
+/// (`reindex_check::logged`): every violation together.
 pub fn check_all(r: &Rdy) -> Result<(), Vec<Violation>> {
     let st = r.read();
     let mut out = vec![];
@@ -60,6 +61,7 @@ pub fn check_all(r: &Rdy) -> Result<(), Vec<Violation>> {
             out.extend(vs);
         }
     }
+    out.extend(crate::m3_audit::check_m3_in(&st));
     match r.fsck() {
         Ok(f) => out.extend(crate::reindex_check::logged_in(&st, &f)),
         Err(e) => out.push(v("fsck", None, e.to_string())),

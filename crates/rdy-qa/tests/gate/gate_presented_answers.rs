@@ -2172,7 +2172,8 @@ fn ui1_lookup_reaches_a_card_beyond_the_pending_cap() {
     local_reply(&v, "reject_proposal", "reject");
     // a hash that is not the card's: the moved refusal with the fresh card
     let wrong = Hash::of(b"another card").to_string();
-    let err = presented_item(&e.read(), PERSON, &refs[0], Some(&wrong)).unwrap_err();
+    // a shown card, never `beyond`: cards raised in one second order by ref, so refs[0] can be past the cap
+    let err = presented_item(&e.read(), PERSON, &shown[0], Some(&wrong)).unwrap_err();
     assert_eq!(err.code, E_PROPOSAL_MOVED, "{err:#?}");
     assert!(err.corrected.is_some());
     // an answered item is gone

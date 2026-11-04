@@ -515,6 +515,47 @@ pub struct Report {
     pub guarded: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
+/// finding 1 and task-10 finding 1): (witness, test file under `tests/`, test). The swarm has one
+/// person in one daemon and checks only the implicit org profile, so these paths are proven by
+/// the named area test, which the gate's area run executes. They are never swarm counts: the
+/// report lists each one with `AREA_PROVEN_NOTE`.
+pub const AREA_PROVEN_WITNESSES: [(&str, &str, &str); 6] = [
+    (
+        "refused wrong-role answer",
+        "authority/authority_routes.rs",
+        "mg5_roles_route_and_enforce_the_same_person",
+    ),
+    (
+        "public blocked check",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "org warning",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "hidden-link-only pass",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+    (
+        "dropped outside decision citation",
+        "publication/publication_m3.rs",
+        "mg6_check_matches_visible_refs_and_reports_hidden_links",
+    ),
+    (
+        "excluded canary scan",
+        "publication/publication_m3.rs",
+        "mg6_profile_outputs_keep_selected_canaries_and_no_excluded_canary",
+    ),
+];
+
+/// What the report says of each `AREA_PROVEN_WITNESSES` row.
+pub const AREA_PROVEN_NOTE: &str = "area-proven; not exercised under swarm concurrency";
+
 /// Lines of proptest output that name a minimal failing input.
 pub fn failing_seeds(output: &str) -> Vec<String> {
     output
@@ -526,6 +567,18 @@ pub fn failing_seeds(output: &str) -> Vec<String> {
 
 /// What the perf table's tail column is.
 pub const TAIL_NOTE: &str = "p95 is the run at index floor(0.95 x runs) in sorted order (the slowest run when there are 20 runs or fewer). A spec target stated as p99 is checked against this column.";
+
+/// The rule the perf verdicts apply (FW-PF3 D-PACK3), printed under the perf table.
+pub const PERF_RULE_NOTE: &str = "Rule (FW-PF3, D-PACK3): a row with a spec target fails when its median is at least 2x its baseline, or when the class baseline lacks it; a spec ceiling fails on p95 in every mode; a row with no spec target or a proposed target is recorded and never fails on its time. On a machine class with no baseline nothing passes.";
+
+/// A perf row's Delta cell: the change from the baseline median and the ratio, or `-` with no
+/// baseline.
+fn delta_cell(v: &Verdict) -> String {
+    match (v.delta_pct, v.baseline_ms) {
+        (Some(d), Some(b)) => format!("{d:+.0}% ({:.2}x)", v.median_ms / b),
+        _ => "-".into(),
+    }
+}
 
 fn mark(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
@@ -601,7 +654,7 @@ pub fn markdown(r: &Report) -> String {
                 v.p95_ms,
                 v.runs,
                 v.baseline_ms.map_or("-".into(), |b| format!("{b:.3}")),
-                v.delta_pct.map_or("-".into(), |d| format!("{d:+.0}%")),
+                delta_cell(v),
                 v.status.label(),
                 v.spec_target.as_deref().unwrap_or("-")
             );
@@ -617,6 +670,18 @@ pub fn markdown(r: &Report) -> String {
             n(Status::Regressed),
             n(Status::OverCeiling),
         );
+        let class = |v: &&Verdict| crate::perf::target_class(&v.op);
+        let informational = r
+            .perf
+            .iter()
+            .filter(|v| class(v).is_some_and(|c| c.informational()))
+            .count();
+        let unclassified = r.perf.iter().filter(|v| class(v).is_none()).count();
+        let _ = writeln!(
+            s,
+            "\n{PERF_RULE_NOTE}\n\n{} targeted, {informational} with no spec target or a proposed target, {unclassified} unclassified.",
+            r.perf.len() - informational - unclassified,
+        );
     }
 
     if !r.notes.is_empty() {
@@ -624,6 +689,17 @@ pub fn markdown(r: &Report) -> String {
         for n in &r.notes {
             let _ = writeln!(s, "- {n}");
         }
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## Area-proven witnesses\n\nThe named area test proves each of these, and this gate's area run executes it. They are not swarm counts.\n"
+    );
+    for (witness, file, test) in AREA_PROVEN_WITNESSES {
+        let _ = writeln!(
+            s,
+            "- {witness}: `{test}` (tests/{file}): {AREA_PROVEN_NOTE}"
+        );
     }
 
     let _ = writeln!(s, "\n## Failing seeds\n");
@@ -698,8 +774,38 @@ pub fn baseline_drift(base: &Baseline, measured: &[Measure]) -> Vec<String> {
     notes
 }
 
+/// One `AREA_PROVEN_WITNESSES` row as the JSON report writes it.
+#[derive(Serialize)]
+struct AreaProven {
+    witness: &'static str,
+    test: &'static str,
+    file: String,
+    note: &'static str,
+}
+
+/// The JSON report: the report's fields, then the `AREA_PROVEN_WITNESSES` rows as `area_proven`.
+#[derive(Serialize)]
+struct JsonReport<'a> {
+    #[serde(flatten)]
+    report: &'a Report,
+    area_proven: Vec<AreaProven>,
+}
+
 pub fn json(r: &Report) -> String {
-    serde_json::to_string_pretty(r).expect("report serializes")
+    let area_proven = AREA_PROVEN_WITNESSES
+        .iter()
+        .map(|(witness, file, test)| AreaProven {
+            witness,
+            test,
+            file: format!("tests/{file}"),
+            note: AREA_PROVEN_NOTE,
+        })
+        .collect();
+    serde_json::to_string_pretty(&JsonReport {
+        report: r,
+        area_proven,
+    })
+    .expect("report serializes")
 }
 
 #[cfg(test)]
@@ -1328,7 +1434,8 @@ mod tests {
             p95_ms: 1.0,
             runs: 20,
         };
-        let mut perf = compare(None, &[mk("log_full")], Mode::Compare);
+        // a targeted row: one with no spec target is recorded, not unbaselined (FW-PF3)
+        let mut perf = compare(None, &[mk("last_changes_doc")], Mode::Compare);
         perf.extend(not_compared(&[mk("history_100")]));
         let r = Report {
             revision: "r".into(),
@@ -1347,7 +1454,7 @@ mod tests {
         };
         let md = markdown(&r);
         assert!(
-            md.contains("| log_full | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
+            md.contains("| last_changes_doc | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
             "{md}"
         );
         assert!(
@@ -1461,5 +1568,198 @@ mod tests {
             !text.contains("--deep") && !text.contains("--only perf"),
             "deep and perf stay off CI"
         );
+    }
+
+    /// The M3 gate's areas and the guard ids each must report (plan Task 10).
+    const M3_AREAS: [(&str, &[&str]); 6] = [
+        ("authority", &["mg5"]),
+        ("publication", &["mg6"]),
+        ("checks", &["mg9"]),
+        ("gate", &["mg9"]),
+        ("invariants", &["mg1"]),
+        ("swarm", &["mg7", "mg8", "mg10"]),
+    ];
+
+    /// A `cargo test -- --list` listing of the real tree: each area binary's `Running` header,
+    /// then a `<file>::<test>: test` line for each `#[test]` fn of its files.
+    fn listing_of(tests: &Path) -> String {
+        let mut out = String::new();
+        for area in test_areas(tests) {
+            let _ = writeln!(
+                out,
+                "     Running tests/{area}/main.rs (target/release/deps/{area}-0)"
+            );
+            for f in dir_paths(&tests.join(&area))
+                .iter()
+                .filter(|f| is_rs_file(f))
+            {
+                let stem = f.file_stem().unwrap().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(f).unwrap();
+                let mut test = false;
+                for line in text.lines().map(str::trim) {
+                    if line == "#[test]" {
+                        test = true;
+                    } else if test && let Some(rest) = line.strip_prefix("fn ") {
+                        let name = rest.split('(').next().unwrap_or_default();
+                        let _ = writeln!(out, "{stem}::{name}: test");
+                        test = false;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Ruling task-10 finding 1: the gate report lists each area-proven witness on its own line,
+    /// with the test that proves it and the stated gap, in Markdown and JSON, whatever the areas
+    /// show, and never as a count.
+    #[test]
+    fn mg10_gate_report_states_each_area_proven_witness_gap() {
+        let want = [
+            "refused wrong-role answer",
+            "public blocked check",
+            // the swarm's org checks read `clear` on every fixed seed (task-10 fix round 1)
+            "org warning",
+            "hidden-link-only pass",
+            "dropped outside decision citation",
+            "excluded canary scan",
+        ];
+        for w in want {
+            assert!(
+                AREA_PROVEN_WITNESSES.iter().any(|(n, _, _)| *n == w),
+                "{w} is not listed: {AREA_PROVEN_WITNESSES:?}"
+            );
+        }
+        let r = report_of(vec![]);
+        let md = markdown(&r);
+        assert!(md.contains("\n## Area-proven witnesses\n"), "{md}");
+        let js: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        let rows = js["area_proven"].as_array().expect("an area_proven list");
+        assert_eq!(rows.len(), AREA_PROVEN_WITNESSES.len());
+        for ((witness, file, test), row) in AREA_PROVEN_WITNESSES.iter().zip(rows) {
+            let line = format!("- {witness}: `{test}` (tests/{file}): {AREA_PROVEN_NOTE}");
+            assert!(md.contains(&line), "{line} in {md}");
+            assert_eq!(
+                row,
+                &serde_json::json!({
+                    "witness": witness,
+                    "test": test,
+                    "file": format!("tests/{file}"),
+                    "note": AREA_PROVEN_NOTE,
+                }),
+            );
+        }
+    }
+
+    /// Plan Task 10: the gate report names each M3 area and its guards. On the real tree, the
+    /// discovery finds the six M3 area binaries and the listing gives each its guard ids. On
+    /// miniature area results, each area row keeps its exact passed, failed, ignored and skipped
+    /// counts, its skip lines and its guard ids, in Markdown and JSON alike. A zero-test area, a
+    /// failed perf process and an empty perf result (both `perf_ok = false` in `qa-gate`'s
+    /// `perf_tier`) never read PASS.
+    #[test]
+    fn mg10_gate_reports_each_m3_area_and_guard() {
+        let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let areas = test_areas(&tests);
+        let guarded = guarded_ids(&listing_of(&tests));
+        for (area, ids) in M3_AREAS {
+            assert!(areas.iter().any(|a| a == area), "no {area} area: {areas:?}");
+            for id in ids {
+                assert!(
+                    guarded.get(area).is_some_and(|g| g.contains(*id)),
+                    "the {area} area lists no {id} guard: {:?}",
+                    guarded.get(area)
+                );
+            }
+        }
+        assert_eq!(layout_problems(&tests), Vec::<String>::new());
+
+        // miniature results: area k has k + 1 passed tests, k ignored and k % 3 skip lines
+        let mut rows = vec![];
+        let mut list = String::new();
+        for (k, (area, ids)) in M3_AREAS.iter().enumerate() {
+            let mut out = String::new();
+            for s in 0..k % 3 {
+                let _ = writeln!(
+                    out,
+                    "{}{}_s{s}: node is not installed",
+                    crate::skip::SKIP_MARK,
+                    ids[0]
+                );
+            }
+            let _ = writeln!(
+                out,
+                "test result: ok. {} passed; 0 failed; {k} ignored; 0 measured; 0 filtered out",
+                k + 1
+            );
+            add_run(&mut rows, area, true, parse_cargo_test(&out));
+            let _ = writeln!(
+                list,
+                "     Running tests/{area}/main.rs (target/release/deps/{area}-0)"
+            );
+            for id in *ids {
+                let _ = writeln!(list, "{area}_m3::{id}_holds: test");
+            }
+            let _ = writeln!(list, "{area}_m3::not_a_guard: test");
+        }
+        let mut r = report_of(rows.clone());
+        r.guarded = guarded_ids(&list);
+        r.pass = overall(&[], &rows, true);
+        assert!(r.pass, "{rows:?}");
+        let md = markdown(&r);
+        let js: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        for (k, (area, ids)) in M3_AREAS.iter().enumerate() {
+            let row = format!("| {area} | PASS | {} | 0 | {k} | {} |", k + 1, k % 3);
+            assert!(md.contains(&row), "{row} in {md}");
+            let mut want: Vec<&str> = ids.to_vec();
+            want.sort_unstable();
+            let line = format!("- {area}: {}", want.join(", "));
+            assert!(md.contains(&line), "{line} in {md}");
+            let a = js["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == *area)
+                .unwrap();
+            assert_eq!(
+                (&a["passed"], &a["ignored"], &a["skipped"]),
+                (
+                    &serde_json::json!(k + 1),
+                    &serde_json::json!(k),
+                    &serde_json::json!(k % 3)
+                ),
+                "{area}"
+            );
+            assert_eq!(a["skip_lines"].as_array().unwrap().len(), k % 3, "{area}");
+            assert_eq!(js["guarded"][*area], serde_json::json!(want), "{area}");
+            if k % 3 > 0 {
+                assert!(md.contains(&format!("Skipped in `{area}`:")), "{md}");
+            }
+        }
+
+        // an area that ran nothing, a failed perf process and an empty perf result fail
+        let mut empty = rows.clone();
+        add_run(&mut empty, "authority_new", true, TestRun::default());
+        assert!(!overall(&[], &empty, true), "a zero-test area");
+        let mut r0 = report_of(empty.clone());
+        r0.pass = overall(&[], &empty, true);
+        let md0 = markdown(&r0);
+        assert!(md0.starts_with("# rdy QA gate: FAIL"), "{md0}");
+        assert!(
+            md0.contains("| authority_new | FAIL | 0 | 0 | 0 | 0 |"),
+            "{md0}"
+        );
+        for note in [
+            "qa-perf exited with exit status: 1",
+            "qa-perf measured nothing",
+        ] {
+            let mut rp = report_of(rows.clone());
+            rp.perf_note = note.into();
+            rp.pass = overall(&[], &rows, false);
+            assert!(!rp.pass, "{note}");
+            let mdp = markdown(&rp);
+            assert!(mdp.starts_with("# rdy QA gate: FAIL"), "{mdp}");
+            assert!(mdp.contains(&format!("## Perf\n\n{note}\n")), "{mdp}");
+        }
     }
 }

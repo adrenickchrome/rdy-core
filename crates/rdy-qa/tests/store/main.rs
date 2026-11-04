@@ -15,6 +15,7 @@ mod store_ingest;
 mod store_kinds;
 mod store_land;
 mod store_m2_kinds;
+mod store_m3_gate_records;
 mod store_open;
 mod store_presented_evidence;
 mod store_pver;

@@ -11,9 +11,9 @@ use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
 use rdy_engine::engine::write_typed;
-use rdy_engine::pending::{CARD_DEFAULT_TOKENS, PendingQuery};
-use rdy_engine::{Materialized, Rdy, Scope, Session, now_ms, testkit};
-use rdy_model::{Block, BlockId, Hash, Op, Role};
+use rdy_engine::pending::{CARD_DEFAULT_TOKENS, ItemKind, PendingQuery};
+use rdy_engine::{DecisionInput, Materialized, Rdy, Scope, Session, WriteRequest, now_ms, testkit};
+use rdy_model::{Block, BlockId, Hash, Justification, Op, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,22 +82,6 @@ pub enum Mode {
     Record,
 }
 
-/// The absolute floor of an fsync-bound op: its median moves with the disk, so a rise of less
-/// than this is noise, whatever its percentage (ruling R5).
-pub const FSYNC_FLOOR_MS: f64 = 2.0;
-/// The absolute floor of every other op: small enough that a sub-millisecond read that grows
-/// many-fold fails, large enough to absorb timer jitter.
-pub const READ_FLOOR_MS: f64 = 0.05;
-
-/// The rise in median (ms) below which `op` never counts as regressed.
-pub fn floor_ms(op: &str) -> f64 {
-    if fsync_bound(op) {
-        FSYNC_FLOOR_MS
-    } else {
-        READ_FLOOR_MS
-    }
-}
-
 /// The spec's ceiling for `op` in ms, enforced on its p95 with or without a baseline. Exact op
 /// names only: a `_50k` op has none, and an op whose target is reported (not enforced) has none.
 pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
@@ -111,6 +95,217 @@ pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
         | "daemon_cold_start"
         | "open_chosen_alts_100" => 2000.0,
         _ => return None,
+    })
+}
+
+/// The rule of a compared row (FW-PF3 D-PACK3): a targeted row regresses when its median is at
+/// least this many times its baseline median. The paused rule has no margin by op class and no
+/// absolute floor.
+pub const REGRESSION_RATIO: f64 = 2.0;
+
+/// What a perf row is measured against: a closed class per exact op name ([`target_class`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetClass {
+    /// A spec target with an enforced ceiling on p95 ([`spec_ceiling_ms`]); compared at 2x.
+    Ceiling,
+    /// A stated spec target that is reported, not enforced; compared at 2x.
+    Target,
+    /// A proposed target (ledger F4), not a spec target: reported, never failed.
+    Proposed,
+    /// No spec target: reported, never failed (D-PACK3).
+    NoTarget,
+}
+
+impl TargetClass {
+    /// Whether a row of this class is reported only: recorded on the bench, whatever its baseline.
+    pub fn informational(self) -> bool {
+        matches!(self, TargetClass::Proposed | TargetClass::NoTarget)
+    }
+}
+
+/// The class of `op`, by its exact name; a `_50k` name takes its typical op's class, without a
+/// ceiling. None for a name the workloads do not measure: it gets no class from a prefix, and
+/// [`compare`] treats it as a targeted row.
+pub fn target_class(op: &str) -> Option<TargetClass> {
+    let (base, large) = match op.strip_suffix(LARGE_SUFFIX) {
+        Some(b) => (b, true),
+        None => (op, false),
+    };
+    let class = match base {
+        "tree_full"
+        | "tree_full_memo"
+        | "brief_doc"
+        | "version_position"
+        | "view_materialize_cold"
+        | "view_cold"
+        | "view_materialize_incremental"
+        | "view_incremental"
+        | "render"
+        | "cold_open"
+        | "cold_open_lagging"
+        | "daemon_cold_start"
+        | "open_chosen_alts_100" => TargetClass::Ceiling,
+        "write_single"
+        | "write_briefed"
+        | "write_consequences"
+        | "write_expired_intents_1k"
+        | "write_settled_alts_1k"
+        | "propose_chosen_alts_100"
+        | "daemon_write_single"
+        | "brief_expired_intents_1k"
+        | "context"
+        | "impact"
+        | "resolve_path"
+        | "version_position_cached"
+        | "view_materialize_after_rebase"
+        | "exclude_cold"
+        | "land_rebase_50"
+        | "brief_inflight_50"
+        | "entity_search"
+        | "search_coverage_sort"
+        | "coverage_carry"
+        | "coverage_carry_hub"
+        | "context_inflight_1k"
+        | "impact_inflight_1k"
+        | "context_view_1k"
+        | "impact_view_1k"
+        | "inflight_carry"
+        | "tension_on_change_1k"
+        | "tension_value_1k"
+        | "tension_drift_1k"
+        | "tension_on_change_delete_1k"
+        | "tension_on_change_view_op_1k"
+        | "review_submit_1k"
+        | "review_submit_nolease_1k"
+        | "inbox_fetch_200_1k"
+        | "history_100"
+        | "last_changes_doc"
+        | "log_page_20"
+        | "refuse_import_20mb_scalar"
+        | "refuse_check_20mb_scalar"
+        | "refuse_import_symlink"
+        | "blob_forged_manifest_refuse"
+        | "figure_forged_manifest_refuse"
+        | "pack_resolve_1000_areas"
+        | "areas_lookup_100k_globs"
+        | "areas_lookup_pathological"
+        | "pack_resolve_2000_types"
+        | "daemon_read_during_big_write"
+        | "daemon_mcp_overview"
+        | "mcp_stdio_overview"
+        | "mcp_stdio_write_max_ops"
+        | "mcp_stdio_oversized_line" => TargetClass::Target,
+        "site_event_after_land" | "site_event_after_view_write" | "site_get_page" => {
+            TargetClass::Proposed
+        }
+        "diff_since"
+        | "site_versions_page"
+        | "site_versions_page_warm"
+        | "write_batch_200"
+        | "pending"
+        | "answer_later"
+        | "propose_land_500_flat"
+        | "search_literal"
+        | "include_200"
+        | "view_consequences_200"
+        | "landing_consequences"
+        | "view_ls_50"
+        | "dump"
+        | "load"
+        | "dump_increment"
+        | "load_chain"
+        | "load_chain_stop"
+        | "redaction_report"
+        | "redaction_land"
+        | "redaction_open"
+        | "redaction_dump"
+        | "export_md"
+        | "export_html"
+        | "export_pdf"
+        | "export_import"
+        | "clone"
+        | "publication_resolve"
+        | "publication_diff"
+        | "render_profile"
+        | "export_profile_md"
+        | "export_profile_html"
+        | "export_profile_pdf"
+        | "plan_read"
+        | "plan_answer_300"
+        | "plan_seal"
+        | "reaffirm_300"
+        | "reflects_suspects"
+        | "publication_manifest"
+        | "render_stream_site"
+        | "render_stream_markdown"
+        | "render_stream_techdocs"
+        | "render_one_page"
+        | "signature_check"
+        | "signature_check_sk"
+        | "signature_lookup"
+        | "lexicon_build"
+        | "suggestions_after_write"
+        | "coverage_all"
+        | "coverage_report_cold"
+        | "inflight_build_1k"
+        | "coord_build_1k"
+        | "tension_carry_1k"
+        | "tension_log_close_50_1k"
+        | "tensions_full_1k"
+        | "tensions_canon"
+        | "tensions_canon_drift"
+        | "tensions_canon_drift_deep"
+        | "review_requests_all_1k"
+        | "review_next_1k"
+        | "review_submit_lookup_1k"
+        | "review_requests_sparse_area"
+        | "review_accept_1k"
+        | "inbox_in_flight_1k"
+        | "inbox_ack_1k"
+        | "gate_tensions_1k"
+        | "mcp_params_9mib"
+        | "mcp_write_9mib"
+        | "render_cold"
+        | "site_build_live"
+        | "site_fanout_32"
+        | "site_profile_build"
+        | "site_profile_review"
+        | "site_profile_menu"
+        | "site_profile_get_page"
+        | "site_profile_event_after_land"
+        | "new_doc_single"
+        | "daemon_write_8_clients"
+        | "invariants_check_all"
+        | "code_index_build"
+        | "brief_code"
+        | "wc_project_typical"
+        | "wc_plan_one_doc"
+        | "log_full"
+        | "check_rules_change"
+        | "check_rules_propose"
+        | "check_request_case"
+        | "check_queue"
+        | "m3a_replay_1"
+        | "m3a_replay_100"
+        | "m3a_replay_1000"
+        | "m3a_landing_ties_1000"
+        | "m3a_landing_ties_10000"
+        | "m3a_read_only_reindex_1000"
+        | "m3a_read_only_reindex_10000"
+        | "m3a_upgrade_backup_1000"
+        | "m3a_upgrade_backup_10000"
+        | "m3_readiness"
+        | "m3_answer_relay"
+        | "m3_policy_land"
+        | "m3_compact"
+        | "publication_check"
+        | "render_diagrams_10k" => TargetClass::NoTarget,
+        _ => return None,
+    };
+    Some(if large && class == TargetClass::Ceiling {
+        TargetClass::Target
+    } else {
+        class
     })
 }
 
@@ -178,7 +373,7 @@ fn spec_target(op: &str) -> Option<String> {
             "< 50 ms cold, an unpinned view after the tier's landings rebased it (M2 spec 15.1)"
         }
         "include_200" => {
-            "< 50 ms: 200 changes included into a fresh view, store write included (M2 spec 15.1 gives no figure for a bulk include; read against the cold materialization figure)"
+            "no spec target: 200 changes included into a fresh view, store write included (M2 spec 15.1 gives no figure for a bulk include; the < 50 ms cold materialization figure is context only)"
         }
         "exclude_cold" => {
             "< 50 ms: one exclude from a 200-change view, then the read that rebuilds it (M2 spec 15.1: exclude counts as cold)"
@@ -477,6 +672,21 @@ fn spec_target(op: &str) -> Option<String> {
         "check_queue" => {
             "no spec target: list the open requests and claim the one eligible independent request among 1,000 durable requests, 500 answered (reported; no ceiling)"
         }
+        "m3_readiness" => {
+            "no spec target: propose a 40-claim stable change, its readiness, stored assessment and card included (reported; no ceiling)"
+        }
+        "m3_answer_relay" => {
+            "no spec target: a relayed approval of a shown ready card through the answer path, durable landing included (reported; no ceiling)"
+        }
+        "m3_policy_land" => {
+            "no spec target: an agent's landing of one ready version that one whole-version policy rule accepts, durable landing included (reported; no ceiling)"
+        }
+        "m3_compact" => {
+            "no spec target: compact a copy whose log holds one removed 64 KiB blob (reported; no ceiling)"
+        }
+        "publication_check" => {
+            "no spec target: check a public profile of 20 selected docs with visible refs and hidden links outside it (reported; no ceiling)"
+        }
         "m3a_replay_1" | "m3a_replay_100" | "m3a_replay_1000" => {
             "recorded, no spec target: replay of N source changes (one update each, half with a diverged target) into an owned view (D-EHC2C); reported, never enforced"
         }
@@ -498,8 +708,9 @@ fn spec_target(op: &str) -> Option<String> {
     })
 }
 
-/// The ops that end in a durable flush, so their medians move with the disk: they get the wider margin.
-fn fsync_bound(op: &str) -> bool {
+/// The ops that end in a durable flush, so their medians move with the disk. The paused rule
+/// (FW-PF3) compares them like every other op; the class is kept for the reports that name it.
+pub fn fsync_bound(op: &str) -> bool {
     op.starts_with("write")
         || op.starts_with("propose")
         || op.starts_with("new_doc")
@@ -516,35 +727,27 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("m3a_upgrade_")
 }
 
-/// The ops that are reported only: no ceiling and no baseline (D-PACK3), so every mode records
-/// them and no compared run fails on them. Today these are the check ops (`CK10_OPS`).
-fn reported_only(op: &str) -> bool {
-    CK10_OPS.contains(&op)
-}
-
 /// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode,
-/// and for a reported-only op in any mode, the rest is `Recorded`. In `Compare` mode an op in the
-/// baseline is `Pass` or `Regressed`, and an op not in it is `Unbaselined`, which fails.
+/// and for an informational op ([`TargetClass::informational`]) in any mode, the rest is
+/// `Recorded`, with the baseline and its delta shown when the class baseline holds the op. In
+/// `Compare` mode a targeted op (or an op with no class) in the baseline is `Regressed` at a median
+/// of [`REGRESSION_RATIO`] times its baseline or more, else `Pass`; one not in it is
+/// `Unbaselined`, which fails.
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) -> Vec<Verdict> {
     measured
         .iter()
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
+            let informational = target_class(&m.op).is_some_and(TargetClass::informational);
             let status = if over_ceiling(m) {
                 Status::OverCeiling
-            } else if mode == Mode::Record || reported_only(&m.op) {
+            } else if mode == Mode::Record || informational {
                 Status::Recorded
             } else {
                 match base {
                     None => Status::Unbaselined,
-                    Some(b) => {
-                        let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
-                        if m.median_ms > b * (1.0 + margin) && m.median_ms - b > floor_ms(&m.op) {
-                            Status::Regressed
-                        } else {
-                            Status::Pass
-                        }
-                    }
+                    Some(b) if m.median_ms >= REGRESSION_RATIO * b => Status::Regressed,
+                    Some(_) => Status::Pass,
                 }
             };
             verdict(m, base, status)
@@ -6198,6 +6401,7 @@ pub fn run_workload() -> Vec<Measure> {
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
     tier_m3a(&mut out, dir.path(), "", TYPICAL_RUNS.landing, &M3A_TYPICAL);
+    tier_m3(&mut out, dir.path(), M3_RUNS);
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
@@ -6205,6 +6409,463 @@ pub fn run_workload() -> Vec<Measure> {
     }
     rdy_model::unseed_ids_for_tests();
     out
+}
+
+/// The five M3 rows (M3 gate, D-PACK3), in the order [`tier_m3`] measures them. All are reported
+/// with no ceiling and no baseline entry.
+pub const M3_OPS: [&str; 5] = [
+    "m3_readiness",
+    "m3_answer_relay",
+    "m3_policy_land",
+    "m3_compact",
+    "publication_check",
+];
+
+/// Runs of each M3 row in the typical workload.
+const M3_RUNS: usize = 5;
+/// Claims of the stable change `m3_readiness` proposes.
+pub const M3_CLAIMS: usize = 40;
+/// Docs the profile of `publication_check` selects.
+pub const M3_SELECTED_DOCS: usize = 20;
+/// Bytes of the blob `m3_compact`'s copy has removed.
+pub const M3_BLOB_BYTES: usize = 64 * 1024;
+
+/// What the M3 rows produced, summed over their runs; [`tier_m3`] prints it beside the timings.
+/// The byte counts are those of the first compaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct M3Facts {
+    /// Claims of each proposed stable change.
+    pub claims: usize,
+    /// Proposals that stored an assessment.
+    pub assessments: usize,
+    /// Approve cards the queue showed for them.
+    pub cards: usize,
+    /// Relayed approvals that landed.
+    pub relayed_landings: usize,
+    /// Agent landings the policy accepted.
+    pub policy_landings: usize,
+    /// Compactions that reported the removed blob.
+    pub compactions: usize,
+    /// Publication checks run.
+    pub checks: usize,
+    /// Docs the checked profile selects.
+    pub selected_docs: usize,
+    /// Visible references the check found leaving the selection.
+    pub visible_refs: usize,
+    /// Link edges the check found leaving the selection.
+    pub links_outside: usize,
+    /// The compacted log's logical, removed, punched and allocated bytes.
+    pub logical_bytes: u64,
+    pub removed_bytes: u64,
+    pub punched_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+/// The person every M3 approval names.
+const M3_PERSON: &str = crate::intake::PERSON;
+
+/// `m3_readiness` and `m3_answer_relay`: in a project of their own, `runs` docs, each with a
+/// stable section landed. For each run, a view writes [`M3_CLAIMS`] claims under its doc's section,
+/// briefed, outside the timer; `m3_readiness` times its propose, which checks readiness and stores
+/// the assessment and card. Then, for each version, the queue's approve card is read outside the
+/// timer and `m3_answer_relay` times the relayed approval through `Rdy::answer`, with its durable
+/// landing. Each version writes its own doc, so no landing moves another's reach.
+fn m3_readiness_and_relay(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    runs: usize,
+    facts: &mut M3Facts,
+) {
+    use crate::edit_loop::{brief_of, write_cited};
+    let dir = parent.join("m3-ready");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut r = Rdy::init(&dir, "rdy-standard").expect("init");
+    let mut sections = vec![];
+    for i in 0..runs {
+        let w = write(
+            &mut r,
+            "m3-seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("m3-doc-{i}"), "title": format!("M3 doc {i}"), "doc_type": "overview"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+            ]),
+        )
+        .expect("seed doc");
+        sections.push(BlockId::parse(&w.created["$s"]).expect("section id"));
+    }
+    land(&mut r, "m3-seed").expect("land the seed");
+    let t = brief_of(&r, &Scope::Canon, &sections.iter().collect::<Vec<_>>())
+        .base
+        .token;
+    let ops: Vec<_> = sections
+        .iter()
+        .map(|s| json!({"op": "update", "id": s.to_string(), "fields": {"lifecycle": "stable"}}))
+        .collect();
+    write_cited(&mut r, "m3-stable", json!(ops), Some(&t)).expect("make the sections stable");
+    // the decision every stable change implements: stable content needs a justification
+    let d = r
+        .decide(
+            &writer(),
+            "m3-stable",
+            DecisionInput {
+                parent: String::new(),
+                statement: "The rules grow by one claim per need".into(),
+                reversibility: Some("two_way".into()),
+                ..Default::default()
+            },
+        )
+        .expect("decide");
+    let decision = BlockId::parse(&d.created["$decision"]).expect("decision id");
+    land(&mut r, "m3-stable").expect("land the stable sections");
+
+    let mut versions = vec![];
+    out.push(measure_timed("m3_readiness", runs, |i| {
+        let view = format!("m3r{i}");
+        let section = &sections[i];
+        let scope = Scope::View(view.clone());
+        let t = brief_of(&r, &scope, &[section]).base.token;
+        let ops: Vec<_> = (0..M3_CLAIMS)
+            .map(|c| json!({"op": "create", "type": "claim", "parent": section.to_string(), "body": format!("Stable claim {c} of run {i}.")}))
+            .collect();
+        r.write_briefed(
+            &writer(),
+            WriteRequest {
+                view: view.clone(),
+                ops: crate::fixtures::parse_test_ops(json!(ops)).expect("the claims' ops"),
+                justification: Some(Justification::Implements(vec![decision.clone()])),
+                message: String::new(),
+            },
+            Some(t),
+        )
+        .expect("write the stable change");
+        crate::intake::answer_open_items(&mut r, &writer(), &view);
+        let s = Instant::now();
+        let p = r
+            .propose(&writer(), &view, &view, Some("Adds forty stable claims."))
+            .expect("propose the stable change");
+        let took = s.elapsed();
+        assert!(p.ready, "the stable change is ready: {:#?}", p.issues);
+        versions.push(p);
+        took
+    }));
+    for p in &versions {
+        let st = r.read();
+        let v: Hash = p.id.parse().expect("version hash");
+        let stored = st
+            .reader()
+            .assessment_of_proposal(&v, st.seq())
+            .expect("assessment lookup");
+        assert!(stored.is_some(), "{} stores an assessment", p.r#ref);
+        facts.assessments += 1;
+    }
+    facts.claims = M3_CLAIMS;
+    let query = PendingQuery {
+        person: M3_PERSON.into(),
+        session_ref: None,
+        max_tokens: CARD_DEFAULT_TOKENS,
+    };
+    let relay = RelayInput {
+        evidence: Some("Yes, land it.".into()),
+        question: Some("Shall I record your answer?".into()),
+        session_ref: Some("perf-m3".into()),
+        ..Default::default()
+    };
+    let agent = Session::agent("agent:relay".into(), Some("perf".into()), Role::Writer)
+        .expect("agent session");
+    out.push(measure_timed("m3_answer_relay", runs, |i| {
+        let p = &versions[i];
+        let card = r
+            .read()
+            .pending(&query)
+            .expect("pending")
+            .items
+            .into_iter()
+            .find(|it| it.r#ref == p.r#ref && it.kind == ItemKind::Approve)
+            .unwrap_or_else(|| panic!("an approve card for {}", p.r#ref));
+        facts.cards += 1;
+        let req = AnswerRequest {
+            r#ref: card.r#ref.clone(),
+            option: "approve".into(),
+            card_hash: Some(card.card_hash.clone()),
+            relay: relay.clone(),
+            ..Default::default()
+        };
+        let s = Instant::now();
+        let info = r
+            .answer(&agent, M3_PERSON, req)
+            .expect("relay the approval");
+        let took = s.elapsed();
+        let landing = info.landing.expect("the approval landed");
+        assert_eq!(landing.assurance, "relayed");
+        facts.relayed_landings += 1;
+        took
+    }));
+    drop(r);
+    std::fs::remove_dir_all(&dir).expect("remove the readiness project");
+}
+
+/// `m3_policy_land`: in an `rdy-qa` pack project of its own, a draft doc with `runs` claims and an
+/// authority policy whose one whole-version rule lets agents `agent:a*` land editorial draft
+/// edits. For each run, agent `agent:a<i>` fixes a typo in claim `i` and proposes it, outside the
+/// timer; the timer covers `Rdy::land_by_policy`, its durable landing included.
+fn m3_policy_land(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    runs: usize,
+    facts: &mut M3Facts,
+) {
+    use crate::tensions::{ag, j_typo, put_j, upd};
+    let dir = parent.join("m3-policy");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    drop(Rdy::init(&dir, "rdy-standard").expect("init"));
+    std::fs::write(
+        dir.join(".rdy/packs/rdy-qa.yaml"),
+        crate::packs::QA_PACK_YAML,
+    )
+    .expect("pack");
+    std::fs::write(dir.join(".rdy.yaml"), "pack: rdy-qa\n").expect("config");
+    let mut r = Rdy::open(&dir).expect("open");
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Ideas"}}),
+    ];
+    for i in 0..runs {
+        ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i} holds.")}));
+    }
+    let w = write(&mut r, "seed", json!(ops)).expect("seed");
+    let claims: Vec<BlockId> = (0..runs)
+        .map(|i| BlockId::parse(&w.created[&format!("$c{i}")]).expect("claim id"))
+        .collect();
+    land(&mut r, "seed").expect("land the seed");
+    let w = write(
+        &mut r,
+        "pol",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "overview"}},
+            {"op": "create", "type": "decision", "id": "$dec", "parent": "$d", "fields": {"statement": "Adopt the policy", "status": "proposed", "needs_content": false}}
+        ]),
+    )
+    .expect("the rules doc");
+    let (doc, decision) = (w.created["$d"].clone(), w.created["$dec"].clone());
+    let policy = json!({
+        "key": "authority-policy",
+        "agent_may_accept": [{
+            "name": "drafts",
+            "actors": ["agent:a*"],
+            "lifecycle": "draft",
+            "justifications": ["implements", "editorial"],
+            "decisions": "none",
+            "max_blocks": 20,
+            "max_items": 20
+        }],
+        "roles": {"approvers": [M3_PERSON]},
+        "require": [{"when": "decision", "role": "approvers"}],
+        "owners": []
+    });
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: "pol".into(),
+            ops: crate::fixtures::parse_test_ops(json!([
+                {"op": "create", "type": "authority_policy", "parent": doc, "fields": policy}
+            ]))
+            .expect("the policy ops"),
+            justification: Some(rdy_model::Justification::Implements(vec![
+                BlockId::parse(&decision).expect("decision id"),
+            ])),
+            message: String::new(),
+        },
+    )
+    .expect("write the policy");
+    land(&mut r, "pol").expect("land the policy");
+
+    out.push(measure_timed("m3_policy_land", runs, |i| {
+        let name = format!("a{i}");
+        put_j(
+            &mut r,
+            &name,
+            upd(&claims[i], &format!("Claim {i} holds, now.")),
+            j_typo(),
+        );
+        let agent = ag(&name);
+        let p = r
+            .propose(&agent, &name, &name, Some("Fixes a typo."))
+            .expect("propose the typo fix");
+        assert!(p.ready, "{name}: {:#?}", p.issues);
+        let s = Instant::now();
+        let info = r.land_by_policy(&agent, &p.r#ref).expect("land by policy");
+        let took = s.elapsed();
+        assert_eq!(info.assurance, "policy");
+        facts.policy_landings += 1;
+        took
+    }));
+    drop(r);
+    std::fs::remove_dir_all(&dir).expect("remove the policy project");
+}
+
+/// `m3_compact`: a project whose figure and its 64 KiB blob were removed by one approved removal,
+/// closed; each run compacts a fresh copy of it, the copy made and opened outside the timer and
+/// removed after it. The first run's logical, removed, punched and allocated bytes and its notes are
+/// printed; a punch the file system does not support is a note, not a failure.
+fn m3_compact(out: &mut Vec<Measure>, parent: &std::path::Path, runs: usize, facts: &mut M3Facts) {
+    let src = parent.join("m3-compact");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    let mut r = Rdy::init(&src, "rdy-standard").expect("init");
+    // distinct bytes, so no chunk is shared with another
+    let mut x: u32 = 0x6d33_c0de;
+    let bytes: Vec<u8> = (0..M3_BLOB_BYTES)
+        .map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        })
+        .collect();
+    let blob = r.store_mut().put_blob(&bytes).expect("put the blob");
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "gallery", "title": "Gallery", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$d", "body": "This prose stays."},
+            {"op": "create", "type": "figure", "id": "$f", "parent": "$d", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "A figure"}}
+        ]),
+    )
+    .expect("write the figure");
+    let figure = BlockId::parse(&w.created["$f"]).expect("figure id");
+    land(&mut r, "work").expect("land the figure");
+    // one approved removal of the figure and its blob, through its durable completion
+    let input = rdy_engine::redaction::RedactInput {
+        targets: vec![figure.to_string(), format!("blob:{blob}")],
+        reason_class: "secret".to_string(),
+        reason: "perf: remove one blob".to_string(),
+        dry_run: false,
+    };
+    r.redact_in(&writer(), "redact", input)
+        .expect("record the request");
+    let prop = r
+        .propose(
+            &writer(),
+            "redact",
+            "Remove one figure",
+            Some(crate::intake::TEST_SUMMARY),
+        )
+        .expect("propose");
+    r.land(&approver(), &prop.id).expect("land the removal");
+    r.close().expect("close");
+
+    out.push(measure_timed("m3_compact", runs, |i| {
+        let work = parent.join(format!("m3-compact-{i}"));
+        copy_project(&src, &work);
+        let r = Rdy::open(&work).expect("open the copy");
+        let s = Instant::now();
+        let report = r.compact(false).expect("compact");
+        let took = s.elapsed();
+        assert!(
+            report.removed_bytes >= M3_BLOB_BYTES as u64,
+            "the removed blob: {report:?}"
+        );
+        if i == 0 {
+            eprintln!(
+                "m3_compact: logical {} bytes, removed {}, punched {}, allocated {}; notes {:?}",
+                report.log_bytes,
+                report.removed_bytes,
+                report.punched_bytes,
+                report.on_disk_bytes,
+                report.notes
+            );
+            facts.logical_bytes = report.log_bytes;
+            facts.removed_bytes = report.removed_bytes;
+            facts.punched_bytes = report.punched_bytes;
+            facts.allocated_bytes = report.on_disk_bytes;
+        }
+        facts.compactions += 1;
+        drop(r);
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&src).expect("remove the compaction project");
+}
+
+/// `publication_check`: a public profile of [`M3_SELECTED_DOCS`] docs. Each selected doc's claim
+/// has a visible reference to a claim outside the selection and a hidden `decided_by` link to a
+/// decision outside it. The timer covers `publication::check` on a warm state.
+fn m3_publication_check(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    runs: usize,
+    facts: &mut M3Facts,
+) {
+    let dir = parent.join("m3-pubcheck");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut r = Rdy::init(&dir, "rdy-standard").expect("init");
+    let w = write(
+        &mut r,
+        "out",
+        json!([
+            {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$os", "parent": "$out", "fields": {"title": "Rulings"}},
+            {"op": "create", "type": "decision", "id": "$d", "parent": "$os", "fields": {"statement": "The ruling.", "status": "proposed"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$os", "body": "The outside claim."},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    )
+    .expect("the outside doc");
+    let (decision, outside, admin) = (
+        w.created["$d"].clone(),
+        w.created["$c"].clone(),
+        w.created["$admin"].clone(),
+    );
+    let mut ops = vec![];
+    for i in 0..M3_SELECTED_DOCS {
+        ops.push(json!({"op": "create", "type": "doc", "id": format!("$p{i}"), "fields": {"name": format!("pub-{i}"), "title": format!("Public {i}"), "doc_type": "page"}}));
+        ops.push(json!({"op": "create", "type": "section", "id": format!("$s{i}"), "parent": format!("$p{i}"), "fields": {"title": "Notes"}}));
+        ops.push(
+            json!({"op": "create", "type": "claim", "parent": format!("$s{i}"),
+            "body": format!("Public claim {i} builds on {{{{{outside}}}}}."),
+            "links": {"decided_by": [{"target": decision}]}}),
+        );
+    }
+    let w = write(&mut r, "out", json!(ops)).expect("the selected docs");
+    let select: Vec<String> = (0..M3_SELECTED_DOCS)
+        .map(|i| w.created[&format!("$p{i}")].clone())
+        .collect();
+    write(
+        &mut r,
+        "out",
+        json!([{"op": "create", "type": "publication_profile", "parent": admin,
+            "fields": {"key": "m3-open", "title": "Open", "audience": "public", "select": select}}]),
+    )
+    .expect("the profile");
+    land(&mut r, "out").expect("land the publication fixture");
+    let st = r.read();
+    st.materialized(&Scope::Canon).expect("warm");
+    out.push(measure_timed("publication_check", runs, |_| {
+        let s = Instant::now();
+        let v = rdy_engine::publication::check(&st, "m3-open", None, None).expect("check");
+        let took = s.elapsed();
+        let refs = &v["references"];
+        let count = |x: &serde_json::Value| x.as_u64().expect("a count") as usize;
+        facts.selected_docs = count(&v["selection"]["docs"]);
+        facts.visible_refs = count(&refs["total"]);
+        facts.links_outside = count(&refs["links_outside"]["count"]);
+        facts.checks += 1;
+        took
+    }));
+    drop(st);
+    drop(r);
+    std::fs::remove_dir_all(&dir).expect("remove the publication project");
+}
+
+/// The five M3 rows ([`M3_OPS`]), each on a fixed small project of its own under `parent`, each
+/// fixture prepared outside the timer. Returns what the rows produced (printed too). Typical tier
+/// only: the fixtures are fixed, not scaled.
+fn tier_m3(out: &mut Vec<Measure>, parent: &std::path::Path, runs: usize) -> M3Facts {
+    let mut facts = M3Facts::default();
+    m3_readiness_and_relay(out, parent, runs, &mut facts);
+    m3_policy_land(out, parent, runs, &mut facts);
+    m3_compact(out, parent, runs, &mut facts);
+    m3_publication_check(out, parent, runs, &mut facts);
+    eprintln!("m3: {facts:?}");
+    facts
 }
 
 /// `invariants_check_all` (typical tier): the checker over canon and every open view, from one
@@ -7462,6 +8123,9 @@ mod tests {
         assert!(spec_target("log_full").unwrap().contains("no spec target"));
     }
 
+    /// The paused rule (FW-PF3 D-PACK3) changed this pin: a targeted row regresses at a median
+    /// of 2x its baseline, with no margin by op class and no absolute floor; a row with no spec
+    /// target is recorded.
     #[test]
     fn regressions_need_both_the_margin_and_the_floor() {
         let base = Baseline {
@@ -7483,22 +8147,30 @@ mod tests {
                 m("context", 0.05),
                 m("render", 126.0),
                 m("write_single", 29.0),
-                m("propose_land_500_flat", 29.0),
+                m("propose_land_500_flat", 1000.0),
             ],
             Mode::Compare,
         );
-        assert!(v[0].pass, "+400% but under 2 ms absolute");
-        assert!(!v[1].pass, "+26% and +26 ms");
-        assert!(v[2].pass, "writes get a 50% margin");
-        assert!(v[3].pass, "proposals fsync too, so they get it as well");
-        let v = compare(Some(&base), &[m("write_single", 31.0)], Mode::Compare);
-        assert!(!v[0].pass);
+        assert!(!v[0].pass, "+400% fails: no absolute floor");
+        assert!(v[1].pass, "+26% is under 2x");
+        assert!(v[2].pass, "+45% is under 2x");
+        assert_eq!(
+            (v[3].status, v[3].pass),
+            (Status::Recorded, true),
+            "no spec target: recorded at any ratio"
+        );
+        let v = compare(Some(&base), &[m("write_single", 39.9)], Mode::Compare);
+        assert!(v[0].pass, "a write gets no other margin: under 2x passes");
+        let v = compare(Some(&base), &[m("write_single", 40.0)], Mode::Compare);
+        assert!(!v[0].pass, "and 2x fails");
         assert!(
-            !compare(None, &[m("log_full", 1e9)], Mode::Compare)[0].pass,
-            "no baseline and no spec ceiling is unbaselined, and fails (hd6)"
+            !compare(None, &[m("history_100", 1e9)], Mode::Compare)[0].pass,
+            "a targeted row with no baseline and no spec ceiling is unbaselined, and fails (hd6)"
         );
     }
 
+    /// The paused rule (FW-PF3 D-PACK3) changed the write case: an fsync op has no 2 ms floor
+    /// any more, so 0.6 -> 2.4 ms (4x) fails like a read.
     #[test]
     fn msw6_a_sub_floor_read_that_regresses_many_fold_fails() {
         let base = Baseline {
@@ -7524,10 +8196,11 @@ mod tests {
             "0.0001 -> 1.3 ms is a 13,000x regression: {:?}",
             v[0]
         );
-        assert!(v[1].pass, "+10% is inside the margin");
+        assert!(v[1].pass, "+10% is under 2x");
         assert!(
-            v[2].pass,
-            "an fsync op keeps its 2 ms disk-noise floor (ruling R5)"
+            !v[2].pass,
+            "an fsync op has no disk-noise floor under the paused rule: {:?}",
+            v[2]
         );
     }
 
@@ -7560,6 +8233,8 @@ mod tests {
         );
     }
 
+    /// The paused rule (FW-PF3 D-PACK3) changed this pin: a targeted row with no baseline fails;
+    /// a row with no spec target is recorded without one, in every mode.
     #[test]
     fn hd6_an_op_with_no_baseline_fails_unless_it_is_being_recorded() {
         let base = Baseline {
@@ -7568,13 +8243,18 @@ mod tests {
         };
         let v = compare(
             Some(&base),
-            &[m("write_single", 0.6), m("log_full", 1.0)],
+            &[m("write_single", 0.6), m("history_100", 1.0)],
             Mode::Compare,
         );
         assert_eq!((v[0].status, v[0].pass), (Status::Pass, true));
         assert_eq!((v[1].status, v[1].pass), (Status::Unbaselined, false));
-        let v = compare(Some(&base), &[m("log_full", 1.0)], Mode::Record);
+        let v = compare(Some(&base), &[m("history_100", 1.0)], Mode::Record);
         assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true));
+        // the no-target exemption: no baseline, and still recorded when compared
+        for mode in [Mode::Compare, Mode::Record] {
+            let v = compare(Some(&base), &[m("log_full", 1.0)], mode);
+            assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true));
+        }
     }
 
     #[test]
@@ -10292,5 +10972,433 @@ mod tests {
         let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
         assert!(!body.contains("renderer_10k"));
         assert!(!body.contains("PerfMode"));
+    }
+
+    // M3 gate Task 3 (FW-PF3 D-PACK3): the paused perf rule and the untargeted rows.
+
+    fn mg3_base(ops: &[(&str, f64)]) -> Baseline {
+        Baseline {
+            machine: "x".into(),
+            ops: ops
+                .iter()
+                .map(|(op, median)| (op.to_string(), m(op, *median)))
+                .collect(),
+        }
+    }
+
+    /// A targeted row fails when its median is at least twice its baseline, with no margin by
+    /// op class and no absolute floor: a write, a read and a sub-floor read follow one rule.
+    #[test]
+    fn mg3_twice_the_baseline_is_the_regression_boundary() {
+        let base = mg3_base(&[
+            ("brief_doc", 1.0),
+            ("write_single", 10.0),
+            ("render", 100.0),
+            ("context", 0.01),
+        ]);
+        let under = compare(
+            Some(&base),
+            &[
+                m("brief_doc", 1.99),
+                m("write_single", 19.9),
+                m("render", 199.0),
+                m("context", 0.0199),
+            ],
+            Mode::Compare,
+        );
+        for v in &under {
+            assert_eq!(target_class(&v.op).map(|c| c.informational()), Some(false));
+            assert_eq!((v.status, v.pass), (Status::Pass, true), "{v:?}");
+        }
+        let at = compare(
+            Some(&base),
+            &[
+                m("brief_doc", 2.0),
+                m("write_single", 20.0),
+                m("render", 200.0),
+                m("context", 0.02),
+            ],
+            Mode::Compare,
+        );
+        for v in &at {
+            assert_eq!((v.status, v.pass), (Status::Regressed, false), "{v:?}");
+            let d = v.delta_pct.expect("a delta");
+            assert!((d - 100.0).abs() < 1e-6, "{v:?}");
+        }
+        assert_eq!(Status::Regressed.label(), "REGRESSED");
+    }
+
+    /// A row with no spec target is recorded on the bench whatever its baseline: absent, or
+    /// present at any ratio. Its ratio is shown when a baseline exists. A targeted row with no
+    /// baseline still fails.
+    #[test]
+    fn mg3_no_target_rows_are_reported_even_without_a_baseline() {
+        let informational = [
+            "log_full",
+            "include_200",
+            "check_queue",
+            "export_import",
+            "site_get_page",
+            "site_event_after_land_50k",
+            "m3_readiness",
+            "m3_answer_relay",
+            "m3_policy_land",
+            "m3_compact",
+            "publication_check",
+        ];
+        let base = mg3_base(&[("history_100", 1.0)]);
+        for op in informational {
+            let class = target_class(op).unwrap_or_else(|| panic!("{op} has no class"));
+            assert!(class.informational(), "{op}: {class:?}");
+            for b in [None, Some(&base)] {
+                let v = compare(b, &[m(op, 1e6)], Mode::Compare);
+                assert_eq!(
+                    (v[0].status, v[0].pass, v[0].baseline_ms),
+                    (Status::Recorded, true, None),
+                    "{op}"
+                );
+            }
+            let with = mg3_base(&[(op, 1.0)]);
+            let v = compare(Some(&with), &[m(op, 10.0)], Mode::Compare);
+            assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true), "{op}");
+            assert_eq!(v[0].baseline_ms, Some(1.0), "{op}");
+            assert!((v[0].delta_pct.expect("a delta") - 900.0).abs() < 1e-6);
+        }
+        // the corrected borrow: include_200 states no target of its own
+        let t = spec_target("include_200").expect("include_200 text");
+        assert!(t.starts_with("no spec target: "), "{t}");
+        assert!(t.contains("< 50 ms") && t.contains("context"), "{t}");
+        // a targeted row with no baseline fails, in a class baseline and with none
+        for b in [None, Some(&base)] {
+            let v = compare(b, &[m("last_changes_doc", 1.0)], Mode::Compare);
+            assert_eq!((v[0].status, v[0].pass), (Status::Unbaselined, false));
+        }
+        // the report shows the recorded row's ratio and the rule
+        let with = mg3_base(&[("log_full", 1.0)]);
+        let perf = compare(Some(&with), &[m("log_full", 10.0)], Mode::Compare);
+        let report = crate::report::Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: true,
+            gates: vec![],
+            areas: vec![],
+            perf,
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        let md = crate::report::markdown(&report);
+        assert!(
+            md.contains("| log_full | 10.000 | 10.000 | 1 | 1.000 | +900% (10.00x) | RECORDED |"),
+            "{md}"
+        );
+        assert!(md.contains(crate::report::PERF_RULE_NOTE), "{md}");
+        assert!(
+            md.contains("0 targeted, 1 with no spec target or a proposed target, 0 unclassified."),
+            "{md}"
+        );
+    }
+
+    /// The closed ceiling set is enforced on p95 in every mode, independent of the median and of
+    /// the baseline. A `_50k` row and an informational row have no ceiling.
+    #[test]
+    fn mg3_explicit_ceilings_still_fail_on_p95() {
+        let set = [
+            ("tree_full", 5.0),
+            ("tree_full_memo", 5.0),
+            ("brief_doc", 5.0),
+            ("version_position", 5.0),
+            ("view_materialize_cold", 50.0),
+            ("view_cold", 50.0),
+            ("view_materialize_incremental", 1.0),
+            ("view_incremental", 1.0),
+            ("render", 2000.0),
+            ("cold_open", 2000.0),
+            ("cold_open_lagging", 2000.0),
+            ("daemon_cold_start", 2000.0),
+            ("open_chosen_alts_100", 2000.0),
+        ];
+        let ceilings: Vec<&str> = mg3_registry()
+            .into_iter()
+            .filter(|op| target_class(op) == Some(TargetClass::Ceiling))
+            .collect();
+        let mut want: Vec<&str> = set.iter().map(|(op, _)| *op).collect();
+        want.sort();
+        let mut got = ceilings.clone();
+        got.sort();
+        got.dedup();
+        assert_eq!(got, want, "the closed ceiling set");
+        for (op, c) in set {
+            assert_eq!(spec_ceiling_ms(op), Some(c), "{op}");
+            let over = Measure {
+                op: op.into(),
+                median_ms: c / 10.0,
+                p95_ms: c * 1.01,
+                runs: 20,
+            };
+            let base = mg3_base(&[(op, c / 10.0)]);
+            for v in [
+                compare(Some(&base), std::slice::from_ref(&over), Mode::Compare),
+                compare(None, std::slice::from_ref(&over), Mode::Compare),
+                compare(None, std::slice::from_ref(&over), Mode::Record),
+                not_compared(std::slice::from_ref(&over)),
+            ] {
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::OverCeiling, false),
+                    "{op}"
+                );
+            }
+            let inside = Measure {
+                p95_ms: c * 0.99,
+                ..over.clone()
+            };
+            let v = compare(Some(&base), &[inside], Mode::Compare);
+            assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op}");
+            let large = format!("{op}{LARGE_SUFFIX}");
+            assert_eq!(spec_ceiling_ms(&large), None, "{large}");
+            assert_eq!(target_class(&large), Some(TargetClass::Target), "{large}");
+        }
+        // an informational row is never over a ceiling
+        let huge = Measure {
+            op: "render_cold".into(),
+            median_ms: 1e7,
+            p95_ms: 1e7,
+            runs: 5,
+        };
+        let v = compare(None, &[huge], Mode::Compare);
+        assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true));
+    }
+
+    /// A machine class the baseline does not hold compares nothing and writes nothing, and no
+    /// row of it passes: an informational row is not recorded as a pass there.
+    #[test]
+    fn mg3_unknown_machine_never_becomes_a_passing_perf_run() {
+        let measured = [
+            m("log_full", 1.0),
+            m("check_queue", 1.0),
+            m("m3_compact", 1.0),
+            m("publication_check", 1.0),
+            m("history_100", 1.0),
+        ];
+        assert!(target_class("m3_compact").expect("a class").informational());
+        let v = not_compared(&measured);
+        assert_eq!(v.len(), measured.len());
+        for v in &v {
+            assert_eq!((v.status, v.pass), (Status::NotCompared, false), "{v:?}");
+        }
+        let over = Measure {
+            op: "tree_full".into(),
+            median_ms: 1.0,
+            p95_ms: 6.0,
+            runs: 20,
+        };
+        let v = not_compared(&[over]);
+        assert_eq!((v[0].status, v[0].pass), (Status::OverCeiling, false));
+        let d = tier_decision(true, false);
+        assert_eq!(d, TierDecision::NotCompared);
+        assert!(!d.writes_baseline(), "an unknown machine writes nothing");
+        assert!(
+            !not_compared(&measured).iter().any(|v| v.pass),
+            "the tier fails"
+        );
+    }
+
+    /// Every op name the workloads measure: the literal names passed to the measuring helpers,
+    /// the names the tiers build from their op lists, and the `_50k` names of the baseline.
+    fn mg3_registry() -> Vec<&'static str> {
+        let src = include_str!("perf.rs");
+        let body = &src[..src.find("#[cfg(test)]\nmod tests").expect("the tests")];
+        let mut ops: Vec<&'static str> = vec![];
+        for call in [
+            "measure(",
+            "measure_timed(",
+            "coverage_hub(",
+            "review_area(",
+            "drift_canon(",
+            "drift_canon_deep(",
+        ] {
+            let mut at = 0;
+            while let Some(i) = body[at..].find(call) {
+                let mut rest = body[at + i + call.len()..].trim_start();
+                rest = rest.strip_prefix("&format!(").unwrap_or(rest);
+                if let Some(lit) = rest.strip_prefix('"') {
+                    let end = lit.find(['"', '{']).expect("a closed literal");
+                    if end > 0 {
+                        ops.push(&lit[..end]);
+                    }
+                }
+                at += i + call.len();
+            }
+        }
+        ops.extend(M3A_OPS);
+        ops.extend(CK10_OPS);
+        ops.extend(PUBLICATION_COST_OPS);
+        ops.extend(PLAN_OPS);
+        ops.extend(SITE_PROFILE_OPS);
+        ops.extend(M3_OPS);
+        ops.extend([
+            "load_chain",
+            "load_chain_stop",
+            "redaction_report",
+            "redaction_land",
+            "redaction_open",
+            "redaction_dump",
+            "export_md",
+            "export_html",
+            "export_pdf",
+            "export_profile_md",
+            "export_profile_html",
+            "export_profile_pdf",
+            "signature_check",
+            "signature_check_sk",
+        ]);
+        ops.sort();
+        ops.dedup();
+        ops
+    }
+
+    /// The classification is closed: every row both workloads emit has a class by its exact
+    /// name, no class comes from a prefix, and the five M3 rows are informational.
+    #[test]
+    fn mg3_every_m3_operation_has_a_target_class() {
+        let ops = mg3_registry();
+        assert!(ops.len() > 150, "{} ops", ops.len());
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        let mut names: Vec<String> = ops.iter().map(|o| o.to_string()).collect();
+        for class in baseline["classes"].as_object().expect("classes").values() {
+            for op in class["ops"].as_object().expect("ops").keys() {
+                // retired before this plan: no workload measures it
+                if op.starts_with("tension_settle_1k") {
+                    continue;
+                }
+                names.push(op.clone());
+            }
+        }
+        let mut missing = vec![];
+        for op in &names {
+            let Some(class) = target_class(op) else {
+                missing.push(op.clone());
+                continue;
+            };
+            // the class and the stated text agree
+            let text = spec_target(op);
+            match class {
+                TargetClass::Ceiling => assert!(spec_ceiling_ms(op).is_some(), "{op}"),
+                TargetClass::Target => {
+                    let t = text.unwrap_or_else(|| panic!("{op} states no target"));
+                    assert!(
+                        !t.contains("no spec target") && !t.contains("no spec budget"),
+                        "{op}: {t}"
+                    );
+                    assert_eq!(spec_ceiling_ms(op), None, "{op}");
+                }
+                TargetClass::Proposed => {
+                    assert!(
+                        text.expect("a proposed target").contains("proposed"),
+                        "{op}"
+                    )
+                }
+                TargetClass::NoTarget => {
+                    if let Some(t) = text {
+                        assert!(
+                            t.contains("no spec target")
+                                || t.contains("no spec budget")
+                                || t.starts_with("recorded"),
+                            "{op}: {t}"
+                        );
+                    }
+                    assert_eq!(spec_ceiling_ms(op), None, "{op}");
+                }
+            }
+        }
+        assert!(missing.is_empty(), "unclassified rows: {missing:?}");
+        // no class by prefix: a name the registry does not hold has none
+        for op in [
+            "mg3_not_an_op",
+            "write_new_thing",
+            "propose_new_thing",
+            "m3a_replay_2",
+            "nonsense_50k",
+            "m3_readiness_extra",
+        ] {
+            assert_eq!(target_class(op), None, "{op}");
+        }
+        assert_eq!(
+            M3_OPS,
+            [
+                "m3_readiness",
+                "m3_answer_relay",
+                "m3_policy_land",
+                "m3_compact",
+                "publication_check"
+            ]
+        );
+        for op in M3_OPS {
+            assert_eq!(target_class(op), Some(TargetClass::NoTarget), "{op}");
+            let t = spec_target(op).unwrap_or_else(|| panic!("{op} has no text"));
+            assert!(t.starts_with("no spec target: "), "{op}: {t}");
+            assert!(t.ends_with("(reported; no ceiling)"), "{op}: {t}");
+            for class in baseline["classes"].as_object().expect("classes").values() {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+            }
+        }
+        // the typical workload measures them; the large tier does not
+        let src = include_str!("perf.rs");
+        let body = |f: &str| {
+            let from = src.find(f).expect(f);
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(body("pub fn run_workload(").contains("tier_m3(&mut out, dir.path(), M3_RUNS)"));
+        assert!(!body("fn run_large_tier(").contains("tier_m3("));
+    }
+
+    /// The five M3 rows on their fixed small fixtures, two runs each: each run produced a stored
+    /// assessment and card, a relayed approval that landed, a landing the policy accepted, a
+    /// compaction of a removed blob and a publication check. Counts only, never a time.
+    #[test]
+    fn mg3_small_m3_fixtures_do_the_named_work() {
+        rdy_model::seed_ids_for_tests(0x6d67_3301);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out = vec![];
+        let facts = tier_m3(&mut out, dir.path(), 2);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(
+            out.iter().map(|m| m.op.as_str()).collect::<Vec<_>>(),
+            M3_OPS,
+            "the five rows, in order"
+        );
+        assert!(out.iter().all(|m| m.runs == 2), "{out:?}");
+        assert_eq!(
+            facts,
+            M3Facts {
+                claims: M3_CLAIMS,
+                assessments: 2,
+                cards: 2,
+                relayed_landings: 2,
+                policy_landings: 2,
+                compactions: 2,
+                checks: 2,
+                selected_docs: M3_SELECTED_DOCS,
+                visible_refs: M3_SELECTED_DOCS,
+                links_outside: M3_SELECTED_DOCS,
+                ..facts
+            }
+        );
+        assert_eq!(
+            (M3_CLAIMS, M3_SELECTED_DOCS, M3_BLOB_BYTES),
+            (40, 20, 64 * 1024)
+        );
+        assert!(
+            facts.removed_bytes >= M3_BLOB_BYTES as u64,
+            "the removed blob: {facts:?}"
+        );
+        assert!(facts.logical_bytes > facts.removed_bytes, "{facts:?}");
+        assert!(facts.allocated_bytes > 0, "{facts:?}");
     }
 }

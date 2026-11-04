@@ -40,10 +40,13 @@ use super::agent::{
     self, AgentHooks, AgentReport, KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of,
 };
 use super::journal::{Entry, InboxRead, Journal, Outcome as Met};
+use super::m3::M3Hooks;
 use super::oracle::{self, copy_tree};
-use super::people::{self, Hooks, Queue};
+use super::people::{self, Hooks, Queue, landing_fields};
 use super::project::{self, CLAIMS_PER_AREA, SeedBlocks, SwarmProject};
-use super::script::{ADVICE_VIEW_SUFFIX, AREAS, Config, Script, script};
+use super::script::{
+    ADVICE_VIEW_SUFFIX, AREAS, Config, EARLY_EDIT, PersonAct, Script, m3_scenarios, script, ui_plan,
+};
 use crate::daemon::{Served, human_command, short_tempdir_in};
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
@@ -111,6 +114,13 @@ pub struct Outcome {
     pub violations: Vec<String>,
     /// The person's queue when its acts ended: the proposals it never landed, oldest first.
     pub queued: Vec<String>,
+    /// The directories the M3 publication scenarios wrote their outputs to (G3), for the oracle.
+    pub m3_outputs: Vec<PathBuf>,
+    /// The copy of the project's log (its segments) the real compact took in its removal window,
+    /// before the removal request, kept for the oracle: it holds the payloads the removal zeroed,
+    /// so a landing before the removal is audited on the log cut before it with those payloads.
+    /// `None` when the run made no removal request.
+    pub pre_removal: Option<PathBuf>,
     /// Holds `frozen`.
     _frozen_dir: tempfile::TempDir,
 }
@@ -220,8 +230,8 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     })
 }
 
-/// After a landing (`reply`, the `rdy approve` reply): the relay reads canon's blocking tensions
-/// again, and each one the landing put into canon is a violation. A read the kill cuts is made
+/// After a landing (`reply`, the landing act's reply, read by `landing_fields`): the relay reads
+/// canon's blocking tensions again, and each one the landing put into canon is a violation. A read the kill cuts is made
 /// again on the restarted daemon: whoever lands (the person, or an agent under the policy) holds
 /// the landing turn, so canon has not moved. A second loss fails the run (the check is never left out).
 pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: &Value) {
@@ -230,16 +240,21 @@ pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: 
         None => canon_blocking(link)
             .unwrap_or_else(|| link.fail("tensions", "lost the daemon twice after a landing")),
     };
-    let landing = reply["landing"].as_str().unwrap_or("?");
+    let landing = landing_fields(reply)["landing"].as_str().unwrap_or("?");
     let mut w = watch.lock().unwrap_or_else(PoisonError::into_inner);
     for t in oracle::new_blocking_canon(&before.canon, &after) {
         w.push(format!("landing {landing}: it put tension {t} into canon"));
     }
 }
 
-/// The run of `cfg` with the scripts its seed gives.
+/// The run of `cfg` with the scripts its seed gives, and its forced M3 scenarios
+/// (`m3_scenarios`), each run by its writer after the act of its step (G3).
 pub fn run(cfg: &Config) -> Outcome {
-    run_script(cfg, script(cfg))
+    let m3 = M3Hooks {
+        scenarios: m3_scenarios(cfg),
+        before_call: None,
+    };
+    run_scripted(cfg, script(cfg), m3)
 }
 
 /// Waits until `progress` (the step every agent has reached) is `target` or more. Past
@@ -341,13 +356,30 @@ fn enqueue(q: &mut Vec<String>, r: String, place: Place, ranks: &mut BTreeMap<St
     q.insert(at, r);
 }
 
+/// Moves the person's version `r` (queued at the back by its `wc_propose`) to right after the
+/// queued first claims, before every other proposal. `ranks` is read, not changed.
+fn work_first(q: &mut Vec<String>, r: &str, ranks: &BTreeMap<String, Place>) {
+    let Some(from) = q.iter().position(|x| x == r) else {
+        return;
+    };
+    let moved = q.remove(from);
+    let at = q
+        .iter()
+        .take_while(|x| ranks.get(version_of(x).0) == Some(&Place::FirstClaim))
+        .count();
+    q.insert(at, moved);
+}
+
 /// The person's pace: before act `k` of `len`, it waits until every agent has reached step
 /// `(k + 1) * steps / len`, then queues the agents' proposals made since its last act (it reads
 /// the journal from a cursor). The queue holds the latest version of each proposal, oldest
 /// proposal first, except that a proposal of the view of a contradiction pair's first marked
 /// claim goes first (the pair is reviewable only once that claim has landed, ruling task-4.2),
 /// and a proposal that chooses a member or a set winner's later work goes right after the queued
-/// first claims (`enqueue`).
+/// first claims (`enqueue`). The version of the person's forced working-copy edit
+/// (`script::EARLY_EDIT`) goes right after the queued first claims too (`work_first`), so the
+/// next landings read its plan and approve it in every seed (rg15): from the back of the queue,
+/// the run often ended first.
 fn pacer(
     cfg: &Config,
     s: &Script,
@@ -363,6 +395,10 @@ fn pacer(
         .enumerate()
         .map(|(k, (a, _))| format!("a{a}-k{}", agent::spell(k)))
         .collect();
+    // the person's forced working-copy edit, when the script holds it
+    let early_edit = (ui_plan(cfg).is_some()
+        && s.person.get(EARLY_EDIT) == Some(&PersonAct::WcEdit))
+    .then_some(EARLY_EDIT);
     let (progress, journal, queue) = (progress.clone(), journal.clone(), queue.clone());
     let queued: Mutex<BTreeSet<String>> = Mutex::default();
     // how far the pacer has read the journal, and the views that won a set by a landing so far
@@ -382,10 +418,16 @@ fn pacer(
             entries
                 .iter()
                 .filter(|e| e.act == "land" && e.outcome == Met::Ok)
-                .filter_map(|e| e.reply.as_ref()?["chosen"]["member"].as_str())
+                .filter_map(|e| landing_fields(e.reply.as_ref()?)["chosen"]["member"].as_str())
                 .map(str::to_string),
         );
         for e in entries {
+            if e.act == "wc_propose" && e.outcome == Met::Ok && Some(e.step) == early_edit {
+                if let Some(r) = e.block.as_deref() {
+                    work_first(&mut q, r, &ranks);
+                }
+                continue;
+            }
             if e.act != "propose" || e.outcome != Met::Ok || !e.actor.starts_with("agent:a") {
                 continue;
             }
@@ -443,10 +485,15 @@ fn stop(served: &Served, seed: u64) {
     }
 }
 
-/// The run of `cfg` with the scripts `s` (a directed run passes its own).
+/// The run of `cfg` with the scripts `s` (a directed run passes its own), and no M3 scenario.
 pub fn run_script(cfg: &Config, s: Script) -> Outcome {
+    run_scripted(cfg, s, M3Hooks::default())
+}
+
+/// `run_script`, with the M3 scenarios `m3`.
+fn run_scripted(cfg: &Config, s: Script, m3: M3Hooks) -> Outcome {
     let journal = Journal::new();
-    match catch_unwind(AssertUnwindSafe(|| run_with(cfg, s, &journal))) {
+    match catch_unwind(AssertUnwindSafe(|| run_with(cfg, s, &journal, m3))) {
         Ok(o) => o,
         Err(p) => {
             let text = p
@@ -486,7 +533,7 @@ fn tail(journal: &[Entry]) -> String {
     )
 }
 
-fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
+fn run_with(cfg: &Config, s: Script, journal: &Journal, m3: M3Hooks) -> Outcome {
     let journal = journal.clone();
     let p = project::build(cfg);
     let at = Where::of(&p);
@@ -507,6 +554,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
             let hooks = AgentHooks {
                 pace: Some(agent_pacer(cfg, &progress, &person_done, s.person.len())),
                 watch: Some(watch.clone()),
+                m3: m3.clone(),
             };
             agent::spawn_paced(
                 &p,
@@ -633,8 +681,14 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
     let landings = journal
         .iter()
         .filter(|e| (e.act == "land" && e.outcome == Met::Ok) || e.act == LAND_FOUND)
-        .filter_map(|e| e.reply.as_ref()?["landing"].as_str().map(str::to_string))
+        .filter_map(|e| {
+            landing_fields(e.reply.as_ref()?)["landing"]
+                .as_str()
+                .map(str::to_string)
+        })
         .collect();
+    let m3_outputs = reports.iter().flat_map(|r| r.m3_outputs.clone()).collect();
+    let pre_removal = reports.iter().find_map(|r| r.pre_removal.clone());
     let violations = watch.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let SwarmProject {
         served,
@@ -652,6 +706,8 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         served,
         violations,
         queued,
+        m3_outputs,
+        pre_removal,
         _frozen_dir: frozen_dir,
     }
 }
