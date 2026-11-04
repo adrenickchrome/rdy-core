@@ -1,5 +1,5 @@
 {
-  "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
+  "change": "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f",
   "consequences": [
     {
       "because": {
@@ -9,9 +9,9 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-80a8343717afa312",
+      "id": "cq-c9a9acb9d9a60a9d",
       "kind": "tension",
-      "tension": "tn-4c7290c3eb2c"
+      "tension": "tn-05bac7642016"
     },
     {
       "because": {
@@ -24,7 +24,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-88eac493867c1d2e",
+      "id": "cq-49a2571ee699c466",
       "kind": "suspect"
     },
     {
@@ -39,7 +39,7 @@
       "block": "c-ZCQ17",
       "fix": "a block in its section changed: check that it still holds, and update it if not; no repin is needed",
       "follow_up": "confirm",
-      "id": "cq-004e8d04beb52cef",
+      "id": "cq-6c688b9d2e8579f3",
       "kind": "dependent"
     }
   ],
@@ -64,7 +64,7 @@
         "blocks": [
           "c-CFPE0"
         ],
-        "id": "tn-4c7290c3eb2c",
+        "id": "tn-05bac7642016",
         "kind": "unjustified_change",
         "overridden": true,
         "severity": "blocking",
@@ -77,17 +77,17 @@
                 "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
               }
             ],
-            "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
+            "change": "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f",
             "run": "a",
-            "side": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
+            "side": "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f",
             "views": [
               "a"
             ]
           }
         ],
         "status": "open",
-        "summary": "change 96807e8ed4ea edits stable normative block c-CFPE0 without a justification",
-        "tension": "4c7290c3eb2c408bb238c35e9ed624d1f1c30f669498e71706bc3e96c20f3841"
+        "summary": "change ae5f9f12ed1d edits stable normative block c-CFPE0 without a justification",
+        "tension": "05bac7642016897fef6783901097c04ce60aaf7260618a47f7424e9ba3dcb921"
       }
     ]
   },

@@ -1,45 +1,45 @@
 {
-  "cursor": "0.40092.0",
+  "cursor": "0.40152.0",
   "entries": [
     {
       "event": "tension_opened",
       "ids": [
-        "4c7290c3eb2c408bb238c35e9ed624d1f1c30f669498e71706bc3e96c20f3841",
-        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
+        "05bac7642016897fef6783901097c04ce60aaf7260618a47f7424e9ba3dcb921",
+        "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension 4c7290c3eb2c opened on your change 96807e8ed4ea (unjustified_change, blocking): a side changed (change 96807e8ed4ea)"
+      "line": "tension 05bac7642016 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a side changed (change ae5f9f12ed1d)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036",
-        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
+        "efd9698048821796ae40569011beb377f1e4de7532c43a0965ee176516051cc7",
+        "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension e92428692222 opened on your change 96807e8ed4ea (edit_collision, blocking): a side changed (change ad11fc51a30f)"
+      "line": "tension efd969804882 opened on your change ae5f9f12ed1d (edit_collision, blocking): a side changed (change 9f68c452d515)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
-        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
+        "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
+        "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension 7f5c73048bf7 opened on your change 96807e8ed4ea (unjustified_change, blocking): a view changed (op 7b6b8474b5d5)"
+      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op c152694ac62a)"
     },
     {
       "event": "tension_resolved",
       "ids": [
-        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
-        "bca8790ac3b743efac2d9ead777c269429919edc5ab3e60a6943fb123f877157"
+        "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
+        "cf845468901412c8d77a476f06a55f2adf824616a1328a64e5ecd17730e78475"
       ],
-      "line": "tension 7f5c73048bf7 no longer involves your in-flight changes: a view changed (op bca8790ac3b7)"
+      "line": "tension 7ed8fe6e7017 no longer involves your in-flight changes: a view changed (op cf8454689014)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
-        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
+        "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
+        "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension 7f5c73048bf7 opened on your change 96807e8ed4ea (unjustified_change, blocking): a view changed (op ef333cb5969c)"
+      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op 7cad89eeda55)"
     },
     {
       "event": "tension_opened",
@@ -85,31 +85,31 @@
     {
       "event": "tension_dismissed",
       "ids": [
-        "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036",
-        "b0ddb84cd234e53e8686aa4b5b83f712da5042a8f9a9e7da9d6b065f642548a6"
+        "efd9698048821796ae40569011beb377f1e4de7532c43a0965ee176516051cc7",
+        "ff373653e8ea4b9838aa8cb4838eb5550b037d0950f562f397bcc41ba5989f57"
       ],
-      "line": "tension e92428692222 dismissed by agent:r"
+      "line": "tension efd969804882 dismissed by agent:r"
     },
     {
       "event": "pending_added",
       "ids": [
-        "460c8a86c4ffc4da03fddd00ad6fe58e1054ba9072d67f0eadaec4856bb2c2dc"
+        "28f76b716b6638c0ceb3c5b4c7f54e6315f73ad00436bdd3a28aded0361b42f8"
       ],
-      "line": "P-460c8a86c4ff@1 waits for an answer; read rdy_pending"
+      "line": "P-28f76b716b66@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "b12fb3156ecf1cd9df13b88c35293789a28486f66c74a1f5ce1c69498b2e8ade"
+        "a348ccbfdc38bbbca26250fd43d3b498842b299852aea74e7c5b4bce58fe45a4"
       ],
       "line": "new advice waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "b7044ab25c5f6809ad37ecee8a466d563b15f6ad599db745586af578c7c2437c"
+        "dce7392a92dd12b72f6446bf7ef8003df33386ca036fd32a164f4381d270ea37"
       ],
-      "line": "P-460c8a86c4ff@2 waits for an answer; read rdy_pending"
+      "line": "P-28f76b716b66@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false

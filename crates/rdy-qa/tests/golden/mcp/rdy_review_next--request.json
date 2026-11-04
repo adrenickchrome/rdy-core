@@ -9,7 +9,7 @@
           "Rules"
         ],
         "id": "D-REKH0",
-        "side": "canon@d18e33043cc57b59371d31b90e8f1cb17603a00cfc3b1c98cdef179f0eec42e6",
+        "side": "canon@df2f167921f1249286f071db976e13f9420754219d83805ea650311750d51297",
         "text": [
           {
             "field": "statement",
@@ -17,7 +17,7 @@
           }
         ],
         "type": "decision",
-        "version": "c13764b268a703255fcd6ffa737299a9fe7308938958bcc12790928f3fe3854e"
+        "version": "8a49e301116bef42ff3e19d5bda609356d06d0c3dabb312c0a70d6c98c7b4995"
       },
       {
         "doc": "spec",
@@ -27,7 +27,7 @@
           "Rules"
         ],
         "id": "c-ZCQ17",
-        "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
+        "side": "9f68c452d5152e14f0032590d330516fcf51f7d68f1898840db0026a87567444",
         "text": [
           {
             "field": "body",
@@ -53,7 +53,7 @@
       ]
     }
   },
-  "case_hash": "2796b2153f4ac570d9d799d159177897685105b3d4ec8b63efd2b0733242e294",
+  "case_hash": "af6d7cc2743c58cdf674686c192a1db8f10c89c69fb8a0096e74f93e6eb458d7",
   "kind": "tension",
   "lease_expires_at": "2025-10-09T09:03:20Z",
   "request": "rq-fa03f79641a2"
