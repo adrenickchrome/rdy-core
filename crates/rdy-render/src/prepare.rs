@@ -64,6 +64,42 @@ pub(crate) struct Prepared {
     /// The store's diagram cache (D-XM8MP): get and put of drawings by key, nothing else; none
     /// for a build with no store.
     pub diagram_cache: Option<DiagramCache>,
+    /// What each shown content block's page marks of its as-built status (D-WJ0SJ, D-69YCN): the
+    /// planned marker and, where the output shows it, the since label. A block that carries
+    /// neither has no entry. It holds no derivation, override or excluded decision.
+    pub status: BTreeMap<BlockId, BlockStatus>,
+}
+
+/// The status words a block's page shows: `Planned`, or `since <version>` when the output shows
+/// the since label. At most one is set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockStatus {
+    pub planned: bool,
+    /// The normalized version of a since label the output shows.
+    pub since: Option<String>,
+}
+
+impl BlockStatus {
+    /// The status a shown block carries: none for an unversioned block, and for a since block
+    /// whose profile does not show the label.
+    pub(crate) fn of(
+        status: rdy_engine::as_built::Status,
+        since: Option<&str>,
+        pill: bool,
+    ) -> Option<BlockStatus> {
+        use rdy_engine::as_built::Status;
+        match status {
+            Status::Planned => Some(BlockStatus {
+                planned: true,
+                since: None,
+            }),
+            Status::Since if pill => Some(BlockStatus {
+                planned: false,
+                since: since.map(str::to_string),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// What a named profile's output reads beyond its selected state (RULING F3, D-0VCQ5): whether
@@ -185,6 +221,13 @@ fn source_reading(
         rdy, reads, scope, purpose, &m, &pack, &site_name, &position, &mut blobs,
     )?;
     let scope_text = scope_text(&versions, scope);
+    // a source output marks planned content and shows no since label (D-69YCN: no profile, off)
+    let ids: Vec<BlockId> = m.ids().cloned().collect();
+    let status: BTreeMap<BlockId, BlockStatus> = rdy
+        .as_built(scope, ids.iter())?
+        .into_iter()
+        .filter_map(|(id, s)| BlockStatus::of(s.status, s.since.as_deref(), false).map(|b| (id, b)))
+        .collect();
     Ok(Prepared {
         m,
         g,
@@ -202,6 +245,7 @@ fn source_reading(
         profile: None,
         menu_url: None,
         diagram_cache: Some(rdy.reader().diagram_cache()),
+        status,
     })
 }
 

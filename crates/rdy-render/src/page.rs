@@ -89,6 +89,8 @@ pub struct Shared<'a> {
     /// page's row read their words through it ([`Shared::removed_link`]). None for the source,
     /// whose removed text reads against `site`.
     pub old_site: Option<&'a Site<'a>>,
+    /// The as-built words each shown content block's page marks ([`Prepared::status`]).
+    pub status: &'a BTreeMap<BlockId, crate::prepare::BlockStatus>,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -1335,7 +1337,14 @@ fn doc_parts(
     let mut doc_body = DocBody {
         title: title.to_string(),
         eyebrow,
-        lede: lede_block.map(|p| inline::spans_html(&p.body, &own)),
+        lede: lede_block.map(|p| {
+            let pill = html::status_pill(p, sh.status.get(&p.id)).map(|s| format!("{s} "));
+            format!(
+                "{}{}",
+                pill.unwrap_or_default(),
+                inline::spans_html(&p.body, &own)
+            )
+        }),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
         diff: edited_diff(sh, &doc.id),
@@ -1400,6 +1409,7 @@ fn doc_parts(
             unavailable: sh.unavailable,
             local_link: sh.local_link(&local),
             diagram: &diagram,
+            status: sh.status.get(&b.id),
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
@@ -1630,6 +1640,7 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
         local_link: sh.local_link(&local),
         // a removed line draws nothing: its diagram reads as its old source below
         diagram: &|_, _| DiagramView::Source,
+        status: None,
     };
     let mut out = String::new();
     for b in blocks {

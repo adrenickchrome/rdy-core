@@ -469,7 +469,17 @@ impl Reader<'_> {
         match name.as_str() {
             "p" => {
                 flush(out, pending);
-                let runs = self.runs(children, &plain);
+                // a block's status line (`Planned`, `since 1.2.0`) is a bold line of its own: it
+                // is never read into a callout's label, a code block, a cell or a title
+                let style = if has_class(tag, "block-status") {
+                    Style {
+                        bold: true,
+                        ..Style::default()
+                    }
+                } else {
+                    plain.clone()
+                };
+                let runs = self.runs(children, &style);
                 if !runs.is_empty() {
                     out.push(PBlock::Para {
                         anchor: id_of(tag),

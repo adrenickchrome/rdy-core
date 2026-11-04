@@ -358,6 +358,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         profile,
         menu_url: _,
         diagram_cache,
+        status,
     } = prepared;
     let m: &rdy_engine::Materialized = &m;
     let mut site = Site::with_words(
@@ -416,6 +417,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         },
         menu_url: None,
         old_site: None,
+        status: &status,
     };
     // a named profile's label is its chosen tag's name (RULING F3)
     let label = match &profile {

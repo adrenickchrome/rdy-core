@@ -266,6 +266,8 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 .block { position: relative; }
 .id-anchor { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
 .marker { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem; }
+.block-status { margin: 1rem 0 0.25rem; font-size: 0.7rem; line-height: 1.2; }
+.status { display: inline-block; padding: 0.1rem 0.5rem; border: 1px solid var(--line-strong); border-radius: 999px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); }
 .normative { margin: 1.2rem 0 1.4rem; padding: 1rem 1.2rem 0.9rem; background: var(--note); border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); border-radius: var(--radius); }
 .normative > p { margin-bottom: 0.5rem; font-size: 0.95rem; }
 .normative > p:last-child { margin-bottom: 0; }

@@ -6,7 +6,9 @@
 //! profiles or local configuration reaches a [`Prepared`] made here.
 use crate::inline;
 use crate::page::lede_of;
-use crate::prepare::{FigureBlobs, History, Prepared, Presentation, ProfilePresentation, Purpose};
+use crate::prepare::{
+    BlockStatus, FigureBlobs, History, Prepared, Presentation, ProfilePresentation, Purpose,
+};
 use crate::render_input::{capture_inputs, disagreements};
 use crate::site::{Site, Url};
 use crate::{disagree, scope_warnings};
@@ -152,8 +154,16 @@ pub(crate) fn prepare_selected(
         m,
         graph,
         references,
+        as_built,
         ..
     } = resolved;
+    // the retained content blocks' words: a status the profile shows, never its derivation
+    let status: BTreeMap<BlockId, BlockStatus> = as_built
+        .into_iter()
+        .filter_map(|(id, s)| {
+            BlockStatus::of(s.status, s.since.as_deref(), s.pill).map(|b| (id, b))
+        })
+        .collect();
     let dropped = references.dropped_decisions;
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
@@ -210,6 +220,7 @@ pub(crate) fn prepare_selected(
         }),
         menu_url: None,
         diagram_cache: None,
+        status,
     })
 }
 
