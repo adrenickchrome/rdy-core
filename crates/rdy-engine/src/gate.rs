@@ -3457,10 +3457,9 @@ impl Rdy {
         }
         let projection = projection.expect("an unprojected version refused as moved");
         // TASK-1277 (p-R7P0W): each key the landing assigns is the key its card showed; a key a
-        // competing landing shifted refuses with a fresh assessment. No rule runs here.
-        if let Some(message) = keys_moved(&st, &pref, &projection, &record, &prospective)? {
-            return Err(self.moved_fresh(&st, &pref, &p, message)?);
-        }
+        // competing landing shifted refuses with a fresh assessment, after the dry run's own
+        // refusal. No rule runs here.
+        let keys_message = keys_moved(&st, &pref, &projection, &record, &prospective)?;
         // the landing alone stamps the accepted decisions' clock
         let now = rfc3339_now();
         let mut accept_ops = projection.updates;
@@ -3524,6 +3523,9 @@ impl Rdy {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
+        }
+        if let Some(message) = keys_message {
+            return Err(self.moved_fresh(&st, &pref, &p, message)?);
         }
         // the version's keys were chosen against the view's base when it was proposed: a pinned
         // view's base (at or before `canon_at`), or `canon_at` for a view a landing has rebased
