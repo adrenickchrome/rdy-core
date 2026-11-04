@@ -33,6 +33,7 @@ mod engine_inbox_moves;
 mod engine_inbox_read;
 mod engine_inbox_sub;
 mod engine_inflight;
+mod engine_instructions;
 mod engine_intents;
 mod engine_lexicon;
 mod engine_links;
