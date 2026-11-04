@@ -561,9 +561,8 @@ fn extensions() -> [Extension; 4] {
 }
 
 /// A pack may add optional fields to `folder`, `finding`, `source` and `instruction`, nothing
-/// else: checked in
-/// the order prefix, children, body, traits, then fields in key order. Its class is forced, so it
-/// is not checked.
+/// else: checked in the order prefix, children, body, traits, then fields in key order. Its class
+/// is forced, so it is not checked.
 fn check_extension(pack: &Pack, ext: &Extension) -> Result<(), SchemaError> {
     let Some(def) = pack.block_types.get(ext.ty) else {
         return Ok(());
