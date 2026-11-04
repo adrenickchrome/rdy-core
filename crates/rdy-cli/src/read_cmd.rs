@@ -366,13 +366,14 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
-    // ab2 (D-WJ0SJ): a content block's as-built status, beside the decision retirement status
-    if v["as_built"].is_object() {
-        out.push_str(&format!("as-built: {}\n", as_built_line(&v["as_built"])));
-    }
     if let Some(line) = history_text::last_change_line(&v["history"][0]) {
         out.push_str(&line);
         out.push('\n');
+    }
+    // ab2 (D-WJ0SJ): a content block's as-built status, after the last change line (blame1 keeps
+    // that line second, right under the header)
+    if v["as_built"].is_object() {
+        out.push_str(&format!("as-built: {}\n", as_built_line(&v["as_built"])));
     }
     if let Some(from) = v["effective_from"].as_str() {
         out.push_str(&format!("effective from: {from}\n"));
