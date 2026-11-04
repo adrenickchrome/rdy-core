@@ -43,7 +43,10 @@ pub(crate) struct ServeArgs {
     pub(crate) profile: Option<String>,
 }
 
-pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
+pub(crate) fn mcp(env: &Env, projectless: bool) -> Result<(Value, String), ErrorReply> {
+    if projectless {
+        return mcp_projectless(env);
+    }
     // before the proxy creates .rdy/run and starts a daemon that would fail at open
     require_project(&env.project)?;
     // D-Q8NFG: before either transport starts, so the direct path's E_IO and the proxy's
@@ -64,8 +67,30 @@ pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| io_error(e, "retry"))?;
     // the session signs through this process's own agent, never a private key file
     let agent = rdy_daemon::signing_transport::direct_agent();
-    rt.block_on(rdy_mcp::server::serve_stdio(env.project.clone(), agent))
-        .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "check the project path"))?;
+    // ain5: the person layer is read in this process too: meta's unused store, or its daemon
+    let person = Arc::new(crate::instructions_cmd::person_reader(true));
+    rt.block_on(rdy_mcp::server::serve_stdio_with_person(
+        env.project.clone(),
+        agent,
+        person,
+    ))
+    .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "check the project path"))?;
+    Ok((Value::Null, String::new()))
+}
+
+/// `rdy mcp` with no project and no meta project (ain5, D-YQPB6): the projectless server, which
+/// answers the session claim and `rdy_instructions` and opens no store. The person layer is read
+/// through meta's daemon, or in this process with `--no-daemon`, once the person creates meta.
+fn mcp_projectless(env: &Env) -> Result<(Value, String), ErrorReply> {
+    configured_actor(env)?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| io_error(e, "retry"))?;
+    let person = Arc::new(crate::instructions_cmd::person_reader(env.no_daemon));
+    rt.block_on(rdy_mcp::bootstrap::serve_projectless_stdio(
+        env.cwd.clone(),
+        person,
+    ))
+    .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "retry rdy mcp"))?;
+    rt.shutdown_background();
     Ok((Value::Null, String::new()))
 }
 

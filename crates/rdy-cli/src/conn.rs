@@ -218,7 +218,10 @@ impl Conn {
             // D-ME2C0: the identity is resolved and checked before the store is opened
             let human = human_actor_for_env(&env.project)?;
             let session = classify(&human, actor.as_deref(), run.as_deref(), Role::Writer)?;
-            let local = Local::open(&env.project)?;
+            // ain5: the person layer is read in this process: meta's unused store, or its daemon
+            let local = Local::open(&env.project)?.with_person_host(Arc::new(
+                rdy_daemon::instructions::PersonReader::direct(VERSION),
+            ));
             Ok(Conn::Direct {
                 local: Box::new(local),
                 session,
@@ -263,8 +266,13 @@ impl Conn {
                 cwd,
             } => {
                 // signed, if at all, by this process's own agent
-                with_direct_context(&**local, session, human, cwd, |cx| dispatch(cx, op, args))
-                    .map_err(ErrorReply::from)
+                let mut out =
+                    with_direct_context(&**local, session, human, cwd, |cx| dispatch(cx, op, args))
+                        .map_err(ErrorReply::from)?;
+                // ain5: a fresh direct process owes the reminder: its overview and briefings
+                // carry it
+                rdy_daemon::ops::with_reminder(op, &mut out, true);
+                Ok(out)
             }
             Conn::Daemon {
                 rt,
