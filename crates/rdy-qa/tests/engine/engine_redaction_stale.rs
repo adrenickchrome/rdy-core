@@ -9,6 +9,10 @@
 //! repeat canon's current state: a later landing's state snapshot, and the landing and answer of
 //! a proposal that does not change the removed block. A new tag that reaches the block still
 //! stales the request, and the erasure set does not change.
+//!
+//! Deep-drain ruling: a proposal or a fork recorded after the request counts only through a
+//! change of the removed content, so a later propose or fork of earlier unrelated changes leaves
+//! the request fresh.
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::pending::{CARD_MAX_TOKENS, Item, Pending, PendingQuery};
@@ -379,8 +383,9 @@ fn fr8_the_erasure_set_is_unchanged_by_the_trim() {
 // unrelated write does not."; TASK-1237: a later record counts only through what changes the
 // removed content). In the swarm, agent a5 proposed its view `a5` again (`P-…@2`, version 1
 // was made before the request) one step after the request; the drain's landing of the removal
-// was then `E_REDACTION_STALE`. fr9 and fr10 pin the canon result and stay ignored until the
-// engine fix lands; fr11 is their control.
+// was then `E_REDACTION_STALE`. The deep-drain ruling: in freshness, a proposal or view
+// recorded after the request counts only through a change of the removed content. fr12 and fr13
+// pin it; fr14 is their control.
 
 /// [`project`], where view `dep` updates the claim the secret's change also wrote before the
 /// request, and nothing proposes it yet.
@@ -396,8 +401,7 @@ fn project_with_dep() -> P {
 }
 
 #[test]
-#[ignore = "product defect: a later unrelated propose or fork stales a removal request (m3gate deep drain, swarm seed 1)"]
-fn fr9_a_later_proposal_of_an_earlier_unrelated_change_keeps_it_fresh() {
+fn fr12_a_later_proposal_of_an_earlier_unrelated_change_keeps_it_fresh() {
     let mut p = project_with_dep();
     // after the request: the view proposes the change it wrote before it
     p.r.propose(&writer(), "dep", "Claim", Some("Updates the claim."))
@@ -409,8 +413,7 @@ fn fr9_a_later_proposal_of_an_earlier_unrelated_change_keeps_it_fresh() {
 }
 
 #[test]
-#[ignore = "product defect: a later unrelated propose or fork stales a removal request (m3gate deep drain, swarm seed 1)"]
-fn fr10_a_later_fork_of_a_view_with_an_earlier_unrelated_change_keeps_it_fresh() {
+fn fr13_a_later_fork_of_a_view_with_an_earlier_unrelated_change_keeps_it_fresh() {
     let mut p = project_with_dep();
     // after the request: the view is forked; the fork holds the earlier change and adds nothing
     p.r.view_fork(&writer(), "dep", "dep-fork").unwrap();
@@ -418,8 +421,8 @@ fn fr10_a_later_fork_of_a_view_with_an_earlier_unrelated_change_keeps_it_fresh()
 }
 
 #[test]
-fn fr11_the_later_proposal_and_fork_are_unrelated_to_the_secret() {
-    // the control of fr9 and fr10: with no later proposal or fork, the earlier change in `dep`
+fn fr14_the_later_proposal_and_fork_are_unrelated_to_the_secret() {
+    // the control of fr12 and fr13: with no later proposal or fork, the earlier change in `dep`
     // leaves the request fresh, so the change alone is not what stales it
     let mut p = project_with_dep();
     assert_lands(
