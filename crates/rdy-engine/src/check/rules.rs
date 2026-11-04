@@ -376,6 +376,12 @@ fn inputs_of(
 ) -> Result<(), ()> {
     out.insert(b)?;
     for rule in rules {
+        // a blocking rule's severity reads the effective lifecycle, inherited from the ancestors
+        if rule.rule.severity == RuleSeverity::Blocking {
+            for a in ancestors(m, b) {
+                out.insert(a)?;
+            }
+        }
         for f in [&rule.select, &rule.require] {
             expr_inputs(&f.expr, m, g, b, out)?;
         }

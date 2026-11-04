@@ -194,7 +194,6 @@ fn seed(r: &mut Rdy, stable: bool, claims: &[(&str, Value)]) -> (String, String,
 }
 
 #[test]
-#[ignore = "KNOWN-ISSUES row 160 (L5/I7): below the fix bar; open M3 gap, exit checklist"]
 fn mg9_rule_reach_includes_lifecycle_ancestors() {
     // row 160: the blocking rule names no lifecycle field, but its severity reads the claim's
     // effective lifecycle, inherited from the doc. The claim fails the rule while the doc is a
