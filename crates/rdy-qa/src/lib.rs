@@ -12,6 +12,7 @@ pub mod git_repo;
 pub mod golden;
 pub mod http;
 pub mod inbox;
+pub mod instructions;
 pub mod intake;
 pub mod invariants;
 pub mod landing_audit;

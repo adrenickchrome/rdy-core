@@ -117,21 +117,35 @@ fn di13_the_new_sentences_sit_after_the_inbox_line() {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
     // ap11: O27 adds the rdy_land sentence; ck8 adds the authoring-check sentence after it
     // ui10: the elicitation sentence follows the relay sentence
-    assert_eq!(s.len(), 29);
+    assert_eq!(s.len(), 30);
     // ui5: element 2 names both claims, before rdy_overview
     assert_eq!(
         s[1],
         "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."
     );
-    assert!(s[12].starts_with("Read rdy_inbox at session start"));
+    assert!(s[13].starts_with("Read rdy_inbox at session start"));
     for (k, want) in DI13_SENTENCES.iter().enumerate() {
-        let at = if k > 5 { 14 + k } else { 13 + k };
+        let at = if k > 5 { 15 + k } else { 14 + k };
         assert_eq!(s[at], *want, "index {at}");
     }
-    assert_eq!(s[19], ELICIT_SENTENCE);
-    assert!(s[22].starts_with("Record a decision with rdy_decide and no parent"));
+    assert_eq!(s[20], ELICIT_SENTENCE);
+    assert!(s[23].starts_with("Record a decision with rdy_decide and no parent"));
     // F1 (D-X3136): where a decision with no parent goes, and never a doc to hold decisions
     assert!(rdy_mcp::server::INSTRUCTIONS.contains(
         "Record a decision with rdy_decide and no parent: it goes to the decision home, or to the project root when the project names none; link content to it with decided_by, and never put a decision in a content doc or create a doc to hold decisions."
     ));
+}
+
+#[test]
+fn ain6_server_says_to_load_instructions_at_every_task() {
+    let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
+    assert_eq!(
+        s[0],
+        "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents."
+    );
+    assert_eq!(
+        s[1],
+        "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."
+    );
+    assert_eq!(s[2], "Call rdy_instructions at the start of every task.");
 }

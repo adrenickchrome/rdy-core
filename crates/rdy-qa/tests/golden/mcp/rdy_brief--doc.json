@@ -201,6 +201,7 @@
       "doc": "d-TNT6J"
     }
   ],
+  "reminder": "Call rdy_instructions at the start of every task.",
   "suspects": [],
   "will_go_stale": []
 }

@@ -17,7 +17,7 @@ use rdy_engine::hub_remotes::{RemoteLevel, RemoteService};
 use rdy_engine::hub_types::{Origin, Secret};
 use rdy_engine::{Rdy, now_ms};
 use rdy_qa::daemon::short_tempdir;
-use rdy_qa::fixtures::{land, rdy_bin, seed_doc};
+use rdy_qa::fixtures::{land, seed_doc};
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, Transcript, exposed_outputs};
 use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode, shell_script};
 use rdy_qa::signing::{QaAgent, TestKey};
@@ -360,7 +360,7 @@ impl Proj {
 
 impl Drop for Proj {
     fn drop(&mut self) {
-        let _ = Command::new(rdy_bin())
+        let _ = rdy_qa::fixtures::rdy_command()
             .env_clear()
             .arg("--project")
             .arg(self.dir.path())
@@ -389,7 +389,7 @@ fn caller<'a>(home: &'a Home, sock: Option<&'a Path>) -> Caller<'a> {
 
 /// `rdy --project <p> <args>` as `c`, with no other variable of this process.
 fn command(p: &Path, c: &Caller<'_>, args: &[&str]) -> Command {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.env_clear()
         .envs(c.home.env())
         .envs(c.extra.iter().copied())

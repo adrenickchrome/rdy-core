@@ -204,12 +204,18 @@ fn rf1_children_and_optional_extensions_are_closed() {
     );
     assert_eq!(
         p.block_types["doc"].children,
-        vec!["chapter", "memo", "publication_profile", "authority_policy"],
+        vec![
+            "chapter",
+            "memo",
+            "instruction",
+            "publication_profile",
+            "authority_policy"
+        ],
         "a parent without decision gains neither"
     );
     assert_eq!(
         bare().block_types["doc"].children,
-        vec!["publication_profile", "authority_policy"]
+        vec!["instruction", "publication_profile", "authority_policy"]
     );
     for pack in [bare(), custom()] {
         for (name, t) in &pack.block_types {

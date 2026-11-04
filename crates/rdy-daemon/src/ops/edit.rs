@@ -1,5 +1,5 @@
-//! The edit ops: new_folder, new_doc, new_profile, new_finding, new_source, keys_assign and
-//! edit_block.
+//! The edit ops: new_folder, new_doc, new_profile, new_finding, new_source, new_instruction,
+//! keys_assign and edit_block.
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{EditBase, RdyError, ReflectsArg, one_justification_error};
@@ -55,6 +55,20 @@ pub(super) struct NewSourceArgs {
     locator: String,
     version: Option<String>,
     parent: Option<String>,
+    view: Option<String>,
+}
+
+/// `rdy new instruction` (ain5, D-8X04F): one instruction under a doc or section, with its
+/// selectors, an optional lock and its reason.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewInstructionArgs {
+    parent: String,
+    text: String,
+    applies_to: Vec<String>,
+    reason: String,
+    #[serde(default)]
+    locked: bool,
     view: Option<String>,
 }
 
@@ -174,6 +188,18 @@ fn create_supporting(
     message: String,
 ) -> Result<Value, RdyError> {
     let op = json!({"op": "create", "type": ty, "id": placeholder, "fields": fields});
+    create_briefed(cx, op, parent, view, message)
+}
+
+/// The briefed create of [`create_supporting`] for the whole create op `op` (its body and links
+/// too), under `parent`.
+fn create_briefed(
+    cx: &OpContext,
+    op: Value,
+    parent: Option<String>,
+    view: Option<String>,
+    message: String,
+) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, view);
     let briefs = cx.engine.briefs();
@@ -254,6 +280,27 @@ pub(super) fn new_source(cx: &OpContext, a: NewSourceArgs) -> Result<Value, RdyE
     }
     let message = format!("new source {}", a.title);
     create_supporting(cx, "source", "$source", fields, a.parent, a.view, message)
+}
+
+/// `rdy new instruction`: one ordinary `create` of an instruction through the calling session's
+/// write, the op `rdy_write` takes: the text as its body, `applies_to`, `locked` only when set,
+/// and the reason as its `decided_by` link. It gets no key. The schema, the selector and reason
+/// checks, the briefing of the parent and every other rule are the write path's own.
+pub(super) fn new_instruction(cx: &OpContext, a: NewInstructionArgs) -> Result<Value, RdyError> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("applies_to".into(), json!(a.applies_to));
+    if a.locked {
+        fields.insert("locked".into(), json!(true));
+    }
+    let op = json!({
+        "op": "create",
+        "type": "instruction",
+        "id": "$instruction",
+        "fields": fields,
+        "body": a.text,
+        "links": {"decided_by": [{"target": a.reason}]},
+    });
+    create_briefed(cx, op, Some(a.parent), a.view, "new instruction".into())
 }
 
 pub(super) fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {

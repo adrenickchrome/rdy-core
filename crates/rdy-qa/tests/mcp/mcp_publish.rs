@@ -3,10 +3,10 @@
 //! profile or an audience, on MCP or on the CLI. The tool is in the remote family, with the
 //! one description the chat path reads. The cross-surface runs against a hub are in the cli
 //! binary's `cli_publish`.
-use rdy_qa::fixtures::{project, rdy_bin};
+use rdy_qa::fixtures::project;
 use rdy_qa::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const DESCRIPTION: &str = "Upload a tagged publication to a publish remote and create a hub candidate. The site selects the profile. Relay warnings, the candidate link and the disclosure review to the person. The hub authorizes publication.";
 const KEEP_LATEST: &str = "Optional: true or false. rdy sends it to the hub beside the record. Omit it to use the hub's default.";
@@ -106,7 +106,7 @@ fn hpb15_no_role_can_override_profile_or_audience() {
         "--force",
         "--resume",
     ] {
-        let o = Command::new(rdy_bin())
+        let o = rdy_qa::fixtures::rdy_command()
             .env_clear()
             .args(["--project"])
             .arg(dir.path())

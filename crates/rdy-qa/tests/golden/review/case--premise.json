@@ -9,7 +9,7 @@
           "Rules"
         ],
         "id": "D-FXQB6",
-        "side": "canon@2569897e8393924b48e89b32b57e08374e29abb891e0a4863565414bb647164e",
+        "side": "canon@d9e4fa9bcb0fcf1e0affd3004451da3d37b34d50c0d5e10f613a26b615822ccf",
         "text": [
           {
             "field": "statement",
@@ -58,5 +58,5 @@
       ]
     }
   },
-  "case_hash": "04834a87f69c86a5558d1e7541069fdd886e2f1ca8ee5c8995d85759d49d8dbb"
+  "case_hash": "c8a46c1549ffb6cf1b06c49a8a2f963a7565c467ec7dd246001d8c548c83bdfe"
 }

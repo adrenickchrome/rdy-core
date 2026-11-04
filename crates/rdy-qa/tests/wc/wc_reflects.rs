@@ -6,7 +6,6 @@ use rdy_engine::wc::state::*;
 use rdy_engine::*;
 use rdy_model::{BlockId, ChangeLinks, Hash, Justification};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
 use rdy_qa::wc::*;
 use serde_json::{Value, json};
 
@@ -42,7 +41,7 @@ fn stored(s: &Served, change: &str) -> Option<Justification> {
 /// `rdy --project <dir> --json edit <args>` as the human, with `EDITOR=editor` (a command line
 /// with no quoting: the edit runs `$EDITOR "$1"`).
 fn edit_cli(s: &Served, editor: &str, args: &[&str]) -> (bool, Value) {
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .arg("--project")
         .arg(s.dir.path())
         .arg("--json")

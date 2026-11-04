@@ -2,11 +2,9 @@
 //! current, a dry run changes nothing and starts no daemon, and a preview store (a scalar store
 //! format) gets the exact dump-and-load refusal, with no backup or upgrade.
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<(u64, Vec<u8>)>> {
     let mut out = BTreeMap::new();
@@ -117,7 +115,7 @@ fn ok11_cli_upgrade_reports_a_current_store_and_keeps_its_daemon() {
     assert!(!root.join(".rdy/run").exists(), "no daemon was started");
     // the directory argument, from elsewhere
     let elsewhere = tempfile::tempdir().unwrap();
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["--json", "upgrade", "--dry-run"])
         .arg(&root)
         .current_dir(elsewhere.path())
@@ -129,7 +127,7 @@ fn ok11_cli_upgrade_reports_a_current_store_and_keeps_its_daemon() {
     assert_eq!(w["from"], v["from"]);
     assert_eq!(w["dry_run"], Value::Bool(true));
     // the current directory when neither is given
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["upgrade"])
         .current_dir(&root)
         .env_remove("RDY_NO_DAEMON")
@@ -145,7 +143,7 @@ fn ok11_cli_upgrade_reports_a_current_store_and_keeps_its_daemon() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "store is current\n");
     assert_eq!(rdy_daemon::live_daemon(&root), Some(pid));
     // the help
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["upgrade", "--help"])
         .output()
         .unwrap();
@@ -166,7 +164,7 @@ fn ok11_upgrade_from_a_subdirectory_reports_on_the_project() {
     let sub = root.join("sub/deeper");
     std::fs::create_dir_all(&sub).unwrap();
     let run = |dir: &Path, args: &[&str]| {
-        Command::new(rdy_bin())
+        rdy_qa::fixtures::rdy_command()
             .args(args)
             .current_dir(dir)
             .env_remove("RDY_NO_DAEMON")

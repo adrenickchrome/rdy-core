@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod error;
 pub mod handler;
 pub mod hello;
+pub mod instructions;
 pub mod layout;
 pub mod session;
 pub mod signing_agent;

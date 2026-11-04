@@ -34,8 +34,11 @@ fn sess2_fixture_sessions_are_human_and_agents_are_kept_out_of_work() {
 #[test]
 fn sess2_human_env_points_xdg_at_a_config_naming_the_actor() {
     let (dir, env) = human_env("human:qa");
-    assert_eq!(env.len(), 1);
-    assert_eq!(env[0].0, "XDG_CONFIG_HOME");
+    // ain: the config, then an empty home of its own (HOME, USERPROFILE, APPDATA)
+    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["XDG_CONFIG_HOME", "HOME", "USERPROFILE", "APPDATA"]);
+    let home = std::path::Path::new(&env[1].1);
+    assert!(home.starts_with(dir.path()) && !home.join(".rdy").exists());
     let text = std::fs::read_to_string(dir.path().join("rdy/config.yaml")).unwrap();
     assert_eq!(text, "actor: human:qa\n");
     assert_eq!(

@@ -7,7 +7,7 @@
 use rdy_engine::publication::IMPLICIT_ORG;
 use rdy_engine::{E_BAD_INPUT, Rdy, Scope};
 use rdy_model::Hash;
-use rdy_qa::fixtures::{approver, land, output_within_stdin, rdy_bin, write};
+use rdy_qa::fixtures::{approver, land, output_within_stdin, write};
 use rdy_render::PublicationArtifact;
 use rdy_render::process::{RenderFormat, read_artifact, write_request_prelude};
 use rdy_render::render_input::capture_inputs;
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::Duration;
 
 /// A hang guard, not a speed check: a child still running at this budget is killed and reaped,
@@ -105,7 +105,7 @@ impl Source {
 /// the person running the tests applies. The child is supervised: a child still running at the
 /// budget is killed and reaped.
 pub(crate) fn rdy_in(dir: &Path, home: &Path, args: &[&str], stdin: &[u8]) -> Output {
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(args)
         .current_dir(dir)
         .env_remove("RDY_ACTOR")

@@ -2,7 +2,7 @@
 
 ## What rdy is
 
-rdy is a system for keeping decisions and documentation consistent while agents change them.
+Your intent, ready for anyone who needs it. rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.
 Design decisions and the current-state docs live in a separate rdy project, which is not public.
 Read them through rdy's MCP tools.
 

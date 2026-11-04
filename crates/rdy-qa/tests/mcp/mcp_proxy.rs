@@ -2,7 +2,6 @@
 //! lines before the daemon, and reports a vanished daemon.
 use rdy_daemon::{Attempt, Hello, MAX_CTL_LINE_BYTES, PROTO_VERSION, Proto, RunDir, connect};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
 use rdy_qa::mcp::{DEADLINE, McpClient};
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -166,7 +165,7 @@ fn proxy1_a_proxy_against_a_store_held_by_no_daemon_fails_fast() {
     s.set_start_timeout(300);
     let holder = McpClient::start(s.dir.path()); // rdy mcp --no-daemon holds the store
     let t = Instant::now();
-    let out = std::process::Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["mcp", "--project"])
         .arg(s.dir.path())
         .envs(s.env_pairs())

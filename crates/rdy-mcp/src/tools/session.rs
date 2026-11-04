@@ -73,12 +73,15 @@ fn fit_tree(mut nodes: Vec<TreeNode>, max_tokens: usize) -> Vec<TreeNode> {
 pub(crate) const MCP_HUMAN_CLAIM_FIX: &str =
     "claim your own agent: actor, and relay the person's words with rdy_answer";
 
-pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
-    // compiled only for this crate's own tests: a release binary has no hook and reads no env
-    #[cfg(test)]
-    if p.actor == "__rdy_test_panic__" {
-        panic!("test hook: deliberate panic")
-    }
+/// The checks of `rdy_session`'s arguments, in order, before anything changes: the role, the
+/// view's form, the agent claim (D-ME2C0), the claim against the call's `_meta` and the
+/// connection's (D-4PHYQ), and canon as a reader's view only (ses1). The session, its role and
+/// its view. The projectless server ([`crate::bootstrap`]) runs the same checks.
+pub(crate) fn checked_session(
+    p: &SessionParams,
+    bound: Option<&crate::claims::Key>,
+    stated: Option<&crate::claims::Asked>,
+) -> Result<(Session, Role, String), RdyError> {
     let role = crate::claims::parse_role(&p.role)?;
     // D-CQMA4: the views of re-affirmation cards' landings are private
     if p.view.as_deref().is_some_and(rdy_engine::is_reserved_view) {
@@ -92,11 +95,11 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         ));
     }
     // D-ME2C0: MCP is an agent surface; a human actor here is a claim, with its MCP fix
-    let session = crate::claims::agent_session(p.actor, p.run, role)?;
+    let session = crate::claims::agent_session(p.actor.clone(), p.run.clone(), role)?;
     // D-4PHYQ: the arguments are a claim; the call's `_meta` claim and the connection's agree
     let key = (session.actor.clone(), session.run.clone());
-    crate::claims::check_session_claim(st, &key)?;
-    let view = p.view.unwrap_or_else(|| session.default_view());
+    crate::claims::check_claim(bound, stated, &key)?;
+    let view = p.view.clone().unwrap_or_else(|| session.default_view());
     // ses1: a reader may read canon by default; a session that writes needs a view of its own
     if view == "canon" && role != Role::Reader {
         return Err(RdyError::new(
@@ -105,6 +108,17 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             "pick another view name; only a reader session may use canon",
         ));
     }
+    Ok((session, role, view))
+}
+
+pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
+    // compiled only for this crate's own tests: a release binary has no hook and reads no env
+    #[cfg(test)]
+    if p.actor == "__rdy_test_panic__" {
+        panic!("test hook: deliberate panic")
+    }
+    let (session, role, view) = checked_session(&p, st.bound.as_ref(), st.claim.as_ref())?;
+    let key = (session.actor.clone(), session.run.clone());
     // the configured person is resolved before anything changes: a refusal (an unreadable config,
     // an actor outside the form) leaves the earlier session, view and subscription as they were
     let person = human_actor_for_env(&st.engine.root())?;
@@ -191,6 +205,12 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         .build_warning_due
         .as_ref()
         .map_or(0, |w| tokens_of(w) + 4);
+    // ain4: the reminder this reply carries, whole and outside the fit, as the warnings
+    let reminder_tokens = if super::reminder_due(st, &s) {
+        super::REMINDER_TOKENS
+    } else {
+        0
+    };
     let daemon = st
         .engine
         .daemon_identity()
@@ -206,6 +226,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let reserve = 300
         + carried_tokens
         + warning_tokens
+        + reminder_tokens
         + daemon.as_ref().map_or(0, |d| d.len().div_ceil(4))
         + coverage.as_ref().map_or(0, tokens_of)
         + coverage_error.as_ref().map_or(0, tokens_of);
@@ -250,10 +271,13 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     // the rest of the reply fits what the warnings leave; the warnings are added whole
     let mut out = budget(
         out,
-        Some(max.saturating_sub(carried_tokens + warning_tokens)),
+        Some(max.saturating_sub(carried_tokens + warning_tokens + reminder_tokens)),
     );
     if let Some(w) = carried_json {
         out["redaction_warnings"] = w;
+    }
+    if reminder_tokens > 0 {
+        super::add_reminder(&mut out);
     }
     Ok(out)
 }

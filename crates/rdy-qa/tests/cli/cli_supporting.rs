@@ -8,7 +8,7 @@ use rdy_engine::decision_fields::{ATTESTED_BY_FIX, TIME_FIX};
 use rdy_engine::{Rdy, Scope};
 use rdy_model::{BlockId, FieldValue};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::{rdy_bin, writer};
+use rdy_qa::fixtures::writer;
 use rdy_qa::mcp::McpClient;
 use rdy_schema::supporting::{EVIDENCE_FIX, EVIDENCE_MESSAGE};
 use serde_json::{Value, json};
@@ -254,7 +254,7 @@ fn rf5_supporting_mcp_schema_and_cli_match() {
     let edit = |script: &str| {
         std::fs::write(&editor, format!("#!/bin/sh\n{script}")).unwrap();
         std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::process::Command::new(rdy_bin())
+        rdy_qa::fixtures::rdy_command()
             .arg("--project")
             .arg(s.dir.path())
             .args(["edit", &decision])

@@ -95,6 +95,30 @@ pub(super) fn supporting_example(block_type: &str) -> Option<Value> {
     }
 }
 
+/// ain1 (D-4W1ZR, D-8X04F): what an instruction is, in `rdy_schema {block_type: "instruction"}`.
+pub const INSTRUCTION_DOC: &str = "An instruction holds one rule for agents. Keep the rule, its why and how to apply it in one body. Put it under a doc or a section. A doc that holds instructions is a ruleset: its title names the ruleset, and its first paragraph says when to load it. applies_to holds 1 to 1024 selectors, each at most 256 bytes: all, area:<name>, type:<name> or act:<write|decide|propose|relay|review|publish|redact>. An instruction with all is required. The other selectors are hints for the agent, and rdy never filters by them. An area that the pack lacks warns with W_INSTRUCTION_SELECTOR and matches nothing. locked is false by default, and it counts only in a set's own project. A decided_by link to a decision gives the reason. An instruction has no key: refer to it by its id.";
+
+/// ain1 (D-8X04F): how a doc becomes a required ruleset, in `rdy_schema`.
+pub const REQUIRED_DOC_RULE: &str = "Set required: true on a ruleset's doc to make every instruction under it required. Write it with rdy_write: update the doc's fields.";
+
+/// ain1: `rdy_schema`'s example create of an instruction. It is a valid write once its parent
+/// and decision placeholders name a doc or section and a decision.
+pub(super) fn instruction_example() -> Value {
+    serde_json::json!({
+        "op": "create",
+        "type": "instruction",
+        "parent": "<doc or section id>",
+        "fields": {"applies_to": ["all", "act:propose"]},
+        "body": "Run the test suite before you propose.\n\nWhy: a proposal that fails its tests wastes a review.\n\nHow to apply: run the tests, fix each failure, then call rdy_propose.",
+        "links": {"decided_by": [{"target": "<decision id>"}]}
+    })
+}
+
+/// ain1: `rdy_schema`'s example update that makes a doc a required ruleset.
+pub(super) fn required_doc_example() -> Value {
+    serde_json::json!({"op": "update", "id": "<doc id>", "fields": {"required": true}})
+}
+
 /// What an entity is and how to link facts to it (FW-EN1, FW-EN3), shown by `rdy_schema`.
 pub const ENTITY_RULE: &str = "Entities are the things the docs talk about: blocks of a type that defines something (term, component, actor, interface, value, entity). Give each a name and, if it helps, aliases. rdy_search on a key, name or alias returns its fact sheet. Link facts to the entities they describe (describes; affects for a decision): write responses suggest these links, and rdy_accept takes the right ones in one call. A value renders as its value and unit wherever it is referenced; a value whose value is blank renders as its name, so give every value a value.";
 

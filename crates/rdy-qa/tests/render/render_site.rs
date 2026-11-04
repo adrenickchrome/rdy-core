@@ -319,7 +319,6 @@ fn ren1_a_symlinked_marker_does_not_mark_a_site() {
 mod in_cwd {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::process::Command;
 
     fn render(
         project: &std::path::Path,
@@ -327,7 +326,7 @@ mod in_cwd {
         out: &str,
     ) -> (bool, String, String) {
         let (_cfg, env) = human_env("human:qa");
-        let o = Command::new(rdy_bin())
+        let o = rdy_qa::fixtures::rdy_command()
             .args([
                 "--no-daemon",
                 "--project",

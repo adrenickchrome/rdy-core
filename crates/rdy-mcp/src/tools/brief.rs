@@ -26,6 +26,19 @@ pub struct BriefParams {
 }
 
 pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
+    let mut out = brief_reply(st, p)?;
+    // ain4: every successful briefing route carries the reminder while it is owed, outside the
+    // briefing's facts and token
+    let s = session(st)?;
+    if super::reminder_due(st, &s) {
+        super::add_reminder(&mut out);
+    }
+    Ok(out)
+}
+
+/// The briefing of one `rdy_brief` call: a continued page, a code file's, or the blocks' and
+/// paths'.
+fn brief_reply(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();

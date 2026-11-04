@@ -3,10 +3,9 @@
 //! the file. rdy init writes .rdy.yaml and no .gitignore (founder ruling).
 use rdy_engine::config_levels::{PROJECT_FILE, effective};
 use rdy_engine::*;
-use rdy_qa::fixtures::{human_env, rdy_bin};
+use rdy_qa::fixtures::human_env;
 use rdy_qa::wc::{json, ok, put, seeded};
 use std::path::Path;
-use std::process::Command;
 
 const NO_RDY_YAML_FIX: &str = "create .rdy.yaml in the project directory with the line `pack: rdy-standard` (or the pack this project uses)";
 
@@ -17,7 +16,7 @@ const NO_STORE_FIX: &str =
 /// is closed, so `rdy mcp` ends at once).
 fn rdy_daemon_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let (_cfg, env) = human_env("human:qa");
-    Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
@@ -31,7 +30,7 @@ fn rdy_daemon_in(cwd: &Path, args: &[&str]) -> std::process::Output {
 /// `rdy <args>` run in `cwd` with no --project flag, as human:qa, with no daemon.
 fn rdy_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let (_cfg, env) = human_env("human:qa");
-    Command::new(rdy_bin())
+    rdy_qa::fixtures::rdy_command()
         .args(args)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
@@ -101,7 +100,7 @@ fn mfb1_the_cli_names_the_missing_rdy_yaml_before_starting_a_daemon() {
     std::fs::remove_file(d.path().join(".rdy.yaml")).unwrap();
     let sub = d.path().join("guides/deep");
     std::fs::create_dir_all(&sub).unwrap();
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     let (_cfg, env) = human_env("human:qa");
     let out = cmd
         .args(["--json", "status"])
@@ -231,8 +230,9 @@ fn mfb1_check_in_an_old_layout_names_rdy_yaml() {
 }
 
 /// Finding 1 (review of mfb1): `rdy mcp` checks for a project before it starts a daemon, as
-/// every other command does. An old layout gets the E_NO_PROJECT text naming .rdy.yaml, and a
-/// directory that is no project gets "not an rdy project"; neither gets a .rdy/run directory.
+/// every other command does. An old layout gets the E_NO_PROJECT text naming .rdy.yaml. A
+/// directory that is no project, with no meta project either, starts the projectless server
+/// (ain5, D-YQPB6), not E_NO_PROJECT. Neither gets a .rdy/run directory.
 #[test]
 fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
     let d = tempfile::tempdir().unwrap();
@@ -251,14 +251,28 @@ fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
     assert!(!err.contains("E_DAEMON_START"), "{err}");
     assert!(!d.path().join(".rdy/run").exists(), "no daemon was started");
 
+    // ain5: no project and no meta project (a home of its own) is the projectless server, which
+    // meets the closed stdin at its initialize request
     let bare = tempfile::tempdir().unwrap();
-    let out = rdy_daemon_in(bare.path(), &["mcp"]);
-    assert!(!out.status.success());
+    let home = tempfile::tempdir().unwrap();
+    let (_cfg, env) = human_env("human:qa");
+    let out = rdy_qa::fixtures::rdy_command()
+        .arg("mcp")
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .current_dir(bare.path())
+        .output()
+        .expect("run rdy");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("E_NO_PROJECT"), "{err}");
-    assert!(err.contains("is not an rdy project"), "{err}");
+    assert!(!err.contains("E_NO_PROJECT"), "{err}");
+    assert!(err.contains("initialize request"), "{err}");
     assert!(!err.contains("E_DAEMON_START"), "{err}");
     assert!(!bare.path().join(".rdy").exists(), "rdy mcp created .rdy");
+    assert!(!home.path().join(".rdy").exists(), "rdy mcp created meta");
 }
 
 /// Ruling (task 1, finding 2): a directory with .rdy.yaml and no store gets one text from the

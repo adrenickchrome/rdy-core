@@ -305,8 +305,10 @@ impl Hosted {
     }
 
     /// `start_with`, as the version of the `rdy` binary, so that a real `rdy` client (its
-    /// `mcp` proxy, its CLI) talks to this host and does not replace it.
+    /// `mcp` proxy, its CLI) talks to this host and does not replace it. Panics first, naming
+    /// the fix, when the `rdy` binary is another build than this test's.
     pub fn start_for_binary(dir: tempfile::TempDir, lan_override: Option<LanOverride>) -> Hosted {
+        require_binary_of_this_build();
         Hosted::serve_as(dir, "human:qa", lan_override, env!("CARGO_PKG_VERSION"))
     }
 
@@ -403,6 +405,34 @@ impl Drop for Hosted {
     }
 }
 
+/// Panics unless the `rdy` binary ([`crate::fixtures::rdy_bin`]) is this test binary's own
+/// build ([`rdy_daemon::BUILD`]). A host of another build exits "to be replaced" at that
+/// binary's first hello (D-CCC6E), so a stale binary (sources changed after the last
+/// `cargo build --release -p rdy-cli`) would fail the test later as a request with no reply.
+/// Checked once per process.
+fn require_binary_of_this_build() {
+    static CHECKED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    let checked = CHECKED
+        .get_or_init(|| binary_carries_build(&crate::fixtures::rdy_bin(), rdy_daemon::BUILD));
+    if let Err(e) = checked {
+        panic!("{e}");
+    }
+}
+
+/// Whether the binary at `bin` holds the build id `build`: every build of `rdy` embeds its own
+/// id, which its hello sends. The error names the binary, the build it lacks and the fix.
+fn binary_carries_build(bin: &Path, build: &str) -> Result<(), String> {
+    let bytes = std::fs::read(bin).map_err(|e| format!("cannot read {}: {e}", bin.display()))?;
+    let id = build.as_bytes();
+    if bytes.windows(id.len()).any(|w| w == id) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is not build {build} of this test: rebuild it with `cargo build --release -p rdy-cli` in the same target dir (cargo qa does this) or set RDY_BIN to a binary of this build",
+        bin.display()
+    ))
+}
+
 /// A fresh `rdy-standard` project whose commands run the real `rdy` binary as a client of its
 /// daemon: `.rdy.yaml` sets `serve.idle_timeout: 60`, the human actor is `human:qa` (a
 /// user config under `XDG_CONFIG_HOME`), and dropping it runs `rdy serve --stop`.
@@ -417,7 +447,7 @@ pub struct Served {
 /// or `RDY_NO_DAEMON` from this process, and `env` (a user config, as `Served::env_pairs`
 /// gives). Worker threads build their commands here so the shell's session never leaks in.
 pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
-    let mut cmd = Command::new(crate::fixtures::rdy_bin());
+    let mut cmd = crate::fixtures::rdy_command();
     cmd.arg("--project")
         .arg(dir)
         .args(args)
@@ -701,4 +731,23 @@ pub fn sorted_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
     let mut v: Vec<String> = lines.iter().map(|l| l.as_ref().to_string()).collect();
     v.sort();
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::binary_carries_build;
+
+    #[test]
+    fn a_binary_of_another_build_is_named_with_the_rebuild_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("rdy");
+        std::fs::write(&bin, b"\x7fELF...build 8129f582bbd747b1...").unwrap();
+        assert_eq!(binary_carries_build(&bin, "8129f582bbd747b1"), Ok(()));
+        let e = binary_carries_build(&bin, "a2d03e9895a586e4").unwrap_err();
+        assert!(e.contains(&bin.display().to_string()), "{e}");
+        assert!(e.contains("a2d03e9895a586e4"), "{e}");
+        assert!(e.contains("cargo build --release -p rdy-cli"), "{e}");
+        let gone = dir.path().join("missing");
+        assert!(binary_carries_build(&gone, "a2d03e9895a586e4").is_err());
+    }
 }

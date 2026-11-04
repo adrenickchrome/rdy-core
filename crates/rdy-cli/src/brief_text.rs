@@ -514,6 +514,11 @@ pub fn plain(v: &Value) -> String {
         );
         out.push('\n');
     }
+    // ain5: the reminder, last, while it is owed; never in the editor's header
+    if let Some(r) = v[rdy_engine::instructions::REMINDER_KEY].as_str() {
+        out.push_str(r);
+        out.push('\n');
+    }
     out
 }
 

@@ -21,7 +21,11 @@ fn rdy_cmd(dir: &std::path::Path, args: &[&str]) -> (tempfile::TempDir, Command)
         .args(args)
         .current_dir(dir)
         .env("RDY_ACTOR", "human:tester")
-        .env(k, v);
+        .env(k, v)
+        // ain: no real home, so no real meta project is read
+        .env("HOME", cfg.path())
+        .env("USERPROFILE", cfg.path())
+        .env("APPDATA", cfg.path());
     (cfg, cmd)
 }
 

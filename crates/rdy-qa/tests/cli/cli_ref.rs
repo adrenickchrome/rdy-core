@@ -1,15 +1,11 @@
 //! `rdy show` takes id@version and whole ref lines (refv1).
-use rdy_qa::{
-    fixtures::{human_env, rdy_bin},
-    golden::*,
-};
-use std::process::Command;
+use rdy_qa::{fixtures::human_env, golden::*};
 
 fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     // direct mode: no test leaves a detached daemon behind; the user config names human:qa as
     // the person, so RDY_ACTOR=human:qa is that person (D-ME2C0), not an agent's human claim
     let (_cfg, env) = human_env("human:qa");
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .arg("--no-daemon")
         .args(args)
         .current_dir(dir)

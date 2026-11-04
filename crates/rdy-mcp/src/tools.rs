@@ -1,4 +1,5 @@
 //! The MCP tools, one file per family; every item is re-exported here, at its old path.
+mod agent_instructions;
 mod asset;
 mod auth;
 mod brief;
@@ -32,6 +33,7 @@ mod tag;
 mod tension;
 mod write;
 
+pub use agent_instructions::*;
 pub use asset::*;
 pub use auth::*;
 pub use brief::*;

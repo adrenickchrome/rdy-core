@@ -5,11 +5,10 @@ use rdy_engine::config_levels::{Effective, LOCAL_FILE, Level, PROJECT_FILE, effe
 use rdy_engine::signing_config::{SignMode, SigningConfig};
 use rdy_engine::signing_crypto::key_fingerprint;
 use rdy_engine::*;
-use rdy_qa::fixtures::{human_env, rdy_bin};
+use rdy_qa::fixtures::human_env;
 use rdy_qa::platform::RecordingAgent;
 use serde_yaml_ng::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Two distinct ssh-ed25519 public keys (test keys; no private half is in the repo).
 const KEY_A: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA11UHVOCACl0jfu9YJgNXZrmz5aFYaKlAqyiZWHiOOw rdy-sig3-test";
@@ -478,7 +477,7 @@ fn sig2_config_does_not_contact_an_agent() {
     // a fake agent that records every connection; SIG has no network code (the hub calls are
     // HA2a's), so the agent socket is the one thing reading signing config could contact
     let agent = RecordingAgent::start().expect("start the recording agent");
-    let out = Command::new(rdy_bin())
+    let out = rdy_qa::fixtures::rdy_command()
         .args(["config", "--show-origin"])
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")

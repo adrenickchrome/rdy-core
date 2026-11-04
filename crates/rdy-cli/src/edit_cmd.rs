@@ -80,6 +80,27 @@ pub(crate) enum NewCmd {
         #[arg(skip)]
         at: EvidenceAt,
     },
+    /// An instruction for agents (D-8X04F): one rule under a doc or section, the selectors
+    /// that say where it applies, and the decision that is its reason. It gets no key. It goes
+    /// to the session's view (`work` for the human, or the view your working copy is bound to).
+    /// The chat path is rdy_write.
+    Instruction {
+        /// The doc or section to put it in (id, key or path).
+        #[arg(long)]
+        parent: String,
+        /// The rule's whole text.
+        #[arg(long)]
+        text: String,
+        /// A selector: all, area:<name>, type:<name> or act:<act>; repeat it for more.
+        #[arg(long = "applies-to", value_name = "SELECTOR", required = true)]
+        applies_to: Vec<String>,
+        /// The decision that is the reason for the rule (id or key).
+        #[arg(long, value_name = "DECISION")]
+        reason: String,
+        /// Store the instruction as locked.
+        #[arg(long)]
+        locked: bool,
+    },
     /// A source: a release, commit or spec that a finding cites. It lives only in the store. Omit
     /// parent to record it in the decision home, or at the project root when the project names
     /// none. The chat path is rdy_write.
@@ -347,11 +368,29 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             }
             return new_supporting(env, "source", args, view);
         }
+        NewCmd::Instruction {
+            parent,
+            text,
+            applies_to,
+            reason,
+            locked,
+        } => {
+            // ain5: `locked` only when set; the view is the session's own, as for a finding
+            let mut args = json!({"parent": parent, "text": text, "applies_to": applies_to,
+                "reason": reason});
+            if locked {
+                args["locked"] = json!(true);
+            }
+            return new_supporting(env, "instruction", args, None);
+        }
         other => other,
     };
     let named = match &what {
         NewCmd::Folder { view, .. } | NewCmd::Doc { view, .. } => view.clone(),
-        NewCmd::Profile { .. } | NewCmd::Finding { .. } | NewCmd::Source { .. } => {
+        NewCmd::Profile { .. }
+        | NewCmd::Finding { .. }
+        | NewCmd::Source { .. }
+        | NewCmd::Instruction { .. } => {
             unreachable!("handled above")
         }
     };
@@ -374,7 +413,10 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             )?;
             ("doc", path, v)
         }
-        NewCmd::Profile { .. } | NewCmd::Finding { .. } | NewCmd::Source { .. } => {
+        NewCmd::Profile { .. }
+        | NewCmd::Finding { .. }
+        | NewCmd::Source { .. }
+        | NewCmd::Instruction { .. } => {
             unreachable!("handled above")
         }
     };

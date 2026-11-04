@@ -275,6 +275,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// version (`proposal:<id>`), and the id hashes `canon_at`, canon's head, whose landing records
 /// now seal the review project's neighbor items; the site bytes of the same scope, which carry
 /// no id, kept their digests.
+/// Re-taken for the instruction block type (ain1): it moves the pack's digest, so the version's
+/// hash moves again. Only `proposal:<id>` changed in the model, the HTML, both Markdown layouts
+/// and the PDF text; the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -309,11 +312,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "a89716dfc4a25792a0e34517b515d9a6562b5ae9f4704c50a1e5babaaf7bac9d",
-            "a7bcc13704d0fa1c8b8bb6b2333839d7b357fe8cdb1158ad64847d9b49609a27",
-            "e6dc9056af666e5c8b93858b2d974bd336e7925d88aa8a35c7f3947c7f12e2cf",
-            "300ad1f829f4da3e602ce2c1f537fde3515a3f04751c440517af159538295dca",
-            "8c7acef8c44754da015df6cb66163fe8ed0b1cf40fd17b612d6d69e88b47e5b4",
+            "894c883de67fe0c4cb9969d61025a271b073b033f370eab0470ac877147ed2cb",
+            "f87328152d30d184b0606fbe06ba0b0b5f0534990ec51c9737452fd4cf424313",
+            "a3911aeb9ba84c89b66ccf99682c36e426eefb7e48c8c0d20b5195f3ac1db593",
+            "3fe8aafad7f22dbb61374810948d5d6e39e4339cd8c411093956a78436a1e99d",
+            "5f09762874d9490f2bfde861b38572233938155799d7f48b203939a9a57531df",
         ],
     ),
 ];

@@ -9,7 +9,7 @@ use rdy_mcp::params::parse_params;
 use rdy_mcp::tools::{ERROR_ROWS, StreamCheckParams};
 use rdy_model::{Answer, AnswerAct, BlockId, Hash, Provenance, RepoId, Role, StateSnapshot};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::{output_within_stdin, rdy_bin};
+use rdy_qa::fixtures::output_within_stdin;
 use rdy_qa::golden::{FIXTURE_DIR, approver, land};
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::closure::{self, END_OF_LOG, StoreSource};
@@ -19,7 +19,6 @@ use rdy_store::sync_stream::{self, StreamHeader, StreamRecord, StreamWriter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 /// A hang guard, not a speed check: a child still running at this budget is killed and reaped,
@@ -155,7 +154,7 @@ fn tree(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
 /// threads, and a child still running at the budget is killed and reaped.
 fn cli(args: &[&str], stdin: &[u8]) -> (bool, String, String) {
     let scratch = tempfile::tempdir().unwrap();
-    let mut cmd = Command::new(rdy_bin());
+    let mut cmd = rdy_qa::fixtures::rdy_command();
     cmd.args(["--json", "stream", "check"])
         .args(args)
         .current_dir(scratch.path())
