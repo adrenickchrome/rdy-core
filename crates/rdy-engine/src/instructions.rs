@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn ain3_layer_order_is_reserved_and_teams_share_a_rank() {
-        let mut ls = vec![
+        let mut ls = [
             Layer::Person,
             Layer::Project,
             Layer::Cited("c".into()),
