@@ -1923,6 +1923,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("pack", "checks a pack file; the schema_packs row covers it"),
     ("plan confirm", "needs an open plan item"),
     ("new finding", "needs a finding pack"),
+    (
+        "new instruction",
+        "writes an instruction; cli_instructions pins its replies",
+    ),
     ("new profile", "needs a publication profile"),
     ("new source", "needs a source file"),
     ("plan defer", "needs an open plan item"),
@@ -1953,6 +1957,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("render-stream", "renders a stream file"),
     ("repin", "needs a pinned reference to move"),
     ("serve", "starts a daemon"),
+    (
+        "setup",
+        "writes CLAUDE.md and AGENTS.md; cli_instruction_setup pins its replies",
+    ),
     ("sign", "needs a signing key"),
     ("site", "starts or reads the live site"),
     ("stream", "checks a stream file; the sync row covers it"),
@@ -2130,6 +2138,13 @@ fn cli_runtime() -> Value {
     }
     p("undo", &["undo"]);
     p("inbox", &["inbox"]);
+    // ain5: the instructions, with a home of its own, so no real person layer is read
+    let home = tempfile::tempdir().expect("a home");
+    let home_text = home.path().to_string_lossy().into_owned();
+    let mut home_env = env.clone();
+    home_env.push(("HOME".to_string(), home_text.clone()));
+    home_env.push(("USERPROFILE".to_string(), home_text));
+    cli_probe(&mut seen, dir, &home_env, "instructions", &["instructions"]);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2853,6 +2868,32 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"dir": tree_dir, "view": "rdr"}),
     );
     drop(rdr);
+    // ain4: the instructions, with a home of its own, so no real person layer is read; a load
+    // id that no layer holds is refused
+    let home = tempfile::tempdir().expect("a home");
+    let mut ins = McpClient::start_isolated(dir, home.path());
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_session",
+        "rdy_session",
+        session("ins", "writer"),
+    );
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_instructions",
+        "rdy_instructions",
+        json!({}),
+    );
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_instructions",
+        "rdy_instructions unknown load",
+        json!({"load": ["project:d-ZZZZZ"]}),
+    );
+    drop(ins);
     elicitation_probes(seen);
     let _ = (doc, a);
 }
