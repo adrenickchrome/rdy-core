@@ -15238,6 +15238,7 @@
       "REDACTION_TARGET_FIX": "\"Use a block id, id@full-version-hash, or blob:full-manifest-hash.\"",
       "RELAY_FIX": "\"relay the person's words with evidence\"",
       "RELAY_PAIR_FIX": "\"pass both (--relayed-by and --evidence) or neither\"",
+      "RELEASE_FIX": "\"Use a version such as 1.2.0 or 2.0.0-rc.1; one leading v is allowed, and +build metadata is not.\"",
       "REMOTE_EXISTS_FIX": "\"change its mode before adding another share remote\"",
       "REMOTE_EXISTS_MESSAGE": "\"a share remote already exists\"",
       "REMOTE_REQUIRED_FIX": "\"pass --remote, or configure one share remote or one remote\"",
@@ -20580,6 +20581,13 @@
             "profile": {
               "description": "A publication profile id or key, or implicit:org for every doc.",
               "type": "string"
+            },
+            "release": {
+              "description": "The product version this candidate ships as, such as 1.2.0 or 2.0.0-rc.1 (one leading v is allowed; no +build). Omit it for no release check. Content that is since a later version, and decisions built in one, block the result. Against never supplies it.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "scope": {
               "description": "canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n.",
