@@ -231,8 +231,9 @@ fn mfb1_check_in_an_old_layout_names_rdy_yaml() {
 }
 
 /// Finding 1 (review of mfb1): `rdy mcp` checks for a project before it starts a daemon, as
-/// every other command does. An old layout gets the E_NO_PROJECT text naming .rdy.yaml, and a
-/// directory that is no project gets "not an rdy project"; neither gets a .rdy/run directory.
+/// every other command does. An old layout gets the E_NO_PROJECT text naming .rdy.yaml. A
+/// directory that is no project, with no meta project either, starts the projectless server
+/// (ain5, D-YQPB6), not E_NO_PROJECT. Neither gets a .rdy/run directory.
 #[test]
 fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
     let d = tempfile::tempdir().unwrap();
@@ -251,14 +252,28 @@ fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
     assert!(!err.contains("E_DAEMON_START"), "{err}");
     assert!(!d.path().join(".rdy/run").exists(), "no daemon was started");
 
+    // ain5: no project and no meta project (a home of its own) is the projectless server, which
+    // meets the closed stdin at its initialize request
     let bare = tempfile::tempdir().unwrap();
-    let out = rdy_daemon_in(bare.path(), &["mcp"]);
-    assert!(!out.status.success());
+    let home = tempfile::tempdir().unwrap();
+    let (_cfg, env) = human_env("human:qa");
+    let out = Command::new(rdy_bin())
+        .arg("mcp")
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .current_dir(bare.path())
+        .output()
+        .expect("run rdy");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("E_NO_PROJECT"), "{err}");
-    assert!(err.contains("is not an rdy project"), "{err}");
+    assert!(!err.contains("E_NO_PROJECT"), "{err}");
+    assert!(err.contains("initialize request"), "{err}");
     assert!(!err.contains("E_DAEMON_START"), "{err}");
     assert!(!bare.path().join(".rdy").exists(), "rdy mcp created .rdy");
+    assert!(!home.path().join(".rdy").exists(), "rdy mcp created meta");
 }
 
 /// Ruling (task 1, finding 2): a directory with .rdy.yaml and no store gets one text from the
