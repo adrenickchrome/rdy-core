@@ -884,20 +884,29 @@ fn rdx10_public_reports_have_one_quarantine_source() {
     );
     assert!(item.card.contains(QUARANTINE), "{}", item.card);
     // a quarantine name that appears before the card is shown again stales the request: the
-    // display refuses the card, and never refreshes the request
+    // display refuses the card, and never refreshes the request. The queue stays readable
+    // (TASK-1233, p-3FBMK): the item stays, without its card
     let late = p.dir.path().join(".rdy/store/index.redb.damaged-99");
     std::fs::write(&late, b"damaged").unwrap();
     let before = report_computations_for_tests();
-    let e =
+    let q =
         p.r.read()
             .pending(&PendingQuery {
                 person: PERSON.into(),
                 session_ref: None,
                 max_tokens: CARD_MAX_TOKENS,
             })
-            .unwrap_err();
-    assert_stale(&e, "a card shown after a new quarantine name");
+            .unwrap();
     assert_eq!(report_computations_for_tests(), before + 1);
+    let listed = q.items.iter().find(|i| i.r#ref == prop.r#ref).unwrap();
+    assert!(!listed.card.contains(QUARANTINE), "{}", listed.card);
+    assert_eq!(listed.card_hash, "");
+    let e = p.r.read().proposal_show(&prop.id).unwrap();
+    let row = e.removal_card_error.expect("the card refuses");
+    assert_eq!(
+        row.code, E_REDACTION_STALE,
+        "a card shown after a new quarantine name"
+    );
     std::fs::remove_file(&late).unwrap();
     // output files (an export, a render, a dump) are not report inputs: no file list, no hook
     let root = p.dir.path();
