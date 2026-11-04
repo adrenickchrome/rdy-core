@@ -9,11 +9,11 @@ use crate::lint::{LintItem, lint_blocks};
 use crate::tree_io::Diagnostic;
 use crate::wc::layout::{WcBlock, WcTree};
 use crate::wc::plan::resolve_figures;
-use rdy_model::BlockId;
-use rdy_schema::supporting;
+use rdy_model::{BlockId, decision};
 use rdy_schema::{
     Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, TypeClass,
 };
+use rdy_schema::{instruction, supporting};
 use serde_json::Value;
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,12 +93,31 @@ pub fn lint_tree(
         .filter(|b| pack.class_of(&b.block.block_type) == TypeClass::Supporting)
         .map(|b| (b.file.as_str(), b.keys.get("id").copied().unwrap_or(b.at)))
         .collect();
+    // ain1 (D-4W1ZR): `decided_by` is store-only, so an instruction's file never shows its
+    // reason. With a view, the reason the view stores for that id is trusted; without one (the
+    // commit plan), the commit restores the hidden links and its write checks the stored block.
+    let hidden_reason: BTreeSet<String> = tree
+        .blocks
+        .iter()
+        .filter(|b| b.block.block_type == instruction::INSTRUCTION)
+        .filter(|b| match view {
+            Some(m) => m.get(&b.block.id).is_some_and(|s| {
+                s.block_type == instruction::INSTRUCTION
+                    && s.links
+                        .get(decision::DECIDED_BY)
+                        .is_some_and(|l| !l.is_empty())
+            }),
+            None => true,
+        })
+        .map(|b| instruction::reason_message(b.block.id.as_str()))
+        .collect();
     diags.extend(
         lint_blocks(pack, view, &items, view.is_some())
             .into_iter()
             .filter(|d| {
                 d.code != "E_PREFIX" || !supporting.contains(&(d.file.as_str(), (d.line, d.column)))
-            }),
+            })
+            .filter(|d| !(d.code == E_VALIDATION && hidden_reason.contains(&d.message))),
     );
     diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     diags
