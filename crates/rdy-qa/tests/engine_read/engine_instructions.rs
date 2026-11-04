@@ -88,6 +88,7 @@ fn nested<'a>(sels: &'a [&'a str], body: &'a str) -> Rule<'a> {
 /// Writes doc `name` titled `title` into `view`, with `required` when given, a lead prose block
 /// when given, and `rules` in order (the nested ones in one section, placed where the first one
 /// is), each with `reason` as its `decided_by`. Returns the doc's id and the instructions' ids.
+#[allow(clippy::too_many_arguments)]
 fn ruleset(
     r: &mut Rdy,
     view: &str,
