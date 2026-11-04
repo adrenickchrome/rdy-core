@@ -285,6 +285,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// Re-taken for the instruction block type (ain1): it moves the pack's digest, so the version's
 /// hash moves again. Only `proposal:<id>` changed in the model, the HTML, both Markdown layouts
 /// and the PDF text; the other three scopes kept their bytes.
+/// Re-taken when main's instruction type (0.40.0) met the as-built fields: the combined pack's
+/// digest moves the version's hash once more. Only the proposal scope moved; the site digests
+/// and the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -319,11 +322,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "21a0e7a1b47210a6c35803d31cb7b133130632f5691411eab8eeb517373c7717",
-            "24bcf22d078203d5aa9a35c16eb934481f9cc86bf5ff225ae5065517e1ce77d7",
-            "ec9c15d14f9417037d8b6d1217bb980c82a3cf1041d024f72106e2d4c0c5a0e0",
-            "e18f873cbfeee89327a44d550e46ce21f0cb8142541c0ad83eff7712739b8a34",
-            "66eabd5504d54b7457ba5885a2d2b590da2efa22e71f26de85d9f8861435e58c",
+            "dddefa45fdd1c8048239ab9838e13acc8073f2f2618ea49c46291d8acb346c4d",
+            "220701fb77a57489f8ceda8526ba9d288e021d2726a82f122653482c4ce0969e",
+            "2f710691108810f1ec760aa4ca4c45d314203c367e8b14606df3b16c14ae7a70",
+            "bd64bb67f81b990c427a054e51b4372554f3df631ba70a13ecdec050d68ea56a",
+            "0514beed128add1b9502a588617733aadba187a6b21e156d5034716403e99fc5",
         ],
     ),
 ];

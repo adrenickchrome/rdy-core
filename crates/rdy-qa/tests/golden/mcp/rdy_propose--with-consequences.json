@@ -1,7 +1,7 @@
 {
   "assessment": null,
   "blocking": [],
-  "canon_at": "5125d1751d847e5b04852f7be0beadb3522472209358dce98ad7cdcce20f9c33",
+  "canon_at": "cdb5da86d4407b72a453f68e1d6a4b1827afbc7ce8f230082a33d5811c5c7423",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -16,7 +16,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-02b029b143e9703a",
+      "id": "cq-b3360924f4bd0aa3",
       "kind": "suspect"
     }
   ],
@@ -32,13 +32,13 @@
       }
     ]
   },
-  "id": "28f76b716b6638c0ceb3c5b4c7f54e6315f73ad00436bdd3a28aded0361b42f8",
+  "id": "92a7042012e98cdd783c764fcaabc04e72681cae7dd174eaa4d2ddfe293faf0b",
   "issues": [
     {
       "block": null,
       "code": "E_BLOCKING_TENSION",
       "fix": "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
-      "message": "landing P-28f76b716b66@1 would put 2 blocking tension(s) into canon",
+      "message": "landing P-92a7042012e9@1 would put 2 blocking tension(s) into canon",
       "severity": "error"
     },
     {
@@ -110,8 +110,8 @@
   },
   "policy": null,
   "ready": false,
-  "ref": "P-28f76b716b66@1",
-  "stable": "28f76b716b6638c0ceb3c5b4c7f54e6315f73ad00436bdd3a28aded0361b42f8",
+  "ref": "P-92a7042012e9@1",
+  "stable": "92a7042012e98cdd783c764fcaabc04e72681cae7dd174eaa4d2ddfe293faf0b",
   "summary": "Rewords A and C.",
   "tensions": [
     {
