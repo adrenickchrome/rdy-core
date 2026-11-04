@@ -110,6 +110,13 @@ pub trait Engine: Send + Sync {
             "drop --no-daemon, or run rdy publish <tag> --to <remote> --site <site>",
         ))
     }
+    /// The host's reader of the person layer for `rdy_instructions` (D-YQPB6, an input seam like
+    /// [`Engine::site`]): the daemon reads the meta project through that project's own daemon. An
+    /// engine with none reads only this project and a missing meta project; another meta
+    /// project is then refused ([`crate::instructions::deliver`]).
+    fn person_host(&self) -> Option<Arc<dyn crate::instructions::PersonHost>> {
+        None
+    }
 }
 
 /// `E_SITE` for an engine that runs without a daemon: the live site is the daemon's.
@@ -469,11 +476,24 @@ pub fn with_writer_result<T: Send + 'static>(
 
 /// The in-process engine: a mutex around the project. Used by `--no-daemon`, `rdy mcp
 /// --no-daemon` and tests.
-pub struct Local(Mutex<Rdy>);
+pub struct Local {
+    rdy: Mutex<Rdy>,
+    /// The host's reader of the person layer, when the host gave one ([`Local::with_person_host`]).
+    person: Option<Arc<dyn crate::instructions::PersonHost>>,
+}
 
 impl Local {
     pub fn new(rdy: Rdy) -> Local {
-        Local(Mutex::new(rdy))
+        Local {
+            rdy: Mutex::new(rdy),
+            person: None,
+        }
+    }
+
+    /// This engine with `host` as its reader of the person layer ([`Engine::person_host`]).
+    pub fn with_person_host(mut self, host: Arc<dyn crate::instructions::PersonHost>) -> Local {
+        self.person = Some(host);
+        self
     }
 
     pub fn open(project: &Path) -> Result<Local, RdyError> {
@@ -493,12 +513,12 @@ impl Local {
     /// recovered with an `invalidate` (the state is republished from the store) and the poison
     /// is cleared, so the next lock pays nothing.
     fn lock(&self) -> MutexGuard<'_, Rdy> {
-        match self.0.lock() {
+        match self.rdy.lock() {
             Ok(g) => g,
             Err(poisoned) => {
                 let mut g = poisoned.into_inner();
                 g.invalidate();
-                self.0.clear_poison();
+                self.rdy.clear_poison();
                 g
             }
         }
@@ -506,7 +526,7 @@ impl Local {
 
     /// Closes the project's store cleanly.
     pub fn close(self) -> Result<(), RdyError> {
-        let r = match self.0.into_inner() {
+        let r = match self.rdy.into_inner() {
             Ok(r) => r,
             Err(poisoned) => {
                 let mut r = poisoned.into_inner();
@@ -580,6 +600,10 @@ impl Engine for Local {
 
     fn leases(&self) -> Arc<LeaseRegistry> {
         self.lock().leases()
+    }
+
+    fn person_host(&self) -> Option<Arc<dyn crate::instructions::PersonHost>> {
+        self.person.clone()
     }
 }
 

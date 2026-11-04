@@ -644,7 +644,19 @@ impl Handler for ServeHandler {
             cwd: &cs.info.cwd,
             agent: &*agent,
         };
-        dispatch(&cx, &request.op, request.args).map_err(ErrorReply::from)
+        // ain4: a complete public instructions reply clears the reminder for the session's actor
+        // and run, in the claims registry this daemon's MCP sessions share; the private form a
+        // host's reader sends marks nothing
+        let public_instructions =
+            request.op == "instructions" && request.args.get("part") != Some(&Value::Bool(true));
+        let out = dispatch(&cx, &request.op, request.args).map_err(ErrorReply::from);
+        if public_instructions && out.is_ok() {
+            self.shared
+                .hub
+                .claims()
+                .mark_instructions_read(&(cs.session.actor.clone(), cs.session.run.clone()));
+        }
+        out
     }
 
     fn mcp(

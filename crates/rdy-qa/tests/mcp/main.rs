@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod mcp;
 mod mcp_accept;
+mod mcp_agent_instructions;
 mod mcp_alts;
 mod mcp_cadence;
 mod mcp_carried_warning;

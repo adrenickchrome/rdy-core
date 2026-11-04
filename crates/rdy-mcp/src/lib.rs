@@ -1,4 +1,5 @@
 pub mod alt_tools;
+pub mod bootstrap;
 pub mod claims;
 pub mod elicitation;
 pub mod entity_tools;

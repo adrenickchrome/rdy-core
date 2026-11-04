@@ -39,13 +39,19 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 63);
+    assert_eq!(OPS.len(), 64);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
         &OPS[impact + 1..impact + 3],
         ["trace", "suspects"],
         "rf12: trace follows impact"
+    );
+    let brief = OPS.iter().position(|o| *o == "brief").unwrap();
+    assert_eq!(
+        OPS[brief + 1],
+        "instructions",
+        "ain4: instructions follows brief"
     );
     let search = OPS.iter().position(|o| *o == "search").unwrap();
     assert_eq!(

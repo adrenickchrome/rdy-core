@@ -142,7 +142,7 @@ fn apply(
 }
 
 /// `e`, a daemon client's refusal, as an rdy error with the same code, message and fix.
-fn rdy_error(e: ErrorReply) -> RdyError {
+pub(crate) fn rdy_error(e: ErrorReply) -> RdyError {
     let code = rdy_engine::core_error_code(&e.code)
         .or_else(|| {
             [E_DAEMON_START, E_DAEMON_VERSION, E_DAEMON_GONE]

@@ -10,7 +10,8 @@
 //! A ruleset is a doc with instructions under it. Its menu entry gives the doc's title, the
 //! text of its first prose block (its lead), its layer, whether it is required, the estimated
 //! tokens of its bodies and its selectors as hints. A hint never selects a rule.
-use crate::error::{E_BAD_INPUT, E_INTERNAL, E_LIMIT, E_NOT_FOUND, E_VALIDATION, RdyError};
+use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, E_NOT_FOUND, E_VALIDATION, RdyError};
+use crate::instructions_config::{PersonPath, PersonSource, resolve_person_from_env};
 use crate::query::source_body;
 use crate::read_state::ReadState;
 use crate::session::Scope;
@@ -21,6 +22,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// The fix of every collector bound.
 pub const LIMIT_FIX: &str = "reduce the selected rulesets or the required instruction set, then call rdy_instructions again";
@@ -236,6 +238,12 @@ impl LoadRequest {
         &self.ids
     }
 
+    /// The ids as the caller gave them, in order: what a host sends to another source, which
+    /// parses them again.
+    pub fn given(&self) -> Vec<&str> {
+        self.ids.iter().map(|i| i.given.as_str()).collect()
+    }
+
     /// Whether this request loads doc `doc` of `layer`, qualified or bare.
     fn names(&self, layer: &Layer, doc: &BlockId) -> bool {
         self.ids
@@ -338,6 +346,13 @@ pub struct Contribution {
     layer: Layer,
     menu: Vec<MenuEntry>,
     instructions: Vec<InstructionRow>,
+}
+
+impl Contribution {
+    /// The layer the source was collected as.
+    pub fn layer(&self) -> &Layer {
+        &self.layer
+    }
 }
 
 /// A writer that counts the bytes written to it and keeps none.
@@ -707,6 +722,180 @@ pub fn merge_with(
         reply.instructions.extend(s.instructions);
         reply.menu.extend(s.menu);
     }
+    let n = json_len(&reply);
+    if n > b.reply_bytes {
+        return Err(exceeded(b.reply_bytes, "bytes of reply JSON", n));
+    }
+    Ok(reply)
+}
+
+/// The line a session's overview and briefings carry until one of its instructions calls
+/// succeeds (ain4). It is part of the reply, never of the briefing's facts or tokens.
+pub const REMINDER: &str = "Call rdy_instructions at the start of every task.";
+
+/// The reply key that carries [`REMINDER`].
+pub const REMINDER_KEY: &str = "reminder";
+
+/// The hint of a person layer with no meta project at `path`: the existing CLI fallback.
+pub fn create_hint(path: &Path) -> String {
+    format!(
+        "Create your meta project with rdy init {}, then write its rules with rdy's tools.",
+        path.display()
+    )
+}
+
+/// Who asks for instructions: the caller's actor and run. A host that reads another source
+/// asks it as this caller, never as the human.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caller {
+    pub actor: String,
+    pub run: Option<String>,
+}
+
+/// The host's reader of the person layer (D-YQPB6): where the meta project is, and its
+/// contribution. The engine never opens another project's store itself; the host reads it
+/// through that project's own daemon, or opens it when no process holds it.
+pub trait PersonHost: Send + Sync {
+    /// The person source, from the user config alone.
+    fn locate(&self) -> Result<PersonSource, RdyError> {
+        resolve_person_from_env()
+    }
+
+    /// The contribution of the meta project at `meta`, its path as configured, as the person
+    /// layer for `load`. A refusal of that project stays the refusal.
+    fn fetch(
+        &self,
+        meta: &Path,
+        load: &LoadRequest,
+        caller: &Caller,
+    ) -> Result<Contribution, RdyError>;
+}
+
+/// Where the person layer is for one call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersonPlace {
+    /// The meta project is the project the call reads: it is read once, as the person layer.
+    ThisProject,
+    /// Another project, at its path as configured (its refusals name it so).
+    Elsewhere(PathBuf),
+    /// No meta project: an empty person layer, with this hint.
+    Missing(String),
+}
+
+/// The place of `person` for a call whose project root is `project` (none outside a project).
+/// A path with neither `.rdy.yaml` nor `.rdy` is no project (an empty person layer and the
+/// creation hint naming it); any other path is a project, and its open says what is wrong with
+/// it. The same directory under another spelling is the same project.
+pub fn place_person(project: Option<&Path>, person: &PersonPath) -> Result<PersonPlace, RdyError> {
+    let meta = match person {
+        PersonPath::Unavailable => {
+            return Ok(PersonPlace::Missing(
+                crate::instructions_config::NO_HOME_MESSAGE.to_string(),
+            ));
+        }
+        PersonPath::Override(p) | PersonPath::Default(p) => p,
+    };
+    let marked = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    if !marked(&meta.join(crate::config_levels::PROJECT_FILE)) && !marked(&meta.join(".rdy")) {
+        return Ok(PersonPlace::Missing(create_hint(meta)));
+    }
+    let canonical = |p: &Path| {
+        std::fs::canonicalize(p).map_err(|e| {
+            RdyError::new(
+                E_IO,
+                format!("cannot resolve {}: {e}", p.display()),
+                "check that the path exists and that you can read it",
+            )
+        })
+    };
+    let same = match project {
+        Some(root) => canonical(root)? == canonical(meta)?,
+        None => false,
+    };
+    Ok(if same {
+        PersonPlace::ThisProject
+    } else {
+        PersonPlace::Elsewhere(meta.clone())
+    })
+}
+
+/// The refusal of a call whose person layer is another project while its host has no reader.
+fn no_person_reader(meta: &Path) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "rdy_instructions reads the person layer at {} through the daemon, and this session runs without one",
+            meta.display()
+        ),
+        "drop --no-daemon",
+    )
+}
+
+/// [`deliver_with`] under [`BOUNDS`].
+pub fn deliver(
+    project: Option<(&ReadState, &Path)>,
+    load: &LoadRequest,
+    caller: &Caller,
+    host: Option<&dyn PersonHost>,
+) -> Result<Reply, RdyError> {
+    deliver_with(project, load, caller, host, &BOUNDS)
+}
+
+/// One public instructions call: the project's captured state (none outside a project) and the
+/// person layer, each read once, merged into one reply. The person source is located first (a
+/// config refusal is the call's); the project's contribution is collected from its captured
+/// state before the host reads another project. A missing meta project is an empty person
+/// layer with the creation hint. The user config's warnings ride on the reply. The whole reply
+/// is bounded (`E_LIMIT`).
+pub fn deliver_with(
+    project: Option<(&ReadState, &Path)>,
+    load: &LoadRequest,
+    caller: &Caller,
+    host: Option<&dyn PersonHost>,
+    b: &Bounds,
+) -> Result<Reply, RdyError> {
+    let source = match host {
+        Some(h) => h.locate()?,
+        None => resolve_person_from_env()?,
+    };
+    let place = place_person(project.map(|p| p.1), &source.path)?;
+    let mut sources = Vec::with_capacity(2);
+    let mut hint = None;
+    match place {
+        PersonPlace::ThisProject => {
+            if let Some((state, _)) = project {
+                sources.push(collect_with(state, Layer::Person, load, b)?);
+            }
+        }
+        PersonPlace::Elsewhere(meta) => {
+            if let Some((state, _)) = project {
+                sources.push(collect_with(state, Layer::Project, load, b)?);
+            }
+            let host = host.ok_or_else(|| no_person_reader(&meta))?;
+            let person = host.fetch(&meta, load, caller)?;
+            if person.layer != Layer::Person {
+                return Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("the person source answered as layer {}", person.layer),
+                    "report this as a bug in the host",
+                ));
+            }
+            sources.push(person);
+        }
+        PersonPlace::Missing(h) => {
+            if let Some((state, _)) = project {
+                sources.push(collect_with(state, Layer::Project, load, b)?);
+            }
+            hint = Some(h);
+        }
+    }
+    let mut reply = merge_with(sources, load, b)?;
+    reply.warnings = source
+        .warnings
+        .iter()
+        .map(|w| serde_json::to_value(w).unwrap_or(serde_json::Value::Null))
+        .collect();
+    reply.hint = hint;
     let n = json_len(&reply);
     if n > b.reply_bytes {
         return Err(exceeded(b.reply_bytes, "bytes of reply JSON", n));

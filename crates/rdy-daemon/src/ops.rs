@@ -24,6 +24,7 @@ mod diff;
 mod dispute;
 mod dump;
 mod edit;
+mod instructions;
 mod intake;
 mod land;
 mod plan;
@@ -47,6 +48,7 @@ use diff::{diff, query};
 use dispute::dispute;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
+use instructions::instructions;
 use intake::{answer, pending};
 use land::{approve, land, propose, tag};
 use plan::{plan, reaffirm, repin};
@@ -113,6 +115,7 @@ pub const OPS: &[&str] = &[
     "tags",
     "block",
     "brief",
+    "instructions",
     "search",
     "diff",
     "query",
@@ -611,6 +614,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
         }
+        "instructions" => instructions(cx, parse(op, args, "{load?, part?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

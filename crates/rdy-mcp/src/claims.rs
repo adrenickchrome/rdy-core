@@ -100,6 +100,9 @@ pub struct Settings {
     pub dedupe: bool,
     /// W_DAEMON_BUILD went out for this actor and run (D-CCC6E). `rdy_session` keeps it.
     pub daemon_build_warned: bool,
+    /// ain4: a complete `rdy_instructions` reply went out for this actor and run, so its
+    /// overview and briefings carry no reminder. In memory only; `rdy_session` keeps it.
+    pub instructions_read: bool,
     /// The last call that used them.
     pub touched: Instant,
 }
@@ -185,6 +188,7 @@ impl Registry {
             .or_else(|| entries.get(key).map(|s| s.dedupe))
             .unwrap_or(false);
         let daemon_build_warned = entries.get(key).is_some_and(|s| s.daemon_build_warned);
+        let instructions_read = entries.get(key).is_some_and(|s| s.instructions_read);
         entries.insert(
             key.clone(),
             Settings {
@@ -192,6 +196,7 @@ impl Registry {
                 role: Some(role),
                 dedupe,
                 daemon_build_warned,
+                instructions_read,
                 touched: now,
             },
         );
@@ -221,6 +226,7 @@ impl Registry {
                 role: Some(Role::Writer),
                 dedupe,
                 daemon_build_warned: false,
+                instructions_read: false,
                 touched: now,
             },
         );
@@ -245,11 +251,42 @@ impl Registry {
                     role: None,
                     dedupe: false,
                     daemon_build_warned: true,
+                    instructions_read: false,
                     touched: now,
                 },
             );
         }
         true
+    }
+
+    /// Whether a complete instructions reply went out for `key` while its settings live.
+    pub fn instructions_read(&self, key: &Key) -> bool {
+        self.live().0.get(key).is_some_and(|s| s.instructions_read)
+    }
+
+    /// Records that a complete instructions reply went out for `key`, with no role or view when
+    /// `key` has no settings. A full registry with no entry for `key` records nothing: the
+    /// reminder then stays, and the reply is never refused for it.
+    pub fn mark_instructions_read(&self, key: &Key) {
+        let (mut entries, now) = self.live();
+        if let Some(s) = entries.get_mut(key) {
+            s.touched = now;
+            s.instructions_read = true;
+            return;
+        }
+        if entries.len() < MAX_SETTINGS {
+            entries.insert(
+                key.clone(),
+                Settings {
+                    view: None,
+                    role: None,
+                    dedupe: false,
+                    daemon_build_warned: false,
+                    instructions_read: true,
+                    touched: now,
+                },
+            );
+        }
     }
 }
 
@@ -417,12 +454,7 @@ pub fn enter(st: &mut McpState, asked: Option<&Asked>, tool: &str) -> Result<(),
     if tool == SESSION_TOOL {
         return Ok(());
     }
-    let key = match (asked.and_then(Asked::identity), &st.bound) {
-        (Some(k), Some(b)) if k != *b => return Err(mismatch()),
-        (Some(k), _) => k,
-        (None, Some(b)) => b.clone(),
-        (None, None) => return Err(no_session()),
-    };
+    let key = claimed_key(asked, st.bound.as_ref())?;
     let hub = hub(st);
     let saved = hub.claims().get(&key);
     let role = asked
@@ -446,6 +478,17 @@ pub fn enter(st: &mut McpState, asked: Option<&Asked>, tool: &str) -> Result<(),
     Ok(())
 }
 
+/// The actor and run a call acts as: its stated claim, which must be the connection's `bound`
+/// one when the connection has one, else the bound one. Neither is `E_NO_SESSION`.
+pub fn claimed_key(asked: Option<&Asked>, bound: Option<&Key>) -> Result<Key, RdyError> {
+    match (asked.and_then(Asked::identity), bound) {
+        (Some(k), Some(b)) if k != *b => Err(mismatch()),
+        (Some(k), _) => Ok(k),
+        (None, Some(b)) => Ok(b.clone()),
+        (None, None) => Err(no_session()),
+    }
+}
+
 /// The role saved for the actor and run of `s` (writer when none is saved): the role a call that
 /// states no `rdy/role` acts with. A one-call override never reaches what is persisted.
 pub fn saved_role(st: &McpState, s: &Session) -> Role {
@@ -459,8 +502,13 @@ pub fn saved_role(st: &McpState, s: &Session) -> Role {
 /// `rdy_session`'s claim check, once its session is valid: the actor and run of a `_meta` claim
 /// on the same call, and the connection's claim, are those of `key`.
 pub fn check_session_claim(st: &McpState, key: &Key) -> Result<(), RdyError> {
-    let stated = st.claim.as_ref().and_then(Asked::identity);
-    if stated.is_some_and(|k| k != *key) || st.bound.as_ref().is_some_and(|b| b != key) {
+    check_claim(st.bound.as_ref(), st.claim.as_ref(), key)
+}
+
+/// [`check_session_claim`] over a connection's `bound` claim and a call's `stated` one.
+pub fn check_claim(bound: Option<&Key>, stated: Option<&Asked>, key: &Key) -> Result<(), RdyError> {
+    let stated = stated.and_then(Asked::identity);
+    if stated.is_some_and(|k| k != *key) || bound.is_some_and(|b| b != key) {
         return Err(mismatch());
     }
     Ok(())
