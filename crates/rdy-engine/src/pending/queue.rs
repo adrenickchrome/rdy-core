@@ -1610,6 +1610,7 @@ impl Version {
         let (canon, canon_g) = (st.materialized(&Scope::Canon)?, st.graph(&Scope::Canon)?);
         let reach = rules::rule_reach(
             &self.pref,
+            pack,
             &compiled,
             (&canon, &canon_g),
             (&built.m, &graph),
