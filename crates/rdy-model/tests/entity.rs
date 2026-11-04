@@ -185,6 +185,30 @@ fn ent1_text_sources_skip_metadata_fields() {
     }
 }
 
+/// FW-AB1: a decision's `built` and a content block's `since` hold release versions, never
+/// prose, so a mention scan and a review case never read them.
+#[test]
+fn ab1_built_and_since_are_metadata_not_text() {
+    let d = block(
+        "decision",
+        &[("statement", s("Keep A")), ("built", s("planned"))],
+        "",
+    );
+    assert_eq!(
+        text_sources(&d),
+        vec![("statement".to_string(), "Keep A".to_string())]
+    );
+    let c = block(
+        "claim",
+        &[("since", s("1.2.0")), ("planned", FieldValue::Bool(false))],
+        "A holds.",
+    );
+    assert_eq!(
+        shown_sources(&c),
+        vec![("body".to_string(), "A holds.".to_string())]
+    );
+}
+
 #[test]
 fn msw18_a_reference_parts_a_phrase() {
     let b = block("claim", &[], "The Ledger {{m-AAAAA}} service is fine.");
