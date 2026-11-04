@@ -608,6 +608,24 @@ impl McpClient {
         McpClient::launch_with(cmd, false)
     }
 
+    /// `start` with the person's places in `home`: `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME` and
+    /// `APPDATA` all point there, so a tool that reads the person layer (`<home>/.rdy/meta`) or
+    /// the user config never reads the real ones.
+    pub fn start_isolated(project: &Path, home: &Path) -> McpClient {
+        let home = home.to_str().expect("a UTF-8 home");
+        let config = Path::new(home).join(".config");
+        let config = config.to_str().expect("a UTF-8 config dir");
+        McpClient::start_with_env(
+            project,
+            &[
+                ("HOME", home),
+                ("USERPROFILE", home),
+                ("XDG_CONFIG_HOME", config),
+                ("APPDATA", config),
+            ],
+        )
+    }
+
     /// `start_with_env` with the child's stderr kept, for a check of everything the server
     /// writes ([`McpClient::finish`]).
     pub fn start_capturing(project: &Path, env: &[(&str, &str)]) -> McpClient {

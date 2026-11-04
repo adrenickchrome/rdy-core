@@ -191,7 +191,11 @@ fn mcp2_the_asset_limit_is_checked_before_decoding() {
 
 #[test]
 fn mcp_every_tool_survives_hostile_params_within_the_deadline() {
-    let (_d, mut c) = server();
+    // rdy_instructions reads the person layer: never the real home's
+    let (d, r) = project();
+    drop(r);
+    let home = tempfile::tempdir().unwrap();
+    let mut c = McpClient::start_isolated(d.path(), home.path());
     session(&mut c);
     let lookalikes = [
         "с-ABCDE",
