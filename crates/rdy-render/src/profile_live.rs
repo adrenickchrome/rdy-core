@@ -12,7 +12,7 @@
 //! the landings it has not seen.
 use crate::changes::{self, Sides};
 use crate::live::{self, ProfileBuild};
-use crate::prepare::{self, FigureBlobs, History, Presentation};
+use crate::prepare::{self, BlockStatus, FigureBlobs, History, Presentation};
 use crate::render_input::capture_inputs;
 use crate::site::Site;
 use crate::{
@@ -141,6 +141,10 @@ fn prepare_within(
         Some(o) => publication::removed_blobs(&source, o)?,
         None => BTreeMap::new(),
     };
+    let old_status = old
+        .as_ref()
+        .map(|o| publication::display_status(&o.as_built))
+        .unwrap_or_default();
     let old_m: Arc<Materialized> = match old {
         Some(o) => {
             FigureBlobs::selected(BTreeMap::new(), old_removed.clone()).project(Arc::new(o.m))
@@ -182,7 +186,7 @@ fn prepare_within(
     // the review against the selected base
     let mut hist = History::empty();
     if reviewing {
-        let listed = review::between_states(&old_m, &m);
+        let listed = review::between_prepared(&old_m, &m, &old_status, &prepared.status);
         let reviewed = prepare::reviewed_of(st, &scope, listed.changed_blocks())?;
         if let Some(r) = &reviewed {
             let old_site = Site::for_profile(&old_m, &pack, &title, &dropped);
@@ -236,14 +240,14 @@ fn prepare_within(
         if let Some(tip) = tip {
             // only the two adjacent states of a walk are held; the shared side carries over.
             // Each side reads as its page would: a figure whose blob lost content is the notice
-            let mut carried: Option<(Hash, Arc<Materialized>)> = None;
+            let mut carried: Option<(Hash, Side)> = None;
             let mut eval = |before: &Hash, after: &Hash| -> Result<bool, RdyError> {
                 let from = match carried.take() {
-                    Some((h, m)) if h == *before => m,
+                    Some((h, side)) if h == *before => side,
                     _ => selected_projected(st, &source, &Scope::At(*before), &profile)?,
                 };
                 let to = selected_projected(st, &source, &Scope::At(*after), &profile)?;
-                let changed = review::between_states(&from, &to).changed_blocks() > 0;
+                let changed = side_review(&from, &to).changed_blocks() > 0;
                 carried = Some((*after, to));
                 Ok(changed)
             };
@@ -275,14 +279,15 @@ fn prepare_within(
     if let Some((n, name, tag_landing)) = &since
         && !summary_page_taken(&m, SINCE_PAGE)
     {
-        let from = selected_projected(st, &source, &Scope::At(*tag_landing), &profile)?;
-        let to = match scope {
-            Scope::Canon => Arc::clone(&m),
+        let from_side = selected_projected(st, &source, &Scope::At(*tag_landing), &profile)?;
+        let to_side = match scope {
+            Scope::Canon => (Arc::clone(&m), prepared.status.clone()),
             _ => selected_projected(st, &source, &Scope::Canon, &profile)?,
         };
+        let (from, to) = (Arc::clone(&from_side.0), Arc::clone(&to_side.0));
         let to_site = Site::for_profile(&to, &pack, &title, &dropped);
         let from_site = Site::for_profile(&from, &pack, &title, &dropped);
-        let rv = review::between_states(&from, &to);
+        let rv = side_review(&from_side, &to_side);
         let diff = diff_states(&from, &to);
         let sides = Sides {
             from: &from,
@@ -415,14 +420,27 @@ fn selected_projected(
     source: &ReadPublicationSource<'_>,
     scope: &Scope,
     profile: &ResolvedProfile,
-) -> Result<Arc<Materialized>, RdyError> {
+) -> Result<Side, RdyError> {
     Ok(match selected_in(st, scope, profile)? {
         Some(r) => {
             let removed = publication::removed_blobs(source, &r)?;
-            FigureBlobs::selected(BTreeMap::new(), removed).project(Arc::new(r.m))
+            let status = publication::display_status(&r.as_built);
+            (
+                FigureBlobs::selected(BTreeMap::new(), removed).project(Arc::new(r.m)),
+                status,
+            )
         }
-        None => Arc::new(Materialized::default()),
+        None => (Arc::new(Materialized::default()), BTreeMap::new()),
     })
+}
+
+/// One prepared side of a history comparison: its selected state and the status words its pages
+/// show.
+type Side = (Arc<Materialized>, BTreeMap<BlockId, BlockStatus>);
+
+/// The review between two prepared sides, counting a visible status change.
+fn side_review(from: &Side, to: &Side) -> review::Review {
+    review::between_prepared(&from.0, &to.0, &from.1, &to.1)
 }
 
 /// The available figure blobs of the current selection and of the review's old one, each once,

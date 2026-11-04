@@ -675,20 +675,22 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
 /// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
 /// digest is the one before.
+/// Re-taken for the as-built plan's Task 5 (FW-AB1): `assets/site.css` gained the status line's
+/// two rules (`.block-status`, `.status`); with the old stylesheet every digest is the one before.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "4a0f21489a628afddf8690230f49b16d2265a62086edbe249c564c7325e5564c",
+            "3f84b35feec2162c0724b3ed07f28ad8e8568530faf0ba4f1dd6715f30ed596b",
         ),
         (
             "view:editing",
-            "bbb5d78597d0bb2f42e2571a14bdbff91396e02fbc311d023e79591ec39dfa81",
+            "25f084e2efff94b69b6a237b8df88a38953195e7c6cd2c475ac47840eadb031c",
         ),
         (
             "view:reserved",
-            "a89fb659040e9b2ed5b2f0caf8657b7c6543c8beb1ded43e6576311580ecdfc0",
+            "e628ccdea1dacde632c1ef81ca4b0ee748a391e63af59eec540399e170746a41",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

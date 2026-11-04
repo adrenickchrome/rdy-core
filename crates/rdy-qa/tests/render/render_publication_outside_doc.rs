@@ -27,7 +27,7 @@ fn ndh4_a_profile_site_trail_shows_a_governing_decision_with_no_doc() {
             {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$guide", "fields": {"title": "Guide section"}},
             {"op": "create", "type": "decision", "id": "$dec",
-             "fields": {"statement": "ROOTCANARY ruling.", "status": "proposed"}},
+             "fields": {"statement": "ROOTCANARY ruling.", "status": "proposed", "built": "1.0.0"}},
             {"op": "create", "type": "claim", "parent": "$s", "body": "Governed words.",
              "links": {"decided_by": [{"target": "$dec"}]}},
             {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}

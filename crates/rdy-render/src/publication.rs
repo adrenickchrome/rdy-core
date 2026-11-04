@@ -6,7 +6,9 @@
 //! profiles or local configuration reaches a [`Prepared`] made here.
 use crate::inline;
 use crate::page::lede_of;
-use crate::prepare::{FigureBlobs, History, Prepared, Presentation, ProfilePresentation, Purpose};
+use crate::prepare::{
+    BlockStatus, FigureBlobs, History, Prepared, Presentation, ProfilePresentation, Purpose,
+};
 use crate::render_input::{capture_inputs, disagreements};
 use crate::site::{Site, Url};
 use crate::{disagree, scope_warnings};
@@ -133,6 +135,19 @@ pub(crate) fn prepare_resolved(
     Ok(prepared)
 }
 
+/// The status words a selection's pages show, from its shown statuses: what [`Prepared::status`]
+/// holds, and what a live review reads for each side.
+pub(crate) fn display_status(
+    as_built: &BTreeMap<BlockId, rdy_engine::publication::ShownStatus>,
+) -> BTreeMap<BlockId, BlockStatus> {
+    as_built
+        .iter()
+        .filter_map(|(id, s)| {
+            BlockStatus::of(s.status, s.since.as_deref(), s.pill).map(|b| (id.clone(), b))
+        })
+        .collect()
+}
+
 /// The selected preparation every profile output shares (D-0VCQ5, D-CWC91): `resolved` with the
 /// figure blobs its caller read (`blobs`) and the reference warning its caller chose (`warning`:
 /// the org warning for durable output, the live warning for a live inspection), read through the
@@ -152,8 +167,11 @@ pub(crate) fn prepare_selected(
         m,
         graph,
         references,
+        as_built,
         ..
     } = resolved;
+    // the retained content blocks' words: a status the profile shows, never its derivation
+    let status = display_status(&as_built);
     let dropped = references.dropped_decisions;
     // a figure whose blob lost content reads as removed from here on, as in source preparation
     let m = blobs.project(Arc::new(m));
@@ -210,6 +228,7 @@ pub(crate) fn prepare_selected(
         }),
         menu_url: None,
         diagram_cache: None,
+        status,
     })
 }
 

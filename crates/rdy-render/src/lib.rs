@@ -1502,6 +1502,7 @@ fn with_shared<R>(
         profile,
         menu_url,
         diagram_cache,
+        status,
         ..
     } = prepared;
     let m: &Materialized = &m;
@@ -1588,6 +1589,7 @@ fn with_shared<R>(
         unavailable,
         menu_url: menu_url.as_deref(),
         old_site: old_site.as_ref(),
+        status: &status,
     };
     let extras = Extras {
         changes: changes_summary,

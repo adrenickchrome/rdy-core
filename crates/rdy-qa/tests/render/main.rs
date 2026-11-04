@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
 mod render_approver;
+mod render_asbuilt;
 mod render_blob_state;
 mod render_build;
 mod render_changes;
