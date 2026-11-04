@@ -73,7 +73,10 @@ fn ain1_schema_example_creates_a_complete_instruction() {
         s["fields"],
         json!({
             "applies_to": {"kind": "list", "required": true, "values": []},
-            "locked": {"kind": "bool", "required": false, "values": []}
+            "locked": {"kind": "bool", "required": false, "values": []},
+            // ab1 (D-WJ0SJ): every content type, the instruction too, has planned and since
+            "planned": {"kind": "bool", "required": false, "values": []},
+            "since": {"kind": "str", "required": false, "values": []}
         })
     );
     let rule = s["instruction"].as_str().unwrap();

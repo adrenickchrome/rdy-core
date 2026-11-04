@@ -42,8 +42,14 @@ fn read(st: &mut McpState, args: Value) -> Result<Value, RdyError> {
     rdy_read(st, serde_json::from_value(args).unwrap())
 }
 
+/// The tokens of a reply, without the instructions reminder: ain4 puts it on a briefing outside
+/// the briefing's budget.
 fn tokens(v: &Value) -> usize {
-    serde_json::to_string(v).unwrap().len() / 4
+    let mut v = v.clone();
+    if let Some(m) = v.as_object_mut() {
+        m.remove(rdy_engine::instructions::REMINDER_KEY);
+    }
+    serde_json::to_string(&v).unwrap().len() / 4
 }
 
 /// The as-built warnings of a reply, as (block, message, fix).
