@@ -769,3 +769,142 @@ fn dq3_the_guide_opens_and_closes_as_written() {
     // Its example parses.
     ok("type = decision and status = live and no in implements");
 }
+
+/// ab2 (D-WJ0SJ): `planned` and `since` are typed built-in fields. planned takes true or false
+/// with = and !=; since takes a release version with every order op, and `has since` applies.
+/// `fields.planned` and `fields.since` stay the raw authored fields. The existing bounds hold.
+#[test]
+fn ab2_filter_fields_are_typed_and_version_ordered() {
+    let cmp = |field: Field, op: Op, value: Value| Expr::Compare { field, op, value };
+    let bool_v = |value: bool, text: &str| Value::Bool {
+        value,
+        text: text.to_string(),
+    };
+    // parsing: names in any case, values as written
+    assert_eq!(
+        expr("planned = true"),
+        cmp(Field::Planned, Op::Eq, bool_v(true, "true"))
+    );
+    assert_eq!(
+        expr("PLANNED != false"),
+        cmp(Field::Planned, Op::Ne, bool_v(false, "false"))
+    );
+    assert_eq!(
+        expr("since >= 1.2.0"),
+        cmp(Field::Since, Op::Ge, str_value("1.2.0"))
+    );
+    assert_eq!(
+        expr("Since < v2.0.0-rc.1"),
+        cmp(Field::Since, Op::Lt, str_value("v2.0.0-rc.1"))
+    );
+    assert_eq!(
+        expr(r#"since = "1.10.0""#),
+        cmp(Field::Since, Op::Eq, str_value("1.10.0"))
+    );
+    // operators
+    for op in ["=", "!="] {
+        ok(&format!("planned {op} true"));
+    }
+    for op in ["<", "<=", ">", ">=", "^="] {
+        assert_eq!(
+            refused(&format!("planned {op} true")),
+            format!("filter: {op} does not apply to planned at column 9")
+        );
+    }
+    for op in ["=", "!=", "<", "<=", ">", ">="] {
+        ok(&format!("since {op} 1.0.0"));
+    }
+    assert_eq!(
+        refused("since ^= 1"),
+        "filter: ^= does not apply to since at column 7"
+    );
+    // has: since takes it, planned is a boolean like suspect and does not
+    assert_eq!(expr("has since"), Expr::Has(Field::Since));
+    assert_eq!(
+        refused("has planned"),
+        "filter: has does not apply to planned at column 5"
+    );
+    // values: planned takes a boolean; since a version within 256 bytes
+    for bad in ["1", "yes", r#""true""#] {
+        assert_eq!(
+            refused(&format!("planned = {bad}")),
+            "filter: planned takes true or false at column 11"
+        );
+    }
+    for bad in [
+        "1",
+        "true",
+        "soon",
+        "1.2",
+        "v1.2.0+build",
+        "vv1.2.0",
+        r#""""#,
+        "null",
+    ] {
+        assert_eq!(
+            refused(&format!("since = {bad}")),
+            "filter: since takes a release version at column 9",
+            "{bad}"
+        );
+    }
+    let long = format!("1.0.0-{}", "a".repeat(251));
+    assert_eq!(long.len(), 257);
+    assert_eq!(
+        refused(&format!("since = \"{long}\"")),
+        "filter: since exceeds 256 bytes at column 9"
+    );
+    let at_bound = format!("1.0.0-{}", "a".repeat(250));
+    assert_eq!(at_bound.len(), 256);
+    ok(&format!("since = \"{at_bound}\""));
+    // raw authored fields keep their generic meaning
+    assert_eq!(
+        expr("fields.since = v1.2.0"),
+        custom_named("since", str_value("v1.2.0"))
+    );
+    assert_eq!(
+        expr("fields.planned = true"),
+        custom_named("planned", bool_v(true, "true"))
+    );
+    ok("has fields.planned");
+    ok("fields.since ^= v1");
+    // typo hints
+    assert_eq!(
+        refused("plannd = true"),
+        "filter: unknown field plannd; did you mean planned? at column 1"
+    );
+    assert_eq!(
+        refused("sinse > 1.0.0"),
+        "filter: unknown field sinse; did you mean since? at column 1"
+    );
+    // the existing bounds still hold with the new fields
+    let long_filter = format!("since = \"{}\"", "1".repeat(MAX_FILTER_CHARS - 10));
+    assert_eq!(long_filter.chars().count(), MAX_FILTER_CHARS);
+    assert!(refused(&format!("{long_filter} ")).contains("longer than 2000 characters"));
+    let parens = |n: usize| format!("{}planned = true{}", "(".repeat(n), ")".repeat(n));
+    ok(&parens(MAX_FILTER_DEPTH));
+    assert_eq!(
+        refused(&parens(MAX_FILTER_DEPTH + 1)),
+        "filter: nesting deeper than 16 at column 17"
+    );
+    let links = |n: usize| {
+        format!(
+            "{}since > 1.0.0{}",
+            "out implements (".repeat(n),
+            ")".repeat(n)
+        )
+    };
+    ok(&links(MAX_LINK_NESTING));
+    assert!(refused(&links(MAX_LINK_NESTING + 1)).contains("more than 3 nested link tests"));
+    // the guide names both fields
+    assert!(FILTER_GUIDE.contains("coverage, planned, since and fields.<name>"));
+    assert!(FILTER_GUIDE.contains("has since is false for planned and unversioned blocks"));
+    assert_eq!(ok("planned = true or has since").needs(), Needs::default());
+}
+
+fn custom_named(name: &str, value: Value) -> Expr {
+    Expr::Compare {
+        field: Field::Custom(name.to_string()),
+        op: Op::Eq,
+        value,
+    }
+}

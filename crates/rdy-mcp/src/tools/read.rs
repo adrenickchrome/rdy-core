@@ -36,6 +36,10 @@ struct ReadEntries {
     warnings: Vec<Value>,
     /// The entries kept, when a pattern is given.
     matched: Option<usize>,
+    /// ab2: the as-built status of each entry's block, when it is a content block.
+    as_built: Vec<Option<rdy_engine::as_built::AsBuilt>>,
+    /// ab2: the as-built override warning of each entry's block, when it has one.
+    as_built_warnings: Vec<Option<Value>>,
 }
 
 impl ReadEntries {
@@ -45,8 +49,56 @@ impl ReadEntries {
         bytes.extend(serde_json::to_vec(q).unwrap_or_default());
         bytes.push(0);
         bytes.extend(self.entries.join("\n\x1e").into_bytes());
+        // ab2: a built-only change moves a status but no entry text: the read moved too
+        bytes.push(0);
+        bytes.extend(serde_json::to_vec(&self.as_built).unwrap_or_default());
         rdy_model::Hash::of(&bytes).to_string()
     }
+
+    /// The bytes entry `i`'s page metadata takes: its `as_built` member and its warning, each
+    /// with a comma.
+    fn meta_bytes(&self, i: usize) -> usize {
+        let status = self.as_built[i].as_ref().map_or(0, |s| {
+            json_len(&json!(self.ids[i].to_string())) + 1 + json_len(&json!(s)) + 1
+        });
+        let warning = self.as_built_warnings[i]
+            .as_ref()
+            .map_or(0, |w| json_len(w) + 1);
+        status + warning
+    }
+}
+
+fn json_len(v: &Value) -> usize {
+    serde_json::to_string(v).map_or(0, |t| t.len())
+}
+
+/// rpag1 with ab2's metadata: the end (exclusive) of the page that starts at `from`, the most
+/// entries whose join with `sep`, JSON-escaped, plus their metadata bytes (`meta`) is at most
+/// `budget_bytes`; never less than one entry while any is left. With no metadata it is
+/// `read_page::page_entries`.
+fn page_end(
+    entries: &[String],
+    meta: &[usize],
+    from: usize,
+    sep: &str,
+    budget_bytes: usize,
+) -> usize {
+    if from >= entries.len() {
+        return from;
+    }
+    let escaped = |t: &str| json_len(&json!(t)).saturating_sub(2);
+    let sep_len = escaped(sep);
+    let mut total = escaped(&entries[from]) + meta[from];
+    let mut end = from + 1;
+    while end < entries.len() {
+        let next = total + sep_len + escaped(&entries[end]) + meta[end];
+        if next > budget_bytes {
+            break;
+        }
+        total = next;
+        end += 1;
+    }
+    end
 }
 
 pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
@@ -145,7 +197,7 @@ fn read_page_of(
         "format": read.format,
         "text": "",
     });
-    if let Some(c) = read.conflict {
+    if let Some(c) = read.conflict.clone() {
         out["conflict"] = c;
     }
     if !read.warnings.is_empty() {
@@ -161,14 +213,42 @@ fn read_page_of(
     envelope["truncated"] = json!(true);
     envelope["omitted"] = json!(all);
     envelope["next"] = json!(format!("{token}:{all}"));
+    // ab2: a page's as-built metadata counts against its budget, entry by entry
+    if read.as_built.iter().any(Option::is_some) {
+        envelope["as_built"] = json!({});
+    }
+    if read.as_built_warnings.iter().any(Option::is_some) && envelope.get("warnings").is_none() {
+        envelope["warnings"] = json!([]);
+    }
     let envelope_bytes = serde_json::to_string(&envelope).map_or(0, |e| e.len());
-    let end = read_page::page_entries(
+    let meta: Vec<usize> = (0..all).map(|i| read.meta_bytes(i)).collect();
+    let end = page_end(
         &read.entries,
+        &meta,
         from,
         read.sep,
         (max * 4).saturating_sub(envelope_bytes).max(1),
     );
     out["text"] = json!(read.entries[from..end].join(read.sep));
+    // ab2: the as-built status of the content blocks this page shows, and their warnings
+    let statuses: serde_json::Map<String, Value> = (from..end)
+        .filter_map(|i| {
+            let s = read.as_built[i].as_ref()?;
+            Some((read.ids[i].to_string(), json!(s)))
+        })
+        .collect();
+    if !statuses.is_empty() {
+        out["as_built"] = Value::Object(statuses);
+    }
+    let warned: Vec<Value> = (from..end)
+        .filter_map(|i| read.as_built_warnings[i].clone())
+        .take(rdy_engine::as_built::MAX_AS_BUILT_WARNINGS)
+        .collect();
+    if !warned.is_empty() {
+        let mut all_warnings = out["warnings"].as_array().cloned().unwrap_or_default();
+        all_warnings.extend(warned);
+        out["warnings"] = json!(all_warnings);
+    }
     if end < read.entries.len() {
         out["truncated"] = json!(true);
         out["omitted"] = json!(read.entries.len() - end);
@@ -384,6 +464,25 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         }
     }
     let (entries, ids) = walk(false);
+    // ab2: each entry's as-built status and its override warning, from the one warning function
+    let statuses: std::collections::BTreeMap<BlockId, rdy_engine::as_built::AsBuilt> =
+        st_.as_built(&scope, &ids)?.into_iter().collect();
+    let mut as_built = Vec::with_capacity(ids.len());
+    let mut as_built_warnings = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let status = statuses.get(id).cloned();
+        let warning = match &status {
+            Some(s) => st_
+                .as_built_warnings(&scope, &[(id.clone(), s.clone())])?
+                .pop()
+                .map(|w| {
+                    json!({"code": w.code, "block": id.to_string(), "message": w.message, "fix": w.fix})
+                }),
+            None => None,
+        };
+        as_built.push(status);
+        as_built_warnings.push(warning);
+    }
     let sep = match format {
         "yaml" => "---\n",
         "markdown" => "\n\n",
@@ -398,6 +497,8 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         ids,
         sep,
         warnings,
+        as_built,
+        as_built_warnings,
     })
 }
 

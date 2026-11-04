@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod cli;
 mod cli_alts;
+mod cli_asbuilt_reads;
 mod cli_blame;
 mod cli_carried_warning;
 mod cli_checks;

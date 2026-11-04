@@ -480,6 +480,16 @@ fn field_inputs(
             }
             add_ancestors(out)?;
         }
+        // ab2: the as-built status reads the block's direct decisions and its containers
+        Field::Planned | Field::Since => {
+            for e in g.outgoing(b).iter().filter(|e| {
+                matches!(&e.kind, EdgeKind::Link(k)
+                    if k == rdy_model::decision::DECIDED_BY || k == rdy_model::decision::IMPLEMENTS)
+            }) {
+                out.insert(&e.to)?;
+            }
+            add_ancestors(out)?;
+        }
         Field::Id | Field::Key | Field::Type | Field::Trait | Field::Custom(_) => {}
     }
     Ok(())

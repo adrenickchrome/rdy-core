@@ -366,6 +366,10 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
+    // ab2 (D-WJ0SJ): a content block's as-built status, beside the decision retirement status
+    if v["as_built"].is_object() {
+        out.push_str(&format!("as-built: {}\n", as_built_line(&v["as_built"])));
+    }
     if let Some(line) = history_text::last_change_line(&v["history"][0]) {
         out.push_str(&line);
         out.push('\n');
@@ -409,6 +413,15 @@ fn show_text(v: &Value) -> String {
             }
         }
     }
+    // ab2 (D-YAY1G): the block's as-built override warning
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "\nwarning {}: {}\n  fix: {}",
+            text(&w["code"]),
+            text(&w["message"]),
+            text(&w["fix"])
+        ));
+    }
     // cgr1: in the inflight scope, the in-flight changes that write the block
     if let Some(rows) = v["inflight"].as_array().filter(|a| !a.is_empty()) {
         out.push_str("\nin flight:");
@@ -448,6 +461,30 @@ fn show_text(v: &Value) -> String {
         }
     }
     out
+}
+
+/// ab2: a status as source tools print it: `planned`, `since <v>` or `unversioned`.
+fn as_built_label(s: &Value) -> String {
+    match s["status"].as_str() {
+        Some("since") => format!("since {}", text(&s["since"])),
+        Some(word) => word.to_string(),
+        None => String::new(),
+    }
+}
+
+/// ab2: the `as-built:` value of `rdy show`: the effective status, then, when an override sets
+/// it, the override's field and holder and what the block's decisions derive.
+fn as_built_line(s: &Value) -> String {
+    let mut line = as_built_label(s);
+    if s["override"].is_object() {
+        line.push_str(&format!(
+            " (override {} on {}; its decisions derive {})",
+            text(&s["override"]["field"]),
+            text(&s["override"]["block"]),
+            as_built_label(&s["derived"])
+        ));
+    }
+    line
 }
 
 fn log_text(v: &Value) -> String {

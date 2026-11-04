@@ -3,6 +3,7 @@ pub mod allowed_signers;
 pub mod alt;
 pub mod answer;
 mod areas;
+pub mod as_built;
 pub mod brief;
 pub mod card_words;
 pub mod carried_warning;

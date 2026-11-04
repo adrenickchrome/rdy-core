@@ -3567,6 +3567,15 @@ impl Rdy {
         }
         warnings.extend(brief_warnings);
         warnings.extend(code_warnings);
+        // ab2 (D-YAY1G): the as-built override warnings of the written blocks, the blocks that
+        // cite a written decision and the blocks under a written section or doc
+        {
+            let st = self.read();
+            let g = st.graph(&scope)?;
+            let written: BTreeSet<BlockId> = touched.iter().cloned().collect();
+            let rows = st.as_built(&scope, &crate::as_built::affected(&m, &g, &written))?;
+            warnings.extend(st.as_built_warnings(&scope, &rows)?);
+        }
         // FW-I1: the authored words of each decision or question this write touched
         for t in &touched {
             if let Some(b) = m.get(t) {

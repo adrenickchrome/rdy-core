@@ -748,6 +748,14 @@ pub struct Base {
 pub struct BaseBlock {
     pub id: String,
     pub version: String,
+    /// ab2 (D-WJ0SJ): a content block's as-built status in the briefing's scope; absent for
+    /// every other block. Display data: the token and the record do not hold it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub as_built: Option<crate::as_built::AsBuilt>,
+    /// ab2 (D-YAY1G): the block's as-built override warning, which `Briefing::warnings` lists
+    /// while the block is on the page.
+    #[serde(skip)]
+    pub warning: Option<Issue>,
 }
 
 /// The most coverage issues a briefing lists; the rest are counted in `issues_omitted`.
@@ -830,6 +838,10 @@ pub struct Briefing {
     #[serde(skip_serializing_if = "is_zero")]
     pub reaches_omitted: usize,
     pub base: Base,
+    /// ab2 (D-YAY1G): the as-built override warnings of the blocks `base.blocks` shows on this
+    /// page, at most `MAX_AS_BUILT_WARNINGS`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Issue>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -1005,6 +1017,18 @@ impl Briefing {
         drop(&mut self.neighbors, skip[10]);
         drop(&mut self.neighbor_sizes, skip[10]);
         drop(&mut self.base.blocks, skip[11]);
+        self.sync_warnings();
+    }
+
+    /// Lists the as-built warnings of the base blocks this page shows (ab2).
+    fn sync_warnings(&mut self) {
+        self.warnings = self
+            .base
+            .blocks
+            .iter()
+            .filter_map(|b| b.warning.clone())
+            .take(crate::as_built::MAX_AS_BUILT_WARNINGS)
+            .collect();
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -1242,7 +1266,10 @@ impl Briefing {
                 self.neighbors.truncate(keep);
                 self.neighbor_sizes.truncate(keep);
             }
-            _ => self.base.blocks.truncate(keep),
+            _ => {
+                self.base.blocks.truncate(keep);
+                self.sync_warnings();
+            }
         }
         *self
             .omitted
@@ -1897,6 +1924,21 @@ impl ReadState {
             related_decisions.truncate(RELATED_CAP);
         }
 
+        // ab2: each covered content block's as-built status, and the warnings of those whose
+        // override disagrees, from the one warning function
+        // (one block at a time, so a later page keeps the warnings of its own blocks)
+        let as_built = self.as_built(scope, ids)?;
+        let mut warned: BTreeMap<BlockId, Issue> = BTreeMap::new();
+        for row in &as_built {
+            if let Some(w) = self
+                .as_built_warnings(scope, std::slice::from_ref(row))?
+                .pop()
+            {
+                warned.insert(row.0.clone(), w);
+            }
+        }
+        let mut statuses: BTreeMap<BlockId, crate::as_built::AsBuilt> =
+            as_built.into_iter().collect();
         let base = Base {
             token: token.to_string(),
             blocks: ids
@@ -1906,6 +1948,8 @@ impl ReadState {
                     version: m
                         .version_of(id)
                         .map_or_else(|| "-".to_string(), |h| h.to_string()),
+                    as_built: statuses.remove(id),
+                    warning: warned.remove(id),
                 })
                 .collect(),
             depends: recorded.len() - ids.len(),
@@ -1956,6 +2000,12 @@ impl ReadState {
             finding_counts,
             reaches,
             reaches_omitted,
+            warnings: base
+                .blocks
+                .iter()
+                .filter_map(|b| b.warning.clone())
+                .take(crate::as_built::MAX_AS_BUILT_WARNINGS)
+                .collect(),
             base,
             truncated: false,
             omitted: BTreeMap::new(),

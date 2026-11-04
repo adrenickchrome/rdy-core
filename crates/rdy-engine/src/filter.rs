@@ -9,6 +9,7 @@
 //! Each link test keeps its inner result per block, so one query costs at most
 //! (tests in the filter) x (blocks + edges) evaluations. The parser bounds the recursion.
 use crate::areas::block_areas;
+use crate::as_built::{AsBuilt, Resolver, Status};
 use crate::coverage::change::candidate_build;
 use crate::coverage::{CoverageIssues, rollup};
 use crate::cursor;
@@ -24,7 +25,7 @@ use rdy_model::{Block, BlockId, FieldValue, Hash};
 use rdy_schema::filter::{Dir, Expr, Field, Filter, FilterError, LinkKind, Op, Value, parse};
 use rdy_schema::{AreaMatcher, Pack, Trait};
 use serde::Serialize;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -67,6 +68,8 @@ pub struct FilterContext<'a> {
     inputs: FilterInputs<'a>,
     filters: RefCell<Vec<Rc<Evaluated>>>,
     evaluations: Cell<usize>,
+    /// ab2: the as-built status of the supplied state, made when a test first reads it.
+    as_built: OnceCell<Resolver<'a>>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -76,6 +79,7 @@ impl<'a> FilterContext<'a> {
             inputs,
             filters: RefCell::new(Vec::new()),
             evaluations: Cell::new(0),
+            as_built: OnceCell::new(),
         }
     }
 
@@ -216,6 +220,13 @@ impl<'a> FilterContext<'a> {
         None
     }
 
+    /// `b`'s as-built status in the supplied state; `None` for a block that is no content block.
+    fn as_built(&self, b: &Block) -> Option<AsBuilt> {
+        self.as_built
+            .get_or_init(|| Resolver::new(self.inputs.pack, self.inputs.m))
+            .status(&b.id)
+    }
+
     fn areas_of(&self, b: &Block) -> Vec<String> {
         if self.inputs.areas.is_empty() {
             return Vec::new();
@@ -258,6 +269,13 @@ impl<'a> FilterContext<'a> {
                 .coverage
                 .get(&b.id)
                 .is_some_and(|score| int_holds(i64::from(*score), op, value)),
+            Field::Planned => self
+                .as_built(b)
+                .is_some_and(|s| bool_holds(s.status == Status::Planned, op, value)),
+            Field::Since => self
+                .as_built(b)
+                .and_then(|s| s.since)
+                .is_some_and(|have| version_holds(&have, op, text)),
             Field::Custom(name) => b
                 .fields
                 .get(name)
@@ -275,9 +293,15 @@ impl<'a> FilterContext<'a> {
             Field::Lifecycle => self.lifecycle(b).is_some(),
             Field::Status => self.inputs.graph.status(&b.id).is_some(),
             Field::Coverage => self.inputs.coverage.contains_key(&b.id),
+            Field::Since => self.as_built(b).is_some_and(|s| s.since.is_some()),
             Field::Custom(name) => b.fields.get(name).is_some_and(|v| *v != FieldValue::Null),
             // the parser refuses `has` of any other field
-            Field::Id | Field::Type | Field::Trait | Field::Suspect | Field::Tension => false,
+            Field::Id
+            | Field::Type
+            | Field::Trait
+            | Field::Suspect
+            | Field::Tension
+            | Field::Planned => false,
         }
     }
 
@@ -333,6 +357,23 @@ fn any_of_holds(have: Vec<&str>, op: Op, want: &str) -> bool {
 
 fn bool_holds(have: bool, op: Op, want: &Value) -> bool {
     matches!(want, Value::Bool { value, .. } if equality_holds(have == *value, op))
+}
+
+/// A since version against a filter's version, in release order; false when either is no
+/// version (the parser refuses a filter version that is none).
+fn version_holds(have: &str, op: Op, want: &str) -> bool {
+    let Some(order) = rdy_schema::as_built::compare(have, want) else {
+        return false;
+    };
+    match op {
+        Op::Eq => order.is_eq(),
+        Op::Ne => order.is_ne(),
+        Op::Lt => order.is_lt(),
+        Op::Le => order.is_le(),
+        Op::Gt => order.is_gt(),
+        Op::Ge => order.is_ge(),
+        Op::StartsWith => false,
+    }
 }
 
 fn int_holds(have: i64, op: Op, want: &Value) -> bool {

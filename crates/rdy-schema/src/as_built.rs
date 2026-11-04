@@ -141,7 +141,7 @@ fn limit(block: &Block, name: &str) -> Issue {
 
 /// Whether `block_type` takes the content override fields `planned` and `since`: a doc-asset
 /// type that is no doc or folder. A doc takes `planned` alone.
-pub(crate) fn is_content_type(pack: &Pack, block_type: &str) -> bool {
+pub fn is_content_type(pack: &Pack, block_type: &str) -> bool {
     pack.class_of(block_type) == TypeClass::DocAsset
         && pack.block_types.contains_key(block_type)
         && !tree::is_tree_type(block_type)
