@@ -664,8 +664,11 @@ fn ain6_public_words_match_the_approved_description() {
     let top: Vec<_> = readme.lines().take(6).collect();
     assert!(top.contains(&HEADLINE) && top.contains(&ABOUT), "{top:?}");
     let agents = read("AGENTS.md");
-    let top: Vec<_> = agents.lines().take(6).collect();
-    assert!(top.contains(&HEADLINE) && top.contains(&ABOUT), "{top:?}");
+    // the line number of the next AGENTS.md line is pinned by pre2_public_tree_names_no_private_project
+    assert_eq!(
+        agents.lines().nth(4),
+        Some(format!("{HEADLINE} {ABOUT}").as_str())
+    );
     for f in [&readme, &agents] {
         assert!(!f.contains("consistent while agents change them"));
     }
