@@ -210,7 +210,8 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
                 .as_built(&Scope::Canon, [&s.a])
                 .unwrap()
                 .pop()
-                .map(|(_, status)| status),
+                .map(|(_, status)| status)
+                .filter(|s| s.status != rdy_engine::as_built::Status::Unversioned),
             warning: None,
         }]
     );

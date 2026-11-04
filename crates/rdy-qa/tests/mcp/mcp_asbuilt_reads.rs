@@ -150,7 +150,8 @@ fn ab2_read_context_brief_and_query_agree() {
     assert_eq!(dec["status"]["status"], "proposed", "{dec}");
     assert!(dec.get("as_built").is_none(), "{dec}");
 
-    // brief: the base blocks carry the status, the briefing the warnings
+    // brief: the base blocks carry the status, except an unversioned one; the briefing carries
+    // the warnings
     let b = rdy_brief(
         &mut st,
         serde_json::from_value(json!({"path": c["$d"], "max_tokens": 100000})).unwrap(),
@@ -163,7 +164,9 @@ fn ab2_read_context_brief_and_query_agree() {
         .filter(|r| r.get("as_built").is_some())
         .map(|r| (r["id"].as_str().unwrap().to_string(), r["as_built"].clone()))
         .collect();
-    assert_eq!(json!(base), want_status);
+    let mut versioned = want_status.clone();
+    versioned.as_object_mut().unwrap().remove(s.as_str());
+    assert_eq!(json!(base), versioned);
     assert_eq!(warnings(&b), want_warnings);
 
     // query: the derived fields select planned content too; source reads hide nothing
@@ -288,7 +291,8 @@ fn ab2_paged_reads_and_briefings_carry_only_their_own_metadata() {
         }
         for r in b["base"]["blocks"].as_array().unwrap() {
             let id = r["id"].as_str().unwrap();
-            assert_eq!(r.get("as_built"), all_status.get(id), "{id}");
+            let want = all_status.get(id).filter(|s| s["status"] != "unversioned");
+            assert_eq!(r.get("as_built"), want, "{id}");
         }
         pages += 1;
         let Some(next) = b["next"].as_str().map(str::to_string) else {

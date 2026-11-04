@@ -748,8 +748,9 @@ pub struct Base {
 pub struct BaseBlock {
     pub id: String,
     pub version: String,
-    /// ab2 (D-WJ0SJ): a content block's as-built status in the briefing's scope; absent for
-    /// every other block. Display data: the token and the record do not hold it.
+    /// ab2 (D-WJ0SJ): a content block's as-built status in the briefing's scope; absent for an
+    /// unversioned block and every other block, so a briefing's budget pays only for the
+    /// statuses that say something. Display data: the token and the record do not hold it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub as_built: Option<crate::as_built::AsBuilt>,
     /// ab2 (D-YAY1G): the block's as-built override warning, which `Briefing::warnings` lists
@@ -1948,7 +1949,9 @@ impl ReadState {
                     version: m
                         .version_of(id)
                         .map_or_else(|| "-".to_string(), |h| h.to_string()),
-                    as_built: statuses.remove(id),
+                    as_built: statuses
+                        .remove(id)
+                        .filter(|s| s.status != crate::as_built::Status::Unversioned),
                     warning: warned.remove(id),
                 })
                 .collect(),
