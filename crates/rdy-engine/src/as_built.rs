@@ -589,8 +589,10 @@ fn built_text(b: Option<&Block>) -> Option<&str> {
 }
 
 /// The seals of each (state, chain head) a warning read, for the last few states.
-static SEALS: LazyLock<Slots<(u64, Option<Hash>), Arc<OverrideSeals>>> =
-    LazyLock::new(Slots::default);
+static SEALS: LazyLock<SealMemo> = LazyLock::new(Slots::default);
+
+/// The memo of [`SEALS`]: by state id and chain head.
+type SealMemo = Slots<(u64, Option<Hash>), Arc<OverrideSeals>>;
 
 thread_local! {
     /// Set while this thread reads a live plan for the fix text: a read the plan's own
@@ -600,7 +602,10 @@ thread_local! {
 
 /// The open as-built subjects of each (state, scope) a warning read, for the last few: a read
 /// or a briefing asks once per block.
-static OPEN: LazyLock<Slots<(u64, Scope), Arc<BTreeSet<String>>>> = LazyLock::new(Slots::default);
+static OPEN: LazyLock<OpenMemo> = LazyLock::new(Slots::default);
+
+/// The memo of [`OPEN`]: by state id and scope.
+type OpenMemo = Slots<(u64, Scope), Arc<BTreeSet<String>>>;
 
 /// The subjects of the open as-built items of `scope`'s live plan, kept per state and scope;
 /// none for any scope but a view or a proposal version, when the plan cannot be read (the fix
