@@ -16,6 +16,12 @@
 //!   naming the version, whose `reply` holds `{via, shown, not_ready, past_cap}`: the card's ref, hash, options
 //!   and recommended option as the queue gave them. A new card is read and shown before every
 //!   answer, the second answer of a moved card too.
+//! - A card past the queue's cap (`PENDING_ITEMS_MAX`, canon: an answer binds only an item
+//!   inside it) is not skipped: the person first works down the oldest items of the queue
+//!   (blocking tensions dismissed, batches approved) through the usual person routes, on the
+//!   person's relay session and in the landing turn,
+//!   bounded, each one an `m3_work_down` entry (`people::work_down`, deep-drain ruling finding
+//!   2); a card that still does not fit fails the run by the route's act.
 //! - A landing an answer made is found and audited as every other is (`people::found_in`): a
 //!   `land_found` entry names it with the view and base read before it (`run::before_land`).
 //!   A call the kill cuts is journaled `Lost` (`Reply::Interrupted`); the link reconnects
@@ -373,6 +379,7 @@ pub(crate) fn run(
         report,
         start,
         elicited: 0,
+        relay: None,
     };
     match sc.route {
         Route::RelayedAnswer => c.relayed(),
@@ -396,6 +403,8 @@ struct Ctx<'a> {
     start: usize,
     /// The calls the scenario's eliciting clients made.
     elicited: usize,
+    /// The person's relay session, opened when a card is past the queue's cap.
+    relay: Option<Link>,
 }
 
 impl Ctx<'_> {
@@ -566,6 +575,36 @@ impl Ctx<'_> {
         self.link.journal.record(e);
     }
 
+    /// The card of `pref` as the queue shows it (`show_card`). When it is past the queue's cap,
+    /// the person first works down the oldest items through the usual person routes
+    /// (`people::work_down`, deep-drain ruling finding 2) on its own relay session, in the
+    /// landing turn (`held`: the caller holds it), and the card is read again.
+    fn show(&mut self, act: &str, pref: &str, held: bool) -> Shown {
+        match show_card(self.link, pref) {
+            Shown::Absent { past_cap: true, .. } => {
+                let gate = self.link.gate.clone();
+                let _turn = (!held).then(|| gate.landing_turn());
+                let step = self.link.step;
+                let link = &*self.link;
+                let relay = self.relay.get_or_insert_with(|| {
+                    Link::connect(
+                        link.at.clone(),
+                        "agent:relay",
+                        "chat",
+                        "reviewer",
+                        None,
+                        link.journal.clone(),
+                        link.gate.clone(),
+                    )
+                });
+                relay.step = step;
+                people::work_down(relay, self.watch, pref, act);
+                show_card(self.link, pref)
+            }
+            shown => shown,
+        }
+    }
+
     /// The reads every approval makes first (`run::before_land`).
     fn before_answer(&mut self, pref: &str) -> Option<Before> {
         let before = run::before_land(self.link, pref);
@@ -579,7 +618,7 @@ impl Ctx<'_> {
     /// when there is no card to answer or the kill cut a read.
     fn card(&mut self, act: &'static str, pref: &str) -> Option<Card> {
         for accepted in [false, true] {
-            match show_card(self.link, pref) {
+            match self.show(act, pref, true) {
                 Shown::Card(c) if c.deferral && !accepted => {
                     let actor = self.link.actor.clone();
                     if !accept_deferrals(self.link, &actor, pref, true) {
@@ -825,7 +864,7 @@ impl Ctx<'_> {
         let Some(old) = self.version(&view, &claim, &first, false) else {
             return;
         };
-        let card = match show_card(self.link, &old) {
+        let card = match self.show("m3_moved_card", &old, false) {
             Shown::Card(c) => *c,
             Shown::Absent { not_ready, .. } => {
                 self.gap(

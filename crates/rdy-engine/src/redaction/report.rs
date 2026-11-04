@@ -1015,11 +1015,12 @@ pub(crate) fn compute_excluding(
     // pass 2: references and quotes
     let mut quotes = Quotes::new(&sources, limits.levels)?;
     let mut seen: HashSet<(u8, Hash)> = HashSet::new();
-    let mut proposals: Vec<(Hash, Vec<Hash>)> = vec![];
+    // each proposal and view op with its changes, and whether it was written after the request
+    let mut proposals: Vec<(Hash, Vec<Hash>, bool)> = vec![];
     let mut landings: BTreeMap<Hash, LandingRecord> = BTreeMap::new();
     let mut snapshots: HashSet<Hash> = HashSet::new();
     let mut tags: Vec<(Hash, String, Hash)> = vec![];
-    let mut view_refs: Vec<(String, Vec<Hash>)> = vec![];
+    let mut view_refs: Vec<(String, Vec<Hash>, bool)> = vec![];
     let mut reviews: Vec<(Hash, Review)> = vec![];
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
@@ -1100,7 +1101,7 @@ pub(crate) fn compute_excluding(
             kinds::PROPOSAL => {
                 let p: Proposal = reader.get_typed(kinds::PROPOSAL, &h)?;
                 quotes.scan(ImpactKind::Proposal, &rec, false, &p)?;
-                proposals.push((h, p.changes));
+                proposals.push((h, p.changes, later(i)));
             }
             kinds::LANDING => {
                 let l: LandingRecord = reader.get_typed(kinds::LANDING, &h)?;
@@ -1126,7 +1127,7 @@ pub(crate) fn compute_excluding(
                 let op: ViewOp = reader.get_typed(kinds::VIEW_OP, &h)?;
                 quotes.scan(audit, &rec, false, &op)?;
                 let named = view_op_changes(&op);
-                view_refs.push((op.view, named));
+                view_refs.push((op.view, named, later(i)));
             }
             kinds::REVIEW => {
                 let r: Review = reader.get_typed(kinds::REVIEW, &h)?;
@@ -1304,16 +1305,26 @@ pub(crate) fn compute_excluding(
     for s in &snapshots {
         row(ImpactKind::StateSnapshot, s.to_string(), refs, false);
     }
+    // a proposal or view op after the request counts only through a change of the removed
+    // content (deep-drain ruling, as TASK-1237 for landings): a later propose or fork that only
+    // carries earlier changes through `dep_hit` adds no copy or reach
+    let reaches = |cs: &[Hash], late: bool| {
+        if late {
+            cs.iter().any(|c| affected_changes.contains(c))
+        } else {
+            cs.iter().any(&hit)
+        }
+    };
     let mut affected_proposals: HashSet<Hash> = HashSet::new();
-    for (p, cs) in &proposals {
-        if cs.iter().any(&hit) {
+    for (p, cs, late) in &proposals {
+        if reaches(cs, *late) {
             affected_proposals.insert(*p);
             row(ImpactKind::Proposal, p.to_string(), refs, false);
         }
     }
     let mut views_hit: BTreeSet<&str> = BTreeSet::new();
-    for (name, cs) in &view_refs {
-        if cs.iter().any(&hit) {
+    for (name, cs, late) in &view_refs {
+        if reaches(cs, *late) {
             views_hit.insert(name);
         }
     }
@@ -1419,8 +1430,8 @@ pub(crate) fn compute_excluding(
     // the removed content (TASK-1237)
     let changing_proposals: HashSet<Hash> = proposals
         .iter()
-        .filter(|(_, cs)| cs.iter().any(|c| affected_changes.contains(c)))
-        .map(|(p, _)| *p)
+        .filter(|(_, cs, _)| cs.iter().any(|c| affected_changes.contains(c)))
+        .map(|(p, _, _)| *p)
         .collect();
     let affected_answers: Vec<Hash> = answers
         .iter()
