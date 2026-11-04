@@ -203,7 +203,15 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
         a.base.blocks,
         vec![BaseBlock {
             id: sa.clone(),
-            version: m.version_of(&s.a).unwrap().to_string()
+            version: m.version_of(&s.a).unwrap().to_string(),
+            // ab2: the as-built status the resolver gives A; A holds no override
+            as_built: r
+                .read()
+                .as_built(&Scope::Canon, [&s.a])
+                .unwrap()
+                .pop()
+                .map(|(_, status)| status),
+            warning: None,
         }]
     );
     assert_eq!(a.base.token, a.record.token_hex());
