@@ -12,6 +12,7 @@ use rdy_engine::wc::state::{Place, WcState, stage_put};
 use rdy_engine::wc::status::compute;
 use rdy_engine::*;
 use rdy_model::*;
+use rdy_store::pio::{Boundary, DurableStep, on_durable};
 use serde_json::json;
 use std::path::Path;
 
@@ -198,36 +199,54 @@ fn wx11_exports_use_lf_without_changing_blob_bytes() {
     assert_eq!(imported, original);
 }
 
-/// A failed final rename of an export is `E_IO` and names both paths.
-#[cfg(unix)]
+/// Takes the test backend of the durable steps off this thread when it drops.
+struct NoDurableBackend;
+
+impl Drop for NoDurableBackend {
+    fn drop(&mut self) {
+        on_durable(None);
+    }
+}
+
+/// A failed final rename of an export is `E_IO` and names both paths. The target does not appear,
+/// and the next export clears the staging directory and passes.
 #[test]
 fn wx11_failed_export_rename_is_io() {
     let d = tempfile::tempdir().unwrap();
     let r = project(d.path(), "guides", LITERAL);
     let parent = tempfile::tempdir().unwrap();
-    // the target is a link to nowhere: it does not exist, and a directory cannot replace a link
     let out = parent.path().join("export");
-    std::os::unix::fs::symlink(parent.path().join("nowhere"), &out).unwrap();
+    let target = out.clone();
+    let guard = NoDurableBackend;
+    on_durable(Some(Box::new(move |step, at| match step {
+        DurableStep::Rename { to, .. } if at == Boundary::Before && *to == target => {
+            Err(std::io::Error::other("injected rename failure"))
+        }
+        _ => Ok(()),
+    })));
     let e = r.read().export(&Scope::Canon, &out).unwrap_err();
+    drop(guard);
     assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.message.contains("injected rename failure"), "{e}");
     assert!(e.message.contains("could not rename"), "{}", e.message);
     assert!(
         e.message.contains(".export.rdy-export-partial"),
         "{}",
         e.message
     );
-    assert!(
-        std::fs::symlink_metadata(&out)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+    assert!(std::fs::symlink_metadata(&out).is_err());
+    let staging = parent.path().join(".export.rdy-export-partial");
+    assert!(staging.is_dir());
+    r.read().export(&Scope::Canon, &out).unwrap();
+    assert!(out.join("docs").is_dir());
+    assert!(std::fs::symlink_metadata(&staging).is_err());
 }
 
-/// A case-only rename of a folder and a doc, checked out again, round-trips: the files take the
-/// new spelling, nothing is left under the old one and the content is kept. On a case-insensitive
+/// A case-only rename of a folder, checked out again, round-trips: the files take the new
+/// spelling, nothing is left under the old one and the content is kept. On a case-insensitive
 /// volume the old and the new spelling are one entry, so a copy that is not renamed through a
-/// temporary name would keep the old spelling or lose the file.
+/// temporary name would keep the old spelling or lose the file. This test changes only the
+/// folder's spelling and has no failure during the temporary-name sequence.
 #[test]
 fn wx11_case_only_rename_round_trips() {
     let d = tempfile::tempdir().unwrap();

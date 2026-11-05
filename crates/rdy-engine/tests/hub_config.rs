@@ -1680,22 +1680,10 @@ fn wx9_username_uses_the_human_actor_shaper() {
         "human:ada"
     );
     // non-Unicode text is absent
-    #[cfg(unix)]
-    let odd = {
-        use std::os::unix::ffi::OsStringExt;
-        std::ffi::OsString::from_vec(vec![b'z', 0xE9])
-    };
-    #[cfg(windows)]
-    let odd = {
-        use std::os::windows::ffi::OsStringExt;
-        std::ffi::OsString::from_wide(&[0x7A, 0xD800])
-    };
-    #[cfg(any(unix, windows))]
-    {
-        let env = account(Some(&odd), Some(&odd));
-        assert_eq!(actor_user(Platform::Unix, &env), None);
-        assert_eq!(actor_user(Platform::Windows, &env), None);
-    }
+    let odd = rdy_store::pio::not_unicode("z");
+    let env = account(Some(&odd), Some(&odd));
+    assert_eq!(actor_user(Platform::Unix, &env), None);
+    assert_eq!(actor_user(Platform::Windows, &env), None);
     // the effective config and the environment reader take the same name
     let p = Fx::new("", None, None);
     let e = effective(p.project(), Some(&p.user_file())).unwrap();

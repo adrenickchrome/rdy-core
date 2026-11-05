@@ -414,21 +414,13 @@ fn wx9_person_source_uses_profile_then_home_drive_path() {
     );
 }
 
-#[cfg(any(unix, windows))]
 #[test]
 fn wx9_person_source_text_that_is_not_unicode_is_data() {
-    #[cfg(unix)]
-    let odd = {
-        use std::os::unix::ffi::OsStringExt;
-        OsString::from_vec(b"/home/zo\xe9".to_vec())
-    };
-    #[cfg(windows)]
-    let odd = {
-        use std::os::windows::ffi::OsStringExt;
-        let mut w: Vec<u16> = r"C:\Users\zo".encode_utf16().collect();
-        w.push(0xD800);
-        OsString::from_wide(&w)
-    };
+    let odd = rdy_store::pio::not_unicode(if cfg!(windows) {
+        r"C:\Users\zo"
+    } else {
+        "/home/zo"
+    });
     let (_d, mut env) = user_file("actor: human:zoe\n");
     env.home = Some(odd.clone());
     env.user_profile = Some(odd.clone());

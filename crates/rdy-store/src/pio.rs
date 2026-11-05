@@ -31,7 +31,8 @@
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`), a Unix
 //!   socket (`bind_socket`) and a child process under another umask (`under_umask`), so the
 //!   store's and the engine's tests need no Unix-only call of their own;
-//! - on every platform, for tests that kill or abort a child: how the child ended (`ended`).
+//! - on every platform, for tests that kill or abort a child: how the child ended (`ended`); and
+//!   for tests of text that is not Unicode: such text (`not_unicode`).
 //!
 //! Each platform's calls live in a child module: `unix` and `windows`. Every other store module,
 //! and the engine, calls these functions. The daemon's `sys` seam re-exports the no-follow and
@@ -235,6 +236,26 @@ pub fn ended(status: &std::process::ExitStatus) -> Ended {
     }
 }
 
+/// `text` followed by one code unit that is not Unicode: the byte 0xE9 on Unix, an unpaired
+/// surrogate on Windows. For test fixtures of paths and account names that are not Unicode.
+#[doc(hidden)]
+pub fn not_unicode(text: &str) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0xE9);
+        std::ffi::OsString::from_vec(bytes)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0xD800);
+        std::ffi::OsString::from_wide(&wide)
+    }
+}
+
 fn bad_punch_range(why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -244,6 +265,13 @@ fn bad_punch_range(why: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wx12d_not_unicode_text_keeps_its_start_and_has_no_str() {
+        let odd = super::not_unicode("zo");
+        assert_eq!(odd.to_str(), None);
+        assert!(odd.to_string_lossy().starts_with("zo"), "{odd:?}");
+    }
+
     use super::*;
     use std::fs;
     use std::io::{Read, Seek, SeekFrom};

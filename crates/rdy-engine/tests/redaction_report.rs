@@ -312,13 +312,12 @@ fn rdx5_quarantine_listing_reuses_both_existing_name_rules() {
     ];
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(
+        rdy_store::pio::symlink(
             "/nonexistent/rdx5",
             store.join("segments/seg-000001.log.torn-2"),
         )
         .unwrap();
-        std::os::unix::fs::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-3"))
-            .unwrap();
+        rdy_store::pio::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-3")).unwrap();
         expected.extend(["index.redb.damaged-3", "segments/seg-000001.log.torn-2"]);
         expected.sort();
     }
@@ -1144,14 +1143,9 @@ fn rdx5_quarantine_names_are_reported_without_erasure() {
     std::fs::create_dir(store.join("index.redb.damaged-6")).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         // unreadable and dangling: reading either for content would fail
-        std::fs::set_permissions(
-            store.join("index.redb.damaged-5"),
-            std::fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(
+        rdy_store::pio::set_mode(&store.join("index.redb.damaged-5"), 0o000).unwrap();
+        rdy_store::pio::symlink(
             "/nonexistent/rdx5",
             store.join("segments/seg-000001.log.torn-6"),
         )
@@ -1200,14 +1194,7 @@ fn rdx5_quarantine_names_are_reported_without_erasure() {
         );
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            store.join("index.redb.damaged-5"),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
-    }
+    rdy_store::pio::set_mode(&store.join("index.redb.damaged-5"), 0o644).unwrap();
     assert_eq!(
         std::fs::read(store.join("index.redb.damaged-5")).unwrap(),
         b"damaged bytes"
