@@ -555,3 +555,204 @@ fn mh1_punch_repeats_and_survives_each_boundary() {
         );
     }
 }
+
+/// A file of `len` bytes: `0xA5` sentinels with zeros at `zeros`, opened to read and write.
+fn sentinel_file(len: usize, zeros: std::ops::Range<usize>) -> (tempfile::NamedTempFile, Vec<u8>) {
+    let f = tempfile::NamedTempFile::new().unwrap();
+    let mut content = vec![0xA5u8; len];
+    content[zeros].fill(0);
+    std::fs::write(f.path(), &content).unwrap();
+    (f, content)
+}
+
+fn open_rw(path: &Path) -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
+#[test]
+fn wx3_sparse_punch_changes_only_authorized_zeros() {
+    // the real platform call over zero runs that touch sentinels on both sides, unaligned and
+    // aligned, twice (a file marked sparse once stays so): every byte, and the length, as before
+    let (f, content) = sentinel_file(3 * 1024 * 1024, 4097..(2 * 1024 * 1024 + 13));
+    let file = open_rw(f.path());
+    for (offset, len) in [
+        (4097u64, 1u64),
+        (4097, 2 * 1024 * 1024 + 13 - 4097),
+        (8192, 1024 * 1024),
+        (2 * 1024 * 1024 + 12, 1),
+    ] {
+        for round in 0..2 {
+            let outcome = pio::punch_hole(&file, offset, len);
+            assert!(outcome.is_ok(), "{offset} {len} round {round}: {outcome:?}");
+            assert_eq!(
+                std::fs::read(f.path()).unwrap(),
+                content,
+                "{offset} {len} round {round}"
+            );
+            assert_eq!(file.metadata().unwrap().len(), content.len() as u64);
+        }
+    }
+    // the punch reads the bytes through the handle it punched: positioned reads agree
+    let mut back = vec![1u8; content.len()];
+    pio::read_exact_at(&file, &mut back, 0).unwrap();
+    assert_eq!(back, content);
+
+    // a removal through the real call: only the removal's zeros differ from the original
+    let setup = Setup::new();
+    let original = segment_bytes(&setup.path);
+    let mut want = original.clone();
+    for s in &setup.spans() {
+        let bytes = want
+            .get_mut(&format!("seg-{:06}.log", s.place.segment))
+            .unwrap();
+        let start = (s.place.offset + HEADER) as usize;
+        bytes[start..start + s.len as usize].fill(0);
+    }
+    let at_start = places(&setup.path);
+    drop(Store::open(&setup.path).unwrap());
+    assert_eq!(segment_bytes(&setup.path), want);
+    let at_real = places(&setup.path);
+    assert_eq!(at_real.len(), at_start.len(), "no frame added or lost");
+
+    // a removed payload that no longer reads as zeros, and a forged header, are refused before
+    // the real call: their bytes stay as they are, and the rest punch again unchanged
+    let spans = setup.spans();
+    let log = log_at(&setup.path);
+    let write_at = |span: &DropSpan, at: u64, byte: u8| {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(segment_file(&setup.path, span))
+            .unwrap();
+        pio::write_all_at(&f, &[byte], at).unwrap();
+    };
+    let kept = spans[0].place.offset + HEADER + 1;
+    let forged = spans[1].place.offset + 5;
+    write_at(&spans[0], kept, 0x77);
+    write_at(&spans[1], forged, !spans[1].hash.0[0]);
+    let before = segment_bytes(&setup.path);
+    let summary = log.punch_removed(MAX_SPANS);
+    drop(log);
+    assert_eq!(summary.attempted, 4);
+    assert_eq!(summary.failed, 2);
+    assert_eq!(segment_bytes(&setup.path), before);
+    let seg0 = &before[&format!("seg-{:06}.log", spans[0].place.segment)];
+    assert_eq!(seg0[kept as usize], 0x77, "a byte the punch was not given");
+}
+
+#[test]
+fn wx3_unsupported_punch_keeps_the_existing_note() {
+    // a removal on open, then a compaction: each outcome gives exactly its existing note, and no
+    // byte changes after the removal's own zeros
+    type Answer = fn() -> io::Result<Punch>;
+    let cases: [(&str, Answer, &[&str]); 3] = [
+        ("unsupported", || Ok(Punch::Unsupported), &[NOT_SUPPORTED]),
+        ("permission", permission_denied, &[FAILED]),
+        ("io", || Err(io::Error::other("injected")), &[FAILED]),
+    ];
+    for (name, answer, want) in cases {
+        let setup = Setup::new();
+        let (events, hooks) = observe(move |_| Some(answer()));
+        let s = Store::open(&setup.path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(diagnostics(&events), want, "{name}: on open");
+        let after_open = segment_bytes(&setup.path);
+        let report = s.compact(false).unwrap();
+        assert_eq!(report.notes, want, "{name}: compact");
+        assert_eq!(
+            report.removed_bytes,
+            setup.ranges().iter().map(|r| r.1).sum::<u64>()
+        );
+        assert_eq!(segment_bytes(&setup.path), after_open, "{name}");
+        drop(hooks);
+        let removed = frames(&s.reader(), s.log_end())
+            .into_iter()
+            .filter(|f| f.payload.is_none())
+            .count();
+        assert_eq!(removed, 4, "{name}: the content stays removed");
+    }
+
+    // a census that cannot read the allocation after punching keeps its existing note
+    let setup = Setup::new();
+    let s = Store::open(&setup.path).unwrap();
+    let (_, hooks) = observe(|_| Some(Ok(Punch::Unsupported)));
+    let reads = Rc::new(RefCell::new(0usize));
+    let r = Rc::clone(&reads);
+    let segments = segment_bytes(&setup.path).len();
+    rdy_store::compact::on_allocation(Some(Box::new(move |_| {
+        *r.borrow_mut() += 1;
+        (*r.borrow() > segments).then(|| Err(io::Error::other("injected census failure")))
+    })));
+    let report = s.compact(false);
+    rdy_store::compact::on_allocation(None);
+    drop(hooks);
+    let report = report.unwrap();
+    assert_eq!(
+        report.notes,
+        [
+            NOT_SUPPORTED,
+            "disk allocation could not be read after punching; on_disk_bytes is the count before this call",
+        ]
+    );
+    assert_eq!(report.punched_bytes, 0);
+}
+
+#[test]
+fn wx3_allocated_bytes_are_not_log_length() {
+    // a real punch of a zero interior frees allocation; the length stays
+    let len = 8 * 1024 * 1024;
+    let (f, content) = sentinel_file(len, 1024 * 1024..7 * 1024 * 1024);
+    let file = open_rw(f.path());
+    file.sync_all().unwrap();
+    let before = pio::allocated_bytes(&file).unwrap();
+    assert!(
+        before >= len as u64 / 2,
+        "a written file is allocated: {before}"
+    );
+    let outcome = pio::punch_hole(&file, 1024 * 1024, 6 * 1024 * 1024).unwrap();
+    assert_eq!(outcome, Punch::Supported, "this file system punches");
+    file.sync_all().unwrap();
+    let after = pio::allocated_bytes(&file).unwrap();
+    assert_eq!(
+        file.metadata().unwrap().len(),
+        len as u64,
+        "the length stays"
+    );
+    assert!(
+        after < len as u64 && after < before,
+        "allocation fell below the length: {before} -> {after} of {len}"
+    );
+    assert_eq!(std::fs::read(f.path()).unwrap(), content);
+
+    // compaction's on_disk_bytes is the segment files' allocation, never the log's length
+    let setup = Setup::new();
+    let s = Store::open(&setup.path).unwrap();
+    let report = s.compact(true).unwrap();
+    let allocated: u64 = std::fs::read_dir(setup.path.join("segments"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with("seg-") && name.ends_with(".log")
+        })
+        .map(|p| pio::allocated_bytes(&std::fs::File::open(p).unwrap()).unwrap())
+        .sum();
+    assert_eq!(report.on_disk_bytes, allocated);
+    let lengths: u64 = segment_bytes(&setup.path)
+        .values()
+        .map(|b| b.len() as u64)
+        .sum();
+    assert_eq!(
+        report.log_bytes, lengths,
+        "log bytes are the segment lengths"
+    );
+    // the removed megabyte blob was punched on open, so its allocation is gone
+    assert!(
+        report.on_disk_bytes < report.log_bytes,
+        "{} on disk for {} log bytes",
+        report.on_disk_bytes,
+        report.log_bytes
+    );
+}

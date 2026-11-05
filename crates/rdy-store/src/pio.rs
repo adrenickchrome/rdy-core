@@ -30,7 +30,6 @@
 //! and the engine, calls these functions. The daemon's `sys` seam re-exports the no-follow and
 //! privacy calls under the same names.
 
-#[cfg(unix)]
 use std::fs::File;
 use std::io;
 
@@ -41,6 +40,8 @@ pub use unix::*;
 
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub use windows::*;
 
 // Stops the build in this module itself, so that each call into it is not one more error: the
 // placeholders in pio/windows.rs name each part that is missing.
@@ -112,7 +113,6 @@ pub fn on_punch(backend: Option<PunchBackend>) {
 /// call; a zero length makes no call and succeeds. On macOS only the range's aligned interior is
 /// punched, so a span with no aligned interior makes no call. A file system that cannot punch is
 /// `Unsupported`; any other failed call is an error.
-#[cfg(unix)]
 pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
     if len == 0 {
         return Ok(Punch::Supported);
@@ -127,7 +127,10 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
     let injected = PUNCH_BACKEND.with(|b| b.borrow_mut().as_mut().and_then(|f| f(offset, len)));
     match injected {
         Some(answer) => answer,
+        #[cfg(unix)]
         None => unix::platform_punch(file, offset, len),
+        #[cfg(windows)]
+        None => windows::platform_punch(file, offset, len),
     }
 }
 
@@ -191,16 +194,17 @@ mod tests {
     #[test]
     fn wx1_isolated_interface_probe_has_no_success_stub() {
         // The Windows provider source, which an isolated native probe compiles on its own, holds
-        // only the placeholders of the parts not built yet: no body that compiles, and no
-        // answer made up without the platform call.
+        // only the registrations of its built children and the placeholders of the parts not
+        // built yet: no body that compiles, and no answer made up without the platform call.
         let (found, rest) = placeholders(&code_lines(&source("src/pio/windows.rs")));
-        assert_eq!(rest.trim(), "", "code outside the placeholders");
+        assert_eq!(
+            rest.trim(),
+            "pub use windows_io::*;\nmod windows_io;",
+            "code outside the placeholders"
+        );
         assert_eq!(
             found,
             [
-                "rdy_store::pio has no Windows implementation yet of positioned reads and \
-                 writes, hole punching (FSCTL_SET_ZERO_DATA on a sparse file) or allocated \
-                 bytes (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of privacy (a protected DACL \
                  with one allow ACE for this account) or no-follow opens (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of opens, entry kinds and \
@@ -258,6 +262,30 @@ mod tests {
         let windows_pio = code_lines(&source("src/pio/windows.rs"));
         for word in STUB_WORDS {
             assert!(!windows_pio.contains(word), "pio/windows.rs holds {word}");
+        }
+        // Positioned I/O, punching and allocation are built (Task 3): pio/windows_io.rs makes each
+        // platform call, and holds no stub body or placeholder before its tests.
+        let io = source("src/pio/windows_io.rs");
+        let io = code_lines(io.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(!io.contains(word), "pio/windows_io.rs holds {word}");
+        }
+        assert!(placeholders(&io).0.is_empty());
+        for call in [
+            "seek_read",
+            "seek_write",
+            "DeviceIoControl",
+            "FSCTL_SET_SPARSE",
+            "FSCTL_SET_ZERO_DATA",
+            "GetFileInformationByHandleEx",
+            "FileStandardInfo",
+        ] {
+            assert!(io.contains(call), "pio/windows_io.rs calls {call}");
         }
     }
 

@@ -952,3 +952,148 @@ fn seal1_an_intact_sealed_segment_passes() {
         .unwrap();
     assert_eq!(n, 9);
 }
+
+/// wx3: positioned reads and writes go to the offset they name and leave the file's cursor where
+/// it was, also when threads share one handle. The log's own reads of the same segment file
+/// still agree.
+#[test]
+fn wx3_positioned_io_keeps_the_cursor() {
+    use rdy_store::pio;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let (loc, _) = log.append(1, b"frame payload").unwrap();
+    log.sync().unwrap();
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    let len = f.metadata().unwrap().len();
+    let mut original = vec![0u8; len as usize];
+    pio::read_exact_at(&f, &mut original, 0).unwrap();
+
+    // a cursor read, then positioned calls, then the cursor read goes on where it stopped
+    f.seek(SeekFrom::Start(3)).unwrap();
+    let mut two = [0u8; 2];
+    f.read_exact(&mut two).unwrap();
+    assert_eq!(two, original[3..5]);
+    let mut back = vec![0u8; 8];
+    pio::read_exact_at(&f, &mut back, len - 8).unwrap();
+    assert_eq!(back, original[len as usize - 8..]);
+    pio::write_all_at(&f, b"tail", len + 100).unwrap();
+    assert_eq!(f.stream_position().unwrap(), 5, "the cursor did not move");
+    f.read_exact(&mut two).unwrap();
+    assert_eq!(two, original[5..7]);
+
+    // a cursor write is not redirected by the positioned calls around it
+    f.seek(SeekFrom::Start(len + 10)).unwrap();
+    pio::write_all_at(&f, b"AB", len + 50).unwrap();
+    std::io::Write::write_all(&mut f, b"cd").unwrap();
+    assert_eq!(f.stream_position().unwrap(), len + 12);
+    let mut at = [0u8; 2];
+    pio::read_exact_at(&f, &mut at, len + 10).unwrap();
+    assert_eq!(&at, b"cd");
+    pio::read_exact_at(&f, &mut at, len + 50).unwrap();
+    assert_eq!(&at, b"AB");
+
+    // threads share the handle: each call reads and writes its own offset only
+    f.seek(SeekFrom::Start(7)).unwrap();
+    let base = len + 1000;
+    std::thread::scope(|s| {
+        for t in 0..8u64 {
+            let f = &f;
+            s.spawn(move || {
+                for round in 0..200u64 {
+                    let at = base + (t * 200 + round) * 16;
+                    let mine = [(t as u8) ^ (round as u8); 16];
+                    pio::write_all_at(f, &mine, at).unwrap();
+                    let mut got = [0u8; 16];
+                    pio::read_exact_at(f, &mut got, at).unwrap();
+                    assert_eq!(got, mine, "thread {t} round {round}");
+                }
+            });
+        }
+    });
+    assert_eq!(
+        f.stream_position().unwrap(),
+        7,
+        "no thread moved the cursor"
+    );
+    for t in 0..8u64 {
+        for round in 0..200u64 {
+            let mut got = [0u8; 16];
+            pio::read_exact_at(&f, &mut got, base + (t * 200 + round) * 16).unwrap();
+            assert_eq!(got, [(t as u8) ^ (round as u8); 16]);
+        }
+    }
+
+    // the frame is still the frame: nothing before the old end changed
+    let mut now = vec![0u8; len as usize];
+    pio::read_exact_at(&f, &mut now, 0).unwrap();
+    assert_eq!(now, original);
+    assert_eq!(log.read(loc).unwrap(), (1, b"frame payload".to_vec()));
+}
+
+/// wx3: a read that the file ends before is `UnexpectedEof`; an offset past `i64::MAX` or a range
+/// whose end overflows is an error before any byte moves; an empty call is a success anywhere.
+/// The file's bytes and length are the same after each refusal.
+#[test]
+fn wx3_short_io_and_overflow_are_handled() {
+    use rdy_store::pio;
+    use std::io::ErrorKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f");
+    std::fs::write(&path, b"0123456789").unwrap();
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let unchanged = || assert_eq!(std::fs::read(&path).unwrap(), b"0123456789");
+
+    // short reads: at the end, past it, and across it
+    for (at, n) in [(10u64, 1usize), (11, 1), (1000, 4), (8, 3), (0, 11)] {
+        let mut buf = vec![0xEEu8; n];
+        let e = pio::read_exact_at(&f, &mut buf, at).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::UnexpectedEof, "{at} {n}");
+        unchanged();
+    }
+    // the last byte, exactly
+    let mut one = [0u8; 1];
+    pio::read_exact_at(&f, &mut one, 9).unwrap();
+    assert_eq!(one, *b"9");
+
+    // offsets the platform cannot address are InvalidInput, for reads and writes alike
+    for at in [u64::MAX, u64::MAX - 1, i64::MAX as u64 + 1] {
+        let mut buf = [0u8; 4];
+        let e = pio::read_exact_at(&f, &mut buf, at).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidInput, "read at {at}");
+        let e = pio::write_all_at(&f, b"xxxx", at).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidInput, "write at {at}");
+        unchanged();
+    }
+    // a range that starts below i64::MAX and ends past it changes nothing
+    for at in [i64::MAX as u64 - 1, i64::MAX as u64 - 3] {
+        assert!(pio::write_all_at(&f, b"xxxx", at).is_err(), "write at {at}");
+        let mut buf = [0u8; 4];
+        assert!(
+            pio::read_exact_at(&f, &mut buf, at).is_err(),
+            "read at {at}"
+        );
+        unchanged();
+    }
+
+    // an empty call is a success, wherever it is, and moves nothing
+    for at in [0, 10, 1000, i64::MAX as u64, u64::MAX] {
+        pio::read_exact_at(&f, &mut [], at).unwrap();
+        pio::write_all_at(&f, &[], at).unwrap();
+    }
+    unchanged();
+
+    // a write past the end extends the file with zeros between
+    pio::write_all_at(&f, b"ab", 12).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"0123456789\0\0ab");
+}

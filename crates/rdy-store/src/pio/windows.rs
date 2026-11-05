@@ -1,11 +1,11 @@
-//! The Windows side of [`crate::pio`] (FW-XP1 Phase 4). No part of it is built yet. Each part
-//! below stops the build with a `compile_error!` that names what it lacks, so no call can reach a
-//! body that compiles without the platform call, and no answer is made up. A child module of this
-//! one replaces each placeholder with its implementation.
+//! The Windows side of [`crate::pio`] (FW-XP1 Phase 4). Each part that is not built yet stops the
+//! build with a `compile_error!` that names what it lacks, so no call can reach a body that
+//! compiles without the platform call, and no answer is made up. A child module of this one
+//! replaces each placeholder with its implementation: `windows_io` makes the positioned reads and
+//! writes, hole punches and allocated-bytes queries.
 
-compile_error!(
-    "rdy_store::pio has no Windows implementation yet of positioned reads and writes, hole punching (FSCTL_SET_ZERO_DATA on a sparse file) or allocated bytes (FW-XP1 Phase 4)"
-);
+pub use windows_io::*;
+mod windows_io;
 
 compile_error!(
     "rdy_store::pio has no Windows implementation yet of privacy (a protected DACL with one allow ACE for this account) or no-follow opens (FW-XP1 Phase 4)"
