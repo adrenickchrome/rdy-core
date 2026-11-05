@@ -361,11 +361,16 @@ fn every_file(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 walk(root, &path, out);
             } else {
                 let rel = path.strip_prefix(root).unwrap().to_path_buf();
-                // A held lock file cannot be read on Windows (byte-range locks are mandatory); it holds no
-                // setting, and `tree` drops an empty one.
+                // On Windows a file another handle holds locked cannot be read (byte-range locks
+                // are mandatory): a lock file holds no setting, so it reads as empty, and the
+                // open store's index stands in as its length.
                 let bytes = match fs::read(&path) {
-                    Err(_) if cfg!(windows) && path.extension().is_some_and(|x| x == "lock") => {
-                        vec![]
+                    Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => {
+                        if path.extension().is_some_and(|x| x == "lock") {
+                            vec![]
+                        } else {
+                            format!("locked, {} bytes", meta.len()).into_bytes()
+                        }
                     }
                     other => other.unwrap_or_else(|e| panic!("{}: {e}", path.display())),
                 };
