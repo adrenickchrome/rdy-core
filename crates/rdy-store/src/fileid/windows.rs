@@ -156,8 +156,12 @@ mod tests {
             "the reparse point is its own object"
         );
         assert_eq!(id(&link), id(&link));
-        let through = std::fs::canonicalize(&link).unwrap();
-        assert_eq!(id(&through), id(&target), "following it reaches the target");
+        match std::fs::canonicalize(&link) {
+            Ok(through) => assert_eq!(id(&through), id(&target), "following it reaches the target"),
+            // ERROR_UNTRUSTED_MOUNT_POINT: the system refuses to traverse a link that an ordinary
+            // account made, so nothing is followed
+            Err(e) => assert_eq!(e.raw_os_error(), Some(448), "{e}"),
+        }
     }
 
     #[test]
