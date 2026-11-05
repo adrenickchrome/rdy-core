@@ -402,12 +402,11 @@ class Sequence(unittest.TestCase):
         self.assertEqual(len(releases.rows), 1)
         self.assertEqual(sorted(a['name'] for a in releases.draft_row()['assets']), sorted(pub.stage_names(stage)))
         draft_id = releases.draft_row()['id']
-        # Both native genuine checks, then the final tag. A second tag job in the same state refuses.
+        # Both native genuine checks, then the final tag. A second tag job in the same state records a retry, with no write.
         stage.both_genuine()
         stage.final_tag()
-        with self.assertRaises(pub.ControllerError) as caught:
-            stage.final_tag()
-        self.assertEqual(str(caught.exception), 'reservation conflict: the final tag v0.43.0 exists before this job created it')
+        self.assertEqual(json.loads(stage.final_tag())['result'], 'recorded_retry')
+        self.assertEqual(releases.mutations.count('create_final_tag'), 1)
         # Promotion: a lost acknowledgement reads back and never publishes twice.
         releases.faults['publish_draft'] = (True, 1)
         self.assertTrue(json.loads(stage.promote()))

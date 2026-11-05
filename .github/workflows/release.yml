@@ -350,7 +350,7 @@ jobs:
         with:
           name: caller-verifier-a${{ github.run_attempt }}
           path: ${{ runner.temp }}/rdy-release-verifier
-      - name: Check everything again, then create v<V> at S once
+      - name: Check everything again, then create v<V> at S once or record the retry
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
@@ -366,7 +366,13 @@ jobs:
           /usr/bin/python3 -I -B trusted/scripts/release/publish.py final-tag
           --signer-sha 0000000000000000000000000000000000000000 --trusted trusted
           --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
-          --work "$RUNNER_TEMP/rdy-release-work"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/final-tag-evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: final-tag-evidence-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/final-tag-evidence/final-tag-evidence.json
+          if-no-files-found: error
+          retention-days: 90
   promote:
     name: Promote verified draft
     needs: [verifier, eligibility, sign, draft, genuine-mac, genuine-linux, final-tag]

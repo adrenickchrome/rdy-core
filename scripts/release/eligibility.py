@@ -313,7 +313,8 @@ class Reservation(object):
 
 @dataclass(frozen=True)
 class Publication(object):
-    """`state` is `unpublished`, `draft` or `published`."""
+    """`state` is `unpublished`, `final_tag`, `draft` or `published`. `final_tag` is a final tag at the reserved
+    commit with no release this reader can see: an unfinished release that gives no new authority."""
     state: str
     release_id: object
 
@@ -1104,9 +1105,11 @@ def _publication(facts, releases, version, commit):
     mine = [r for r in releases if r.tag_name == 'v' + version]
     final = facts.optional('ref', 'tags/v' + version)
     if not mine:
-        if final is not None:
+        if final is None:
+            return Publication('unpublished', None)
+        if _tag_commit(facts, final) != commit:
             raise Refused(CONFLICT, 'the tag v' + version + ' exists without its release')
-        return Publication('unpublished', None)
+        return Publication('final_tag', None)
     if len(mine) != 1:
         raise Refused(CONFLICT, 'more than one release names v' + version)
     release = mine[0]

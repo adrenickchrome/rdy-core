@@ -319,9 +319,10 @@ class Stage(object):
         self.genuine(LINUX, attempt)
 
     def final_tag(self, attempt=1):
-        PUBLISH.run_final_tag(self.releases, self.rig.enrollment, self.request(attempt), self.transfers(), DISPATCH_RUN,
-                              attempt, H, self.rig.verifier, self.work())
+        evidence = PUBLISH.run_final_tag(self.releases, self.rig.enrollment, self.request(attempt), self.transfers(),
+                                         DISPATCH_RUN, attempt, H, self.rig.verifier, self.work())
         self.w.job(DISPATCH_RUN, attempt, TAG_JOB_ID + 1000 * (attempt - 1), PUBLISH.TAG_JOB)
+        return evidence
 
     def promote(self, attempt=1):
         return PUBLISH.promote(self.git, self.releases, self.rig.enrollment, self.request(attempt), self.transfers(),
@@ -333,6 +334,16 @@ class Stage(object):
         self.draft()
         self.both_genuine()
         return self
+
+    def later_attempt(self, attempt=2):
+        """A later attempt's eligibility and signer jobs: the signer recovers the retained bytes and transfers them."""
+        self.w.runs.setdefault((DISPATCH_RUN, attempt), dict(self.w.runs[(DISPATCH_RUN, 1)], run_attempt=attempt))
+        self.w.job(DISPATCH_RUN, attempt, ELIGIBILITY_JOB_ID + 1000 * (attempt - 1), PUBLISH.ELIGIBILITY_JOB)
+        result = PUBLISH.reconcile(self.request(attempt), self.git, self.releases, self.rig.verifier, H, self.work())
+        signer = self.rig.session(self.rig.rerun(attempt=attempt))
+        retained = signer.recover(self.rig.tuple_bytes())
+        self.transfer_signature(retained.signature, signer.authorization(), attempt=attempt)
+        return result
 
     def public_check(self, receipt, target=LINUX, **changes):
         arguments = dict(checker=self.checker(target), verify=self.rig.verifier, work=self.work(),
@@ -1187,22 +1198,602 @@ class Retry(Base):
 
 
 class TagWindow(Base):
-    def test_rsig7_tag_without_a_visible_release_stops_a_retry(self):
-        # A read-only token cannot list a draft. After the final tag and before the promotion lands, a new run
-        # reads the tag with no release, and it stops there: no credentials, no Sign and no write. The window is
-        # the promote job alone, because the tag job checks everything first.
+    def test_rsig7_tag_without_a_visible_release_resumes_a_retry(self):
+        # A read-only token cannot list a draft. After the final tag and before the promotion lands, a new run reads
+        # the tag at the reserved commit with no release. That is an unfinished release, not a conflict.
         stage = self.stage()
         stage.ready()
         stage.final_tag()
         before = list(stage.releases.mutations)
         signs = stage.rig.kms.signs
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual((result.state, result.mode, result.terminal), ('ready', 'recovery', None))
+        self.assertEqual(stage.releases.mutations, before)
+        self.assertEqual(stage.rig.kms.signs, signs)
+        # A second tag job in the same state changes nothing either.
+        stage.final_tag()
+        self.assertEqual(stage.releases.mutations.count('create_final_tag'), 1)
+        # A tag somewhere else still stops the retry, before any credentials, Sign or write.
+        stage.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
         self.refused('reservation conflict: the tag v0.43.0 exists without its release', PUBLISH.reconcile, stage.request(),
                      stage.git, stage.releases, stage.rig.verifier, H, stage.work())
         self.assertEqual(stage.releases.mutations, before)
         self.assertEqual(stage.rig.kms.signs, signs)
-        # A second tag job in the same state changes nothing either.
-        self.refused('reservation conflict: the final tag v0.43.0 exists before this job created it', stage.final_tag)
-        self.assertEqual(stage.releases.mutations.count('create_final_tag'), 1)
+
+
+class FinalTagRetry(Base):
+    """A retry between the final tag and the publication. Every remote write goes to the fakes."""
+
+    def interrupted(self):
+        """A run that created the final tag and stopped before its promotion landed."""
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        return stage
+
+    def snapshot(self, stage):
+        return (list(stage.releases.mutations), stage.rig.kms.signs, list(stage.git.created),
+                copy.deepcopy(stage.releases.rows), stage.w.refs.get('tags/v0.43.0'))
+
+    def test_rsig11_new_reservation_with_existing_tag_still_refuses(self):
+        text = 'reservation conflict: the tag v0.43.0 already exists'
+        stage = self.stage()
+        stage.w.refs['tags/v0.43.0'] = ('commit', S)
+        self.refused(text, PUBLISH.reconcile, stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        stage.w.find_job(ctl.RESERVE_JOB_ID).update(status='in_progress', conclusion=None)
+        self.refused(text, PUBLISH.reserve_tuple, stage.request(), stage.git, DISPATCH_RUN, 1, H)
+        self.assertEqual(stage.git.created, [], 'no reservation object or ref')
+        self.assertNotIn('tags/reserve/v0.43.0', stage.w.refs)
+
+    def test_rsig11_retry_after_final_tag_makes_no_second_sign_and_promotes_the_same_draft(self):
+        stage = self.interrupted()
+        draft_id = stage.releases.draft_row()['id']
+        assets = copy.deepcopy(stage.releases.draft_row()['assets'])
+        tag = stage.w.refs['tags/v0.43.0']
+        created = list(stage.git.created)
+        self.assertEqual(stage.rig.kms.signs, 1)
+
+        # Attempt 2: every job runs again and reads everything again.
+        result = stage.later_attempt(2)
+        self.assertEqual((result.state, result.mode), ('ready', 'recovery'))
+        stage.w.job(DISPATCH_RUN, 2, 9499, CONTROLLER.RESERVE_JOB)
+        stage.w.find_job(9499).update(status='in_progress', conclusion=None)
+        receipt = json.loads(PUBLISH.reserve_tuple(stage.request(2), stage.git, DISPATCH_RUN, 2, H))
+        self.assertIs(receipt['created'], False)
+        stage.draft(attempt=2)
+        stage.both_genuine(attempt=2)
+        evidence = json.loads(stage.final_tag(attempt=2))
+        self.assertEqual(evidence['result'], 'recorded_retry')
+        published = json.loads(stage.promote(attempt=2))
+
+        # One Sign, one draft, one tag, one flip, and the same draft id and assets.
+        self.assertEqual(stage.rig.kms.signs, 1)
+        self.assertEqual(stage.git.created, created)
+        mutations = stage.releases.mutations
+        self.assertEqual((mutations.count('create_draft'), mutations.count('create_final_tag'),
+                          mutations.count('publish_draft')), (1, 1, 1))
+        self.assertEqual(mutations[-1], 'publish_draft')
+        self.assertEqual(len(stage.releases.rows), 1)
+        self.assertEqual(published['release_id'], draft_id)
+        self.assertEqual(evidence['release_id'], draft_id)
+        self.assertFalse(stage.releases.draft_row()['draft'])
+        self.assertEqual(stage.releases.draft_row()['assets'], assets)
+        self.assertEqual(stage.w.refs['tags/v0.43.0'], tag)
+        # The retried release is then the ordinary terminal observation.
+        result = PUBLISH.reconcile(stage.request(2), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual(result.state, 'already_published_matching')
+        self.assertEqual(result.terminal.release_id, draft_id)
+
+    def test_rsig11_final_tag_job_accepts_only_the_exact_tag_with_no_write_and_records_it(self):
+        stage = self.stage()
+        stage.ready()
+        created = json.loads(stage.final_tag())
+        self.assertEqual(created, {'schema': 1, 'version': '0.43.0', 'commit': S, 'tuple_sha256': stage.rig.tuple_sha(),
+                                   'release_id': stage.releases.draft_row()['id'], 'run_id': DISPATCH_RUN, 'run_attempt': 1,
+                                   'result': 'created'})
+        before = self.snapshot(stage)
+        # The exact tag: no write, and the evidence says so.
+        retry = json.loads(stage.final_tag())
+        self.assertEqual(retry, dict(created, result='recorded_retry'))
+        self.assertEqual(self.snapshot(stage), before)
+        # An annotated tag at S reads through to S, and it is recorded the same way.
+        name = format(0xfeed, '040x')
+        stage.w.tags[name] = dict(sha=name, tag='v0.43.0', object_type='commit', object_sha=S, message_bytes=b'',
+                                  sha256=digest(93))
+        stage.w.refs['tags/v0.43.0'] = ('tag', name)
+        self.assertEqual(json.loads(stage.final_tag())['result'], 'recorded_retry')
+        self.assertEqual(stage.releases.mutations, before[0])
+
+        # A tag at another commit refuses, and nothing moves it.
+        stage.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
+        self.refused('reservation conflict: the tag v0.43.0 is not the reserved commit', stage.final_tag)
+        self.assertEqual(stage.w.refs['tags/v0.43.0'], ('commit', '9' * 40))
+        self.assertEqual(stage.releases.mutations, before[0])
+        # The job's own read comes after its checks. A tag that moved during them is refused by that read.
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        before = list(stage.releases.mutations)
+        real = PUBLISH._qualify
+
+        def moved_during_the_checks(*args):
+            ready = real(*args)
+            stage.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
+            return ready
+        with mock.patch.object(PUBLISH, '_qualify', moved_during_the_checks):
+            self.refused('reservation conflict: the final tag v0.43.0 exists before this job created it', stage.final_tag)
+        self.assertEqual(stage.releases.mutations, before)
+
+        # All its checks come first: with the exact tag present, each failure is that check's own refusal.
+        def drop_genuine(s):
+            del s.w.members[(GENUINE_ART[MAC], PUBLISH.GENUINE_MEMBER)]
+
+        def bad_signature(s):
+            s.rig.verifier.good = set()
+
+        def asset_bytes(s):
+            row = s.releases.draft_row()
+            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
+
+        def closed(s):
+            s.rig.install(state='CLOSED')
+        for apply, text in (
+                (drop_genuine, 'eligibility incomplete: the ' + MAC + ' genuine receipt artifact is unavailable'),
+                (bad_signature, 'evidence mismatch: the transferred signature does not verify'),
+                (asset_bytes, 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
+                (closed, 'authority unavailable: admission is CLOSED')):
+            fresh = self.interrupted()
+            apply(fresh)
+            before = self.snapshot(fresh)
+            with self.subTest(apply=apply.__name__):
+                self.refused(text, fresh.final_tag)
+                self.assertEqual(self.snapshot(fresh), before)
+
+        # The evidence reaches a durable per-attempt artifact, with no new permission. A job with no record fails.
+        job = job_text('final-tag')
+        self.assertEqual(permissions_of('final-tag'), {'actions': 'read', 'contents': 'write'})
+        self.assertIn('--out "$RUNNER_TEMP/final-tag-evidence"', job)
+        self.assertIn('name: ' + PUBLISH.FINAL_TAG_ARTIFACT + '${{ github.run_attempt }}\n', job)
+        self.assertIn('path: ${{ runner.temp }}/final-tag-evidence/' + PUBLISH.FINAL_TAG_MEMBER + '\n', job)
+        self.assertIn('if-no-files-found: error\n', job)
+        stage = self.interrupted()
+        out = stage.work() / 'evidence'
+        with mock.patch.object(PUBLISH, '_start', lambda *_: (stage.releases, stage.work(), stage.rig.verifier)), \
+                mock.patch.object(PUBLISH, '_enrollment', lambda *_: stage.rig.enrollment), \
+                mock.patch.object(PUBLISH, '_parsed_request', lambda _: stage.request()), \
+                mock.patch.object(PUBLISH, '_transfers', lambda _: stage.transfers()), \
+                mock.patch.object(PUBLISH.sign, 'SshVerifier', lambda: stage.rig.verifier):
+            args = mock.Mock(signer_sha=H, out=out)
+            PUBLISH.cmd_final_tag(args, {'RDY_RELEASE_SETTINGS_READBACK': json.dumps(PUBLISH.SETTINGS_READBACK),
+                                         'GITHUB_RUN_ID': str(DISPATCH_RUN), 'GITHUB_RUN_ATTEMPT': '1'})
+        self.assertEqual(json.loads((out / PUBLISH.FINAL_TAG_MEMBER).read_bytes())['result'], 'recorded_retry')
+
+    def test_rsig11_missing_or_changed_draft_refuses_and_creates_nothing(self):
+        def missing(s):
+            s.releases.rows.clear()
+
+        def missing_asset(s):
+            row = s.releases.draft_row()
+            row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
+
+        def extra_asset(s):
+            s.releases.add_asset(s.releases.draft_row(), 'unexpected.bin', b'z')
+
+        def asset_bytes(s):
+            row = s.releases.draft_row()
+            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
+
+        def notes(s):
+            s.releases.draft_row()['body'] = 'changed notes'
+
+        def target(s):
+            s.releases.draft_row()['target'] = '9' * 40
+
+        def second(s):
+            s.releases.rows.append(dict(s.releases.draft_row(), id=9999))
+
+        def replaced(s):
+            # The same bytes under another draft id: only the receipts can tell.
+            s.releases.draft_row()['id'] += 500
+        tag = 'the final tag v0.43.0 exists without its draft'
+        changed = 'the draft changed after its receipt'
+        for apply, draft, final in (
+                (missing, tag, changed),
+                (missing_asset, 'the draft lacks CLAUDE.md', 'the draft lacks CLAUDE.md'),
+                (extra_asset, 'the draft holds the unexpected asset unexpected.bin',
+                 'the draft holds the unexpected asset unexpected.bin'),
+                (asset_bytes, 'the draft asset AGENTS.md is not its exact bytes',
+                 'the draft asset AGENTS.md is not its exact bytes'),
+                (notes, 'the draft of v0.43.0 is not the exact draft', 'the draft of v0.43.0 is not the exact draft'),
+                (target, 'the release of v0.43.0 does not target the reserved commit', None),
+                (second, 'more than one release names v0.43.0', None),
+                (replaced, 'the draft changed after a prior receipt', changed)):
+            fresh = self.interrupted()
+            fresh.git.runs_of_release = [(DISPATCH_RUN, 1)]
+            fresh.later_attempt(2)
+            fresh.draft(attempt=2)
+            fresh.both_genuine(attempt=2)
+            apply(fresh)
+            before = self.snapshot(fresh)
+            # The draft job, which could write, is the one that must not.
+            with self.subTest(apply=apply.__name__, job='draft'):
+                self.refused('reservation conflict: ' + draft, fresh.draft, attempt=2)
+                self.assertEqual(self.snapshot(fresh), before)
+            # The later jobs refuse the same state, against this attempt's receipts.
+            for name in ('final_tag', 'promote'):
+                with self.subTest(apply=apply.__name__, job=name):
+                    with self.assertRaises(ControllerError) as caught:
+                        getattr(fresh, name)(attempt=2)
+                    if final is not None:
+                        self.assertEqual(str(caught.exception), 'reservation conflict: ' + final)
+                    self.assertEqual(self.snapshot(fresh), before)
+
+    def test_rsig11_revocation_still_stops_the_retry(self):
+        def revoke(s):
+            good = s.git.release_trust
+
+            def trust(version, policy_commit, signing):
+                if signing:
+                    raise ControllerError('the key for v0.43.0 is revoked for new signing')
+                return good(version, policy_commit, signing)
+            s.git.release_trust = trust
+
+        def closed(s):
+            s.rig.install(state='CLOSED')
+        for apply, text in ((revoke, 'signer revoked: the key for v0.43.0 is revoked for new signing'),
+                            (closed, 'authority unavailable: admission is CLOSED')):
+            stage = self.interrupted()
+            stage.later_attempt(2)
+            stage.draft(attempt=2)
+            stage.both_genuine(attempt=2)
+            apply(stage)
+            before = self.snapshot(stage)
+            for job in (stage.final_tag, stage.promote):
+                with self.subTest(apply=apply.__name__, job=job.__name__):
+                    self.refused(text, job, attempt=2)
+                    self.assertEqual(self.snapshot(stage), before)
+            # The signer of a later attempt stops too, with no Sign and no release write.
+            stage.w.runs.setdefault((DISPATCH_RUN, 3), dict(stage.w.runs[(DISPATCH_RUN, 1)], run_attempt=3))
+            with self.subTest(apply=apply.__name__, job='signer'):
+                self.refused(text, lambda: stage.rig.session(stage.rig.rerun(attempt=3)))
+                self.assertEqual(self.snapshot(stage), before)
+
+    def test_rsig11_no_permission_timeout_or_ambiguous_visibility_is_no_proof_of_absence(self):
+        failures = (('permission', GITHUB.Unauthorized('read', 'not authorized (HTTP 403)', 403)),
+                    ('timeout', GITHUB.Uncertain('read', 'outcome unknown (timeout)')),
+                    ('ambiguous', GITHUB.Malformed('read', 'the answer is malformed')))
+
+        def reconciled(stage):
+            return PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+
+        def tag_read_fails(stage, error):
+            real = stage.git.ref
+
+            def ref(name):
+                if name == 'tags/v0.43.0':
+                    raise error
+                return real(name)
+            stage.git.ref = ref
+        for name, error in failures:
+            # The reader: a failed read of the releases or of the tag reports no state at all.
+            for broken in ('releases', 'tag'):
+                stage = self.interrupted()
+                before = self.snapshot(stage)
+                if broken == 'releases':
+                    stage.git.releases = mock.Mock(side_effect=error)
+                else:
+                    tag_read_fails(stage, error)
+                with self.subTest(name=name, broken=broken, job='eligibility'):
+                    with self.assertRaises(ControllerError) as caught:
+                        reconciled(stage)
+                    self.assertIn(str(error), str(caught.exception))
+                    self.assertEqual(self.snapshot(stage), before)
+            # The writer: a failed list of the drafts creates nothing and flips nothing.
+            stage = self.interrupted()
+            stage.later_attempt(2)
+            stage.draft(attempt=2)
+            stage.both_genuine(attempt=2)
+            before = self.snapshot(stage)
+            stage.releases.full_releases = mock.Mock(side_effect=error)
+            for job in (stage.draft, stage.final_tag, stage.promote):
+                with self.subTest(name=name, job=job.__name__):
+                    with self.assertRaises(ControllerError) as caught:
+                        job(attempt=2)
+                    self.assertIn(str(error), str(caught.exception))
+                    self.assertEqual(self.snapshot(stage), before)
+        # A token that lists nothing without saying why: a success with no draft is what a read-only token sees. It
+        # is not absence either. The draft is still there, and no writer acts on that answer.
+        stage = self.interrupted()
+        stage.later_attempt(2)
+        stage.draft(attempt=2)
+        stage.both_genuine(attempt=2)
+        before = self.snapshot(stage)
+        stage.releases.full_releases = lambda: []
+        self.refused('reservation conflict: the final tag v0.43.0 exists without its draft', stage.draft, attempt=2)
+        for job in (stage.final_tag, stage.promote):
+            self.refused('reservation conflict: the draft changed after its receipt', job, attempt=2)
+        self.assertEqual(self.snapshot(stage), before)
+
+        # The wire: only an authenticated 404 is absence. A 403, a 5xx and a timeout never read as no tag or no release.
+        class Wire(object):
+            def __init__(self, answer):
+                self.answer = answer
+
+            def request(self, method, path, body=None, limit=None):
+                if path == '/repos/' + CANDIDATE.REPOSITORY:
+                    return GITHUB.Response(200, {}, canon({'full_name': CANDIDATE.REPOSITORY, 'id': GITHUB.REPOSITORY_ID}))
+                if isinstance(self.answer, Exception):
+                    raise self.answer
+                return GITHUB.Response(self.answer, {}, b'{}')
+
+        def client(answer):
+            return PUBLISH.Releases(Wire(answer), self.stage().work(), 'unused', pause=lambda attempt: None)
+        self.assertIsNone(PUBLISH._final_tag_commit(client(404), '0.43.0'))
+        for answer in (401, 403, 500, GITHUB.Timeout(), GITHUB.TransportFailure()):
+            with self.subTest(answer=answer):
+                with self.assertRaises(ControllerError) as caught:
+                    PUBLISH._final_tag_commit(client(answer), '0.43.0')
+                self.assertNotIsInstance(caught.exception, GITHUB.Absent)
+                with self.assertRaises(ControllerError) as caught:
+                    client(answer).full_releases()
+                self.assertNotIsInstance(caught.exception, GITHUB.Absent)
+
+    def test_rsig11_later_writer_keeps_the_hidden_draft_or_refuses_a_duplicate_or_mismatch(self):
+        stage = self.interrupted()
+        row = copy.deepcopy(stage.releases.draft_row())
+        # The read-only reader sees the tag alone. The writer's token sees the draft that was hidden from it.
+        self.assertEqual(ELIGIBILITY.preliminary_recovery(stage.request(), stage.git).publication,
+                         ELIGIBILITY.Publication('final_tag', None))
+        self.assertEqual(ELIGIBILITY.preliminary_recovery(stage.request(), stage.releases).publication,
+                         ELIGIBILITY.Publication('draft', row['id']))
+        stage.later_attempt(2)
+        before = self.snapshot(stage)
+        result = stage.draft(attempt=2)
+        self.assertEqual(self.snapshot(stage), before, 'the writer reconciles with no write')
+        self.assertEqual(stage.releases.draft_row(), row)
+        receipt = json.loads(result.receipt)
+        self.assertEqual((receipt['release_id'], receipt['commit']), (row['id'], row['target']))
+        self.assertEqual(receipt['notes_sha256'], sha(row['body'].encode('utf-8')))
+        self.assertEqual([a['asset_id'] for a in receipt['assets']],
+                         [a['asset_id'] for a in sorted(row['assets'], key=lambda a: a['name'])])
+
+        def duplicate(s):
+            s.releases.rows.append(dict(s.releases.draft_row(), id=9999))
+
+        def other_target(s):
+            s.releases.draft_row()['target'] = '9' * 40
+
+        def other_notes(s):
+            s.releases.draft_row()['body'] = 'changed notes'
+
+        def other_id(s):
+            s.releases.draft_row()['id'] += 500
+
+        def other_asset(s):
+            row = s.releases.draft_row()
+            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
+        for change, text in ((duplicate, 'more than one release names v0.43.0'),
+                             (other_target, 'the release of v0.43.0 does not target the reserved commit'),
+                             (other_notes, 'the draft of v0.43.0 is not the exact draft'),
+                             (other_id, 'the draft changed after a prior receipt'),
+                             (other_asset, 'the draft asset AGENTS.md is not its exact bytes')):
+            fresh = self.interrupted()
+            fresh.git.runs_of_release = [(DISPATCH_RUN, 1)]
+            fresh.later_attempt(2)
+            change(fresh)
+            before = self.snapshot(fresh)
+            with self.subTest(change=change.__name__):
+                self.refused('reservation conflict: ' + text, fresh.draft, attempt=2)
+                self.assertEqual(self.snapshot(fresh), before)
+
+    def test_rsig11_a_final_tag_gives_no_publication_authority(self):
+        def stops(stage, job, *args, **kwargs):
+            before = self.snapshot(stage)
+            with self.assertRaises(ControllerError):
+                job(*args, **kwargs)
+            self.assertEqual(self.snapshot(stage), before)
+            self.no_publication(stage)
+        # A tag at S and the signature, with no draft: nothing to promote, and no job makes one.
+        stage = self.stage()
+        stage.sign()
+        stage.w.refs['tags/v0.43.0'] = ('commit', S)
+        stops(stage, stage.draft)
+        self.assertEqual(stage.releases.rows, [])
+        # The tag and the exact draft, with no genuine checks in this attempt.
+        stage = self.interrupted()
+        stage.later_attempt(2)
+        stage.draft(attempt=2)
+        stops(stage, stage.final_tag, attempt=2)
+        stops(stage, stage.promote, attempt=2)
+        # The tag and the exact draft, with only the earlier attempt's receipts: they name another attempt.
+        stage = self.interrupted()
+        stage.later_attempt(2)
+        stops(stage, stage.final_tag, attempt=2)
+        stops(stage, stage.promote, attempt=2)
+        # The tag, the exact draft and every receipt, when current authority is gone.
+        stage = self.interrupted()
+        stage.rig.install(state='CLOSED')
+        stops(stage, stage.final_tag)
+        stops(stage, stage.promote)
+
+    def published_and_gone(self):
+        """A release that a run published and a later run read as published, and that has since gone."""
+        stage = self.interrupted()
+        stage.git.runs_of_release = [(DISPATCH_RUN, 1)]
+        stage.promote()
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual(result.state, 'already_published_matching')
+        stage.releases.rows.clear()
+        stage.w.releases[:] = [r for r in stage.w.releases if r['tag_name'] != 'v0.43.0']
+        return stage
+
+    def evidence(self, stage):
+        return copy.deepcopy(stage.w.artifacts), dict(stage.w.members), dict(stage.rig.table.items)
+
+    def test_rsig11_published_release_that_has_gone_creates_no_replacement_and_keeps_the_evidence(self):
+        def gone(stage):
+            pass
+
+        def gone_with_its_tag(stage):
+            # The rules deny this. The prior receipt alone must still stop a replacement.
+            del stage.w.refs['tags/v0.43.0']
+        for variant, draft_text in ((gone, 'the final tag v0.43.0 exists without its draft'),
+                                    (gone_with_its_tag, 'the draft changed after a prior receipt')):
+            stage = self.published_and_gone()
+            variant(stage)
+            stage.later_attempt(2)
+            before, kept = self.snapshot(stage), self.evidence(stage)
+            with self.subTest(variant=variant.__name__, job='draft'):
+                self.refused('reservation conflict: ' + draft_text, stage.draft, attempt=2)
+            for job in (stage.final_tag, stage.promote):
+                with self.subTest(variant=variant.__name__, job=job.__name__):
+                    with self.assertRaises(ControllerError):
+                        job(attempt=2)
+            self.assertEqual(self.snapshot(stage), before)
+            self.assertEqual(self.evidence(stage), kept)
+            self.assertEqual(stage.releases.mutations.count('create_draft'), 1)
+            self.assertEqual(stage.rig.kms.signs, 1)
+        # The same bytes in a new draft are no recovery: only the prior receipt can tell, by the draft's id.
+        stage = self.published_and_gone()
+        stage.later_attempt(2)
+        stage.releases.create_draft('v0.43.0', S, 'v0.43.0', stage.draft_result.draft.body)
+        for entry in stage.draft_result.draft.assets:
+            stage.releases.add_asset(stage.releases.draft_row(), entry.name, (stage.draft_result.folder / entry.name).read_bytes())
+        before = self.snapshot(stage)
+        self.refused('reservation conflict: the draft changed after a prior receipt', stage.draft, attempt=2)
+        self.assertEqual(self.snapshot(stage), before)
+
+    def test_rsig11_a_receipted_draft_is_never_created_or_filled_again(self):
+        # No tag yet. A receipt says the draft was complete, so a missing draft or asset is a changed draft.
+        def removed(s):
+            s.releases.rows.clear()
+
+        def lost_an_asset(s):
+            row = s.releases.draft_row()
+            row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
+        for change, text in ((removed, 'the draft changed after a prior receipt'), (lost_an_asset, 'the draft lacks CLAUDE.md')):
+            stage = self.stage()
+            stage.sign()
+            stage.draft()
+            stage.git.runs_of_release = [(DISPATCH_RUN, 1)]
+            change(stage)
+            before = list(stage.releases.mutations)
+            with self.subTest(change=change.__name__):
+                self.refused('reservation conflict: ' + text, stage.draft)
+                self.assertEqual(stage.releases.mutations, before)
+
+
+class FinalTagSigner(sgn.Base):
+    """The real signer order and adapter over the journal, with a final tag at the reserved commit."""
+
+    def tagged(self):
+        self.rig.w.refs['tags/v0.43.0'] = ('commit', S)
+
+    def test_rsig11_signer_after_final_tag_reuses_the_retained_signature(self):
+        rig = self.rig
+        rig.reserve_version()
+        first = sgn.Inner(rig)
+        rig.run(rig.controller(), first)
+        self.assertEqual(first.signs, 1)
+        self.tagged()
+        second = sgn.Inner(rig)
+        outcome = rig.run(rig.later(2, 'unknown'), second)
+        self.assertEqual(outcome.result, 'already verified')
+        self.assertEqual(outcome.signature, sgn.ARMORED)
+        self.assertEqual(second.calls, ['get-public-key'])
+
+    def test_rsig11_an_attempt_with_no_retained_bytes_stays_unknown(self):
+        rig = self.rig
+        rig.reserve_version()
+        with self.assertRaises(sgn.Death):
+            rig.run(rig.controller(), sgn.Inner(rig, die_at='after dispatch'))
+        self.tagged()
+        later = sgn.Inner(rig)
+        with self.assertRaises(ControllerError) as caught:
+            rig.run(rig.later(2, 'unknown'), later)
+        self.assertEqual(caught.exception.code, CONTROLLER.UNKNOWN)
+        self.assertEqual(later.signs, 0)
+
+    def test_rsig11_a_final_tag_gives_no_first_sign(self):
+        # A tag at the reserved commit before any attempt did not come from this path. It cannot start signing: the
+        # state gives no new authority. The refusal keeps its old text and leaves the reservation as it was.
+        rig = self.rig
+        rig.reserve_version()
+        self.tagged()
+        inner = sgn.Inner(rig)
+        with self.assertRaises(ControllerError) as caught:
+            rig.run(rig.controller(), inner)
+        self.assertEqual(str(caught.exception), 'reservation conflict: the tag v0.43.0 exists without its release')
+        self.assertEqual(inner.signs, 0)
+        self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+        self.assertEqual(rig.row()['phase'], 'RESERVED')
+
+    def test_rsig11_a_visible_draft_beside_the_tag_gives_no_first_sign(self):
+        # The signer's token cannot list a draft. One that could still reads the tag: the state is not what forbids it.
+        rig = self.rig
+        rig.reserve_version()
+        self.tagged()
+        rig.w.releases.append({'release_id': 302, 'tag_name': 'v0.43.0', 'target_commitish': S, 'draft': True,
+                               'prerelease': True, 'assets': ()})
+        inner = sgn.Inner(rig)
+        with self.assertRaises(ControllerError) as caught:
+            rig.run(rig.controller(), inner)
+        self.assertEqual(str(caught.exception), 'reservation conflict: the tag v0.43.0 exists without its release')
+        self.assertEqual(inner.signs, 0)
+        self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+
+    def test_rsig11_unknown_attempt_history_refuses_with_a_final_tag(self):
+        # No attempt record, a tag at S and history that cannot prove the earlier run stopped. The answer is unknown,
+        # not a conflict that a later run could read as proof that nothing was sent.
+        rig = self.rig
+        rig.reserve_version()
+        rig.session()
+        self.tagged()
+        for attempt, change in (
+                (2, lambda: setattr(rig.history, 'error', ControllerError('the history read failed'))),
+                (3, lambda: setattr(rig.history, 'answer', CONTROLLER.History(complete=False, invocations=()))),
+                (4, lambda: None)):
+            ctrl = rig.later(attempt, 'unknown')
+            change()
+            inner = sgn.Inner(rig)
+            with self.subTest(attempt=attempt):
+                with self.assertRaises(ControllerError) as caught:
+                    rig.run(ctrl, inner)
+                self.assertEqual(caught.exception.code, CONTROLLER.UNKNOWN)
+                self.assertEqual(inner.signs, 0)
+                self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+                self.assertEqual(rig.row()['phase'], 'RESERVED')
+            rig.history.error = None
+
+    def test_rsig11_a_failed_tag_read_gives_no_first_sign(self):
+        rig = self.rig
+        rig.reserve_version()
+        real = rig.git.ref
+        errors = (GITHUB.Unauthorized('ref', 'not authorized (HTTP 403)', 403), GITHUB.Uncertain('ref', 'outcome unknown (timeout)'))
+        for attempt, error in enumerate(errors, 2):
+            def ref(name, error=error):
+                if name == 'tags/v0.43.0':
+                    raise error
+                return real(name)
+            ctrl = rig.later(attempt)
+            rig.git.ref = ref
+            inner = sgn.Inner(rig)
+            with self.subTest(error=str(error)):
+                with self.assertRaises(ControllerError):
+                    rig.run(ctrl, inner)
+                self.assertEqual(inner.signs, 0)
+                self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+                # The read right before the attempt says the same, not "no tag".
+                with self.assertRaises(ControllerError) as caught:
+                    CONTROLLER._final_tag_present(rig.git, '0.43.0')
+                self.assertEqual(str(caught.exception), 'signing outcome unknown: the final tag read is unavailable')
+            rig.git.ref = real
+        self.assertIs(CONTROLLER._final_tag_present(rig.git, '0.43.0'), False)
+        self.tagged()
+        self.assertIs(CONTROLLER._final_tag_present(rig.git, '0.43.0'), True)
 
 
 def stage_names(stage):

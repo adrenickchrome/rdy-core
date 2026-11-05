@@ -11,7 +11,8 @@ Each subcommand is one job of .github/workflows/release.yml, in this order:
                   a missing asset once, accepts an existing asset only by its exact bytes, then downloads every
                   asset anew. It never removes or replaces anything.
   genuine         Runs the genuine checker over the draft's exact bytes on one native target.
-  final-tag       Checks everything again, then creates v<V> at S once.
+  final-tag       Checks everything again, then creates v<V> at S once. An existing tag at S is a recorded retry:
+                  no write, and its evidence says so.
   promote         Checks everything again through the publisher App's view, then flips that same draft id.
   check-published Reads every public asset with no credentials and checks exact bytes. A failure here is an
                   incident: nothing replaces a published byte.
@@ -62,6 +63,8 @@ DRAFT_RECEIPT_RE = re.compile(r'draft-receipt-a[1-9][0-9]*')
 DRAFT_ASSETS_ARTIFACT = 'draft-assets-a'
 GENUINE_ARTIFACT = 'genuine-'
 GENUINE_MEMBER = 'genuine-receipt.json'
+FINAL_TAG_ARTIFACT = 'final-tag-evidence-a'
+FINAL_TAG_MEMBER = 'final-tag-evidence.json'
 
 GUIDES = ('AGENTS.md', 'CLAUDE.md')
 MANIFEST = 'SHA256SUMS'
@@ -711,16 +714,22 @@ def _draft_receipt(facts, release, transfers, run_id, attempt):
     return value, raw
 
 
-def _check_prior_receipts(facts, version, current):
-    """Every readable draft receipt of every run of this version's caller. The draft and its bytes never change, so
-    each must equal this one. An expired artifact says nothing. An unreadable one stops the release."""
+def _prior_receipts(facts, version):
+    """Every readable draft receipt of every run of this version's caller. An expired artifact says nothing. An
+    unreadable one stops the release."""
+    found = []
     for run_id, _ in facts.release_runs(version):
         for artifact in facts.run_artifacts(run_id):
             if artifact.expired or not DRAFT_RECEIPT_RE.fullmatch(artifact.name):
                 continue
-            prior = _parse_draft_receipt(facts.artifact_member(artifact, DRAFT_RECEIPT_MEMBER, cand.RECORD_MAX))
-            if prior != current:
-                raise Refused(CONFLICT, 'the draft changed after a prior receipt')
+            found.append(_parse_draft_receipt(facts.artifact_member(artifact, DRAFT_RECEIPT_MEMBER, cand.RECORD_MAX)))
+    return found
+
+
+def _check_prior_receipts(facts, version, current):
+    """The draft and its bytes never change, so each prior receipt must equal this one."""
+    if any(prior != current for prior in _prior_receipts(facts, version)):
+        raise Refused(CONFLICT, 'the draft changed after a prior receipt')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -824,12 +833,18 @@ def _receipt_bytes(fact, plan):
                    'release_id': fact.release_id, 'notes_sha256': _sha(plan.notes.encode('utf-8')), 'assets': assets})
 
 
-def prepare_draft(api, plan, work):
+def prepare_draft(api, plan, work, receipted=False):
     """The one private draft. An existing draft keeps its id. It uploads a missing asset once, accepts an existing
-    asset only by its exact bytes and repairs nothing."""
+    asset only by its exact bytes and repairs nothing. Once a receipt or the final tag exists, the draft was complete:
+    nothing here writes, and a missing draft or asset is a changed draft."""
     tag = 'v' + plan.version
     fact = _find_draft(api, plan.version)
+    tagged = _final_tag_commit(api, plan.version) is not None
     if fact is None:
+        if tagged:
+            raise Refused(CONFLICT, 'the final tag ' + tag + ' exists without its draft')
+        if receipted:
+            raise Refused(CONFLICT, 'the draft changed after a prior receipt')
         try:
             fact = api.create_draft(tag, plan.commit, tag, plan.notes)
         except gh.ReconcileRequired:
@@ -843,6 +858,8 @@ def prepare_draft(api, plan, work):
     for asset in fact.assets:
         _check_asset_bytes(api, asset, plan.wants[asset.name], check / asset.name)
     for name in sorted(set(plan.wants) - present):
+        if tagged or receipted:
+            raise Refused(CONFLICT, 'the draft lacks ' + name)
         try:
             api.upload_asset(fact.release_id, name, plan.folder / name)
         except gh.ReconcileRequired:
@@ -862,7 +879,7 @@ def run_draft(facts, api, request, transfers, run_id, attempt, signer_sha, verif
     trust = ctl._signing_trust(facts, release, release.policy_commit)
     signature, _ = _signature_transfer(facts, release, transfers, run_id, attempt, verifier, trust['signer_line'])
     plan = _gather(facts, request, release, signature, fetch_crate, work)
-    result = prepare_draft(api, plan, work)
+    result = prepare_draft(api, plan, work, bool(_prior_receipts(facts, release.version)))
     _check_prior_receipts(facts, release.version, _parse_draft_receipt(result.receipt))
     return result
 
@@ -993,17 +1010,23 @@ def _final_tag_commit(reader, version):
 
 def run_final_tag(api, enrollment, request, transfers, run_id, attempt, signer_sha, verifier, work):
     """After both genuine checks and every other check: v<V> at S, once. The publisher needs no tag bypass, and
-    the tag is never moved. A lost answer reads back; an unresolved one stops."""
+    the tag is never moved. A lost answer reads back; an unresolved one stops. An existing tag at S is a recorded
+    retry with no write. Returns the job's evidence."""
     ready = _qualify(api, api, enrollment, request, transfers, run_id, attempt, signer_sha, verifier, work)
     version, commit = ready.release.version, ready.release.commit
-    if _final_tag_commit(api, version) is not None:
+    existing = _final_tag_commit(api, version)
+    if existing is not None and existing != commit:
         raise Refused(CONFLICT, 'the final tag v' + version + ' exists before this job created it')
-    try:
-        api.create_final_tag(version, commit)
-    except gh.ReconcileRequired:
-        pass
-    if _final_tag_commit(api, version) != commit:
-        raise Refused(CONFLICT, 'the final tag outcome is unresolved; reconcile again before any creation')
+    if existing is None:
+        try:
+            api.create_final_tag(version, commit)
+        except gh.ReconcileRequired:
+            pass
+        if _final_tag_commit(api, version) != commit:
+            raise Refused(CONFLICT, 'the final tag outcome is unresolved; reconcile again before any creation')
+    return _canon({'schema': 1, 'version': version, 'commit': commit, 'tuple_sha256': ready.release.tuple_sha256,
+                   'release_id': ready.fact.release_id, 'run_id': run_id, 'run_attempt': attempt,
+                   'result': 'created' if existing is None else 'recorded_retry'})
 
 
 def _promotion_receipt(ready, fact):
@@ -1240,8 +1263,9 @@ def cmd_final_tag(args, environ):
     check_settings_readback(environ.get('RDY_RELEASE_SETTINGS_READBACK', ''))
     facts, work, _ = _start(args, environ)
     run_id, attempt = _where(environ)
-    run_final_tag(facts, _enrollment(environ, args.signer_sha), _parsed_request(environ), _transfers(environ), run_id,
-                  attempt, args.signer_sha, sign.SshVerifier(), work)
+    _write(args.out, FINAL_TAG_MEMBER, run_final_tag(facts, _enrollment(environ, args.signer_sha), _parsed_request(environ),
+                                                     _transfers(environ), run_id, attempt, args.signer_sha,
+                                                     sign.SshVerifier(), work))
 
 
 def cmd_promote(args, environ):
@@ -1299,6 +1323,7 @@ def main(argv=None):
     p.add_argument('--out', type=Path, required=True)
     p = command('final-tag', cmd_final_tag)
     _common(p)
+    p.add_argument('--out', type=Path, required=True)
     p = command('promote', cmd_promote)
     _common(p)
     p.add_argument('--github-output', type=Path, required=True)

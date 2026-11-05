@@ -577,6 +577,82 @@ class Base(unittest.TestCase):
         return result
 
 
+class FinalTagState(Base):
+    """A final tag with no visible release. A read-only token cannot list a draft, so the tag may be all it sees."""
+
+    RECOVERIES = (ELIGIBILITY.preliminary_recovery, ELIGIBILITY.authenticate_recovery, ELIGIBILITY.authenticate_published)
+
+    def annotated(self, w, name, object_type, object_sha):
+        w.tags[name] = dict(sha=name, tag='v0.43.0', object_type=object_type, object_sha=object_sha, message_bytes=b'',
+                            sha256=digest(93))
+        w.refs['tags/v0.43.0'] = ('tag', name)
+
+    def test_rsig11_tag_at_reserved_commit_without_visible_release_is_unfinished(self):
+        w = World()
+        w.reserve()
+        w.refs['tags/v0.43.0'] = ('commit', S)
+        for call in self.RECOVERIES:
+            with self.subTest(call=call.__name__):
+                self.assertEqual(call(w.request(), w.facts()).publication, ELIGIBILITY.Publication('final_tag', None))
+        self.assertEqual(w.mutations, [])
+        # An annotated tag reads through to its commit, as the draft and published states read it.
+        w = World()
+        w.reserve()
+        self.annotated(w, format(0xfeed, '040x'), 'commit', S)
+        self.assertEqual(self.qualifies(w, recovery=True).publication, ELIGIBILITY.Publication('final_tag', None))
+        # The state replaces no other: no tag is unpublished, and a visible release wins over the tag alone.
+        w = World()
+        w.reserve()
+        self.assertEqual(self.qualifies(w, recovery=True).publication, ELIGIBILITY.Publication('unpublished', None))
+        w.refs['tags/v0.43.0'] = ('commit', S)
+        w.releases.append({'release_id': 302, 'tag_name': 'v0.43.0', 'target_commitish': S, 'draft': True,
+                           'prerelease': True, 'assets': ()})
+        self.assertEqual(self.qualifies(w, recovery=True).publication, ELIGIBILITY.Publication('draft', 302))
+
+    def test_rsig11_tag_at_another_commit_refuses(self):
+        def lightweight(w):
+            w.refs['tags/v0.43.0'] = ('commit', OTHER)
+
+        def annotated_elsewhere(w):
+            self.annotated(w, format(0xfeed, '040x'), 'commit', OTHER)
+
+        def annotated_not_a_commit(w):
+            self.annotated(w, format(0xfeed, '040x'), 'tree', S)
+        for change in (lightweight, annotated_elsewhere, annotated_not_a_commit):
+            for call in self.RECOVERIES:
+                w = World()
+                w.reserve()
+                change(w)
+                with self.subTest(change=change.__name__, call=call.__name__):
+                    with self.assertRaises(Refused) as caught:
+                        call(w.request(), w.facts())
+                    self.assertEqual(str(caught.exception), 'reservation conflict: the tag v0.43.0 exists without its release')
+                    self.assertEqual(w.mutations, [])
+
+    def test_rsig11_tag_without_reservation_still_refuses(self):
+        for call in self.RECOVERIES:
+            w = World()
+            w.refs['tags/v0.43.0'] = ('commit', S)
+            with self.subTest(call=call.__name__):
+                with self.assertRaises(Refused) as caught:
+                    call(w.request(), w.facts())
+                self.assertEqual(str(caught.exception), 'eligibility incomplete: v0.43.0 has no reservation to recover')
+        # A reservation that is not authenticated gives the state nothing to stand on.
+        w = World()
+        w.refs['tags/v0.43.0'] = ('commit', S)
+        w.refs['tags/reserve/v0.43.0'] = ('commit', S)
+        self.refuses(w, 'reservation conflict: the reservation of v0.43.0 is not an annotated tag', recovery=True)
+        w = World()
+        w.reserve(dict(w.expected_tuple(), commit=H))
+        w.refs['tags/v0.43.0'] = ('commit', S)
+        self.refuses(w, 'reservation conflict: the reservation tuple does not name its tag', recovery=True)
+        # The new-version path never returns the state, with or without the tag.
+        w = World()
+        w.refs['tags/v0.43.0'] = ('commit', S)
+        self.refuses(w, 'reservation conflict: the tag v0.43.0 already exists')
+        self.assertIsNone(self.qualifies(World()).publication)
+
+
 class Eligibility(Base):
     def test_rsig5_all_eligibility_facts_are_required(self):
         w = World()
@@ -1219,7 +1295,7 @@ class Eligibility(Base):
                                                'draft': False, 'prerelease': True, 'assets': ()}),
                             w.refs.update({'tags/v0.43.0': ('commit', OTHER)})),
                  'reservation conflict: the published v0.43.0 is not the reserved commit'),
-                (lambda w: w.refs.update({'tags/v0.43.0': ('commit', S)}),
+                (lambda w: w.refs.update({'tags/v0.43.0': ('commit', OTHER)}),
                  'reservation conflict: the tag v0.43.0 exists without its release')):
             w = World()
             w.reserve()

@@ -720,6 +720,18 @@ class _SessionFacts(object):
 # The reservation
 # ---------------------------------------------------------------------------------------------
 
+def _final_tag_present(facts, version):
+    """The final tag, read now. It gives no first Sign, whatever else a reader sees beside it. Only an
+    authenticated 404 is absence."""
+    try:
+        facts.ref('tags/v' + version)
+    except gh.Absent:
+        return False
+    except ControllerError:
+        raise Refused(UNKNOWN, 'the final tag read is unavailable')
+    return True
+
+
 def _readback(facts, preliminary):
     """The mandatory exact readback: the ref, its annotated object, the message bytes, the direct commit
     target, and Cargo and the committed release exports at that commit against E."""
@@ -1375,6 +1387,8 @@ class Controller(object):
         if any(records[keys[name]] is not None for name in ('attempt', 'signature', 'completion')):
             raise Refused(UNKNOWN, 'the reservation has output and no attempt')
         self._prior_history(release)
+        if _final_tag_present(self.facts, release.version):
+            raise Refused(CONFLICT, 'the tag v' + release.version + ' exists without its release')
         attempt = _canon({'schema': 1, 'state': 'attempt_started', 'repository_id': REPOSITORY_ID,
                           'version': release.version, 'tuple_sha256': release.tuple_sha256,
                           'reservation_object': release.reservation.tag_object, 'commit': release.commit,
