@@ -367,7 +367,7 @@ fn every_file(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                     Err(_) if cfg!(windows) && path.extension().is_some_and(|x| x == "lock") => {
                         vec![]
                     }
-                    other => other.unwrap(),
+                    other => other.unwrap_or_else(|e| panic!("{}: {e}", path.display())),
                 };
                 out.insert(rel, bytes);
             }
