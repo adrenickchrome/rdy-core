@@ -948,7 +948,9 @@ fn is_owned_private(f: &File) -> io::Result<bool> {
 
 /// The mode of a backup's copy of a file whose metadata is `source`: its owner may read it, and
 /// write it only when the source's owner may; its group and others get nothing. So a copy is
-/// never more open than its source.
+/// never more open than its source. Unix only: Windows has no permission modes, and the private
+/// create gives the copy its private descriptor.
+#[cfg(unix)]
 fn copy_mode(source: &std::fs::Metadata) -> u32 {
     0o400 | (pio::mode_of(source) & 0o200)
 }
@@ -964,6 +966,8 @@ fn make_private_dir_at(dir: &File, name: &OsStr) -> Result<File, StoreError> {
 /// Opens the directory `name` just created in the open directory `dir`
 /// ([`make_private_dir_at`]), with its mode set to 0o700 first.
 fn open_made_dir(dir: &File, name: &OsStr) -> Result<File, StoreError> {
+    // Windows has no permission modes: the private create already made the directory private
+    #[cfg(unix)]
     pio::set_mode_at(dir, name, 0o700)?;
     let made = pio::open_dir_at(dir, name).map_err(file_type_error)?;
     let privacy = pio::privacy(&made)?;
@@ -1057,8 +1061,10 @@ fn write_backup(
         hit(Phase::Copy(rel))?;
         let (at, name) = split_rel(rel);
         let src = open_file_at(&open_rel_dir(&source.handle, at)?, name)?;
+        #[cfg(unix)]
         let mode = copy_mode(&src.metadata()?);
         let mut dst = pio::create_private_at(&open_rel_dir(&copy, at)?, name)?;
+        #[cfg(unix)]
         dst.set_permissions(pio::permissions(mode))?;
         let (n, digest) = stream(&src, Some(&mut dst), &mut buf)?;
         if n != *len {

@@ -7,14 +7,18 @@
 //!   `create_private_dir`, `make_private_dir`), and who may use an open file or directory
 //!   ([`privacy`], one query of its handle, as a [`Privacy`]);
 //! - durability: a directory flush ([`sync_dir`], [`sync_open_dir`]) and a durable rename
-//!   ([`rename_durable`]); a failure of either is an error, never a success;
+//!   ([`rename_durable`]); a failure of either is an error, never a success. On Windows a flush is
+//!   `FlushFileBuffers` on a directory handle and a rename is a write-through `MoveFileExW`
+//!   (D-FPKPS). A test backend ([`on_durable`]) sees each flush and rename, `rename_at`'s too,
+//!   before and after its platform call, and can fail it;
 //! - calls in an open directory (`open_dir`, `open_dir_at`, `open_read_at`,
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
-//!   `remove_dir_at`, `set_mode_at`, `rename_at`, `is_link_refusal`): each names one entry of a
-//!   directory handle, so a path that is changed after the handle was opened cannot redirect
-//!   it, and none follows a link at that entry; `is_empty_dir` and `for_each_entry` list a
-//!   directory handle itself, and `entry_kind_at` reads an entry's kind without following or
-//!   opening it;
+//!   `remove_dir_at`, `rename_at`, `is_link_refusal`, and on Unix only `set_mode_at`): each names
+//!   one entry of a directory handle, so a path that is changed after the handle was opened
+//!   cannot redirect it, and none follows a link at that entry; `is_empty_dir` and
+//!   `for_each_entry` list a directory handle itself, and `entry_kind_at` reads an entry's kind
+//!   without following or opening it. Windows has no permission modes, so `set_mode_at` has no
+//!   Windows form: a private Windows create gives the object its private descriptor;
 //! - a child process that starts in an open directory (`start_in_dir`), and the path of a program
 //!   in that directory (`program_in_dir`), for the same reason; each gives a guard (`StartPin`,
 //!   `ProgramInDir`) that the caller holds until the child is waited;
@@ -44,13 +48,6 @@ pub use unix::*;
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
-
-// Stops the build in this module itself, so that each call into it is not one more error: the
-// placeholders in pio/windows.rs name each part that is missing.
-#[cfg(windows)]
-compile_error!(
-    "rdy_store::pio is not built on Windows yet; each part that is missing has its own error in pio/windows.rs (FW-XP1 Phase 4)"
-);
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)");
@@ -136,6 +133,68 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
     }
 }
 
+/// One durable step, as a test backend of [`on_durable`] sees it.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurableStep {
+    /// A flush of the directory at the path ([`sync_dir`], [`sync_open_dir`]).
+    Flush(std::path::PathBuf),
+    /// A rename of `from` to `to` ([`rename_durable`], [`rename_at`]), with the flags of its
+    /// platform call: MoveFileExW's on Windows, none (0) on Unix. In a [`rename_at`] on Unix, the
+    /// two paths are the entry names.
+    Rename {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+        flags: u32,
+    },
+}
+
+/// Where a test backend of [`on_durable`] runs: just before a step's platform call, or just after
+/// the call succeeded.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    Before,
+    After,
+}
+
+/// A test backend of the durable steps: it sees each step at each [`Boundary`], and an error it
+/// gives fails the step. Before the call, the call is then not made; after it, the call was made.
+/// It can only fail a step: a call's own error is always the step's error.
+#[doc(hidden)]
+pub type DurableBackend = Box<dyn FnMut(&DurableStep, Boundary) -> io::Result<()>>;
+
+thread_local! {
+    static DURABLE_BACKEND: std::cell::RefCell<Option<DurableBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: every durable step on this thread calls `backend`. None removes it.
+#[doc(hidden)]
+pub fn on_durable(backend: Option<DurableBackend>) {
+    DURABLE_BACKEND.with(|b| *b.borrow_mut() = backend);
+}
+
+/// Runs `call`, the platform call of the durable step that `step` describes, with the test
+/// backend of [`on_durable`], if one is set, before and after it. `step` is made only for a
+/// backend.
+pub(crate) fn durable(
+    step: impl FnOnce() -> DurableStep,
+    call: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let step = DURABLE_BACKEND.with(|b| b.borrow().is_some()).then(step);
+    let at = |boundary| match &step {
+        Some(step) => DURABLE_BACKEND.with(|b| match b.borrow_mut().as_mut() {
+            Some(backend) => backend(step, boundary),
+            None => Ok(()),
+        }),
+        None => Ok(()),
+    };
+    at(Boundary::Before)?;
+    call()?;
+    at(Boundary::After)
+}
+
 fn bad_punch_range(why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -196,37 +255,27 @@ mod tests {
     #[test]
     fn wx1_isolated_interface_probe_has_no_success_stub() {
         // The Windows provider source, which an isolated native probe compiles on its own, holds
-        // only the registrations of its built children and the placeholders of the parts not
-        // built yet: no body that compiles, and no answer made up without the platform call.
+        // only the registrations of its built children, and no placeholder is left (Task 6): no
+        // body that compiles, and no answer made up without the platform call.
         let (found, rest) = placeholders(&code_lines(&source("src/pio/windows.rs")));
         assert_eq!(
             rest.trim(),
             "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;\n\
              pub use windows_security::*;\n#[path = \"windows_security.rs\"]\n\
              mod windows_security;\n\
-             pub use windows_dir::*;\n#[path = \"windows_dir.rs\"]\nmod windows_dir;",
+             pub use windows_dir::*;\n#[path = \"windows_dir.rs\"]\nmod windows_dir;\n\
+             pub use windows_durable::*;\n#[path = \"windows_durable.rs\"]\n\
+             mod windows_durable;",
             "code outside the placeholders"
         );
-        assert_eq!(
-            found,
-            [
-                "rdy_store::pio has no Windows implementation yet of permission-mode changes \
-                 anchored to an open directory (set_mode_at) (FW-XP1 Phase 4)",
-                "rdy_store::pio has no Windows implementation yet of directory flushes \
-                 (FlushFileBuffers) or write-through renames (MoveFileExW) (FW-XP1 Phase 4)",
-            ]
-        );
-        // This module stops the build itself on Windows too, so that each call into it is not one
-        // more error, and holds nothing else for Windows.
+        assert!(found.is_empty(), "{found:?}");
+        // This module no longer stops the build on Windows: only a platform that is neither Unix
+        // nor Windows stops it.
         let pio = source("src/pio.rs");
         let (found, _) = placeholders(&code_lines(pio.split("#[cfg(test)]").next().unwrap()));
         assert_eq!(
             found,
-            [
-                "rdy_store::pio is not built on Windows yet; each part that is missing has its \
-                 own error in pio/windows.rs (FW-XP1 Phase 4)",
-                "rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)",
-            ]
+            ["rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)"]
         );
         // The file identity seam is built on Windows (Task 2): fileid/windows.rs makes each
         // platform call, and neither file holds a stub body before its tests or a Windows
@@ -356,8 +405,7 @@ mod tests {
             "SecurityDescriptor: sd",
             "FileDispositionInfoEx",
             "FILE_DISPOSITION_FLAG_POSIX_SEMANTICS",
-            "MoveFileExW",
-            "MOVEFILE_REPLACE_EXISTING",
+            "move_entry(",
             "FILE_SHARE_READ | FILE_SHARE_WRITE;",
             "PinnedDir::of(dir)",
             "cmd.current_dir(OsString::from_wide(&pinned.verbatim))",
@@ -365,6 +413,40 @@ mod tests {
         ] {
             assert!(dir.contains(call), "pio/windows_dir.rs calls {call}");
         }
+        // Directory flushes and write-through renames are built (Task 6): pio/windows_durable.rs
+        // flushes a directory handle opened with backup semantics and the right to add a file,
+        // renames with MoveFileExW's write-through flag and never its copy flag, and holds no
+        // stub body or placeholder before its tests.
+        let durable = source("src/pio/windows_durable.rs");
+        let durable = code_lines(durable.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(
+                !durable.contains(word),
+                "pio/windows_durable.rs holds {word}"
+            );
+        }
+        assert!(placeholders(&durable).0.is_empty());
+        for call in [
+            "FlushFileBuffers",
+            "FILE_FLAG_BACKUP_SEMANTICS",
+            "FILE_ADD_FILE | FILE_READ_ATTRIBUTES | SYNCHRONIZE",
+            "open_entry(dir, &[], FLUSH_ACCESS, FILE_DIRECTORY_FILE)",
+            "MoveFileExW(source.as_ptr(), target.as_ptr(), MOVE_FLAGS)",
+            "MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH",
+            "PinnedDir::of(&from_dir)",
+            "PinnedDir::of(&to_dir)",
+        ] {
+            assert!(
+                durable.contains(call),
+                "pio/windows_durable.rs calls {call}"
+            );
+        }
+        assert!(!durable.contains("MOVEFILE_COPY_ALLOWED"));
     }
 
     #[test]

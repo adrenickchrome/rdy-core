@@ -9,7 +9,7 @@ use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, Per
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
-use super::{EntryKind, Privacy, Punch, bad_punch_range};
+use super::{DurableStep, EntryKind, Privacy, Punch, bad_punch_range, durable};
 
 /// Fills `buf` from `f` at `offset`. A file that ends first is `ErrorKind::UnexpectedEof`.
 pub fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -137,7 +137,8 @@ pub fn sync_dir(path: &Path) -> io::Result<()> {
 /// `fsync`. A failed flush is an error, `could not sync directory {path}: {error}`, of the same
 /// kind as the failed call's.
 pub fn sync_open_dir(dir: &File, path: &Path) -> io::Result<()> {
-    dir.sync_all().map_err(|e| sync_failed(path, e))
+    durable(|| DurableStep::Flush(path.to_path_buf()), || dir.sync_all())
+        .map_err(|e| sync_failed(path, e))
 }
 
 fn sync_failed(path: &Path, e: io::Error) -> io::Error {
@@ -152,7 +153,12 @@ fn sync_failed(path: &Path, e: io::Error) -> io::Error {
 /// rename is an error, `could not rename {from} to {to}: {error}`, of the same kind as the
 /// failed call's; nothing is ever copied instead.
 pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
-    fs::rename(from, to).map_err(|e| {
+    let step = || DurableStep::Rename {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        flags: 0,
+    };
+    durable(step, || fs::rename(from, to)).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!(
@@ -340,10 +346,17 @@ pub fn program_in_dir(_dir: &File, name: &OsStr) -> io::Result<ProgramInDir> {
 /// Renames the entry `from` over the entry `to`, both in the open directory `dir`.
 #[allow(unsafe_code)]
 pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    let step = || DurableStep::Rename {
+        from: from.into(),
+        to: to.into(),
+        flags: 0,
+    };
     let (from, to) = (entry_name(from)?, entry_name(to)?);
     let fd = dir.as_raw_fd();
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and two live C strings.
-    cvt(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) }).map(|_| ())
+    durable(step, || {
+        // SAFETY: as in `create_private_dir_at`: an open descriptor and two live C strings.
+        cvt(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) }).map(|_| ())
+    })
 }
 
 /// Whether the open directory `dir` holds no entry but `.` and `..`. It is listed in this

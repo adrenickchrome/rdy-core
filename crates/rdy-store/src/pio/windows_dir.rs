@@ -20,7 +20,8 @@
 //!   handle (`FileDispositionInfoEx`): what another process puts at the name after the open is
 //!   never removed, and a reparse point is removed as itself, never followed. A create or a probe
 //!   that cleans up after itself removes the object it made through its own handle, never by name.
-//! - A rename is a path call (`MoveFileExW`, as D-FPKPS says), made while the directory is pinned:
+//! - A rename is a path call (a write-through `MoveFileExW`, as D-FPKPS says, made by the sibling
+//!   `windows_durable`), made while the directory is pinned:
 //!   a new handle of the directory itself that reads it and does not share delete, so nobody can
 //!   move or remove the directory while it is open, and NTFS refuses to move any directory above
 //!   an open handle. Both names are entries of the pinned directory. Its path is its final path,
@@ -36,7 +37,8 @@
 //!   name against the same bound, before the name is copied.
 //!
 //! This file depends only on `std`, `windows-sys`, [`crate::fileid`], [`EntryKind`] and its
-//! sibling `windows_security`, so an isolated probe can compile and test it with those files.
+//! siblings `windows_security` and `windows_durable` (whose move it makes), so an isolated probe
+//! can compile and test it with those files.
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::File;
@@ -65,11 +67,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
-    FileFullDirectoryRestartInfo, GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING,
-    MoveFileExW, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle,
+    FileFullDirectoryRestartInfo, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
+    SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
+use super::windows_durable::move_entry;
 use super::windows_security::{
     NATIVE_PATH_MAX, ObjectKind, PrivateDescriptor, attribute_tag, final_path, is_reparse_refusal,
     native, not_made, not_private, os_error, parent_changed, privacy, reparse_point,
@@ -409,11 +412,11 @@ pub fn remove_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
 /// ([`PinnedDir`]): while the call runs, nobody can move or remove it or a directory above it,
 /// and its path is checked to name it before and after the move. The move is `MoveFileExW` on the
 /// two verbatim paths in the pinned directory, so `from` and `to` stay entries of the directory
-/// that `dir` opened, whatever its old path names now. A reparse point at `from` is moved itself,
-/// and one at `to` is replaced itself, never followed. Nothing is copied: a move that would need a
-/// copy fails. As on Windows generally, an existing directory at `to` is never replaced
-/// (`ERROR_ACCESS_DENIED`). A failed move is the OS error.
-#[allow(unsafe_code)]
+/// that `dir` opened, whatever its old path names now. It writes through (`MOVEFILE_WRITE_THROUGH`,
+/// `windows_durable`'s move). A reparse point at `from` is moved itself, and one at `to` is
+/// replaced itself, never followed. Nothing is copied: a move that would need a copy fails. As on
+/// Windows generally, an existing directory at `to` is never replaced (`ERROR_ACCESS_DENIED`). A
+/// failed move is the OS error.
 pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
     let from_units = entry_name(dir, from)?;
     let to_units = entry_name(dir, to)?;
@@ -421,13 +424,12 @@ pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
     let source = pinned.entry(from, &from_units)?;
     let target = pinned.entry(to, &to_units)?;
     after_open();
-    // SAFETY: both paths are NUL-terminated and live for the call.
-    let ok = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
-    let moved = if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    };
+    let moved = move_entry(
+        &source,
+        &target,
+        &pinned.shown.join(from),
+        &pinned.shown.join(to),
+    );
     after_open();
     moved?;
     pinned.check()
@@ -579,6 +581,11 @@ impl PinnedDir {
         Ok(())
     }
 
+    /// The final path of the pinned directory, as messages show it.
+    pub(super) fn shown(&self) -> &Path {
+        &self.shown
+    }
+
     /// The verbatim path of the entry `name` (its checked units `units`) in the pinned directory,
     /// NUL-terminated. A path longer than 32,767 units is refused before it is made (`the native
     /// path for {path} exceeds 32767 UTF-16 code units`).
@@ -726,7 +733,12 @@ fn open_at(dir: &File, name: &OsStr, access: u32, options: u32) -> io::Result<Fi
 /// entry itself and never a reparse point's target, and no reparse point followed on the way. A
 /// failed open is its NTSTATUS.
 #[allow(unsafe_code)]
-fn open_entry(dir: &File, units: &[u16], access: u32, options: u32) -> Result<File, NTSTATUS> {
+pub(super) fn open_entry(
+    dir: &File,
+    units: &[u16],
+    access: u32,
+    options: u32,
+) -> Result<File, NTSTATUS> {
     in_dir(
         dir,
         units,
@@ -833,7 +845,7 @@ fn status_error(dir: &File, name: &OsStr, status: NTSTATUS) -> io::Error {
 
 /// The Win32 error of the NTSTATUS `status`.
 #[allow(unsafe_code)]
-fn dos_error(status: NTSTATUS) -> i32 {
+pub(super) fn dos_error(status: NTSTATUS) -> i32 {
     // SAFETY: the call takes a plain integer and has no preconditions.
     unsafe { RtlNtStatusToDosError(status) as i32 }
 }
@@ -842,7 +854,7 @@ fn dos_error(status: NTSTATUS) -> i32 {
 /// the units are made: `the native path for {path} exceeds 32767 UTF-16 code units`, `the
 /// native path for {path} contains a NUL`), then not empty, `.` or `..`, and with no `/`, `\` or
 /// `:` (a stream).
-fn entry_name(dir: &File, name: &OsStr) -> io::Result<Vec<u16>> {
+pub(super) fn entry_name(dir: &File, name: &OsStr) -> io::Result<Vec<u16>> {
     let invalid = |text: String| io::Error::new(io::ErrorKind::InvalidInput, text);
     if name.encode_wide().count() > NATIVE_PATH_MAX {
         return Err(invalid(format!(
