@@ -1,0 +1,227 @@
+# Build one immutable preview candidate from refs/tags/candidate/v<V> at commit S. Each native job
+# runs the fast gate, builds from `git archive S` in a new workspace with path remaps, packages
+# with qa-release-package and refuses a binary that holds a host path. The assembly job downloads
+# each build by artifact id, checks its artifact digest, rehashes every file and writes SHA256SUMS
+# over exactly the two archives. Nothing here signs, needs a secret or OIDC, or writes to the
+# repository. A reserved or released version never builds again.
+name: release-candidate
+on:
+  push:
+    tags: ["candidate/v*"]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: rdy-core-candidate-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  check:
+    name: Candidate source and version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Candidate ref, main ancestry, Cargo version and target policy
+        id: check
+        env:
+          CANDIDATE_REF: ${{ github.ref }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: >-
+          python3 -B scripts/release/candidate.py check-ref --repo "$GITHUB_WORKSPACE"
+          --ref "$CANDIDATE_REF" --sha "$CANDIDATE_SHA" --main refs/remotes/origin/main
+          --github-output "$GITHUB_OUTPUT"
+  build-mac:
+    name: Native candidate (aarch64-apple-darwin)
+    needs: check
+    runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      COMMIT: ${{ needs.check.outputs.commit }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Candidate is still unreserved
+        # Again here: a re-run of a failed build job does not re-run the check job.
+        env:
+          CANDIDATE_REF: ${{ github.ref }}
+        run: >-
+          python3 -B scripts/release/candidate.py check-ref --repo "$GITHUB_WORKSPACE"
+          --ref "$CANDIDATE_REF" --sha "$COMMIT" --main refs/remotes/origin/main
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Native fast gate (fmt, clippy, tests; no perf)
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --skip-perf --require-all
+      - name: Fast gate counts
+        run: >-
+          python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
+          --commit "$COMMIT" --out "$RUNNER_TEMP/fast-gate.json"
+      - name: No tracked file changed
+        run: git diff --exit-code
+      - name: Build from git archive, package and inspect
+        run: >-
+          python3 -B scripts/release/candidate.py build --repo "$GITHUB_WORKSPACE" --commit "$COMMIT"
+          --version "$VERSION" --target aarch64-apple-darwin --work "$RUNNER_TEMP/rdy-candidate"
+          --fast-gate "$RUNNER_TEMP/fast-gate.json" --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT" --out "$RUNNER_TEMP/candidate-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: rdy-candidate-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-out
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+  build-linux:
+    name: Native candidate (x86_64-unknown-linux-gnu)
+    needs: check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      COMMIT: ${{ needs.check.outputs.commit }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Candidate is still unreserved
+        # Again here: a re-run of a failed build job does not re-run the check job.
+        env:
+          CANDIDATE_REF: ${{ github.ref }}
+        run: >-
+          python3 -B scripts/release/candidate.py check-ref --repo "$GITHUB_WORKSPACE"
+          --ref "$CANDIDATE_REF" --sha "$COMMIT" --main refs/remotes/origin/main
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Locked dependencies
+        run: cargo fetch --locked
+      - name: Native fast gate (fmt, clippy, tests; no perf)
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo qa --skip-perf --require-all
+      - name: Fast gate counts
+        run: >-
+          python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
+          --commit "$COMMIT" --out "$RUNNER_TEMP/fast-gate.json"
+      - name: No tracked file changed
+        run: git diff --exit-code
+      - name: Build from git archive, package and inspect
+        run: >-
+          python3 -B scripts/release/candidate.py build --repo "$GITHUB_WORKSPACE" --commit "$COMMIT"
+          --version "$VERSION" --target x86_64-unknown-linux-gnu --work "$RUNNER_TEMP/rdy-candidate"
+          --fast-gate "$RUNNER_TEMP/fast-gate.json" --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT" --out "$RUNNER_TEMP/candidate-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: rdy-candidate-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-out
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+  assemble:
+    name: Candidate manifest
+    needs: [check, build-mac, build-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.check.outputs.commit }}
+      VERSION: ${{ needs.check.outputs.version }}
+      MAC_ID: ${{ needs.build-mac.outputs.artifact_id }}
+      MAC_DIGEST: ${{ needs.build-mac.outputs.artifact_digest }}
+      LINUX_ID: ${{ needs.build-linux.outputs.artifact_id }}
+      LINUX_DIGEST: ${{ needs.build-linux.outputs.artifact_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      # Each build is fetched by its artifact id as the uploaded ZIP; the script checks the
+      # artifact digest itself, then every file digest against the build receipt.
+      - name: Download the aarch64-apple-darwin build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-mac.outputs.artifact_id }}
+          path: ${{ runner.temp }}/in/aarch64-apple-darwin
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download the x86_64-unknown-linux-gnu build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-linux.outputs.artifact_id }}
+          path: ${{ runner.temp }}/in/x86_64-unknown-linux-gnu
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Rehash and write SHA256SUMS over exactly the two archives
+        run: >-
+          python3 -B scripts/release/candidate.py assemble --version "$VERSION" --commit "$COMMIT"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --input "aarch64-apple-darwin=$RUNNER_TEMP/in/aarch64-apple-darwin,$MAC_ID,$MAC_DIGEST"
+          --input "x86_64-unknown-linux-gnu=$RUNNER_TEMP/in/x86_64-unknown-linux-gnu,$LINUX_ID,$LINUX_DIGEST"
+          --out "$RUNNER_TEMP/candidate"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: rdy-candidate-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+      - name: Candidate address
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo '## Candidate'
+            echo "v$VERSION at $COMMIT: run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT,"
+            echo "artifact rdy-candidate-a$GITHUB_RUN_ATTEMPT id $ARTIFACT_ID digest $ARTIFACT_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
