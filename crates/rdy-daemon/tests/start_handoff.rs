@@ -53,6 +53,15 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// The error of `out`, which must have failed for the reason `what` names. The success types here
+/// have no `Debug`, so `expect_err` does not apply.
+fn failed<T, E>(out: Result<T, E>, what: &str) -> E {
+    match out {
+        Err(e) => e,
+        Ok(_) => panic!("{what}"),
+    }
+}
+
 /// A fresh project under a directory short enough for its socket, and the script that runs this
 /// test binary as its daemon.
 struct Fixture {
@@ -262,13 +271,13 @@ fn wx8a_racing_start_cannot_steal_handoff() {
     );
     let rt2 = rt();
     let spawned = Arc::new(AtomicUsize::new(0));
-    let e = rt2
-        .block_on(connect_or_start(
+    let e = failed(
+        rt2.block_on(connect_or_start(
             &f.run,
             f.options(None, spawned.clone(), Duration::from_secs(1)),
-        ))
-        .err()
-        .expect("the rival waits and gives up");
+        )),
+        "the rival waits and gives up",
+    );
     assert_eq!(e.code, E_DAEMON_START);
     assert_eq!(
         e.message,
@@ -347,17 +356,17 @@ fn wx8a_failed_handoff_releases_only_its_own_lock() {
     // the parent times out before its child claims, and another owner comes
     let f = Fixture::new();
     let n = Arc::new(AtomicUsize::new(0));
-    let e = rt
-        .block_on(connect_or_start(
+    let e = failed(
+        rt.block_on(connect_or_start(
             &f.run,
             f.options(
                 Some(("BeforeClaim", "wait:".into())),
                 n.clone(),
                 Duration::from_secs(1),
             ),
-        ))
-        .err()
-        .expect("the parent gives up");
+        )),
+        "the parent gives up",
+    );
     assert_eq!(e.code, E_DAEMON_START);
     assert!(
         e.message
@@ -493,9 +502,7 @@ fn wx8a_an_upgrade_refuses_another_projects_guard() {
     .expect("refused");
     assert_eq!(e.code, rdy_engine::E_LOCKED);
     assert_eq!(format_text(&f), before, "nothing changed");
-    let e = Rdy::open_under_start(&f.root, &foreign)
-        .err()
-        .expect("refused");
+    let e = failed(Rdy::open_under_start(&f.root, &foreign), "refused");
     assert_eq!(e.code, rdy_engine::E_LOCKED);
 }
 
