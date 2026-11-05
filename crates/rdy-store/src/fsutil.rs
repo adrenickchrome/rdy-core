@@ -90,7 +90,7 @@ pub fn zero_file(path: &Path) -> io::Result<()> {
             path.display()
         )));
     }
-    let links = crate::fileid::links(&meta);
+    let links = crate::fileid::links_of(&f, path)?;
     if links != 1 {
         let why = format!(
             "{} has more than one link ({links}), so it was not zeroed",

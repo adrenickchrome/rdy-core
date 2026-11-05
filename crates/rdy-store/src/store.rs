@@ -435,9 +435,10 @@ fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
         let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)
             .map_err(refused)?;
         let meta = f.metadata().map_err(refused)?;
-        let links = crate::fileid::links(&meta);
+        let links = crate::fileid::links_of(&f, &path).map_err(refused)?;
         let shared_with_index = links == 2
-            && crate::fileid::FileId::lstat(&index).ok() == Some(crate::fileid::FileId::of(&meta));
+            && crate::fileid::FileId::lstat(&index).ok()
+                == Some(crate::fileid::FileId::of_open(&f, &path).map_err(refused)?);
         if !meta.is_file() || !(links == 1 || shared_with_index) {
             not_ours();
             continue;

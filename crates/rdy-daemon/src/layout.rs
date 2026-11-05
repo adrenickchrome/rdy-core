@@ -581,10 +581,10 @@ mod tests {
         let rdy = fs::symlink_metadata(d.path().join(".rdy")).unwrap();
         assert_eq!(own.to_string(), format!("{}:{}", rdy.dev(), rdy.ino()));
         assert_eq!(own.to_string().parse::<ProjectId>(), Ok(own));
-        let other = ProjectId {
-            dev: own.dev,
-            ino: own.ino + 1,
+        let ProjectId::Unix { dev, ino } = own else {
+            panic!("a Unix project identity: {own}")
         };
+        let other = ProjectId::Unix { dev, ino: ino + 1 };
         let cases: Vec<(String, Option<&str>)> = vec![
             (format!("/s.sock\n{own}\n"), Some("/s.sock")),
             (format!("/s.sock\n{other}\n"), None),
@@ -592,7 +592,7 @@ mod tests {
             (format!("/s.sock\n{own}"), None),
             (format!("/s.sock\n{own}\nmore\n"), None),
             (format!("s.sock\n{own}\n"), None),
-            (format!("/s.sock\n{}:x\n", own.dev), None),
+            (format!("/s.sock\n{dev}:x\n"), None),
             (format!("/s.sock\n+{own}\n"), None),
             (format!("/{}\n{own}\n", "s".repeat(MAX_SOCKET_PATH)), None),
         ];
@@ -619,7 +619,7 @@ mod tests {
     /// Guard: the identity's text and its parse error stay as they are on the wire.
     #[test]
     fn ps8_the_identity_text_is_unchanged() {
-        assert_eq!(ProjectId { dev: 1, ino: 2 }.to_string(), "1:2");
+        assert_eq!(ProjectId::Unix { dev: 1, ino: 2 }.to_string(), "1:2");
         assert_eq!(
             "x".parse::<ProjectId>(),
             Err(r#""x" is not a project identity (dev:ino)"#.to_string())

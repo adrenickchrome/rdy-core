@@ -890,12 +890,13 @@ mod tests {
         // the handle identity queries agree with the Metadata reads, and name the path
         let handle = File::open(&to).unwrap();
         let m = handle.metadata().unwrap();
-        assert_eq!(FileId::of_open(&handle, &to).unwrap(), FileId::of(&m));
-        assert_eq!(fileid::links_of(&handle, &to).unwrap(), fileid::links(&m));
-        assert_eq!(
-            fileid::change_stamp_of(&handle, &to).unwrap(),
-            fileid::change_stamp(&m)
-        );
+        let unix = FileId::Unix {
+            dev: m.dev(),
+            ino: m.ino(),
+        };
+        assert_eq!(FileId::of_open(&handle, &to).unwrap(), unix);
+        assert_eq!(fileid::links_of(&handle, &to).unwrap(), m.nlink());
+        assert_eq!(fileid::change_stamp_of(&handle, &to).unwrap().id, unix);
         fs::hard_link(&to, d.path().join("h")).unwrap();
         assert_eq!(fileid::links_of(&handle, &to).unwrap(), 2);
     }

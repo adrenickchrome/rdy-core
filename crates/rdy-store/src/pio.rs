@@ -225,25 +225,36 @@ mod tests {
                 "rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)",
             ]
         );
-        // The file identity seam: its Windows side is a placeholder too, with no stub body
-        // before its tests.
+        // The file identity seam is built on Windows (Task 2): fileid/windows.rs makes each
+        // platform call, and neither file holds a stub body before its tests or a Windows
+        // placeholder.
         let fileid = source("src/fileid.rs");
         let product = code_lines(fileid.split("#[cfg(all(test").next().unwrap());
-        for word in ["unreachable!", "unimplemented!", "todo!"] {
-            assert!(!product.contains(word), "fileid.rs holds {word}");
+        let provider = source("src/fileid/windows.rs");
+        let provider = code_lines(provider.split("#[cfg(test)]").next().unwrap());
+        for (file, code) in [("fileid.rs", &product), ("fileid/windows.rs", &provider)] {
+            for word in [
+                "unreachable!",
+                "unimplemented!",
+                "todo!",
+                "Default::default",
+            ] {
+                assert!(!code.contains(word), "{file} holds {word}");
+            }
         }
-        let windows = product
-            .split("#[cfg(windows)]\n")
-            .nth(1)
-            .expect("a #[cfg(windows)] item in fileid.rs");
-        let (found, _) = placeholders(windows);
         assert_eq!(
-            found.first().map(String::as_str),
-            Some(
-                "rdy_store::fileid has no Windows implementation yet of the identity \
-                 (FILE_ID_INFO), change stamp and link count of an open file (FW-XP1 Phase 4)"
-            )
+            placeholders(&product).0,
+            ["rdy_store::fileid has no implementation for this platform (FW-XP1 D-1RXEA)"]
         );
+        assert!(placeholders(&provider).0.is_empty());
+        for call in [
+            "GetFileInformationByHandleEx",
+            "FileIdInfo",
+            "FileBasicInfo",
+            "FileStandardInfo",
+        ] {
+            assert!(provider.contains(call), "fileid/windows.rs calls {call}");
+        }
         let windows_pio = code_lines(&source("src/pio/windows.rs"));
         for word in STUB_WORDS {
             assert!(!windows_pio.contains(word), "pio/windows.rs holds {word}");

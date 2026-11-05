@@ -137,11 +137,14 @@ mod tests {
         let run = RunDir::of_project(d.path());
         let (listener, socket, project) = bind(&run).await.unwrap();
         let id = FileId::lstat(&d.path().join(".rdy")).unwrap();
+        let FileId::Unix { dev, ino } = id else {
+            panic!("a Unix identity: {id}")
+        };
         let mut want = path_bytes(&socket).to_vec();
         want.push(b'\n');
-        want.extend_from_slice(format!("{}:{}\n", id.dev, id.ino).as_bytes());
+        want.extend_from_slice(format!("{dev}:{ino}\n").as_bytes());
         assert_eq!(fs::read(run.socket_record()).unwrap(), want);
-        assert_eq!(project.to_string(), format!("{}:{}", id.dev, id.ino));
+        assert_eq!(project.to_string(), format!("{dev}:{ino}"));
         assert_eq!(socket, run.socket());
         let mode = fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the socket's mode");

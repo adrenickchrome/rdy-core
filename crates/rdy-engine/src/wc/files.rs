@@ -168,14 +168,19 @@ pub(crate) fn blocking_ancestor(root: &Path, rel: &Path) -> Option<PathBuf> {
         .and_then(|d| d.strip_prefix(root).ok().map(Path::to_path_buf))
 }
 
-/// The file's identity on disk, for a regular file not behind a link.
+/// The file's identity on disk, for a regular file not behind a link; none when it cannot be
+/// read.
 pub(crate) fn identity(root: &Path, rel: &str) -> Option<FileId> {
     let p = inside(rel).ok()?;
     if behind_link(root, p) {
         return None;
     }
-    let m = fs::symlink_metadata(root.join(p)).ok()?;
-    m.file_type().is_file().then(|| FileId::of(&m))
+    let path = root.join(p);
+    let m = fs::symlink_metadata(&path).ok()?;
+    if !m.file_type().is_file() {
+        return None;
+    }
+    FileId::lstat(&path).ok()
 }
 
 /// Whether writing `rel` would overwrite something checkout does not track: one of its
@@ -192,10 +197,14 @@ fn occupied(
     if behind_link(root, p) {
         return Ok(true);
     }
-    Ok(match fs::symlink_metadata(root.join(p)) {
+    let path = root.join(p);
+    Ok(match fs::symlink_metadata(&path) {
         Err(_) => false,
         Ok(_) if tracked.contains_key(rel) => false,
-        Ok(m) => !(m.file_type().is_file() && dropped.contains(&FileId::of(&m))),
+        // an identity that cannot be read is not known to be a dropped file
+        Ok(m) => {
+            !(m.file_type().is_file() && FileId::lstat(&path).is_ok_and(|id| dropped.contains(&id)))
+        }
     })
 }
 
@@ -206,7 +215,7 @@ fn fix_case(dir: &Path) -> Result<(), RdyError> {
     let (Some(parent), Some(want)) = (dir.parent(), dir.file_name()) else {
         return Ok(());
     };
-    let Ok(meta) = fs::symlink_metadata(dir) else {
+    let Ok(id) = FileId::lstat(dir) else {
         return Ok(());
     };
     let Ok(listing) = fs::read_dir(parent) else {
@@ -220,8 +229,7 @@ fn fix_case(dir: &Path) -> Result<(), RdyError> {
             return Ok(());
         }
         if name.to_string_lossy().to_lowercase() == lower
-            && e.metadata()
-                .is_ok_and(|m| FileId::of(&m) == FileId::of(&meta))
+            && FileId::lstat(&e.path()).is_ok_and(|other| other == id)
         {
             stored = Some(name);
         }
@@ -641,7 +649,8 @@ pub fn changed_since_staged(
             if st.stage.deleted.contains(*rel) {
                 reachable
                     && fs::symlink_metadata(root.join(p)).is_ok_and(|m| {
-                        !(m.file_type().is_file() && copies.contains(&FileId::of(&m)))
+                        !(m.file_type().is_file()
+                            && FileId::lstat(&root.join(p)).is_ok_and(|id| copies.contains(&id)))
                     })
             } else {
                 let disk = reachable.then(|| regular_bytes(&root.join(p))).flatten();
@@ -718,7 +727,9 @@ fn replaceable(place: &Place, st: &WcState, rel: &str, text: Option<&str>) -> bo
         return true;
     }
     // only when its own copies differ: the tracked paths that are this same file
-    let same = FileId::of(&meta);
+    let Ok(same) = FileId::lstat(&path) else {
+        return false;
+    };
     st.base
         .files
         .keys()

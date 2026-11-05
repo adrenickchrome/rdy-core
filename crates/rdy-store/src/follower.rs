@@ -114,7 +114,7 @@ pub fn read_mark(dir: &Path) -> Result<Option<FollowerMark>, StoreError> {
         )
     })?;
     let meta = file.metadata().map_err(|_| refused(Why::Unreadable))?;
-    match private_regular(&file, &meta) {
+    match private_regular(&file, &meta, &path) {
         Ok(true) => {}
         Ok(false) => return Err(refused(Why::NotPrivate)),
         Err(_) => return Err(refused(Why::Unreadable)),
@@ -132,12 +132,19 @@ pub fn read_mark(dir: &Path) -> Result<Option<FollowerMark>, StoreError> {
     parse(&bytes).map(Some)
 }
 
-/// Whether the open `file`, whose metadata is `meta`, is one private regular file of this
-/// account's: not shared by a second name. Its privacy is read from the handle; a failed read is
-/// an error.
-fn private_regular(file: &std::fs::File, meta: &std::fs::Metadata) -> std::io::Result<bool> {
+/// Whether the open `file` (named `path`), whose metadata is `meta`, is one private regular file
+/// of this account's: not shared by a second name. Its privacy and link count are read from the
+/// handle; a failed read is an error.
+fn private_regular(
+    file: &std::fs::File,
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> std::io::Result<bool> {
     let privacy = pio::privacy(file)?;
-    Ok(meta.is_file() && privacy.mine && privacy.private && crate::fileid::links(meta) == 1)
+    Ok(meta.is_file()
+        && privacy.mine
+        && privacy.private
+        && crate::fileid::links_of(file, path)? == 1)
 }
 
 /// The mark in `bytes`, which is within the size bound.

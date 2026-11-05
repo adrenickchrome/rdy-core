@@ -1192,7 +1192,7 @@ fn reuse_backup(
         .try_reserve_exact(expected.files.len())
         .map_err(|_| failed(UpgradeFailure::Limit, None))?;
     let held = list_tree(&copy, &[], |rel, f, m| {
-        if !is_owned_private(f)? || ids.contains(&FileId::of(m)) {
+        if !is_owned_private(f)? || ids.contains(&FileId::of_file(f)?) {
             return Err(mismatch());
         }
         if m.is_file() {
