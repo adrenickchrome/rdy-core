@@ -552,7 +552,7 @@ impl HeldLock {
 
 /// The lock of a store directory, held (lock1). An open store holds one; a caller can take one
 /// first and give it to [`Store::open_locked`], so no other process opens the store between
-/// the two (a load holds it from before the rename of its store until the load ends). The lock
+/// the two (a load holds it from after the rename of its store until the load ends). The lock
 /// is released when the last holder drops it.
 #[derive(Clone)]
 pub struct StoreLock(Arc<HeldLock>);
@@ -581,6 +581,17 @@ impl StoreLock {
             Err(e) => return Err(e.into()),
         };
         Ok(StoreLock(Arc::new(HeldLock::take(file, dir)?)))
+    }
+
+    /// Closes the lock file, when this is its last holder. Otherwise gives the lock back.
+    pub(crate) fn close(self) -> Result<(), StoreLock> {
+        match Arc::try_unwrap(self.0) {
+            Ok(held) => {
+                drop(held);
+                Ok(())
+            }
+            Err(shared) => Err(StoreLock(shared)),
+        }
     }
 
     /// Whether this is the lock of the store at `dir`: the held file is the file at `dir/lock`.

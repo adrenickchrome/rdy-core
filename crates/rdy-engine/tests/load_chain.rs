@@ -6,7 +6,10 @@
 //! written, even for a moment. Each file's trailer must be the one the pre-pass read, and no
 //! store takes its place before every file passed; a failure restores the target.
 use rdy_engine::dump_stop::DumpStop;
-use rdy_engine::load::{LoadSummary, PlaceFault, fail_next_placement_for_tests, load, load_chain};
+use rdy_engine::load::{
+    LoadSummary, PlaceFault, PlaceStep, fail_next_placement_for_tests, load, load_chain,
+    with_placement_hook_for_tests,
+};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
 use rdy_model::redaction::{RedactionApply, RedactionCarried};
@@ -15,9 +18,13 @@ use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, TRAILER_LEN};
 use rdy_store::dump_chain::batch_end;
 use rdy_store::holder::StoreMode;
 use rdy_store::kinds;
+use rdy_store::layout::{RUN_DIR, START_LOCK_FILE};
+use rdy_store::pio::{Boundary, DurableStep, on_durable};
 use rdy_store::redaction_carried::{HOLDER_FIX, PROJECT_FIX};
 use rdy_store::segment::{Location, on_segment_write};
+use rdy_store::start_lock::StartGuard;
 use rdy_store::take_batch::UploadTarget;
+use rdy_store::{StoreError, StoreLock};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1513,4 +1520,358 @@ fn released_refusal(bytes: &[u8]) -> (u64, String) {
         rdy_store::StoreError::Dump { at, what } => (at, what),
         e => panic!("not a damaged dump: {e:?}"),
     }
+}
+
+/// Fails the flush of the directory at `dir` on this thread until it drops.
+struct FailFlush;
+
+impl Drop for FailFlush {
+    fn drop(&mut self) {
+        on_durable(None);
+    }
+}
+
+fn fail_flush(dir: PathBuf) -> FailFlush {
+    on_durable(Some(Box::new(move |step, at| match step {
+        DurableStep::Flush(d) if at == Boundary::Before && *d == dir => {
+            Err(std::io::Error::other("injected sync failure"))
+        }
+        _ => Ok(()),
+    })));
+    FailFlush
+}
+
+// A chain load's failed sync of its segments directory restores the target: the error is the
+// target's, and `.rdy/store.loading`, with all it holds, goes.
+#[test]
+fn hc7_failed_segments_sync_restores_the_target() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let files = vec![t.f0.clone(), t.i1.clone()];
+
+    // a target that holds a file of its own
+    let (to, before) = kept_target(d, "sync");
+    let loading = to.join(".rdy/store.loading");
+    let g = fail_flush(loading.join("segments"));
+    let e = chain_err(&files, &to, None);
+    drop(g);
+    assert_eq!(e.code, E_IO, "{e:?}");
+    assert!(e.message.contains("injected sync failure"), "{e:?}");
+    assert!(
+        e.message.starts_with(&loading.display().to_string()),
+        "{e:?}"
+    );
+    assert_eq!(tree(&to), before);
+    // the same chain then loads into the same target
+    let s: LoadSummary = chain_load(&files, &to, None);
+    assert_eq!(s.chain.len(), 2);
+}
+
+/// Whether another holder has the start lock of the project at `to`. A take that gets it lets it
+/// go at once.
+fn start_held(to: &Path) -> bool {
+    StartGuard::try_take(&to.join(".rdy")).unwrap().is_none()
+}
+
+/// Every segment file of the store under `project`, by name.
+fn segments(project: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    tree(&project.join(".rdy/store/segments"))
+        .into_iter()
+        .filter_map(|(path, bytes)| Some((path, bytes?)))
+        .collect()
+}
+
+/// The log under `to` is the start of the log under `from`, byte for byte, and holds bytes.
+fn assert_log_is_a_prefix(to: &Path, from: &Path) {
+    let source = segments(from);
+    let loaded = segments(to);
+    assert!(!loaded.is_empty());
+    for (name, bytes) in &loaded {
+        let have = source.get(name).unwrap_or_else(|| panic!("no {name:?}"));
+        assert!(have.starts_with(bytes), "{name:?} differs from its source");
+    }
+}
+
+/// A full dump and an increment whose log holds a view ref that names no view op: fsck refuses
+/// the chain.
+fn forged_chain(d: &Path) -> Vec<PathBuf> {
+    let src = d.join("forged");
+    let mut r = Rdy::init(&src, "rdy-standard").unwrap();
+    add(&mut r, 0, "a block");
+    land(&mut r);
+    let f = d.join("forged-f0.rdydump");
+    let s0 = r.read().dump(&f).unwrap();
+    r.store_mut()
+        .set_refs_unchecked_for_tests(vec![("view/forged".into(), vec![0u8; 32])])
+        .unwrap();
+    r.close().unwrap();
+    let r = Rdy::open(&src).unwrap();
+    let i = d.join("forged-i1.rdydump");
+    r.read().dump_after(&s0.chain_end(), &i).unwrap();
+    r.close().unwrap();
+    vec![f, i]
+}
+
+/// A kept target whose `.rdy` already has run state of its own: a start lock and a file.
+fn target_with_run(d: &Path, name: &str) -> (PathBuf, BTreeMap<PathBuf, Option<Vec<u8>>>) {
+    let to = d.join(name);
+    let run = to.join(".rdy").join(RUN_DIR);
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(to.join("keep.txt"), b"mine").unwrap();
+    std::fs::write(run.join(START_LOCK_FILE), b"").unwrap();
+    std::fs::write(run.join("daemon.log"), b"an older run").unwrap();
+    let before = tree(&to);
+    (to, before)
+}
+
+#[test]
+fn wx8b_loading_store_is_closed_before_rename() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let inputs = [
+        ("full", vec![t.f0.clone()]),
+        ("chain", vec![t.f0.clone(), t.i1.clone()]),
+    ];
+    for (name, files) in inputs {
+        let to = d.join(name);
+        let dot = to.join(".rdy");
+        let saw = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&saw);
+        let hook = move |step| {
+            if step == PlaceStep::Closed {
+                seen.set(true);
+                let loading = dot.join("store.loading");
+                assert!(!dot.join("store").exists());
+                assert!(loading.join("FORMAT").is_file());
+                // nothing holds its lock
+                drop(StoreLock::take(&loading).expect("the lock of the closed store is free"));
+                // and Windows refuses this while any file below the directory is open
+                let aside = dot.join("aside");
+                std::fs::rename(&loading, &aside).unwrap();
+                std::fs::rename(&aside, &loading).unwrap();
+            }
+            Ok(())
+        };
+        with_placement_hook_for_tests(hook, || chain_load(&files, &to, None));
+        assert!(saw.get(), "{name}: the load never reached the rename");
+        assert_log_is_a_prefix(&to, &d.join("p"));
+        let r = Rdy::open(&to).unwrap();
+        r.fsck().unwrap();
+        r.close().unwrap();
+    }
+}
+
+#[test]
+fn wx8b_start_lock_covers_close_rename_reopen() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let inputs = [
+        ("full", vec![t.f0.clone()]),
+        ("chain", vec![t.f0.clone(), t.i1.clone()]),
+    ];
+    for (name, files) in inputs {
+        let to = d.join(name);
+        let at = to.clone();
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&steps);
+        let hook = move |step: PlaceStep| {
+            seen.borrow_mut().push(step);
+            assert!(start_held(&at), "{step:?}: the start lock is free");
+            // a direct open in the window is refused and takes nothing: before the rename no
+            // store stands, and after it the start lock stops the open
+            if matches!(step, PlaceStep::Closed | PlaceStep::Renamed) {
+                let e = match Rdy::open(&at) {
+                    Ok(_) => panic!("{step:?}: a direct open took the store"),
+                    Err(e) => e,
+                };
+                let want = match step {
+                    PlaceStep::Closed => E_NO_PROJECT,
+                    _ => E_LOCKED,
+                };
+                assert_eq!(e.code, want, "{step:?}: {e:?}");
+            }
+            let store = at.join(".rdy/store");
+            if step == PlaceStep::Renamed {
+                drop(StoreLock::take(&store).expect("no store lock across the rename"));
+            }
+            if matches!(step, PlaceStep::Reopened | PlaceStep::Checked) {
+                assert!(matches!(
+                    StoreLock::take(&store),
+                    Err(StoreError::Locked(_))
+                ));
+            }
+            Ok(())
+        };
+        with_placement_hook_for_tests(hook, || chain_load(&files, &to, None));
+        assert_eq!(
+            *steps.borrow(),
+            [
+                PlaceStep::Closed,
+                PlaceStep::Renamed,
+                PlaceStep::Reopened,
+                PlaceStep::Checked
+            ],
+            "{name}"
+        );
+        // the load removed the run state it made, and let the lock go; the store opens
+        assert!(!to.join(".rdy").join(RUN_DIR).exists(), "{name}");
+        assert!(!start_held(&to), "{name}: the load kept the start lock");
+        let r = Rdy::open(&to).unwrap();
+        r.close().unwrap();
+    }
+}
+
+#[test]
+fn wx8b_failed_installed_check_rolls_back_while_locked() {
+    let _clock = pin_clock(1_000_000);
+    let scratch = tempfile::tempdir().unwrap();
+    let d = scratch.path();
+    let files = forged_chain(d);
+
+    // run state the load made goes with the rest; a target's own stays, byte for byte
+    let new_run = kept_target(d, "new-run");
+    let old_run = target_with_run(d, "old-run");
+    for (to, before) in [new_run, old_run] {
+        let own_run = before.contains_key(Path::new(".rdy/run"));
+        let at = to.clone();
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&steps);
+        let hook = move |step: PlaceStep| {
+            seen.borrow_mut().push(step);
+            let store = at.join(".rdy/store");
+            match step {
+                PlaceStep::Undoing => {
+                    assert!(start_held(&at), "the undo starts with the start lock free");
+                    assert!(store.exists(), "the store went before the undo");
+                }
+                PlaceStep::Undone => {
+                    assert!(!store.exists());
+                    assert!(!at.join(".rdy/store.loading").exists());
+                    // where the load made `.rdy`, no name is left to look at the lock through
+                    if own_run {
+                        assert!(start_held(&at), "the undo ended with the start lock free");
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        };
+        let e = with_placement_hook_for_tests(hook, || chain_err(&files, &to, None));
+        assert_eq!(e.code, E_DUMP, "{e:?}");
+        assert!(
+            e.message
+                .starts_with("the dump loads, but the project fails fsck: "),
+            "{e:?}"
+        );
+        assert!(
+            steps
+                .borrow()
+                .ends_with(&[PlaceStep::Undoing, PlaceStep::Undone]),
+            "{:?}",
+            steps.borrow()
+        );
+        assert_eq!(tree(&to), before);
+        if own_run {
+            assert!(!start_held(&to), "the failed load kept the start lock");
+        }
+    }
+}
+
+#[test]
+fn wx8b_a_failure_at_every_boundary_restores_the_target() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let files = vec![t.f0.clone(), t.i1.clone()];
+    let boundaries = [
+        PlaceStep::Closed,
+        PlaceStep::Renamed,
+        PlaceStep::Reopened,
+        PlaceStep::Checked,
+    ];
+    for (n, at) in boundaries.into_iter().enumerate() {
+        let new_run = kept_target(d, &format!("new-run-{n}"));
+        let old_run = target_with_run(d, &format!("old-run-{n}"));
+        for (to, before) in [new_run, old_run] {
+            let hook = move |step| {
+                if step == at {
+                    return Err(std::io::Error::other("injected boundary failure"));
+                }
+                Ok(())
+            };
+            let e = with_placement_hook_for_tests(hook, || chain_err(&files, &to, None));
+            assert_eq!(e.code, E_IO, "{at:?}: {e:?}");
+            assert!(e.message.contains("injected boundary failure"), "{e:?}");
+            assert_eq!(tree(&to), before, "{at:?}");
+            // the same chain then loads there; a target's own run state stays through that too
+            chain_load(&files, &to, None);
+            assert_log_is_a_prefix(&to, &d.join("p"));
+            let run = |t: &BTreeMap<PathBuf, Option<Vec<u8>>>| {
+                t.iter()
+                    .filter(|(path, _)| path.starts_with(".rdy/run"))
+                    .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(run(&tree(&to)), run(&before), "{at:?}");
+        }
+        // a target the load made goes whole
+        let new = d.join(format!("new-{n}")).join("deeper");
+        let hook = move |step| {
+            if step == at {
+                return Err(std::io::Error::other("injected boundary failure"));
+            }
+            Ok(())
+        };
+        with_placement_hook_for_tests(hook, || chain_err(&files, &new, None));
+        assert!(!d.join(format!("new-{n}")).exists(), "{at:?}");
+    }
+}
+
+#[test]
+fn wx8b_a_held_start_lock_refuses_the_load_before_it_writes() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let (to, _) = target_with_run(d, "held");
+    let start = StartGuard::try_take(&to.join(".rdy")).unwrap().unwrap();
+    let before = tree(&to);
+    let e = chain_err(std::slice::from_ref(&t.f0), &to, None);
+    assert_eq!(e.code, E_LOCKED, "{e:?}");
+    assert_eq!(tree(&to), before);
+    // the refused load did not touch the holder's lock
+    assert!(start.guards(&to.join(".rdy")));
+    drop(start);
+    chain_load(std::slice::from_ref(&t.f0), &to, None);
+}
+
+#[test]
+fn wx8b_an_open_that_holds_the_installed_store_keeps_it() {
+    // what no start lock excludes yet: a holder of the store's own lock after the rename
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let to = d.join("taken");
+    let store = to.join(".rdy/store");
+    let holder = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&holder);
+    let hook = move |step| {
+        if step == PlaceStep::Renamed {
+            *keep.borrow_mut() = Some(StoreLock::take(&store).unwrap());
+        }
+        Ok(())
+    };
+    let e =
+        with_placement_hook_for_tests(hook, || chain_err(std::slice::from_ref(&t.f0), &to, None));
+    assert_eq!(e.code, E_DUMP, "{e:?}");
+    assert!(
+        e.message.contains("another rdy process opened the project"),
+        "{e:?}"
+    );
+    drop(holder.take());
+    let r = Rdy::open(&to).unwrap();
+    r.fsck().unwrap();
+    r.close().unwrap();
 }

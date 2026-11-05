@@ -338,6 +338,39 @@ fn ha12_holder_load_uses_holder_fsck() {
 }
 
 #[test]
+fn wx8b_a_holder_load_takes_the_same_installation() {
+    let root = tempfile::tempdir().unwrap();
+    let src_dir = divergent_holder(root.path(), RepoId([9; 16]));
+    let src = Rdy::open_holder(&src_dir).unwrap();
+    let dump = root.path().join("h.rdydump");
+    src.read().dump(&dump).unwrap();
+    src.close().unwrap();
+    let target = root.path().join("loaded");
+    let at = target.clone();
+    let steps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&steps);
+    let hook = move |step| {
+        seen.borrow_mut().push(step);
+        let start = rdy_store::start_lock::StartGuard::try_take(&at.join(".rdy")).unwrap();
+        assert!(start.is_none(), "{step:?}: the start lock is free");
+        Ok(())
+    };
+    load::with_placement_hook_for_tests(hook, || load::load(&dump, &target).unwrap());
+    assert_eq!(
+        *steps.borrow(),
+        [
+            load::PlaceStep::Closed,
+            load::PlaceStep::Renamed,
+            load::PlaceStep::Reopened,
+            load::PlaceStep::Checked
+        ]
+    );
+    let got = Rdy::open_holder(&target).unwrap();
+    got.fsck().unwrap();
+    got.close().unwrap();
+}
+
+#[test]
 fn ha12_clone_refuses_holder_before_origin_changes() {
     let root = tempfile::tempdir().unwrap();
     let src_dir = divergent_holder(root.path(), RepoId([5; 16]));

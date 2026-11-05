@@ -30,6 +30,11 @@
 //!
 //! Only the holder of the reservation file's lock reads or writes the file: Windows refuses a read
 //! of a locked range through any other handle.
+//!
+//! The start lock file stays once it stands, with one exception: a load that made it removes it
+//! as the load ends, while it holds it, so a load adds no run state to its target. A taker that
+//! opened the file before that checks the name after it locks ([`FileLock::is_at`]), so a lock on
+//! a removed file is no guard.
 
 use crate::fileid::FileId;
 use crate::layout::{RUN_DIR, START_LOCK_FILE};
@@ -52,8 +57,7 @@ pub struct FileLock(File);
 
 impl FileLock {
     /// Opens `path` (create, read and write, private, never through a link; std opens it so that
-    /// no child inherits it) and tries the lock once. `Ok(None)` when another holder has it. The
-    /// file is never deleted.
+    /// no child inherits it) and tries the lock once. `Ok(None)` when another holder has it.
     pub fn try_take(path: &Path) -> io::Result<Option<FileLock>> {
         let file = pio::open_no_follow(
             pio::private_file(
@@ -75,6 +79,27 @@ impl FileLock {
         // a file left by an older run keeps its mode through open; set it exactly
         pio::make_private_file(&lock.0)?;
         Ok(Some(lock))
+    }
+
+    /// [`FileLock::try_take`] of a file that stands at `path` already: never creates it, and
+    /// leaves its mode alone. `Ok(None)` when another holder has it; a missing file is
+    /// `NotFound`.
+    pub fn try_take_existing(path: &Path) -> io::Result<Option<FileLock>> {
+        let file = pio::open_no_follow(OpenOptions::new().read(true).write(true), path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(FileLock(file))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    /// Whether the held file is the file at `path` now. A load that made a start lock removes it
+    /// when it fails: a rival that opened the file before that holds a lock on nothing.
+    fn is_at(&self, path: &Path) -> bool {
+        matches!(
+            (FileId::of_file(&self.0), FileId::lstat(path)),
+            (Ok(held), Ok(named)) if held == named
+        )
     }
 
     /// Test hook: a duplicate of the descriptor, as a spawned child holds one until exec.
@@ -210,10 +235,54 @@ impl StartGuard {
     pub fn try_take(rdy_dir: &Path) -> io::Result<Option<StartGuard>> {
         let project = FileId::lstat(rdy_dir)?;
         let run = run_dir(rdy_dir)?;
-        let Some(lock) = FileLock::try_take(&run.join(START_LOCK_FILE))? else {
-            return Ok(None);
+        let path = run.join(START_LOCK_FILE);
+        let lock = match FileLock::try_take(&path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return Ok(None),
+            // a load that made the run directory removed it just now: try again
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
         };
-        if !no_claim_held(&run)? {
+        StartGuard::from_lock(lock, &path, &run, rdy_dir, project)
+    }
+
+    /// [`StartGuard::try_take`] that makes nothing: a project with no start lock file has no one
+    /// to exclude yet, which is [`ExistingLock::Absent`]. For an open, which writes no run state.
+    pub fn try_take_existing(rdy_dir: &Path) -> io::Result<ExistingLock> {
+        let run = rdy_dir.join(RUN_DIR);
+        let path = run.join(START_LOCK_FILE);
+        let absent = |e: io::Error| match e.kind() {
+            io::ErrorKind::NotFound => Ok(ExistingLock::Absent),
+            _ => Err(e),
+        };
+        let project = match FileId::lstat(rdy_dir) {
+            Ok(id) => id,
+            Err(e) => return absent(e),
+        };
+        let lock = match FileLock::try_take_existing(&path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return Ok(ExistingLock::Busy),
+            Err(e) => return absent(e),
+        };
+        Ok(
+            match StartGuard::from_lock(lock, &path, &run, rdy_dir, project)? {
+                Some(guard) => ExistingLock::Held(guard),
+                None => ExistingLock::Busy,
+            },
+        )
+    }
+
+    /// The guard of `lock`, just taken on the file `path` in the run directory `run`. `Ok(None)`
+    /// when that file left its name (nothing excludes anyone through it) or a launched daemon
+    /// holds a claim.
+    fn from_lock(
+        lock: FileLock,
+        path: &Path,
+        run: &Path,
+        rdy_dir: &Path,
+        project: FileId,
+    ) -> io::Result<Option<StartGuard>> {
+        if !lock.is_at(path) || !no_claim_held(run)? {
             return Ok(None);
         }
         Ok(Some(StartGuard {
@@ -256,6 +325,16 @@ impl StartGuard {
             record,
         }))
     }
+}
+
+/// What one try at a start lock that must already exist found.
+pub enum ExistingLock {
+    /// No start lock file stands there.
+    Absent,
+    /// Another holder has it, or a launched daemon holds a claim.
+    Busy,
+    /// It is held now.
+    Held(StartGuard),
 }
 
 /// What has become of a reservation, as its writer sees it.
@@ -351,6 +430,9 @@ impl StartClaim {
         let Some(lock) = FileLock::try_take(&path)? else {
             return Ok(Err(self));
         };
+        if !lock.is_at(&path) {
+            return Ok(Err(self));
+        }
         Ok(Ok(StartGuard {
             rdy_dir: self.rdy_dir.clone(),
             project: self.project,
@@ -388,6 +470,21 @@ mod tests {
             assert!(unclaimed_record(id, u32::MAX, &token).len() <= MAX_RESERVATION_BYTES);
             assert!(claimed_record(id, u32::MAX).len() <= MAX_RESERVATION_BYTES);
         }
+    }
+
+    #[test]
+    fn wx8b_a_lock_on_a_removed_file_is_at_no_name() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("start.lock");
+        let lock = FileLock::try_take(&path).unwrap().unwrap();
+        assert!(lock.is_at(&path));
+        // a rival's handle after a removal: the name is gone
+        fs::remove_file(&path).unwrap();
+        assert!(!lock.is_at(&path));
+        // or another file stands at it
+        let other = FileLock::try_take(&path).unwrap().unwrap();
+        assert!(!lock.is_at(&path));
+        assert!(other.is_at(&path));
     }
 
     #[test]

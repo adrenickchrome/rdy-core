@@ -2,15 +2,42 @@
 //! not a directory (an M2.0 project's stub file, for one) is a store of another rdy build and is
 //! refused before anything is locked or written.
 use crate::error::StoreError;
+use crate::pio;
+use crate::start_lock::StartGuard;
 use crate::store::{OpenPolicy, Store, StoreLock};
 use std::path::Path;
 
 /// The store directory inside `.rdy`.
 pub const STORE_DIR: &str = "store";
+/// The store directory a load writes inside `.rdy` before it installs it as [`STORE_DIR`].
+pub const LOADING_DIR: &str = "store.loading";
 /// The run directory inside `.rdy`.
 pub const RUN_DIR: &str = "run";
 /// The project's start lock in the run directory (see `start_lock`).
 pub const START_LOCK_FILE: &str = "start.lock";
+
+/// Renames the finished `.rdy/store.loading` of the project whose `.rdy` directory is `rdy_dir` to
+/// `.rdy/store`, the one installation of every load. `lock` is that store's lock, which this call
+/// closes first: no process can rename a directory on Windows while a file below it is open, so
+/// the caller has closed every other handle below it. From here until the caller opens the
+/// installed store under a new lock, only `start` keeps the store to the caller. `before_rename`
+/// runs between the close and the rename; its error fails the call. A guard of another project,
+/// or a lock that has another holder, is `Locked` with nothing renamed. The caller flushes
+/// `.rdy`.
+pub fn install_loading_store(
+    rdy_dir: &Path,
+    start: &StartGuard,
+    lock: StoreLock,
+    before_rename: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), StoreError> {
+    let loading = rdy_dir.join(LOADING_DIR);
+    if !start.guards(rdy_dir) || lock.close().is_err() {
+        return Err(StoreError::Locked(loading));
+    }
+    before_rename()?;
+    pio::rename_durable(&loading, &rdy_dir.join(STORE_DIR))?;
+    Ok(())
+}
 
 /// Opens the store of the project whose `.rdy` directory is `rdy_dir`. A missing store is
 /// refused, never created: only `create_project_store` (rdy init) creates one.

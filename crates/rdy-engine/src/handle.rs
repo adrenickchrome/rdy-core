@@ -10,7 +10,7 @@ use crate::{
 use arc_swap::ArcSwap;
 use rdy_schema::Pack;
 use rdy_store::holder::StoreMode;
-use rdy_store::start_lock::StartGuard;
+use rdy_store::start_lock::{ExistingLock, StartGuard};
 use rdy_store::upgrade::{UpgradeReport, UpgradeStep};
 use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::cell::RefCell;
@@ -147,7 +147,7 @@ impl Rdy {
     /// borrow the guard and never take that lock again. A guard of another project is `E_LOCKED`.
     pub fn open_under_start(project: &Path, start: &StartGuard) -> Result<Rdy, RdyError> {
         check_start(project, start)?;
-        Rdy::open(project)
+        Rdy::open_with(project, OpenPolicy::AutoUpgrade, None, Some(start))
     }
 
     /// Opens `project` as [`Rdy::open`] does, with upgrade policy `policy` (embedded callers):
@@ -155,7 +155,7 @@ impl Rdy {
     /// before the handle is returned; `RequireCurrent` refuses a store that needs either with
     /// E_STORE_FORMAT, before anything is written.
     pub fn open_with_policy(project: &Path, policy: OpenPolicy) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, policy, None)
+        Rdy::open_with(project, policy, None, None)
     }
 
     /// Test hook: opens the project or holder (`mode`) at `root` with policy `policy` and the
@@ -170,7 +170,7 @@ impl Rdy {
         registry: &[UpgradeStep],
     ) -> Result<Rdy, RdyError> {
         match mode {
-            StoreMode::Project => Rdy::open_with(root, policy, Some(registry)),
+            StoreMode::Project => Rdy::open_with(root, policy, Some(registry), None),
             StoreMode::Holder => Rdy::open_holder_with(root, policy, Some(registry)),
         }
     }
@@ -191,7 +191,7 @@ impl Rdy {
     }
 
     /// Opens `project` under `lock`, the store lock the caller took and keeps (a load, from
-    /// before the rename of its store until it ends), in the mode its store holds: a holder as
+    /// after the rename of its store until it ends), in the mode its store holds: a holder as
     /// [`Rdy::open_holder`] does, with no config or pack file read; a project as [`Rdy::open`]
     /// does, with its config read once the mode is known. A lock that is not this project's
     /// store's is `E_LOCKED`.
@@ -252,8 +252,14 @@ impl Rdy {
         project: &Path,
         policy: OpenPolicy,
         registry: Option<&[UpgradeStep]>,
+        start: Option<&StartGuard>,
     ) -> Result<Rdy, RdyError> {
         let context = project_context(project)?;
+        // held across the open: start lock before store lock
+        let _load_excluded = match start {
+            Some(_) => None,
+            None => exclude_a_load(project)?,
+        };
         let store = Rdy::open_store(&project.join(".rdy"), policy, registry)?;
         // a holder is never read as a project: it has no canon, config or pack (D-BPYN8)
         if store.mode()? == StoreMode::Holder {
@@ -589,6 +595,20 @@ impl Rdy {
     /// Days without a write after which an open view is idle (`views.idle_days`, default 14).
     pub fn idle_days(&self) -> u32 {
         self.read().idle_days()
+    }
+}
+
+/// What keeps an open without a guard from taking a store that a load has closed and renamed, and
+/// has not opened again: the project's start lock, when its file stands (every load makes it
+/// first). Another holder is `E_LOCKED`, in the store's words. The file is not made here, and a
+/// lock file that cannot be opened (a read-only store's project) leaves the open to its own
+/// checks. The rest of the entry-point inventory takes this lock from its outer call.
+fn exclude_a_load(project: &Path) -> Result<Option<StartGuard>, RdyError> {
+    let dot = project.join(".rdy");
+    match StartGuard::try_take_existing(&dot) {
+        Ok(ExistingLock::Held(start)) => Ok(Some(start)),
+        Ok(ExistingLock::Busy) => Err(StoreError::Locked(dot.join(layout::STORE_DIR)).into()),
+        Ok(ExistingLock::Absent) | Err(_) => Ok(None),
     }
 }
 

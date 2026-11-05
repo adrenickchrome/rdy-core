@@ -241,9 +241,7 @@ pub(crate) fn load_verified(
             warnings,
         })
     })();
-    if out.is_err() {
-        made.undo();
-    }
+    made.end(out.is_ok());
     out
 }
 
