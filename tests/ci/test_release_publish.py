@@ -1,0 +1,1636 @@
+"""The release caller, the private draft, the genuine-check receipts and promotion, with fake remote services.
+
+No test reaches GitHub, AWS or a key. Every write goes to `FakeReleases` or the eligibility `World`. Archive
+bytes here are fixed filler, so their digests are real digests of filler. The one real signature is the public
+v0.35.0 vector already in the repository: it proves the verifier's command shape on real bytes, and nothing
+else. A "signature" anywhere else is opaque bytes that only the fake verifier knows.
+"""
+import copy
+import io
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_release_controller as ctl  # noqa: E402
+import test_release_sign as sgn  # noqa: E402
+
+base = ctl.base
+CONTROLLER, ELIGIBILITY, GITHUB, CANDIDATE = ctl.CONTROLLER, base.ELIGIBILITY, base.GITHUB, base.CANDIDATE
+sys.modules['controller'] = CONTROLLER
+sys.modules['sign'] = sgn.SIGN
+SIGN = sgn.SIGN
+PUBLISH = base.load('publish')
+Refused, ControllerError = CONTROLLER.Refused, base.ControllerError
+ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW_PATH = ROOT / '.github/workflows/release.yml'
+WORKFLOW = WORKFLOW_PATH.read_text() if WORKFLOW_PATH.exists() else 'jobs:\n'
+SIGN_WORKFLOW = (ROOT / '.github/workflows/release-sign.yml').read_text()
+VECTOR = ROOT / 'crates/rdy-qa/fixtures/release-keys/receiver-v1/real-v0.35.0'
+
+sha, canon, digest = base.sha, base.canon, base.digest
+S, P, H, REPO = base.S, base.P, base.H, base.REPO
+MAC, LINUX = CANDIDATE.TARGETS
+DISPATCH_RUN = base.DISPATCH_RUN
+SIGNATURE = ctl.SIGNATURE
+RUNS_ON = {MAC: 'macos-26', LINUX: 'ubuntu-26.04'}
+ARCHIVE_BYTES = {MAC: b'filler archive for the mac target\n', LINUX: b'filler archive for the linux target\n'}
+CRATES = {'imbl-7.0.2.crate': b'filler crate one\n', 'imbl-sized-chunks-0.2.0.crate': b'filler crate two\n'}
+LOCK = ('version = 4\n\n[[package]]\nname = "imbl"\nversion = "7.0.2"\nsource = "registry+x"\nchecksum = "'
+        + sha(CRATES['imbl-7.0.2.crate']) + '"\n\n[[package]]\nname = "imbl-sized-chunks"\nversion = "0.2.0"\n'
+        'source = "registry+x"\nchecksum = "' + sha(CRATES['imbl-sized-chunks-0.2.0.crate'])
+        + '"\n\n[[package]]\nname = "rdy-core"\nversion = "0.43.0"\n').encode()
+SIG_ART, RECEIPT_ART, ASSETS_ART = 9301, 9302, 9303
+GENUINE_ART = {MAC: 9304, LINUX: 9305}
+GENUINE_JOB = {MAC: 9406, LINUX: 9407}
+ELIGIBILITY_JOB_ID, DRAFT_JOB_ID, TAG_JOB_ID = 9401, 9402, 9403
+
+
+def real_archive(version, target):
+    data = ARCHIVE_BYTES[target]
+    return {'name': 'rdy-' + version + '-preview-' + target + '.tar.gz', 'sha256': sha(data), 'size': len(data)}
+
+
+def release_world(world=None):
+    """One release whose archives, crates and lock file are real bytes."""
+    with mock.patch.object(base, 'archive', real_archive):
+        w = world() if world else base.World()
+    sources = [{'name': n, 'sha256': sha(d), 'size': len(d)} for n, d in sorted(CRATES.items())]
+    for build in w.candidate['builds']:
+        build['sources'] = copy.deepcopy(sources)
+    w.members[(base.CAND_ART, 'candidate.json')] = canon(w.candidate)
+    w.put(S, 'Cargo.lock', LOCK)
+    w.seal()
+    return w
+
+
+def archive_files(w):
+    return {f['name']: ARCHIVE_BYTES[MAC if MAC in f['name'] else LINUX] for f in w.archives}
+
+
+def manifest_of(w):
+    return CANDIDATE.manifest_bytes(w.archives)
+
+
+class Git(ctl.FakeGit):
+    """The fact source, with the artifact ZIPs and the run lists that the release job names."""
+
+    def __init__(self, world):
+        ctl.FakeGit.__init__(self, world)
+        self.paths = {}
+        self.runs_of_release = []
+
+    def artifact_path(self, fact):
+        return self.paths[fact.artifact_id]
+
+    def release_runs(self, version):
+        return list(self.runs_of_release)
+
+    def run_artifacts(self, run_id):
+        return [GITHUB.ArtifactFact(**a) for a in self.w.artifacts.values() if a['run_id'] == run_id]
+
+
+class FakeReleases(object):
+    """GitHub's release API over the World. A write is recorded. Nothing can delete a draft or an asset."""
+
+    def __init__(self, stage):
+        self.stage = stage
+        self.w = stage.rig.w
+        self.rows = []
+        self.blobs = {}
+        self.mutations = []
+        self.faults = {}
+        self.next_id = 7000
+
+    def __getattr__(self, name):
+        return getattr(self.stage.rig.git, name)
+
+    def _fact(self, row):
+        return PUBLISH.DraftFact(row['id'], row['tag'], row['target'], row['name'], row['draft'], row['prerelease'],
+                                 row['body'], tuple(PUBLISH.AssetFact(**a) for a in row['assets']))
+
+    def full_releases(self):
+        return [self._fact(r) for r in self.rows]
+
+    def releases(self):
+        rows = [GITHUB.ReleaseFact(**r) for r in self.w.releases]
+        for row in self.rows:
+            if row['draft']:
+                rows.append(GITHUB.ReleaseFact(row['id'], row['tag'], row['target'], True, row['prerelease'], ()))
+        return rows
+
+    def release_full(self, release_id):
+        for row in self.rows:
+            if row['id'] == release_id:
+                return self._fact(row)
+        raise base.absent('release')
+
+    def public_release(self, tag):
+        for row in self.rows:
+            if row['tag'] == tag and not row['draft']:
+                return self._fact(row)
+        raise base.absent('release')
+
+    def _fault(self, name, applied):
+        fault = self.faults.get(name)
+        if fault is None or fault[0] != applied:
+            return
+        if fault[1] > 0:
+            self.faults[name] = (applied, fault[1] - 1)
+            raise GITHUB.ReconcileRequired(name, 'timeout')
+
+    def create_draft(self, tag, target, name, body):
+        self.mutations.append('create_draft')
+        self._fault('create_draft', False)
+        self.next_id += 1
+        row = dict(id=self.next_id, tag=tag, target=target, name=name, draft=True, prerelease=True, body=body, assets=[])
+        self.rows.append(row)
+        self._fault('create_draft', True)
+        return self._fact(row)
+
+    def add_asset(self, row, name, data, state='uploaded'):
+        self.next_id += 1
+        asset = dict(asset_id=self.next_id, name=name, size=len(data), state=state, digest='sha256:' + sha(data))
+        row['assets'].append(asset)
+        self.blobs[self.next_id] = data
+        return asset
+
+    def upload_asset(self, release_id, name, path):
+        self.mutations.append('upload ' + name)
+        self._fault('upload ' + name, False)
+        row = [r for r in self.rows if r['id'] == release_id][0]
+        if any(a['name'] == name for a in row['assets']):
+            raise GITHUB.ReconcileRequired('upload', 'HTTP 422', 422)
+        asset = self.add_asset(row, name, Path(path).read_bytes())
+        self._fault('upload ' + name, True)
+        return PUBLISH.AssetFact(**asset)
+
+    def download_asset(self, asset, out, limit):
+        data = self.blobs[asset.asset_id]
+        Path(out).write_bytes(data)
+        return sha(data), len(data)
+
+    def public_asset(self, tag, name, out, limit):
+        row = [r for r in self.rows if r['tag'] == tag and not r['draft']][0]
+        found = [a for a in row['assets'] if a['name'] == name]
+        if not found:
+            raise GITHUB.Malformed('public asset', 'HTTP 404')
+        data = self.blobs[found[0]['asset_id']]
+        Path(out).write_bytes(data)
+        return sha(data), len(data)
+
+    def create_final_tag(self, version, commit):
+        self.mutations.append('create_final_tag')
+        self._fault('create_final_tag', False)
+        self.w.refs['tags/v' + version] = ('commit', commit)
+        self._fault('create_final_tag', True)
+        return GITHUB.RefFact('refs/tags/v' + version, 'commit', commit, digest(91))
+
+    def publish_draft(self, release_id):
+        self.mutations.append('publish_draft')
+        self._fault('publish_draft', False)
+        row = [r for r in self.rows if r['id'] == release_id][0]
+        row['draft'] = False
+        tag = row['tag']
+        self.w.refs.setdefault('tags/' + tag, ('commit', row['target']))
+        self.w.releases.append(dict(release_id=row['id'], tag_name=tag, target_commitish=row['target'], draft=False,
+                                    prerelease=True, assets=()))
+        self._fault('publish_draft', True)
+        return self._fact(row)
+
+    def draft_row(self):
+        return [r for r in self.rows if r['tag'] == 'v' + self.w.v][0]
+    def signs(self):
+        return self.stage.rig.kms.signs
+
+
+class Stage(object):
+    """One release, one run, advanced job by job. Every step reads its input as the workflow gives it."""
+
+    def __init__(self, world=None):
+        self.w = world or release_world()
+        self.rig = ctl.Rig(self.w)
+        self.git = Git(self.w)
+        self.rig.git = self.git
+        self.releases = FakeReleases(self)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.count = 0
+        self.w.job(DISPATCH_RUN, 1, ELIGIBILITY_JOB_ID, PUBLISH.ELIGIBILITY_JOB)
+        self.checker_calls = []
+        self.install_report = None
+        self.put_candidate_zip()
+
+    def close(self):
+        self.tmp.cleanup()
+
+    def work(self):
+        self.count += 1
+        path = self.root / ('work-' + str(self.count))
+        path.mkdir()
+        return path
+
+    def put_candidate_zip(self):
+        path = self.root / 'candidate.zip'
+        with zipfile.ZipFile(path, 'w') as z:
+            for name, data in archive_files(self.w).items():
+                z.writestr(name, data)
+            z.writestr('SHA256SUMS', manifest_of(self.w))
+            z.writestr('candidate.json', canon(self.w.candidate))
+        self.git.paths[base.CAND_ART] = path
+
+    def request(self, attempt=1):
+        return self.w.request(dispatch_run_attempt=attempt)
+
+    def transfers(self):
+        return PUBLISH.Transfers(signature_id=SIG_ART, signature_digest=digest(21), draft_receipt_id=RECEIPT_ART,
+                                 genuine=dict(GENUINE_ART))
+
+    def fetch_crate(self, name):
+        return CRATES[name]
+
+    # -- jobs, in order ---------------------------------------------------------------------------
+
+    def sign(self):
+        """The reserve and signer jobs, through the controller, and their transfer."""
+        self.rig.reserve_version()
+        ctrl = self.rig.session()
+        signature = self.rig.sign(ctrl)
+        self.authorization = ctrl.authorization()
+        self.transfer_signature(signature, self.authorization)
+        return signature
+
+    def transfer_signature(self, signature, authorization, attempt=1, art=SIG_ART):
+        self.w.artifacts[art] = self.w.artifact(art, 'rdy-signature-a' + str(attempt), DISPATCH_RUN, digest(21), 512)
+        self.w.members[(art, 'SHA256SUMS.sig')] = signature
+        self.w.members[(art, 'authorization.json')] = authorization
+
+    def draft(self, attempt=1):
+        """The draft job: it gathers, syncs, reads back and transfers both artifacts."""
+        result = PUBLISH.run_draft(self.git, self.releases, self.request(attempt), self.transfers(), DISPATCH_RUN, attempt,
+                                   H, self.rig.verifier, self.fetch_crate, self.work())
+        self.w.job(DISPATCH_RUN, attempt, DRAFT_JOB_ID + 1000 * (attempt - 1), PUBLISH.DRAFT_JOB)
+        self.w.artifacts[RECEIPT_ART] = self.w.artifact(RECEIPT_ART, 'draft-receipt-a' + str(attempt), DISPATCH_RUN,
+                                                        digest(22), 512)
+        self.w.members[(RECEIPT_ART, 'draft-receipt.json')] = result.receipt
+        self.w.artifacts[ASSETS_ART] = self.w.artifact(ASSETS_ART, 'draft-assets-a' + str(attempt), DISPATCH_RUN,
+                                                       digest(23), 4096)
+        path = self.root / ('assets-' + str(attempt) + '.zip')
+        with zipfile.ZipFile(path, 'w') as z:
+            for entry in sorted(result.folder.iterdir()):
+                z.write(entry, entry.name)
+        self.git.paths[ASSETS_ART] = path
+        self.draft_result = result
+        return result
+
+    def checker(self, target):
+        def run(argv, boundary):
+            self.checker_calls.append(argv)
+            download = Path(argv[argv.index('--download') + 1])
+            self.seen_download = sorted(p.name for p in download.iterdir())
+            return self.install_report or self.report(target)
+        return run
+
+    def report(self, target, **changes):
+        value = {'binary': 'rdy', 'checks': [{'name': n, 'passed': True} for n in CANDIDATE.CHECK_NAMES],
+                 'commit': S, 'os': 'test', 'skipped': 0, 'target': target, 'version': self.w.v}
+        value.update(changes)
+        return canon(value)
+
+    def genuine(self, target, attempt=1):
+        data = PUBLISH.genuine_check(self.git, self.request(attempt), target, ASSETS_ART, RECEIPT_ART, DISPATCH_RUN, attempt,
+                                     self.checker(target), self.work(), {'PATH': '/usr/bin'})
+        self.w.job(DISPATCH_RUN, attempt, GENUINE_JOB[target] + 1000 * (attempt - 1), PUBLISH.GENUINE_JOBS[target])
+        art = GENUINE_ART[target]
+        self.w.artifacts[art] = self.w.artifact(art, PUBLISH.GENUINE_ARTIFACT + target + '-a' + str(attempt), DISPATCH_RUN,
+                                                digest(24), 512)
+        self.w.members[(art, PUBLISH.GENUINE_MEMBER)] = data
+        return data
+
+    def both_genuine(self, attempt=1):
+        self.genuine(MAC, attempt)
+        self.genuine(LINUX, attempt)
+
+    def final_tag(self, attempt=1):
+        PUBLISH.run_final_tag(self.releases, self.rig.enrollment, self.request(attempt), self.transfers(), DISPATCH_RUN,
+                              attempt, H, self.rig.verifier, self.work())
+        self.w.job(DISPATCH_RUN, attempt, TAG_JOB_ID + 1000 * (attempt - 1), PUBLISH.TAG_JOB)
+
+    def promote(self, attempt=1):
+        return PUBLISH.promote(self.git, self.releases, self.rig.enrollment, self.request(attempt), self.transfers(),
+                               DISPATCH_RUN, attempt, H, self.rig.verifier, self.work())
+
+    def ready(self):
+        """Everything before the final tag."""
+        self.sign()
+        self.draft()
+        self.both_genuine()
+        return self
+
+    def public_check(self, receipt, target=LINUX, **changes):
+        arguments = dict(checker=self.checker(target), verify=self.rig.verifier, work=self.work(),
+                         env={'PATH': '/usr/bin'})
+        arguments.update(changes)
+        return PUBLISH.check_published(self.releases, receipt, target, **arguments)
+
+
+def job_text(name):
+    match = re.search(r'^  ' + re.escape(name) + r':\n((?:(?:    .*)?\n)+)', WORKFLOW, re.M)
+    if match is None:
+        raise AssertionError('no job ' + name)
+    return match.group(1)
+
+
+def job_ids():
+    jobs = WORKFLOW[WORKFLOW.index('\njobs:\n'):]
+    return re.findall(r'^  ([A-Za-z0-9_-]+):\n', jobs, re.M)
+
+
+def permissions_of(name):
+    match = re.search(r'^    permissions:\n((?:      .*\n)+)', job_text(name), re.M)
+    if match is None:
+        return {}
+    return dict(re.findall(r'^      ([a-z-]+): (read|write)$', match.group(1), re.M))
+
+
+def needs_of(name):
+    match = re.search(r'^    needs: \[(.*)\]$', job_text(name), re.M)
+    if match:
+        return [n.strip() for n in match.group(1).split(',')]
+    match = re.search(r'^    needs: (.*)$', job_text(name), re.M)
+    return [match.group(1).strip()] if match else []
+
+
+def reach(name):
+    found = set()
+    for need in needs_of(name):
+        found.add(need)
+        found |= reach(need)
+    return found
+
+
+class Base(unittest.TestCase):
+    def stage(self, world=None):
+        stage = Stage(world)
+        self.addCleanup(stage.close)
+        return stage
+
+    def refused(self, text, call, *args, **kwargs):
+        with self.assertRaises(ControllerError) as caught:
+            call(*args, **kwargs)
+        self.assertEqual(str(caught.exception), text)
+
+    def no_publication(self, stage):
+        self.assertNotIn('publish_draft', stage.releases.mutations)
+
+
+class Caller(Base):
+    def test_rsig7_caller_uses_candidate_ref_and_literal_signer_sha(self):
+        # The one literal: the uses line, the callee input, every checkout and every script argument.
+        self.assertIn('on:\n  workflow_dispatch:\n', WORKFLOW)
+        for word in ('\n  push:', '\n  schedule:', '\n  workflow_call:', '\n  pull_request'):
+            self.assertNotIn(word, WORKFLOW)
+        uses = re.findall(r'uses: adrenickchrome/rdy-core/\.github/workflows/release-sign\.yml@(\S+)', WORKFLOW)
+        self.assertEqual(len(uses), 1, 'one reusable call: the callee checks that the run references it once')
+        literal = uses[0]
+        self.assertRegex(literal, r'\A[0-9a-f]{40}\Z')
+        self.assertEqual(job_text('sign').count('signer_sha: ' + literal + '\n'), 1)
+        refs = re.findall(r'^\s+ref: (.*)$', WORKFLOW, re.M)
+        self.assertTrue(refs)
+        self.assertEqual(set(refs), {literal})
+        arguments = re.findall(r'--signer-sha (\S+)', WORKFLOW)
+        self.assertTrue(arguments)
+        self.assertEqual(set(arguments), {literal})
+        self.assertNotIn('@main', WORKFLOW)
+        self.assertNotIn('uses: ./', WORKFLOW)
+        self.assertNotIn('secrets: inherit', WORKFLOW)
+        self.assertEqual(re.findall(r'^\s+repository: (.*)$', WORKFLOW, re.M), [REPO] * len(refs))
+        self.assertEqual(WORKFLOW.count('persist-credentials: false'), len(refs))
+        for line in re.findall(r'uses: (\S+)', WORKFLOW):
+            self.assertRegex(line, r'@[0-9a-f]{40}\Z', 'every action and the callee are literal commits')
+
+        # The lane covers the whole caller; the callee never locks it again.
+        self.assertIn('concurrency:\n  group: rdy-core-release-authority\n  cancel-in-progress: false\n', WORKFLOW)
+        self.assertNotIn('concurrency', SIGN_WORKFLOW.split('jobs:', 1)[1])
+        self.assertNotIn('rdy-core-release-authority\n', SIGN_WORKFLOW.split('jobs:', 1)[1])
+
+        # All permissions are at job scope; only the reusable call can pass OIDC.
+        self.assertIn('\npermissions: {}\n', WORKFLOW)
+        self.assertNotIn('always()', WORKFLOW)
+        self.assertNotIn('continue-on-error', WORKFLOW)
+        self.assertEqual(WORKFLOW.count('id-token: write'), 1)
+        self.assertEqual(permissions_of('sign'), {'actions': 'read', 'contents': 'read', 'security-events': 'read',
+                                                  'id-token': 'write'})
+        self.assertEqual(permissions_of('eligibility'), {'actions': 'read', 'contents': 'read', 'security-events': 'read'})
+        for name in job_ids():
+            if name != 'sign':
+                self.assertNotIn('uses: adrenickchrome/', job_text(name))
+                self.assertIn('    timeout-minutes:', job_text(name))
+        self.assertEqual(re.search(r'^    name: (.*)$', job_text('sign'), re.M).group(1), 'Sign')
+        self.assertEqual(sorted(re.findall(r'^      (mode|signer_sha|request|reserve_artifact_id):', job_text('sign'), re.M)),
+                         ['mode', 'request', 'reserve_artifact_id', 'signer_sha'])
+
+        # The reservation job's frozen identity.
+        self.assertEqual(CONTROLLER.RESERVE_JOB_KEY, 'reserve')
+        reserve = job_text('reserve')
+        self.assertEqual(re.search(r'^    name: (.*)$', reserve, re.M).group(1), 'Reserve release tuple')
+        self.assertEqual(permissions_of('reserve'), {'actions': 'read', 'contents': 'write'})
+        for word in ('matrix', 'strategy', 'secrets.', 'id-token', 'environment:', 'create-github-app-token'):
+            self.assertNotIn(word, reserve)
+        self.assertIn('name: reserve-receipt-${{ github.run_attempt }}\n', reserve)
+        self.assertEqual(WORKFLOW_PATH.relative_to(ROOT).as_posix(), CONTROLLER.RESERVE_WORKFLOW)
+
+        # A skeleton caller cannot do anything: the literal does not resolve, and the scripts refuse it first.
+        if literal == PUBLISH.UNPINNED:
+            self.assertEqual(set(uses), {PUBLISH.UNPINNED})
+        for bad in (PUBLISH.UNPINNED, 'main', '2' * 39, 'A' * 40):
+            with self.subTest(bad=bad):
+                self.refused('not authorized: the release caller has no literal signer revision', PUBLISH.check_pin, bad)
+        stage = self.stage()
+        calls = len(stage.w.calls)
+        self.refused('not authorized: the release caller has no literal signer revision', PUBLISH.reconcile,
+                     stage.request(), stage.git, stage.releases, stage.rig.verifier, PUBLISH.UNPINNED, stage.work())
+        self.assertEqual(len(stage.w.calls), calls, 'it refuses before any read')
+        # The literal must be the policy's signer: the same refusal at every stage that acts.
+        self.refused('not authorized: the policy names another signer revision', PUBLISH.reconcile, stage.request(), stage.git,
+                     stage.releases, stage.rig.verifier, '4' * 40, stage.work())
+
+        # Eligibility reads the dispatch run: it runs on the candidate ref, never main.
+        stage = self.stage()
+        stage.w.runs[(DISPATCH_RUN, 1)]['head_branch'] = 'main'
+        with self.assertRaises(ControllerError) as caught:
+            PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertIn('not authorized', str(caught.exception))
+
+        # The dispatch inputs become one closed request. A bad input refuses without echoing its body.
+        environ = {'RDY_INPUT_VERSION': '0.43.0', 'RDY_INPUT_CANDIDATE_RUN_ID': '5', 'RDY_INPUT_CANDIDATE_RUN_ATTEMPT': '1',
+                   'RDY_INPUT_CANDIDATE_ARTIFACT_ID': '6', 'RDY_INPUT_EVIDENCE_RUN_ID': '7',
+                   'RDY_INPUT_EVIDENCE_RUN_ATTEMPT': '1', 'RDY_INPUT_EVIDENCE_ARTIFACT_ID': '8',
+                   'RDY_INPUT_EVIDENCE_SHA256': digest(1), 'RDY_INPUT_APPROVALS': '[]', 'GITHUB_RUN_ID': '9',
+                   'GITHUB_RUN_ATTEMPT': '2'}
+        request = PUBLISH.request_from_inputs(environ)
+        self.assertEqual((request.version, request.dispatch_run_id, request.dispatch_run_attempt, request.approvals),
+                         ('0.43.0', 9, 2, ()))
+        self.refused('the input candidate_run_id is not a positive integer', PUBLISH.request_from_inputs,
+                     dict(environ, RDY_INPUT_CANDIDATE_RUN_ID='5; curl hostile'))
+
+    def test_rsig7_reserve_job_writes_only_the_reservation(self):
+        stage = self.stage()
+        stage.w.find_job(ctl.RESERVE_JOB_ID).update(status='in_progress', conclusion=None)
+        # The eligibility job holds the alert read. The reserve job has no security-events permission, so it
+        # never asks: it needs that job's success in this exact attempt.
+        stage.git.open_code_scanning_alerts = mock.Mock(side_effect=AssertionError('the reserve job has no alert read'))
+        data = PUBLISH.reserve_tuple(stage.request(), stage.git, DISPATCH_RUN, 1, H)
+        receipt = json.loads(data)
+        self.assertIs(receipt['created'], True)
+        self.assertEqual(receipt['job_id'], str(ctl.RESERVE_JOB_ID))
+        self.assertEqual(stage.git.created, ['tag object', 'ref'])
+
+        # A later attempt reads the reservation and never writes it.
+        again = json.loads(PUBLISH.reserve_tuple(stage.request(), stage.git, DISPATCH_RUN, 1, H))
+        self.assertIs(again['created'], False)
+        self.assertEqual(stage.git.created, ['tag object', 'ref'])
+
+        # No passing eligibility job, no new reservation.
+        stage = self.stage()
+        stage.w.find_job(ctl.RESERVE_JOB_ID).update(status='in_progress', conclusion=None)
+        stage.w.find_job(ELIGIBILITY_JOB_ID).update(conclusion='failure')
+        with self.assertRaises(ControllerError) as caught:
+            PUBLISH.reserve_tuple(stage.request(), stage.git, DISPATCH_RUN, 1, H)
+        self.assertIn('the Release eligibility job did not pass', str(caught.exception))
+        self.assertEqual(stage.git.created, [])
+
+        # A matrix or a spoofed second job has no single identity.
+        stage = self.stage()
+        stage.w.find_job(ctl.RESERVE_JOB_ID).update(status='in_progress', conclusion=None)
+        stage.w.job(DISPATCH_RUN, 1, 9988, CONTROLLER.RESERVE_JOB)
+        stage.w.find_job(9988).update(status='in_progress', conclusion=None)
+        self.refused('this run attempt has no single running reserve job', PUBLISH.reserve_tuple, stage.request(), stage.git,
+                     DISPATCH_RUN, 1, H)
+        self.assertEqual(stage.git.created, [])
+
+
+class Draft(Base):
+    def test_rsig7_draft_target_body_and_asset_set_are_exact(self):
+        stage = self.stage()
+        stage.sign()
+        result = stage.draft()
+        row = stage.releases.draft_row()
+        self.assertEqual((row['tag'], row['target'], row['draft'], row['prerelease'], row['name']),
+                         ('v0.43.0', S, True, True, 'v0.43.0'))
+        self.assertEqual(row['body'], stage.w.notes.decode())
+        names = sorted(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md'] + sorted(CRATES)
+        self.assertEqual(sorted(a['name'] for a in row['assets']), sorted(names))
+        self.assertEqual(stage.releases.mutations.count('create_draft'), 1)
+        self.assertEqual(sorted(p.name for p in result.folder.iterdir()), sorted(names))
+        receipt = json.loads(result.receipt)
+        self.assertEqual((receipt['release_id'], receipt['commit'], receipt['version'], receipt['tuple_sha256']),
+                         (row['id'], S, '0.43.0', stage.rig.tuple_sha()))
+        self.assertEqual(receipt['notes_sha256'], sha(stage.w.notes))
+        self.assertEqual([a['name'] for a in receipt['assets']], sorted(names))
+        for entry in receipt['assets']:
+            self.assertEqual(stage.releases.blobs[entry['asset_id']], (result.folder / entry['name']).read_bytes())
+
+        # Each change of an existing draft refuses. The job never deletes, replaces or edits anything.
+        def change(field, value):
+            def apply(s):
+                s.releases.draft_row()[field] = value
+            return apply
+
+        def add_extra(name):
+            def apply(s):
+                s.releases.add_asset(s.releases.draft_row(), name, b'x')
+            return apply
+
+        def clobber(s):
+            row = s.releases.draft_row()
+            asset = [a for a in row['assets'] if a['name'] == 'SHA256SUMS'][0]
+            s.releases.blobs[asset['asset_id']] = b'y' * asset['size']
+
+        def resize(s):
+            row = s.releases.draft_row()
+            asset = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            asset['size'] += 1
+
+        def twice(s):
+            s.releases.add_asset(s.releases.draft_row(), 'AGENTS.md', b'# Agent guide\n\nUse rdy.\n')
+
+        def incomplete(s):
+            row = s.releases.draft_row()
+            [a for a in row['assets'] if a['name'] == 'CLAUDE.md'][0]['state'] = 'starter'
+
+        def second(s):
+            s.releases.next_id += 1
+            s.releases.rows.append(dict(s.releases.draft_row(), id=s.releases.next_id, assets=[]))
+
+        for apply, text in (
+                (change('target', '9' * 40), 'reservation conflict: the release of v0.43.0 does not target the reserved commit'),
+                (change('body', 'other notes'), 'reservation conflict: the draft of v0.43.0 is not the exact draft'),
+                (change('prerelease', False), 'reservation conflict: the draft of v0.43.0 is not the exact draft'),
+                (change('name', 'other'), 'reservation conflict: the draft of v0.43.0 is not the exact draft'),
+                (add_extra('extra.txt'), 'reservation conflict: the draft holds the unexpected asset extra.txt'),
+                (add_extra('test-root.pub'), 'reservation conflict: the draft holds the unexpected asset test-root.pub'),
+                (add_extra('allowed_signers'), 'reservation conflict: the draft holds the unexpected asset allowed_signers'),
+                (clobber, 'reservation conflict: the draft asset SHA256SUMS is not its exact bytes'),
+                (resize, 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
+                (twice, 'reservation conflict: the draft holds AGENTS.md twice'),
+                (incomplete, 'reservation conflict: the draft asset CLAUDE.md is incomplete'),
+                (second, 'reservation conflict: more than one release names v0.43.0')):
+            fresh = self.stage()
+            fresh.sign()
+            fresh.draft()
+            apply(fresh)
+            before = list(fresh.releases.mutations)
+            with self.subTest(text=text):
+                with self.assertRaises(ControllerError) as caught:
+                    fresh.draft()
+                self.assertEqual(str(caught.exception), text)
+                self.assertEqual(fresh.releases.mutations, before, 'a refusal writes nothing')
+
+        # A missing asset at promotion is a changed draft, not something to upload there.
+        fresh = self.stage()
+        fresh.ready()
+        row = fresh.releases.draft_row()
+        row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
+        self.refused('reservation conflict: the draft lacks CLAUDE.md', fresh.final_tag)
+        self.assertEqual(fresh.releases.mutations.count('upload CLAUDE.md'), 1)
+
+        # The signature artifact supplies only verified bytes.
+        for change_signature, text in (
+                (lambda s: s.w.members.update({(SIG_ART, 'SHA256SUMS.sig'): b'other bytes'}),
+                 'evidence mismatch: the transferred signature is not the authorized signature'),
+                (lambda s: s.rig.verifier.__setattr__('good', set()),
+                 'evidence mismatch: the transferred signature does not verify'),
+                (lambda s: s.w.artifacts[SIG_ART].update(name='rdy-signature-a7'),
+                 'evidence mismatch: the signature artifact is not from this run attempt'),
+                (lambda s: s.w.artifacts[SIG_ART].update(head_sha='9' * 40),
+                 'evidence mismatch: the signature artifact is not from this run attempt'),
+                (lambda s: s.w.artifacts[SIG_ART].update(digest=digest(77)),
+                 'evidence mismatch: the signature artifact is not the one the signer job uploaded')):
+            fresh = self.stage()
+            fresh.sign()
+            change_signature(fresh)
+            with self.subTest(text=text):
+                self.refused(text, fresh.draft)
+                self.assertEqual(fresh.releases.mutations, [])
+
+        # Crates: exact digest, size and lock entry, from the authenticated candidate record.
+        fresh = self.stage()
+        fresh.sign()
+        fresh.fetch_crate = lambda name: b'different bytes'
+        self.refused('evidence mismatch: the source crate imbl-7.0.2.crate is not its reserved bytes', fresh.draft)
+        self.assertEqual(fresh.releases.mutations, [])
+        fresh = self.stage()
+        fresh.sign()
+        fresh.w.put(S, 'Cargo.lock', LOCK.replace(sha(CRATES['imbl-7.0.2.crate']).encode(), digest(5).encode()))
+        self.refused('evidence mismatch: the source crate imbl-7.0.2.crate is not in Cargo.lock at the release commit',
+                     fresh.draft)
+        fresh = self.stage()
+        fresh.sign()
+        one = fresh.w.candidate
+        for build in one['builds']:
+            build['sources'] = build['sources'][:1]
+        fresh.w.members[(base.CAND_ART, 'candidate.json')] = canon(one)
+        fresh.put_candidate_zip()
+        self.refused('evidence mismatch: the release does not name exactly two source crates', fresh.draft)
+
+        # The first machine release adds exactly the transition pair; the JSON matches the trust digest.
+        def first():
+            return base.first_machine_world()
+        transition = b'{"scheme":"filler"}\n'
+        w = release_world(first)
+        w.put(P, 'release-keys/transition-v0.42.0.json', transition)
+        w.put(P, 'release-keys/transition-v0.42.0.json.sig', b'filler endorsement\n')
+        release = mock.Mock(version='0.42.0', commit=S, first_machine_tag='v0.42.0', policy_commit=P,
+                            transition_sha256=sha(transition), manifest_sha256=w.manifest,
+                            artifacts=tuple((f['name'], f['sha256'], f['size']) for f in w.archives),
+                            candidate_run=(base.CAND_RUN, 1, base.CAND_ART, digest(5)))
+        release.tuple_value.return_value = {'artifacts': w.archives}
+        wants, files = PUBLISH.wanted_assets(Git(w), release, SIGNATURE)
+        self.assertEqual(sorted(wants), sorted(list(archive_files(w)) + [
+            'SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md', 'transition-v0.42.0.json',
+            'transition-v0.42.0.json.sig'] + list(CRATES)))
+        self.assertEqual(files['transition-v0.42.0.json'], transition)
+        release.transition_sha256 = digest(1)
+        self.refused('evidence mismatch: the published transition is not the reserved transition',
+                     PUBLISH.wanted_assets, Git(w), release, SIGNATURE)
+
+    def test_rsig7_draft_job_has_no_signing_or_publisher_authority(self):
+        for name in ('draft', 'final-tag'):
+            job = job_text(name)
+            self.assertEqual(permissions_of(name), {'actions': 'read', 'contents': 'write'})
+            self.assertNotIn('create-github-app-token', job)
+            self.assertNotIn('secrets.', job)
+            self.assertNotIn('id-token', job)
+        self.assertIn('sign', needs_of('draft'))
+        self.assertNotIn('environment:', job_text('draft'))
+        self.assertNotIn('cargo ', job_text('draft'))
+        # The signer has no release write: it stays in its own job, separate from the draft.
+        self.assertNotIn('create_draft', (ROOT / 'scripts/release/sign.py').read_text())
+        for word in ('contents: write', 'RDY_RELEASE_PUBLISHER', 'secrets:'):
+            self.assertNotIn(word, SIGN_WORKFLOW)
+        # A publication attempt from a read-only reader has no method to call.
+        stage = self.stage()
+        stage.sign()
+        stage.draft()
+        self.assertEqual(stage.releases.mutations.count('publish_draft'), 0)
+        self.assertFalse(hasattr(stage.git, 'publish_draft'))
+
+
+class Genuine(Base):
+    def test_rsig7_both_native_genuine_checks_precede_publish(self):
+        # Both native jobs, on the qualified native runners, come before the tag and the promotion.
+        for target, name in ((MAC, 'genuine-mac'), (LINUX, 'genuine-linux')):
+            job = job_text(name)
+            self.assertIn('runs-on: ' + RUNS_ON[target] + '\n', job)
+            self.assertEqual(permissions_of(name), {'actions': 'read', 'contents': 'read'})
+            self.assertIn('    name: ' + PUBLISH.GENUINE_JOBS[target] + '\n', job)
+            self.assertIn(name, needs_of('final-tag'))
+            self.assertIn(name, needs_of('promote'))
+            self.assertIn('draft', needs_of(name))
+            self.assertIn('--target ' + target, job)
+        self.assertIn('final-tag', needs_of('promote'))
+        self.assertEqual(set(job_ids()) - reach('promote') - {'promote'}, {'published-mac', 'published-linux'})
+        self.assertLessEqual({'sign', 'draft', 'genuine-mac', 'genuine-linux', 'final-tag', 'eligibility', 'reserve'},
+                             reach('promote'))
+
+        # The checker takes the exact bytes of the draft, with the version-selected key. Nothing rebuilds.
+        stage = self.stage()
+        stage.sign()
+        stage.draft()
+        data = stage.genuine(MAC)
+        argv = stage.checker_calls[-1]
+        for flag, want in (('--version', '0.43.0'), ('--commit', S), ('--target', MAC),
+                           ('--signer-line', stage.w.trust['signer_line'])):
+            self.assertEqual(argv[argv.index(flag) + 1], want)
+        self.assertEqual(stage.seen_download, sorted([real_archive('0.43.0', MAC)['name'], 'SHA256SUMS', 'SHA256SUMS.sig']))
+        receipt = json.loads(data)
+        self.assertEqual((receipt['version'], receipt['commit'], receipt['target'], receipt['skipped']),
+                         ('0.43.0', S, MAC, 0))
+        self.assertEqual(receipt['checks'], [{'name': n, 'passed': True} for n in CANDIDATE.CHECK_NAMES])
+        self.assertEqual(receipt['tuple_sha256'], stage.rig.tuple_sha())
+        self.assertEqual(receipt['manifest_sha256'], stage.w.manifest)
+        self.assertEqual(receipt['signature_sha256'], sha(SIGNATURE))
+        self.assertEqual(receipt['release_id'], stage.releases.draft_row()['id'])
+        self.assertEqual(receipt['draft_receipt_sha256'], sha(stage.draft_result.receipt))
+
+        # A bad report refuses in the job itself.
+        for report in (stage.report(MAC, skipped=1), stage.report(MAC, commit='9' * 40), stage.report(MAC, version='0.44.0'),
+                       stage.report(MAC, checks=[{'name': n, 'passed': n != 'mcp'} for n in CANDIDATE.CHECK_NAMES]),
+                       stage.report(MAC, checks=[{'name': 'signature', 'passed': True}])):
+            stage.install_report = report
+            with self.assertRaises(ControllerError):
+                stage.genuine(MAC)
+        stage.install_report = None
+
+        # A changed archive in the transfer never reaches the checker.
+        calls = len(stage.checker_calls)
+        with zipfile.ZipFile(stage.git.paths[ASSETS_ART], 'r') as z:
+            members = {n: z.read(n) for n in z.namelist()}
+        for change, text in (
+                ({real_archive('0.43.0', MAC)['name']: b'tampered'},
+                 'evidence mismatch: the draft assets artifact is not the draft receipt'),
+                ({'allowed_signers': b'test root'}, 'evidence mismatch: the draft assets artifact is not the draft receipt')):
+            path = stage.root / 'changed.zip'
+            with zipfile.ZipFile(path, 'w') as z:
+                for name, value in dict(members, **change).items():
+                    z.writestr(name, value)
+            stage.git.paths[ASSETS_ART] = path
+            with self.subTest(text=text):
+                self.refused(text, stage.genuine, MAC)
+        self.assertEqual(len(stage.checker_calls), calls)
+
+        # Promotion needs both receipts, from both jobs of this exact attempt.
+        def drop_job(target):
+            def apply(s):
+                s.w.jobs[(DISPATCH_RUN, 1)] = [j for j in s.w.jobs[(DISPATCH_RUN, 1)] if j['name'] != PUBLISH.GENUINE_JOBS[target]]
+            return apply
+
+        def fail_job(target):
+            def apply(s):
+                s.w.find_job(GENUINE_JOB[target]).update(conclusion='failure')
+            return apply
+
+        def skip_job(target):
+            def apply(s):
+                s.w.find_job(GENUINE_JOB[target]).update(conclusion='skipped')
+            return apply
+
+        def edit(who, **changes):
+            def apply(s):
+                key = (GENUINE_ART[who], PUBLISH.GENUINE_MEMBER)
+                s.w.members[key] = canon(dict(json.loads(s.w.members[key]), **changes))
+            return apply
+
+        def wrong_artifact(s):
+            s.w.artifacts[GENUINE_ART[LINUX]]['name'] = PUBLISH.GENUINE_ARTIFACT + MAC + '-a1'
+
+        def missing(s):
+            del s.w.artifacts[GENUINE_ART[MAC]]
+
+        def old_attempt(s):
+            s.w.artifacts[GENUINE_ART[MAC]]['name'] = PUBLISH.GENUINE_ARTIFACT + MAC + '-a9'
+        name = PUBLISH.GENUINE_JOBS
+        for apply, text in (
+                (drop_job(MAC), 'eligibility incomplete: the ' + name[MAC] + ' job did not pass'),
+                (drop_job(LINUX), 'eligibility incomplete: the ' + name[LINUX] + ' job did not pass'),
+                (fail_job(LINUX), 'eligibility incomplete: the ' + name[LINUX] + ' job did not pass'),
+                (skip_job(MAC), 'eligibility incomplete: the ' + name[MAC] + ' job did not pass'),
+                (edit(MAC, skipped=1), 'evidence mismatch: the ' + MAC + ' genuine receipt is not all six checks'),
+                (edit(LINUX, checks=[]), 'evidence mismatch: the ' + LINUX + ' genuine receipt is not all six checks'),
+                (edit(MAC, commit='9' * 40), 'evidence mismatch: the ' + MAC + ' genuine receipt is not this release'),
+                (edit(LINUX, version='0.44.0'), 'evidence mismatch: the ' + LINUX + ' genuine receipt is not this release'),
+                (edit(MAC, tuple_sha256=digest(1)), 'evidence mismatch: the ' + MAC + ' genuine receipt is not this release'),
+                (edit(LINUX, manifest_sha256=digest(1)), 'evidence mismatch: the ' + LINUX + ' genuine receipt is not this release'),
+                (edit(MAC, signature_sha256=digest(1)), 'evidence mismatch: the ' + MAC + ' genuine receipt is not this release'),
+                (edit(MAC, release_id=1), 'evidence mismatch: the ' + MAC + ' genuine receipt is not this release'),
+                (edit(LINUX, draft_receipt_sha256=digest(1)), 'evidence mismatch: the ' + LINUX + ' genuine receipt is not this release'),
+                (edit(MAC, target=LINUX), 'evidence mismatch: the ' + MAC + ' genuine receipt is not this release'),
+                (wrong_artifact, 'evidence mismatch: the ' + LINUX + ' genuine receipt artifact is not from this run attempt'),
+                (old_attempt, 'evidence mismatch: the ' + MAC + ' genuine receipt artifact is not from this run attempt'),
+                (missing, 'eligibility incomplete: the ' + MAC + ' genuine receipt artifact is unavailable')):
+            fresh = self.stage()
+            fresh.ready()
+            apply(fresh)
+            with self.subTest(text=text):
+                self.refused(text, fresh.final_tag)
+                self.assertNotIn('create_final_tag', fresh.releases.mutations)
+            # The same refusal holds if the tag already exists: the promotion checks it all again.
+            fresh = self.stage()
+            fresh.ready()
+            fresh.final_tag()
+            apply(fresh)
+            with self.subTest(text=text, at='promote'):
+                self.refused(text, fresh.promote)
+                self.no_publication(fresh)
+
+        # The final tag is created once, at S, only after the checks; a promotion needs it.
+        stage = self.stage()
+        stage.ready()
+        self.assertNotIn('tags/v0.43.0', stage.w.refs)
+        self.refused('reservation conflict: the final tag v0.43.0 is missing', stage.promote)
+        self.no_publication(stage)
+        stage.final_tag()
+        self.assertEqual(stage.w.refs['tags/v0.43.0'], ('commit', S))
+        receipt = json.loads(stage.promote())
+        self.assertEqual(stage.releases.mutations.count('publish_draft'), 1)
+        self.assertFalse(stage.releases.draft_row()['draft'])
+        self.assertEqual(receipt['release_id'], stage.releases.draft_row()['id'])
+        self.assertEqual(receipt['tuple_sha256'], stage.rig.tuple_sha())
+        self.assertEqual(receipt['signer_line'], stage.w.trust['signer_line'])
+        # The receipt stays outside E: E's bytes did not change.
+        self.assertEqual(sha(stage.w.members[(base.EVID_ART, 'release-record.json')]), stage.w.evidence_sha)
+
+        # A tag somewhere else stops; a lost create reads back; it never repeats.
+        stage = self.stage()
+        stage.ready()
+        stage.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
+        with self.assertRaises(ControllerError):
+            stage.final_tag()
+        self.assertNotIn('create_final_tag', stage.releases.mutations)
+        stage = self.stage()
+        stage.ready()
+        stage.releases.faults['create_final_tag'] = (True, 1)
+        stage.final_tag()
+        self.assertEqual(stage.releases.mutations.count('create_final_tag'), 1)
+        stage = self.stage()
+        stage.ready()
+        stage.releases.faults['create_final_tag'] = (False, 1)
+        self.refused('reservation conflict: the final tag outcome is unresolved; reconcile again before any creation',
+                     stage.final_tag)
+        self.assertEqual(stage.releases.mutations.count('create_final_tag'), 1)
+
+
+class Drift(Base):
+    def test_rsig7_drift_or_revocation_before_publish_refuses(self):
+        def revoke(s):
+            good = s.git.release_trust
+
+            def trust(version, policy_commit, signing):
+                if signing:
+                    raise ControllerError('the key for v0.43.0 is revoked for new signing')
+                return good(version, policy_commit, signing)
+            s.git.release_trust = trust
+
+        def trust_unavailable(s):
+            s.git.release_trust = mock.Mock(side_effect=ControllerError('offline'))
+
+        def admission(state):
+            def apply(s):
+                s.rig.install(state=state, holder=None if state == 'CLOSED' else {
+                    'run_id': '1', 'run_attempt': '1', 'job_id': '1', 'grant_id': '00000000-0000-4000-8000-000000000009'})
+            return apply
+
+        def other_signer(s):
+            s.rig.install(signer_workflow_sha='4' * 40)
+
+        def rollback(s):
+            s.rig.install(policy_commit=H)
+
+        def asset(name, data):
+            def apply(s):
+                row = s.releases.draft_row()
+                entry = [a for a in row['assets'] if a['name'] == name][0]
+                s.releases.blobs[entry['asset_id']] = data
+                entry['size'] = len(data)
+            return apply
+
+        def extra(s):
+            s.releases.add_asset(s.releases.draft_row(), 'unexpected.bin', b'z')
+
+        def replaced_asset(s):
+            row = s.releases.draft_row()
+            entry = [a for a in row['assets'] if a['name'] == 'SHA256SUMS.sig'][0]
+            entry['asset_id'] = 99123
+            s.releases.blobs[99123] = SIGNATURE
+
+        def new_draft_id(s):
+            row = s.releases.draft_row()
+            old = row['id']
+            row['id'] = old + 500
+
+        def edit_notes(s):
+            s.releases.draft_row()['body'] = 'changed notes'
+
+        def edit_target(s):
+            s.releases.draft_row()['target'] = '9' * 40
+
+        def un_prerelease(s):
+            s.releases.draft_row()['prerelease'] = False
+
+        def moved_reservation(s):
+            value = copy.deepcopy(s.w.expected_tuple())
+            value['manifest_sha256'] = digest(1)
+            s.w.tags[s.w.refs['tags/reserve/v0.43.0'][1]]['message_bytes'] = canon(value)
+
+        def changed_e(s):
+            s.w.members[(base.EVID_ART, 'release-record.json')] = canon(dict(s.w.e, audit={'reference': 'x', 'sha256': digest(1)}))
+
+        def moved_tag(s):
+            s.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
+
+        def moved_candidate(s):
+            s.w.refs['tags/candidate/v0.43.0'] = ('commit', '9' * 40)
+
+        def no_authorization(s):
+            del s.w.members[(SIG_ART, 'authorization.json')]
+
+        def other_tuple(s):
+            key = (SIG_ART, 'authorization.json')
+            s.w.members[key] = canon(dict(json.loads(s.w.members[key]), tuple_sha256=digest(1)))
+
+        def changed_receipt(s):
+            s.w.members[(RECEIPT_ART, 'draft-receipt.json')] = canon(dict(json.loads(s.w.members[(RECEIPT_ART, 'draft-receipt.json')]),
+                                                                         notes_sha256=digest(3)))
+
+        for apply, code in (
+                (revoke, 'signer revoked: the key for v0.43.0 is revoked for new signing'),
+                (trust_unavailable, None),
+                (admission('CLOSED'), 'authority unavailable: admission is CLOSED'),
+                (admission('DRAINING'), None),
+                (other_signer, 'authority unavailable: the admission record names another signer'),
+                (rollback, None),
+                (asset('SHA256SUMS', b'other'), 'reservation conflict: the draft asset SHA256SUMS is not its exact bytes'),
+                (asset('AGENTS.md', b'other'), 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
+                (asset('imbl-7.0.2.crate', b'other'), 'reservation conflict: the draft asset imbl-7.0.2.crate is not its exact bytes'),
+                (extra, 'reservation conflict: the draft holds the unexpected asset unexpected.bin'),
+                (replaced_asset, 'reservation conflict: the draft changed after its receipt'),
+                (new_draft_id, 'reservation conflict: the draft changed after its receipt'),
+                (edit_notes, 'reservation conflict: the draft of v0.43.0 is not the exact draft'),
+                (edit_target, None),
+                (un_prerelease, 'reservation conflict: the draft of v0.43.0 is not the exact draft'),
+                (moved_reservation, None),
+                (changed_e, None),
+                (moved_tag, None),
+                (moved_candidate, None),
+                (no_authorization, 'evidence mismatch: the signer authorization is unavailable'),
+                (other_tuple, 'evidence mismatch: the signer authorization is not this tuple'),
+                (changed_receipt, None)):
+            for when in ('final_tag', 'promote'):
+                fresh = self.stage()
+                fresh.ready()
+                if when == 'promote':
+                    fresh.final_tag()
+                elif apply is moved_tag:
+                    continue
+                apply(fresh)
+                with self.subTest(change=apply.__name__, when=when):
+                    with self.assertRaises(ControllerError) as caught:
+                        getattr(fresh, when)()
+                    if code is not None:
+                        self.assertEqual(str(caught.exception), code)
+                    self.no_publication(fresh)
+
+        # A policy revocation of a founder receipt or the disabled channel does not touch a standing preview,
+        # but a settled revocation of the signer does, even though the signature is already retained.
+        fresh = self.stage()
+        fresh.ready()
+        fresh.final_tag()
+        revoke(fresh)
+        self.refused('signer revoked: the key for v0.43.0 is revoked for new signing', fresh.promote)
+
+        # A prior attempt's receipt: anything different stops the release.
+        stage = self.stage()
+        stage.sign()
+        stage.draft()
+        prior = 9500
+        stage.w.artifacts[prior] = stage.w.artifact(prior, 'draft-receipt-a1', DISPATCH_RUN - 1, digest(26), 512)
+        value = json.loads(stage.draft_result.receipt)
+        stage.w.members[(prior, 'draft-receipt.json')] = canon(dict(value, release_id=value['release_id'] + 1))
+        stage.git.runs_of_release = [(DISPATCH_RUN - 1, 1)]
+        self.refused('reservation conflict: the draft changed after a prior receipt', stage.draft)
+        # An identical prior receipt is fine.
+        stage.w.members[(prior, 'draft-receipt.json')] = canon(value)
+        stage.draft()
+        # An expired prior receipt says nothing; an unreadable one stops.
+        stage.w.artifacts[prior]['expired'] = True
+        stage.draft()
+        stage.w.artifacts[prior]['expired'] = False
+        del stage.w.members[(prior, 'draft-receipt.json')]
+        with self.assertRaises(ControllerError):
+            stage.draft()
+
+
+class Retry(Base):
+    def lost_ack(self):
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        stage.releases.faults['publish_draft'] = (True, 1)
+        return stage
+
+    def test_rsig7_retry_reuses_draft_signature_and_tuple(self):
+        # A run that stopped after two uploads: the next attempt reuses them and uploads each missing asset once.
+        stage = self.stage()
+        stage.sign()
+        signature_bytes = stage.w.members[(SIG_ART, 'SHA256SUMS.sig')]
+        stage.releases.faults['upload SHA256SUMS'] = (False, 1)
+        self.refused('reservation conflict: the upload of SHA256SUMS is unresolved; reconcile again before any upload',
+                     stage.draft)
+        first = list(stage.releases.mutations)
+        self.assertEqual(first.count('create_draft'), 1)
+        draft_id = stage.releases.draft_row()['id']
+        kept = {a['name']: a['asset_id'] for a in stage.releases.draft_row()['assets']}
+        self.assertTrue(kept)
+        self.assertNotIn('SHA256SUMS', kept)
+        stage.rig.w.runs.setdefault((DISPATCH_RUN, 2), dict(stage.w.runs[(DISPATCH_RUN, 1)], run_attempt=2))
+        # The signer's second attempt recovers the retained signature with no second Sign. Its bytes are the same.
+        signs = stage.rig.kms.signs
+        self.assertEqual(signs, 1)
+        stage.transfer_signature(signature_bytes, stage.authorization, attempt=2)
+        stage.w.job(DISPATCH_RUN, 2, 9410, PUBLISH.ELIGIBILITY_JOB)
+        stage.draft(attempt=2)
+        second = stage.releases.mutations[len(first):]
+        self.assertEqual(second, ['upload ' + n for n in sorted(set(stage_names(stage)) - set(kept))])
+        self.assertEqual(stage.releases.draft_row()['id'], draft_id, 'the same draft')
+        for name, asset_id in kept.items():
+            self.assertEqual([a['asset_id'] for a in stage.releases.draft_row()['assets'] if a['name'] == name], [asset_id])
+        self.assertEqual(stage.rig.kms.signs, 1)
+
+        # A create whose acknowledgement was lost reads back; no second draft.
+        stage = self.stage()
+        stage.sign()
+        stage.releases.faults['create_draft'] = (True, 1)
+        stage.draft()
+        self.assertEqual(stage.releases.mutations.count('create_draft'), 1)
+        self.assertEqual(len(stage.releases.rows), 1)
+        # An upload whose acknowledgement was lost reads back; never a second upload.
+        stage = self.stage()
+        stage.sign()
+        stage.releases.faults['upload AGENTS.md'] = (True, 1)
+        stage.draft()
+        self.assertEqual(stage.releases.mutations.count('upload AGENTS.md'), 1)
+        # A create that did not apply: a later attempt must reconcile. Nothing else happens now.
+        stage = self.stage()
+        stage.sign()
+        stage.releases.faults['create_draft'] = (False, 1)
+        self.refused('reservation conflict: the draft outcome is unresolved; reconcile again before any creation', stage.draft)
+        self.assertEqual(stage.releases.mutations, ['create_draft'])
+
+        # The lost publication acknowledgement inside the job: read, never send it again.
+        stage = self.lost_ack()
+        receipt = json.loads(stage.promote())
+        self.assertEqual(stage.releases.mutations.count('publish_draft'), 1)
+        self.assertEqual(receipt['release_id'], stage.releases.draft_row()['id'])
+        # A publication that did not apply: it refuses and leaves the draft for a later reconcile.
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        stage.releases.faults['publish_draft'] = (False, 1)
+        self.refused('reservation conflict: the publication outcome is unresolved; reconcile again before any publication',
+                     stage.promote)
+        self.assertEqual(stage.releases.mutations.count('publish_draft'), 1)
+
+        # A retry dispatch after the lost acknowledgement, and after a later version published: read-only success.
+        for later in (False, True):
+            stage = self.lost_ack()
+            stage.promote()
+            if later:
+                stage.w.releases.append(dict(release_id=900, tag_name='v0.44.0', target_commitish='7' * 40, draft=False,
+                                             prerelease=True, assets=()))
+            before = list(stage.releases.mutations)
+            signs = stage.rig.kms.signs
+            created = list(stage.git.created)
+            stage.git.artifact_path = mock.Mock(side_effect=AssertionError('no artifact is needed'))
+            result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+            with self.subTest(later=later):
+                self.assertEqual(result.state, 'already_published_matching')
+                self.assertIsInstance(result.terminal, CONTROLLER.AlreadyPublishedMatching)
+                self.assertEqual(result.terminal.tuple_sha256, stage.rig.tuple_sha())
+                self.assertEqual(result.terminal.signature_sha256, sha(SIGNATURE))
+                self.assertEqual(stage.releases.mutations, before, 'zero release mutation')
+                self.assertEqual(stage.rig.kms.signs, signs, 'zero Sign')
+                self.assertEqual(stage.git.created, created)
+
+        # The observation stands even with the channel disabled, and it reports the status apart.
+        stage = self.lost_ack()
+        stage.promote()
+        stage.w.ep['approval_channel']['enabled'] = False
+        stage.w.publish_policy(ctl.HEAD)
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual(result.state, 'already_published_matching')
+        self.assertIs(result.terminal.channel_enabled, False)
+        self.assertIs(result.terminal.signer_revoked, False)
+        # A later revocation of the signer is reported apart: history, not a claim of current trust.
+        stage = self.lost_ack()
+        stage.promote()
+        good = stage.git.release_trust
+
+        def revoked(version, policy_commit, signing):
+            if signing:
+                raise ControllerError('the key for v0.43.0 is revoked for new signing')
+            return good(version, policy_commit, signing)
+        stage.git.release_trust = revoked
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual(result.state, 'already_published_matching')
+        self.assertIs(result.terminal.signer_revoked, True)
+
+        # An old published version, under an older signer, needs no pin match: it is not eligibility.
+        stage = self.lost_ack()
+        stage.promote()
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, '4' * 40, stage.work())
+        self.assertEqual(result.state, 'already_published_matching')
+
+        # Exact bytes, or no observation. Each of these stays read-only and never opens a signing path.
+        def blob(name, data):
+            def apply(s):
+                row = s.releases.draft_row()
+                entry = [a for a in row['assets'] if a['name'] == name][0]
+                s.releases.blobs[entry['asset_id']] = data
+            return apply
+
+        def drop(name):
+            def apply(s):
+                row = s.releases.draft_row()
+                row['assets'] = [a for a in row['assets'] if a['name'] != name]
+            return apply
+
+        def extra(s):
+            s.releases.add_asset(s.releases.draft_row(), 'extra.txt', b'x')
+
+        def bad_sig(s):
+            s.rig.verifier.good = set()
+
+        def notes(s):
+            s.releases.draft_row()['body'] = 'edited'
+        archive = real_archive('0.43.0', MAC)['name']
+        for apply, text in (
+                (blob(archive, b'different'), 'reservation conflict: the published archives differ from the reserved tuple'),
+                (blob('SHA256SUMS', b'different'), 'reservation conflict: the published manifest differs from the reserved tuple'),
+                (blob('AGENTS.md', b'different'), 'reservation conflict: the published asset set is not the expected set'),
+                (blob('imbl-7.0.2.crate', b'different'), 'reservation conflict: the published asset set is not the expected set'),
+                (extra, 'reservation conflict: the published asset set is not the expected set'),
+                (drop('CLAUDE.md'), 'reservation conflict: the published asset set is not the expected set'),
+                (drop('SHA256SUMS.sig'), 'eligibility incomplete: the published signature is missing'),
+                (drop(archive), 'eligibility incomplete: the published archive ' + archive + ' is missing'),
+                (bad_sig, 'reservation conflict: the published signature does not verify'),
+                (notes, 'reservation conflict: the published notes differ from the release record')):
+            stage = self.lost_ack()
+            stage.promote()
+            apply(stage)
+            before = list(stage.releases.mutations)
+            signs = stage.rig.kms.signs
+            with self.subTest(text=text):
+                self.refused(text, PUBLISH.reconcile, stage.request(), stage.git, stage.releases, stage.rig.verifier, H,
+                             stage.work())
+                self.assertEqual(stage.releases.mutations, before)
+                self.assertEqual(stage.rig.kms.signs, signs)
+
+        # The workflow stops at the terminal observation: nothing later can run.
+        for name in ('reserve', 'draft', 'genuine-mac', 'genuine-linux', 'final-tag', 'promote', 'published-mac', 'published-linux'):
+            self.assertIn('eligibility', reach(name))
+        for name in ('reserve', 'draft'):
+            self.assertIn("needs.eligibility.outputs.state == 'ready'", job_text(name))
+        self.assertIn("needs.eligibility.outputs.state == 'ready'", job_text('sign'))
+
+        # An unfinished older version stays eligible for recovery only, under current authority.
+        stage = self.stage()
+        stage.sign()
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual((result.state, result.mode), ('ready', 'recovery'))
+        stage = self.stage()
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual((result.state, result.mode), ('ready', 'new'))
+        # A later version shipped and this one has no reservation: nothing new.
+        stage = self.stage()
+        stage.w.releases.append(dict(release_id=900, tag_name='v0.44.0', target_commitish='7' * 40, draft=False,
+                                     prerelease=True, assets=()))
+        with self.assertRaises(ControllerError):
+            PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+
+
+class TagWindow(Base):
+    def test_rsig7_tag_without_a_visible_release_stops_a_retry(self):
+        # A read-only token cannot list a draft. After the final tag and before the promotion lands, a new run
+        # reads the tag with no release, and it stops there: no credentials, no Sign and no write. The window is
+        # the promote job alone, because the tag job checks everything first.
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        before = list(stage.releases.mutations)
+        signs = stage.rig.kms.signs
+        self.refused('reservation conflict: the tag v0.43.0 exists without its release', PUBLISH.reconcile, stage.request(),
+                     stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual(stage.releases.mutations, before)
+        self.assertEqual(stage.rig.kms.signs, signs)
+        # A second tag job in the same state changes nothing either.
+        self.refused('reservation conflict: the final tag v0.43.0 exists before this job created it', stage.final_tag)
+        self.assertEqual(stage.releases.mutations.count('create_final_tag'), 1)
+
+
+def stage_names(stage):
+    return list(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md'] + list(CRATES)
+
+
+class FakeResponse(io.BytesIO):
+    def __init__(self, status, body=b'', headers=None):
+        io.BytesIO.__init__(self, body)
+        self.code = status
+        self.headers = headers or {}
+
+    def getcode(self):
+        return self.code
+
+
+class FakeOpener(object):
+    """Records each Request. It answers from a list; a test reads the headers it was given."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        return self.answers.pop(0)
+
+
+def repository_answer():
+    return FakeResponse(200, json.dumps({'id': base.REPO_ID, 'full_name': REPO}).encode())
+
+
+class Publisher(Base):
+    def test_rsig7_publish_uses_only_the_publisher_app(self):
+        # The workflow: the one token mint, in the one qualified job, in environment release.
+        self.assertEqual(WORKFLOW.count('create-github-app-token'), 1)
+        promote = job_text('promote')
+        self.assertIn('    environment: release\n', promote)
+        self.assertEqual(permissions_of('promote'), {'actions': 'read', 'contents': 'read'})
+        self.assertIn('    name: ' + PUBLISH.PROMOTE_JOB + '\n', promote)
+        token = re.search(r'uses: actions/create-github-app-token@[0-9a-f]{40}.*\n        with:\n((?:          .*\n)+)', promote)
+        self.assertEqual(dict(re.findall(r'^\s+([a-z-]+): (.*)$', token.group(1), re.M)),
+                         {'app-id': '${{ vars.RDY_RELEASE_PUBLISHER_APP_ID }}',
+                          'private-key': '${{ secrets.RDY_RELEASE_PUBLISHER_APP_PRIVATE_KEY }}',
+                          'owner': 'adrenickchrome', 'repositories': 'rdy-core', 'permission-contents': 'write'})
+        self.assertEqual(re.findall(r'secrets\.[A-Z_]+', WORKFLOW), ['secrets.RDY_RELEASE_PUBLISHER_APP_PRIVATE_KEY'])
+        self.assertEqual(WORKFLOW.count('RDY_PUBLISHER_TOKEN'), 1)
+        for name in job_ids():
+            if name != 'promote':
+                self.assertNotIn('RDY_RELEASE_PUBLISHER', job_text(name))
+                self.assertNotIn('steps.token', job_text(name))
+        self.assertNotIn('gh release', WORKFLOW)
+        self.assertNotIn('--clobber', WORKFLOW)
+        # No candidate code runs beside the App key: no cargo, no candidate download, only the trusted scripts.
+        for word in ('cargo ', 'candidate', 'rustup', './'):
+            self.assertNotIn(word, promote.split('steps:', 1)[1].replace('trusted/', ''))
+        self.assertLess(promote.index('ref: '), promote.index('create-github-app-token'))
+
+        # The script: only the publisher token can publish; there is no fallback.
+        stage = self.stage()
+        self.refused('the promotion has no publisher App token', PUBLISH.publisher_client,
+                     {'GITHUB_TOKEN': 'built-in-value', 'GH_TOKEN': 'other'}, stage.work(), 'verifier')
+        client = PUBLISH.publisher_client({'GITHUB_TOKEN': 'built-in-value', 'RDY_PUBLISHER_TOKEN': 'app-value'}, stage.work(),
+                                          'verifier')
+        opener = FakeOpener([repository_answer(), FakeResponse(200, json.dumps(release_row(draft=False)).encode())])
+        client.transport._opener = opener
+        client.pause = lambda attempt: None
+        published = client.publish_draft(4242)
+        self.assertFalse(published.draft)
+        patch = opener.requests[-1]
+        self.assertEqual((patch.get_method(), patch.full_url, patch.data),
+                         ('PATCH', 'https://api.github.com/repos/' + REPO + '/releases/4242', b'{"draft":false}'))
+        self.assertEqual(patch.get_header('Authorization'), 'Bearer app-value')
+        for request in opener.requests:
+            self.assertNotIn('built-in-value', str(request.headers))
+
+        # Only a draft flip: the body names nothing else, and an uncertain answer asks for a reconcile.
+        for answer in (FakeResponse(422), FakeResponse(409), FakeResponse(500), FakeResponse(429)):
+            client.transport._opener = FakeOpener([answer])
+            with self.assertRaises(GITHUB.ReconcileRequired):
+                client.publish_draft(4242)
+        client.transport._opener = FakeOpener([FakeResponse(200, json.dumps(release_row(draft=True)).encode())])
+        with self.assertRaises(GITHUB.ReconcileRequired):
+            client.publish_draft(4242)
+        client.transport._opener = FakeOpener([FakeResponse(403, b'{}')])
+        with self.assertRaises(ControllerError):
+            client.publish_draft(4242)
+
+        # A signing job has no App, and the promotion has no signing path.
+        self.assertNotIn('secrets', SIGN_WORKFLOW.split('jobs:', 1)[1])
+        source = (ROOT / 'scripts/release/publish.py').read_text()
+        for word in ('before_sign', 'load_adapter', 'kms', 'request_oidc', 'assume_role', 'delete_', "'DELETE'"):
+            self.assertNotIn(word, source)
+
+        # The activation readback: exact, sanitized and required at both jobs that change refs or the release.
+        good = copy.deepcopy(PUBLISH.SETTINGS_READBACK)
+        PUBLISH.check_settings_readback(json.dumps(good))
+        for text in ('', 'not json'):
+            self.refused('not authorized: the publisher settings readback does not match the qualified settings',
+                         PUBLISH.check_settings_readback, text)
+        self.assertEqual(good['publisher']['installed_repositories'], [REPO])
+        self.assertEqual(good['publisher']['permissions'], {'contents': 'write', 'metadata': 'read'})
+        self.assertIs(good['publisher']['signing_grant'], False)
+        self.assertEqual(good['environment'], 'release')
+        self.assertEqual(good['rulesets']['main'], {'delete': 'denied', 'force_push': 'denied', 'publisher_bypass': False})
+        self.assertEqual(sorted(good['rulesets']['tags']), ['candidate/*', 'reserve/*', 'v*'])
+        for rule in good['rulesets']['tags'].values():
+            self.assertEqual(rule, {'delete': 'denied', 'update': 'denied', 'publisher_bypass': False})
+
+        def mutate(path, value):
+            changed = copy.deepcopy(PUBLISH.SETTINGS_READBACK)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            return changed
+        for changed in (mutate(('publisher', 'installed_repositories'), [REPO, 'rdyhq/rdy-web']),
+                        mutate(('publisher', 'permissions'), {'contents': 'write', 'metadata': 'read', 'workflows': 'write'}),
+                        mutate(('publisher', 'signing_grant'), True),
+                        mutate(('environment',), 'other'),
+                        mutate(('rulesets', 'main', 'publisher_bypass'), True),
+                        mutate(('rulesets', 'main', 'force_push'), 'allowed'),
+                        mutate(('rulesets', 'tags', 'reserve/*', 'publisher_bypass'), True),
+                        mutate(('rulesets', 'tags', 'v*', 'delete'), 'allowed'),
+                        dict(PUBLISH.SETTINGS_READBACK, extra=1)):
+            with self.subTest(changed=changed):
+                self.refused('not authorized: the publisher settings readback does not match the qualified settings',
+                             PUBLISH.check_settings_readback, json.dumps(changed))
+        self.assertIn('RDY_RELEASE_SETTINGS_READBACK: ${{ vars.RDY_RELEASE_SETTINGS_READBACK }}', promote)
+        self.assertIn('RDY_RELEASE_SETTINGS_READBACK: ${{ vars.RDY_RELEASE_SETTINGS_READBACK }}', job_text('final-tag'))
+        self.assertIn('    environment: release\n', job_text('final-tag'))
+
+        # The promotion reads drafts only through the App's view: the built-in read token cannot see them.
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        self.assertEqual([r.tag_name for r in stage.git.releases() if r.tag_name == 'v0.43.0'], [])
+        stage.promote()
+        self.assertEqual(stage.releases.mutations.count('publish_draft'), 1)
+
+
+def release_row(draft=True, assets=(), body='notes', tag='v0.43.0', ident=4242):
+    return {'id': ident, 'tag_name': tag, 'target_commitish': S, 'name': tag, 'draft': draft, 'prerelease': True,
+            'body': body, 'assets': list(assets)}
+
+
+class Public(Base):
+    def published(self):
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        return stage, stage.promote()
+
+    def test_rsig7_published_checks_are_anonymous_and_byte_exact(self):
+        # The workflow: no token, no secret, no environment in a public check.
+        for target, name in ((MAC, 'published-mac'), (LINUX, 'published-linux')):
+            job = job_text(name)
+            self.assertIn('runs-on: ' + RUNS_ON[target] + '\n', job)
+            self.assertEqual(permissions_of(name), {'contents': 'read'})
+            for word in ('GITHUB_TOKEN', 'github.token', 'secrets.', 'RDY_PUBLISHER', 'environment:', 'GH_TOKEN'):
+                self.assertNotIn(word, job)
+            self.assertIn('promote', needs_of(name))
+            self.assertIn('--target ' + target, job)
+
+        # The transport: no Authorization header, ever; no proxy from the environment; GET only.
+        with mock.patch.dict('os.environ', {'GITHUB_TOKEN': 'ambient', 'https_proxy': 'http://proxy.invalid:1',
+                                            'HTTPS_PROXY': 'http://proxy.invalid:1'}):
+            transport = PUBLISH.AnonymousTransport()
+        handlers = [type(h).__name__ for h in transport._opener.handlers]
+        self.assertNotIn('HTTPBasicAuthHandler', handlers)
+        for handler in transport._opener.handlers:
+            self.assertEqual(getattr(handler, 'proxies', {}), {})
+        opener = FakeOpener([repository_answer(), FakeResponse(200, json.dumps(release_row(draft=False)).encode()),
+                             FakeResponse(302, b'', {'location': 'https://objects.example/x'}),
+                             FakeResponse(200, b'exact bytes')])
+        transport._opener = opener
+        client = PUBLISH.Releases(transport, self.stage().work(), 'verifier')
+        client.pause = lambda attempt: None
+        self.assertEqual(client.public_release('v0.43.0').release_id, 4242)
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(folder))
+        self.assertEqual(client.public_asset('v0.43.0', 'SHA256SUMS', folder / 'out', 1024), (sha(b'exact bytes'), 11))
+        self.assertEqual((folder / 'out').read_bytes(), b'exact bytes')
+        for request in opener.requests:
+            self.assertIsNone(request.get_header('Authorization'))
+            self.assertEqual(request.get_method(), 'GET')
+        self.assertEqual(opener.requests[2].full_url,
+                         'https://github.com/' + REPO + '/releases/download/v0.43.0/SHA256SUMS')
+        self.assertEqual(opener.requests[3].full_url, 'https://objects.example/x')
+        for bad in (lambda: transport.request('POST', '/x', b'{}'), lambda: transport.request('PATCH', '/x', b'{}'),
+                    lambda: transport.request('DELETE', '/x')):
+            with self.assertRaises(ControllerError):
+                bad()
+        # A redirect to plain HTTP or a 404 is not a success.
+        for answers in ([FakeResponse(302, b'', {'location': 'http://objects.example/x'})], [FakeResponse(404, b'gone')]):
+            transport._opener = FakeOpener(answers)
+            target = folder / ('bad-' + str(len(answers[0].headers)))
+            with self.assertRaises(ControllerError):
+                client.public_asset('v0.43.0', 'SHA256SUMS', target, 1024)
+            self.assertFalse(target.exists())
+        # The environment guard.
+        for name in ('GITHUB_TOKEN', 'GH_TOKEN', 'RDY_PUBLISHER_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'AWS_SESSION_TOKEN'):
+            self.refused('the public checks must run without credentials', PUBLISH.check_anonymous_env, {name: 'x'})
+        PUBLISH.check_anonymous_env({'PATH': '/usr/bin', 'RUNNER_TEMP': '/tmp'})
+
+        # A good release: every asset, by exact bytes, and the native quick start.
+        stage, receipt = self.published()
+        data = stage.public_check(receipt)
+        value = json.loads(data)
+        self.assertEqual((value['version'], value['commit'], value['tuple_sha256'], value['release_id'], value['target']),
+                         ('0.43.0', S, stage.rig.tuple_sha(), stage.releases.draft_row()['id'], LINUX))
+        self.assertEqual(value['notes_sha256'], sha(stage.w.notes))
+        self.assertEqual(sorted(value['assets']), sorted(stage_names(stage)))
+        self.assertEqual(value['checks'], [{'name': n, 'passed': True} for n in CANDIDATE.CHECK_NAMES])
+        argv = stage.checker_calls[-1]
+        self.assertEqual(argv[argv.index('--signer-line') + 1], stage.w.trust['signer_line'])
+        before = list(stage.releases.mutations)
+
+        # Each difference is an incident: a refusal, and still no write.
+        def blob(name, data):
+            def apply(s):
+                row = s.releases.draft_row()
+                entry = [a for a in row['assets'] if a['name'] == name][0]
+                s.releases.blobs[entry['asset_id']] = data
+            return apply
+
+        def drop(name):
+            def apply(s):
+                row = s.releases.draft_row()
+                row['assets'] = [a for a in row['assets'] if a['name'] != name]
+            return apply
+
+        def extra(s):
+            s.releases.add_asset(s.releases.draft_row(), 'extra.txt', b'x')
+
+        def body(s):
+            s.releases.draft_row()['body'] = 'edited'
+
+        def tag(s):
+            s.w.refs['tags/v0.43.0'] = ('commit', '9' * 40)
+
+        def verify(s):
+            s.rig.verifier.good = set()
+
+        def un_publish(s):
+            s.releases.draft_row()['draft'] = True
+
+        def another(s):
+            s.releases.draft_row()['id'] += 1
+        incident = 'published v0.43.0 is an incident: '
+        for apply, text in (
+                (blob('SHA256SUMS', b'other'), 'SHA256SUMS is not its exact bytes'),
+                (blob(real_archive('0.43.0', LINUX)['name'], b'other'),
+                 real_archive('0.43.0', LINUX)['name'] + ' is not its exact bytes'),
+                (blob('AGENTS.md', b'other'), 'AGENTS.md is not its exact bytes'),
+                (drop('CLAUDE.md'), 'the public asset set is not the expected set'),
+                (extra, 'the public asset set is not the expected set'),
+                (body, 'the public notes are not the release notes'),
+                (tag, 'the tag is not at the release commit'),
+                (verify, 'the public signature is not Good'),
+                (un_publish, 'the public release is unavailable'),
+                (another, 'the public release is another release')):
+            fresh, data = self.published()
+            apply(fresh)
+            mutations = list(fresh.releases.mutations)
+            with self.subTest(text=text):
+                self.refused(incident + text, fresh.public_check, data)
+                self.assertEqual(fresh.releases.mutations, mutations)
+        fresh, data = self.published()
+        fresh.install_report = fresh.report(LINUX, skipped=1)
+        with self.assertRaises(ControllerError):
+            fresh.public_check(data)
+        self.assertEqual(stage.releases.mutations, before)
+
+        # A notification failure is outside this path: the workflow never touches it, and nothing here rolls back.
+        self.assertNotIn('core-release-notify', WORKFLOW.split('jobs:', 1)[1])
+        self.assertNotIn('dispatches', WORKFLOW)
+
+        # The published-exact verifier takes its signature from public bytes, against the reserved signer line.
+        stage, _ = self.published()
+        reconciliation = ELIGIBILITY.authenticate_published(stage.request(), stage.git)
+        calls = []
+
+        class Verify(object):
+            def verify(self, signature, manifest, line, principal, namespace):
+                calls.append((signature, manifest, line, principal, namespace))
+                return True
+        proof = PUBLISH.PublishedVerifier(stage.releases, stage.git, Verify(), stage.work()).verify_published(reconciliation)
+        self.assertEqual(calls, [(SIGNATURE, manifest_of(stage.w), stage.w.trust['signer_line'], 'rdy-release', 'rdy-release-v1')])
+        self.assertIs(proof.signature_verified, True)
+        self.assertEqual((proof.principal, proof.namespace, proof.fingerprint), ('rdy-release', 'rdy-release-v1', ctl.FINGERPRINT))
+        self.assertEqual(proof.archives, tuple((f['name'], f['sha256'], f['size']) for f in stage.w.archives))
+        self.assertIs(proof.assets_complete, True)
+        self.assertEqual(proof.notes_sha256, sha(stage.w.notes))
+        self.assertEqual(proof.commit, S)
+        self.assertIs(proof.draft, False)
+
+    @unittest.skipUnless(shutil.which('ssh-keygen'), 'ssh-keygen is not installed')
+    def test_rsig7_verifier_accepts_the_public_v035_vector_only(self):
+        line = (VECTOR / 'allowed-signers').read_text().strip()
+        manifest = (VECTOR / 'SHA256SUMS').read_bytes()
+        signature = (VECTOR / 'SHA256SUMS.sig').read_bytes()
+        verifier = SIGN.SshVerifier()
+        self.assertIs(verifier.verify(signature, manifest, line, 'rdy-release', 'rdy-release-v1'), True)
+        self.assertIs(verifier.verify(signature, manifest + b'x', line, 'rdy-release', 'rdy-release-v1'), False)
+        self.assertIs(verifier.verify(signature, manifest, line, 'rdy-release', 'rdy-release-key-v1'), False)
+        self.assertIs(verifier.verify(signature, manifest, line, 'someone-else', 'rdy-release-v1'), False)
+
+
+class Wire(Base):
+    def client(self, answers, token='write-value'):
+        client = PUBLISH.Releases(PUBLISH.Transport(token), self.stage().work(), 'verifier')
+        client.pause = lambda attempt: None
+        client.transport._opener = FakeOpener([repository_answer()] + answers)
+        return client
+
+    def test_rsig7_draft_requests_are_exact(self):
+        created = release_row()
+        client = self.client([FakeResponse(201, json.dumps(created).encode())])
+        fact = client.create_draft('v0.43.0', S, 'v0.43.0', 'notes')
+        request = client.transport._opener.requests[-1]
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(request.full_url, 'https://api.github.com/repos/' + REPO + '/releases')
+        self.assertEqual(json.loads(request.data), {'tag_name': 'v0.43.0', 'target_commitish': S, 'name': 'v0.43.0',
+                                                    'body': 'notes', 'draft': True, 'prerelease': True})
+        self.assertEqual((fact.release_id, fact.draft, fact.target_commitish), (4242, True, S))
+        # An answer that is not the exact request needs a reconcile.
+        client = self.client([FakeResponse(201, json.dumps(release_row(draft=False)).encode())])
+        with self.assertRaises(GITHUB.ReconcileRequired):
+            client.create_draft('v0.43.0', S, 'v0.43.0', 'notes')
+        client = self.client([])
+        for bad in (('main', S), ('v0.43.0', 'main')):
+            with self.assertRaises(ControllerError):
+                client.create_draft(bad[0], bad[1], 'v', 'notes')
+
+        # An upload: octet-stream, the upload host, once. A 422 reads back; it never clobbers.
+        folder = self.stage().work()
+        path = folder / 'SHA256SUMS'
+        path.write_bytes(b'manifest bytes')
+        asset = {'id': 11, 'name': 'SHA256SUMS', 'size': 14, 'state': 'uploaded', 'digest': 'sha256:' + digest(1)}
+        client = self.client([FakeResponse(201, json.dumps(asset).encode())])
+        fact = client.upload_asset(4242, 'SHA256SUMS', path)
+        request = client.transport._opener.requests[-1]
+        self.assertEqual(request.full_url,
+                         'https://uploads.github.com/repos/' + REPO + '/releases/4242/assets?name=SHA256SUMS')
+        self.assertEqual(request.get_header('Content-type'), 'application/octet-stream')
+        self.assertEqual(request.get_header('Content-length'), '14')
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer write-value')
+        self.assertEqual((fact.asset_id, fact.name, fact.size, fact.state), (11, 'SHA256SUMS', 14, 'uploaded'))
+        for answer in (FakeResponse(422), FakeResponse(500), FakeResponse(201, b'not json')):
+            client = self.client([answer])
+            with self.assertRaises(GITHUB.ReconcileRequired):
+                client.upload_asset(4242, 'SHA256SUMS', path)
+        client = self.client([])
+        with self.assertRaises(ControllerError):
+            client.upload_asset(4242, '../SHA256SUMS', path)
+
+        # A tag: exactly v<V> at a commit.
+        client = self.client([FakeResponse(201, json.dumps({'ref': 'refs/tags/v0.43.0', 'object': {'type': 'commit', 'sha': S}}).encode())])
+        fact = client.create_final_tag('0.43.0', S)
+        request = client.transport._opener.requests[-1]
+        self.assertEqual(json.loads(request.data), {'ref': 'refs/tags/v0.43.0', 'sha': S})
+        self.assertEqual((fact.object_type, fact.object_sha), ('commit', S))
+        client = self.client([])
+        for bad in (('0.43.1', S), ('0.43.0', 'main')):
+            with self.assertRaises(ControllerError):
+                client.create_final_tag(*bad)
+
+        # An authenticated asset download: octet-stream, through the redirect, with no token past it.
+        client = self.client([FakeResponse(302, b'', {'location': 'https://objects.example/a'}), FakeResponse(200, b'bytes')])
+        out = folder / 'one'
+        result = client.download_asset(PUBLISH.AssetFact(11, 'x', 5, 'uploaded', None), out, 1024)
+        self.assertEqual(result, (sha(b'bytes'), 5))
+        first, second = client.transport._opener.requests[-2:]
+        self.assertEqual(first.full_url, 'https://api.github.com/repos/' + REPO + '/releases/assets/11')
+        self.assertEqual(first.get_header('Accept'), 'application/octet-stream')
+        self.assertEqual(first.get_header('Authorization'), 'Bearer write-value')
+        self.assertIsNone(second.get_header('Authorization'))
+        # A body over the limit leaves no file.
+        client = self.client([FakeResponse(200, b'x' * 2000)])
+        out = folder / 'two'
+        with self.assertRaises(ControllerError):
+            client.download_asset(PUBLISH.AssetFact(11, 'x', 5, 'uploaded', None), out, 1024)
+        self.assertFalse(out.exists())
+
+        # A release read: closed fields of the exact types; duplicate asset names stay visible to the check.
+        rows = [release_row(assets=[dict(asset), dict(asset, id=12)])]
+        client = self.client([FakeResponse(200, json.dumps(rows).encode())])
+        fact = client.full_releases()[0]
+        self.assertEqual([a.asset_id for a in fact.assets], [11, 12])
+        self.assertEqual(fact.body, 'notes')
+        for bad in (dict(rows[0], assets='x'), dict(rows[0], draft='yes'), dict(rows[0], assets=[dict(asset, size='1')]),
+                    dict(rows[0], assets=[dict(asset, name=5)])):
+            client = self.client([FakeResponse(200, json.dumps([bad]).encode())])
+            with self.assertRaises(ControllerError):
+                client.full_releases()
+        # A null body is an empty body.
+        client = self.client([FakeResponse(200, json.dumps([dict(rows[0], body=None)]).encode())])
+        self.assertEqual(client.full_releases()[0].body, '')
+
+
+class Cli(Base):
+    def run_cli(self, *args, env=None):
+        environ = {'PATH': '/usr/bin:/bin'}
+        environ.update(env or {})
+        return subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'scripts/release/publish.py')] + list(args),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environ,
+                              check=False)
+
+    def test_rsig7_cli_failures_use_the_controller_prefix(self):
+        done = self.run_cli('nonsense')
+        self.assertEqual(done.returncode, 2)
+        done = self.run_cli('eligibility')
+        self.assertEqual(done.returncode, 2)
+        with tempfile.TemporaryDirectory() as folder:
+            work = str(Path(folder) / 'work')
+            done = self.run_cli('check-published', '--target', LINUX, '--checker', '/bin/true', '--work', work,
+                                '--out', str(Path(folder) / 'out'), env={'GITHUB_TOKEN': 'secret-value',
+                                                                         'RDY_PUBLISH_RECEIPT': '{}'})
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stderr, b'release controller: the public checks must run without credentials\n')
+        self.assertNotIn(b'secret-value', done.stdout + done.stderr)
+        # Every command the workflow names exists, and the workflow's arguments parse.
+        for command in re.findall(r'trusted/scripts/release/publish\.py (\S+)', WORKFLOW):
+            done = self.run_cli(command, '--help')
+            self.assertEqual(done.returncode, 0, command)
+
+
+if __name__ == '__main__':
+    unittest.main()
