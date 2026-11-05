@@ -199,7 +199,7 @@ mod tests {
         let (found, rest) = placeholders(&code_lines(&source("src/pio/windows.rs")));
         assert_eq!(
             rest.trim(),
-            "pub use windows_io::*;\nmod windows_io;",
+            "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;",
             "code outside the placeholders"
         );
         assert_eq!(

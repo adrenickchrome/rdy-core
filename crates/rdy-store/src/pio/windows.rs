@@ -5,6 +5,8 @@
 //! writes, hole punches and allocated-bytes queries.
 
 pub use windows_io::*;
+// a sibling file: this file is not a mod.rs, so a plain `mod` would look in pio/windows/
+#[path = "windows_io.rs"]
 mod windows_io;
 
 compile_error!(
