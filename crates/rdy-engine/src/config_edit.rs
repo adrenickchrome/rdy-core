@@ -32,7 +32,7 @@ use rdy_store::{fsutil, pio};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A config file's bytes, read under its sibling lock, which is held until drop.
@@ -181,16 +181,47 @@ fn too_large(limit: usize) -> RdyError {
 /// not empty, with no `.`, `..` or empty component (a programming error guard: callers pass
 /// constants).
 fn split_rel(rel: &Path) -> Result<(Vec<&OsStr>, &OsStr), RdyError> {
-    let text = rel.to_str().ok_or_else(not_private)?;
     let mut parts: Vec<&OsStr> = vec![];
-    for part in text.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            return Err(not_private());
+    for part in rel.components() {
+        match part {
+            Component::Normal(name) if name.to_str().is_some() => parts.push(name),
+            _ => return Err(not_private()),
         }
-        parts.push(OsStr::new(part));
     }
     let name = parts.pop().ok_or_else(not_private)?;
     Ok((parts, name))
+}
+
+#[cfg(test)]
+mod split_rel_tests {
+    use super::*;
+
+    #[test]
+    fn splits_native_paths() {
+        let rel: PathBuf = [".rdy", "hub", "credentials"].iter().collect();
+        let (dirs, name) = split_rel(&rel).unwrap();
+        assert_eq!(dirs, [OsStr::new(".rdy"), OsStr::new("hub")]);
+        assert_eq!(name, OsStr::new("credentials"));
+        let (dirs, name) = split_rel(Path::new("file")).unwrap();
+        assert!(dirs.is_empty());
+        assert_eq!(name, OsStr::new("file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn splits_backslash_paths() {
+        let (dirs, name) = split_rel(Path::new(r"a\b\c")).unwrap();
+        assert_eq!(dirs, [OsStr::new("a"), OsStr::new("b")]);
+        assert_eq!(name, OsStr::new("c"));
+        assert!(split_rel(Path::new(r"a\..\c")).is_err());
+    }
+
+    #[test]
+    fn refuses_odd_paths() {
+        for bad in ["", ".", "..", "a/../b", "./a", "/a"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
 }
 
 /// `<name>.lock`.
