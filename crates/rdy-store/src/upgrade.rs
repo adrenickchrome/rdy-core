@@ -939,9 +939,11 @@ fn naming(e: StoreError, backup: &Path) -> StoreError {
     }
 }
 
-/// Whether `meta` is owned by this user, with no permission bit for its group or others.
-fn is_owned_private(meta: &std::fs::Metadata) -> bool {
-    pio::owner(meta) == pio::own_uid() && pio::is_owner_only(meta)
+/// Whether the open file or directory `f` is this account's, and no other account may use it,
+/// read from its handle. A failed read is an error.
+fn is_owned_private(f: &File) -> io::Result<bool> {
+    let privacy = pio::privacy(f)?;
+    Ok(privacy.mine && privacy.owner_only)
 }
 
 /// The mode of a backup's copy of a file whose metadata is `source`: its owner may read it, and
@@ -964,8 +966,8 @@ fn make_private_dir_at(dir: &File, name: &OsStr) -> Result<File, StoreError> {
 fn open_made_dir(dir: &File, name: &OsStr) -> Result<File, StoreError> {
     pio::set_mode_at(dir, name, 0o700)?;
     let made = pio::open_dir_at(dir, name).map_err(file_type_error)?;
-    let m = made.metadata()?;
-    if !(pio::is_private_dir(&m) && pio::owner(&m) == pio::own_uid() && pio::is_empty_dir(&made)?) {
+    let privacy = pio::privacy(&made)?;
+    if !(privacy.private && privacy.mine && pio::is_empty_dir(&made)?) {
         return Err(failed(UpgradeFailure::BackupMismatch, None));
     }
     Ok(made)
@@ -1119,7 +1121,7 @@ fn reuse_backup(
         }
     };
     let root = pio::open_dir_at(target.parent, target.name).map_err(opened)?;
-    if !is_owned_private(&root.metadata()?) {
+    if !is_owned_private(&root)? {
         return Err(mismatch());
     }
     // what backup.json must say: this store's files as they are now, and which files they are
@@ -1167,7 +1169,7 @@ fn reuse_backup(
         Err(StoreError::Upgrade { .. }) => return Err(mismatch()),
         Err(e) => return Err(e),
     };
-    if !is_owned_private(&manifest.metadata()?) {
+    if !is_owned_private(&manifest)? {
         return Err(mismatch());
     }
     let mut got = Vec::new();
@@ -1182,7 +1184,7 @@ fn reuse_backup(
     // the copy holds exactly what backup.json lists, each file private, independent of the
     // store's files and with its recorded digest
     let copy = pio::open_dir_at(&root, BACKUP_STORE.as_ref()).map_err(opened)?;
-    if !is_owned_private(&copy.metadata()?) {
+    if !is_owned_private(&copy)? {
         return Err(mismatch());
     }
     let mut digests: Vec<BackupFile> = Vec::new();
@@ -1190,7 +1192,7 @@ fn reuse_backup(
         .try_reserve_exact(expected.files.len())
         .map_err(|_| failed(UpgradeFailure::Limit, None))?;
     let held = list_tree(&copy, &[], |rel, f, m| {
-        if !is_owned_private(m) || ids.contains(&FileId::of(m)) {
+        if !is_owned_private(f)? || ids.contains(&FileId::of(m)) {
             return Err(mismatch());
         }
         if m.is_file() {

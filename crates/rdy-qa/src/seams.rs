@@ -24,6 +24,8 @@ pub const TOKENS: &[&str] = &[
 /// The seam files: any use is allowed.
 pub const SEAM_FILES: &[&str] = &[
     "crates/rdy-store/src/pio.rs",
+    "crates/rdy-store/src/pio/unix.rs",
+    "crates/rdy-store/src/pio/windows.rs",
     "crates/rdy-store/src/fileid.rs",
     "crates/rdy-daemon/src/sys/unix.rs",
     "crates/rdy-qa/src/platform.rs",

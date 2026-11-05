@@ -32,6 +32,21 @@ impl FileId {
     pub fn of_file(f: &File) -> io::Result<FileId> {
         f.metadata().map(|m| FileId::of(&m))
     }
+
+    /// The identity of the open file `f`, read from its handle. A failed read is an error,
+    /// `could not read the file identity of {path}: {error}`, of the same kind as the failed
+    /// call's.
+    pub fn of_open(f: &File, path: &Path) -> io::Result<FileId> {
+        f.metadata().map(|m| FileId::of(&m)).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "could not read the file identity of {}: {e}",
+                    path.display()
+                ),
+            )
+        })
+    }
 }
 
 impl fmt::Display for FileId {
@@ -100,6 +115,30 @@ pub fn links(meta: &std::fs::Metadata) -> u64 {
     os::links(meta)
 }
 
+/// The change stamp of the open file `f`, read from its handle. A failed read is an error,
+/// `could not read change stamp for {path}: {error}`.
+pub fn change_stamp_of(f: &File, path: &Path) -> io::Result<ChangeStamp> {
+    f.metadata()
+        .map(|m| change_stamp(&m))
+        .map_err(|e| unread("change stamp", path, e))
+}
+
+/// How many links (names) the open file `f` has, read from its handle. A failed read is an
+/// error, `could not read link count for {path}: {error}`.
+pub fn links_of(f: &File, path: &Path) -> io::Result<u64> {
+    f.metadata()
+        .map(|m| links(&m))
+        .map_err(|e| unread("link count", path, e))
+}
+
+/// `could not read {field} for {path}: {error}`, of the same kind as `e`.
+fn unread(field: &str, path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(
+        e.kind(),
+        format!("could not read {field} for {}: {e}", path.display()),
+    )
+}
+
 /// The platform fields this module reads. Only this module names a platform's metadata.
 #[cfg(unix)]
 mod os {
@@ -121,25 +160,13 @@ mod os {
     }
 }
 
-#[cfg(not(unix))]
-compile_error!("rdy_store::fileid has no implementation for this platform yet (FW-XP1 Phase 4)");
+#[cfg(windows)]
+compile_error!(
+    "rdy_store::fileid has no Windows implementation yet of the identity (FILE_ID_INFO), change stamp and link count of an open file (FW-XP1 Phase 4)"
+);
 
-/// No implementation (O1): the `compile_error!` above stops the build, and these signatures
-/// keep it the only error. They never run and give no identity.
-#[cfg(not(unix))]
-mod os {
-    pub(super) fn dev_ino(_: &std::fs::Metadata) -> (u64, u64) {
-        unreachable!("rdy_store::fileid has no implementation for this platform yet")
-    }
-
-    pub(super) fn ino_ctime(_: &std::fs::Metadata) -> (u64, i64, i64) {
-        unreachable!("rdy_store::fileid has no implementation for this platform yet")
-    }
-
-    pub(super) fn links(_: &std::fs::Metadata) -> u64 {
-        unreachable!("rdy_store::fileid has no implementation for this platform yet")
-    }
-}
+#[cfg(not(any(unix, windows)))]
+compile_error!("rdy_store::fileid has no implementation for this platform (FW-XP1 D-1RXEA)");
 
 /// Unix only: the tests read `st_dev`, `st_ino` and `st_ctime` and make symbolic links.
 #[cfg(all(test, unix))]

@@ -116,7 +116,7 @@ impl LockedConfig {
         let keep = match pio::open_read_at(&self.dir, &self.name) {
             Ok(f) => {
                 let m = f.metadata().map_err(|_| save_failed())?;
-                check_target(&m, self.private)?;
+                check_target(&f, &m, self.private)?;
                 (!self.private).then(|| m.permissions())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -270,7 +270,8 @@ fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, Rdy
         Err(e) => return Err(open_failed(&e)),
     };
     let m = dir.metadata().map_err(|_| save_failed())?;
-    if !m.is_dir() || pio::owner(&m) != pio::own_uid() || !pio::is_private_dir(&m) {
+    let privacy = pio::privacy(&dir).map_err(|_| save_failed())?;
+    if !m.is_dir() || !privacy.mine || !privacy.private {
         return Err(not_private());
     }
     dir.sync_all().map_err(|_| save_failed())?;
@@ -296,23 +297,25 @@ fn probe_name(name: &OsStr) -> OsString {
 /// it, and all users may write it only when the sticky bit is set.
 fn check_dir(dir: &File, private: bool) -> Result<(), RdyError> {
     let m = dir.metadata().map_err(|_| save_failed())?;
+    let privacy = pio::privacy(dir).map_err(|_| save_failed())?;
     let shared = if private {
-        pio::is_shared_writable(&m)
+        privacy.shared_writable
     } else {
-        pio::is_world_writable_unsticky(&m)
+        privacy.open_to_all
     };
-    if m.is_dir() && pio::owner(&m) == pio::own_uid() && !shared {
+    if m.is_dir() && privacy.mine && !shared {
         Ok(())
     } else {
         Err(not_private())
     }
 }
 
-/// The target, judged from its open handle: a regular file this user owns, and 0o600 when
-/// `private`.
-fn check_target(m: &Metadata, private: bool) -> Result<(), RdyError> {
-    let ours = m.is_file() && pio::owner(m) == pio::own_uid();
-    if ours && (!private || pio::is_private_file(m)) {
+/// The target, judged from its open handle `f`, whose metadata is `m`: a regular file this user
+/// owns, and private (0o600) when `private`.
+fn check_target(f: &File, m: &Metadata, private: bool) -> Result<(), RdyError> {
+    let privacy = pio::privacy(f).map_err(|_| save_failed())?;
+    let ours = m.is_file() && privacy.mine;
+    if ours && (!private || privacy.private) {
         Ok(())
     } else {
         Err(not_private())
@@ -346,7 +349,8 @@ fn open_lock(dir: &File, name: &OsStr) -> Result<File, RdyError> {
         Err(e) => return Err(open_failed(&e)),
     };
     let m = file.metadata().map_err(|_| save_failed())?;
-    if !m.is_file() || pio::owner(&m) != pio::own_uid() || !pio::is_owner_only(&m) {
+    let privacy = pio::privacy(&file).map_err(|_| save_failed())?;
+    if !m.is_file() || !privacy.mine || !privacy.owner_only {
         return Err(not_private());
     }
     Ok(file)
@@ -362,7 +366,7 @@ fn read_target(dir: &File, name: &OsStr, private: bool, limit: usize) -> Result<
         Err(e) => return Err(open_failed(&e)),
     };
     let m = file.metadata().map_err(|_| save_failed())?;
-    check_target(&m, private)?;
+    check_target(&file, &m, private)?;
     let cap = u64::try_from(limit)
         .ok()
         .and_then(|l| l.checked_add(1))
