@@ -7,6 +7,10 @@ use std::path::Path;
 
 /// The store directory inside `.rdy`.
 pub const STORE_DIR: &str = "store";
+/// The run directory inside `.rdy`.
+pub const RUN_DIR: &str = "run";
+/// The project's start lock in the run directory (see `start_lock`).
+pub const START_LOCK_FILE: &str = "start.lock";
 
 /// Opens the store of the project whose `.rdy` directory is `rdy_dir`. A missing store is
 /// refused, never created: only `create_project_store` (rdy init) creates one.

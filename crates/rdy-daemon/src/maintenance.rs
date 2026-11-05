@@ -5,9 +5,9 @@
 //! no steps and no pending completion returns unchanged: no daemon is stopped, no lock taken.
 //! Otherwise it takes `start.lock` (so no client starts a daemon meanwhile), stops the
 //! project's daemon with [`request_stop`] (its peer identity checks included), waits for that
-//! daemon to exit, and applies the plan through `rdy_engine::maintenance::apply_planned`, which
-//! takes the store lock, plans again and runs the upgrade and its completion. The old daemon is
-//! not restarted: the next ordinary connection starts this rdy's.
+//! daemon to exit, and applies the plan through `rdy_engine::maintenance::apply_planned_under`,
+//! which borrows the guard, takes the store lock, plans again and runs the upgrade and its
+//! completion. The old daemon is not restarted: the next ordinary connection starts this rdy's.
 //!
 //! A dry run plans only: it never starts or stops a daemon, opens a writer, creates a lock, or
 //! writes a backup or an index. The connected MCP path never comes here.
@@ -15,10 +15,11 @@ use crate::client::{LOCK_RETRY, StopRequest, request_stop};
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::hello::{Hello, PROTO_VERSION};
 use crate::layout::RunDir;
-use crate::lock::FileLock;
 use crate::session::Proto;
+use crate::sys::{self, Liveness};
 use rdy_engine::maintenance::{self as m, UpgradeReport};
 use rdy_engine::{E_HELD_BY_READER, E_IO, E_LOCKED, RdyError};
+use rdy_store::start_lock::StartGuard;
 use rdy_store::upgrade::{UpgradePlan, UpgradeStep};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +57,27 @@ pub fn with_start_registry_for_tests<T>(registry: Vec<UpgradeStep>, f: impl FnOn
 /// The steps a connection's start plans with on this thread.
 fn start_registry() -> Option<Vec<UpgradeStep>> {
     START_REGISTRY.with(|r| r.borrow().clone())
+}
+
+thread_local! {
+    /// Runs before each try at the store on this thread ([`with_apply_hook_for_tests`]).
+    static APPLY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: runs `f` with `hook` called before each try at the store on this thread, so a test
+/// can tell how far a coordinator has come. No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn with_apply_hook_for_tests<T>(hook: impl FnMut() + 'static, f: impl FnOnce() -> T) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            APPLY_HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    APPLY_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    let _off = Off;
+    f()
 }
 
 /// How many times a coordinator has run in this process (a test reads it).
@@ -134,10 +156,11 @@ fn apply(
     root: &Path,
     planned: &UpgradePlan,
     registry: Option<&[UpgradeStep]>,
+    start: &StartGuard,
 ) -> Result<UpgradeReport, RdyError> {
     match registry {
-        None => m::apply_planned(root, planned),
-        Some(r) => m::apply_planned_with_registry_for_tests(root, planned, r),
+        None => m::apply_planned_under(root, planned, start),
+        Some(r) => m::apply_planned_under_with_registry_for_tests(root, planned, start, r),
     }
 }
 
@@ -187,18 +210,23 @@ async fn coordinate(
             "check the project directory's permissions",
         )
     })?;
-    let _start = start_lock(&run, Instant::now() + timeout)
+    let start = start_lock(&run, Instant::now() + timeout)
         .await
         .map_err(rdy_error)?;
     stop_daemon(root, &run, timeout, None)
         .await
         .map_err(rdy_error)?;
-    apply_while_locked(root, &planned, registry, Instant::now() + timeout).await
+    apply_while_locked(root, &planned, registry, &start, Instant::now() + timeout).await
 }
 
 /// Asks the project's daemon to stop ([`request_stop`]) and waits for it to exit: its process
-/// when its pid is known, else its socket. Nothing is done when no daemon answers. The wait ends
-/// after [`STOP_WAIT`], or at `deadline` when that comes first (a connection's own deadline).
+/// when its pid is known, else its endpoint, until it stops accepting. Only a proved end ends the
+/// wait ([`Liveness`]). Nothing is done when no daemon answers. The wait ends after [`STOP_WAIT`],
+/// or at `deadline` when that comes first (a connection's own deadline).
+///
+/// None of this proves the store free: no reply, a missing record and a closed endpoint say
+/// nothing of a process that still drains. What upgrades a store takes the store's lock itself,
+/// under `start.lock` ([`apply_while_locked`]).
 pub(crate) async fn stop_daemon(
     root: &Path,
     run: &RunDir,
@@ -212,13 +240,16 @@ pub(crate) async fn stop_daemon(
     else {
         return Ok(());
     };
-    let gone = || match pid {
-        Some(p) => !crate::spawn::process_alive(p),
-        None => !socket.exists(),
-    };
     let started = Instant::now();
     let until = deadline.map_or(started + STOP_WAIT, |d| d.min(started + STOP_WAIT));
-    while !gone() {
+    loop {
+        let seen = match pid {
+            Some(p) => sys::process_liveness(p),
+            None => sys::endpoint_liveness(&socket).await,
+        };
+        if seen == Liveness::Gone {
+            return Ok(());
+        }
         if Instant::now() >= until {
             return Err(ErrorReply::new(
                 E_DAEMON_GONE,
@@ -231,15 +262,14 @@ pub(crate) async fn stop_daemon(
         }
         tokio::time::sleep(POLL).await;
     }
-    Ok(())
 }
 
 /// Takes `start.lock`, retrying until `deadline`: the lock `connect_or_start` spawns under.
-async fn start_lock(run: &RunDir, deadline: Instant) -> Result<FileLock, ErrorReply> {
+async fn start_lock(run: &RunDir, deadline: Instant) -> Result<StartGuard, ErrorReply> {
     let path = run.start_lock();
     loop {
-        match FileLock::try_take(&path) {
-            Ok(Some(lock)) => return Ok(lock),
+        match StartGuard::try_take(run.rdy_dir()) {
+            Ok(Some(start)) => return Ok(start),
             Ok(None) => {}
             Err(e) => {
                 return Err(ErrorReply::new(
@@ -260,16 +290,22 @@ async fn start_lock(run: &RunDir, deadline: Instant) -> Result<FileLock, ErrorRe
     }
 }
 
-/// Applies `planned` while the caller holds `start.lock`. A store still held by a daemon that
-/// is draining (`E_LOCKED`, `E_HELD_BY_READER`) is retried until `deadline`.
+/// Applies `planned` while the caller holds `start.lock`, which `start` lends. A store still held
+/// by a daemon that is draining (`E_LOCKED`, `E_HELD_BY_READER`) is retried until `deadline`.
 async fn apply_while_locked(
     root: &Path,
     planned: &UpgradePlan,
     registry: Option<&[UpgradeStep]>,
+    start: &StartGuard,
     deadline: Instant,
 ) -> Result<UpgradeReport, RdyError> {
     loop {
-        match apply(root, planned, registry) {
+        APPLY_HOOK.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+        match apply(root, planned, registry, start) {
             Err(e)
                 if (e.code == E_LOCKED || e.code == E_HELD_BY_READER)
                     && Instant::now() < deadline =>
@@ -288,17 +324,35 @@ async fn apply_while_locked(
 /// a store that needs steps or its pending completion is upgraded and completed, with the full
 /// fsck before `FORMAT` is published; a store with an unknown read-only feature is never
 /// upgraded. Any other planner failure is left to the daemon's open.
-pub(crate) async fn before_start(run: &RunDir, deadline: Instant) -> Result<(), ErrorReply> {
+pub(crate) async fn before_start(
+    run: &RunDir,
+    start: &StartGuard,
+    deadline: Instant,
+) -> Result<(), ErrorReply> {
     let root = run.root();
     let Some(planned) = start_plan(&root)? else {
         return Ok(());
     };
     COORDINATOR_RUNS.fetch_add(1, Ordering::SeqCst);
     let registry = start_registry();
-    apply_while_locked(&root, &planned, registry.as_deref(), deadline)
+    apply_while_locked(&root, &planned, registry.as_deref(), start, deadline)
         .await
         .map(|_| ())
         .map_err(ErrorReply::from)
+}
+
+/// What a launched daemon checks once it owns the start, before it opens the store: its starter
+/// planned before it let go, and the store may have moved since. A store that needs work now gets
+/// it here, under the same guard. A store still held (a predecessor that drains) is left to the
+/// open that follows, which retries and plans again.
+pub(crate) fn revalidate_plan(root: &Path, start: &StartGuard) -> Result<(), RdyError> {
+    let Some(planned) = start_plan(root).map_err(rdy_error)? else {
+        return Ok(());
+    };
+    match apply(root, &planned, start_registry().as_deref(), start) {
+        Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => Ok(()),
+        out => out.map(|_| ()),
+    }
 }
 
 /// The plan [`before_start`] acts on: `None` when there is no work for it.

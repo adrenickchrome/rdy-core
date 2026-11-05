@@ -4,12 +4,13 @@
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION, valid_build};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
-use crate::lock::{FileLock, open_no_follow};
+use crate::lock::open_no_follow;
 use crate::session::{Proto, SessionId};
 use crate::signing_transport::{CallerLink, CallerSigner, InterruptSource, read_reply, sigint};
 use crate::socket::MAX_SOCKET_PATH;
-use crate::spawn::Spawned;
+use crate::spawn::{Launch, Launched, LaunchedChild, Spawned};
 use crate::sys;
+use rdy_store::start_lock::{ReservationState, StartGuard};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,6 +36,8 @@ pub fn connect_backoff(attempt: u32) -> Duration {
 }
 /// The pause between two tries of `start.lock`.
 pub const LOCK_RETRY: Duration = Duration::from_millis(50);
+/// The pause between two looks at whether a launched daemon has claimed its start.
+const CLAIM_POLL: Duration = Duration::from_millis(2);
 /// How many lines of `daemon.log` an `E_DAEMON_START` cites.
 pub const LOG_TAIL_LINES: usize = 20;
 
@@ -849,7 +852,9 @@ fn stopping(e: &ErrorReply) -> bool {
 }
 
 /// Connects to the project's daemon, starting one if none answers. At most one client spawns:
-/// the spawn happens under `start.lock`, after a second connect made while holding it. A refusal
+/// the spawn happens under `start.lock`, after a second connect made while holding it, and the
+/// daemon it launches takes the start over before this waits for it to answer
+/// (`rdy_store::start_lock`). A refusal
 /// from a daemon that is stopping (its own project is gone or replaced: a project restored in
 /// place) is retried once, within the same start timeout; that daemon removed its socket before
 /// it answered, so the retry starts this project's own daemon.
@@ -936,6 +941,8 @@ impl Start<'_> {
                         Some(deadline),
                     )
                     .await?;
+                    // its endpoint is gone, and its process may still drain the store
+                    saw_exiting = true;
                 }
                 Attempt::Refused(e) => return Err(e),
                 Attempt::Exiting => saw_exiting = true,
@@ -954,9 +961,9 @@ impl Start<'_> {
         run.ensure().map_err(|e| ensure_error(run, e))?;
         let hello = hello_of(run.project_id().map_err(|e| ensure_error(run, e))?);
         let lock_path = run.start_lock();
-        let _lock = loop {
-            match FileLock::try_take(&lock_path) {
-                Ok(Some(lock)) => break lock,
+        let start = loop {
+            match StartGuard::try_take(run.rdy_dir()) {
+                Ok(Some(start)) => break start,
                 Ok(None) => {}
                 Err(e) => {
                     return Err(start_error(format!(
@@ -1026,13 +1033,39 @@ impl Start<'_> {
 
         // 3b. a store that needs an upgrade, or the completion of a sealed one, is upgraded
         // before any daemon serves it: the full fsck, then `FORMAT`, then the spawn (D-WWAK7)
-        crate::maintenance::before_start(run, deadline).await?;
+        crate::maintenance::before_start(run, &start, deadline).await?;
 
         // 4. spawn
         let log_from = log_len(run);
-        let mut spawned = match spawn(run) {
+        let launch =
+            Launch::arm().map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
+        let result = spawn(run);
+        let launched = launch.finish();
+        let mut spawned = match result {
             Ok(s) => s,
             Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
+        };
+
+        // 4b. the start becomes the daemon's: it claims it before anything here waits for it to
+        // answer, and this side lets go of the lock it would need. A spawner of its own keeps the
+        // lock's exclusion here until its daemon answers.
+        let _kept = match launched {
+            Launched::OwnWay => Some(start),
+            Launched::NoProcess => {
+                drop(start);
+                None
+            }
+            Launched::Child(child) => {
+                let wait = Handoff {
+                    run,
+                    deadline,
+                    start_timeout,
+                    log_from,
+                };
+                wait.run(&start, child, &mut spawned).await?;
+                drop(start);
+                None
+            }
         };
 
         // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
@@ -1085,6 +1118,63 @@ impl Start<'_> {
             }
             tokio::time::sleep(connect_backoff(attempt_no).min(deadline - now)).await;
             attempt_no += 1;
+        }
+    }
+}
+
+/// A start's handoff to the daemon it launched.
+struct Handoff<'a> {
+    run: &'a RunDir,
+    deadline: Instant,
+    start_timeout: Duration,
+    log_from: u64,
+}
+
+impl Handoff<'_> {
+    /// Under `start`, records the start for `child`, sends it the token and waits until the child
+    /// has claimed it. A child that exits first ends the wait, with its reservation withdrawn:
+    /// the caller's wait for an answer reports the exit. A deadline withdraws it too, and is
+    /// `not_ready`: a child that claims later finds nothing and does not open the store.
+    async fn run(
+        &self,
+        start: &StartGuard,
+        child: LaunchedChild,
+        spawned: &mut Spawned,
+    ) -> Result<(), ErrorReply> {
+        let timed_out = || not_ready(self.run, self.start_timeout, Some(self.log_from));
+        let lock_error = |e: io::Error| {
+            start_error(format!(
+                "could not lock {}: {e}",
+                self.run.start_lock().display()
+            ))
+        };
+        let reservation = loop {
+            match start.reserve(child.pid, &child.token) {
+                Ok(Some(r)) => break r,
+                Ok(None) if Instant::now() >= self.deadline => return Err(timed_out()),
+                Ok(None) => tokio::time::sleep(CLAIM_POLL).await,
+                Err(e) => return Err(lock_error(e)),
+            }
+        };
+        child.send_token();
+        loop {
+            match reservation.state() {
+                Ok(ReservationState::Unclaimed) => {}
+                Ok(ReservationState::Claimed | ReservationState::Ended) => return Ok(()),
+                Err(e) => {
+                    let _ = reservation.withdraw();
+                    return Err(lock_error(e));
+                }
+            }
+            if (spawned.exited)().is_some() {
+                let _ = reservation.withdraw();
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                let _ = reservation.withdraw();
+                return Err(timed_out());
+            }
+            tokio::time::sleep(CLAIM_POLL).await;
         }
     }
 }

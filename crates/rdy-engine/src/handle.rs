@@ -10,6 +10,7 @@ use crate::{
 use arc_swap::ArcSwap;
 use rdy_schema::Pack;
 use rdy_store::holder::StoreMode;
+use rdy_store::start_lock::StartGuard;
 use rdy_store::upgrade::{UpgradeReport, UpgradeStep};
 use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::cell::RefCell;
@@ -141,6 +142,14 @@ impl Rdy {
         Rdy::open_with_policy(project, OpenPolicy::AutoUpgrade)
     }
 
+    /// Opens `project` as [`Rdy::open`] does, under `start`, the project's start lock, which the
+    /// caller holds and keeps across the open (a daemon's start): the open and any upgrade it runs
+    /// borrow the guard and never take that lock again. A guard of another project is `E_LOCKED`.
+    pub fn open_under_start(project: &Path, start: &StartGuard) -> Result<Rdy, RdyError> {
+        check_start(project, start)?;
+        Rdy::open(project)
+    }
+
     /// Opens `project` as [`Rdy::open`] does, with upgrade policy `policy` (embedded callers):
     /// `AutoUpgrade` upgrades the store and completes the upgrade ([`Rdy::complete_upgrade`])
     /// before the handle is returned; `RequireCurrent` refuses a store that needs either with
@@ -219,12 +228,14 @@ impl Rdy {
 
     /// [`Rdy::open_locked`] with `context`, resolved by the caller for `mode` before it wrote
     /// anything (an upgrade: a project that cannot open is refused before its backup). A store
-    /// of another mode is the adapter refusal of [`Rdy::open`] or [`Rdy::open_holder`].
+    /// of another mode is the adapter refusal of [`Rdy::open`] or [`Rdy::open_holder`]. The
+    /// caller holds `_start`, the project's start lock, and this reopen borrows it.
     pub(crate) fn open_locked_with(
         project: &Path,
         lock: &rdy_store::StoreLock,
         mode: StoreMode,
         context: Context,
+        _start: &StartGuard,
     ) -> Result<Rdy, RdyError> {
         let store = layout::open_project_store_locked(&project.join(".rdy"), lock)?;
         match (mode, store.mode()?) {
@@ -579,6 +590,21 @@ impl Rdy {
     pub fn idle_days(&self) -> u32 {
         self.read().idle_days()
     }
+}
+
+/// `E_LOCKED` unless `start` is the start lock of the project at `project`.
+pub(crate) fn check_start(project: &Path, start: &StartGuard) -> Result<(), RdyError> {
+    if start.guards(&project.join(".rdy")) {
+        return Ok(());
+    }
+    Err(RdyError::new(
+        crate::E_LOCKED,
+        format!(
+            "the start lock this call holds is not the start lock of {}",
+            project.display()
+        ),
+        "take the start lock of this project",
+    ))
 }
 
 /// Test hook: while the guard is held, this thread knows a read-only store feature that the

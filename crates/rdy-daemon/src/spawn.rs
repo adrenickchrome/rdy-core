@@ -1,20 +1,124 @@
-//! Starting a detached daemon: the `rdy serve --detach` command a client spawns, and the
-//! child's own `detach`.
+//! Starting a detached daemon: the `rdy serve --detach` command a client spawns, the child's own
+//! `detach`, and the private pipe that carries a start's one-use token to the launched process
+//! (`rdy_store::start_lock`).
 
 use crate::layout::RunDir;
 use crate::lock::open_no_follow;
 use crate::socket::check_socket_path;
 use crate::sys;
+use rdy_store::start_lock::HandoffToken;
+use std::cell::RefCell;
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
+
+/// What a start has armed for this thread while its spawner runs: the pipe's read end, until
+/// `serve_command` takes it for the child's stdin, then the pid `spawn_serve` launched with it.
+struct Armed {
+    reader: Option<PipeReader>,
+    pid: Option<u32>,
+}
+
+thread_local! {
+    static ARMED: RefCell<Option<Armed>> = const { RefCell::new(None) };
+}
+
+/// A start's preparation for one launch: the spawner runs between [`Launch::arm`] and
+/// [`Launch::finish`], on this thread, with no await between them.
+pub(crate) struct Launch {
+    writer: PipeWriter,
+}
+
+/// What a spawner did with an armed [`Launch`].
+pub(crate) enum Launched {
+    /// It starts its daemon its own way, with no `serve_command` (a test's in-process or echo
+    /// daemon). The starter keeps the start lock until that daemon answers.
+    OwnWay,
+    /// It built the command and launched it some other way: no process to tie a reservation to.
+    /// The child reads no token and takes its own guard, so the starter lets go.
+    NoProcess,
+    /// `serve_command` and `spawn_serve` launched this process.
+    Child(LaunchedChild),
+}
+
+/// A launched process that waits for its token.
+pub(crate) struct LaunchedChild {
+    pub(crate) pid: u32,
+    pub(crate) token: HandoffToken,
+    writer: PipeWriter,
+}
+
+impl LaunchedChild {
+    /// Sends the token and closes the pipe. A child that is gone reads nothing, and the starter
+    /// sees its exit: a failed write changes nothing.
+    pub(crate) fn send_token(mut self) {
+        let _ = self.writer.write_all(self.token.text());
+    }
+}
+
+impl Launch {
+    /// Arms this thread for one launch.
+    pub(crate) fn arm() -> io::Result<Launch> {
+        let (reader, writer) = io::pipe()?;
+        ARMED.with(|a| {
+            *a.borrow_mut() = Some(Armed {
+                reader: Some(reader),
+                pid: None,
+            });
+        });
+        Ok(Launch { writer })
+    }
+
+    /// Disarms this thread and says what the spawner did.
+    pub(crate) fn finish(self) -> Launched {
+        let armed = ARMED.with(|a| a.borrow_mut().take());
+        match armed {
+            None
+            | Some(Armed {
+                reader: Some(_), ..
+            }) => Launched::OwnWay,
+            Some(Armed { pid: None, .. }) => Launched::NoProcess,
+            Some(Armed { pid: Some(pid), .. }) => Launched::Child(LaunchedChild {
+                pid,
+                token: HandoffToken::new(),
+                writer: self.writer,
+            }),
+        }
+    }
+}
+
+/// The token an armed start sends on this process's stdin, waiting until `until`. `None` when the
+/// stdin ends first (`/dev/null`: no start armed this launch, or its starter died), or holds no
+/// token. A token alone gives no right: `rdy_store::start_lock` checks it against the reservation,
+/// with this process's id and the project.
+pub(crate) fn inherited_token(until: Instant) -> Option<HandoffToken> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("rdy-start-token".into())
+        .spawn(move || {
+            let mut text = [0u8; HandoffToken::TEXT_LEN];
+            let read = io::stdin().lock().read_exact(&mut text);
+            let _ = tx.send(read.ok().map(|()| text));
+        })
+        .ok()?;
+    let left = until.saturating_duration_since(Instant::now());
+    let text = rx.recv_timeout(left).ok().flatten()?;
+    HandoffToken::from_text(&text)
+}
+
+/// The stdin of a command `serve_command` builds: an armed start's pipe, else `/dev/null`.
+fn serve_stdin() -> Stdio {
+    let reader = ARMED.with(|a| a.borrow_mut().as_mut().and_then(|a| a.reader.take()));
+    reader.map_or_else(Stdio::null, Stdio::from)
+}
 
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
 /// --spawned --project <project>` in `project` (`--spawned` tells `rdy serve --detach` to serve
-/// in that process rather than spawn another), stdin from /dev/null, stdout and stderr appended
-/// to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
+/// in that process rather than spawn another), stdin from /dev/null (or, under a start armed on
+/// this thread, the private pipe of its token), stdout and stderr appended to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
 /// variable removed from its environment, and a new session (so a new process group) of its own
 /// from before its exec. The run dir is made absolute first, and a socket path the daemon could
 /// not bind (`socket::check_socket_path`) is refused on that absolute path, before anything is
@@ -40,7 +144,7 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
         .arg("--project")
         .arg(&project)
         .current_dir(&project)
-        .stdin(Stdio::null())
+        .stdin(serve_stdin())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
     // a new session, so the daemon's own `detach` can leave ours
@@ -67,6 +171,14 @@ pub struct Spawned {
 /// which `process_alive` still reports.
 pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
     let mut child = cmd.spawn()?;
+    // a command `serve_command` armed: this is the process the start's token goes to
+    ARMED.with(|a| {
+        if let Some(a) = a.borrow_mut().as_mut()
+            && a.reader.is_none()
+        {
+            a.pid = Some(child.id());
+        }
+    });
     let code = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&code);
     std::thread::Builder::new()

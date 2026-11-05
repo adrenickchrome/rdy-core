@@ -12,9 +12,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const RUN_DIR: &str = "run";
+pub use rdy_store::layout::{RUN_DIR, START_LOCK_FILE};
 pub const SOCKET_FILE: &str = "rdy.sock";
-pub const START_LOCK_FILE: &str = "start.lock";
 pub const PID_FILE: &str = "daemon.pid";
 pub const LOG_FILE: &str = "daemon.log";
 /// The run dir's own `.gitignore`: its files are the daemon's, never a checkout's.
@@ -77,8 +76,12 @@ impl RunDir {
 
     /// The project's identity: `lstat` of its `.rdy` (the run dir's parent), never followed.
     pub fn project_id(&self) -> io::Result<ProjectId> {
-        // `<root>/.rdy/run` always has its `.rdy` as parent
-        ProjectId::lstat(self.0.parent().unwrap_or(Path::new(".rdy")))
+        ProjectId::lstat(self.rdy_dir())
+    }
+
+    /// The project's `.rdy`: `<root>/.rdy/run` always has it as parent.
+    pub fn rdy_dir(&self) -> &Path {
+        self.0.parent().unwrap_or(Path::new(".rdy"))
     }
 
     /// The project root, canonical (`canonical_root`): what a daemon names as the project it

@@ -170,6 +170,40 @@ pub fn alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// What `kill(pid, 0)` says of `pid`: `ESRCH` is gone, success and `EPERM` (a process of another
+/// user) are live, and anything else, a pid out of range included, proves neither.
+#[allow(unsafe_code)]
+pub fn process_liveness(pid: u32) -> super::Liveness {
+    use super::Liveness;
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Liveness::Ambiguous;
+    };
+    // SAFETY: signal 0 sends nothing; `kill` only checks that the process exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Liveness::Live;
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Liveness::Gone,
+        Some(libc::EPERM) => Liveness::Live,
+        _ => Liveness::Ambiguous,
+    }
+}
+
+/// What a connect to the endpoint at `path` says. No name there and a refused connect are gone: no
+/// process listens. A connect is live (it closes at once, and the daemon reads an end of file where
+/// a hello would be), and so is access denied. Anything else proves neither.
+pub async fn endpoint_liveness(path: &Path) -> super::Liveness {
+    use super::Liveness;
+    match connect(path).await {
+        Ok(_) => Liveness::Live,
+        Err(e) => match e.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Liveness::Gone,
+            io::ErrorKind::PermissionDenied => Liveness::Live,
+            _ => Liveness::Ambiguous,
+        },
+    }
+}
+
 /// Sends `SIGTERM` to `pid`, which `rdy serve` takes as `rdy serve --stop`. `Ok(true)` when it
 /// was sent, `Ok(false)` when the process is gone (`ESRCH`). A `pid` of 1 or less is refused:
 /// never init, and never a process group (`kill(0, ..)` and negative pids).
@@ -915,6 +949,49 @@ mod tests {
         // reaped by the wait, so the pid names no process
         assert!(!alive(pid));
         assert!(!terminate(pid).unwrap());
+    }
+
+    #[test]
+    fn wx8a_process_liveness_proves_only_an_end() {
+        use crate::sys::{Liveness, process_liveness};
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        assert_eq!(process_liveness(child.id()), Liveness::Live);
+        // pid 1 is another user's unless the test runs as root: live either way
+        assert_eq!(process_liveness(1), Liveness::Live);
+        assert_eq!(process_liveness(u32::MAX), Liveness::Ambiguous);
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(process_liveness(pid), Liveness::Gone);
+    }
+
+    #[test]
+    fn wx8a_endpoint_liveness_proves_only_an_end() {
+        use crate::sys::{Liveness, endpoint_liveness};
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("s.sock");
+        rt().block_on(async {
+            // a missing name; then a listener; then a name left with no listener
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
+            let listener = bind(&path).unwrap();
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Live);
+            drop(listener);
+            assert!(path.exists(), "the listener's drop leaves the name");
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
+            // what is no socket proves nothing
+            let plain = d.path().join("plain");
+            fs::write(&plain, b"x").unwrap();
+            assert_ne!(endpoint_liveness(&plain).await, Liveness::Live);
+            // no access: not an end
+            let closed = d.path().join("closed");
+            create_private_dir(&closed).unwrap();
+            let inside = closed.join("s.sock");
+            let _kept = bind(&inside).unwrap();
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+            let seen = endpoint_liveness(&inside).await;
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(seen, Liveness::Live, "access denied");
+        });
     }
 
     #[test]

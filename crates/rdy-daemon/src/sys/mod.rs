@@ -10,6 +10,11 @@
 //! `rdy_store::pio`, so engine code can use them too; this seam re-exports them under the same
 //! names. `make_private_path` stays here.
 //! - process lifecycle: a new session on spawn, exit codes, liveness, `SIGTERM` and `setsid`;
+//! - what a stop's wait knows of an old daemon ([`Liveness`], `process_liveness`,
+//!   `endpoint_liveness`). The contract for every platform: only a proved end is `Gone`. Access
+//!   denied and an answering endpoint are `Live`, anything else unclear is `Ambiguous`, and a
+//!   caller waits on both. A named pipe is no filesystem object, so its probe connects, never
+//!   looks for a name;
 //! - stop signals: `SIGINT` and `SIGTERM` in a tokio runtime;
 //! - the startup environment: the diagram crate's variables, removed before anything else runs;
 //! - the site socket's option before its bind (D-FPKPS, `configure_site_socket`): `SO_REUSEADDR`
@@ -25,6 +30,17 @@ pub use unix::*;
 
 #[cfg(not(unix))]
 compile_error!("rdy_daemon::sys has no implementation for this platform yet (FW-XP1 Phase 4)");
+
+/// What is known of an old daemon's process or endpoint while a stop waits for it to end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Liveness {
+    /// It has ended: proved, not assumed.
+    Gone,
+    /// It is there: it answered, or the system refused this user access to it.
+    Live,
+    /// The system's answer proves neither. A wait counts this as still live.
+    Ambiguous,
+}
 
 /// The variables the pinned diagram crate reads at run time. Each one changes its drawing.
 const MMDFLUX_ENVIRONMENT: [&str; 6] = [

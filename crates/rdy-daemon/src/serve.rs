@@ -19,6 +19,7 @@ use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, Sess
 use rdy_engine::{classify, human_actor_for_env};
 use rdy_mcp::server::DaemonBuildWarning;
 use rdy_model::Role;
+use rdy_store::start_lock::{ClaimOutcome, HandoffToken, StartClaim, StartGuard};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -40,11 +41,64 @@ pub const WARM_SCOPES: &[Scope] = &[Scope::Canon];
 pub const LOCKED_RETRY: Duration = Duration::from_secs(2);
 /// The interval of those retries.
 const LOCKED_RETRY_EVERY: Duration = Duration::from_millis(25);
+/// The pause between two tries at a start's claim or lock.
+const START_RETRY_EVERY: Duration = Duration::from_millis(2);
+
+/// A point of a daemon's start where a test hook runs ([`with_start_hook_for_tests`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartPoint {
+    /// A launched daemon has its token and has not claimed its start.
+    BeforeClaim,
+    /// It has claimed its start and has not taken `start.lock`.
+    Claimed,
+    /// It owns the start and has not revalidated anything or opened the store.
+    Guarded,
+    /// The store is open, with the start still held.
+    Opened,
+}
+
+type StartHook = Box<dyn FnMut(StartPoint) -> io::Result<()>>;
+
+thread_local! {
+    /// This thread's start hook ([`with_start_hook_for_tests`]).
+    static START_HOOK: std::cell::RefCell<Option<StartHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: runs `f` with `hook` called at each [`StartPoint`] of a start on this thread. An
+/// error fails the start there. No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn with_start_hook_for_tests<T>(
+    hook: impl FnMut(StartPoint) -> io::Result<()> + 'static,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            START_HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    START_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    let _off = Off;
+    f()
+}
+
+/// Calls this thread's start hook, if any, at `point`.
+fn start_point(point: StartPoint) -> Result<(), ServeError> {
+    let Some(mut hook) = START_HOOK.with(|h| h.borrow_mut().take()) else {
+        return Ok(());
+    };
+    let r = hook(point);
+    START_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    r.map_err(ServeError::Runtime)
+}
 
 pub struct ServeOptions {
     pub project: PathBuf,
     pub version: String,
-    /// Run in a session of its own (`setsid`), for a daemon spawned by a client.
+    /// Run in a session of its own (`setsid`), for a daemon spawned by a client. It reads its
+    /// start's token from its stdin (`spawn::serve_command`).
     pub detach: bool,
     /// `None` never idles out (a foreground `rdy serve`).
     pub idle_timeout: Option<Duration>,
@@ -157,9 +211,16 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         crate::spawn::detach().map_err(ServeError::Runtime)?;
     }
     let root = RunDir::of_project(&opts.project).root();
-    // (2)
+    // (2) the start first, then the store: start.lock before the store lock
+    let start = match take_start(&opts) {
+        Ok(s) => s,
+        Err(err) => {
+            say(&root, &err.to_string());
+            return Err(err);
+        }
+    };
     log("opening store");
-    let rdy = match open_store(&opts.project) {
+    let rdy = match open_store(&opts.project, start.as_ref()) {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             let err = ServeError::AlreadyRunning(store_dir(&opts.project));
@@ -172,6 +233,7 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
             return Err(err);
         }
     };
+    start_point(StartPoint::Opened)?;
     // (3)
     let shared = Shared::new(rdy);
     shared.set_daemon_identity(&opts.version, crate::BUILD);
@@ -240,6 +302,8 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         }
         None => (None, None),
     };
+    // the daemon owns the project now: a client that connects finds its socket and waits there
+    drop(start);
     let thread = {
         let shared = Arc::clone(&shared);
         let readiness = readiness.clone();
@@ -271,16 +335,111 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
     })
 }
 
+/// The start of this process, held: what lets it open the store and bind its socket. A foreground
+/// start takes its own guard. A daemon a client launched (`detach`) reads its token and claims the
+/// start its client recorded for it; with no token (a stdin at its end) it is a start of its own
+/// like any other. A directory that is no project gets no guard: the open refuses it in its own
+/// words, with nothing made in it.
+fn take_start(opts: &ServeOptions) -> Result<Option<StartGuard>, ServeError> {
+    if rdy_engine::config_levels::require_project(&opts.project).is_err() {
+        return Ok(None);
+    }
+    let run = RunDir::of_project(&opts.project);
+    run.ensure().map_err(ServeError::Bind)?;
+    if !opts.detach {
+        return own_start(&opts.project, &run, Instant::now() + LOCKED_RETRY).map(Some);
+    }
+    let until = Instant::now() + rdy_engine::serve_config(&opts.project).start_timeout;
+    match crate::spawn::inherited_token(until) {
+        Some(token) => claim_start(&opts.project, &run, &token, until).map(Some),
+        None => own_start(&opts.project, &run, until).map(Some),
+    }
+}
+
+/// `start.lock` could not be taken: the file's or the system's own reason.
+fn lock_refused(run: &RunDir, e: io::Error) -> ServeError {
+    ServeError::Runtime(io::Error::new(
+        e.kind(),
+        format!("could not lock {}: {e}", run.start_lock().display()),
+    ))
+}
+
+/// Takes `start.lock` with its reservation checked, retrying until `until`. Another owner at that
+/// point is `AlreadyRunning`: it starts a daemon, or changes the store under this one.
+fn own_start(project: &Path, run: &RunDir, until: Instant) -> Result<StartGuard, ServeError> {
+    loop {
+        match StartGuard::try_take(run.rdy_dir()) {
+            Ok(Some(start)) => return Ok(start),
+            Ok(None) if Instant::now() >= until => {
+                return Err(ServeError::AlreadyRunning(store_dir(project)));
+            }
+            Ok(None) => std::thread::sleep(LOCKED_RETRY_EVERY),
+            Err(e) => return Err(lock_refused(run, e)),
+        }
+    }
+}
+
+/// Takes over the start its client recorded for this process: claims it, takes `start.lock` once
+/// the client lets go, and revalidates what may have moved while no one held the lock: the project
+/// (the claim binds its identity), the endpoint and the upgrade plan. A start that is no longer
+/// this process's, or a daemon that answers now, is a concurrent winner: `AlreadyRunning`, with
+/// the store unopened.
+fn claim_start(
+    project: &Path,
+    run: &RunDir,
+    token: &HandoffToken,
+    until: Instant,
+) -> Result<StartGuard, ServeError> {
+    let lost = || ServeError::AlreadyRunning(store_dir(project));
+    start_point(StartPoint::BeforeClaim)?;
+    let mut claim = loop {
+        match StartClaim::try_claim(run.rdy_dir(), token, std::process::id()) {
+            Ok(ClaimOutcome::Claimed(c)) => break c,
+            Ok(ClaimOutcome::NotOurs) => {
+                log("this start is no longer this daemon's: its client gave up, or another won");
+                return Err(lost());
+            }
+            Ok(ClaimOutcome::Busy) if Instant::now() >= until => return Err(lost()),
+            Ok(ClaimOutcome::Busy) => std::thread::sleep(START_RETRY_EVERY),
+            Err(e) => return Err(lock_refused(run, e)),
+        }
+    };
+    start_point(StartPoint::Claimed)?;
+    let start = loop {
+        match claim.try_into_guard() {
+            Ok(Ok(start)) => break start,
+            Ok(Err(_)) if Instant::now() >= until => return Err(lost()),
+            Ok(Err(c)) => {
+                claim = c;
+                std::thread::sleep(START_RETRY_EVERY);
+            }
+            Err(e) => return Err(lock_refused(run, e)),
+        }
+    };
+    start_point(StartPoint::Guarded)?;
+    if crate::client::live_daemon(project).is_some() {
+        log("another daemon serves this project: this one does not open the store");
+        return Err(lost());
+    }
+    crate::maintenance::revalidate_plan(project, &start).map_err(ServeError::Open)?;
+    Ok(start)
+}
+
 /// `Rdy::open`, retried while the store is `E_LOCKED` for up to [`LOCKED_RETRY`]: a predecessor
 /// daemon removes its socket before it drains and closes its store (and its process keeps the
 /// index open until it exits), so a successor spawned the moment the socket is gone, by a
 /// version replace or after `rdy serve --stop`, finds the store still held for a few tens of ms.
 /// A holder that keeps it (a `--no-daemon` command, a live daemon) is still `E_LOCKED` after the
-/// bound.
-fn open_store(project: &Path) -> Result<Rdy, RdyError> {
+/// bound. `start` is the start lock this process holds; `None` only for what is no project, which
+/// the open refuses.
+fn open_store(project: &Path, start: Option<&StartGuard>) -> Result<Rdy, RdyError> {
     let deadline = Instant::now() + LOCKED_RETRY;
     loop {
-        match Rdy::open(project) {
+        let opened = match start {
+            Some(start) => Rdy::open_under_start(project, start),
+            None => Rdy::open(project),
+        };
+        match opened {
             Err(e)
                 if (e.code == E_LOCKED || e.code == E_HELD_BY_READER)
                     && Instant::now() < deadline =>
