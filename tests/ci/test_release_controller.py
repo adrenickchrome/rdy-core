@@ -15,6 +15,7 @@ import pickle
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_release_eligibility as base  # noqa: E402
@@ -2969,6 +2970,711 @@ def rig_reserve(ctrl, rig):
         with ctrl.reserve(**dict(rig.adapter_args(), **changes)):
             raise AssertionError('reserve yielded')
     return enter
+
+
+class Repairs(Base):
+    """The signer repairs. Each case keeps every other fact valid, so only the named fact refuses."""
+
+    MOVED = 'authority unavailable: the evidence policy moved beyond a revocation in this epoch'
+    HIGH = {'number': 2, 'state': 'open', 'tool': 'CodeQL', 'security_severity': 'high'}
+    BUDGET = 'signing outcome unknown: the signing budget has passed'
+
+    @staticmethod
+    def advance(rig):
+        """A new protected commit on main that carries every file forward."""
+        old = rig.head()
+        new = format(0xb000 + len(rig.w.commits), '040x')
+        rig.w.commits[new] = (old,)
+        for (path, commit), body in list(rig.w.files.items()):
+            if commit == old:
+                rig.w.files[(path, new)] = body
+        rig.w.refs['heads/main'] = ('commit', new)
+        return new
+
+    def land(self, rig, change):
+        """A protected commit on main whose evidence policy has `change` applied. P keeps its own."""
+        commit = self.advance(rig)
+        change(rig.w.ep)
+        rig.w.publish_policy(commit)
+        return commit
+
+    def reserved(self, *baseline):
+        """A reservation, with `baseline` changes in the epoch's policy at P and at main."""
+        rig = Rig()
+        for change in baseline:
+            change(rig.w.ep)
+        rig.w.publish_policy(P)
+        rig.w.publish_policy(HEAD)
+        rig.install()
+        rig.reserve_version()
+        return rig
+
+    @staticmethod
+    def authority(rig):
+        release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+        return CONTROLLER.check_authority(rig.git, rig.enrollment, release, lambda holder: False)
+
+    @staticmethod
+    def channel(**changes):
+        return lambda ep: ep['approval_channel'].update(changes)
+
+    # -- A: the evidence policy inside one epoch ------------------------------------------------
+
+    def test_rsig12_a_added_coordinator_refuses_in_the_same_epoch(self):
+        # A coordinator added on main only, with the admission record unchanged.
+        rig = self.reserved()
+        prior = copy.deepcopy(rig.admission())
+        kept = rig.w.files[('release-keys/policy.json', P)]
+        rig.w.ep['coordinators'].append({'actor_id': 812345, 'app_id': None, 'installation_id': None})
+        rig.w.publish_policy(HEAD)
+        self.refused(self.MOVED, rig.controller().admit)
+        self.assertEqual(rig.admission(), prior)
+        self.assertEqual(rig.w.files[('release-keys/policy.json', P)], kept)
+        self.assertEqual((rig.kms.calls, rig.providers), ([], []))
+        # The promotion path reads the same rule before anything else.
+        self.refused(self.MOVED, CONTROLLER.check_promotion, rig.git, rig.enrollment, rig.request(), DISPATCH_RUN, 1, b'{}')
+
+    def test_rsig12_a_every_other_policy_change_refuses(self):
+        def coordinator_gone(ep):
+            ep['coordinators'].pop(0)
+
+        def coordinator_changed(ep):
+            ep['coordinators'][1]['app_id'] = 99
+
+        def archive(ep):
+            ep['approval_channel']['archive']['table'] = 'rdy-other-table'
+
+        def workflow(ep):
+            ep['evidence_workflow']['sha'] = base.OTHER
+        cases = [('coordinator removed', coordinator_gone), ('coordinator changed', coordinator_changed),
+                 ('archive', archive), ('evidence workflow', workflow)]
+        for key, value in (('founder_user_id', 99), ('workflow_id', 99), ('workflow_path', '.github/workflows/other.yml'),
+                           ('implementation_sha', base.OTHER), ('workflow_file_sha256', digest(99)),
+                           ('required_job_name', 'other'), ('environment_id', 99), ('environment_name', 'other')):
+            cases.append((key, self.channel(**{key: value})))
+        for label, change in cases:
+            rig = self.reserved()
+            release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+            change(rig.w.ep)
+            rig.w.publish_policy(HEAD)
+            with self.subTest(label):
+                self.refused(self.MOVED, CONTROLLER.check_authority, rig.git, rig.enrollment, release, lambda h: False)
+        # Re-enabling, losing a revocation and reordering need a new epoch.
+        one, two = digest(61), digest(62)
+        for label, start, change in (
+                ('re-enabled', self.channel(enabled=False), self.channel(enabled=True)),
+                ('revocation lost', self.channel(revoked_receipts=[one, two]), self.channel(revoked_receipts=[two])),
+                ('revocations emptied', self.channel(revoked_receipts=[one]), self.channel(revoked_receipts=[])),
+                ('swap', self.channel(revoked_receipts=[one]), self.channel(revoked_receipts=[two])),
+                ('reorder', self.channel(revoked_receipts=[one, two]), self.channel(revoked_receipts=[two, one]))):
+            rig = self.reserved(start)
+            change(rig.w.ep)
+            rig.w.publish_policy(HEAD)
+            with self.subTest(label):
+                self.refused(self.MOVED, self.authority, rig)
+        # Any other change of the policy file itself keeps its text.
+        for label, key, value in (('trust', 'records_sha256', digest(99)), ('role', 'role_arn', base.ROLE_ARN + '-other'),
+                                  ('signer', 'signer_workflow_sha', base.OTHER)):
+            rig = self.reserved()
+            release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+            rig.w.policy[key] = value
+            rig.w.publish_policy(HEAD)
+            with self.subTest(label):
+                self.refused('authority unavailable: the admission policy digest is not the protected policy',
+                             CONTROLLER.check_authority, rig.git, rig.enrollment, release, lambda h: False)
+
+    def test_rsig12_a_authority_reducing_changes_pass(self):
+        one, two = digest(61), digest(62)
+        for label, changes in (('identical', ()),
+                               ('disabled', (self.channel(enabled=False),)),
+                               ('revocation added', (self.channel(revoked_receipts=[one]),)),
+                               ('one by one', (self.channel(revoked_receipts=[one]),
+                                               self.channel(revoked_receipts=[one, two]),
+                                               self.channel(enabled=False)))):
+            rig = self.reserved()
+            for change in changes:
+                self.land(rig, change)
+            with self.subTest(label):
+                snapshot, _ = self.authority(rig)
+                self.assertEqual(snapshot.commit, rig.head())
+                rig.controller().admit()
+        # A list that gains an entry may name the older entries anywhere.
+        rig = self.reserved(self.channel(revoked_receipts=[one]))
+        self.land(rig, self.channel(revoked_receipts=[two, one]))
+        self.authority(rig)
+        # A change that only reduces authority takes effect at once: the next unfinished act refuses on it.
+        rig = Rig(base.first_machine_world())
+        receipt = rig.w.add_card('release_1')
+        rig.seed_archive(receipt)
+        rig.install()
+        rig.reserve_version()
+        self.land(rig, self.channel(revoked_receipts=[receipt]))
+        self.refused('not authorized: the release_1 card receipt is revoked', rig.controller().admit)
+
+    def test_rsig12_a_a_lost_revocation_refuses_against_history(self):
+        # Each end equals the epoch's first baseline. Only the protected history shows what happened.
+        one = digest(61)
+        for label, first, second in (('receipt', self.channel(revoked_receipts=[one]), self.channel(revoked_receipts=[])),
+                                     ('channel', self.channel(enabled=False), self.channel(enabled=True))):
+            rig = self.reserved()
+            self.land(rig, first)
+            self.land(rig, second)
+            with self.subTest(label):
+                self.assertEqual(rig.w.files[('release-keys/evidence-policy.json', rig.head())],
+                                 rig.w.files[('release-keys/evidence-policy.json', P)])
+                self.refused(self.MOVED, self.authority, rig)
+        # The same holds for a later step, after an accepted reduction.
+        rig = self.reserved()
+        self.land(rig, self.channel(revoked_receipts=[one]))
+        self.authority(rig)
+        self.land(rig, self.channel(revoked_receipts=[]))
+        self.refused(self.MOVED, self.authority, rig)
+
+    def test_rsig12_a_incomplete_evidence_refuses(self):
+        one = digest(61)
+        unavailable = 'authority unavailable: the protected policy is unavailable'
+
+        def prepared():
+            rig = self.reserved()
+            release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+            middle = self.land(rig, self.channel(revoked_receipts=[one]))
+            self.land(rig, self.channel(revoked_receipts=[one, digest(62)]))
+            return rig, release, middle
+
+        def check(rig, release):
+            return CONTROLLER.check_authority(rig.git, rig.enrollment, release, lambda h: False)
+
+        ep_path, policy_path = 'release-keys/evidence-policy.json', 'release-keys/policy.json'
+        # Both referenced bodies and their hashes.
+        for label, commit, path, data, message in (
+                ('baseline body gone', P, ep_path, None, unavailable),
+                ('head body gone', 'head', ep_path, None, unavailable),
+                ('baseline body malformed', P, ep_path, canon({'x': 1}), unavailable),
+                ('middle body gone', 'middle', ep_path, None, unavailable),
+                ('middle policy gone', 'middle', policy_path, None, unavailable)):
+            rig, release, middle = prepared()
+            key = (path, {'head': rig.head(), 'middle': middle}.get(commit, commit))
+            if data is None:
+                del rig.w.files[key]
+            else:
+                rig.w.files[key] = data
+            with self.subTest(label):
+                self.refused(message, check, rig, release)
+        # A well-formed body that is not the one its policy names.
+        for label, commit in (('baseline', P), ('head', None)):
+            rig, release, _ = prepared()
+            other = copy.deepcopy(rig.w.ep)
+            other['coordinators'].append({'actor_id': 812345, 'app_id': None, 'installation_id': None})
+            rig.w.files[(ep_path, commit or rig.head())] = canon(other)
+            with self.subTest('forged ' + label):
+                self.refused('authority unavailable: the evidence policy does not match its policy digest',
+                             check, rig, release)
+        # A failed history read, and a policy commit off main's first-parent chain.
+        rig, release, _ = prepared()
+        rig.w.errors['commit'] = GITHUB.Uncertain('commit', 'outcome unknown (HTTP 502)')
+        self.refused(unavailable, check, rig, release)
+        rig = self.reserved()
+        release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+        side = self.advance(rig)
+        rig.w.commits[side] = (base.BASE, P)
+        self.refused("authority unavailable: the policy commit is not on main's first-parent chain", check, rig, release)
+
+    def test_rsig12_a_history_read_is_bounded(self):
+        rig = self.reserved()
+        release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+        limit = CONTROLLER.POLICY_HISTORY_MAX
+        self.assertEqual(limit, ELIGIBILITY.FIRST_PARENT_MAX)
+        last = rig.head()
+        for n in range(limit + 1):
+            rig.w.commits[format(0xf00000 + n, '040x')] = (last,)
+            last = format(0xf00000 + n, '040x')
+        rig.w.put(last, ADMISSION, canon(rig.record()))
+        rig.w.refs['heads/main'] = ('commit', last)
+        for name in ('release-keys/policy.json', 'release-keys/evidence-policy.json'):
+            rig.w.files[(name, last)] = rig.w.files[(name, P)]
+        rig.w.calls = []
+        self.refused('input limit exceeded: the protected policy history is longer than ' + str(limit) + ' commits',
+                     CONTROLLER.check_authority, rig.git, rig.enrollment, release, lambda h: False)
+        self.assertLessEqual(len([c for c in rig.w.calls if c[0] == 'commit']), limit + 1)
+        # One invocation reads each older commit of the history once. Main's head is read every time.
+        rig = self.reserved()
+        release = ELIGIBILITY.preliminary_recovery(rig.request(), rig.git)
+        self.land(rig, self.channel(enabled=False))
+        self.land(rig, self.channel(revoked_receipts=[digest(61)]))
+        ctrl = rig.controller()
+        ctrl.admit()
+        rig.w.calls = []
+        ctrl._authority(ctrl.preliminary)
+        self.assertEqual([c for c in rig.w.calls if c[0] == 'commit'], [])
+        older = rig.w.commits[rig.head()][0]
+        self.assertEqual([c for c in rig.w.calls if c[0] == 'contents' and c[2] == older], [])
+        self.assertIn(('contents', 'release-keys/evidence-policy.json', rig.head()), rig.w.calls)
+        # A later head adds one step to what was read.
+        newest = self.land(rig, self.channel(revoked_receipts=[digest(61), digest(62)]))
+        rig.w.calls = []
+        ctrl._authority(ctrl.preliminary)
+        self.assertEqual([c[1] for c in rig.w.calls if c[0] == 'commit'], [newest])
+
+    # -- B: the present status of the signer ----------------------------------------------------
+
+    def observed(self, rig=None):
+        rig = rig or Rig()
+        rig.reserve_version()
+        rig.publish()
+        self.advance(rig)
+        rig.w.calls = []
+        return rig, rig.controller(artifact=None, run_evidence=FakeEvidence())
+
+    def test_rsig12_b_later_revocation_on_main_reads_true(self):
+        rig, fresh = self.observed()
+        original, calls = rig.git.release_trust, []
+
+        def trust(version, commit, signing):
+            calls.append((commit, signing))
+            if signing and commit == rig.head():
+                raise ControllerError('release trust: the key for ' + version + ' is revoked for new signing')
+            return original(version, commit, signing)
+        rig.git.release_trust = trust
+        answer = fresh.recover(rig.tuple_bytes())
+        self.assertIsInstance(answer, CONTROLLER.AlreadyPublishedMatching)
+        self.assertIs(answer.signer_revoked, True)
+        self.assertEqual(answer.signer_status, 'revoked')
+        self.assertEqual([c for c in calls if c[1]], [(rig.head(), True)], 'present status reads current main')
+        self.assertIn((P, False), calls, 'the original verification keeps the historical policy')
+        self.assertEqual((rig.kms.calls, rig.providers, rig.table.writes, rig.git.created), ([], [], [], ['tag object', 'ref']))
+
+    def test_rsig12_b_false_needs_a_valid_current_check(self):
+        rig, fresh = self.observed()
+        answer = fresh.recover(rig.tuple_bytes())
+        self.assertIs(answer.signer_revoked, False)
+        self.assertEqual(answer.signer_status, 'not revoked')
+        self.assertIn(('release_trust', rig.w.v, rig.head(), True), rig.w.calls)
+        self.assertNotIn(('release_trust', rig.w.v, P, True), rig.w.calls)
+        # A current answer about another signer, version or commit proves nothing.
+        for label, changes in (('fingerprint', {'fingerprint': 'SHA256:' + 'B' * 43}),
+                               ('transition', {'transition_sha256': digest(77)}),
+                               ('version', {'version': '0.44.0'}),
+                               ('commit', {'policy_commit': P}),
+                               ('extra', {'extra': 1})):
+            rig, fresh = self.observed()
+            original = rig.git.release_trust
+
+            def trust(version, commit, signing, original=original, changes=changes):
+                answer = original(version, commit, signing)
+                return dict(answer, **changes) if signing else answer
+            rig.git.release_trust = trust
+            with self.subTest(label):
+                found = fresh.recover(rig.tuple_bytes())
+                self.assertIsInstance(found, CONTROLLER.AlreadyPublishedMatching)
+                self.assertIsNone(found.signer_revoked)
+                self.assertEqual(found.signer_status, 'unknown')
+
+    def test_rsig12_b_unavailable_status_is_unknown(self):
+        def trust_down(rig):
+            original = rig.git.release_trust
+
+            def trust(version, commit, signing):
+                if signing:
+                    raise ControllerError('current trust unavailable')
+                return original(version, commit, signing)
+            rig.git.release_trust = trust
+
+        def gone(path):
+            def change(rig):
+                self.advance(rig)
+                del rig.w.files[(path, rig.head())]
+            return change
+
+        def forged_revocation(rig):
+            # A revocation answer from a snapshot whose records are not the ones its policy names.
+            self.advance(rig)
+            rig.w.files[('release-keys/records.txt', rig.head())] = b'other records\n'
+            original = rig.git.release_trust
+
+            def trust(version, commit, signing):
+                if signing:
+                    raise ControllerError('release trust: the key for ' + version + ' is revoked for new signing')
+                return original(version, commit, signing)
+            rig.git.release_trust = trust
+
+        def moved(rig):
+            original = rig.git.release_trust
+
+            def trust(version, commit, signing):
+                answer = original(version, commit, signing)
+                if signing:
+                    self.advance(rig)
+                return answer
+            rig.git.release_trust = trust
+
+        def main_ref_gone(rig):
+            original = rig.git.release_trust
+
+            def trust(version, commit, signing):
+                answer = original(version, commit, signing)
+                if signing:
+                    rig.w.refs.pop('heads/main')
+                return answer
+            rig.git.release_trust = trust
+        for label, change in (('trust', trust_down), ('policy', gone('release-keys/policy.json')),
+                              ('evidence', gone('release-keys/evidence-policy.json')),
+                              ('records', gone('release-keys/records.txt')),
+                              ('forged revocation', forged_revocation), ('moved', moved), ('ref', main_ref_gone)):
+            rig, fresh = self.observed()
+            verify = rig.published.verify_published
+
+            # Main changes after the historical proof is read, so only the present status can see it.
+            def proved(reconciliation, verify=verify, change=change, rig=rig):
+                answer = verify(reconciliation)
+                change(rig)
+                return answer
+            rig.published.verify_published = proved
+            with self.subTest(label):
+                answer = fresh.recover(rig.tuple_bytes())
+                self.assertIsInstance(answer, CONTROLLER.AlreadyPublishedMatching)
+                self.assertIsNone(answer.signer_revoked)
+                self.assertEqual(answer.signer_status, 'unknown')
+                self.assertEqual((rig.kms.calls, rig.providers, rig.table.writes), ([], [], []))
+        # Unknown gives no authority: the terminal observation stays terminal and nothing follows it.
+        self.refused('reservation conflict: v' + rig.w.v + ' is published; this observation is terminal',
+                     fresh.issue_credentials, rig.provider())
+        # Missing historical proof gives no matching result, whatever the present status reads.
+        rig, fresh = self.observed()
+        rig.published.answer = None
+        trust_down(rig)
+        with self.assertRaises(Refused) as caught:
+            fresh.recover(rig.tuple_bytes())
+        self.assertEqual(caught.exception.code, CONTROLLER.INCOMPLETE)
+        self.assertIsNone(fresh.terminal)
+
+    # -- C: the alert read before a new Sign ----------------------------------------------------
+
+    def test_rsig12_c_alert_after_reservation_refuses_a_new_sign(self):
+        rig = Rig()
+        ctrl = rig.ready()
+        evidence = rig.w.members[(base.EVID_ART, 'release-record.json')]
+        reservation = rig.w.refs['tags/reserve/v' + rig.w.v]
+        rig.w.alerts.append(dict(self.HIGH))
+        rig.w.calls = []
+        with ctrl.reserve(**rig.adapter_args()):
+            self.refused('eligibility incomplete: 1 open high or critical code scanning alert', ctrl.before_sign,
+                         rig.payload_digest())
+        self.assertIn(('open_code_scanning_alerts', 'refs/heads/main'), rig.w.calls)
+        self.assertEqual(rig.row()['phase'], 'RESERVED', 'the refused invocation wrote no attempt')
+        self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+        self.assertIs(ctrl._attempted, False, 'its stop receipt can say before_attempt')
+        self.assertEqual(rig.kms.signs, 0)
+        self.assertEqual(ctrl.refusals()[-1]['stage'], 'attempt')
+        # E and the reservation stay the originals, and the same version goes on once the alert closes.
+        self.assertEqual(rig.w.members[(base.EVID_ART, 'release-record.json')], evidence)
+        self.assertEqual(rig.w.refs['tags/reserve/v' + rig.w.v], reservation)
+        rig.w.alerts.pop()
+        with ctrl.reserve(**rig.adapter_args()):
+            self.assertIsInstance(ctrl.before_sign(rig.payload_digest()), CONTROLLER.Permit)
+
+    def test_rsig12_c_unavailable_alert_api_refuses_a_new_sign(self):
+        for error, message in (
+                (GITHUB.Unauthorized('code scanning alerts', 'not authorized (HTTP 403)', 403),
+                 'eligibility incomplete: GitHub code scanning alerts: not authorized (HTTP 403)'),
+                (GITHUB.Uncertain('code scanning alerts', 'outcome unknown (HTTP 502)'),
+                 'eligibility incomplete: GitHub code scanning alerts: outcome unknown (HTTP 502)')):
+            rig = Rig()
+            ctrl = rig.ready()
+            rig.w.errors['open_code_scanning_alerts'] = error
+            with self.subTest(message), ctrl.reserve(**rig.adapter_args()):
+                self.refused(message, ctrl.before_sign, rig.payload_digest())
+            self.assertEqual(rig.row()['phase'], 'RESERVED')
+            self.assertEqual(rig.kms.signs, 0)
+
+    def test_rsig12_c_no_new_sign_means_no_alert_read(self):
+        unavailable = GITHUB.Unauthorized('code scanning alerts', 'not authorized (HTTP 403)', 403)
+        # A terminal historical observation.
+        rig, fresh = self.observed()
+        rig.w.alerts.append(dict(self.HIGH))
+        rig.w.errors['open_code_scanning_alerts'] = unavailable
+        self.assertIsInstance(fresh.recover(rig.tuple_bytes()), CONTROLLER.AlreadyPublishedMatching)
+        self.assertNotIn('open_code_scanning_alerts', [c[0] for c in rig.w.calls])
+        # A retained signature sends no Sign, so it needs no new alert read.
+        rig = Rig()
+        rig.sign(rig.ready())
+        rig.w.alerts.append(dict(self.HIGH))
+        rig.w.errors['open_code_scanning_alerts'] = unavailable
+        rig.w.calls = []
+        again = rig.session(rig.rerun())
+        self.assertEqual(again.recover(rig.tuple_bytes()).signature, SIGNATURE)
+        self.assertNotIn('open_code_scanning_alerts', [c[0] for c in rig.w.calls])
+        self.assertEqual(rig.kms.signs, 1)
+
+    # -- D: the one signing deadline ------------------------------------------------------------
+
+    def dispatched(self):
+        rig = Rig()
+        ctrl = rig.ready()
+        with ctrl.reserve(**rig.adapter_args()):
+            ctrl.before_sign(rig.payload_digest()).consume()
+        rig.kms.calls.append('sign')
+        return rig, ctrl
+
+    @staticmethod
+    def slow(rig, ctrl, write, read):
+        """Journal calls that take `write` and `read` seconds, each inside the timeout it was given."""
+        calls, do_write, do_read = [], ctrl.journal.write, ctrl.journal.snapshot
+
+        def slow_write(actions, timeout):
+            calls.append(('write', timeout))
+            rig.clock.value += write
+            return do_write(actions, timeout)
+
+        def slow_read(keys, timeout):
+            calls.append(('read', timeout))
+            rig.clock.value += read
+            return do_read(keys, timeout)
+        ctrl.journal.write, ctrl.journal.snapshot = slow_write, slow_read
+        return calls
+
+    def assert_recoverable(self, rig):
+        """Durable output stays. A later attempt returns those bytes, with no second Sign."""
+        self.assertEqual(rig.table.items[(rig.tuple_pk(), 'SIGNATURE')], SIGNATURE)
+        self.assertEqual(rig.row()['phase'], 'COMPLETE')
+        fresh = rig.controller(artifact=None, run_evidence=FakeEvidence())
+        fresh.attach_journal(rig.table)
+        self.assertEqual(fresh.recover(rig.tuple_bytes()).signature, SIGNATURE)
+        self.assertEqual(rig.kms.signs, 1)
+
+    def test_rsig12_d_success_past_the_deadline_is_unknown(self):
+        # KMS 60, write 59, readback 59, each within the timeout it was given.
+        rig, ctrl = self.dispatched()
+        start = rig.clock.value
+        rig.clock.value += 60
+        calls = self.slow(rig, ctrl, 59, 59)
+        self.refused(self.BUDGET, ctrl.retain_signature, SIGNATURE)
+        self.assertEqual(rig.clock.value - start, 178)
+        self.assertEqual(calls, [('write', 60), ('read', 1)], 'each operation has what is left, not what was left')
+        self.assertIsNone(ctrl._retained)
+        self.refused('authority unavailable: nothing was retained in this invocation', ctrl.authorization)
+        self.assert_recoverable(rig)
+
+    def test_rsig12_d_deadline_is_read_before_each_step(self):
+        # The write used all of it: no readback is sent, and the write stays.
+        rig, ctrl = self.dispatched()
+        rig.clock.value += 60
+        calls = self.slow(rig, ctrl, 60, 0)
+        self.refused(self.BUDGET, ctrl.retain_signature, SIGNATURE)
+        self.assertEqual(calls, [('write', 60)])
+        self.assert_recoverable(rig)
+        # The readback ends exactly at the deadline: not a success.
+        rig, ctrl = self.dispatched()
+        calls = self.slow(rig, ctrl, 60, 60)
+        self.refused(self.BUDGET, ctrl.retain_signature, SIGNATURE)
+        self.assertEqual(calls, [('write', 120), ('read', 60)])
+        self.assert_recoverable(rig)
+        # The verification used all of it: nothing is written, nothing is deleted, nothing is sent again.
+        rig, ctrl = self.dispatched()
+        calls = self.slow(rig, ctrl, 0, 0)
+        verify = rig.verifier.verify
+
+        def slow_verify(*args):
+            rig.clock.value += CONTROLLER.SIGN_BUDGET
+            return verify(*args)
+        rig.verifier.verify = slow_verify
+        self.refused(self.BUDGET, ctrl.retain_signature, SIGNATURE)
+        self.assertEqual(calls, [])
+        self.assertNotIn((rig.tuple_pk(), 'SIGNATURE'), rig.table.items)
+        self.assertEqual(rig.row()['phase'], 'ATTEMPTED')
+        self.assertEqual(rig.kms.signs, 1)
+        # A retained signature keeps its success inside the budget.
+        rig, ctrl = self.dispatched()
+        rig.clock.value += 60
+        calls = self.slow(rig, ctrl, 20, 20)
+        self.assertEqual(ctrl.retain_signature(SIGNATURE), SIGNATURE)
+        self.assertEqual(calls, [('write', 60), ('read', 40)])
+
+    # -- E: the VERSION initializer -------------------------------------------------------------
+
+    def test_rsig12_e_initializer_is_create_only_with_exact_readback(self):
+        rig = Rig()
+        rig.reserve_version()
+        seen = []
+        write = rig.table.transact_write_items
+
+        def capture(actions, token, timeout):
+            seen.extend(actions)
+            return write(actions, token, timeout)
+        rig.table.transact_write_items = capture
+        rig.session()
+        puts = [a['Put'] for a in seen if 'Put' in a and a['Put']['Item']['pk']['S'].startswith('VERSION#')]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0]['ConditionExpression'], 'attribute_not_exists(pk) AND attribute_not_exists(sk)')
+        self.assertEqual((puts[0]['Item']['pk']['S'], puts[0]['Item']['sk']['S']), rig.version_key())
+        self.assertEqual(rig.row()['phase'], 'RESERVED')
+        self.assertEqual(rig.row()['revision'], '1')
+        # A different row found by the readback is never accepted, and never replaced.
+        rig = Rig()
+        rig.reserve_version()
+        ctrl = rig.controller()
+        ctrl.admit()
+        ctrl.issue_credentials(rig.provider())
+        other = canon({'schema': 1, 'other': True})
+        rig.table.hook = lambda: rig.table.items.__setitem__(rig.version_key(), other)
+        rig.table.fail_next('VERSION#', 'unsent')
+        self.refused('signing outcome unknown: the reservation row has no exact acknowledgement', ctrl.open_session, rig.table)
+        self.assertEqual(rig.table.items[rig.version_key()], other)
+        # A lost answer with nothing stored is no row.
+        rig = Rig()
+        rig.reserve_version()
+        rig.table.fail_next('VERSION#', 'unsent')
+        self.refused('signing outcome unknown: the reservation row has no exact acknowledgement', rig.session)
+        self.assertNotIn(rig.version_key(), rig.table.items)
+
+    def test_rsig12_e_old_reservation_gets_no_clean_row(self):
+        none = 'signing outcome unknown: the reservation has no journal row and this holder did not freshly create it'
+        rig = Rig()
+        data = rig.reserve_version()
+        self.assertIs(json.loads(data)['created'], True)
+        # A later attempt's reserve job only finds the reservation. Its receipt says so.
+        winner = canon(dict(json.loads(data), created=False, run_attempt='2'))
+        rig.upload_receipt(winner, attempt=2)
+        rig.add_job(DISPATCH_RUN, 2, 9095)
+        job = rig.w.find_job(9095)
+        job.update(name=CONTROLLER.RESERVE_JOB, status='completed', conclusion='success')
+        self.refused(none, rig.session, rig.rerun(2, reserve_artifact_id=RECEIPT_ART))
+        self.assertNotIn(rig.version_key(), rig.table.items)
+        # Attempt 1's fresh receipt is not this attempt's history.
+        rig = Rig()
+        data = rig.reserve_version()
+        rig.add_job(DISPATCH_RUN, 2, 9095)
+        job = rig.w.find_job(9095)
+        job.update(name=CONTROLLER.RESERVE_JOB, status='completed', conclusion='success')
+        self.refused('signing outcome unknown: the reserve receipt is unavailable', rig.session,
+                     rig.rerun(2, reserve_artifact_id=RECEIPT_ART))
+        self.assertNotIn(rig.version_key(), rig.table.items)
+        # A fresh receipt that a failed or other reserve job would have to vouch for.
+        rig = Rig()
+        rig.reserve_version()
+        rig.w.find_job(RESERVE_JOB_ID).update(conclusion='failure')
+        self.refused('signing outcome unknown: the reserve job is not the one completed reserve job', rig.session)
+        self.assertNotIn(rig.version_key(), rig.table.items)
+
+    def test_rsig12_e_a_row_is_never_a_sign_permit(self):
+        # A clean row, an unproven prior invocation: no attempt and no Sign.
+        rig = Rig()
+        ctrl = rig.ready()
+        self.assertEqual(rig.row()['phase'], 'RESERVED')
+        rig.history.answer = CONTROLLER.History(complete=True, invocations=(
+            CONTROLLER.Invocation(DISPATCH_RUN, 9, 9999, 'unknown'),))
+        with ctrl.reserve(**rig.adapter_args()):
+            self.refused('signing outcome unknown: a prior invocation is not proven to have stopped before its attempt',
+                         ctrl.before_sign, rig.payload_digest())
+        self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+        self.assertEqual(rig.kms.signs, 0)
+        # A row alone leaves no permit: a process with the row and no grant has no attempt.
+        rig = Rig()
+        rig.ready()
+        later = rig.controller(artifact=None, run_evidence=FakeEvidence())
+        self.refused('authority unavailable: a KMS request needs the reservation context', later.before_sign,
+                     rig.payload_digest())
+        self.refused('authority unavailable: the signing session is not open',
+                     lambda: later.reserve(**rig.adapter_args()).__enter__())
+        self.assertEqual(rig.kms.signs, 0)
+
+    # -- F: reserved H, key and fingerprint against current admission and running Enrollment ----
+
+    @staticmethod
+    def f_cases():
+        other_key = base.NEW_KEY_ARN
+        return (('admission H', lambda r, c: r.install(mirror=False, signer_workflow_sha=base.OTHER),
+                 'authority unavailable: the admission record names another signer'),
+                ('admission key', lambda r, c: r.install(mirror=False, key_arn=other_key),
+                 'authority unavailable: the admission record names another key'),
+                ('admission fingerprint', lambda r, c: r.install(mirror=False, fingerprint='SHA256:' + 'B' * 43),
+                 'authority unavailable: the admission record names another key'),
+                ('running H', lambda r, c: setattr(c, 'enrollment', dataclasses.replace(
+                    c.enrollment, signer_workflow_sha=base.OTHER)),
+                 'authority unavailable: the admission record names another signer'))
+
+    def assert_unrewritten(self, rig, reservation, row):
+        self.assertEqual(rig.w.refs['tags/reserve/v' + rig.w.v], reservation)
+        self.assertEqual(rig.w.tags[reservation[1]]['message_bytes'], rig.tuple_bytes())
+        self.assertEqual(rig.table.items.get(rig.version_key()), row)
+        self.assertEqual(rig.kms.signs, 0)
+
+    def test_rsig12_f_every_unfinished_signing_path_refuses_a_mismatch(self):
+        held = []
+
+        def admit(rig):
+            return rig.controller(), lambda c: c.admit()
+
+        def issue(rig):
+            ctrl = rig.controller()
+            ctrl.admit()
+            return ctrl, lambda c: c.issue_credentials(rig.provider())
+
+        def session(rig):
+            ctrl = rig.controller()
+            ctrl.admit()
+            ctrl.issue_credentials(rig.provider())
+            return ctrl, lambda c: c.open_session(rig.table)
+
+        def enter(rig):
+            ctrl = rig.session()
+            return ctrl, lambda c: c.reserve(**rig.adapter_args()).__enter__()
+
+        def attempt(rig):
+            ctrl = rig.session()
+            held.append(ctrl.reserve(**rig.adapter_args()))
+            held[-1].__enter__()
+            return ctrl, lambda c: c.before_sign(rig.payload_digest())
+        for stage, prepare in (('admit', admit), ('issue', issue), ('session', session), ('reserve', enter),
+                               ('attempt', attempt)):
+            for label, change, message in self.f_cases():
+                rig = Rig()
+                rig.reserve_version()
+                ctrl, step = prepare(rig)
+                reservation = rig.w.refs['tags/reserve/v' + rig.w.v]
+                row = rig.table.items.get(rig.version_key())
+                change(rig, ctrl)
+                with self.subTest(stage=stage, change=label):
+                    self.refused(message, step, ctrl)
+                    self.assert_unrewritten(rig, reservation, row)
+
+    def test_rsig12_f_recovery_and_promotion_refuse_a_mismatch(self):
+        for label, change, message in self.f_cases():
+            # Recovery of retained bytes.
+            rig = Rig()
+            rig.sign(rig.ready())
+            kept = rig.table.items[(rig.tuple_pk(), 'SIGNATURE')]
+            fresh = rig.controller(artifact=None, run_evidence=FakeEvidence())
+            fresh.attach_journal(rig.table)
+            reservation = rig.w.refs['tags/reserve/v' + rig.w.v]
+            change(rig, fresh)
+            with self.subTest('recover', change=label):
+                self.refused(message, fresh.recover, rig.tuple_bytes())
+                self.assertEqual(rig.w.refs['tags/reserve/v' + rig.w.v], reservation)
+                self.assertEqual(rig.table.items[(rig.tuple_pk(), 'SIGNATURE')], kept)
+            # Promotion.
+            rig = Rig()
+            rig.reserve_version()
+            holder = mock.Mock(enrollment=rig.enrollment)
+            change(rig, holder)
+            with self.subTest('promotion', change=label):
+                self.refused(message, CONTROLLER.check_promotion, rig.git, holder.enrollment, rig.request(), DISPATCH_RUN, 1,
+                             b'{}')
+
+    def test_rsig12_f_candidate_input_cannot_select_h(self):
+        rig = Rig()
+        value = {f.name: getattr(rig.request(), f.name) for f in dataclasses.fields(ELIGIBILITY.Request)}
+        value['approvals'] = []
+        with self.assertRaises(ELIGIBILITY.Refused) as caught:
+            ELIGIBILITY.parse_request(dict(value, signer_workflow_sha=base.OTHER))
+        self.assertIn("unknown field 'signer_workflow_sha'", str(caught.exception))
+        # E's candidate names no signer. T's H comes from the protected policy, and a tuple that names another
+        # H is not the tuple of the authenticated facts.
+        self.assertNotIn('signer_workflow_sha', rig.w.candidate)
+        forged = rig.w.expected_tuple()
+        forged['signer']['signer_workflow_sha'] = base.OTHER
+        rig.w.reserve(forged)
+        self.refused('evidence mismatch: the reservation tuple is not the tuple of the authenticated facts',
+                     rig.controller().admit)
 
 
 if __name__ == '__main__':

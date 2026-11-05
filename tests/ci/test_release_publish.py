@@ -6,6 +6,7 @@ v0.35.0 vector already in the repository: it proves the verifier's command shape
 else. A "signature" anywhere else is opaque bytes that only the fake verifier knows.
 """
 import copy
+import dataclasses
 import io
 import json
 from pathlib import Path
@@ -2221,6 +2222,101 @@ class Cli(Base):
         for command in re.findall(r'trusted/scripts/release/publish\.py (\S+)', WORKFLOW):
             done = self.run_cli(command, '--help')
             self.assertEqual(done.returncode, 0, command)
+
+
+class SignerRepairs(unittest.TestCase):
+    """The signer repairs, at the reserve and eligibility jobs."""
+
+    def stage(self):
+        stage = Stage()
+        self.addCleanup(stage.close)
+        return stage
+
+    def test_rsig12_c_reserve_keeps_an_inherited_observation(self):
+        # The eligibility job's success is an earlier observation of this exact run. It is no alert list.
+        stage = self.stage()
+        stage.w.find_job(ctl.RESERVE_JOB_ID).update(status='in_progress', conclusion=None)
+        stage.git.open_code_scanning_alerts = mock.Mock(side_effect=AssertionError('the reserve job has no alert read'))
+        inherited = PUBLISH.inherited_alerts(stage.request(), stage.git, DISPATCH_RUN, 1)
+        self.assertIsInstance(inherited, ELIGIBILITY.InheritedAlerts)
+        self.assertEqual((inherited.request, inherited.commit, inherited.workflow_path, inherited.run_id,
+                          inherited.run_attempt, inherited.job_id),
+                         (stage.request(), S, '.github/workflows/release.yml', DISPATCH_RUN, 1, ELIGIBILITY_JOB_ID))
+        self.assertFalse(hasattr(inherited, 'alerts'), 'it claims no alert list')
+        self.assertFalse(hasattr(PUBLISH, '_AlertsRead'), 'no adapter answers an empty list from job metadata')
+        preliminary = ELIGIBILITY.qualify_new(stage.request(), stage.git, inherited)
+        self.assertIs(preliminary.alert_observation, inherited)
+        stage.git.open_code_scanning_alerts.assert_not_called()
+        self.assertIs(json.loads(PUBLISH.reserve_tuple(stage.request(), stage.git, DISPATCH_RUN, 1, H))['created'], True)
+        stage.git.open_code_scanning_alerts.assert_not_called()
+        # The eligibility job itself made a real read, and says so. Recovery holds no observation.
+        stage = self.stage()
+        self.assertEqual(ELIGIBILITY.qualify_new(stage.request(), stage.git).alert_observation,
+                         ELIGIBILITY.FreshAlertRead('refs/heads/main'))
+        self.assertIn(('open_code_scanning_alerts', 'refs/heads/main'), stage.w.calls)
+        stage.rig.reserve_version()
+        self.assertIsNone(ELIGIBILITY.preliminary_recovery(stage.request(), stage.git).alert_observation)
+
+    def test_rsig12_c_inherited_observation_is_bound_to_this_run(self):
+        stage = self.stage()
+        good = PUBLISH.inherited_alerts(stage.request(), stage.git, DISPATCH_RUN, 1)
+        other_candidate = stage.w.request(candidate_run_attempt=2)
+        other_evidence = stage.w.request(evidence_sha256=digest(99))
+        message = 'eligibility incomplete: the inherited alert observation is not this exact release run'
+        for label, changes in (('commit', {'commit': base.OTHER}), ('workflow', {'workflow_path': '.github/workflows/x.yml'}),
+                               ('run', {'run_id': 1}), ('attempt', {'run_attempt': 2}),
+                               ('candidate', {'request': other_candidate}), ('evidence', {'request': other_evidence})):
+            with self.subTest(label), self.assertRaises(ELIGIBILITY.Refused) as caught:
+                ELIGIBILITY.qualify_new(stage.request(), stage.git, dataclasses.replace(good, **changes))
+            self.assertEqual(str(caught.exception), message)
+        with self.assertRaises(ELIGIBILITY.Refused) as caught:
+            ELIGIBILITY.qualify_new(stage.request(), stage.git, [])
+        self.assertEqual(str(caught.exception), message)
+        self.assertEqual(stage.git.created, [])
+
+    def test_rsig12_c_a_job_name_alone_is_not_the_observation(self):
+        did_not_pass = 'eligibility incomplete: the Release eligibility job did not pass'
+        cases = (('failed', lambda s: s.w.find_job(ELIGIBILITY_JOB_ID).update(conclusion='failure'), did_not_pass),
+                 ('running', lambda s: s.w.find_job(ELIGIBILITY_JOB_ID).update(status='in_progress', conclusion=None),
+                  did_not_pass),
+                 ('wrong head', lambda s: s.w.find_job(ELIGIBILITY_JOB_ID).update(head_sha=base.OTHER), did_not_pass),
+                 ('missing', lambda s: s.w.find_job(ELIGIBILITY_JOB_ID).update(name='Another job'), did_not_pass),
+                 ('duplicate', lambda s: s.w.job(DISPATCH_RUN, 1, 9499, PUBLISH.ELIGIBILITY_JOB), did_not_pass),
+                 ('unreadable', lambda s: s.w.errors.update(attempt_jobs=GITHUB.Uncertain('jobs', 'outcome unknown')),
+                  'eligibility incomplete: the eligibility job is unavailable'))
+        for label, change, message in cases:
+            stage = self.stage()
+            change(stage)
+            with self.subTest(label), self.assertRaises(Refused) as caught:
+                PUBLISH.inherited_alerts(stage.request(), stage.git, DISPATCH_RUN, 1)
+            self.assertEqual(str(caught.exception), message)
+        # Another attempt's success is not this attempt's, and a request for another attempt names another run.
+        stage = self.stage()
+        with self.assertRaises(Refused) as caught:
+            PUBLISH.inherited_alerts(stage.request(2), stage.git, DISPATCH_RUN, 1)
+        self.assertEqual(str(caught.exception), 'eligibility incomplete: the request is not this run attempt')
+        stage.rig.add_job(DISPATCH_RUN, 2, 9498)
+        with self.assertRaises(Refused) as caught:
+            PUBLISH.inherited_alerts(stage.request(2), stage.git, DISPATCH_RUN, 2)
+        self.assertEqual(str(caught.exception), did_not_pass)
+
+    def test_rsig12_b_unknown_status_is_shown_as_unknown(self):
+        for revoked, shown in ((None, 'unknown'), (True, 'revoked'), (False, 'not revoked')):
+            terminal = CONTROLLER.AlreadyPublishedMatching(
+                version='0.43.0', commit=S, tuple_sha256=digest(1), release_id=1, manifest_sha256=digest(2),
+                signature_sha256=digest(3), channel_enabled=True, revoked_receipts=(), signer_revoked=revoked)
+            result = PUBLISH.Reconciled('already_published_matching', None, terminal)
+            out = io.StringIO()
+            with mock.patch.object(PUBLISH, '_start', return_value=(None, None, None)), \
+                    mock.patch.object(PUBLISH, 'request_from_inputs'), mock.patch.object(PUBLISH, '_anonymous'), \
+                    mock.patch.object(PUBLISH, '_request_value', return_value={}), \
+                    mock.patch.object(PUBLISH, '_output'), mock.patch.object(PUBLISH, 'reconcile', return_value=result), \
+                    mock.patch.object(PUBLISH.sys, 'stdout', out):
+                PUBLISH.cmd_eligibility(mock.Mock(), {})
+            with self.subTest(shown):
+                value = json.loads(out.getvalue())
+                self.assertEqual(value['signer_status'], shown)
+                self.assertNotIn('signer_revoked', value)
 
 
 if __name__ == '__main__':

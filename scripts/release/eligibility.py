@@ -17,6 +17,13 @@ returns a `Qualified`. Only a `Qualified` can reach KMS.
 E, T, the caller and the publication state, and it reports the current approval status without acting
 on it. Its `Reconciliation` result is not eligibility for anything.
 
+A new reservation records how it knows the code scanning alerts in `alert_observation`. `FreshAlertRead` is
+a real read by this job. `InheritedAlerts` is the reserve job's earlier observation: it has no alert
+permission, so it names the exact successful eligibility job of this request and run attempt, and it holds
+no alert list. Neither one permits a Sign. `check_alerts` is the live read that the signer repeats before a
+new Sign. E stays the original. A retained signature or a published observation sends no Sign and needs no
+new read.
+
 None of them writes GitHub state, acquires a grant or contacts KMS. `facts` is a read-only source of
 GitHub-owned facts (the read methods of `github.GitHub`, with its fact types and refusals) and a few
 more reads:
@@ -283,6 +290,7 @@ class ReleaseFacts(object):
     install: tuple
     reservation: object
     publication: object
+    alert_observation: object
 
     def tuple_value(self):
         """T as a new dict (the record itself stays immutable)."""
@@ -309,6 +317,25 @@ class Reconciliation(ReleaseFacts):
 class Reservation(object):
     ref_sha256: str
     tag_object: str
+
+
+@dataclass(frozen=True)
+class FreshAlertRead(object):
+    """This job read the open code scanning alerts on `ref`, and none blocked."""
+    ref: str
+
+
+@dataclass(frozen=True)
+class InheritedAlerts(object):
+    """The eligibility job's earlier alert read, as the reserve job knows it from that job's success. It is not
+    a fresh read and holds no alert list. It supports only the reservation bookkeeping of this exact request,
+    candidate, workflow, run and attempt."""
+    request: Request
+    commit: str
+    workflow_path: str
+    run_id: int
+    run_attempt: int
+    job_id: int
 
 
 @dataclass(frozen=True)
@@ -615,9 +642,8 @@ def _source(facts, record, version, commit):
         raise Refused(MISMATCH, 'the release guide does not match its digest')
 
 
-def _security(facts, record, commit, live):
-    """The six required jobs ran on S in their own workflows; with `live`, no open high or critical
-    code scanning alert."""
+def _security(facts, record, commit):
+    """The six required jobs ran on S in their own workflows."""
     for entry in record.value['security']['jobs']:
         name, value = entry['name'], entry['job']
         run = facts.call('run_attempt', value['run_id'], value['run_attempt'])
@@ -628,12 +654,30 @@ def _security(facts, record, commit, live):
         job = _job(facts, value, commit, name + ' job')
         if job.name != name:
             raise Refused(MISMATCH, 'the ' + name + ' job is another job')
-    if live:
-        alerts = facts.call('open_code_scanning_alerts', ALERT_REF)
-        blocking = [a for a in alerts if a.state == 'open' and a.security_severity in BLOCKING_SEVERITIES]
-        if blocking:
-            raise Refused(INCOMPLETE, str(len(blocking)) + ' open high or critical code scanning alert'
-                          + ('' if len(blocking) == 1 else 's'))
+
+
+def _read_alerts(facts):
+    """No open high or critical code scanning alert on main, read now."""
+    alerts = facts.call('open_code_scanning_alerts', ALERT_REF)
+    blocking = [a for a in alerts if a.state == 'open' and a.security_severity in BLOCKING_SEVERITIES]
+    if blocking:
+        raise Refused(INCOMPLETE, str(len(blocking)) + ' open high or critical code scanning alert'
+                      + ('' if len(blocking) == 1 else 's'))
+    return FreshAlertRead(ALERT_REF)
+
+
+def check_alerts(facts):
+    """The live alert read before a new Sign. A blocking alert or a failed read refuses."""
+    return _read_alerts(_Facts(facts))
+
+
+def _check_inherited(inherited, request, commit, evidence_policy):
+    """An inherited observation stands only for this exact request and its release run attempt."""
+    if not (isinstance(inherited, InheritedAlerts) and inherited.request == request and inherited.commit == commit
+            and inherited.workflow_path == evidence_policy.value['release_workflow_path']
+            and (inherited.run_id, inherited.run_attempt) == (request.dispatch_run_id, request.dispatch_run_attempt)):
+        raise Refused(INCOMPLETE, 'the inherited alert observation is not this exact release run')
+    return inherited
 
 
 def _trust(facts, version, policy, policy_commit, signing):
@@ -936,7 +980,7 @@ def _cards(facts, main, request, record, evidence_policy, current_evidence_polic
 # Qualification
 # ---------------------------------------------------------------------------------------------
 
-def _authenticate(facts, request, mode, releases, reserved, resolve_cards):
+def _authenticate(facts, request, mode, releases, reserved, resolve_cards, inherited=None):
     """Every release fact except the cards, which the stage's `resolve_cards` decides. Returns the
     fields of a `ReleaseFacts` and the current evidence policy."""
     version = request.version
@@ -983,7 +1027,13 @@ def _authenticate(facts, request, mode, releases, reserved, resolve_cards):
     if len(named_runs | runs) > RUNS_MAX:
         raise Refused(LIMIT, 'the release names more than ' + str(RUNS_MAX) + ' run attempts')
     _source(facts, record, version, commit)
-    _security(facts, record, commit, live=reserved is None)
+    _security(facts, record, commit)
+    if reserved is not None:
+        observation = None
+    elif inherited is not None:
+        observation = _check_inherited(inherited, request, commit, current_evidence_policy)
+    else:
+        observation = _read_alerts(facts)
 
     trust = _trust(facts, version, policy, policy_commit, reserved is None)
     expected = {'repository': REPOSITORY, 'version': version, 'commit': commit,
@@ -1024,13 +1074,14 @@ def _authenticate(facts, request, mode, releases, reserved, resolve_cards):
         candidate_run=(candidate_run.run_id, candidate_run.run_attempt, candidate_artifact.artifact_id,
                        candidate_artifact.digest),
         fast_gate_ignored=tuple((t['target'], t['fast_gate']['ignored']) for t in e['targets']),
-        install=install, reservation=None, publication=None), current_evidence_policy
+        install=install, reservation=None, publication=None, alert_observation=observation), current_evidence_policy
 
 
-def qualify_new(request, facts):
+def qualify_new(request, facts, inherited=None):
     """The pre-credential check of a new reservation of the requested version: V must be free and newer
     than every published version. It reads no archive and writes nothing. Its `Preliminary` permits
-    only the reservation bookkeeping."""
+    only the reservation bookkeeping. `inherited` replaces the alert read for a job with no alert
+    permission."""
     request = check_request(request)
     facts = _Facts(facts)
     version = request.version
@@ -1043,7 +1094,7 @@ def qualify_new(request, facts):
         raise Refused(CONFLICT, 'a release of v' + version + ' already exists')
     if any(m >= _minor(version) for m in _published(releases)):
         raise Refused(CONFLICT, 'v' + version + ' is not newer than every published version')
-    fields, _ = _authenticate(facts, request, 'new', releases, None, _preliminary_cards('new'))
+    fields, _ = _authenticate(facts, request, 'new', releases, None, _preliminary_cards('new'), inherited)
     return Preliminary(**fields)
 
 
@@ -1063,6 +1114,14 @@ def authenticate_published(request, facts):
     """Historical reconciliation: the same reservation, E, T, caller and publication, with no current
     approval decision. The approval status is reported, never acted on. Writes nothing."""
     return _recover(request, facts, Reconciliation, _historical_cards)
+
+
+def protected_main(facts):
+    """Main's commit now, with its policy, evidence policy and trust records authenticated together."""
+    facts = _Facts(facts)
+    head = _Main(facts).head
+    _policy_at(facts, head)
+    return head
 
 
 def check_source(facts, evidence_bytes, version, commit):

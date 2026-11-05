@@ -209,7 +209,7 @@ class FakeFacts(object):
 
     def release_trust(self, version, policy_commit, signing):
         self._hit('release_trust', version, policy_commit, signing)
-        return dict(self.w.trust, version=version)
+        return dict(self.w.trust, version=version, policy_commit=policy_commit)
 
 
 class World(object):

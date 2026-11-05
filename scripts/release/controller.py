@@ -11,7 +11,8 @@ The order of one signing run:
    It resolves every founder card, archives a first use, initializes the reservation row from the fresh
    reserve-job receipt and finalizes the grant from the server's actual STS expiry.
 4. `reserve` is the adapter's context manager. KMS calls happen inside it. `before_public_key` guards
-   GetPublicKey. `before_sign` acknowledges the durable attempt and returns one volatile `Permit`.
+   GetPublicKey. `before_sign` reads the live alerts, acknowledges the durable attempt and returns one
+   volatile `Permit`.
 5. `retain_signature` persists the real bytes and the completion receipt. `recover` can return only
    verified retained bytes, a terminal published observation, or a refusal.
 
@@ -72,6 +73,8 @@ ADMISSION_HEAD = 'heads/main'
 ADMISSION_REF = 'refs/' + ADMISSION_HEAD
 ADMISSION_PATH = 'release-keys/admission.json'
 POLICY_PATH = elig.POLICY_PATH
+EVIDENCE_POLICY_PATH = elig.EVIDENCE_POLICY_PATH
+POLICY_HISTORY_MAX = elig.FIRST_PARENT_MAX   # commits of main read between an epoch's policy and main's head
 LANE = 'rdy-core-release-authority'
 
 # The reserve job's frozen identity. The release workflow emits these literals.
@@ -276,7 +279,9 @@ class PublishedBytes(object):
 class AlreadyPublishedMatching(object):
     """A terminal, read-only observation: this exact tuple is published. It is history, not current
     eligibility or a claim that the release remains trusted. It holds no signature bytes and leads to no
-    Sign, draft, upload, promotion, repair or notification. The current status is reported apart."""
+    Sign, draft, upload, promotion, repair or notification. The current status is reported apart:
+    `signer_revoked` is True for a verified revocation on current main, False after a valid current check of
+    this signer, and None when that is unknown. None is not clear, and it gives no authority."""
     version: str
     commit: str
     tuple_sha256: str
@@ -286,6 +291,13 @@ class AlreadyPublishedMatching(object):
     channel_enabled: bool
     revoked_receipts: tuple
     signer_revoked: object
+
+    @property
+    def signer_status(self):
+        """The present status as it is shown."""
+        if self.signer_revoked is None:
+            return 'unknown'
+        return 'revoked' if self.signer_revoked else 'not revoked'
 
 
 @dataclass(frozen=True)
@@ -522,10 +534,11 @@ def _signing_trust(facts, release, policy_commit):
     return answer
 
 
-def check_authority(facts, enrollment, release, named):
+def check_authority(facts, enrollment, release, named, history=None):
     """Current authority for this release, from protected main only. Candidate files and caller JSON
-    never reach this. `named(holder)` says whether a DRAINING record names this job. Returns the
-    snapshot and the trust result."""
+    never reach this. `named(holder)` says whether a DRAINING record names this job. `history` keeps
+    what one process already read of the immutable policy history. Returns the snapshot and the trust
+    result."""
     snapshot = read_admission(facts)
     value = snapshot.value
     if snapshot.state == 'CLOSED':
@@ -545,13 +558,11 @@ def check_authority(facts, enrollment, release, named):
     try:
         policy = facts.contents(POLICY_PATH, value['policy_commit'], ev.RECORD_MAX)
         parsed = ev.parse_policy(policy.data)
-        current_policy = ev.parse_policy(facts.contents(POLICY_PATH, snapshot.commit, ev.RECORD_MAX).data)
-    except ControllerError:
+    except (ControllerError, RecursionError):
         raise Refused(AUTHORITY, 'the protected policy is unavailable')
-    # Main may move the evidence policy (the channel and receipt revocations) with no maintenance: those
-    # take effect at once through eligibility. Any other change of the policy needs a new epoch.
-    if _sha(policy.data) != value['policy_sha256'] or _unmoved(parsed.value) != _unmoved(current_policy.value):
+    if _sha(policy.data) != value['policy_sha256']:
         raise Refused(AUTHORITY, 'the admission policy digest is not the protected policy')
+    _check_policy_history(facts, value['policy_commit'], snapshot.commit, history or PolicyHistory())
     if parsed.value['records_sha256'] != value['trust_sha256']:
         raise Refused(AUTHORITY, 'the admission trust digest is not the protected trust')
     return snapshot, _signing_trust(facts, release, value['policy_commit'])
@@ -559,6 +570,81 @@ def check_authority(facts, enrollment, release, named):
 
 def _unmoved(policy):
     return {key: value for key, value in policy.items() if key != 'evidence_policy_sha256'}
+
+
+def _evidence_fixed(evidence_policy):
+    """Every field of the evidence policy that only a new epoch may change."""
+    channel = evidence_policy['approval_channel']
+    return ({key: value for key, value in evidence_policy.items() if key != 'approval_channel'},
+            {key: value for key, value in channel.items() if key not in ('enabled', 'revoked_receipts')})
+
+
+def _only_reduces(old, new):
+    """One protected step inside an epoch: identical, or the channel goes from enabled to disabled, or
+    `revoked_receipts` gains entries and loses none. Anything else needs the closed, drained higher epoch."""
+    if _evidence_fixed(old) != _evidence_fixed(new):
+        return False
+    before, after = old['approval_channel'], new['approval_channel']
+    if after['enabled'] and not before['enabled']:
+        return False
+    was, now = before['revoked_receipts'], after['revoked_receipts']
+    return was == now or (set(was) <= set(now) and len(now) > len(was))
+
+
+def _policy_state(facts, commit, older):
+    """The policy at one protected commit and the evidence policy body it names, checked against its digest.
+    A commit that names the digest of `older` names the bytes already authenticated."""
+    try:
+        policy = ev.parse_policy(facts.contents(POLICY_PATH, commit, ev.RECORD_MAX).data).value
+        if older is not None and older[0]['evidence_policy_sha256'] == policy['evidence_policy_sha256']:
+            return policy, older[1]
+        evidence_policy = ev.parse_evidence_policy(facts.contents(EVIDENCE_POLICY_PATH, commit, ev.RECORD_MAX).data)
+    except (ControllerError, RecursionError):
+        raise Refused(AUTHORITY, 'the protected policy is unavailable')
+    if evidence_policy.sha256 != policy['evidence_policy_sha256']:
+        raise Refused(AUTHORITY, 'the evidence policy does not match its policy digest')
+    return policy, evidence_policy.value
+
+
+class PolicyHistory(object):
+    """What one process already read of main's immutable first-parent chain."""
+
+    def __init__(self):
+        self.parents = {}
+        self.states = {}
+
+
+def _check_policy_history(facts, base, head, history):
+    """Main may reduce authority with no maintenance: those changes take effect at once through eligibility.
+    Each step of main's first-parent chain from the epoch's policy commit is checked, so a revocation that was
+    added cannot disappear later in the same epoch, even when main returns to the first baseline. Any other
+    change of the policy needs a new epoch. The read is bounded, and incomplete evidence refuses. Older commits
+    are read once per process. Main's head is read every time."""
+    chain = [head]
+    try:
+        while chain[-1] != base and (base, chain[-1]) not in history.states:
+            if len(chain) > POLICY_HISTORY_MAX:
+                raise Refused(LIMIT, 'the protected policy history is longer than ' + str(POLICY_HISTORY_MAX) + ' commits')
+            if chain[-1] not in history.parents:
+                parents = facts.commit(chain[-1]).parents
+                if not parents:
+                    raise Refused(AUTHORITY, "the policy commit is not on main's first-parent chain")
+                history.parents[chain[-1]] = parents[0]
+            chain.append(history.parents[chain[-1]])
+    except Refused:
+        raise
+    except ControllerError:
+        raise Refused(AUTHORITY, 'the protected policy is unavailable')
+    older = history.states.get((base, chain[-1])) or _policy_state(facts, chain[-1], None)
+    for commit, parent in zip(reversed(chain[:-1]), reversed(chain[1:])):
+        history.states[(base, parent)] = older
+        # Main's own head always has its body read, whatever its digest says.
+        newer = _policy_state(facts, commit, None if commit == head else older)
+        if _unmoved(older[0]) != _unmoved(newer[0]):
+            raise Refused(AUTHORITY, 'the admission policy digest is not the protected policy')
+        if not _only_reduces(older[1], newer[1]):
+            raise Refused(AUTHORITY, 'the evidence policy moved beyond a revocation in this epoch')
+        older = newer
 
 
 def _stable(admission):
@@ -910,6 +996,7 @@ class Controller(object):
         self._sign_deadline = None
         self._dispatched = False
         self._retained = None
+        self._policy_history = PolicyHistory()
         self._refusals = []
 
     # -- receipts ------------------------------------------------------------------------------
@@ -935,7 +1022,7 @@ class Controller(object):
                           'job_id': str(self.holder.job_id), 'grant_id': self.grant_id}
 
     def _authority(self, release):
-        snapshot, trust = check_authority(self.facts, self.enrollment, release, self._named)
+        snapshot, trust = check_authority(self.facts, self.enrollment, release, self._named, self._policy_history)
         self.signer_line = trust['signer_line']
         return snapshot
 
@@ -1389,6 +1476,8 @@ class Controller(object):
         self._prior_history(release)
         if _final_tag_present(self.facts, release.version):
             raise Refused(CONFLICT, 'the tag v' + release.version + ' exists without its release')
+        # The live alert read, with this job's own permission. E stays the original.
+        _eligibility(elig.check_alerts, self.facts)
         attempt = _canon({'schema': 1, 'state': 'attempt_started', 'repository_id': REPOSITORY_ID,
                           'version': release.version, 'tuple_sha256': release.tuple_sha256,
                           'reservation_object': release.reservation.tag_object, 'commit': release.commit,
@@ -1433,18 +1522,25 @@ class Controller(object):
         self._dispatched = True
         return KMS_MAX
 
+    def _sign_left(self):
+        """The seconds left of the one signing deadline, read now. None left is an unknown outcome: what is
+        already durable stays, and a later attempt reconciles it with no second Sign."""
+        left = self._sign_deadline - self.clock.now()
+        if left <= 0:
+            raise Refused(UNKNOWN, 'the signing budget has passed')
+        return left
+
     @_staged('retain')
     def retain_signature(self, signature):
         """Persists the actual bytes and the completion receipt in one transaction and reads all of it
-        back. A bad signature is never retained. An unknown outcome never sends another Sign."""
+        back, inside the one signing deadline. A bad signature is never retained. An unknown outcome never
+        sends another Sign and deletes nothing."""
         self._not_terminal()
         if not self._dispatched or self._retained is not None:
             raise Refused(UNKNOWN, 'this invocation has no dispatch to retain')
         if not isinstance(signature, bytes) or len(signature) > SIGNATURE_MAX:
             raise Refused(LIMIT, 'the signature is larger than ' + str(SIGNATURE_MAX) + ' bytes')
-        now = self.clock.now()
-        if now >= self._sign_deadline:
-            raise Refused(UNKNOWN, 'the signing budget has passed')
+        self._sign_left()
         release = self.qualified
         if not self._verified(signature, release):
             raise Refused(UNKNOWN, 'the returned signature does not verify')
@@ -1461,19 +1557,20 @@ class Controller(object):
         new_row = _canon(dict(row, phase='COMPLETE', revision=str(int(row['revision']) + 1)))
         grant_key = _grant_key(self.grant_id)
         unknown = Refused(UNKNOWN, 'the retention write outcome is unknown')
-        remaining = max(1, self._sign_deadline - now)
         try:
             fresh = self.journal.write([self.journal.put(keys['signature'], signature),
                                         self.journal.put(keys['completion'], completion),
                                         self.journal.exact(keys['attempt'], self._attempt_bytes),
                                         self.journal.exact(grant_key, self.grant_bytes),
-                                        self.journal.cas(keys['row'], self._row_bytes, new_row)], remaining)
-            back = self.journal.snapshot((keys['signature'], keys['completion'], keys['attempt'], keys['row']), remaining)
+                                        self.journal.cas(keys['row'], self._row_bytes, new_row)], self._sign_left())
+            back = self.journal.snapshot((keys['signature'], keys['completion'], keys['attempt'], keys['row']),
+                                         self._sign_left())
         except JOURNAL_ERRORS:
             raise unknown
         if not fresh or (back[keys['signature']], back[keys['completion']], back[keys['attempt']],
                          back[keys['row']]) != (signature, completion, self._attempt_bytes, new_row):
             raise unknown
+        self._sign_left()
         self._retained = RetainedSignature(signature, release.version, release.tuple_sha256, attempt_sha256)
         return signature
 
@@ -1631,11 +1728,31 @@ class Controller(object):
             signer_revoked=self._signer_revoked(reconciliation))
 
     def _signer_revoked(self, release):
-        """The current status, reported apart. None means the read failed: it changes no result."""
+        """The present status, reported apart, from an authenticated snapshot of current main. The historical
+        policy stays with the original verification. True is a verified revocation, False is a valid current
+        check of the original signer and version, and None is everything else. It changes no result."""
         try:
-            self.facts.release_trust(release.version, release.policy_commit, True)
+            head = elig.protected_main(self.facts)
+        except ControllerError:
+            return None
+        answer = None
+        try:
+            answer = self.facts.release_trust(release.version, head, True)
+            cand.closed(answer, elig.TRUST_KEYS, 'the release trust result')
         except ControllerError as error:
-            return True if 'is revoked for new signing' in str(error) else None
+            if 'is revoked for new signing' not in str(error):
+                return None
+        try:
+            again = self.facts.ref(ADMISSION_HEAD)
+        except ControllerError:
+            return None
+        if (again.object_type, again.object_sha) != ('commit', head):
+            return None
+        if answer is None:
+            return True
+        if (answer['version'], answer['fingerprint'], answer['transition_sha256'], answer['policy_commit']) != (
+                release.version, release.fingerprint, release.transition_sha256, head):
+            return None
         return False
 
     def journal_phase(self):

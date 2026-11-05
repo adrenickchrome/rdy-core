@@ -601,21 +601,20 @@ def _job_passed(facts, run_id, attempt, name, commit):
     return jobs[0]
 
 
-class _AlertsRead(object):
+def inherited_alerts(request, facts, run_id, attempt):
     """The reserve job has contents:write and actions:read only. The alert read belongs to the eligibility job,
-    which ran on this commit in this exact attempt: its success stands for that read, and nothing else."""
-
-    def __init__(self, facts, run_id, attempt):
-        self._facts = facts
-        self._where = (run_id, attempt)
-
-    def __getattr__(self, name):
-        return getattr(self._facts, name)
-
-    def open_code_scanning_alerts(self, ref):
-        run_id, attempt = self._where
-        _job_passed(self._facts, run_id, attempt, ELIGIBILITY_JOB, self._facts.run_attempt(run_id, attempt).head_sha)
-        return []
+    which ran on this commit in this exact attempt. Its success is an earlier observation for the reservation
+    bookkeeping of this request, not a fresh read: the signer reads the alerts again before a new Sign."""
+    if (request.dispatch_run_id, request.dispatch_run_attempt) != (run_id, attempt):
+        raise Refused(INCOMPLETE, 'the request is not this run attempt')
+    try:
+        run = facts.run_attempt(run_id, attempt)
+        job = _job_passed(facts, run_id, attempt, ELIGIBILITY_JOB, run.head_sha)
+    except Refused:
+        raise
+    except ControllerError:
+        raise Refused(INCOMPLETE, 'the eligibility job is unavailable')
+    return elig.InheritedAlerts(request, run.head_sha, run.path, run_id, attempt, job.job_id)
 
 
 def reserve_tuple(request, facts, run_id, attempt, signer_sha):
@@ -629,7 +628,7 @@ def reserve_tuple(request, facts, run_id, attempt, signer_sha):
     try:
         facts.ref('tags/reserve/v' + request.version)
     except gh.Absent:
-        preliminary = _lifted(elig.qualify_new, request, _AlertsRead(facts, run_id, attempt))
+        preliminary = _lifted(elig.qualify_new, request, facts, inherited_alerts(request, facts, run_id, attempt))
     else:
         preliminary = _lifted(elig.preliminary_recovery, request, facts)
     _check_release_pin(preliminary, signer_sha)
@@ -1223,7 +1222,7 @@ def cmd_eligibility(args, environ):
                                  'tuple_sha256': terminal.tuple_sha256, 'release_id': terminal.release_id,
                                  'channel_enabled': terminal.channel_enabled,
                                  'revoked_receipts': list(terminal.revoked_receipts),
-                                 'signer_revoked': terminal.signer_revoked}).decode('utf-8'))
+                                 'signer_status': terminal.signer_status}).decode('utf-8'))
 
 
 def cmd_reserve(args, environ):

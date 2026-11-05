@@ -976,6 +976,59 @@ class Trusted(Base):
             SIGN.parse_enrollment(json.dumps(value), 'main')
 
 
+class SignerRepairs(Base):
+    """The signer repairs, through the whole signer."""
+
+    def test_rsig12_c_new_alert_stops_the_signer_before_its_attempt(self):
+        rig = self.rig
+        rig.reserve_version()
+        ctrl, inner = rig.controller(), Inner(rig)
+        rig.w.alerts.append({'number': 2, 'state': 'open', 'tool': 'CodeQL', 'security_severity': 'critical'})
+        text = self.refused(CONTROLLER.INCOMPLETE, rig.run, ctrl, inner)
+        self.assertEqual(text, 'eligibility incomplete: 1 open high or critical code scanning alert')
+        self.assertEqual(inner.signs, 0)
+        self.assertEqual(rig.row()['phase'], 'RESERVED')
+        self.assertNotIn((rig.tuple_pk(), 'ATTEMPT'), rig.table.items)
+        # Its stop receipt is honest, and a later attempt can go on from it once the alert closes.
+        out = Path(self.tmp, 'stop')
+        SIGN.write_stop(out, ctrl)
+        self.assertEqual(json.loads(Path(out, SIGN.STOP_FILE).read_bytes())['stopped'], 'before_attempt')
+        rig.w.alerts.pop()
+        fresh = Inner(rig)
+        self.assertEqual(rig.run(rig.later(2), fresh).result, 'signed and verified')
+        self.assertEqual(fresh.signs, 1)
+
+    def test_rsig12_c_retained_path_of_the_signer_reads_no_alert(self):
+        rig = self.rig
+        rig.reserve_version()
+        inner = Inner(rig)
+        self.assertEqual(rig.run(rig.controller(), inner).result, 'signed and verified')
+        rig.w.alerts.append({'number': 2, 'state': 'open', 'tool': 'CodeQL', 'security_severity': 'critical'})
+        rig.w.calls = []
+        fresh = Inner(rig)
+        self.assertEqual(rig.run(rig.later(2, 'attempt_or_later'), fresh).result, 'already verified')
+        self.assertEqual(fresh.signs, 0)
+        self.assertNotIn('open_code_scanning_alerts', [c[0] for c in rig.w.calls])
+
+    def test_rsig12_d_late_retention_sends_no_second_sign(self):
+        rig = self.rig
+        rig.reserve_version()
+        inner = Inner(rig)
+        write = rig.table.transact_write_items
+
+        def slow(actions, token, timeout):
+            rig.clock.value += CONTROLLER.SIGN_BUDGET if timeout == CONTROLLER.SIGN_BUDGET else 0
+            return write(actions, token, timeout)
+        rig.table.transact_write_items = slow
+        text = self.refused(CONTROLLER.UNKNOWN, rig.run, rig.controller(), inner)
+        self.assertEqual(text, 'signing outcome unknown: the signing budget has passed')
+        self.assertEqual(inner.signs, 1)
+        rig.table.transact_write_items = write
+        fresh = Inner(rig)
+        self.assertEqual(rig.run(rig.later(2, 'attempt_or_later'), fresh).result, 'already verified')
+        self.assertEqual(fresh.signs, 0)
+
+
 # ---------------------------------------------------------------------------------------------
 # AWS CLI distribution
 # ---------------------------------------------------------------------------------------------
