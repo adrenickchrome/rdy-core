@@ -210,8 +210,8 @@ mod tests {
             [
                 "rdy_store::pio has no Windows implementation yet of permission-mode changes \
                  anchored to an open directory (set_mode_at) (FW-XP1 Phase 4)",
-                "rdy_store::pio has no Windows implementation yet of renames anchored to an \
-                 open directory or of a child process that starts in one (FW-XP1 Phase 4)",
+                "rdy_store::pio has no Windows implementation yet of a child process that \
+                 starts in an open directory (start_in_dir) (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of directory flushes \
                  (FlushFileBuffers) or write-through renames (MoveFileExW) (FW-XP1 Phase 4)",
             ]
@@ -322,11 +322,12 @@ mod tests {
             );
         }
         // Opens, entry kinds and listings in an open directory are built (Task 5a), and so are
-        // creates and removals (Task 5b): pio/windows_dir.rs opens and makes each entry relative
-        // to the directory handle, never following a reparse point, makes it with the private
-        // descriptor, removes the object it opened through that handle, and lists the directory
-        // through a new open of its handle; it holds no stub body or placeholder before its
-        // tests.
+        // creates and removals (Task 5b) and renames (Task 5c): pio/windows_dir.rs opens and makes
+        // each entry relative to the directory handle, never following a reparse point, makes it
+        // with the private descriptor, removes the object it opened through that handle, lists
+        // the directory through a new open of its handle, and renames by path while a pin that
+        // does not share delete holds the directory, checking its path before and after; it
+        // holds no stub body or placeholder before its tests.
         let dir = source("src/pio/windows_dir.rs");
         // its test hook is under #[cfg(test)] too: the code ends where its test module starts
         let dir = code_lines(dir.split("#[cfg(test)]\nmod tests {").next().unwrap());
@@ -354,6 +355,10 @@ mod tests {
             "SecurityDescriptor: sd",
             "FileDispositionInfoEx",
             "FILE_DISPOSITION_FLAG_POSIX_SEMANTICS",
+            "MoveFileExW",
+            "MOVEFILE_REPLACE_EXISTING",
+            "FILE_SHARE_READ | FILE_SHARE_WRITE;",
+            "PinnedDir::of(dir)",
         ] {
             assert!(dir.contains(call), "pio/windows_dir.rs calls {call}");
         }

@@ -1,7 +1,7 @@
-//! Calls in an open directory (`rdy_store::pio`): opens, entry kinds, listings, creates and
-//! removals anchored to a directory handle (FW-XP1 Phase 4). The pins run on every platform: a
-//! directory moved or replaced after its handle was opened, or an entry swapped for a link, never
-//! redirects a call, and every refusal fails closed. What a create makes is private from the
+//! Calls in an open directory (`rdy_store::pio`): opens, entry kinds, listings, creates, removals,
+//! renames and child processes anchored to a directory handle (FW-XP1 Phase 4). The pins run on
+//! every platform: a directory moved or replaced after its handle was opened, or an entry swapped
+//! for a link, never redirects a call, and every refusal fails closed. What a create makes is private from the
 //! moment it exists. Names and native paths are bounded before anything is made of them.
 
 use rdy_store::fileid::FileId;
@@ -855,4 +855,438 @@ fn wx5b_private_create_has_no_public_window() {
         &pio::open_read_at(&dir, OsStr::new("f")).unwrap(),
         "f at the end",
     );
+}
+
+/// The contents of the file `name` in the open directory `dir`.
+fn read_at(dir: &fs::File, name: &str) -> String {
+    let f = pio::open_read_at(dir, OsStr::new(name)).unwrap();
+    let mut text = String::new();
+    io::Read::read_to_string(&mut &f, &mut text).unwrap();
+    text
+}
+
+#[test]
+fn wx5c_rename_pins_both_parents() {
+    let root = tempfile::tempdir().unwrap();
+    let p = root.path().join("p");
+    fs::create_dir(&p).unwrap();
+    fs::write(p.join("a"), b"mine").unwrap();
+    fs::write(p.join("t"), b"old target").unwrap();
+    fs::create_dir(p.join("s")).unwrap();
+    fs::write(p.join("s").join("inner"), b"inner").unwrap();
+    let evil = tempfile::tempdir().unwrap();
+    for name in ["a", "b", "t"] {
+        fs::write(evil.path().join(name), b"theirs").unwrap();
+    }
+    fs::create_dir(evil.path().join("sub")).unwrap();
+    fs::write(evil.path().join("sub").join("x"), b"theirs").unwrap();
+    let evil_ids: Vec<FileId> = ["a", "b", "t", "sub"]
+        .iter()
+        .map(|n| id(&evil.path().join(n)))
+        .collect();
+    let intact = |what: &str| {
+        for (n, want) in ["a", "b", "t", "sub"].iter().zip(&evil_ids) {
+            assert_eq!(id(&evil.path().join(n)), *want, "{what}: {n}");
+        }
+        for n in ["a", "b", "t"] {
+            assert_eq!(fs::read(evil.path().join(n)).unwrap(), b"theirs", "{what}");
+        }
+        assert_eq!(
+            listed(&pio::open_dir(&evil.path().join("sub")).unwrap()),
+            ["x"]
+        );
+    };
+    let dir = pio::open_dir(&p).unwrap();
+    let own = id_of(&dir);
+    let a_id = id(&p.join("a"));
+    let s_id = id(&p.join("s"));
+
+    // the directory's path names another directory: both names of a rename are entries of the
+    // directory the handle opened, never of the one at its path now
+    let real = root.path().join("p-moved");
+    fs::rename(&p, &real).unwrap();
+    fs::create_dir(&p).unwrap();
+    fs::write(p.join("a"), b"decoy").unwrap();
+    fs::write(p.join("t"), b"decoy").unwrap();
+    pio::rename_at(&dir, OsStr::new("a"), OsStr::new("b")).unwrap();
+    assert_eq!(listed(&dir), ["b", "s", "t"]);
+    assert_eq!(read_at(&dir, "b"), "mine");
+    assert_eq!(
+        id(&real.join("b")),
+        a_id,
+        "a rename moves the entry, never a copy"
+    );
+    assert_eq!(listed(&pio::open_dir(&p).unwrap()), ["a", "t"]);
+    assert_eq!(fs::read(p.join("a")).unwrap(), b"decoy");
+
+    // the path is a link to another directory: a rename that replaces an entry replaces the
+    // entry of the directory the handle opened
+    fs::remove_dir_all(&p).unwrap();
+    link_dir(evil.path(), &p);
+    pio::rename_at(&dir, OsStr::new("b"), OsStr::new("t")).unwrap();
+    assert_eq!(listed(&dir), ["s", "t"]);
+    assert_eq!(read_at(&dir, "t"), "mine");
+    assert_eq!(id(&real.join("t")), a_id);
+    intact("the path linked");
+    // a directory is renamed with what it holds
+    pio::rename_at(&dir, OsStr::new("s"), OsStr::new("s2")).unwrap();
+    let s2 = pio::open_dir_at(&dir, OsStr::new("s2")).unwrap();
+    assert_eq!(id_of(&s2), s_id);
+    assert_eq!(listed(&s2), ["inner"]);
+    drop(s2);
+    // a case-only rename keeps the entry
+    pio::rename_at(&dir, OsStr::new("s2"), OsStr::new("S2")).unwrap();
+    assert_eq!(listed(&dir), ["S2", "t"]);
+    assert_eq!(id(&real.join("S2")), s_id);
+    pio::rename_at(&dir, OsStr::new("S2"), OsStr::new("s")).unwrap();
+
+    // a link at the old name is renamed as itself, never followed
+    link_file(&evil.path().join("a"), &real.join("lf"));
+    link_dir(&evil.path().join("sub"), &real.join("ld"));
+    pio::rename_at(&dir, OsStr::new("lf"), OsStr::new("lf2")).unwrap();
+    pio::rename_at(&dir, OsStr::new("ld"), OsStr::new("ld2")).unwrap();
+    for name in ["lf2", "ld2"] {
+        assert_eq!(
+            pio::entry_kind_at(&dir, OsStr::new(name)).unwrap(),
+            EntryKind::Link,
+            "{name}"
+        );
+    }
+    intact("links renamed");
+    // a file link at the new name is replaced itself, never written through
+    pio::rename_at(&dir, OsStr::new("t"), OsStr::new("lf2")).unwrap();
+    assert_eq!(
+        pio::entry_kind_at(&dir, OsStr::new("lf2")).unwrap(),
+        EntryKind::File
+    );
+    assert_eq!(read_at(&dir, "lf2"), "mine");
+    intact("a file link replaced");
+    // a directory link at the new name: Unix replaces the link itself; Windows refuses to
+    // replace a directory entry; neither reaches the directory it names
+    fs::write(real.join("c"), b"c").unwrap();
+    let replaced = pio::rename_at(&dir, OsStr::new("c"), OsStr::new("ld2"));
+    #[cfg(unix)]
+    {
+        replaced.unwrap();
+        assert_eq!(
+            pio::entry_kind_at(&dir, OsStr::new("ld2")).unwrap(),
+            EntryKind::File
+        );
+    }
+    #[cfg(windows)]
+    {
+        let e = replaced.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        assert_eq!(
+            pio::entry_kind_at(&dir, OsStr::new("ld2")).unwrap(),
+            EntryKind::Link
+        );
+        unlink(&real.join("ld2"));
+        pio::rename_at(&dir, OsStr::new("c"), OsStr::new("ld2")).unwrap();
+    }
+    intact("a directory link at the new name");
+
+    // a missing entry is NotFound, and nothing is made at either name
+    let e = pio::rename_at(&dir, OsStr::new("gone"), OsStr::new("new")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    // both names are checked as for the opens, before anything is made of them
+    let long = "n".repeat(40_000);
+    for bad in ["", ".", "..", "a/b", "a\0b", long.as_str()] {
+        for e in [
+            pio::rename_at(&dir, OsStr::new(bad), OsStr::new("new")).unwrap_err(),
+            pio::rename_at(&dir, OsStr::new("lf2"), OsStr::new(bad)).unwrap_err(),
+        ] {
+            let shown: String = bad.chars().take(8).collect();
+            assert_ne!(e.kind(), io::ErrorKind::NotFound, "{shown:?}: {e}");
+            #[cfg(windows)]
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{shown:?}: {e}");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let e = pio::rename_at(&dir, OsStr::new("lf2"), OsStr::new("a\0b")).unwrap_err();
+        assert!(e.to_string().ends_with("contains a NUL"), "{e}");
+        let e = pio::rename_at(&dir, OsStr::new(&long), OsStr::new("new")).unwrap_err();
+        assert!(
+            e.to_string().ends_with("exceeds 32767 UTF-16 code units"),
+            "{e}"
+        );
+    }
+    assert_eq!(listed(&dir), ["ld2", "lf2", "s"]);
+    assert_eq!(id_of(&dir), own);
+    intact("the end");
+}
+
+#[test]
+fn wx5c_start_in_dir_uses_the_verified_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let p = root.path().join("p");
+    fs::create_dir(&p).unwrap();
+    fs::write(p.join("marker"), b"mine").unwrap();
+    let real = root.path().join("p-moved");
+    // a program in the directory, started by a relative name
+    #[cfg(unix)]
+    let (program, script) = ("./show", "#!/bin/sh\ncat marker\n");
+    #[cfg(windows)]
+    let (program, script) = (".\\show.cmd", "@type marker\r\n");
+    let program_file = Path::new(program).file_name().unwrap().to_owned();
+    fs::write(p.join(&program_file), script).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(p.join(&program_file), pio::permissions(0o755)).unwrap();
+    // the decoy that takes the directory's path, with its own marker and program
+    let decoy = |at: &Path| {
+        fs::create_dir(at).unwrap();
+        fs::write(at.join("marker"), b"theirs").unwrap();
+        // the decoy's program shows its own marker: a start in the decoy shows "theirs"
+        fs::write(at.join(&program_file), script).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(at.join(&program_file), pio::permissions(0o755)).unwrap();
+    };
+    let shown = |cmd: &mut std::process::Command| {
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    // the directory moves before the call, and another one takes its path
+    let dir = pio::open_dir(&p).unwrap();
+    fs::rename(&p, &real).unwrap();
+    decoy(&p);
+    let mut cmd = std::process::Command::new(program);
+    pio::start_in_dir(&mut cmd, &dir).unwrap();
+    assert_eq!(shown(&mut cmd), "mine");
+
+    // the path changes after the call and before the start: the child still starts in the
+    // directory the handle opened, and the caller may close its handle first
+    fs::remove_dir_all(&p).unwrap();
+    fs::rename(&real, &p).unwrap();
+    let mut cmd = std::process::Command::new(program);
+    pio::start_in_dir(&mut cmd, &dir).unwrap();
+    drop(dir);
+    fs::rename(&p, &real).unwrap();
+    decoy(&p);
+    assert_eq!(shown(&mut cmd), "mine");
+    // the path is a link to the decoy when the child starts
+    let decoy_dir = root.path().join("decoy");
+    fs::rename(&p, &decoy_dir).unwrap();
+    let dir = pio::open_dir(&real).unwrap();
+    let mut cmd = std::process::Command::new(program);
+    pio::start_in_dir(&mut cmd, &dir).unwrap();
+    fs::rename(&real, &p).unwrap();
+    link_dir(&decoy_dir, &real);
+    assert_eq!(shown(&mut cmd), "mine");
+    // the same command starts again in the same directory
+    assert_eq!(shown(&mut cmd), "mine");
+    assert_eq!(fs::read(decoy_dir.join("marker")).unwrap(), b"theirs");
+}
+
+/// The stages of [`wx5c_adversarial_swaps_preserve_every_boundary`], met at the same two-channel
+/// barrier as [`Stage`].
+#[derive(Clone, Copy, Debug)]
+enum SwapStage {
+    /// The directory's path names another directory, holding the decoys `s`, `f`, `w` and `d`.
+    ParentMoved,
+    /// The directory's path is a link to another directory, holding the same decoys.
+    ParentLinked,
+    /// In the directory itself, `s` is a directory link and `f` a file link to the decoys.
+    EntriesLinked,
+    /// Everything is back where it was.
+    Restored,
+}
+
+#[test]
+fn wx5c_adversarial_swaps_preserve_every_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let p = root.path().join("p");
+    fs::create_dir_all(p.join("s")).unwrap();
+    fs::write(p.join("s").join("inner"), b"mine").unwrap();
+    fs::write(p.join("f"), b"mine").unwrap();
+    let evil = tempfile::tempdir().unwrap();
+    fs::create_dir(evil.path().join("s")).unwrap();
+    fs::write(evil.path().join("s").join("inner"), b"theirs").unwrap();
+    for name in ["f", "w", "w2"] {
+        fs::write(evil.path().join(name), b"theirs").unwrap();
+    }
+    fs::create_dir(evil.path().join("d")).unwrap();
+    let evil_names = ["d", "f", "s", "w", "w2"];
+    let evil_ids: Vec<FileId> = evil_names
+        .iter()
+        .map(|n| id(&evil.path().join(n)))
+        .collect();
+    let dir = pio::open_dir(&p).unwrap();
+    let own = id_of(&dir);
+    let (s_id, f_id) = (id(&p.join("s")), id(&p.join("f")));
+    let old = root.path().join("p-old");
+
+    let stages = [
+        SwapStage::ParentMoved,
+        SwapStage::ParentLinked,
+        SwapStage::EntriesLinked,
+        SwapStage::Restored,
+    ];
+    let rounds = 6;
+    let (made_tx, made) = mpsc::channel::<()>();
+    let (checked, checked_rx) = mpsc::channel::<()>();
+    let swapper = {
+        let (p, old, evil) = (p.clone(), old.clone(), evil.path().to_path_buf());
+        std::thread::spawn(move || {
+            for _ in 0..rounds {
+                for stage in stages {
+                    match stage {
+                        SwapStage::ParentMoved => {
+                            fs::rename(&p, &old).unwrap();
+                            fs::create_dir_all(p.join("s")).unwrap();
+                            fs::create_dir(p.join("d")).unwrap();
+                            for name in ["f", "w", "w2"] {
+                                fs::write(p.join(name), b"decoy").unwrap();
+                            }
+                        }
+                        SwapStage::ParentLinked => {
+                            fs::remove_dir_all(&p).unwrap();
+                            link_dir(&evil, &p);
+                        }
+                        SwapStage::EntriesLinked => {
+                            fs::rename(old.join("s"), old.join("s-aside")).unwrap();
+                            link_dir(&evil.join("s"), &old.join("s"));
+                            fs::rename(old.join("f"), old.join("f-aside")).unwrap();
+                            link_file(&evil.join("f"), &old.join("f"));
+                        }
+                        SwapStage::Restored => {
+                            // what the opener left at `s` and `f`: a link, or the file a rename
+                            // put over the link
+                            unlink(&old.join("s"));
+                            fs::rename(old.join("s-aside"), old.join("s")).unwrap();
+                            unlink(&old.join("f"));
+                            fs::rename(old.join("f-aside"), old.join("f")).unwrap();
+                            unlink(&p);
+                            fs::rename(&old, &p).unwrap();
+                        }
+                    }
+                    made_tx.send(()).unwrap(); // the stage is made
+                    if checked_rx.recv().is_err() {
+                        return; // the opener failed
+                    }
+                }
+            }
+        })
+    };
+
+    for round in 0..rounds {
+        for stage in stages {
+            if made.recv().is_err() {
+                // the swapper failed: its panic is the cause
+                let cause = swapper.join().unwrap_err();
+                std::panic::resume_unwind(cause);
+            }
+            let what = format!("round {round}, {stage:?}");
+            let real = match stage {
+                SwapStage::Restored => p.clone(),
+                _ => old.clone(),
+            };
+            match stage {
+                SwapStage::ParentMoved | SwapStage::ParentLinked | SwapStage::Restored => {
+                    // every call through the handle reaches the directory it opened: opens,
+                    // kinds and listings, creates, the probe, renames and removals
+                    assert_eq!(listed(&dir), ["f", "s"], "{what}");
+                    let s = pio::open_dir_at(&dir, OsStr::new("s")).unwrap();
+                    assert_eq!(id_of(&s), s_id, "{what}");
+                    assert_eq!(read_at(&s, "inner"), "mine", "{what}");
+                    drop(s);
+                    let f = pio::open_read_at(&dir, OsStr::new("f")).unwrap();
+                    assert_eq!(id_of(&f), f_id, "{what}");
+                    drop(f);
+                    let mut w = pio::create_private_at(&dir, OsStr::new("w")).unwrap();
+                    io::Write::write_all(&mut w, b"mine").unwrap();
+                    let w_id = id_of(&w);
+                    drop(w);
+                    pio::rename_at(&dir, OsStr::new("w"), OsStr::new("w2")).unwrap();
+                    assert_eq!(id(&real.join("w2")), w_id, "{what}");
+                    assert_eq!(read_at(&dir, "w2"), "mine", "{what}");
+                    pio::create_private_dir_at(&dir, OsStr::new("d")).unwrap();
+                    pio::rename_at(&dir, OsStr::new("d"), OsStr::new("d2")).unwrap();
+                    assert_eq!(
+                        pio::entry_kind_at(&dir, OsStr::new("d2")).unwrap(),
+                        EntryKind::Dir,
+                        "{what}"
+                    );
+                    assert_eq!(listed(&dir), ["d2", "f", "s", "w2"], "{what}");
+                    pio::remove_dir_at(&dir, OsStr::new("d2")).unwrap();
+                    pio::remove_file_at(&dir, OsStr::new("w2")).unwrap();
+                    assert!(
+                        pio::umask_keeps_0700_at(&dir, OsStr::new("w")).unwrap(),
+                        "{what}"
+                    );
+                    assert_eq!(listed(&dir), ["f", "s"], "{what}");
+                }
+                SwapStage::EntriesLinked => {
+                    // a link at an entry is never followed: opens refuse it, creates find it
+                    // there, and a rename moves or replaces the link itself
+                    for name in ["s", "f"] {
+                        assert_eq!(
+                            pio::entry_kind_at(&dir, OsStr::new(name)).unwrap(),
+                            EntryKind::Link,
+                            "{what}: {name}"
+                        );
+                        let e = pio::open_read_at(&dir, OsStr::new(name)).unwrap_err();
+                        assert!(pio::is_link_refusal(&e), "{what}: {name}: {e}");
+                        let e = pio::open_dir_at(&dir, OsStr::new(name)).unwrap_err();
+                        assert!(pio::is_link_refusal(&e), "{what}: {name}: {e}");
+                        for e in [
+                            pio::create_private_at(&dir, OsStr::new(name)).unwrap_err(),
+                            pio::create_private_dir_at(&dir, OsStr::new(name)).unwrap_err(),
+                            pio::umask_keeps_0700_at(&dir, OsStr::new(name)).unwrap_err(),
+                        ] {
+                            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{what}: {e}");
+                        }
+                        let e = pio::remove_dir_at(&dir, OsStr::new(name)).unwrap_err();
+                        assert!(pio::is_link_refusal(&e), "{what}: {name}: {e}");
+                        // the link moves away and back as itself
+                        pio::rename_at(&dir, OsStr::new(name), OsStr::new("moved")).unwrap();
+                        assert_eq!(
+                            pio::entry_kind_at(&dir, OsStr::new("moved")).unwrap(),
+                            EntryKind::Link,
+                            "{what}: {name}"
+                        );
+                        pio::rename_at(&dir, OsStr::new("moved"), OsStr::new(name)).unwrap();
+                    }
+                    // a file renamed over the file link replaces the link, never its target
+                    let mut w = pio::create_private_at(&dir, OsStr::new("w")).unwrap();
+                    io::Write::write_all(&mut w, b"mine").unwrap();
+                    drop(w);
+                    pio::rename_at(&dir, OsStr::new("w"), OsStr::new("f")).unwrap();
+                    assert_eq!(
+                        pio::entry_kind_at(&dir, OsStr::new("f")).unwrap(),
+                        EntryKind::File,
+                        "{what}"
+                    );
+                    assert_eq!(read_at(&dir, "f"), "mine", "{what}");
+                    assert_eq!(listed(&dir), ["f", "f-aside", "s", "s-aside"], "{what}");
+                }
+            }
+            // the decoys and the other directory are as they were
+            for (n, want) in evil_names.iter().zip(&evil_ids) {
+                assert_eq!(id(&evil.path().join(n)), *want, "{what}: {n}");
+            }
+            for n in ["f", "w", "w2"] {
+                assert_eq!(fs::read(evil.path().join(n)).unwrap(), b"theirs", "{what}");
+            }
+            assert_eq!(
+                fs::read(evil.path().join("s").join("inner")).unwrap(),
+                b"theirs",
+                "{what}"
+            );
+            if let SwapStage::ParentMoved = stage {
+                for n in ["f", "w", "w2"] {
+                    assert_eq!(fs::read(p.join(n)).unwrap(), b"decoy", "{what}");
+                }
+                assert!(listed(&pio::open_dir(&p.join("d")).unwrap()).is_empty());
+            }
+            checked.send(()).unwrap();
+        }
+    }
+    swapper.join().unwrap();
+    assert_eq!(listed(&dir), ["f", "s"]);
+    assert_eq!(id(&p), own);
+    assert_eq!(id(&p.join("s")), s_id);
+    assert_eq!(listed(&pio::open_dir(evil.path()).unwrap()), evil_names);
 }

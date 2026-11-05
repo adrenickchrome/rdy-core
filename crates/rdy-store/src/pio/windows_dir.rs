@@ -1,5 +1,5 @@
 //! The Windows calls of [`crate::pio`] in an open directory (FW-XP1 Phase 4): opens, entry kinds,
-//! listings, creates and removals anchored to a directory handle.
+//! listings, creates, removals and renames anchored to a directory handle.
 //!
 //! - The directory handle is the verified ancestor. Every entry is opened relative to it
 //!   (`NtOpenFile` with the handle as the root directory and one entry name), never through a
@@ -20,6 +20,13 @@
 //!   handle (`FileDispositionInfoEx`): what another process puts at the name after the open is
 //!   never removed, and a reparse point is removed as itself, never followed. A create or a probe
 //!   that cleans up after itself removes the object it made through its own handle, never by name.
+//! - A rename is a path call (`MoveFileExW`, as D-FPKPS says), made while the directory is pinned:
+//!   a new handle of the directory itself that reads it and does not share delete, so nobody can
+//!   move or remove the directory while it is open, and NTFS refuses to move any directory above
+//!   an open handle. Both names are entries of the pinned directory. Its path is its final path,
+//!   which holds no reparse point, and it is checked before and after the move: resolved again, it
+//!   must name the pinned directory (`the directory holding {path} changed during the operation`).
+//!   The path is used verbatim (`\\?\`), so no name is changed on the way (a trailing dot stays).
 //! - Bounds: an entry name longer than 32,767 UTF-16 code units, or with a NUL, is refused before
 //!   anything is made of it. Each listed record is checked against the listing buffer, and its
 //!   name against the same bound, before the name is copied.
@@ -51,11 +58,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
-    FileFullDirectoryRestartInfo, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
-    SYNCHRONIZE, SetFileInformationByHandle,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING,
+    MoveFileExW, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -97,6 +104,11 @@ const NEW_FILE_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE;
 
 /// The rights of a handle that removes an entry: remove it, and read its attributes.
 const REMOVE_ACCESS: u32 = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+/// The sharing of a pin ([`PinnedDir`]): reading and writing, never delete. The pin reads the
+/// directory (`FILE_LIST_DIRECTORY`): a handle with only attribute rights takes no part in
+/// sharing, and its sharing would refuse nothing.
+const SHARE_NO_DELETE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
 #[cfg(test)]
 thread_local! {
@@ -386,6 +398,161 @@ pub fn remove_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
         return Err(reparse_point(&entry_path(dir, name)));
     }
     delete_open(&entry)
+}
+
+/// Renames the entry `from` over the entry `to`, both in the open directory `dir`, replacing a
+/// file at `to`. Both names are checked first, as for the opens. The directory is then pinned
+/// ([`PinnedDir`]): while the call runs, nobody can move or remove it or a directory above it,
+/// and its path is checked to name it before and after the move. The move is `MoveFileExW` on the
+/// two verbatim paths in the pinned directory, so `from` and `to` stay entries of the directory
+/// that `dir` opened, whatever its old path names now. A reparse point at `from` is moved itself,
+/// and one at `to` is replaced itself, never followed. Nothing is copied: a move that would need a
+/// copy fails. As on Windows generally, an existing directory at `to` is never replaced
+/// (`ERROR_ACCESS_DENIED`). A failed move is the OS error.
+#[allow(unsafe_code)]
+pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    let from_units = entry_name(dir, from)?;
+    let to_units = entry_name(dir, to)?;
+    let pinned = PinnedDir::of(dir)?;
+    let source = pinned.entry(from, &from_units)?;
+    let target = pinned.entry(to, &to_units)?;
+    after_open();
+    // SAFETY: both paths are NUL-terminated and live for the call.
+    let ok = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+    let moved = if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    after_open();
+    moved?;
+    pinned.check()
+}
+
+/// A directory held so that its path keeps naming it, for a call that needs a path: a new handle
+/// of the directory itself (its handle and an empty name), which reads it and shares reading and
+/// writing but not delete. While the pin is open, nobody can move or remove the directory, and
+/// NTFS refuses to move any directory above an open handle; entries in it can still be made,
+/// moved and removed. The path is the pin's final path, which holds no reparse point, and
+/// [`PinnedDir::check`] resolves it again and compares the identity it reaches with the pin's.
+pub(super) struct PinnedDir {
+    /// Held, never read: while it is open, the directory and those above it stay where they are.
+    _pin: File,
+    /// The final path, as messages show it.
+    shown: PathBuf,
+    /// The final path, verbatim (`\\?\`, or `\\?\UNC\`), without a NUL.
+    verbatim: Vec<u16>,
+    id: FileId,
+}
+
+impl PinnedDir {
+    /// Pins the open directory `dir` (the pin must name it) and checks that its final path names
+    /// it. A directory that another handle holds open to be moved or removed (`DELETE`) cannot be
+    /// pinned: the OS's sharing violation.
+    #[allow(unsafe_code)]
+    pub(super) fn of(dir: &File) -> io::Result<PinnedDir> {
+        let pin = in_dir(dir, &[], std::ptr::null(), |attributes, handle, status| {
+            // SAFETY: as in `open_entry`.
+            unsafe {
+                NtOpenFile(
+                    handle,
+                    DIR_ACCESS,
+                    attributes,
+                    status,
+                    SHARE_NO_DELETE,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                )
+            }
+        })
+        .map_err(|status| io::Error::from_raw_os_error(dos_error(status)))?;
+        after_open();
+        let shown = final_path(pin.as_raw_handle())?;
+        let verbatim = verbatim(&shown);
+        let id = FileId::of_open(&pin, &shown)?;
+        if FileId::of_open(dir, &shown)? != id {
+            return Err(parent_changed(&shown));
+        }
+        let pinned = PinnedDir {
+            _pin: pin,
+            shown,
+            verbatim,
+            id,
+        };
+        pinned.check()?;
+        Ok(pinned)
+    }
+
+    /// The pinned directory's path resolved again from its start, now: it must reach the pinned
+    /// directory (`the directory holding {path} changed during the operation`). A path that cannot
+    /// be opened is that open's error.
+    #[allow(unsafe_code)]
+    pub(super) fn check(&self) -> io::Result<()> {
+        let mut path = self.verbatim.clone();
+        path.push(0);
+        // SAFETY: `path` is NUL-terminated and lives for the call; no security attributes or
+        // template handle are passed.
+        let h = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                SHARE_ALL,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the call succeeded, so `h` is a new handle that nothing else owns.
+        let again = File::from(unsafe { OwnedHandle::from_raw_handle(h) });
+        if FileId::of_open(&again, &self.shown)? != self.id {
+            return Err(parent_changed(&self.shown));
+        }
+        Ok(())
+    }
+
+    /// The verbatim path of the entry `name` (its checked units `units`) in the pinned directory,
+    /// NUL-terminated. A path longer than 32,767 units is refused before it is made (`the native
+    /// path for {path} exceeds 32767 UTF-16 code units`).
+    pub(super) fn entry(&self, name: &OsStr, units: &[u16]) -> io::Result<Vec<u16>> {
+        if self.verbatim.len() + 1 + units.len() > NATIVE_PATH_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the native path for {} exceeds 32767 UTF-16 code units",
+                    self.shown.join(name).display()
+                ),
+            ));
+        }
+        let mut path = Vec::with_capacity(self.verbatim.len() + units.len() + 2);
+        path.extend_from_slice(&self.verbatim);
+        if path.last() != Some(&BACKSLASH) {
+            path.push(BACKSLASH);
+        }
+        path.extend_from_slice(units);
+        path.push(0);
+        Ok(path)
+    }
+}
+
+/// The verbatim form of `shown`, a final path as [`final_path`] shows it: `\\server\share\...`
+/// becomes `\\?\UNC\server\share\...`, any other `\\?\` and the path. A final path is already
+/// whole and normalized, so nothing in it is changed.
+fn verbatim(shown: &Path) -> Vec<u16> {
+    let units: Vec<u16> = shown.as_os_str().encode_wide().collect();
+    let unc: Vec<u16> = r"\\".encode_utf16().collect();
+    match units.strip_prefix(&unc[..]) {
+        Some(rest) => r"\\?\UNC\"
+            .encode_utf16()
+            .chain(rest.iter().copied())
+            .collect(),
+        None => r"\\?\"
+            .encode_utf16()
+            .chain(units.iter().copied())
+            .collect(),
+    }
 }
 
 /// [`create_private_at`] and [`create_private_dir_at`]: makes `name` in `dir` as a new object of
@@ -805,6 +972,184 @@ mod tests {
         .unwrap();
         names.sort();
         names
+    }
+
+    #[test]
+    fn wx5c_native_the_pin_holds_at_every_boundary_of_a_rename() {
+        let _: fn(&File, &OsStr, &OsStr) -> io::Result<()> = rename_at;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("top");
+        let p = top.join("p");
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("a"), b"mine").unwrap();
+        let dir = open_dir(&p).unwrap();
+        let a_id = id(&p.join("a"));
+        // without a pin, the directory moves while `dir` is open (its handle shares delete)
+        fs::rename(&p, top.join("p-aside")).unwrap();
+        fs::rename(top.join("p-aside"), &p).unwrap();
+        // at each boundary of the call, nothing can move the directory or the one above it
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(i32, i32)>::new()));
+        {
+            let (seen, p, top) = (seen.clone(), p.clone(), top.clone());
+            on_next_open(move || {
+                let moved = fs::rename(&p, p.with_file_name("p-aside")).unwrap_err();
+                let above = fs::rename(&top, top.with_file_name("top-aside")).unwrap_err();
+                let removed = fs::remove_dir(&p).unwrap_err();
+                assert_eq!(moved.raw_os_error(), removed.raw_os_error());
+                seen.borrow_mut()
+                    .push((moved.raw_os_error().unwrap(), above.raw_os_error().unwrap()));
+            });
+        }
+        rename_at(&dir, OsStr::new("a"), OsStr::new("b")).unwrap();
+        no_hook();
+        // the pin's sharing violation (32) and the open handle's refusal (5), at the three
+        // boundaries: after the pin, before the move and after the move
+        assert_eq!(*seen.borrow(), [(32, 5), (32, 5), (32, 5)]);
+        assert_eq!(names(&dir), ["b"]);
+        assert_eq!(id(&p.join("b")), a_id);
+        // and the pin ends with the call
+        fs::rename(&p, top.join("p-aside")).unwrap();
+        fs::rename(top.join("p-aside"), &p).unwrap();
+
+        // a racer that replaces the old name before the move: the entry at the name moves, in
+        // the pinned directory, as renameat moves what is at the name on Unix
+        let decoy = tempfile::tempdir().unwrap();
+        fs::write(decoy.path().join("b"), b"theirs").unwrap();
+        {
+            let p = p.clone();
+            let mut boundary = 0;
+            on_next_open(move || {
+                boundary += 1;
+                if boundary == 2 {
+                    fs::rename(p.join("b"), p.join("b-aside")).unwrap();
+                    fs::write(p.join("b"), b"racer").unwrap();
+                }
+            });
+        }
+        rename_at(&dir, OsStr::new("b"), OsStr::new("c")).unwrap();
+        no_hook();
+        assert_eq!(names(&dir), ["b-aside", "c"]);
+        assert_eq!(fs::read(p.join("c")).unwrap(), b"racer");
+        assert_eq!(id(&p.join("b-aside")), a_id);
+        assert_eq!(fs::read(decoy.path().join("b")).unwrap(), b"theirs");
+
+        // a directory that another handle holds open to be moved cannot be pinned: the call
+        // fails with the sharing violation, and nothing moves
+        let held = OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&p)
+            .unwrap();
+        let e = rename_at(&dir, OsStr::new("c"), OsStr::new("d")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(32), "{e}");
+        drop(held);
+        assert_eq!(names(&dir), ["b-aside", "c"]);
+    }
+
+    #[test]
+    fn wx5c_native_a_pinned_path_that_names_another_directory_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let dir = open_dir(&a).unwrap();
+        let pinned = PinnedDir::of(&dir).unwrap();
+        assert_eq!(pinned.shown, final_path(dir.as_raw_handle()).unwrap());
+        pinned.check().unwrap();
+        // the path that the pin checks resolves to another directory
+        let other = final_path(open_dir(&b).unwrap().as_raw_handle()).unwrap();
+        let wrong = PinnedDir {
+            _pin: PinnedDir::of(&dir).unwrap()._pin,
+            verbatim: verbatim(&other),
+            shown: other.clone(),
+            id: pinned.id,
+        };
+        let e = wrong.check().unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "the directory holding {} changed during the operation",
+                other.display()
+            )
+        );
+        assert_eq!(e.kind(), io::ErrorKind::Other);
+        // a path that no longer opens is that open's error
+        let gone = d.path().join("gone");
+        let missing = PinnedDir {
+            _pin: PinnedDir::of(&dir).unwrap()._pin,
+            verbatim: verbatim(&gone),
+            shown: gone,
+            id: pinned.id,
+        };
+        assert_eq!(missing.check().unwrap_err().kind(), io::ErrorKind::NotFound);
+        // the verbatim forms
+        let w = |s: &str| String::from_utf16(&verbatim(Path::new(s))).unwrap();
+        assert_eq!(w(r"C:\x\y"), r"\\?\C:\x\y");
+        assert_eq!(w(r"\\server\share\x"), r"\\?\UNC\server\share\x");
+    }
+
+    #[test]
+    fn wx5c_native_a_rename_keeps_every_name_exact() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = open_dir(d.path()).unwrap();
+        // names that a path call would change (a trailing dot or space, a lone surrogate) are
+        // renamed as they are: the paths are verbatim
+        let lone = OsString::from_wide(&[0x61, 0xD800]);
+        let lone2 = OsString::from_wide(&[0x62, 0xD800]);
+        for (from, to) in [
+            (OsStr::new("dot."), OsStr::new("dot2.")),
+            (OsStr::new("space "), OsStr::new("space2 ")),
+            (lone.as_os_str(), lone2.as_os_str()),
+        ] {
+            drop(create_private_at(&dir, from).unwrap());
+            rename_at(&dir, from, to).unwrap();
+            let listed: Vec<OsString> = {
+                let mut v = vec![];
+                for_each_entry::<io::Error>(&dir, |n| {
+                    v.push(n.to_os_string());
+                    Ok(())
+                })
+                .unwrap();
+                v
+            };
+            assert_eq!(listed, [to.to_os_string()], "{from:?}");
+            remove_file_at(&dir, to).unwrap();
+        }
+        // the whole path is bounded before it is made: a name that passes its own bound, in a
+        // directory whose path makes the total longer than 32,767 units
+        let shown = final_path(dir.as_raw_handle()).unwrap();
+        drop(create_private_at(&dir, OsStr::new("a")).unwrap());
+        let long = "n".repeat(NATIVE_PATH_MAX - 4);
+        for (from, to) in [("a", long.as_str()), (long.as_str(), "a")] {
+            let e = rename_at(&dir, OsStr::new(from), OsStr::new(to)).unwrap_err();
+            let name = if from == "a" { to } else { from };
+            assert_eq!(
+                (e.kind(), e.to_string()),
+                (
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the native path for {} exceeds 32767 UTF-16 code units",
+                        shown.join(name).display()
+                    )
+                )
+            );
+        }
+        assert_eq!(names(&dir), ["a"]);
+        // Windows replaces a file with a directory (Unix refuses, ENOTDIR), and never replaces
+        // a directory
+        create_private_dir_at(&dir, OsStr::new("dir")).unwrap();
+        create_private_dir_at(&dir, OsStr::new("empty")).unwrap();
+        let e = rename_at(&dir, OsStr::new("a"), OsStr::new("empty")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(5), "{e}");
+        let e = rename_at(&dir, OsStr::new("dir"), OsStr::new("empty")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(5), "{e}");
+        rename_at(&dir, OsStr::new("dir"), OsStr::new("a")).unwrap();
+        assert_eq!(
+            entry_kind_at(&dir, OsStr::new("a")).unwrap(),
+            EntryKind::Dir
+        );
+        assert_eq!(names(&dir), ["a", "empty"]);
     }
 
     #[test]
