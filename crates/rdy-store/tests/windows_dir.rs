@@ -1,8 +1,8 @@
-//! Calls in an open directory (`rdy_store::pio`): opens, entry kinds and listings anchored to a
-//! directory handle (FW-XP1 Phase 4). The pins run on every platform: a directory moved or
-//! replaced after its handle was opened, or an entry swapped for a link, never redirects a call,
-//! and every refusal fails closed. Names and native paths are bounded before anything is made of
-//! them.
+//! Calls in an open directory (`rdy_store::pio`): opens, entry kinds, listings, creates and
+//! removals anchored to a directory handle (FW-XP1 Phase 4). The pins run on every platform: a
+//! directory moved or replaced after its handle was opened, or an entry swapped for a link, never
+//! redirects a call, and every refusal fails closed. What a create makes is private from the
+//! moment it exists. Names and native paths are bounded before anything is made of them.
 
 use rdy_store::fileid::FileId;
 use rdy_store::pio::{self, EntryKind};
@@ -464,4 +464,395 @@ fn wx5a_native_path_bounds_precede_allocation() {
         assert_eq!(listed(&at), ["leaf"]);
         assert_eq!(id_of(&pio::open_dir(&path).unwrap()), id_of(&at));
     }
+}
+
+/// Lets every account write the directory `path`, remove or replace its entries, and hands that
+/// access to what is made in it: mode 0o777 on Unix; on Windows inheritable full access for
+/// Everyone and for Users.
+fn widen(path: &Path) {
+    #[cfg(unix)]
+    fs::set_permissions(path, pio::permissions(0o777)).unwrap();
+    #[cfg(windows)]
+    for sid in ["*S-1-1-0", "*S-1-5-32-545"] {
+        let out = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/grant", &format!("{sid}:(OI)(CI)(F)")])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls: {out:?}");
+    }
+}
+
+/// `f` is private to this account: on Unix mode 0o600 or 0o700; on Windows its owner is this
+/// account and its protected DACL holds the account's one ACE.
+fn assert_private(f: &fs::File, what: &str) {
+    let p = pio::privacy(f).unwrap();
+    assert!(p.mine && p.private && p.owner_only, "{what}: {p:?}");
+    assert!(!p.shared_writable && !p.open_to_all, "{what}: {p:?}");
+    #[cfg(windows)]
+    {
+        let kind = if f.metadata().unwrap().is_dir() {
+            pio::ObjectKind::Dir
+        } else {
+            pio::ObjectKind::File
+        };
+        let me = pio::current_account().unwrap();
+        let s = pio::security_of(f).unwrap();
+        assert_eq!(s.owner, Some(me), "{what}: the owner");
+        assert!(s.protected, "{what}: no inherited access");
+        assert_eq!(
+            s.dacl,
+            Some(vec![pio::Ace::private(me, kind)]),
+            "{what}: the ACEs"
+        );
+    }
+}
+
+/// The stages of [`wx5b_parent_swap_cannot_redirect_a_write`], met at the same two-channel
+/// barrier as [`Stage`].
+#[derive(Clone, Copy, Debug)]
+enum WriteStage {
+    /// The directory's path names another directory, holding the decoys `w` and `d`.
+    ParentMoved,
+    /// The directory's path is a link to another directory, holding the decoys `w` and `d`.
+    ParentLinked,
+    /// In the directory itself, `w` is a file link and `d` a directory link to the decoys.
+    EntriesLinked,
+    /// Everything is back where it was.
+    Restored,
+}
+
+#[test]
+fn wx5b_parent_swap_cannot_redirect_a_write() {
+    let root = tempfile::tempdir().unwrap();
+    let p = root.path().join("p");
+    fs::create_dir(&p).unwrap();
+    let evil = tempfile::tempdir().unwrap();
+    fs::write(evil.path().join("w"), b"theirs").unwrap();
+    fs::create_dir(evil.path().join("d")).unwrap();
+    fs::write(evil.path().join("d").join("inside"), b"theirs").unwrap();
+    let (evil_w, evil_d) = (id(&evil.path().join("w")), id(&evil.path().join("d")));
+    let dir = pio::open_dir(&p).unwrap();
+    let own = id_of(&dir);
+    let old = root.path().join("p-old");
+
+    let stages = [
+        WriteStage::ParentMoved,
+        WriteStage::ParentLinked,
+        WriteStage::EntriesLinked,
+        WriteStage::Restored,
+    ];
+    let rounds = 8;
+    let (made_tx, made) = mpsc::channel::<()>();
+    let (checked, checked_rx) = mpsc::channel::<()>();
+    let swapper = {
+        let (p, old, evil) = (p.clone(), old.clone(), evil.path().to_path_buf());
+        std::thread::spawn(move || {
+            for _ in 0..rounds {
+                for stage in stages {
+                    match stage {
+                        WriteStage::ParentMoved => {
+                            fs::rename(&p, &old).unwrap();
+                            fs::create_dir(&p).unwrap();
+                            fs::write(p.join("w"), b"decoy").unwrap();
+                            fs::create_dir(p.join("d")).unwrap();
+                        }
+                        WriteStage::ParentLinked => {
+                            fs::remove_dir_all(&p).unwrap();
+                            link_dir(&evil, &p);
+                        }
+                        WriteStage::EntriesLinked => {
+                            link_file(&evil.join("w"), &old.join("w"));
+                            link_dir(&evil.join("d"), &old.join("d"));
+                        }
+                        WriteStage::Restored => {
+                            unlink(&old.join("w"));
+                            unlink(&old.join("d"));
+                            unlink(&p);
+                            fs::rename(&old, &p).unwrap();
+                        }
+                    }
+                    made_tx.send(()).unwrap(); // the stage is made
+                    if checked_rx.recv().is_err() {
+                        return; // the writer failed
+                    }
+                }
+            }
+        })
+    };
+
+    for round in 0..rounds {
+        for stage in stages {
+            if made.recv().is_err() {
+                // the swapper failed: its panic is the cause
+                let cause = swapper.join().unwrap_err();
+                std::panic::resume_unwind(cause);
+            }
+            let what = format!("round {round}, {stage:?}");
+            // the directory the handle opened, wherever it is now
+            let real = match stage {
+                WriteStage::Restored => p.clone(),
+                _ => old.clone(),
+            };
+            match stage {
+                WriteStage::ParentMoved | WriteStage::ParentLinked | WriteStage::Restored => {
+                    // each create and removal reaches the directory the handle opened, never
+                    // what its path names now
+                    let mut f = pio::create_private_at(&dir, OsStr::new("w")).unwrap();
+                    io::Write::write_all(&mut f, b"mine").unwrap();
+                    drop(f);
+                    assert_eq!(fs::read(real.join("w")).unwrap(), b"mine", "{what}");
+                    pio::create_private_dir_at(&dir, OsStr::new("d")).unwrap();
+                    let d = pio::open_dir_at(&dir, OsStr::new("d")).unwrap();
+                    assert_eq!(id_of(&d), id(&real.join("d")), "{what}");
+                    assert!(pio::is_empty_dir(&d).unwrap(), "{what}");
+                    drop(d);
+                    assert_eq!(listed(&dir), ["d", "w"], "{what}");
+                    pio::remove_file_at(&dir, OsStr::new("w")).unwrap();
+                    pio::remove_dir_at(&dir, OsStr::new("d")).unwrap();
+                    assert!(listed(&dir).is_empty(), "{what}");
+                    assert!(
+                        pio::umask_keeps_0700_at(&dir, OsStr::new("w")).unwrap(),
+                        "{what}"
+                    );
+                    assert!(listed(&dir).is_empty(), "{what}");
+                }
+                WriteStage::EntriesLinked => {
+                    // a link at the entry is never written through: each create refuses it
+                    for e in [
+                        pio::create_private_at(&dir, OsStr::new("w")).unwrap_err(),
+                        pio::create_private_dir_at(&dir, OsStr::new("w")).unwrap_err(),
+                        pio::create_private_at(&dir, OsStr::new("d")).unwrap_err(),
+                        pio::create_private_dir_at(&dir, OsStr::new("d")).unwrap_err(),
+                        pio::umask_keeps_0700_at(&dir, OsStr::new("w")).unwrap_err(),
+                        pio::umask_keeps_0700_at(&dir, OsStr::new("d")).unwrap_err(),
+                    ] {
+                        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{what}: {e}");
+                    }
+                    assert_eq!(listed(&dir), ["d", "w"], "{what}");
+                }
+            }
+            // the decoys and the other directory are as they were
+            assert_eq!(
+                fs::read(evil.path().join("w")).unwrap(),
+                b"theirs",
+                "{what}"
+            );
+            assert_eq!(id(&evil.path().join("w")), evil_w, "{what}");
+            assert_eq!(id(&evil.path().join("d")), evil_d, "{what}");
+            assert_eq!(
+                listed(&pio::open_dir(&evil.path().join("d")).unwrap()),
+                ["inside"]
+            );
+            if let WriteStage::ParentMoved = stage {
+                assert_eq!(fs::read(p.join("w")).unwrap(), b"decoy", "{what}");
+                assert!(p.join("d").is_dir(), "{what}");
+            }
+            checked.send(()).unwrap();
+        }
+    }
+    swapper.join().unwrap();
+    assert!(listed(&dir).is_empty());
+    assert_eq!(id(&p), own);
+    assert_eq!(listed(&pio::open_dir(evil.path()).unwrap()), ["d", "w"]);
+}
+
+#[test]
+fn wx5b_reparse_swap_cannot_redirect_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let p = root.path().join("p");
+    fs::create_dir(&p).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let victim = elsewhere.path().join("victim");
+    let vdir = elsewhere.path().join("vdir");
+    fs::write(&victim, b"keep").unwrap();
+    fs::create_dir(&vdir).unwrap();
+    fs::write(vdir.join("inside"), b"keep").unwrap();
+    let (victim_id, vdir_id) = (id(&victim), id(&vdir));
+    let dir = pio::open_dir(&p).unwrap();
+    let intact = |what: &str| {
+        assert_eq!(fs::read(&victim).unwrap(), b"keep", "{what}");
+        assert_eq!(id(&victim), victim_id, "{what}");
+        assert_eq!(id(&vdir), vdir_id, "{what}");
+        assert_eq!(fs::read(vdir.join("inside")).unwrap(), b"keep", "{what}");
+    };
+
+    // a temp file is made; then its entry is swapped for a link: the cleanup removes the link
+    // itself, never what it points to, and our file stays where it was moved
+    for target in [&victim, &vdir] {
+        let what = format!("tmp swapped for a link to {}", target.display());
+        let f = pio::create_private_at(&dir, OsStr::new("tmp")).unwrap();
+        fs::rename(p.join("tmp"), p.join("tmp-aside")).unwrap();
+        if target.is_dir() {
+            link_dir(target, &p.join("tmp"));
+        } else {
+            link_file(target, &p.join("tmp"));
+        }
+        assert_eq!(
+            pio::entry_kind_at(&dir, OsStr::new("tmp")).unwrap(),
+            EntryKind::Link,
+            "{what}"
+        );
+        pio::remove_file_at(&dir, OsStr::new("tmp")).unwrap();
+        intact(&what);
+        assert_eq!(listed(&dir), ["tmp-aside"], "{what}");
+        assert_eq!(id(&p.join("tmp-aside")), id_of(&f), "{what}");
+        drop(f);
+        pio::remove_file_at(&dir, OsStr::new("tmp-aside")).unwrap();
+        assert!(listed(&dir).is_empty(), "{what}");
+    }
+
+    // a directory link where a directory is removed is refused, and nothing is removed
+    for (name, make) in [
+        ("dlink", link_dir as fn(&Path, &Path)),
+        ("dsym", symlink_dir as fn(&Path, &Path)),
+    ] {
+        make(&vdir, &p.join(name));
+        let e = pio::remove_dir_at(&dir, OsStr::new(name)).unwrap_err();
+        assert!(pio::is_link_refusal(&e), "{name}: {e}");
+        intact(name);
+        assert_eq!(
+            pio::entry_kind_at(&dir, OsStr::new(name)).unwrap(),
+            EntryKind::Link,
+            "{name}"
+        );
+        // the link itself is removed as an entry
+        pio::remove_file_at(&dir, OsStr::new(name)).unwrap();
+        intact(name);
+    }
+    // a file link where a directory is removed is refused too
+    link_file(&victim, &p.join("flink"));
+    let e = pio::remove_dir_at(&dir, OsStr::new("flink")).unwrap_err();
+    assert!(pio::is_link_refusal(&e), "{e}");
+    pio::remove_file_at(&dir, OsStr::new("flink")).unwrap();
+    intact("flink");
+
+    // the directory's path is swapped for a link to the victim's directory: a cleanup through
+    // the handle removes only the entries of the directory it opened
+    fs::write(p.join("inside"), b"mine").unwrap();
+    fs::create_dir(p.join("sub")).unwrap();
+    let moved = root.path().join("p-moved");
+    fs::rename(&p, &moved).unwrap();
+    link_dir(elsewhere.path(), &p);
+    fs::write(vdir.join("sub-decoy"), b"keep").unwrap();
+    pio::remove_file_at(&dir, OsStr::new("inside")).unwrap();
+    pio::remove_dir_at(&dir, OsStr::new("sub")).unwrap();
+    assert!(listed(&dir).is_empty());
+    assert!(listed(&pio::open_dir(&moved).unwrap()).is_empty());
+    intact("parent linked");
+    assert_eq!(fs::read(vdir.join("sub-decoy")).unwrap(), b"keep");
+
+    // removals keep their kinds: a directory is not removed as a file, a file not as a
+    // directory, a directory that is not empty stays, and a missing entry is NotFound
+    fs::create_dir(moved.join("full")).unwrap();
+    fs::write(moved.join("full").join("x"), b"x").unwrap();
+    fs::write(moved.join("file"), b"f").unwrap();
+    assert!(pio::remove_file_at(&dir, OsStr::new("full")).is_err());
+    let e = pio::remove_dir_at(&dir, OsStr::new("full")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::DirectoryNotEmpty, "{e}");
+    let e = pio::remove_dir_at(&dir, OsStr::new("file")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotADirectory, "{e}");
+    assert_eq!(listed(&dir), ["file", "full"]);
+    for e in [
+        pio::remove_file_at(&dir, OsStr::new("gone")).unwrap_err(),
+        pio::remove_dir_at(&dir, OsStr::new("gone")).unwrap_err(),
+    ] {
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    }
+    // a removal while the file is still open, then a create at the same name
+    let open = pio::open_read_at(&dir, OsStr::new("file")).unwrap();
+    pio::remove_file_at(&dir, OsStr::new("file")).unwrap();
+    assert_eq!(listed(&dir), ["full"]);
+    drop(pio::create_private_at(&dir, OsStr::new("file")).unwrap());
+    drop(open);
+    // a file whose owner may only read it is removed, as unlink does on Unix
+    let mut ro = fs::metadata(moved.join("file")).unwrap().permissions();
+    ro.set_readonly(true);
+    fs::set_permissions(moved.join("file"), ro).unwrap();
+    pio::remove_file_at(&dir, OsStr::new("file")).unwrap();
+    assert_eq!(listed(&dir), ["full"]);
+
+    // names are checked as for the opens, before anything is made of them
+    let long = "n".repeat(40_000);
+    for bad in ["", ".", "..", "a/b", "a\0b", long.as_str()] {
+        for e in [
+            pio::create_private_at(&dir, OsStr::new(bad)).unwrap_err(),
+            pio::create_private_dir_at(&dir, OsStr::new(bad)).unwrap_err(),
+            pio::umask_keeps_0700_at(&dir, OsStr::new(bad)).unwrap_err(),
+            pio::remove_file_at(&dir, OsStr::new(bad)).unwrap_err(),
+            pio::remove_dir_at(&dir, OsStr::new(bad)).unwrap_err(),
+        ] {
+            let shown: String = bad.chars().take(8).collect();
+            assert_ne!(e.kind(), io::ErrorKind::NotFound, "{shown:?}: {e}");
+            assert!(!pio::is_link_refusal(&e), "{shown:?}");
+            #[cfg(windows)]
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{shown:?}");
+        }
+    }
+    assert_eq!(listed(&dir), ["full"]);
+    intact("names");
+}
+
+#[test]
+fn wx5b_private_create_has_no_public_window() {
+    // a directory that hands every account access to what is made in it
+    let root = tempfile::tempdir().unwrap();
+    let open = root.path().join("open");
+    fs::create_dir(&open).unwrap();
+    widen(&open);
+    let dir = pio::open_dir(&open).unwrap();
+    let p = pio::privacy(&dir).unwrap();
+    assert!(p.shared_writable && p.open_to_all, "{p:?}");
+
+    // a new file is private before any byte is written and before make_private_file: it takes
+    // none of the directory's access
+    let mut f = pio::create_private_at(&dir, OsStr::new("f")).unwrap();
+    assert_private(&f, "a new file");
+    assert_eq!(f.metadata().unwrap().len(), 0);
+    io::Write::write_all(&mut f, b"secret").unwrap();
+    f.sync_all().unwrap();
+    pio::make_private_file(&f).unwrap();
+    assert_private(&f, "the file after make_private_file");
+    let again = pio::open_read_at(&dir, OsStr::new("f")).unwrap();
+    assert_private(&again, "the file opened again");
+    assert_eq!(id_of(&again), id_of(&f));
+
+    // a new directory is private from the moment it exists, and so is what is made in it
+    pio::create_private_dir_at(&dir, OsStr::new("d")).unwrap();
+    let d = pio::open_dir_at(&dir, OsStr::new("d")).unwrap();
+    assert_private(&d, "a new directory");
+    assert!(pio::is_empty_dir(&d).unwrap());
+    let inner = pio::create_private_at(&d, OsStr::new("inner")).unwrap();
+    assert_private(&inner, "a file in the new directory");
+    pio::create_private_dir_at(&d, OsStr::new("sub")).unwrap();
+    assert_private(
+        &pio::open_dir_at(&d, OsStr::new("sub")).unwrap(),
+        "a directory in the new directory",
+    );
+
+    // the probe makes the private file it asks about and removes it again
+    assert!(pio::umask_keeps_0700_at(&dir, OsStr::new(".probe")).unwrap());
+    assert_eq!(listed(&dir), ["d", "f"]);
+
+    // an existing entry is never opened, widened or changed by a create
+    for name in ["f", "d"] {
+        for e in [
+            pio::create_private_at(&dir, OsStr::new(name)).unwrap_err(),
+            pio::create_private_dir_at(&dir, OsStr::new(name)).unwrap_err(),
+            pio::umask_keeps_0700_at(&dir, OsStr::new(name)).unwrap_err(),
+        ] {
+            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{name}: {e}");
+        }
+    }
+    fs::write(open.join("theirs"), b"theirs").unwrap();
+    let e = pio::create_private_at(&dir, OsStr::new("theirs")).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
+    assert_eq!(fs::read(open.join("theirs")).unwrap(), b"theirs");
+    let p = pio::privacy(&pio::open_read_at(&dir, OsStr::new("theirs")).unwrap()).unwrap();
+    assert!(!p.private, "an existing file keeps its access: {p:?}");
+    assert_eq!(fs::read(open.join("f")).unwrap(), b"secret");
+    assert_private(
+        &pio::open_read_at(&dir, OsStr::new("f")).unwrap(),
+        "f at the end",
+    );
 }

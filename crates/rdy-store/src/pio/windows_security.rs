@@ -964,7 +964,7 @@ pub(super) fn os_error(code: u32) -> io::Error {
 }
 
 /// `could not make {path} private to this account: {error}`, of the same kind as `e`.
-fn not_made(path: &Path, e: io::Error) -> io::Error {
+pub(super) fn not_made(path: &Path, e: io::Error) -> io::Error {
     io::Error::new(
         e.kind(),
         format!(
@@ -975,7 +975,7 @@ fn not_made(path: &Path, e: io::Error) -> io::Error {
 }
 
 /// `{path} is not private to this account`.
-fn not_private(path: &Path) -> io::Error {
+pub(super) fn not_private(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!("{} is not private to this account", path.display()),

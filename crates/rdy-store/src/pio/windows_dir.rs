@@ -1,5 +1,5 @@
-//! The Windows calls of [`crate::pio`] in an open directory (FW-XP1 Phase 4): opens, entry kinds
-//! and listings anchored to a directory handle.
+//! The Windows calls of [`crate::pio`] in an open directory (FW-XP1 Phase 4): opens, entry kinds,
+//! listings, creates and removals anchored to a directory handle.
 //!
 //! - The directory handle is the verified ancestor. Every entry is opened relative to it
 //!   (`NtOpenFile` with the handle as the root directory and one entry name), never through a
@@ -12,6 +12,14 @@
 //! - A listing goes through a new open of the directory itself (its handle and an empty name), so
 //!   it resolves no path and has its own position, and the new handle must name the same
 //!   directory.
+//! - A create makes the entry relative to the handle (`NtCreateFile`, `FILE_CREATE`) with this
+//!   account's private descriptor (`windows_security`'s `PrivateDescriptor`), so it is private
+//!   from the moment it exists; anything at the name, a reparse point included, is
+//!   `AlreadyExists` and never followed. The new object's privacy is then read from its handle.
+//! - A removal opens the entry itself for `DELETE` and removes the object it opened, through that
+//!   handle (`FileDispositionInfoEx`): what another process puts at the name after the open is
+//!   never removed, and a reparse point is removed as itself, never followed. A create or a probe
+//!   that cleans up after itself removes the object it made through its own handle, never by name.
 //! - Bounds: an entry name longer than 32,767 UTF-16 code units, or with a NUL, is refused before
 //!   anything is made of it. Each listed record is checked against the listing buffer, and its
 //!   name against the same bound, before the name is copied.
@@ -19,7 +27,7 @@
 //! This file depends only on `std`, `windows-sys`, [`crate::fileid`], [`EntryKind`] and its
 //! sibling `windows_security`, so an isolated probe can compile and test it with those files.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_void};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -28,25 +36,32 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtOpenFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    NtCreateFile, NtOpenFile,
 };
 use windows_sys::Win32::Foundation::{
-    ERROR_BAD_LENGTH, ERROR_DIRECTORY, ERROR_FILENAME_EXCED_RANGE, ERROR_INVALID_NAME,
-    ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, OBJ_CASE_INSENSITIVE,
+    ERROR_BAD_LENGTH, ERROR_DIRECTORY, ERROR_DIRECTORY_NOT_SUPPORTED, ERROR_FILENAME_EXCED_RANGE,
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
+    ERROR_NOT_SUPPORTED, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, OBJ_CASE_INSENSITIVE,
     OBJ_DONT_REPARSE, RtlNtStatusToDosError, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
 };
+use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_LIST_DIRECTORY,
+    CreateFileW, DELETE, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileFullDirectoryInfo, FileFullDirectoryRestartInfo, GetFileInformationByHandleEx,
-    OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
+    FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
+    SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 use super::windows_security::{
-    NATIVE_PATH_MAX, attribute_tag, final_path, is_reparse_refusal, native, os_error,
-    parent_changed, reparse_point,
+    NATIVE_PATH_MAX, ObjectKind, PrivateDescriptor, attribute_tag, final_path, is_reparse_refusal,
+    native, not_made, not_private, os_error, parent_changed, privacy, reparse_point,
 };
 use crate::fileid::FileId;
 use crate::pio::EntryKind;
@@ -76,11 +91,28 @@ const _: () = assert!(std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName) == NAME
 /// (`IsReparseTagNameSurrogate`).
 const NAME_SURROGATE: u32 = 0x2000_0000;
 
+/// The rights of a new file's handle: read and write it, read its attributes and security, flush
+/// it, and remove it again (`DELETE`) if it is not private.
+const NEW_FILE_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE;
+
+/// The rights of a handle that removes an entry: remove it, and read its attributes.
+const REMOVE_ACCESS: u32 = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
 #[cfg(test)]
 thread_local! {
-    /// Test hook: runs after an entry is opened and before the opened object is checked.
+    /// Test hook: runs after an entry is opened or made and before the object is checked.
     static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test hook [`AFTER_OPEN`], if one is set; does nothing outside tests.
+fn after_open() {
+    #[cfg(test)]
+    AFTER_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook()
+        }
+    });
 }
 
 /// Opens the directory `path` for the `*_at` calls below. Links in `path` are followed: the
@@ -275,6 +307,170 @@ fn records<E: From<io::Error>>(
     }
 }
 
+/// Creates the new file `name` in the open directory `dir`, for reading and writing, private to
+/// this account from the moment it exists: it is made relative to `dir` with this account's
+/// private descriptor (on Unix, mode 0o600 less the umask). Anything at `name`, a reparse point
+/// included, fails with `ErrorKind::AlreadyExists` and is never followed. The new file's privacy
+/// is then read from its handle; a file that is not private (a file system that keeps no
+/// security) is removed through that handle, never by name, and the create fails, `{path} is not
+/// private to this account`.
+pub fn create_private_at(dir: &File, name: &OsStr) -> io::Result<File> {
+    create_private(dir, name, ObjectKind::File)
+}
+
+/// Creates the directory `name` in the open directory `dir`, private to this account from the
+/// moment it exists, as [`create_private_at`] makes a file: an existing `name` is
+/// `ErrorKind::AlreadyExists`, and a directory that is not private is removed through the handle
+/// that made it. The handle is then closed (on Unix, mkdir returns none).
+pub fn create_private_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    create_private(dir, name, ObjectKind::Dir).map(drop)
+}
+
+/// Whether [`create_private_dir_at`] makes a private object here (the question that the umask
+/// asks on Unix, where it can take bits from mode 0o700; Windows has no umask): it creates the
+/// new file `name` in the open directory `dir` with this account's private descriptor (anything
+/// at `name`, a reparse point included, fails with `ErrorKind::AlreadyExists` and is never
+/// followed), reads whether it is private from the file's handle, and removes the file again
+/// through that handle, so what another process puts at `name` meanwhile stays.
+pub fn umask_keeps_0700_at(dir: &File, name: &OsStr) -> io::Result<bool> {
+    let units = entry_name(dir, name)?;
+    let sd = PrivateDescriptor::of_this_account(ObjectKind::File)?;
+    let probe = create_entry(
+        dir,
+        &units,
+        FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE,
+        // no FILE_NON_DIRECTORY_FILE: with it, a directory at `name` is ACCESS_DENIED, not a
+        // collision; FILE_CREATE without FILE_DIRECTORY_FILE makes a file
+        0,
+        &sd,
+    )
+    .map_err(|status| status_error(dir, name, status))?;
+    after_open();
+    let private = privacy(&probe).map(|p| p.mine && p.private);
+    let removed = delete_open(&probe);
+    drop(probe);
+    let private = private?;
+    removed?;
+    Ok(private)
+}
+
+/// Removes the entry `name` (not a directory) from the open directory `dir`. The entry itself is
+/// opened, never followed, and the object opened is removed through that handle: a reparse point
+/// (a link, a junction) is removed as itself, and what another process puts at `name` after the
+/// open stays. A directory that is not a link is refused (`ERROR_DIRECTORY_NOT_SUPPORTED`).
+pub fn remove_file_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    let units = entry_name(dir, name)?;
+    let entry = open_entry(dir, &units, REMOVE_ACCESS, 0)
+        .map_err(|status| status_error(dir, name, status))?;
+    after_open();
+    let info = attribute_tag(entry.as_raw_handle())?;
+    if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        && kind_from(info.FileAttributes, info.ReparseTag) != EntryKind::Link
+    {
+        return Err(os_error(ERROR_DIRECTORY_NOT_SUPPORTED));
+    }
+    delete_open(&entry)
+}
+
+/// Removes the empty directory `name` from the open directory `dir`. The entry itself is opened as
+/// a directory, never followed, and removed through that handle, as in [`remove_file_at`]. A
+/// reparse point at `name` is refused (`{path} is a reparse point; rdy will not follow it`, or
+/// `ERROR_DIRECTORY` for one that is not a directory), with an error that [`is_link_refusal`]
+/// accepts; a directory that is not empty stays (`ERROR_DIR_NOT_EMPTY`).
+pub fn remove_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    let units = entry_name(dir, name)?;
+    let entry = open_entry(dir, &units, REMOVE_ACCESS, FILE_DIRECTORY_FILE)
+        .map_err(|status| status_error(dir, name, status))?;
+    after_open();
+    if attribute_tag(entry.as_raw_handle())?.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(reparse_point(&entry_path(dir, name)));
+    }
+    delete_open(&entry)
+}
+
+/// [`create_private_at`] and [`create_private_dir_at`]: makes `name` in `dir` as a new object of
+/// `kind` with this account's private descriptor, then checks from its handle that it is private,
+/// or removes it through that handle.
+fn create_private(dir: &File, name: &OsStr, kind: ObjectKind) -> io::Result<File> {
+    let units = entry_name(dir, name)?;
+    let sd = PrivateDescriptor::of_this_account(kind)
+        .map_err(|e| not_made(&entry_path(dir, name), e))?;
+    let (access, options) = match kind {
+        // options 0, as in umask_keeps_0700_at: a directory at `name` is a collision
+        ObjectKind::File => (NEW_FILE_ACCESS, 0),
+        ObjectKind::Dir => (DIR_ACCESS | DELETE, FILE_DIRECTORY_FILE),
+    };
+    let made = create_entry(dir, &units, access, options, &sd)
+        .map_err(|status| status_error(dir, name, status))?;
+    after_open();
+    match privacy(&made) {
+        Ok(p) if p.mine && p.private => Ok(made),
+        checked => {
+            // the object this call made, through its own handle: never what is at `name` now
+            let _ = delete_open(&made);
+            let path = entry_path(dir, name);
+            Err(match checked {
+                Err(e) => not_made(&path, e),
+                Ok(_) => not_private(&path),
+            })
+        }
+    }
+}
+
+/// Removes the object that `f` is open on (with `DELETE`), whatever name it has now: its entry is
+/// unlinked when the last handle with the delete set is closed, at once with POSIX semantics,
+/// even while other handles keep the object open. The owner's read-only attribute does not stop
+/// it, as a file's own mode does not stop unlink on Unix. A file system without the POSIX form
+/// (`ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED` or `ERROR_INVALID_FUNCTION`) gets the
+/// classic form, whose failure is the error. A directory that is not empty is
+/// `ERROR_DIR_NOT_EMPTY`.
+#[allow(unsafe_code)]
+fn delete_open(f: &File) -> io::Result<()> {
+    let ex = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    // SAFETY: `f` is open for the call; `ex` is a valid FILE_DISPOSITION_INFO_EX of the size
+    // passed, which the call only reads.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&raw const ex).cast::<c_void>(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    let no_posix_form = [
+        ERROR_INVALID_PARAMETER,
+        ERROR_NOT_SUPPORTED,
+        ERROR_INVALID_FUNCTION,
+    ]
+    .iter()
+    .any(|&code| e.raw_os_error() == Some(code as i32));
+    if !no_posix_form {
+        return Err(e);
+    }
+    let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: as above, with a valid FILE_DISPOSITION_INFO.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const classic).cast::<c_void>(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 const SLASH: u16 = b'/' as u16;
 const BACKSLASH: u16 = b'\\' as u16;
 const COLON: u16 = b':' as u16;
@@ -285,12 +481,7 @@ fn open_at(dir: &File, name: &OsStr, access: u32, options: u32) -> io::Result<Fi
     let units = entry_name(dir, name)?;
     let f = open_entry(dir, &units, access, options)
         .map_err(|status| status_error(dir, name, status))?;
-    #[cfg(test)]
-    AFTER_OPEN.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook()
-        }
-    });
+    after_open();
     if attribute_tag(f.as_raw_handle())?.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(reparse_point(&entry_path(dir, name)));
     }
@@ -303,6 +494,76 @@ fn open_at(dir: &File, name: &OsStr, access: u32, options: u32) -> io::Result<Fi
 /// failed open is its NTSTATUS.
 #[allow(unsafe_code)]
 fn open_entry(dir: &File, units: &[u16], access: u32, options: u32) -> Result<File, NTSTATUS> {
+    in_dir(
+        dir,
+        units,
+        std::ptr::null(),
+        |attributes, handle, status| {
+            // SAFETY: `attributes`, `handle` and `status` are valid for the call, and what
+            // `attributes` points to lives for it (see `in_dir`); NtOpenFile only reads the name.
+            unsafe {
+                NtOpenFile(
+                    handle,
+                    access,
+                    attributes,
+                    status,
+                    SHARE_ALL,
+                    options | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                )
+            }
+        },
+    )
+}
+
+/// The new entry `units` (one checked entry name) of the open directory `dir`, made relative to
+/// `dir` (`FILE_CREATE`: anything at the name, a reparse point included, is
+/// `STATUS_OBJECT_NAME_COLLISION` and is never opened) with the security descriptor `sd`, and
+/// opened with `access`, sharing everything, for synchronous I/O. A failed create is its
+/// NTSTATUS.
+#[allow(unsafe_code)]
+fn create_entry(
+    dir: &File,
+    units: &[u16],
+    access: u32,
+    options: u32,
+    sd: &PrivateDescriptor,
+) -> Result<File, NTSTATUS> {
+    in_dir(
+        dir,
+        units,
+        sd.as_ptr().cast_const().cast(),
+        |attributes, handle, status| {
+            // SAFETY: as in `open_entry`; no allocation size or extended attributes are passed, and
+            // the descriptor lives as long as `sd`, for the call.
+            unsafe {
+                NtCreateFile(
+                    handle,
+                    access,
+                    attributes,
+                    status,
+                    std::ptr::null(),
+                    FILE_ATTRIBUTE_NORMAL,
+                    SHARE_ALL,
+                    FILE_CREATE,
+                    options | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    std::ptr::null(),
+                    0,
+                )
+            }
+        },
+    )
+}
+
+/// Calls `call` with the object attributes of the entry `units` of `dir` (no reparse point
+/// followed on the way, case-insensitive, with the security descriptor `sd` or none), a handle
+/// slot and a status block, all of which live for the call; the handle it fills is the result.
+#[allow(unsafe_code)]
+fn in_dir(
+    dir: &File,
+    units: &[u16],
+    sd: *const SECURITY_DESCRIPTOR,
+    call: impl FnOnce(&OBJECT_ATTRIBUTES, &mut HANDLE, &mut IO_STATUS_BLOCK) -> NTSTATUS,
+) -> Result<File, NTSTATUS> {
     // an entry name is at most NATIVE_PATH_MAX units, so its length in bytes fits in a u16
     let bytes = (units.len() * 2) as u16;
     let name = UNICODE_STRING {
@@ -315,23 +576,12 @@ fn open_entry(dir: &File, units: &[u16], access: u32, options: u32) -> Result<Fi
         RootDirectory: dir.as_raw_handle(),
         ObjectName: &name,
         Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
-        SecurityDescriptor: std::ptr::null(),
+        SecurityDescriptor: sd,
         SecurityQualityOfService: std::ptr::null(),
     };
     let mut handle: HANDLE = std::ptr::null_mut();
     let mut status = IO_STATUS_BLOCK::default();
-    // SAFETY: `dir` is open for the call; `name` points at `units`, which lives for the call and
-    // which NtOpenFile only reads; `attributes`, `handle` and `status` are valid for the call.
-    let r = unsafe {
-        NtOpenFile(
-            &mut handle,
-            access,
-            &attributes,
-            &mut status,
-            SHARE_ALL,
-            options | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
-        )
-    };
+    let r = call(&attributes, &mut handle, &mut status);
     if r < 0 || handle.is_null() {
         return Err(r);
     }
@@ -504,6 +754,299 @@ mod tests {
             Ok(true)
         })?;
         Ok(names)
+    }
+
+    /// Runs `hook` after the next entry is opened or made on this thread, before it is checked,
+    /// then removes it.
+    fn on_next_open(hook: impl FnMut() + 'static) {
+        AFTER_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    fn no_hook() {
+        AFTER_OPEN.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// Grants every account full access to `path`.
+    fn grant_everyone(path: &Path) {
+        let out = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/grant", "*S-1-1-0:(F)"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    /// The owner and DACL of what `path` names, read without following it.
+    fn security_at(path: &Path) -> super::super::Security {
+        let f = OpenOptions::new()
+            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .unwrap();
+        super::super::security_of(&f).unwrap()
+    }
+
+    /// The security of a private object of `kind` of this account.
+    fn private_security(kind: ObjectKind) -> super::super::Security {
+        let me = super::super::current_account().unwrap();
+        super::super::Security {
+            owner: Some(me),
+            protected: true,
+            dacl: Some(vec![super::super::Ace::private(me, kind)]),
+        }
+    }
+
+    fn names(dir: &File) -> Vec<String> {
+        let mut names = vec![];
+        for_each_entry::<io::Error>(dir, |n| {
+            names.push(n.to_string_lossy().into_owned());
+            Ok(())
+        })
+        .unwrap();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn wx5b_native_seam_exports_keep_their_contract() {
+        let _: fn(&File, &OsStr) -> io::Result<File> = create_private_at;
+        let _: fn(&File, &OsStr) -> io::Result<()> = create_private_dir_at;
+        let _: fn(&File, &OsStr) -> io::Result<bool> = umask_keeps_0700_at;
+        let _: fn(&File, &OsStr) -> io::Result<()> = remove_file_at;
+        let _: fn(&File, &OsStr) -> io::Result<()> = remove_dir_at;
+        // a new file's handle reads, writes, flushes, reads its security and takes WRITE_DAC
+        let d = tempfile::tempdir().unwrap();
+        let dir = open_dir(d.path()).unwrap();
+        let mut f = create_private_at(&dir, OsStr::new("f")).unwrap();
+        io::Write::write_all(&mut f, b"bytes").unwrap();
+        f.sync_all().unwrap();
+        let mut back = String::new();
+        io::Seek::rewind(&mut f).unwrap();
+        io::Read::read_to_string(&mut f, &mut back).unwrap();
+        assert_eq!(back, "bytes");
+        super::super::make_private_file(&f).unwrap();
+        assert!(super::super::privacy(&f).unwrap().private);
+        // an ordinary existing name is AlreadyExists, the OS's error 183
+        let e = create_private_at(&dir, OsStr::new("f")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(183), "{e}");
+        // a directory is not removed as a file
+        create_private_dir_at(&dir, OsStr::new("sub")).unwrap();
+        let e = remove_file_at(&dir, OsStr::new("sub")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}");
+        assert_eq!(names(&dir), ["f", "sub"]);
+    }
+
+    #[test]
+    fn wx5b_native_a_swap_before_cleanup_keeps_the_replacement() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().to_path_buf();
+        let dir = open_dir(&p).unwrap();
+
+        // a file is opened for removal, then moved aside and replaced before it is removed: the
+        // object opened is removed, and the replacement stays
+        fs::write(p.join("f"), b"mine").unwrap();
+        let mine = id(&p.join("f"));
+        let at = p.clone();
+        on_next_open(move || {
+            fs::rename(at.join("f"), at.join("f-aside")).unwrap();
+            fs::write(at.join("f"), b"theirs").unwrap();
+        });
+        remove_file_at(&dir, OsStr::new("f")).unwrap();
+        no_hook();
+        assert_eq!(names(&dir), ["f"]);
+        assert_eq!(fs::read(p.join("f")).unwrap(), b"theirs");
+        assert_ne!(id(&p.join("f")), mine);
+        fs::remove_file(p.join("f")).unwrap();
+
+        // the same for a directory
+        fs::create_dir(p.join("s")).unwrap();
+        let at = p.clone();
+        on_next_open(move || {
+            fs::rename(at.join("s"), at.join("s-aside")).unwrap();
+            fs::create_dir(at.join("s")).unwrap();
+            fs::write(at.join("s").join("theirs"), b"theirs").unwrap();
+        });
+        remove_dir_at(&dir, OsStr::new("s")).unwrap();
+        no_hook();
+        assert_eq!(names(&dir), ["s"]);
+        assert_eq!(fs::read(p.join("s").join("theirs")).unwrap(), b"theirs");
+        fs::remove_dir_all(p.join("s")).unwrap();
+
+        // a directory is opened for removal, then swapped for a junction: the junction's target
+        // is never emptied or removed
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("keep"), b"keep").unwrap();
+        fs::create_dir(p.join("s")).unwrap();
+        let (at, target) = (p.clone(), elsewhere.path().to_path_buf());
+        on_next_open(move || {
+            fs::rename(at.join("s"), at.join("s-aside")).unwrap();
+            junction(&target, &at.join("s"));
+        });
+        remove_dir_at(&dir, OsStr::new("s")).unwrap();
+        no_hook();
+        assert_eq!(names(&dir), ["s"]);
+        assert_eq!(
+            entry_kind_at(&dir, OsStr::new("s")).unwrap(),
+            EntryKind::Link
+        );
+        assert_eq!(fs::read(elsewhere.path().join("keep")).unwrap(), b"keep");
+        remove_file_at(&dir, OsStr::new("s")).unwrap();
+        assert!(names(&dir).is_empty());
+
+        // a new file has the private descriptor at the moment it exists; it is then opened to
+        // every account and replaced at its name before the create checks it: the create fails,
+        // removes the file it made, and leaves the replacement
+        let at = p.clone();
+        on_next_open(move || {
+            assert_eq!(
+                security_at(&at.join("t")),
+                private_security(ObjectKind::File),
+                "at creation"
+            );
+            fs::rename(at.join("t"), at.join("t-aside")).unwrap();
+            grant_everyone(&at.join("t-aside"));
+            fs::write(at.join("t"), b"theirs").unwrap();
+        });
+        let e = create_private_at(&dir, OsStr::new("t")).unwrap_err();
+        no_hook();
+        let shown = final_path(dir.as_raw_handle()).unwrap().join("t");
+        assert_eq!(
+            (e.kind(), e.to_string()),
+            (
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not private to this account", shown.display())
+            )
+        );
+        assert_eq!(names(&dir), ["t"]);
+        assert_eq!(fs::read(p.join("t")).unwrap(), b"theirs");
+        fs::remove_file(p.join("t")).unwrap();
+
+        // the same for a new directory
+        let at = p.clone();
+        on_next_open(move || {
+            assert_eq!(
+                security_at(&at.join("t")),
+                private_security(ObjectKind::Dir),
+                "at creation"
+            );
+            fs::rename(at.join("t"), at.join("t-aside")).unwrap();
+            grant_everyone(&at.join("t-aside"));
+            fs::create_dir(at.join("t")).unwrap();
+        });
+        let e = create_private_dir_at(&dir, OsStr::new("t")).unwrap_err();
+        no_hook();
+        assert_eq!(
+            e.to_string(),
+            format!("{} is not private to this account", shown.display())
+        );
+        assert_eq!(names(&dir), ["t"]);
+        fs::remove_dir(p.join("t")).unwrap();
+
+        // the probe file is replaced at its name before it is removed: it is removed through its
+        // own handle, and the replacement stays
+        let at = p.clone();
+        on_next_open(move || {
+            assert_eq!(
+                security_at(&at.join(".probe")),
+                private_security(ObjectKind::File)
+            );
+            fs::rename(at.join(".probe"), at.join(".probe-aside")).unwrap();
+            fs::write(at.join(".probe"), b"theirs").unwrap();
+        });
+        assert!(umask_keeps_0700_at(&dir, OsStr::new(".probe")).unwrap());
+        no_hook();
+        assert_eq!(names(&dir), [".probe"]);
+        assert_eq!(fs::read(p.join(".probe")).unwrap(), b"theirs");
+
+        // the probe answers no when what it made is not private, and still removes only it
+        fs::remove_file(p.join(".probe")).unwrap();
+        let at = p.clone();
+        on_next_open(move || grant_everyone(&at.join(".probe")));
+        assert!(!umask_keeps_0700_at(&dir, OsStr::new(".probe")).unwrap());
+        no_hook();
+        assert!(names(&dir).is_empty());
+    }
+
+    #[test]
+    fn wx5b_native_every_reparse_tag_at_cleanup_is_never_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("victim"), b"keep").unwrap();
+        fs::create_dir(elsewhere.path().join("vdir")).unwrap();
+        fs::write(elsewhere.path().join("vdir").join("inside"), b"keep").unwrap();
+        let p = d.path();
+        let make = |p: &Path| {
+            junction(&elsewhere.path().join("vdir"), &p.join("junction"));
+            symlink_dir(elsewhere.path().join("vdir"), p.join("dirlink")).unwrap();
+            symlink_file(elsewhere.path().join("victim"), p.join("filelink")).unwrap();
+            symlink_file(p.join("nowhere"), p.join("dangling")).unwrap();
+            fs::write(p.join("customfile"), b"").unwrap();
+            set_custom_tag(&p.join("customfile"), 0x0000_1234);
+            fs::create_dir(p.join("customdir")).unwrap();
+            set_custom_tag(&p.join("customdir"), 0x0000_1234);
+        };
+        make(p);
+        let dir = open_dir(p).unwrap();
+        let intact = || {
+            assert_eq!(fs::read(elsewhere.path().join("victim")).unwrap(), b"keep");
+            assert_eq!(
+                fs::read(elsewhere.path().join("vdir").join("inside")).unwrap(),
+                b"keep"
+            );
+            assert!(!p.join("nowhere").exists());
+        };
+        let all = [
+            "customdir",
+            "customfile",
+            "dangling",
+            "dirlink",
+            "filelink",
+            "junction",
+        ];
+        for name in all {
+            let name = OsStr::new(name);
+            // a create at the entry is AlreadyExists and never reaches what it names
+            for e in [
+                create_private_at(&dir, name).unwrap_err(),
+                create_private_dir_at(&dir, name).unwrap_err(),
+                umask_keeps_0700_at(&dir, name).unwrap_err(),
+            ] {
+                assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{name:?}: {e}");
+            }
+            // a directory removal refuses every reparse point, with the exact text where it
+            // opened one as a directory
+            let e = remove_dir_at(&dir, name).unwrap_err();
+            assert!(is_link_refusal(&e), "{name:?}: {e}");
+            if e.raw_os_error() != Some(ERROR_DIRECTORY as i32) {
+                assert_eq!(
+                    e.to_string(),
+                    format!(
+                        "{} is a reparse point; rdy will not follow it",
+                        final_path(dir.as_raw_handle())
+                            .unwrap()
+                            .join(name)
+                            .display()
+                    )
+                );
+            }
+            intact();
+        }
+        assert_eq!(names(&dir), all);
+        // a file removal removes each link and the reparse file itself; a directory that is not
+        // a link stays
+        let e = remove_file_at(&dir, OsStr::new("customdir")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}");
+        for name in ["customfile", "dangling", "dirlink", "filelink", "junction"] {
+            remove_file_at(&dir, OsStr::new(name)).unwrap();
+            intact();
+        }
+        assert_eq!(names(&dir), ["customdir"]);
+        let vdir = open_dir(&elsewhere.path().join("vdir")).unwrap();
+        assert_eq!(names(&vdir), ["inside"]);
+        assert_eq!(
+            names(&open_dir(elsewhere.path()).unwrap()),
+            ["vdir", "victim"]
+        );
     }
 
     #[test]

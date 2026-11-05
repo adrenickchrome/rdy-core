@@ -3,8 +3,8 @@
 //! compiles without the platform call, and no answer is made up. A child module of this one
 //! replaces each placeholder with its implementation: `windows_io` makes the positioned reads and
 //! writes, hole punches and allocated-bytes queries; `windows_security` makes private objects and
-//! no-follow opens; `windows_dir` makes the opens, entry kinds and listings anchored to an open
-//! directory.
+//! no-follow opens; `windows_dir` makes the opens, entry kinds, listings, creates and removals
+//! anchored to an open directory.
 
 pub use windows_io::*;
 // a sibling file: this file is not a mod.rs, so a plain `mod` would look in pio/windows/
@@ -20,7 +20,7 @@ pub use windows_dir::*;
 mod windows_dir;
 
 compile_error!(
-    "rdy_store::pio has no Windows implementation yet of creates and removals anchored to an open directory (FW-XP1 Phase 4)"
+    "rdy_store::pio has no Windows implementation yet of permission-mode changes anchored to an open directory (set_mode_at) (FW-XP1 Phase 4)"
 );
 
 compile_error!(
