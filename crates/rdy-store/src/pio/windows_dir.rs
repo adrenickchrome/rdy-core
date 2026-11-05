@@ -1,5 +1,5 @@
 //! The Windows calls of [`crate::pio`] in an open directory (FW-XP1 Phase 4): opens, entry kinds,
-//! listings, creates, removals and renames anchored to a directory handle.
+//! listings, creates, removals, renames and child processes anchored to a directory handle.
 //!
 //! - The directory handle is the verified ancestor. Every entry is opened relative to it
 //!   (`NtOpenFile` with the handle as the root directory and one entry name), never through a
@@ -27,6 +27,10 @@
 //!   which holds no reparse point, and it is checked before and after the move: resolved again, it
 //!   must name the pinned directory (`the directory holding {path} changed during the operation`).
 //!   The path is used verbatim (`\\?\`), so no name is changed on the way (a trailing dot stays).
+//! - A child's start directory and its program are paths that the child resolves when it starts,
+//!   after the spawn has returned. So `start_in_dir` and `program_in_dir` pin the directory as a
+//!   rename does, check its path, and give those verbatim paths, and the caller holds the pin
+//!   until the child is waited.
 //! - Bounds: an entry name longer than 32,767 UTF-16 code units, or with a NUL, is refused before
 //!   anything is made of it. Each listed record is checked against the listing buffer, and its
 //!   name against the same bound, before the name is copied.
@@ -427,6 +431,68 @@ pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
     after_open();
     moved?;
     pinned.check()
+}
+
+/// What [`start_in_dir`] and [`program_in_dir`] give the caller to hold until the child is
+/// waited: a pin of the directory ([`PinnedDir`]). A child resolves its start directory and its
+/// program from their paths when it starts, after the spawn has returned; while the pin is held,
+/// nobody can move or remove the directory or a directory above it, so those paths still name it.
+#[must_use = "hold it until the child is waited: on Windows it keeps the directory where it is"]
+pub struct StartPin {
+    /// Held: while it is open, the directory and those above it stay where they are.
+    pinned: PinnedDir,
+}
+
+impl std::fmt::Debug for StartPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StartPin").field(&self.pinned.shown).finish()
+    }
+}
+
+/// The path of a program in an open directory, from [`program_in_dir`], and the pin that keeps it
+/// naming that directory's entry while the caller holds it.
+#[must_use = "hold it until the child is waited: on Windows it keeps the directory where it is"]
+#[derive(Debug)]
+pub struct ProgramInDir {
+    path: PathBuf,
+    _pin: StartPin,
+}
+
+impl ProgramInDir {
+    /// The program's absolute path for `Command::new`: the verbatim path of the entry in the
+    /// pinned directory, so it is never looked up from this process's directory or the search
+    /// path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Makes the child that `cmd` spawns start in the open directory `dir`. A child's start directory
+/// is a path that the child resolves when it starts, after the spawn has returned. So the
+/// directory is pinned ([`PinnedDir`]), its final path is checked to name it, and the child's
+/// start directory is that verbatim path. The caller holds the returned [`StartPin`] until the
+/// child is waited, and may close `dir`. A program in `dir` is named by [`program_in_dir`]: a
+/// relative program (`.\name`) would be looked up from this process's directory.
+pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<StartPin> {
+    let pinned = PinnedDir::of(dir)?;
+    cmd.current_dir(OsString::from_wide(&pinned.verbatim));
+    Ok(StartPin { pinned })
+}
+
+/// The absolute path of the program `name`, one entry of the open directory `dir`, for a child
+/// that [`start_in_dir`] starts in `dir`. The name is checked first, as for the opens, and the
+/// directory is pinned while the caller holds the result, so the path keeps naming the entry
+/// of the directory that `dir` opened. A path longer than 32,767 units is refused before it is
+/// made.
+pub fn program_in_dir(dir: &File, name: &OsStr) -> io::Result<ProgramInDir> {
+    let units = entry_name(dir, name)?;
+    let pinned = PinnedDir::of(dir)?;
+    let mut path = pinned.entry(name, &units)?;
+    path.pop();
+    Ok(ProgramInDir {
+        path: PathBuf::from(OsString::from_wide(&path)),
+        _pin: StartPin { pinned },
+    })
 }
 
 /// A directory held so that its path keeps naming it, for a call that needs a path: a new handle
@@ -1045,6 +1111,90 @@ mod tests {
         assert_eq!(e.raw_os_error(), Some(32), "{e}");
         drop(held);
         assert_eq!(names(&dir), ["b-aside", "c"]);
+    }
+
+    #[test]
+    fn wx5c_native_a_child_start_holds_the_pin_until_the_guard_drops() {
+        let _: fn(&mut std::process::Command, &File) -> io::Result<StartPin> = start_in_dir;
+        let _: fn(&File, &OsStr) -> io::Result<ProgramInDir> = program_in_dir;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("top");
+        let p = top.join("p");
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("marker"), b"mine").unwrap();
+        fs::write(p.join("show.cmd"), "@type marker\r\n").unwrap();
+        let dir = open_dir(&p).unwrap();
+        // nothing can move the directory or the one above it, or remove it: the pin's sharing
+        // violation (32) and the open handle's refusal (5)
+        let refused = || {
+            let moved = fs::rename(&p, top.join("p-aside")).unwrap_err();
+            let above = fs::rename(&top, d.path().join("top-aside")).unwrap_err();
+            let removed = fs::remove_dir(&p).unwrap_err();
+            (
+                moved.raw_os_error(),
+                above.raw_os_error(),
+                removed.raw_os_error(),
+            )
+        };
+        let moves = || {
+            fs::rename(&p, top.join("p-aside")).unwrap();
+            fs::rename(top.join("p-aside"), &p).unwrap();
+        };
+        let shown = |out: std::process::Output| {
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        // the start directory and the program are verbatim paths of the pinned directory
+        let program = program_in_dir(&dir, OsStr::new("show.cmd")).unwrap();
+        let mut cmd = std::process::Command::new(program.path());
+        cmd.stdout(std::process::Stdio::piped());
+        let start = start_in_dir(&mut cmd, &dir).unwrap();
+        let want = OsString::from_wide(&verbatim(&final_path(dir.as_raw_handle()).unwrap()));
+        assert_eq!(cmd.get_current_dir().unwrap().as_os_str(), want);
+        assert_eq!(program.path(), Path::new(&want).join("show.cmd"));
+        // a child resolves both paths when it starts, after the spawn has returned: a move right
+        // after the spawn is refused, and the child reads its own marker
+        let child = cmd.spawn().unwrap();
+        assert_eq!(refused(), (Some(32), Some(5), Some(32)));
+        assert_eq!(shown(child.wait_with_output().unwrap()), "mine");
+        // each guard pins the directory until it is dropped
+        drop(start);
+        assert_eq!(refused(), (Some(32), Some(5), Some(32)));
+        drop(program);
+        moves();
+        let mut cmd = std::process::Command::new("cmd");
+        let start = start_in_dir(&mut cmd, &dir).unwrap();
+        assert_eq!(refused(), (Some(32), Some(5), Some(32)));
+        drop(start);
+        moves();
+
+        // a directory that another handle holds open to be moved cannot be pinned: each call
+        // fails with the sharing violation, and the command's start directory is not set
+        let held = OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&p)
+            .unwrap();
+        let mut cmd = std::process::Command::new("cmd");
+        let e = start_in_dir(&mut cmd, &dir).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(32), "{e}");
+        assert_eq!(cmd.get_current_dir(), None);
+        let e = program_in_dir(&dir, OsStr::new("show.cmd")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(32), "{e}");
+        drop(held);
+
+        // a name is checked before the pin, with the opens' texts; so is the native bound
+        let e = program_in_dir(&dir, OsStr::new("a\0b")).unwrap_err();
+        assert!(e.to_string().ends_with("contains a NUL"), "{e}");
+        let long = "n".repeat(32_767 - p.as_os_str().len());
+        let e = program_in_dir(&dir, OsStr::new(&long)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+        assert!(
+            e.to_string().ends_with("exceeds 32767 UTF-16 code units"),
+            "{e}"
+        );
     }
 
     #[test]

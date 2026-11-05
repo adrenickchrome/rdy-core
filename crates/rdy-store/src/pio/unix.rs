@@ -286,12 +286,37 @@ pub fn set_mode_at(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     .map(|_| ())
 }
 
+/// What [`start_in_dir`] and [`program_in_dir`] give the caller to hold until the child is
+/// waited. On Unix it holds nothing: the child changes into the directory through its own copy
+/// of the handle, so no path needs to keep naming it.
+#[must_use = "hold it until the child is waited: on Windows it keeps the directory where it is"]
+#[derive(Debug)]
+pub struct StartPin(());
+
+/// The path of a program in an open directory, from [`program_in_dir`], and what the caller
+/// holds while a child runs it.
+#[must_use = "hold it until the child is waited: on Windows it keeps the directory where it is"]
+#[derive(Debug)]
+pub struct ProgramInDir {
+    path: std::path::PathBuf,
+    _pin: StartPin,
+}
+
+impl ProgramInDir {
+    /// The program's path for `Command::new`: on Unix `./name`, which a child that
+    /// [`start_in_dir`] starts in the directory finds there.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Makes the child that `cmd` spawns start in the open directory `dir`: the child changes into
 /// it (`fchdir`) before its exec, so a path to `dir` that changes after `dir` was opened cannot
-/// move the child elsewhere. A relative program path (`./name`) is found in `dir`. `cmd` keeps
-/// its own copy of the handle, so the caller may close `dir`.
+/// move the child elsewhere. A program from [`program_in_dir`] is found in `dir`. `cmd` keeps its
+/// own copy of the handle, so the caller may close `dir`. The caller holds the returned
+/// [`StartPin`] until the child is waited.
 #[allow(unsafe_code)]
-pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<()> {
+pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<StartPin> {
     use std::os::unix::process::CommandExt;
     let dir = dir.try_clone()?;
     // SAFETY: the closure runs in the child between fork and exec. It calls only `fchdir`,
@@ -299,7 +324,17 @@ pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<(
     unsafe {
         cmd.pre_exec(move || cvt(libc::fchdir(dir.as_raw_fd())).map(|_| ()));
     }
-    Ok(())
+    Ok(StartPin(()))
+}
+
+/// The path of the program `name`, one entry of the open directory `dir`, for a child that
+/// [`start_in_dir`] starts in `dir`: `./name`. The name is checked first, as for the opens.
+pub fn program_in_dir(_dir: &File, name: &OsStr) -> io::Result<ProgramInDir> {
+    entry_name(name)?;
+    Ok(ProgramInDir {
+        path: Path::new(".").join(name),
+        _pin: StartPin(()),
+    })
 }
 
 /// Renames the entry `from` over the entry `to`, both in the open directory `dir`.
@@ -742,7 +777,8 @@ mod tests {
         let _: fn(&File, &OsStr) -> io::Result<()> = remove_file_at;
         let _: fn(&File, &OsStr) -> io::Result<()> = remove_dir_at;
         let _: fn(&File, &OsStr, u32) -> io::Result<()> = set_mode_at;
-        let _: fn(&mut std::process::Command, &File) -> io::Result<()> = start_in_dir;
+        let _: fn(&mut std::process::Command, &File) -> io::Result<StartPin> = start_in_dir;
+        let _: fn(&File, &OsStr) -> io::Result<ProgramInDir> = program_in_dir;
         let _: fn(&File, &OsStr, &OsStr) -> io::Result<()> = rename_at;
         let _: fn(&File) -> io::Result<bool> = is_empty_dir;
         #[allow(clippy::type_complexity)]
@@ -946,7 +982,7 @@ mod tests {
         fs::write(d.path().join("moved/name"), b"#!/bin/sh\npwd -P\n").unwrap();
         set_mode(&d.path().join("moved/name"), 0o700).unwrap();
         let mut cmd = std::process::Command::new("./name");
-        start_in_dir(&mut cmd, &here).unwrap();
+        let _start = start_in_dir(&mut cmd, &here).unwrap();
         drop(here);
         let out = cmd.output().unwrap();
         assert!(out.status.success(), "{out:?}");

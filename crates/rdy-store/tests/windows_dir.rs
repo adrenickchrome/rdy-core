@@ -1024,60 +1024,124 @@ fn wx5c_start_in_dir_uses_the_verified_directory() {
     fs::create_dir(&p).unwrap();
     fs::write(p.join("marker"), b"mine").unwrap();
     let real = root.path().join("p-moved");
-    // a program in the directory, started by a relative name
+    // a program in the directory, started by its name in the directory
     #[cfg(unix)]
-    let (program, script) = ("./show", "#!/bin/sh\ncat marker\n");
+    let (name, script) = ("show", "#!/bin/sh\ncat marker\n");
     #[cfg(windows)]
-    let (program, script) = (".\\show.cmd", "@type marker\r\n");
-    let program_file = Path::new(program).file_name().unwrap().to_owned();
-    fs::write(p.join(&program_file), script).unwrap();
+    let (name, script) = ("show.cmd", "@type marker\r\n");
+    let name = OsStr::new(name);
+    fs::write(p.join(name), script).unwrap();
     #[cfg(unix)]
-    fs::set_permissions(p.join(&program_file), pio::permissions(0o755)).unwrap();
+    fs::set_permissions(p.join(name), pio::permissions(0o755)).unwrap();
     // the decoy that takes the directory's path, with its own marker and program
     let decoy = |at: &Path| {
         fs::create_dir(at).unwrap();
         fs::write(at.join("marker"), b"theirs").unwrap();
         // the decoy's program shows its own marker: a start in the decoy shows "theirs"
-        fs::write(at.join(&program_file), script).unwrap();
+        fs::write(at.join(name), script).unwrap();
         #[cfg(unix)]
-        fs::set_permissions(at.join(&program_file), pio::permissions(0o755)).unwrap();
+        fs::set_permissions(at.join(name), pio::permissions(0o755)).unwrap();
     };
     let shown = |cmd: &mut std::process::Command| {
         let out = cmd.output().unwrap();
         assert!(out.status.success(), "{out:?}");
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
+    // A swap of a path while the pins are held: on Unix it lands; on Windows the pins refuse it,
+    // the directory itself (a sharing violation) and a directory above it (access denied) alike.
+    let swap = |from: &Path, to: &Path| -> bool {
+        match fs::rename(from, to) {
+            Ok(()) => {
+                if cfg!(windows) {
+                    panic!("{} moved while it was pinned", from.display());
+                }
+                true
+            }
+            Err(e) => {
+                if cfg!(unix) {
+                    panic!("{}: {e}", from.display());
+                }
+                assert!(matches!(e.raw_os_error(), Some(32 | 5)), "{e}");
+                false
+            }
+        }
+    };
 
-    // the directory moves before the call, and another one takes its path
+    // the directory moves before the calls, and another one takes its path
     let dir = pio::open_dir(&p).unwrap();
     fs::rename(&p, &real).unwrap();
     decoy(&p);
-    let mut cmd = std::process::Command::new(program);
-    pio::start_in_dir(&mut cmd, &dir).unwrap();
+    let program = pio::program_in_dir(&dir, name).unwrap();
+    #[cfg(unix)]
+    assert_eq!(program.path(), Path::new("./show"));
+    #[cfg(windows)]
+    assert!(
+        program.path().is_absolute() && program.path().ends_with("p-moved/show.cmd"),
+        "{}",
+        program.path().display()
+    );
+    let mut cmd = std::process::Command::new(program.path());
+    let start = pio::start_in_dir(&mut cmd, &dir).unwrap();
     assert_eq!(shown(&mut cmd), "mine");
+    drop((start, program));
 
-    // the path changes after the call and before the start: the child still starts in the
-    // directory the handle opened, and the caller may close its handle first
+    // the path changes after the calls and before the start, and the caller closed its handle
+    // first: the child still starts in the directory the handle opened, and runs its program
     fs::remove_dir_all(&p).unwrap();
     fs::rename(&real, &p).unwrap();
-    let mut cmd = std::process::Command::new(program);
-    pio::start_in_dir(&mut cmd, &dir).unwrap();
+    let program = pio::program_in_dir(&dir, name).unwrap();
+    let mut cmd = std::process::Command::new(program.path());
+    let start = pio::start_in_dir(&mut cmd, &dir).unwrap();
     drop(dir);
-    fs::rename(&p, &real).unwrap();
-    decoy(&p);
+    let at = if swap(&p, &real) {
+        decoy(&p);
+        real.clone()
+    } else {
+        p.clone()
+    };
+    // a directory above it moves (on Windows, refused)
+    let above = root.path().with_extension("above");
+    if swap(root.path(), &above) {
+        fs::rename(&above, root.path()).unwrap();
+    }
     assert_eq!(shown(&mut cmd), "mine");
-    // the path is a link to the decoy when the child starts
+    drop((start, program));
+
+    // the path is a link to a decoy when the child starts
     let decoy_dir = root.path().join("decoy");
-    fs::rename(&p, &decoy_dir).unwrap();
-    let dir = pio::open_dir(&real).unwrap();
-    let mut cmd = std::process::Command::new(program);
-    pio::start_in_dir(&mut cmd, &dir).unwrap();
-    fs::rename(&real, &p).unwrap();
-    link_dir(&decoy_dir, &real);
+    if at == real {
+        fs::rename(&p, &decoy_dir).unwrap();
+    } else {
+        decoy(&decoy_dir);
+    }
+    let dir = pio::open_dir(&at).unwrap();
+    let program = pio::program_in_dir(&dir, name).unwrap();
+    let mut cmd = std::process::Command::new(program.path());
+    let start = pio::start_in_dir(&mut cmd, &dir).unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    if swap(&at, &elsewhere) {
+        link_dir(&decoy_dir, &at);
+    }
     assert_eq!(shown(&mut cmd), "mine");
     // the same command starts again in the same directory
     assert_eq!(shown(&mut cmd), "mine");
     assert_eq!(fs::read(decoy_dir.join("marker")).unwrap(), b"theirs");
+    drop((start, program));
+
+    // a name that is not one entry is refused before anything is made of it, as for the opens
+    let long = "n".repeat(40_000);
+    let mut bad = vec!["", ".", "..", "a/b", "a\0b"];
+    // the native bound, which Windows checks before the path is made
+    if cfg!(windows) {
+        bad.push(long.as_str());
+    }
+    for bad in bad {
+        let e = pio::program_in_dir(&dir, OsStr::new(bad)).err().unwrap();
+        let shown: String = bad.chars().take(8).collect();
+        assert_ne!(e.kind(), io::ErrorKind::NotFound, "{shown:?}: {e}");
+        #[cfg(windows)]
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{shown:?}: {e}");
+    }
 }
 
 /// The stages of [`wx5c_adversarial_swaps_preserve_every_boundary`], met at the same two-channel

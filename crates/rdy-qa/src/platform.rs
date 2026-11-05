@@ -254,10 +254,18 @@ pub fn rename_at(dir: &File, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io
     rdy_store::pio::rename_at(dir, from, to)
 }
 
+pub use rdy_store::pio::{ProgramInDir, StartPin};
+
 /// Makes the child that `cmd` spawns start in the open directory `dir`, whatever later happens
-/// to the paths that led to it; a program named `./name` is found in `dir`.
-pub fn start_in_dir(cmd: &mut Command, dir: &File) -> io::Result<()> {
+/// to the paths that led to it. The caller holds the returned guard until the child is waited.
+pub fn start_in_dir(cmd: &mut Command, dir: &File) -> io::Result<StartPin> {
     rdy_store::pio::start_in_dir(cmd, dir)
+}
+
+/// The path of the program `name` in the open directory `dir`, for a child that
+/// [`start_in_dir`] starts there; the caller holds it until the child is waited.
+pub fn program_in_dir(dir: &File, name: &std::ffi::OsStr) -> io::Result<ProgramInDir> {
+    rdy_store::pio::program_in_dir(dir, name)
 }
 
 /// Sets the permission bits of the open file `file` to `mode`.

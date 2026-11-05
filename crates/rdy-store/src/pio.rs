@@ -15,7 +15,9 @@
 //!   it, and none follows a link at that entry; `is_empty_dir` and `for_each_entry` list a
 //!   directory handle itself, and `entry_kind_at` reads an entry's kind without following or
 //!   opening it;
-//! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
+//! - a child process that starts in an open directory (`start_in_dir`), and the path of a program
+//!   in that directory (`program_in_dir`), for the same reason; each gives a guard (`StartPin`,
+//!   `ProgramInDir`) that the caller holds until the child is waited;
 //! - hole punching ([`punch_hole`]) and a file's allocated bytes (`allocated_bytes`): a file
 //!   system's own best effort, which never changes a byte that a read returns;
 //! - Unix only, for Unix mechanism tests and the Unix seams of the daemon and QA: this process's
@@ -210,8 +212,6 @@ mod tests {
             [
                 "rdy_store::pio has no Windows implementation yet of permission-mode changes \
                  anchored to an open directory (set_mode_at) (FW-XP1 Phase 4)",
-                "rdy_store::pio has no Windows implementation yet of a child process that \
-                 starts in an open directory (start_in_dir) (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of directory flushes \
                  (FlushFileBuffers) or write-through renames (MoveFileExW) (FW-XP1 Phase 4)",
             ]
@@ -326,8 +326,9 @@ mod tests {
         // each entry relative to the directory handle, never following a reparse point, makes it
         // with the private descriptor, removes the object it opened through that handle, lists
         // the directory through a new open of its handle, and renames by path while a pin that
-        // does not share delete holds the directory, checking its path before and after; it
-        // holds no stub body or placeholder before its tests.
+        // does not share delete holds the directory, checking its path before and after, and
+        // starts a child in the directory's checked verbatim path while that pin is held (Task 5c,
+        // ruling R1); it holds no stub body or placeholder before its tests.
         let dir = source("src/pio/windows_dir.rs");
         // its test hook is under #[cfg(test)] too: the code ends where its test module starts
         let dir = code_lines(dir.split("#[cfg(test)]\nmod tests {").next().unwrap());
@@ -359,6 +360,8 @@ mod tests {
             "MOVEFILE_REPLACE_EXISTING",
             "FILE_SHARE_READ | FILE_SHARE_WRITE;",
             "PinnedDir::of(dir)",
+            "cmd.current_dir(OsString::from_wide(&pinned.verbatim))",
+            "Ok(StartPin { pinned })",
         ] {
             assert!(dir.contains(call), "pio/windows_dir.rs calls {call}");
         }

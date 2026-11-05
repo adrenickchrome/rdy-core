@@ -383,7 +383,8 @@ impl Work<'_> {
             .map_err(|_| Failure::FileOperation)?;
         let (name, reserved) = self.archive.insert((name, reserved));
         let mut tar = (setup.tar)(&stem);
-        platform::start_in_dir(&mut tar, &self.out_dir).map_err(|_| Failure::FileOperation)?;
+        let start =
+            platform::start_in_dir(&mut tar, &self.out_dir).map_err(|_| Failure::FileOperation)?;
         let into = reserved.try_clone().map_err(|_| Failure::FileOperation)?;
         let tarred = platform::run_bounded_to(
             tar,
@@ -392,6 +393,7 @@ impl Work<'_> {
             RELEASE_CHILD_OUTPUT_MAX,
             RELEASE_CHILD_DEADLINE,
         );
+        drop(start);
         match tarred {
             Ok(o) if o.status.success() => {}
             Ok(_) => return Err(Failure::FileOperation),
@@ -504,14 +506,18 @@ const PROBE_BUSY_TRIES: u32 = 50;
 fn probe_version(stage: &File, version: &str, setup: &Setup) -> Result<bool, Failure> {
     let mut tries = 1;
     loop {
-        let mut probe = (setup.probe)(Path::new("./rdy"));
-        platform::start_in_dir(&mut probe, stage).map_err(|_| Failure::FileOperation)?;
+        let program =
+            platform::program_in_dir(stage, "rdy".as_ref()).map_err(|_| Failure::FileOperation)?;
+        let mut probe = (setup.probe)(program.path());
+        let start =
+            platform::start_in_dir(&mut probe, stage).map_err(|_| Failure::FileOperation)?;
         let run = platform::run_bounded(
             probe,
             None,
             RELEASE_CHILD_OUTPUT_MAX,
             RELEASE_CHILD_DEADLINE,
         );
+        drop((start, program));
         match run {
             Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy && tries < PROBE_BUSY_TRIES => {
                 tries += 1;
@@ -1194,7 +1200,7 @@ fn run_guide(
     }
     let mut cmd = (setup.process)(c);
     cmd.envs(env.iter().copied());
-    platform::start_in_dir(&mut cmd, &dl.dir).map_err(|_| stage)?;
+    let _start = platform::start_in_dir(&mut cmd, &dl.dir).map_err(|_| stage)?;
     (setup.ran)(c);
     let out = run_ok(setup, cmd, stdin, stage)?;
     if intact(input, dl, owned, installed) {
@@ -1286,9 +1292,11 @@ impl MadeDir {
         }
         let mut find = Command::new("find");
         find.args([".", "-mindepth", "1", "-delete"]);
-        let emptied = platform::start_in_dir(&mut find, &self.dir).is_ok()
-            && platform::run_bounded(find, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
-                .is_ok_and(|o| o.status.success());
+        // the guard is held until find is waited
+        let emptied = platform::start_in_dir(&mut find, &self.dir).is_ok_and(|_start| {
+            platform::run_bounded(find, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
+                .is_ok_and(|o| o.status.success())
+        });
         // rmdir removes only an empty directory: a directory swapped in since is not removed
         emptied && self.in_place() && platform::remove_dir_at(&self.parent, &self.name).is_ok()
     }
@@ -1821,6 +1829,8 @@ fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), Inst
     path.push(":");
     path.push(SMOKE_PATH);
     let start = smoke.dir.dir.try_clone().map_err(|_| Daemon)?;
+    // the guard of each product command, held until the smoke ends: each child is waited by then
+    let started = std::cell::RefCell::new(Vec::new());
     let product = |args: &[&OsStr], stage: InstallFailure| -> Result<Command, InstallFailure> {
         let mut cmd = Command::new(rdy);
         cmd.args(args)
@@ -1833,7 +1843,9 @@ fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), Inst
             .env("HOME", &root)
             .env("USERPROFILE", &root)
             .env("APPDATA", &config);
-        platform::start_in_dir(&mut cmd, &start).map_err(|_| stage)?;
+        started
+            .borrow_mut()
+            .push(platform::start_in_dir(&mut cmd, &start).map_err(|_| stage)?);
         Ok(cmd)
     };
     let p = project.as_os_str();
