@@ -192,38 +192,6 @@ fn split_rel(rel: &Path) -> Result<(Vec<&OsStr>, &OsStr), RdyError> {
     Ok((parts, name))
 }
 
-#[cfg(test)]
-mod split_rel_tests {
-    use super::*;
-
-    #[test]
-    fn splits_native_paths() {
-        let rel: PathBuf = [".rdy", "hub", "credentials"].iter().collect();
-        let (dirs, name) = split_rel(&rel).unwrap();
-        assert_eq!(dirs, [OsStr::new(".rdy"), OsStr::new("hub")]);
-        assert_eq!(name, OsStr::new("credentials"));
-        let (dirs, name) = split_rel(Path::new("file")).unwrap();
-        assert!(dirs.is_empty());
-        assert_eq!(name, OsStr::new("file"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn splits_backslash_paths() {
-        let (dirs, name) = split_rel(Path::new(r"a\b\c")).unwrap();
-        assert_eq!(dirs, [OsStr::new("a"), OsStr::new("b")]);
-        assert_eq!(name, OsStr::new("c"));
-        assert!(split_rel(Path::new(r"a\..\c")).is_err());
-    }
-
-    #[test]
-    fn refuses_odd_paths() {
-        for bad in ["", ".", "..", "a/../b", "./a", "/a"] {
-            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
-        }
-    }
-}
-
 /// `<name>.lock`.
 fn lock_name(name: &OsStr) -> OsString {
     let mut lock = name.to_os_string();
@@ -410,4 +378,36 @@ fn read_target(dir: &File, name: &OsStr, private: bool, limit: usize) -> Result<
         return Err(too_large(limit));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod split_rel_tests {
+    use super::*;
+
+    #[test]
+    fn splits_native_paths() {
+        let rel: PathBuf = [".rdy", "hub", "credentials"].iter().collect();
+        let (dirs, name) = split_rel(&rel).unwrap();
+        assert_eq!(dirs, [OsStr::new(".rdy"), OsStr::new("hub")]);
+        assert_eq!(name, OsStr::new("credentials"));
+        let (dirs, name) = split_rel(Path::new("file")).unwrap();
+        assert!(dirs.is_empty());
+        assert_eq!(name, OsStr::new("file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn splits_backslash_paths() {
+        let (dirs, name) = split_rel(Path::new(r"a\b\c")).unwrap();
+        assert_eq!(dirs, [OsStr::new("a"), OsStr::new("b")]);
+        assert_eq!(name, OsStr::new("c"));
+        assert!(split_rel(Path::new(r"a\..\c")).is_err());
+    }
+
+    #[test]
+    fn refuses_odd_paths() {
+        for bad in ["", ".", "..", "a/../b", "./a", "/a"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
 }
