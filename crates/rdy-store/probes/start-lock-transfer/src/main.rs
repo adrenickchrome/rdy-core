@@ -118,6 +118,15 @@ fn child_mode(mode: &str, path: &Path) {
                 std::thread::park();
             }
         }
+        // reads a token from its stdin, the private pipe of a handoff
+        "token" => {
+            let mut text = [0u8; 32];
+            match std::io::stdin().read_exact(&mut text) {
+                Ok(()) => say(&format!("read {}", String::from_utf8_lossy(&text))),
+                Err(e) => say(&format!("no token: {:?}", e.kind())),
+            }
+            std::process::exit(0);
+        }
         other => panic!("unknown mode {other}"),
     }
 }
@@ -213,6 +222,24 @@ fn main() {
             (&a).read(&mut mine).map_err(|e| e.to_string())
         );
         a.unlock().expect("unlock");
+    }
+
+    // 7. a pipe as a child's stdin: what a handoff's token travels on
+    {
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        let mut c = child("token", &path, Stdio::from(reader));
+        writer.write_all(&[b'a'; 32]).expect("write");
+        drop(writer);
+        println!("7a a token sent after the spawn: {}", line(&mut c));
+        c.wait().expect("wait");
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        let mut c = child("token", &path, Stdio::from(reader));
+        drop(writer);
+        println!("7b the sender gone with no token: {}", line(&mut c));
+        c.wait().expect("wait");
+        let mut c = child("token", &path, Stdio::null());
+        println!("7c a null stdin: {}", line(&mut c));
+        c.wait().expect("wait");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
