@@ -77,6 +77,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           category: /language:${{ matrix.language }}
@@ -89,7 +90,8 @@ jobs:
           path: sarif
           retention-days: 7
       # Each CodeQL false positive is checked and then dismissed on its alert, with its reason.
-      # There are no rule, query or path exclusions. So the SARIF step does not block on results:
+      # The only exclusion is the integration test folders (crates/*/tests), set in the CodeQL config file.
+      # There are no rule or query exclusions. So the SARIF step does not block on results:
       # it fails on analyzer errors and malformed SARIF, and it lists every high or critical result.
       # The alert step blocks: any open high or critical CodeQL alert on the analysed ref fails the
       # job, whatever its category, so each language job also sees the other language's alerts.

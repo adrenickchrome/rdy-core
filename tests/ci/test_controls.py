@@ -1163,5 +1163,36 @@ class plz5_CoverageProfiles(unittest.TestCase):
         self.assertEqual(self.cargo_calls(), self.expected_calls(1))
 
 
+class CodeqlConfig(unittest.TestCase):
+    def ignored(self):
+        lines = (ROOT / '.github/codeql/codeql-config.yml').read_text().splitlines()
+        paths, active = [], False
+        for line in lines:
+            if line.startswith('#') or not line.strip():
+                continue
+            if not line.startswith((' ', '-')):
+                active = line.strip() == 'paths-ignore:'
+            elif active:
+                match = re.fullmatch(r'\s*-\s*(.+?)\s*', line)
+                self.assertIsNotNone(match, line)
+                paths.append(match.group(1).strip('\'"'))
+        return paths
+
+    def test_codeql_ignores_exactly_the_tests_folders(self):
+        self.assertEqual(self.ignored(), ['crates/*/tests/**'])
+
+    def test_codeql_never_ignores_src(self):
+        for path in self.ignored():
+            self.assertNotIn('src', path.split('/'))
+        text = (ROOT / '.github/codeql/codeql-config.yml').read_text()
+        self.assertNotIn('paths:', text.replace('paths-ignore:', ''))
+
+    def test_security_workflow_codeql_init_uses_the_config(self):
+        text = (ROOT / '.github/workflows/security.yml').read_text()
+        init = re.search(r'github/codeql-action/init@[^\n]*\n((?:        .*\n)+)', text)
+        self.assertIsNotNone(init)
+        self.assertIn('config-file: ./.github/codeql/codeql-config.yml', init.group(1))
+
+
 if __name__ == '__main__':
     unittest.main()
