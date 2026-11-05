@@ -232,13 +232,19 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             } else if meta.is_dir() {
                 stack.push(p);
             } else {
-                // a file that the open store holds a byte-range lock on cannot be read on
-                // Windows (os error 33); it is the lock file, which holds no project bytes
+                // the open store holds a byte-range lock on its lock file and its derived index,
+                // and Windows refuses to read them (os error 33): their length stands for them,
+                // and every log byte is still read
                 let bytes = match std::fs::read(&p) {
                     Ok(b) => b,
                     Err(e) if e.raw_os_error() == Some(33) => {
-                        assert_eq!(p.file_name().unwrap(), "lock", "{}", p.display());
-                        vec![]
+                        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                        assert!(
+                            ["lock", "index.redb"].contains(&name.as_str()),
+                            "{}",
+                            p.display()
+                        );
+                        std::fs::metadata(&p).unwrap().len().to_le_bytes().to_vec()
                     }
                     Err(e) => panic!("{}: {e}", p.display()),
                 };
