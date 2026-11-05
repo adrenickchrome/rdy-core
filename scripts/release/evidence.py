@@ -631,14 +631,24 @@ SCOPE_KEYS = {
     'revocation': ('repository', 'key_arn', 'fingerprint', 'revocation_sha256', 'last_good_tag'),
     'new_platform': ('repository', 'targets'),
 }
-ISSUER_KEYS = ('repository_id', 'workflow_id', 'workflow_path', 'implementation_sha', 'run_id', 'run_attempt',
-               'run_head_sha', 'ref', 'actor_id', 'triggering_actor_id', 'job_id', 'job_name', 'artifact_id',
-               'artifact_sha256', 'reviewer_id', 'environment_id', 'environment_name', 'review_comment_sha256',
-               'provider_evidence_sha256')
-PROJECTION_KEYS = ('schema', 'repository_id', 'head_repository_id', 'workflow_id', 'workflow_path',
-                   'implementation_sha', 'workflow_file_sha256', 'run_id', 'run_attempt', 'run_head_sha', 'ref',
-                   'event', 'status', 'conclusion', 'actor_id', 'triggering_actor_id', 'job', 'artifact', 'review',
-                   'source_responses')
+# Approval records have two versions. Schema 1 is the frozen approval-channel-v1 wire: its receipt's
+# `issuer.provider_evidence_sha256` hashes the whole projection, source responses included. Schema 2 is
+# the successor: its receipt's `issuer.stable_identity_sha256` hashes only the projection's `identity`,
+# and the source responses are a separate `audit` section that the archive acceptance binds.
+RECORD_SCHEMAS = (1, 2)
+ISSUER_FACT_KEYS = ('repository_id', 'workflow_id', 'workflow_path', 'implementation_sha', 'run_id', 'run_attempt',
+                    'run_head_sha', 'ref', 'actor_id', 'triggering_actor_id', 'job_id', 'job_name', 'artifact_id',
+                    'artifact_sha256', 'reviewer_id', 'environment_id', 'environment_name',
+                    'review_comment_sha256')
+ISSUER_KEYS = ISSUER_FACT_KEYS + ('provider_evidence_sha256',)
+ISSUER_V2_KEYS = ISSUER_FACT_KEYS + ('stable_identity_sha256',)
+PROVIDER_FACT_KEYS = ('repository_id', 'head_repository_id', 'workflow_id', 'workflow_path', 'implementation_sha',
+                      'workflow_file_sha256', 'run_id', 'run_attempt', 'run_head_sha', 'ref', 'event', 'status',
+                      'conclusion', 'actor_id', 'triggering_actor_id', 'job', 'artifact', 'review')
+PROJECTION_KEYS = ('schema',) + PROVIDER_FACT_KEYS + ('source_responses',)
+PROJECTION_V2_KEYS = ('schema', 'identity', 'audit')
+IDENTITY_KEYS = ('schema', 'decision', 'kind', 'policy_commit', 'scope') + PROVIDER_FACT_KEYS
+PROVIDER_AUDIT_KEYS = ('source_responses',)
 PROJECTION_JOB_KEYS = ('id', 'name', 'run_id', 'status', 'conclusion')
 PROJECTION_ARTIFACT_KEYS = ('id', 'name', 'sha256', 'workflow_run_id', 'repository_id', 'head_repository_id',
                             'head_sha', 'expired', 'request_sha256')
@@ -690,9 +700,21 @@ def parse_approval_request(data):
     return Record('approval request', digest, len(data), value)
 
 
-def check_issuer(value):
+def record_schema(value, what):
+    """The version of an approval record: 1 (the frozen v1 wire) or 2 (the successor)."""
+    if not isinstance(value, dict):
+        raise ControllerError(what + ' is not an object')
+    if 'schema' not in value:
+        raise ControllerError("missing field 'schema'")
+    schema = value['schema']
+    if not (type(schema) is int and schema in RECORD_SCHEMAS):
+        raise ControllerError(what + ' schema is not 1 or 2')
+    return schema
+
+
+def check_issuer(value, schema=1):
     what = 'the approval issuer'
-    closed(value, ISSUER_KEYS, what)
+    closed(value, ISSUER_KEYS if schema == 1 else ISSUER_V2_KEYS, what)
     const(value['repository_id'], REPOSITORY_ID, what + ' repository id')
     for key in ('workflow_id', 'run_id', 'actor_id', 'triggering_actor_id', 'job_id', 'artifact_id', 'reviewer_id',
                 'environment_id'):
@@ -706,38 +728,38 @@ def check_issuer(value):
     sha256(value['artifact_sha256'], what + ' artifact digest')
     text(value['environment_name'], what + ' environment name', NAME_MAX)
     sha256(value['review_comment_sha256'], what + ' review comment digest')
-    sha256(value['provider_evidence_sha256'], what + ' provider evidence digest')
+    if schema == 1:
+        sha256(value['provider_evidence_sha256'], what + ' provider evidence digest')
+    else:
+        sha256(value['stable_identity_sha256'], what + ' stable identity digest')
     return value
 
 
 def parse_approval_receipt(data):
-    """An accepted founder approval receipt, at most 64 KiB. A card names its SHA-256."""
+    """An accepted founder approval receipt, at most 64 KiB. A card names its SHA-256. Schema 1 binds
+    `issuer.provider_evidence_sha256` (the whole v1 projection); schema 2 binds
+    `issuer.stable_identity_sha256` (the projection's identity only)."""
     digest, value = read(data, 'approval receipt', RECORD_MAX)
     closed(value, RECEIPT_KEYS, 'the approval receipt')
-    const(value['schema'], 1, 'the approval receipt schema')
+    schema = record_schema(value, 'the approval receipt')
     const(value['decision'], DECISION, 'the approval receipt decision')
     commit(value['policy_commit'], 'the approval receipt policy commit')
     sha256(value['workflow_scope_digest'], 'the approval receipt workflow scope digest')
     check_scope(check_kind(value['kind'], 'the approval receipt'), value['scope'])
-    check_issuer(value['issuer'])
+    check_issuer(value['issuer'], schema)
     return Record('approval receipt', digest, len(data), value)
 
 
-def provider_evidence_sha256(value):
-    """The approval identity an approval receipt binds: the SHA-256 of the canonical projection
-    without `source_responses`. Those digests and lengths of the original responses are audit data:
-    GitHub re-renders its responses (pushes, counters, timestamps), so they never form the identity."""
-    return hashlib.sha256(cand.canonical({k: v for k, v in value.items() if k != 'source_responses'})).hexdigest()
+def stable_identity_sha256(identity):
+    """The successor approval identity: the SHA-256 of the canonical JSON (sorted keys, compact
+    separators, UTF-8, one final LF) of a schema 2 projection's `identity` object. The identity holds
+    typed provenance and scope facts only: never a response digest, ETag, JSON order or other provider
+    metadata. GitHub's review history has no review id, time or attempt, so none is in it."""
+    return hashlib.sha256(cand.canonical(identity)).hexdigest()
 
 
-def parse_provider_evidence(data):
-    """The canonical provider-facts projection an approval receipt binds, at most 64 KiB. It holds
-    digests and lengths of the original responses, not the responses. The receipt binds its
-    `provider_evidence_sha256`; the archive acceptance binds its exact bytes."""
-    digest, value = read(data, 'provider evidence', RECORD_MAX)
-    what = 'the provider evidence'
-    closed(value, PROJECTION_KEYS, what)
-    const(value['schema'], 1, what + ' schema')
+def check_provider_facts(value, what):
+    """The typed facts of one completed founder approval run (a v1 projection, or a v2 identity)."""
     const(value['repository_id'], REPOSITORY_ID, what + ' repository id')
     const(value['head_repository_id'], REPOSITORY_ID, what + ' head repository id')
     for key in ('workflow_id', 'run_id', 'actor_id', 'triggering_actor_id'):
@@ -774,15 +796,6 @@ def parse_provider_evidence(data):
     const(review['user_type'], 'User', what + ' reviewer type')
     pos_int(review['environment_id'], what + ' environment id')
     text(review['environment_name'], what + ' environment name', NAME_MAX)
-    responses = value['source_responses']
-    if not (isinstance(responses, list) and all(isinstance(r, dict) for r in responses)
-            and [r.get('kind') for r in responses] == list(SOURCE_KINDS)):
-        raise ControllerError(what + ' source responses are not the nine kinds in order')
-    for entry in responses:
-        closed(entry, SOURCE_RESPONSE_KEYS, what + ' source response')
-        sha256(entry['sha256'], what + ' source response digest')
-        if not (cand.is_int(entry['bytes'], 1) and entry['bytes'] <= SOURCE_RESPONSE_MAX):
-            raise ControllerError(what + ' source response size is not 1 to ' + str(SOURCE_RESPONSE_MAX) + ' bytes')
     # One run: its job, artifact and reviewer belong to it.
     if job['run_id'] != value['run_id'] or artifact['workflow_run_id'] != value['run_id']:
         raise ControllerError(what + ' job or artifact is not from its run')
@@ -792,6 +805,47 @@ def parse_provider_evidence(data):
         raise ControllerError(what + ' actors and reviewer differ')
     if COMMENT_RE.fullmatch(review['comment']).group(1) != artifact['request_sha256']:
         raise ControllerError(what + ' review comment does not name its request')
+    return value
+
+
+def check_source_responses(responses, what):
+    """The nine {kind, sha256, bytes} digests of the original responses, sorted by kind."""
+    if not (isinstance(responses, list) and all(isinstance(r, dict) for r in responses)
+            and [r.get('kind') for r in responses] == list(SOURCE_KINDS)):
+        raise ControllerError(what + ' source responses are not the nine kinds in order')
+    for entry in responses:
+        closed(entry, SOURCE_RESPONSE_KEYS, what + ' source response')
+        sha256(entry['sha256'], what + ' source response digest')
+        if not (cand.is_int(entry['bytes'], 1) and entry['bytes'] <= SOURCE_RESPONSE_MAX):
+            raise ControllerError(what + ' source response size is not 1 to ' + str(SOURCE_RESPONSE_MAX) + ' bytes')
+    return responses
+
+
+def parse_provider_evidence(data):
+    """The canonical provider-facts projection of a founder approval, at most 64 KiB. It holds digests
+    and lengths of the original responses, not the responses.
+
+    Schema 1 (frozen v1) is flat: the typed facts and `source_responses`; a v1 receipt binds the SHA-256
+    of these exact bytes. Schema 2 splits it: `identity` (the typed facts and the request's decision,
+    kind, policy commit and scope), which a v2 receipt binds through `stable_identity_sha256`, and
+    `audit` (`source_responses`), which only the archive acceptance binds, through the exact bytes."""
+    digest, value = read(data, 'provider evidence', RECORD_MAX)
+    what = 'the provider evidence'
+    schema = record_schema(value, what)
+    if schema == 1:
+        closed(value, PROJECTION_KEYS, what)
+        check_provider_facts(value, what)
+        check_source_responses(value['source_responses'], what)
+        return Record('provider evidence', digest, len(data), value)
+    closed(value, PROJECTION_V2_KEYS, what)
+    identity = closed(value['identity'], IDENTITY_KEYS, what + ' identity')
+    const(identity['schema'], 2, what + ' identity schema')
+    const(identity['decision'], DECISION, what + ' identity decision')
+    commit(identity['policy_commit'], what + ' identity policy commit')
+    check_scope(check_kind(identity['kind'], what + ' identity'), identity['scope'])
+    check_provider_facts(identity, what)
+    audit = closed(value['audit'], PROVIDER_AUDIT_KEYS, what + ' audit')
+    check_source_responses(audit['source_responses'], what)
     return Record('provider evidence', digest, len(data), value)
 
 
@@ -842,35 +896,53 @@ def check_acceptance(value):
 def parse_archive_envelope(data):
     """The one bounded (64 KiB) archive record of an accepted founder approval. Its three bodies
     are parsed from their exact bytes and must join by hash; the issuer must map back to the
-    provider evidence field by field. This checks the record against itself only: the backend,
-    lineage and current policy are checked by eligibility."""
+    provider evidence field by field. The envelope, receipt and provider evidence share one schema.
+
+    Schema 1 is the frozen v1 record: the receipt's `provider_evidence_sha256` and the acceptance's
+    `provider_projection_sha256` both hash the exact projection bytes. Schema 2: the receipt's
+    `stable_identity_sha256` hashes the projection's identity, which must bind the request's decision,
+    kind, policy commit and scope; the acceptance's `provider_projection_sha256` hashes the exact
+    projection bytes, so the archived audit section cannot change without detection.
+
+    This checks the record against itself only: the backend, lineage and current policy are checked
+    by eligibility."""
     digest, value = read(data, 'archive envelope', RECORD_MAX)
     closed(value, ENVELOPE_KEYS, 'the archive envelope')
-    const(value['schema'], 1, 'the archive envelope schema')
+    schema = record_schema(value, 'the archive envelope')
     request = parse_approval_request(body(value['request_body'], 'request'))
     receipt = parse_approval_receipt(body(value['receipt_body'], 'receipt'))
     projection = parse_provider_evidence(body(value['provider_projection_body'], 'provider evidence'))
     acceptance = check_acceptance(value['acceptance'])
+    if not (receipt.value['schema'] == projection.value['schema'] == schema):
+        raise ControllerError('the archive envelope, receipt and provider evidence schemas differ')
+    facts = projection.value if schema == 1 else projection.value['identity']
     if acceptance['receipt_sha256'] != receipt.sha256:
         raise ControllerError('the archive acceptance does not bind its receipt')
     issuer = receipt.value['issuer']
     if receipt.value['workflow_scope_digest'] != request.sha256 or acceptance['request_sha256'] != request.sha256 \
-            or projection.value['artifact']['request_sha256'] != request.sha256:
+            or facts['artifact']['request_sha256'] != request.sha256:
         raise ControllerError('the approval receipt does not bind its request')
-    if issuer['provider_evidence_sha256'] != provider_evidence_sha256(projection.value) \
-            or acceptance['provider_projection_sha256'] != projection.sha256:
+    if schema == 1:
+        bound = issuer['provider_evidence_sha256'] == projection.sha256
+    else:
+        bound = issuer['stable_identity_sha256'] == stable_identity_sha256(facts)
+    if not bound or acceptance['provider_projection_sha256'] != projection.sha256:
         raise ControllerError('the approval receipt does not bind its provider evidence')
     for key in ('kind', 'scope', 'policy_commit', 'decision'):
         if request.value[key] != receipt.value[key]:
             raise ControllerError('the approval receipt ' + key.replace('_', ' ') + ' does not match its request')
+    if schema == 2:
+        for key in ('kind', 'scope', 'policy_commit', 'decision'):
+            if request.value[key] != facts[key]:
+                raise ControllerError('the approval identity ' + key.replace('_', ' ') + ' does not match its request')
     for key, path in ISSUER_FROM_PROJECTION:
-        fact = projection.value
+        fact = facts
         for part in path:
             fact = fact[part]
         if issuer[key] != fact or type(issuer[key]) is not type(fact):
             raise ControllerError('the approval issuer ' + key.replace('_', ' ')
                                   + ' does not match its provider evidence')
-    comment = projection.value['review']['comment'].encode('utf-8')
+    comment = facts['review']['comment'].encode('utf-8')
     if issuer['review_comment_sha256'] != hashlib.sha256(comment).hexdigest():
         raise ControllerError('the approval issuer review comment digest does not match its provider evidence')
     return Envelope('archive envelope', digest, len(data), value, request, receipt, projection, acceptance)

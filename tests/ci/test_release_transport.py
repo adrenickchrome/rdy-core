@@ -208,8 +208,55 @@ def receipt(request_value, request_bytes, projection_bytes):
                        'reviewer_id': FOUNDER, 'environment_id': 41,
                        'environment_name': 'release-exception-approval',
                        'review_comment_sha256': sha(proj['review']['comment'].encode()),
-                       'provider_evidence_sha256': sha(canon({k: v for k, v in proj.items()
-                                                              if k != 'source_responses'}))}}
+                       'provider_evidence_sha256': sha(projection_bytes)}}
+
+
+def identity(request_value, request_bytes):
+    """The successor (schema 2) stable identity: the typed provider facts and the request's bindings,
+    with no response digest."""
+    value = projection(request_bytes)
+    del value['source_responses']
+    value.update(schema=2, decision='D-PZKAP', kind=request_value['kind'],
+                 policy_commit=request_value['policy_commit'], scope=copy.deepcopy(request_value['scope']))
+    return value
+
+
+def projection_v2(request_value, request_bytes):
+    return {'schema': 2, 'identity': identity(request_value, request_bytes),
+            'audit': {'source_responses': projection(request_bytes)['source_responses']}}
+
+
+def receipt_v2(request_value, request_bytes, projection_bytes):
+    value = receipt(request_value, request_bytes, canon(projection(request_bytes)))
+    value['schema'] = 2
+    del value['issuer']['provider_evidence_sha256']
+    value['issuer']['stable_identity_sha256'] = sha(canon(json.loads(projection_bytes)['identity']))
+    return value
+
+
+def envelope_v2(kind='key_change'):
+    req = request(kind)
+    req_bytes = canon(req)
+    proj_bytes = canon(projection_v2(req, req_bytes))
+    rec_bytes = canon(receipt_v2(req, req_bytes, proj_bytes))
+    value = envelope(kind)
+    value.update(schema=2, receipt_body=rec_bytes.decode(), provider_projection_body=proj_bytes.decode())
+    value['acceptance'].update(receipt_sha256=sha(rec_bytes), provider_projection_sha256=sha(proj_bytes))
+    return value
+
+
+def rebind(value):
+    """Re-binds an envelope's digests after a body change: the receipt names the projection's
+    identity (or, in schema 1, the whole projection) and the acceptance names both exact bodies."""
+    proj_bytes = value['provider_projection_body'].encode()
+    rec = json.loads(value['receipt_body'])
+    if rec['schema'] == 2:
+        rec['issuer']['stable_identity_sha256'] = sha(canon(json.loads(proj_bytes)['identity']))
+    else:
+        rec['issuer']['provider_evidence_sha256'] = sha(proj_bytes)
+    value['receipt_body'] = canon(rec).decode()
+    value['acceptance'].update(receipt_sha256=sha(canon(rec)), provider_projection_sha256=sha(proj_bytes))
+    return value
 
 
 def envelope(kind='key_change'):
@@ -541,19 +588,25 @@ class Schemas(unittest.TestCase):
         value['provider_projection_body'] = canon(proj).decode()
         self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
                            'the provider evidence source responses are not the nine kinds in order')
-        # The receipt binds the approval identity, not the recorded response digests; the acceptance
-        # binds the exact projection bytes that were archived.
+        # Frozen v1: issuer.provider_evidence_sha256 and acceptance.provider_projection_sha256 both hash
+        # the whole projection, its source responses included. A changed response digest refuses even
+        # when the acceptance names the new bytes, and a receipt that binds a subset refuses.
         value = envelope()
         proj = json.loads(value['provider_projection_body'])
         proj['source_responses'][4]['sha256'] = digest(41)
         value['provider_projection_body'] = canon(proj).decode()
+        value['acceptance']['provider_projection_sha256'] = sha(canon(proj))
         self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
                            'the approval receipt does not bind its provider evidence')
-        value['acceptance']['provider_projection_sha256'] = sha(canon(proj))
-        self.assertEqual(EVIDENCE.parse_archive_envelope(canon(value)).receipt.sha256,
-                         envelope()['acceptance']['receipt_sha256'])
-        self.assertEqual(EVIDENCE.provider_evidence_sha256(proj),
-                         EVIDENCE.provider_evidence_sha256(json.loads(envelope()['provider_projection_body'])))
+        value = envelope()
+        proj = json.loads(value['provider_projection_body'])
+        rec = json.loads(value['receipt_body'])
+        rec['issuer']['provider_evidence_sha256'] = sha(canon({k: v for k, v in proj.items()
+                                                               if k != 'source_responses'}))
+        value['receipt_body'] = canon(rec).decode()
+        value['acceptance']['receipt_sha256'] = sha(canon(rec))
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                           'the approval receipt does not bind its provider evidence')
         # Escaping inside the envelope still counts towards its 64 KiB bound.
         value = envelope()
         value['request_body'] = value['request_body'] + '\u0001' * 11000
@@ -561,6 +614,115 @@ class Schemas(unittest.TestCase):
                            'the archive envelope is larger than 65536 bytes')
         # Parsing grants no authority: a parsed receipt carries no approval flag.
         self.assertFalse(hasattr(record, 'approved'))
+
+    def test_rsig5_successor_identity_splits_identity_and_audit(self):
+        # Schema 2: the receipt binds stable_identity_sha256, the SHA-256 of the canonical `identity`;
+        # the source responses are a separate `audit` section that only the acceptance binds.
+        for kind in ('release_1', 'key_change', 'revocation', 'new_platform'):
+            with self.subTest(kind=kind):
+                env = envelope_v2(kind)
+                record = EVIDENCE.parse_archive_envelope(canon(env))
+                self.assertEqual((record.value, record.receipt.value['schema'], record.projection.value['schema']),
+                                 (env, 2, 2))
+                ident = record.projection.value['identity']
+                self.assertEqual(EVIDENCE.stable_identity_sha256(ident), sha(canon(ident)))
+                self.assertEqual(record.receipt.value['issuer']['stable_identity_sha256'], sha(canon(ident)))
+                self.assertEqual(record.acceptance['provider_projection_sha256'], record.projection.sha256)
+                self.assertEqual((ident['kind'], ident['scope']), (request(kind)['kind'], request(kind)['scope']))
+        # The audit section can differ without changing the identity or the receipt; the acceptance
+        # must name the exact archived bytes, so a changed audit is detected.
+        value = envelope_v2()
+        proj = json.loads(value['provider_projection_body'])
+        proj['audit']['source_responses'][4]['sha256'] = digest(41)
+        value['provider_projection_body'] = canon(proj).decode()
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                           'the approval receipt does not bind its provider evidence')
+        value['acceptance']['provider_projection_sha256'] = sha(canon(proj))
+        record = EVIDENCE.parse_archive_envelope(canon(value))
+        self.assertEqual(record.receipt.sha256, envelope_v2()['acceptance']['receipt_sha256'])
+        self.assertEqual(record.projection.value['audit']['source_responses'][4]['sha256'], digest(41))
+        # The audit stays closed and complete.
+        for change, message in (
+                (lambda p: p['audit']['source_responses'].reverse(),
+                 'the provider evidence source responses are not the nine kinds in order'),
+                (lambda p: p.pop('audit'), "missing field 'audit'"),
+                (lambda p: p['audit'].update(etag='x'), "unknown field 'etag'"),
+                (lambda p: p['audit']['source_responses'][0].update(bytes=0),
+                 'the provider evidence source response size is not 1 to 4194304 bytes')):
+            value = envelope_v2()
+            proj = json.loads(value['provider_projection_body'])
+            change(proj)
+            value['provider_projection_body'] = canon(proj).decode()
+            with self.subTest(message=message):
+                self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(rebind(value)), message)
+        # Every identity field is bound: a changed fact changes the identity, and the issuer must
+        # map back to it field by field.
+        value = envelope_v2()
+        proj = json.loads(value['provider_projection_body'])
+        proj['identity']['job']['id'] = 6102
+        value['provider_projection_body'] = canon(proj).decode()
+        value['acceptance']['provider_projection_sha256'] = sha(canon(proj))
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                           'the approval receipt does not bind its provider evidence')
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(rebind(value)),
+                           'the approval issuer job id does not match its provider evidence')
+        # The identity binds the request's kind, scope, policy and decision.
+        for key, change in (('scope', lambda i: i.update(scope=dict(i['scope'], targets=[MAC]))),
+                            ('policy commit', lambda i: i.update(policy_commit='5' * 40)),
+                            ('kind', lambda i: i.update(kind='new_platform', scope={'repository': REPO,
+                                                                                    'targets': [MAC, LINUX]}))):
+            value = envelope_v2()
+            proj = json.loads(value['provider_projection_body'])
+            change(proj['identity'])
+            value['provider_projection_body'] = canon(proj).decode()
+            with self.subTest(key=key):
+                self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(rebind(value)),
+                                   'the approval identity ' + key + ' does not match its request')
+        # The identity is closed: no response digest, ETag or other provider metadata enters it.
+        for change, message in (
+                (lambda i: i.update(etag='W/"1"'), "unknown field 'etag'"),
+                (lambda i: i.update(source_responses=[]), "unknown field 'source_responses'"),
+                (lambda i: i.pop('decision'), "missing field 'decision'"),
+                (lambda i: i.update(schema=1), 'the provider evidence identity schema is not 2'),
+                (lambda i: i['review'].update(comment='APPROVE sha256:' + digest(3)),
+                 'the provider evidence review comment does not name its request')):
+            value = envelope_v2()
+            proj = json.loads(value['provider_projection_body'])
+            change(proj['identity'])
+            value['provider_projection_body'] = canon(proj).decode()
+            with self.subTest(message=message):
+                self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(rebind(value)), message)
+        # One version per record: the envelope, receipt and projection schemas agree, and a schema 2
+        # receipt carries the successor field only.
+        req_bytes = canon(request())
+        for change in (lambda v: v.update(schema=1),
+                       lambda v: v.update(receipt_body=envelope()['receipt_body']),
+                       lambda v: v.update(provider_projection_body=envelope()['provider_projection_body'])):
+            value = envelope_v2()
+            change(value)
+            with self.subTest(value=sorted(value)):
+                self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                                   'the archive envelope, receipt and provider evidence schemas differ')
+        rec = receipt_v2(request(), req_bytes, canon(projection_v2(request(), req_bytes)))
+        rec['issuer']['provider_evidence_sha256'] = digest(42)
+        self.assertRefuses(EVIDENCE.parse_approval_receipt, canon(rec), "unknown field 'provider_evidence_sha256'")
+        for parse, make, what in (
+                (EVIDENCE.parse_archive_envelope, envelope_v2, 'the archive envelope'),
+                (EVIDENCE.parse_approval_receipt,
+                 lambda: receipt_v2(request(), req_bytes, canon(projection_v2(request(), req_bytes))),
+                 'the approval receipt'),
+                (EVIDENCE.parse_provider_evidence, lambda: projection_v2(request(), req_bytes),
+                 'the provider evidence')):
+            for schema in (3, True, '2'):
+                value = make()
+                value['schema'] = schema
+                with self.subTest(what=what, schema=schema):
+                    self.assertRefuses(parse, canon(value), what + ' schema is not 1 or 2')
+        # The 64 KiB aggregate bound still holds for the whole record.
+        value = envelope_v2()
+        value['request_body'] = value['request_body'] + '\u0001' * 11000
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                           'the archive envelope is larger than 65536 bytes')
 
 
 class Transport(unittest.TestCase):

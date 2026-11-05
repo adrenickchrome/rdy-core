@@ -443,9 +443,10 @@ class World(object):
                 'reference': 'dynamodb://' + ACCOUNT + '/us-east-2/rdy-test-release-control/APPROVAL%23'
                              + receipt_sha256 + '/RECORD'}
 
-    def add_card(self, kind, via='archive', scope=None, receipt_kind=None):
+    def add_card(self, kind, via='archive', scope=None, receipt_kind=None, schema=2):
         """Adds a founder card to E. `archive`: an accepted envelope in the archive. `first_use`: a
-        live approval run whose receipt the eligibility step rebuilds."""
+        live approval run whose receipt the eligibility step rebuilds. `schema` 2 is the successor
+        record (a stable identity and an audit section); 1 is the frozen v1 record."""
         request = {'schema': 1, 'decision': 'D-PZKAP', 'policy_commit': P, 'kind': receipt_kind or kind,
                    'scope': scope or self.scope_for(receipt_kind or kind)}
         request_bytes = canon(request)
@@ -474,8 +475,8 @@ class World(object):
             head_sha, zip_sha = '4' * 40, digest(15)
             self.responses[run_id] = [{'kind': k, 'sha256': digest(20 + i), 'bytes': 100 + i}
                                       for i, k in enumerate(SOURCE_KINDS)]
-        projection = {
-            'schema': 1, 'repository_id': REPO_ID, 'head_repository_id': REPO_ID, 'workflow_id': 31,
+        facts = {
+            'repository_id': REPO_ID, 'head_repository_id': REPO_ID, 'workflow_id': 31,
             'workflow_path': APPROVAL_WF, 'implementation_sha': H, 'workflow_file_sha256': sha(self.approval_wf),
             'run_id': run_id, 'run_attempt': 1, 'run_head_sha': head_sha, 'ref': 'refs/heads/main',
             'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'success', 'actor_id': FOUNDER,
@@ -486,10 +487,17 @@ class World(object):
                          'workflow_run_id': run_id, 'repository_id': REPO_ID, 'head_repository_id': REPO_ID,
                          'head_sha': head_sha, 'expired': False, 'request_sha256': sha(request_bytes)},
             'review': {'state': 'approved', 'comment': 'APPROVE sha256:' + sha(request_bytes), 'user_id': FOUNDER,
-                       'user_type': 'User', 'environment_id': 41, 'environment_name': 'release-exception-approval'},
-            'source_responses': self.responses[run_id]}
-        projection_bytes = canon(projection)
-        receipt = {'schema': 1, 'decision': 'D-PZKAP', 'kind': request['kind'], 'policy_commit': P,
+                       'user_type': 'User', 'environment_id': 41, 'environment_name': 'release-exception-approval'}}
+        if schema == 1:
+            projection_bytes = canon(dict(facts, schema=1, source_responses=self.responses[run_id]))
+            binding = ('provider_evidence_sha256', sha(projection_bytes))
+        else:
+            identity = dict(facts, schema=2, decision='D-PZKAP', kind=request['kind'], policy_commit=P,
+                            scope=copy.deepcopy(request['scope']))
+            projection_bytes = canon({'schema': 2, 'identity': identity,
+                                      'audit': {'source_responses': self.responses[run_id]}})
+            binding = ('stable_identity_sha256', sha(canon(identity)))
+        receipt = {'schema': schema, 'decision': 'D-PZKAP', 'kind': request['kind'], 'policy_commit': P,
                    'workflow_scope_digest': sha(request_bytes), 'scope': copy.deepcopy(request['scope']),
                    'issuer': {'repository_id': REPO_ID, 'workflow_id': 31, 'workflow_path': APPROVAL_WF,
                               'implementation_sha': H, 'run_id': run_id, 'run_attempt': 1, 'run_head_sha': head_sha,
@@ -498,31 +506,34 @@ class World(object):
                               'artifact_sha256': zip_sha, 'reviewer_id': FOUNDER, 'environment_id': 41,
                               'environment_name': 'release-exception-approval',
                               'review_comment_sha256': sha(('APPROVE sha256:' + sha(request_bytes)).encode()),
-                              'provider_evidence_sha256': projection_identity(projection)}}
+                              binding[0]: binding[1]}}
         receipt_bytes = canon(receipt)
         receipt_sha = sha(receipt_bytes)
         if via == 'first_use':
             self.approval_runs.append({'receipt_sha256': receipt_sha, 'run_id': run_id, 'artifact_id': artifact_id})
         else:
-            acceptance = {'schema': 1, 'receipt_sha256': receipt_sha, 'request_sha256': sha(request_bytes),
-                          'provider_projection_sha256': sha(projection_bytes), 'signer_workflow_sha': H,
-                          'run_id': 7001, 'run_attempt': 1, 'job_id': 7101, 'policy_commit': P,
-                          'policy_sha256': sha(self.files[('release-keys/policy.json', P)]),
-                          'authority_sha256': LINEAGE['authority_sha256'], 'table_id': LINEAGE['table_id'],
-                          'genesis_sha256': LINEAGE['genesis_sha256'], 'accepted_at': '2026-11-05T10:00:00Z'}
-            self.archive[receipt_sha] = canon({'schema': 1, 'request_body': request_bytes.decode(),
-                                               'receipt_body': receipt_bytes.decode(),
-                                               'provider_projection_body': projection_bytes.decode(),
-                                               'acceptance': acceptance})
+            self.archive[receipt_sha] = self.envelope(request_bytes, receipt_bytes, projection_bytes)
         self.e['approval_basis']['mode'] = 'founder_card'
         self.e['approval_basis']['cards'].append(self.card(receipt_sha, kind))
         self.seal()
         return receipt_sha
 
+    def envelope(self, request_bytes, receipt_bytes, projection_bytes):
+        """The archive record the signer writes at first acceptance, in the receipt's schema."""
+        acceptance = {'schema': 1, 'receipt_sha256': sha(receipt_bytes), 'request_sha256': sha(request_bytes),
+                      'provider_projection_sha256': sha(projection_bytes), 'signer_workflow_sha': H,
+                      'run_id': 7001, 'run_attempt': 1, 'job_id': 7101, 'policy_commit': P,
+                      'policy_sha256': sha(self.files[('release-keys/policy.json', P)]),
+                      'authority_sha256': LINEAGE['authority_sha256'], 'table_id': LINEAGE['table_id'],
+                      'genesis_sha256': LINEAGE['genesis_sha256'], 'accepted_at': '2026-11-05T10:00:00Z'}
+        return canon({'schema': json.loads(receipt_bytes)['schema'], 'request_body': request_bytes.decode(),
+                      'receipt_body': receipt_bytes.decode(), 'provider_projection_body': projection_bytes.decode(),
+                      'acceptance': acceptance})
 
-def projection_identity(projection):
-    """The approval identity a receipt binds: the projection without its audit-only response digests."""
-    return sha(canon({k: v for k, v in projection.items() if k != 'source_responses'}))
+
+def stable_identity(projection_bytes):
+    """The successor approval identity a schema 2 receipt binds: the SHA-256 of the canonical identity."""
+    return sha(canon(json.loads(projection_bytes)['identity']))
 
 
 def accept(world, receipt_sha256, **changes):
@@ -1025,10 +1036,12 @@ class Eligibility(Base):
         self.assertEqual((card.kind, card.receipt_sha256, card.source, card.envelope_bytes),
                          ('release_1', receipt, 'first_use', None))
         self.assertEqual(sha(card.receipt_bytes), receipt)
-        self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['provider_evidence_sha256'],
-                         projection_identity(json.loads(card.projection_bytes)))
+        self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['stable_identity_sha256'],
+                         stable_identity(card.projection_bytes))
         self.assertEqual(card.request_bytes, w.members[(w.approval_runs[0]['artifact_id'], 'approval-request.json')])
-        self.assertNotIn('approval_record', [c[0] for c in w.calls])
+        # Fresh provider proof is used only after the archive authenticates that no accepted record exists.
+        self.assertIn(('approval_record', receipt), w.calls)
+        self.assertEqual(w.archive, {})
 
     def test_rsig5_missing_or_wrong_scope_key_and_platform_cards_refuse(self):
         # A key change needs its card; a standing preview cannot cover it.
@@ -1289,11 +1302,11 @@ class FirstUseIdentity(Base):
         again = self.qualifies(w).cards[0]
         self.assertEqual((again.receipt_sha256, again.receipt_bytes, again.request_bytes),
                          (receipt, first.receipt_bytes, first.request_bytes))
-        # The projection still records the responses it saw, for audit; they are not its identity.
-        self.assertEqual(json.loads(again.projection_bytes)['source_responses'], w.responses[r])
+        # The projection still records the responses it saw, in its audit section; they are not its identity.
+        self.assertEqual(json.loads(again.projection_bytes)['audit']['source_responses'], w.responses[r])
         self.assertNotEqual(again.projection_bytes, first.projection_bytes)
-        self.assertEqual(projection_identity(json.loads(again.projection_bytes)),
-                         projection_identity(json.loads(first.projection_bytes)))
+        self.assertEqual(json.loads(again.projection_bytes)['identity'], json.loads(first.projection_bytes)['identity'])
+        self.assertEqual(stable_identity(again.projection_bytes), stable_identity(first.projection_bytes))
         # The recorded responses date from the approval; later live responses differ from them.
         w.repository_sha, w.runs[(r, 1)]['sha256'], w.artifacts[a]['sha256'] = digest(101), digest(102), digest(103)
         self.assertEqual(self.qualifies(w).cards[0].receipt_bytes, first.receipt_bytes)
@@ -1320,6 +1333,23 @@ class FirstUseIdentity(Base):
              'not authorized: the release_1 card does not name the founder-approved receipt'),
             (lambda w, r, a: (w.artifacts[a].update(digest=digest(78)), respond(w, r, request_archive=digest(78))),
              'not authorized: the release_1 card does not name the founder-approved receipt'),
+            # So are the policy commit, the job and the run head, each changed consistently.
+            (lambda w, r, a: restate(w, r, a, policy_commit=S),
+             'not authorized: the release_1 card does not name the founder-approved receipt'),
+            (lambda w, r, a: w.jobs[(r, 1)][0].update(job_id=9999),
+             'not authorized: the release_1 card does not name the founder-approved receipt'),
+            (lambda w, r, a: (w.runs[(r, 1)].update(head_sha=P), w.artifacts[a].update(head_sha=P),
+                              w.put(P, APPROVAL_WF, w.approval_wf)),
+             'not authorized: the release_1 card does not name the founder-approved receipt'),
+            # A changed source, attempt or comment, and competing reviews, refuse with their own reasons.
+            (lambda w, r, a: w.put(HEAD, APPROVAL_WF, b'name: release-approval\nrun: forged\n'),
+             'not authorized: the release_1 approval workflow is not its pinned bytes'),
+            (lambda w, r, a: w.runs.update({(r, 2): dict(w.runs.pop((r, 1)), run_attempt=2)}),
+             'eligibility incomplete: GitHub run attempt: not found'),
+            (lambda w, r, a: w.reviews[r][0].update(comment='APPROVE sha256:' + digest(64)),
+             'not authorized: the founder review does not approve the release_1 request'),
+            (lambda w, r, a: w.reviews[r].append(dict(w.reviews[r][0], user_id=PERSON)),
+             'not authorized: the release_1 approval run needs exactly one founder review'),
         )
         for recovery in (False, True):
             for change, message in changes:
@@ -1347,6 +1377,84 @@ class FirstUseIdentity(Base):
                 current_channel(w, **channel)
                 with self.subTest(via=via, message=message):
                     self.refuses(w, message, recovery=True)
+
+    def test_rsig5_first_acceptance_is_kept_and_reused_from_the_archive(self):
+        # Before the first durable archive, fresh provider proof is required: unavailable or expired
+        # proof refuses.
+        for change, message in (
+                (lambda w, r, a: w.artifacts[a].update(expired=True),
+                 'eligibility incomplete: GitHub artifact: the artifact expired'),
+                (lambda w, r, a: w.errors.update(approval_responses=ControllerError('approval responses unavailable')),
+                 'eligibility incomplete: approval responses unavailable'),
+                (lambda w, r, a: w.reviews[r].clear(),
+                 'not authorized: the release_1 approval run needs exactly one founder review'),
+                (lambda w, r, a: w.errors.update(approval_record=ControllerError('the archive is unavailable')),
+                 'eligibility incomplete: the archive is unavailable')):
+            w, receipt, r, a = self.first_use()
+            change(w, r, a)
+            with self.subTest(message=message):
+                self.refuses(w, message)
+        # The first acceptance: the signer archives the exact qualified bytes, after the reservation.
+        w, receipt, r, a = self.first_use()
+        e_bytes = w.members[(EVID_ART, 'release-record.json')]
+        first = self.qualifies(w)
+        card = first.cards[0]
+        w.reserve()
+        record = w.envelope(card.request_bytes, card.receipt_bytes, card.projection_bytes)
+        w.archive[receipt] = record
+        # Later the provider evidence changes or goes: responses re-render, the artifact expires and the
+        # review history is gone. Recovery reuses the accepted record and observes nothing fresh.
+        respond(w, r, repository=digest(95), run_attempt=digest(96), artifact=digest(97), job=digest(98))
+        w.artifacts[a]['expired'] = True
+        w.reviews[r] = []
+        w.calls = []
+        recovered = self.qualifies(w, recovery=True)
+        again = recovered.cards[0]
+        self.assertEqual((again.source, again.receipt_sha256, again.envelope_bytes), ('archive', receipt, record))
+        self.assertEqual((again.request_bytes, again.receipt_bytes, again.projection_bytes),
+                         (card.request_bytes, card.receipt_bytes, card.projection_bytes))
+        self.assertEqual(json.loads(again.projection_bytes)['audit'], json.loads(card.projection_bytes)['audit'])
+        self.assertNotEqual(json.loads(again.projection_bytes)['audit']['source_responses'], w.responses[r])
+        self.assertEqual((recovered.evidence_bytes, recovered.evidence_sha256), (e_bytes, first.evidence_sha256))
+        self.assertEqual(recovered.tuple_bytes, first.tuple_bytes)
+        self.assertEqual(recovered.tuple_bytes, w.tags[RESERVE_TAG]['message_bytes'])
+        self.assertEqual(w.archive, {receipt: record})
+        for name in ('run_approvals', 'approval_responses'):
+            self.assertNotIn(name, [c[0] for c in w.calls])
+        self.assertNotIn(('artifact', a, r), w.calls)
+        self.assertNotIn(('artifact_member', a, 'approval-request.json'), w.calls)
+        self.assertNotIn(('run_attempt', r, 1), w.calls)
+        # The same holds without the approval run in the request; a request that names another run for
+        # the accepted receipt refuses.
+        self.assertEqual(self.qualifies(w, recovery=True, request=w.request(approvals=[])).cards[0].envelope_bytes,
+                         record)
+        other = [dict(w.approval_runs[0], run_id=r + 50)]
+        self.refuses(w, 'evidence mismatch: the requested release_1 approval run is not the accepted one',
+                     recovery=True, request=w.request(approvals=other))
+        # Current authority is still checked apart from the accepted identity.
+        current_channel(w, enabled=False)
+        self.refuses(w, 'not authorized: the founder approval channel is disabled', recovery=True)
+
+    def test_rsig5_frozen_v1_approvals_keep_full_projection_semantics(self):
+        # A frozen v1 archive record still authenticates: its receipt binds the whole projection.
+        w = first_machine_world()
+        receipt = w.add_card('release_1', schema=1)
+        card = self.qualifies(w).cards[0]
+        self.assertEqual((card.source, card.envelope_bytes), ('archive', w.archive[receipt]))
+        issuer = EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']
+        self.assertEqual(issuer['provider_evidence_sha256'], sha(card.projection_bytes))
+        # A v1 first use rebuilds the v1 receipt from the same live facts.
+        w = first_machine_world()
+        receipt = w.add_card('release_1', via='first_use', schema=1)
+        card = self.qualifies(w).cards[0]
+        self.assertEqual((card.source, card.receipt_sha256), ('first_use', receipt))
+        projection = EVIDENCE.parse_provider_evidence(card.projection_bytes)
+        self.assertEqual(projection.value['schema'], 1)
+        self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['provider_evidence_sha256'],
+                         projection.sha256)
+        # v1 is byte-sensitive as frozen: a re-rendered response gives another v1 receipt.
+        respond(w, w.approval_runs[0]['run_id'], repository=digest(95))
+        self.refuses(w, 'not authorized: the release_1 card does not name the founder-approved receipt')
 
 
 if __name__ == '__main__':
