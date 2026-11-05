@@ -30,6 +30,7 @@
 //! and the engine, calls these functions. The daemon's `sys` seam re-exports the no-follow and
 //! privacy calls under the same names.
 
+#[cfg(unix)]
 use std::fs::File;
 use std::io;
 
@@ -40,6 +41,13 @@ pub use unix::*;
 
 #[cfg(windows)]
 mod windows;
+
+// Stops the build in this module itself, so that each call into it is not one more error: the
+// placeholders in pio/windows.rs name each part that is missing.
+#[cfg(windows)]
+compile_error!(
+    "rdy_store::pio is not built on Windows yet; each part that is missing has its own error in pio/windows.rs (FW-XP1 Phase 4)"
+);
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)");
@@ -203,6 +211,18 @@ mod tests {
                  open directory or of a child process that starts in one (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of directory flushes \
                  (FlushFileBuffers) or write-through renames (MoveFileExW) (FW-XP1 Phase 4)",
+            ]
+        );
+        // This module stops the build itself on Windows too, so that each call into it is not one
+        // more error, and holds nothing else for Windows.
+        let pio = source("src/pio.rs");
+        let (found, _) = placeholders(&code_lines(pio.split("#[cfg(test)]").next().unwrap()));
+        assert_eq!(
+            found,
+            [
+                "rdy_store::pio is not built on Windows yet; each part that is missing has its \
+                 own error in pio/windows.rs (FW-XP1 Phase 4)",
+                "rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)",
             ]
         );
         // The file identity seam: its Windows side is a placeholder too, with no stub body
