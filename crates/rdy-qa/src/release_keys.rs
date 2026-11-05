@@ -51,7 +51,7 @@ pub const ROOT_ALLOWED_SIGNERS: &str = "rdy-release namespaces=\"rdy-release-v1\
 /// The first minor the root signed.
 pub const HISTORICAL_FIRST: u32 = 17;
 /// The last minor the root signed. The first machine epoch starts after it.
-pub const HISTORICAL_LAST: u32 = 35;
+pub const HISTORICAL_LAST: u32 = 41;
 /// The machine key type.
 pub const MACHINE_KEY_TYPE: &str = "ssh-ed25519";
 /// The approved release target set at this base. It never follows a wider target table.
@@ -431,9 +431,15 @@ pub struct ReleaseKeys {
 
 /// The historical root's epoch.
 fn historical_epoch() -> Epoch {
+    historical_epoch_to(HISTORICAL_LAST)
+}
+
+/// The historical root's epoch ending at `last` (tests use an earlier end for the immutable
+/// schema vectors).
+fn historical_epoch_to(last: u32) -> Epoch {
     Epoch {
         first: HISTORICAL_FIRST,
-        last: Some(HISTORICAL_LAST),
+        last: Some(last),
         key_type: ROOT_KEY_TYPE.to_string(),
         key_base64: ROOT_KEY_BASE64.to_string(),
         fingerprint: ROOT_FINGERPRINT.to_string(),
@@ -841,8 +847,15 @@ fn parse_revocation(record: &Record, minor: u32) -> Result<Revocation, String> {
 /// Appends the transition `t` after the epochs so far.
 fn enroll(epochs: &mut Vec<Epoch>, t: Transition, record: Record) -> Result<(), TrustError> {
     let refuse = |why: &str| TrustError::Statement(record.name.clone(), why.to_string());
-    if t.minor <= HISTORICAL_LAST {
-        return Err(refuse("the first machine epoch starts after v0.35.0"));
+    let boundary = epochs
+        .first()
+        .and_then(|e| e.last)
+        .unwrap_or(HISTORICAL_LAST);
+    if t.minor <= boundary {
+        return Err(refuse(&format!(
+            "the first machine epoch starts after {}",
+            tag_of(boundary)
+        )));
     }
     let Some(prior) = epochs.last() else {
         return Err(refuse("no historical epoch"));
@@ -1016,6 +1029,27 @@ impl ReleaseKeys {
         }
     }
 
+    /// The authenticated trust of the repository at `root`: its `release-keys/` directory when
+    /// there is one, else the historical root alone (the state before the machine cutover).
+    pub fn for_repository(root: &Path) -> Result<ReleaseKeys, TrustError> {
+        let dir = root.join("release-keys");
+        if dir.is_dir() {
+            ReleaseKeys::load(&dir)
+        } else {
+            Ok(ReleaseKeys::historical())
+        }
+    }
+
+    /// The historical root only, ending at `last` (tests of the immutable schema vectors).
+    #[cfg(test)]
+    fn historical_through(last: u32) -> ReleaseKeys {
+        ReleaseKeys {
+            epochs: vec![historical_epoch_to(last)],
+            records: String::new(),
+            policy: None,
+        }
+    }
+
     /// Loads and authenticates the complete `release-keys/` directory `dir` against the pinned
     /// root.
     pub fn load(dir: &Path) -> Result<ReleaseKeys, TrustError> {
@@ -1027,6 +1061,16 @@ impl ReleaseKeys {
     pub fn load_checked_by(
         dir: &Path,
         check: &dyn StatementCheck,
+    ) -> Result<ReleaseKeys, TrustError> {
+        ReleaseKeys::load_checked_to(dir, check, HISTORICAL_LAST)
+    }
+
+    /// [`ReleaseKeys::load_checked_by`] with the historical epoch ending at `historical_last`
+    /// (the pinned `HISTORICAL_LAST` in production).
+    fn load_checked_to(
+        dir: &Path,
+        check: &dyn StatementCheck,
+        historical_last: u32,
     ) -> Result<ReleaseKeys, TrustError> {
         let listing = list(dir)?;
         let named = paired(&listing)?;
@@ -1069,7 +1113,7 @@ impl ReleaseKeys {
         }
         // Numeric order, a transition before a revocation at the same minor.
         records.sort_by_key(|r| (r.0, r.1));
-        let mut epochs = vec![historical_epoch()];
+        let mut epochs = vec![historical_epoch_to(historical_last)];
         for (minor, kind, record) in records {
             let refuse = |why: String| TrustError::Statement(record.name.clone(), why);
             match kind {
@@ -1147,7 +1191,7 @@ impl ReleaseKeys {
             .ok_or_else(|| TrustError::NoTrust(version.to_string()))
     }
 
-    /// The one key of `version`, for archival verification: the root through v0.35.0, then each
+    /// The one key of `version`, for archival verification: the root through v0.41.0, then each
     /// machine epoch through its last good tag. A gap, an earlier version, a patch, a
     /// pre-release and a 1.x version have none.
     pub fn signer_for(&self, version: &str) -> Result<Signer, TrustError> {
@@ -1250,9 +1294,15 @@ impl ReleaseKeys {
         }
         out.push_str("\nNo other version has a release key.");
         if self.epochs.len() == 1 {
-            out.push_str(
-                " The machine release key is pending: no version after v0.35.0 has a release key yet.",
-            );
+            let last = self
+                .epochs
+                .first()
+                .and_then(|e| e.last)
+                .unwrap_or(HISTORICAL_LAST);
+            out.push_str(&format!(
+                " The machine release key is pending: no version after {} has a release key yet.",
+                tag_of(last)
+            ));
         }
         out.push('\n');
         for e in self.epochs.iter().filter(|e| e.has_good_release()) {
@@ -1487,12 +1537,16 @@ mod tests {
 
         /// Loads with the structural mock.
         fn load(&self) -> Result<ReleaseKeys, TrustError> {
-            ReleaseKeys::load_checked_by(self.path(), &Structural)
+            ReleaseKeys::load_checked_to(self.path(), &Structural, SCHEMA_VECTOR_LAST)
         }
     }
 
     /// The three unendorsed receiver records: key 1 from v0.40.0, revoked after v0.41.0, then
     /// key 2 from v0.44.0.
+    /// The immutable receiver vectors place machine epochs at 36 to 44, so structural loads of
+    /// them end the historical epoch at 35. Production ends it at `HISTORICAL_LAST` (41).
+    const SCHEMA_VECTOR_LAST: u32 = 35;
+
     fn unendorsed_records() -> Records {
         [
             "revocation-v0.40.0.json",
@@ -1532,7 +1586,7 @@ mod tests {
         );
 
         let h = ReleaseKeys::historical();
-        for v in ["0.17.0", "0.20.0", "0.35.0"] {
+        for v in ["0.17.0", "0.20.0", "0.35.0", "0.36.0", "0.41.0"] {
             let s = h.signer_for(v).expect(v);
             assert_eq!(s.fingerprint, ROOT_FINGERPRINT);
             assert_eq!(format!("{}\n", s.signer_line), ROOT_ALLOWED_SIGNERS);
@@ -1540,7 +1594,7 @@ mod tests {
             assert_eq!(s.transition_sha256, None);
             assert_eq!(s.version, v);
         }
-        for v in ["0.1.0", "0.16.0", "0.36.0", "0.4294967295.0"] {
+        for v in ["0.1.0", "0.16.0", "0.42.0", "0.4294967295.0"] {
             assert_eq!(
                 h.signer_for(v),
                 Err(TrustError::NoTrust(v.to_string())),
@@ -1563,8 +1617,8 @@ mod tests {
             assert_eq!(h.signer_for(v), Err(TrustError::NotVersion), "{v:?}");
         }
         assert_eq!(
-            TrustError::NoTrust("0.36.0".into()).to_string(),
-            "release trust: no release key for 0.36.0"
+            TrustError::NoTrust("0.42.0".into()).to_string(),
+            "release trust: no release key for 0.42.0"
         );
 
         // structural epochs: key 1 for 40-41, key 2 from 44, nothing in the gaps
@@ -1617,8 +1671,8 @@ mod tests {
             Err(TrustError::BadSignature("0.35.0".into()))
         );
         assert_eq!(
-            h.verify_release("0.36.0", &m, &sig),
-            Err(TrustError::NoTrust("0.36.0".into()))
+            h.verify_release("0.42.0", &m, &sig),
+            Err(TrustError::NoTrust("0.42.0".into()))
         );
         // a valid signature by another epoch's key is refused before anything else
         assert_eq!(
@@ -1715,7 +1769,8 @@ mod tests {
 
         // each record is checked in its own namespace over its exact bytes
         let rec = Recording::default();
-        ReleaseKeys::load_checked_by(reg.path(), &rec).expect("structural load");
+        ReleaseKeys::load_checked_to(reg.path(), &rec, SCHEMA_VECTOR_LAST)
+            .expect("structural load");
         let calls = rec.0.into_inner();
         let want: Vec<Call> = unendorsed_records()
             .into_iter()
@@ -1897,7 +1952,7 @@ mod tests {
         );
         assert_eq!(
             keys.versions_txt(),
-            ReleaseKeys::historical().versions_txt()
+            ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST).versions_txt()
         );
         let next = Reg::with_policy(
             &[
@@ -2210,7 +2265,7 @@ mod tests {
         // with no record and no control file, only the historical root remains
         let empty = Reg::new(&[]);
         let keys = empty.load().expect("empty registry");
-        assert_eq!(keys, ReleaseKeys::historical());
+        assert_eq!(keys, ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST));
         assert_eq!(
             keys.eligible_signer("0.36.0"),
             Err(TrustError::NoTrust("0.36.0".into()))
@@ -2247,7 +2302,7 @@ mod tests {
 
         // the receiver's published files: the historical table and the root file (their digests
         // are in the receiver contract)
-        let historical = ReleaseKeys::historical();
+        let historical = ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST);
         assert_eq!(
             sha256_hex(historical.versions_txt().as_bytes()),
             "028019de9b6f9b2c9f789a291600449a97ed9eab2cf3a34c3b80e32e2cdc3f0b"

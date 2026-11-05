@@ -4208,7 +4208,7 @@ esac
         // The README: no install block while the key is pending; the generated ready section
         // (the selected key, the trust list and the install blocks) when ready. A version's key
         // comes from the authenticated records, not from the README.
-        let keys = ReleaseKeys::historical();
+        let keys = ReleaseKeys::for_repository(&repository_root()).expect("repository trust");
         let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
         assert_eq!(
             readme_install_problem(&readme, &keys),

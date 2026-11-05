@@ -128,14 +128,14 @@ fn rsig2_cli_selects_and_verifies_the_real_historical_release() {
         "release trust: SHA256SUMS is over 1024 bytes",
     );
     refused(
-        &verify("0.40.0", &manifest),
+        &verify("0.42.0", &manifest),
         1,
-        "release trust: no release key for 0.40.0",
+        "release trust: no release key for 0.42.0",
     );
     refused(
-        &trust(&["select", "--version", "0.36.0"]),
+        &trust(&["select", "--version", "0.42.0"]),
         1,
-        "release trust: no release key for 0.36.0",
+        "release trust: no release key for 0.42.0",
     );
     refused(
         &trust(&["select", "--version", "v0.35.0"]),
@@ -257,7 +257,7 @@ fn rsig2_cli_renders_the_historical_trust_section_and_tables() {
     let versions = historical.versions_txt();
     assert_eq!(
         release_keys::sha256_hex(versions.as_bytes()),
-        "028019de9b6f9b2c9f789a291600449a97ed9eab2cf3a34c3b80e32e2cdc3f0b"
+        "5d29df2e931e998ae3a494ccf80b1e5a10c0f572a3c811f9b224ce57c7e249cd"
     );
     ok(&trust(&["versions"]), &versions);
     let empty = tempfile::tempdir().expect("tempdir");

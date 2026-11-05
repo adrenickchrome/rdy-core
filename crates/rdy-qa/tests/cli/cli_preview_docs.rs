@@ -974,14 +974,50 @@ fn rsig3_readme_lists_epochs_and_uses_the_selected_key() {
         ready_readme(&two, "0.35.0").replacen(&notes_url("0.35.0"), &notes_url("0.50.0"), 1);
     assert!(trust_state_error(&wrong).is_err());
 
-    // the real README: the trust list is the one the records generate
+    // the real README: the trust list is the one the authenticated records generate
     let real = read("README.md");
-    if !real.contains(PENDING) {
-        let trust = historical.trust_section().expect("trust list");
-        assert!(
-            real.contains(&trust),
-            "the real README holds the generated trust list"
-        );
+    let keys = ReleaseKeys::for_repository(&root()).expect("the repository's trust");
+    assert_eq!(real_trust_list_problem(&real, &keys), Ok(()));
+
+    // a cutover README, generated from machine records, passes the same comparison; the
+    // historical-only list does not match it, and the cutover list does not match a README
+    // that still says the machine key is pending
+    let cutover = ready_readme(&two, "0.60.0");
+    assert_eq!(real_trust_list_problem(&cutover, &two), Ok(()));
+    assert!(real_trust_list_problem(&cutover, &historical).is_err());
+    assert!(real_trust_list_problem(&ready_readme(&historical, RV), &two).is_err());
+}
+
+/// The YubiKey range runs through v0.41.0 (D-Z5ES3), and the real README says so.
+#[test]
+fn rsig3_historical_range_runs_through_v0_41_0() {
+    assert_eq!(HISTORICAL_LAST, 41);
+    let real = read("README.md");
+    assert!(
+        real.contains("| v0.17.0 to v0.41.0 | `sk-ssh-ed25519@openssh.com` |"),
+        "the trust row"
+    );
+    assert!(real.contains("The allowed-signers line for v0.17.0 to v0.41.0:"));
+    assert!(!real.contains("v0.17.0 to v0.35.0"));
+    assert!(!real.contains("no version after v0.35.0"));
+    let keys = ReleaseKeys::historical();
+    for v in ["0.35.0", "0.36.0", "0.41.0"] {
+        assert!(keys.signer_for(v).is_ok(), "{v}");
+    }
+    assert!(keys.signer_for("0.42.0").is_err());
+}
+
+/// The real README holds the trust list that `keys` (the authenticated records) generate. A
+/// README still in the pending key state holds none.
+fn real_trust_list_problem(real: &str, keys: &ReleaseKeys) -> Result<(), String> {
+    if real.contains(PENDING) {
+        return Ok(());
+    }
+    let trust = keys.trust_section().map_err(|e| e.to_string())?;
+    if real.contains(&trust) {
+        Ok(())
+    } else {
+        Err("the README does not hold the generated trust list".into())
     }
 }
 
