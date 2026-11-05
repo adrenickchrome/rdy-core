@@ -2,16 +2,17 @@
 //! build with a `compile_error!` that names what it lacks, so no call can reach a body that
 //! compiles without the platform call, and no answer is made up. A child module of this one
 //! replaces each placeholder with its implementation: `windows_io` makes the positioned reads and
-//! writes, hole punches and allocated-bytes queries.
+//! writes, hole punches and allocated-bytes queries; `windows_security` makes private objects and
+//! no-follow opens.
 
 pub use windows_io::*;
 // a sibling file: this file is not a mod.rs, so a plain `mod` would look in pio/windows/
 #[path = "windows_io.rs"]
 mod windows_io;
 
-compile_error!(
-    "rdy_store::pio has no Windows implementation yet of privacy (a protected DACL with one allow ACE for this account) or no-follow opens (FW-XP1 Phase 4)"
-);
+pub use windows_security::*;
+#[path = "windows_security.rs"]
+mod windows_security;
 
 compile_error!(
     "rdy_store::pio has no Windows implementation yet of opens, entry kinds and listings anchored to an open directory (FW-XP1 Phase 4)"

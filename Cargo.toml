@@ -41,8 +41,9 @@ libc = "0.2.190"
 # Win32 bindings, only in the platform seams: the site socket's Windows option
 # (SO_EXCLUSIVEADDRUSE, D-FPKPS) in rdy_daemon::sys, handle identity, change time and link
 # count in rdy_store::fileid, and hole punching (FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA) and
-# allocated bytes in rdy_store::pio. The version tokio, mio and socket2 already lock.
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
+# allocated bytes, and private security descriptors (a token's user, a protected DACL) and
+# reparse-point refusals, in rdy_store::pio. The version tokio, mio and socket2 already lock.
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemServices", "Win32_System_Threading"] }
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"

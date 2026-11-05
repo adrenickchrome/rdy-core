@@ -199,14 +199,14 @@ mod tests {
         let (found, rest) = placeholders(&code_lines(&source("src/pio/windows.rs")));
         assert_eq!(
             rest.trim(),
-            "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;",
+            "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;\n\
+             pub use windows_security::*;\n#[path = \"windows_security.rs\"]\n\
+             mod windows_security;",
             "code outside the placeholders"
         );
         assert_eq!(
             found,
             [
-                "rdy_store::pio has no Windows implementation yet of privacy (a protected DACL \
-                 with one allow ACE for this account) or no-follow opens (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of opens, entry kinds and \
                  listings anchored to an open directory (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of creates and removals \
@@ -286,6 +286,41 @@ mod tests {
             "FileStandardInfo",
         ] {
             assert!(io.contains(call), "pio/windows_io.rs calls {call}");
+        }
+        // Privacy and no-follow opens are built (Task 4): pio/windows_security.rs reads the
+        // token's user and each object's descriptor, makes objects with the private descriptor,
+        // sets it, and refuses reparse points; it holds no stub body or placeholder before its
+        // tests.
+        let security = source("src/pio/windows_security.rs");
+        let security = code_lines(security.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(
+                !security.contains(word),
+                "pio/windows_security.rs holds {word}"
+            );
+        }
+        assert!(placeholders(&security).0.is_empty());
+        for call in [
+            "GetTokenInformation",
+            "GetKernelObjectSecurity",
+            "SetKernelObjectSecurity",
+            "ReOpenFile",
+            "CreateFileW",
+            "CreateDirectoryW",
+            "FileAttributeTagInfo",
+            "FILE_FLAG_OPEN_REPARSE_POINT",
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            "SE_DACL_PROTECTED",
+        ] {
+            assert!(
+                security.contains(call),
+                "pio/windows_security.rs calls {call}"
+            );
         }
     }
 

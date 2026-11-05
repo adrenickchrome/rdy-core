@@ -420,3 +420,432 @@ fn hsa2_a_replacement_in_a_directory_handle_ignores_later_path_changes() {
     assert_eq!(mode(&d.path().join("a-aside/f.yaml")), 0o640);
     assert_eq!(fs::read(d.path().join("a-aside/f.yaml")).unwrap(), b"kept");
 }
+
+// Task 4 (FW-XP1 Phase 4): privacy and no-follow on every platform. Each pin runs on Unix with
+// modes and on Windows with security descriptors: a private object there is this account's, with
+// a protected DACL that holds one allow ACE, for this account, and no inherited access.
+
+/// The privacy of a private object that rdy made: this account's, and no other account's.
+const PRIVATE: pio::Privacy = pio::Privacy {
+    mine: true,
+    private: true,
+    owner_only: true,
+    shared_writable: false,
+    open_to_all: false,
+};
+
+/// `path` opened for reading, never through a link (a directory opens too).
+fn open_read(path: &Path) -> io::Result<fs::File> {
+    pio::open_no_follow(fs::OpenOptions::new().read(true), path)
+}
+
+/// The privacy of what `path` names, read from a handle.
+fn privacy_at(path: &Path) -> pio::Privacy {
+    pio::privacy(&open_read(path).unwrap()).unwrap()
+}
+
+/// Lets every account write `path` and, for a directory, remove or replace its entries, and
+/// hands that access to what is made in it: mode 0o777 (a directory) or 0o666 on Unix; on
+/// Windows inheritable full access for Everyone and for Users.
+fn widen(path: &Path) {
+    #[cfg(unix)]
+    {
+        let mode = if path.is_dir() { 0o777 } else { 0o666 };
+        fs::set_permissions(path, pio::permissions(mode)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let inherit = if path.is_dir() { "(OI)(CI)" } else { "" };
+        for sid in ["*S-1-1-0", "*S-1-5-32-545"] {
+            run(
+                "icacls",
+                &[
+                    path.as_os_str(),
+                    "/grant".as_ref(),
+                    format!("{sid}:{inherit}(F)").as_ref(),
+                ],
+            );
+        }
+    }
+}
+
+/// Runs `program` with `args` and checks that it succeeded.
+#[cfg(windows)]
+fn run(program: &str, args: &[&std::ffi::OsStr]) {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{program} {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A link at `link` to the file or directory `target`: a symbolic link; on Windows a file or
+/// directory symbolic link (`mklink`, `mklink /D`).
+fn link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    pio::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let mut args: Vec<&std::ffi::OsStr> = vec!["/C".as_ref(), "mklink".as_ref()];
+        if target.is_dir() {
+            args.push("/D".as_ref());
+        }
+        args.extend([link.as_os_str(), target.as_os_str()]);
+        run("cmd", &args);
+    }
+}
+
+/// On Windows: `f`'s owner is this account, and its DACL is protected and holds exactly the one
+/// ACE that rdy gives a private object of `kind`.
+#[cfg(windows)]
+fn assert_only_the_account_ace(f: &fs::File, kind: pio::ObjectKind, what: &str) {
+    let me = pio::current_account().unwrap();
+    let s = pio::security_of(f).unwrap();
+    assert_eq!(s.owner, Some(me), "{what}: the owner");
+    assert!(s.protected, "{what}: no inherited access");
+    assert_eq!(
+        s.dacl,
+        Some(vec![pio::Ace::private(me, kind)]),
+        "{what}: the ACEs"
+    );
+}
+
+#[test]
+fn wx4_private_objects_have_only_the_account_ace() {
+    let d = tempfile::tempdir().unwrap();
+    // a new private directory, and an existing one opened to all and made private
+    let new_dir = d.path().join("run");
+    pio::create_private_dir(&new_dir).unwrap();
+    let old_dir = d.path().join("old");
+    fs::create_dir(&old_dir).unwrap();
+    widen(&old_dir);
+    assert!(!privacy_at(&old_dir).owner_only, "the fixture is open");
+    pio::make_private_dir(&old_dir).unwrap();
+    pio::make_private_dir(&old_dir).unwrap();
+    for dir in [&new_dir, &old_dir] {
+        let f = open_read(dir).unwrap();
+        assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "{}", dir.display());
+        #[cfg(windows)]
+        assert_only_the_account_ace(&f, pio::ObjectKind::Dir, &dir.display().to_string());
+    }
+    // a new private file (the lock's options), private before make_private_file, and after it
+    let lock = new_dir.join("daemon.lock");
+    let f = pio::open_no_follow(
+        pio::private_file(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+        ),
+        &lock,
+    )
+    .unwrap();
+    assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "a new private file");
+    pio::make_private_file(&f).unwrap();
+    assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "made private again");
+    // an existing file opened to all keeps its access through a private open (the log's
+    // options), and make_private_file narrows it to this account
+    let log = d.path().join("daemon.log");
+    fs::write(&log, b"older run\n").unwrap();
+    widen(&log);
+    let f = pio::open_no_follow(
+        pio::private_file(fs::OpenOptions::new().append(true).create(true)),
+        &log,
+    )
+    .unwrap();
+    let before = pio::privacy(&f).unwrap();
+    assert!(
+        before.mine && !before.private && before.shared_writable,
+        "{before:?}"
+    );
+    pio::make_private_file(&f).unwrap();
+    for (path, f) in [(&lock, open_read(&lock).unwrap()), (&log, f)] {
+        assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "{}", path.display());
+        #[cfg(windows)]
+        assert_only_the_account_ace(&f, pio::ObjectKind::File, &path.display().to_string());
+    }
+    assert_eq!(fs::read(&log).unwrap(), b"older run\n", "the bytes stay");
+}
+
+#[test]
+fn wx4_inheritance_and_foreign_owner_are_refused() {
+    let d = tempfile::tempdir().unwrap();
+    // a directory that hands every account access to what is made in it
+    let open = d.path().join("open");
+    fs::create_dir(&open).unwrap();
+    widen(&open);
+    let p = privacy_at(&open);
+    assert!(
+        p.mine && !p.private && !p.owner_only && p.shared_writable && p.open_to_all,
+        "{p:?}"
+    );
+    // a plain file made in it gets that access: it is not private, and others may write it
+    let plain = open.join("plain");
+    fs::write(&plain, b"plain").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&plain, pio::permissions(0o666)).unwrap();
+    let p = privacy_at(&plain);
+    assert!(
+        p.mine && !p.private && !p.owner_only && p.shared_writable && p.open_to_all,
+        "{p:?}"
+    );
+    // a private directory and a private file made in it take none of it
+    let run = open.join("run");
+    pio::create_private_dir(&run).unwrap();
+    assert_eq!(privacy_at(&run), PRIVATE, "a private directory");
+    let file = open.join("private");
+    let f = pio::open_no_follow(
+        pio::private_file(fs::OpenOptions::new().write(true).create_new(true)),
+        &file,
+    )
+    .unwrap();
+    assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "a private file");
+    // the plain file, made private, keeps none of the access it was given
+    let f = pio::open_no_follow(fs::OpenOptions::new().read(true).write(true), &plain).unwrap();
+    pio::make_private_file(&f).unwrap();
+    assert_eq!(
+        pio::privacy(&f).unwrap(),
+        PRIVATE,
+        "the plain file made private"
+    );
+    #[cfg(windows)]
+    {
+        let s = pio::security_of(&f).unwrap();
+        assert!(s.protected, "the inherited access is gone");
+        assert_eq!(s.dacl.map(|a| a.len()), Some(1));
+    }
+    // a directory and a file of another account are never made private, and stay as they are
+    #[cfg(unix)]
+    let (theirs_dir, theirs_file) = (PathBuf::from("/"), PathBuf::from("/etc/hosts"));
+    #[cfg(windows)]
+    let (theirs_dir, theirs_file) = {
+        let root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"));
+        (root.clone(), root.join(r"System32\drivers\etc\hosts"))
+    };
+    let before = privacy_at(&theirs_dir);
+    assert!(
+        !before.mine,
+        "{} is another account's",
+        theirs_dir.display()
+    );
+    let e = pio::make_private_dir(&theirs_dir).unwrap_err();
+    #[cfg(windows)]
+    assert_eq!(
+        e.to_string(),
+        format!("{} is not private to this account", theirs_dir.display())
+    );
+    #[cfg(unix)]
+    assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+    assert_eq!(privacy_at(&theirs_dir), before, "unchanged");
+    let f = open_read(&theirs_file).unwrap();
+    let before = pio::privacy(&f).unwrap();
+    assert!(
+        !before.mine,
+        "{} is another account's",
+        theirs_file.display()
+    );
+    let e = pio::make_private_file(&f).unwrap_err();
+    #[cfg(windows)]
+    {
+        let text = e.to_string().to_lowercase();
+        assert!(
+            text.ends_with(r"\system32\drivers\etc\hosts is not private to this account"),
+            "{e}"
+        );
+    }
+    #[cfg(unix)]
+    assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+    assert_eq!(pio::privacy(&f).unwrap(), before, "unchanged");
+}
+
+#[test]
+fn wx4_run_entries_refuse_every_reparse_tag() {
+    let d = tempfile::tempdir().unwrap();
+    let run = d.path().join("run");
+    pio::create_private_dir(&run).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let victim = elsewhere.path().join("victim");
+    fs::write(&victim, b"keep").unwrap();
+    let victim_dir = elsewhere.path().join("victim-dir");
+    fs::create_dir(&victim_dir).unwrap();
+    widen(&victim);
+    widen(&victim_dir);
+    let (file_before, dir_before) = (privacy_at(&victim), privacy_at(&victim_dir));
+    // a link to a file, a link to a directory and, on Windows, a junction: a mount-point
+    // reparse point. The provider's own tests cover the other reparse tags.
+    link(&victim, &run.join("lfile"));
+    link(&victim_dir, &run.join("ldir"));
+    #[cfg(windows)]
+    run_mklink_junction(&victim_dir, &run.join("junction"));
+    let entries: &[&str] = if cfg!(windows) {
+        &["lfile", "ldir", "junction"]
+    } else {
+        &["lfile", "ldir"]
+    };
+    for &name in entries {
+        let at = run.join(name);
+        let opens: [(&str, fs::OpenOptions); 4] = [
+            ("read", {
+                let mut o = fs::OpenOptions::new();
+                o.read(true);
+                o
+            }),
+            ("write", {
+                let mut o = fs::OpenOptions::new();
+                o.write(true);
+                o
+            }),
+            ("append and create", {
+                let mut o = fs::OpenOptions::new();
+                o.append(true).create(true);
+                o
+            }),
+            ("read, write and create", {
+                let mut o = fs::OpenOptions::new();
+                o.read(true).write(true).create(true).truncate(false);
+                o
+            }),
+        ];
+        for (how, mut opts) in opens {
+            let e = pio::open_no_follow(&mut opts, &at).unwrap_err();
+            #[cfg(windows)]
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "{} is a reparse point; rdy will not follow it",
+                    at.display()
+                ),
+                "{name}, {how}"
+            );
+            #[cfg(unix)]
+            let _ = (e, how);
+        }
+        // a private create never follows the entry: one of its own is refused as existing, and
+        // one that may open what stands there is refused as a link
+        let e = pio::open_no_follow(
+            pio::private_file(fs::OpenOptions::new().write(true).create_new(true)),
+            &at,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{name}: {e}");
+        let e = pio::open_no_follow(
+            pio::private_file(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false),
+            ),
+            &at,
+        )
+        .unwrap_err();
+        #[cfg(windows)]
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "{} is a reparse point; rdy will not follow it",
+                at.display()
+            ),
+            "{name}"
+        );
+        #[cfg(unix)]
+        let _ = e;
+        // on Windows a directory is made private only when it is no reparse point
+        #[cfg(windows)]
+        {
+            let e = pio::make_private_dir(&at).unwrap_err();
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "{} is a reparse point; rdy will not follow it",
+                    at.display()
+                ),
+                "{name}"
+            );
+        }
+    }
+    // nothing was followed: the targets keep their bytes, entries and access
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    assert!(names(&victim_dir).is_empty());
+    assert_eq!(names(elsewhere.path()), ["victim", "victim-dir"]);
+    assert_eq!(
+        (privacy_at(&victim), privacy_at(&victim_dir)),
+        (file_before, dir_before)
+    );
+}
+
+/// A junction (a mount-point reparse point) at `link` to the directory `target`.
+#[cfg(windows)]
+fn run_mklink_junction(target: &Path, link: &Path) {
+    run(
+        "cmd",
+        &[
+            "/C".as_ref(),
+            "mklink".as_ref(),
+            "/J".as_ref(),
+            link.as_os_str(),
+            target.as_os_str(),
+        ],
+    );
+}
+
+#[test]
+fn wx4_private_temp_is_private_at_creation() {
+    // a directory that hands every account access to what is made in it
+    let d = tempfile::tempdir().unwrap();
+    let open = d.path().join("open");
+    fs::create_dir(&open).unwrap();
+    widen(&open);
+    // the private file constructor, which the future MCP token is to use (none is made here):
+    // private when it is made, before make_private_file and before a byte is written
+    let token = open.join("token");
+    let mut f = pio::open_no_follow(
+        pio::private_file(fs::OpenOptions::new().write(true).create_new(true)),
+        &token,
+    )
+    .unwrap();
+    assert_eq!(f.metadata().unwrap().len(), 0, "nothing written yet");
+    assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "private at creation");
+    #[cfg(windows)]
+    assert_only_the_account_ace(&f, pio::ObjectKind::File, "the token");
+    io::Write::write_all(&mut f, b"secret").unwrap();
+    drop(f);
+    assert_eq!(privacy_at(&token), PRIVATE);
+    assert_eq!(fs::read(&token).unwrap(), b"secret");
+    // the private temp of a durable private write: private and empty when it is made
+    let target = open.join("credentials.yaml");
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<(pio::Privacy, u64)>>> = Default::default();
+    let log = seen.clone();
+    with_private_write_probe_for_tests(
+        move |stage, p: &Path| {
+            if stage == PrivateWriteStage::Created {
+                let f = open_read(p)?;
+                log.borrow_mut()
+                    .push((pio::privacy(&f)?, f.metadata()?.len()));
+            }
+            Ok(())
+        },
+        || write_private_durable(&target, b"secret bytes"),
+    )
+    .unwrap();
+    assert_eq!(*seen.borrow(), [(PRIVATE, 0)]);
+    // a replacement keeps the private descriptor of the temp, not the access of what it replaced
+    let wide = open.join("config.yaml");
+    fs::write(&wide, b"old").unwrap();
+    widen(&wide);
+    write_private_durable(&wide, b"new").unwrap();
+    for path in [&target, &wide] {
+        let f = open_read(path).unwrap();
+        assert_eq!(pio::privacy(&f).unwrap(), PRIVATE, "{}", path.display());
+        #[cfg(windows)]
+        assert_only_the_account_ace(&f, pio::ObjectKind::File, &path.display().to_string());
+    }
+    assert_eq!(fs::read(&wide).unwrap(), b"new");
+    assert_eq!(names(&open), ["config.yaml", "credentials.yaml", "token"]);
+}
