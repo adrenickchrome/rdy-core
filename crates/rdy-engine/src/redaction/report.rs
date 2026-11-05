@@ -1033,6 +1033,9 @@ pub(crate) fn compute_excluding(
     let later = |i: usize| after.is_some_and(|at| i > at);
     let mut later_landings: HashSet<Hash> = HashSet::new();
     let mut later_answers: HashSet<Hash> = HashSet::new();
+    // D-SJBTD (known issue 703): the changes that hold a quote, in their own text or in a block
+    // they write; a landing after the request that lands one brings the quote into canon
+    let mut quoting_changes: HashSet<Hash> = HashSet::new();
     // the carried records, reduced to what their references need (no decoded record is kept)
     let mut carried = Carried::default();
     let audit = ImpactKind::AuditText;
@@ -1083,19 +1086,27 @@ pub(crate) fn compute_excluding(
                         &c.links,
                     ),
                 )?;
+                let mut quoting =
+                    quotes
+                        .found
+                        .contains_key(&(ImpactKind::Change as u8, rec.clone(), false));
                 for op in &c.ops {
                     if let Op::Create { block } | Op::Update { block, .. } = op {
                         let v = block.version_hash();
                         if block.is_redacted() || versions.contains(&v) {
                             continue;
                         }
-                        quotes.scan(
-                            ImpactKind::BlockVersion,
-                            &version_record(&block.id, &v),
+                        let record = version_record(&block.id, &v);
+                        quotes.scan(ImpactKind::BlockVersion, &record, true, block)?;
+                        quoting |= quotes.found.contains_key(&(
+                            ImpactKind::BlockVersion as u8,
+                            record,
                             true,
-                            block,
-                        )?;
+                        ));
                     }
+                }
+                if quoting {
+                    quoting_changes.insert(h);
                 }
             }
             kinds::PROPOSAL => {
@@ -1332,12 +1343,15 @@ pub(crate) fn compute_excluding(
         row(ImpactKind::View, v.to_string(), refs, false);
     }
     // a landing after the request counts only when it lands a change of the removed content
-    // (TASK-1237); its tags still reach the content through its history
+    // (TASK-1237) or a change that holds a quote of it (D-SJBTD); its tags still reach the
+    // content through its history
     let landing_direct: HashSet<Hash> = landings
         .iter()
         .filter(|(h, l)| {
             if later_landings.contains(*h) {
-                l.changes.iter().any(|c| affected_changes.contains(c))
+                l.changes
+                    .iter()
+                    .any(|c| affected_changes.contains(c) || quoting_changes.contains(c))
             } else {
                 l.changes.iter().any(&hit)
             }

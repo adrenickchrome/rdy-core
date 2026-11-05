@@ -435,7 +435,7 @@ fn pub12_implicit_diff_uses_the_same_rules() {
     assert!(!d.profile_changed, "two implicit sides have no revision");
     assert_ne!(d.before_selection_hash, d.after_selection_hash);
     // the check report carries the same comparison, with null identity
-    let v = publication::check(&st, IMPLICIT, None, Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(&st, IMPLICIT, None, Some("tag:v1.0.0"), None).unwrap();
     assert_eq!(v["disclosure"]["added_docs"][0]["id"], c.to_string());
     assert_eq!(v["disclosure"]["profile_id"], Value::Null);
     assert_eq!(v["disclosure"]["profile_changed"], false);
@@ -457,7 +457,7 @@ fn pub12_implicit_diff_uses_the_same_rules() {
     other.profile.trail = false;
     let e = publication::disclosure_diff(&after, &other).unwrap_err();
     assert_err(&e, E_BAD_INPUT, AUDIENCE_MISMATCH.0, AUDIENCE_MISMATCH.1);
-    let e = publication::check(&st, "implicit:public", None, Some("canon")).unwrap_err();
+    let e = publication::check(&st, "implicit:public", None, Some("canon"), None).unwrap_err();
     assert_err(&e, E_BAD_INPUT, ALWAYS_ORG.0, ALWAYS_ORG.1);
 
     // a self-diff is empty

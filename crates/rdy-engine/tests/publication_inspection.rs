@@ -331,7 +331,7 @@ fn spv1_each_scope_reads_its_profile_revision() {
         (&*format!("proposal:{}", p2.r#ref), &e),
         (&*format!("proposal:{}", latest_form(&p2.r#ref)), &e),
     ] {
-        let v = publication::check(&st, "site", Some(text), None).unwrap();
+        let v = publication::check(&st, "site", Some(text), None, None).unwrap();
         assert_eq!(
             v["selection"]["entries"][0]["id"],
             doc.as_str(),
@@ -489,7 +489,7 @@ fn spv1_check_candidate_widens_but_baseline_does_not() {
         Scope::At(h) => h.to_string(),
         other => panic!("{other:?}"),
     };
-    let check = |scope: Option<&str>| publication::check(&st, "site", scope, None).unwrap();
+    let check = |scope: Option<&str>| publication::check(&st, "site", scope, None, None).unwrap();
 
     // the exact candidate objects
     let canon = json!({"kind": "canon", "landing": head});
@@ -536,7 +536,7 @@ fn spv1_check_candidate_widens_but_baseline_does_not() {
     assert_eq!(keys(&latest), ["kind", "landing", "proposal"]);
 
     // a stable baseline compares a review candidate
-    let v = publication::check(&st, "site", Some("draft"), Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(&st, "site", Some("draft"), Some("tag:v1.0.0"), None).unwrap();
     assert_eq!(v["scope"], view);
     assert_eq!(v["against"], json!({"kind": "landing", "landing": tagged}));
     assert_eq!(v["disclosure"]["profile_id"], pf.as_str());
@@ -547,6 +547,7 @@ fn spv1_check_candidate_widens_but_baseline_does_not() {
         "site",
         Some(&format!("proposal:{}", p2.r#ref)),
         Some("canon"),
+        None,
     )
     .unwrap();
     assert_eq!(v["against"], canon);
@@ -562,11 +563,11 @@ fn spv1_check_candidate_widens_but_baseline_does_not() {
         String::new(),
         "Canon".to_string(),
     ] {
-        let err = publication::check(&st, "site", Some("draft"), Some(&bad)).unwrap_err();
+        let err = publication::check(&st, "site", Some("draft"), Some(&bad), None).unwrap_err();
         assert_err(&err, E_BAD_INPUT, BASELINE.0, BASELINE.1);
     }
     // the in-flight candidate is refused with the inspection text
-    let err = publication::check(&st, "site", Some("inflight"), None).unwrap_err();
+    let err = publication::check(&st, "site", Some("inflight"), None, None).unwrap_err();
     assert_err(&err, E_BAD_INPUT, INSPECTION_SCOPE.0, INSPECTION_SCOPE.1);
 }
 
@@ -741,7 +742,7 @@ fn spv1_check_empty_and_case_sensitive_candidates_are_closed() {
     );
     land(&mut r, "work");
     let st = r.read();
-    let check = |s: &str| publication::check(&st, "site", Some(s), None);
+    let check = |s: &str| publication::check(&st, "site", Some(s), None, None);
     for s in ["", "view:", "inflight"] {
         assert_err(
             &check(s).unwrap_err(),
@@ -804,14 +805,14 @@ fn spv1_check_empty_and_case_sensitive_candidates_are_closed() {
         json!([{"op": "create", "type": "doc", "fields": {"name": "z", "title": "Z", "doc_type": "page"}}]),
     );
     let st = r.read();
-    let v = publication::check(&st, "site", Some("Canon"), None).unwrap();
+    let v = publication::check(&st, "site", Some("Canon"), None, None).unwrap();
     assert_eq!(
         v["scope"],
         json!({"kind": "view", "landing": null, "view": "Canon"})
     );
     assert_eq!(v["selection"]["entries"][0]["id"], a.as_str());
     // and `canon` is still canon
-    let v = publication::check(&st, "site", Some("canon"), None).unwrap();
+    let v = publication::check(&st, "site", Some("canon"), None, None).unwrap();
     assert_eq!(v["scope"]["kind"], "canon");
 }
 
@@ -886,10 +887,10 @@ fn spv1_live_warning_keeps_blocked_policy() {
     assert_eq!(clear.references.live_warning(), None);
     assert!(clear.require_output().is_ok());
     // the check report keeps its own warnings: a blocked result carries none
-    let v = publication::check(&st, "open", Some("work"), None).unwrap();
+    let v = publication::check(&st, "open", Some("work"), None, None).unwrap();
     assert_eq!(v["references"]["status"], "blocked");
     assert_eq!(v["warnings"], json!([]));
-    let v = publication::check(&st, "site", Some("work"), None).unwrap();
+    let v = publication::check(&st, "site", Some("work"), None, None).unwrap();
     assert_eq!(
         v["warnings"],
         json!([{
@@ -969,7 +970,7 @@ fn spv1_inspection_is_bounded_and_read_only() {
         );
     }
     assert_limit(
-        &publication::check(&st, &long, Some("draft"), None).unwrap_err(),
+        &publication::check(&st, &long, Some("draft"), None, None).unwrap_err(),
         "profile name",
         128,
         "bytes",
@@ -1095,13 +1096,13 @@ fn spv1_inspection_is_bounded_and_read_only() {
 
     // every inspection, refusals included, leaves the log, refs and files as they were
     for scope in ["canon", "draft", &format!("proposal:{}", p.r#ref)] {
-        publication::check(&st, "site", Some(scope), Some("canon")).unwrap();
+        publication::check(&st, "site", Some(scope), Some("canon"), None).unwrap();
         let s = st.resolve_scope(scope).unwrap();
         let res = publication::resolve_inspection(&st, &s, "site").unwrap();
         with_source(&st, |src| publication::load_inspection_assets(src, &res)).unwrap();
         publication::resolve_revision(&st, &s, &bid(&pf)).unwrap();
     }
-    assert!(publication::check(&st, "site", Some("inflight"), None).is_err());
+    assert!(publication::check(&st, "site", Some("inflight"), None, None).is_err());
     assert_eq!(st.seq(), seq);
     drop(st);
     r.close().unwrap();
@@ -1152,7 +1153,7 @@ fn spv1_profile_key_reassignment_does_not_change_baseline_identity() {
 
     for scope in ["draft".to_string(), format!("proposal:{}", p.r#ref)] {
         // the candidate's id governs the baseline: the retired key finds the old profile
-        let v = publication::check(&st, "retired", Some(&scope), Some("tag:v1.0.0")).unwrap();
+        let v = publication::check(&st, "retired", Some(&scope), Some("tag:v1.0.0"), None).unwrap();
         assert_eq!(v["profile"]["id"], p1.as_str(), "{scope}");
         assert_eq!(v["profile"]["key"], "retired", "{scope}");
         assert_eq!(v["disclosure"]["profile_id"], p1.as_str(), "{scope}");
@@ -1165,12 +1166,13 @@ fn spv1_profile_key_reassignment_does_not_change_baseline_identity() {
             .collect();
         assert_eq!(added, [b.as_str()], "{scope}");
         assert_eq!(
-            publication::check(&st, &p1, Some(&scope), Some("tag:v1.0.0")).unwrap(),
+            publication::check(&st, &p1, Some(&scope), Some("tag:v1.0.0"), None).unwrap(),
             v,
             "{scope}: by id, the same report"
         );
         // the key's new holder has no baseline revision: no fallback by key
-        let err = publication::check(&st, "site", Some(&scope), Some("tag:v1.0.0")).unwrap_err();
+        let err =
+            publication::check(&st, "site", Some(&scope), Some("tag:v1.0.0"), None).unwrap_err();
         assert_err(
             &err,
             E_NOT_FOUND,
@@ -1178,7 +1180,7 @@ fn spv1_profile_key_reassignment_does_not_change_baseline_identity() {
             "Use a publication profile id or key from this scope.",
         );
         // in the candidate itself the key names the new profile
-        let v = publication::check(&st, "site", Some(&scope), None).unwrap();
+        let v = publication::check(&st, "site", Some(&scope), None, None).unwrap();
         assert_eq!(v["profile"]["id"], p2.as_str(), "{scope}");
     }
     // by revision lookup: the tag holds the old profile under the old key, and no new one

@@ -231,26 +231,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
 /// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
 /// digest is the one before.
+/// Re-taken for the as-built plan's Task 5 (FW-AB1): only `assets/site.css` moved (the status
+/// line's `.block-status` and `.status` rules); with the old stylesheet every digest is the one
+/// before. The fixture holds no planned or since content, so no page text moved.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "21642f0832b97285efb61d917880ab903c53bc2de5e6db52f9036af1bc095dec",
-        "806c8173c7b51ff512bb6c61be8826e153d4aa34d4c85937b3311a4ef1205c47",
+        "b20d5140a30e1d505f88c14876f0a8e853490ce49ff89c80e09c03a53b726ccf",
+        "10d95fdaccde87bbbcb5598f2d451b374096d7e73d2a1916e609d129eb6d5670",
     ),
     (
         "tag",
-        "54546f66fb0068cdc371c0f1c786af0c1525dc285f178aa0ef6e1cbd61785985",
-        "b67fd54c5013115533d49be99b93e3b6ce55f87fb93a93d8b329132f17045053",
+        "423cf95667942f150039e7c489144810a2d223561b57b5a62afa6765a4f8d132",
+        "ab4d4aa4942ec323c38d35cf3204f5fee2e7072cbba8b8c040819aabc28db237",
     ),
     (
         "view",
-        "9e2484c84716a5291a9463bb5c092a9c2d8c930e09bb0510548958e585f7889b",
-        "e2917b402459014652d0a59f8526fd336427ac6d9ea15929c6b36bcdda46b98c",
+        "48a25babc63a87e3db0d60dc5a469dab889817d1c0caef2066c019096fc42d32",
+        "c866995179d2bbc81f82ae4c8dd922cc1eef949208a6179f983f4ed95957d917",
     ),
     (
         "proposal",
-        "086cf0c840d050f698da95b6277af5b8b66bba45985b1841640b71633c9ae8d0",
-        "61d222afbb2bb7ef754ed5cd6c72267010d9b35763f1b1d66cbf548258a5563a",
+        "18e7e3a9c6cdaf33bbe2a0f3a570719c3ad1a5bf64aea7535bb7d976394712d3",
+        "b8430a4a510ae4bf34879d27e373e8c089b0f8eef69a34a3bd84f21684460f9f",
     ),
 ];
 
@@ -275,9 +278,16 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// version (`proposal:<id>`), and the id hashes `canon_at`, canon's head, whose landing records
 /// now seal the review project's neighbor items; the site bytes of the same scope, which carry
 /// no id, kept their digests.
+/// Re-taken for the as-built plan's Task 1 (FW-AB1): a new decision records `built: planned`, so
+/// the review project's decision record, canon's head and the version's hash move; only the
+/// proposal scope's `proposal:<id>` text changed. Its site bytes, and every other scope, kept
+/// their digests.
 /// Re-taken for the instruction block type (ain1): it moves the pack's digest, so the version's
 /// hash moves again. Only `proposal:<id>` changed in the model, the HTML, both Markdown layouts
 /// and the PDF text; the other three scopes kept their bytes.
+/// Re-taken when main's instruction type (0.40.0) met the as-built fields: the combined pack's
+/// digest moves the version's hash once more. Only the proposal scope moved; the site digests
+/// and the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -312,11 +322,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "894c883de67fe0c4cb9969d61025a271b073b033f370eab0470ac877147ed2cb",
-            "f87328152d30d184b0606fbe06ba0b0b5f0534990ec51c9737452fd4cf424313",
-            "a3911aeb9ba84c89b66ccf99682c36e426eefb7e48c8c0d20b5195f3ac1db593",
-            "3fe8aafad7f22dbb61374810948d5d6e39e4339cd8c411093956a78436a1e99d",
-            "5f09762874d9490f2bfde861b38572233938155799d7f48b203939a9a57531df",
+            "dddefa45fdd1c8048239ab9838e13acc8073f2f2618ea49c46291d8acb346c4d",
+            "220701fb77a57489f8ceda8526ba9d288e021d2726a82f122653482c4ce0969e",
+            "2f710691108810f1ec760aa4ca4c45d314203c367e8b14606df3b16c14ae7a70",
+            "bd64bb67f81b990c427a054e51b4372554f3df631ba70a13ecdec050d68ea56a",
+            "0514beed128add1b9502a588617733aadba187a6b21e156d5034716403e99fc5",
         ],
     ),
 ];

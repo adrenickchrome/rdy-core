@@ -1,4 +1,5 @@
 //! The designed rendering of every content type, and the references inside text.
+use crate::prepare::BlockStatus;
 use crate::{highlight, inline};
 use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, RefSpan, entity, ref_spans};
 use rdy_schema::Pack;
@@ -394,6 +395,8 @@ pub struct BlockCtx<'a> {
     /// How the page shows a diagram block, from the block and its resolved plain source
     /// ([`diagram_source`]).
     pub diagram: &'a dyn Fn(&Block, &str) -> DiagramView,
+    /// The as-built words the block's page marks: `Planned`, or the since label an output shows.
+    pub status: Option<&'a BlockStatus>,
 }
 
 /// How a page shows a diagram (D-FY4VF, D-KAGB2, D-3BM8P).
@@ -492,8 +495,48 @@ fn marker(ctx: &BlockCtx, block_type: &str, words: &str) -> String {
 /// The fields that hold a block's primary text, in the order the engine reads them.
 const PRIMARY_FIELDS: [&str; 4] = ["statement", "prompt", "name", "title"];
 
-/// Inner HTML for one block. A block the site leaves out (a rationale, a decision) is empty.
+/// The status line of a block: one `Planned` or `since <version>` word, in a paragraph of its own
+/// so every output (site, single file, Markdown, PDF, llms, copy) keeps it as a line of text. A
+/// planned note carries `Planned` as its eyebrow instead, so it has none.
+fn status_line(b: &Block, ctx: &BlockCtx) -> String {
+    match status_pill(b, ctx.status) {
+        Some(pill) => format!("<p class=\"block-status\">{pill}</p>"),
+        None => String::new(),
+    }
+}
+
+/// The pill of a block's status (`Planned` or `since <version>`), none for a block with neither
+/// and for a planned note, whose eyebrow is `Planned`. A doc's lede carries it inline.
+pub(crate) fn status_pill(b: &Block, status: Option<&BlockStatus>) -> Option<String> {
+    let s = status?;
+    let (class, words) = if s.planned {
+        if b.block_type == "note" {
+            return None;
+        }
+        ("planned", PLANNED.to_string())
+    } else {
+        ("since", format!("since {}", s.since.as_deref()?))
+    };
+    Some(format!(
+        "<span class=\"status status-{class}\">{}</span>",
+        escape(&words)
+    ))
+}
+
+/// The word a planned block carries.
+pub const PLANNED: &str = "Planned";
+
+/// Inner HTML for one block, with its status line first. A block the site leaves out (a
+/// rationale, a decision) is empty.
 pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
+    let html = block_body_html(b, ctx);
+    if html.is_empty() {
+        return html;
+    }
+    format!("{}{html}", status_line(b, ctx))
+}
+
+fn block_body_html(b: &Block, ctx: &BlockCtx) -> String {
     let (depth, link) = (ctx.depth, ctx.link);
     let ictx = inline::Ctx {
         link,
@@ -529,11 +572,11 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             )
         }
         "example" | "note" => {
-            // a note that is `planned` carries the quiet "Planned" marker, not its type's eyebrow
-            let planned =
-                t == "note" && matches!(b.fields.get("planned"), Some(FieldValue::Bool(true)));
+            // a note whose effective status is planned carries the quiet "Planned" marker, not its
+            // type's eyebrow (the status line leaves it out: one word, once)
+            let planned = t == "note" && ctx.status.is_some_and(|s| s.planned);
             let eyebrow = if planned {
-                "Planned".into()
+                PLANNED.into()
             } else {
                 display_name(t)
             };

@@ -6803,7 +6803,9 @@ fn m3_publication_check(
         json!([
             {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$os", "parent": "$out", "fields": {"title": "Rulings"}},
-            {"op": "create", "type": "decision", "id": "$d", "parent": "$os", "fields": {"statement": "The ruling.", "status": "proposed"}},
+            // shipped, so the public profile keeps the claims it governs (D-WJ0SJ: a new decision
+            // defaults to `built: planned`, and a public profile hides what it governs)
+            {"op": "create", "type": "decision", "id": "$d", "parent": "$os", "fields": {"statement": "The ruling.", "status": "proposed", "built": "1.0.0"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$os", "body": "The outside claim."},
             {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
         ]),
@@ -6840,7 +6842,7 @@ fn m3_publication_check(
     st.materialized(&Scope::Canon).expect("warm");
     out.push(measure_timed("publication_check", runs, |_| {
         let s = Instant::now();
-        let v = rdy_engine::publication::check(&st, "m3-open", None, None).expect("check");
+        let v = rdy_engine::publication::check(&st, "m3-open", None, None, None).expect("check");
         let took = s.elapsed();
         let refs = &v["references"];
         let count = |x: &serde_json::Value| x.as_u64().expect("a count") as usize;

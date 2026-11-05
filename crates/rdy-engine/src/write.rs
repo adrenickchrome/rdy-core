@@ -2064,6 +2064,9 @@ fn build_ops(
                     pins: BTreeMap::new(),
                     read_identity: None,
                 };
+                // D-WJ0SJ: a new decision starts planned, or `none` when it needs no content;
+                // only this authoring create sets it, never a read, an edit or a load
+                rdy_schema::as_built::default_built(&mut block);
                 if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
                     let base = tree::default_name(block.field_str("title"), &block.id);
                     let name = ov.with_sibs(block.parent.as_ref(), |s| {
@@ -3615,6 +3618,15 @@ impl Rdy {
         warnings.extend(brief_warnings);
         warnings.extend(code_warnings);
         warnings.extend(selector_warnings);
+        // ab2 (D-YAY1G): the as-built override warnings of the written blocks, the blocks that
+        // cite a written decision and the blocks under a written section or doc
+        {
+            let st = self.read();
+            let g = st.graph(&scope)?;
+            let written: BTreeSet<BlockId> = touched.iter().cloned().collect();
+            let rows = st.as_built(&scope, &crate::as_built::affected(&m, &g, &written))?;
+            warnings.extend(st.as_built_warnings(&scope, &rows)?);
+        }
         // FW-I1: the authored words of each decision or question this write touched
         for t in &touched {
             if let Some(b) = m.get(t) {

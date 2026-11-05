@@ -2,6 +2,8 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod daemon_approver_ui;
+mod daemon_asbuilt;
+mod daemon_asbuilt_release;
 mod daemon_concurrent;
 mod daemon_crash;
 mod daemon_crash_m2;

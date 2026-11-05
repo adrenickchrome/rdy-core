@@ -163,7 +163,6 @@ fn world() -> World {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "KNOWN-ISSUES row 139 (L7/I4): below the fix bar; open M3 gap, exit checklist"]
 async fn mg9_elicited_later_is_honoured_by_pending_and_next() {
     let w = world();
     let confirms: Vec<_> = w

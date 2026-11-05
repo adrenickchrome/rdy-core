@@ -75,7 +75,14 @@ fn seed(dir: &std::path::Path) -> String {
 /// The engine's own report of `site` at v2 against v1, read with the project closed again.
 fn engine_report(dir: &std::path::Path) -> Value {
     let r = Rdy::open(dir).unwrap();
-    let v = publication::check(&r.read(), "site", Some("tag:v2.0.0"), Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(
+        &r.read(),
+        "site",
+        Some("tag:v2.0.0"),
+        Some("tag:v1.0.0"),
+        None,
+    )
+    .unwrap();
     r.close().unwrap();
     v
 }

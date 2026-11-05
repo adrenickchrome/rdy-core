@@ -6,7 +6,8 @@
 //! candidate may be a view or a proposal version (D-CWC91); its baseline stays stable.
 
 use super::diff::{DisclosureDiff, disclosure_diff};
-use super::references::ReferenceReport;
+use super::references::{CheckStatus, ReferenceReport};
+use super::release;
 use super::select::{Resolved, bad_inspection_scope, resolve, resolve_inspection};
 use crate::error::*;
 use crate::{ReadState, Scope};
@@ -265,7 +266,12 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
     })
 }
 
-fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDiff)>) -> Value {
+fn report_json(
+    r: &Resolved,
+    scope: &Side,
+    against: Option<(&Side, &DisclosureDiff)>,
+    release: Option<(CheckStatus, Value)>,
+) -> Value {
     let (entries, omitted_entries) = listed(&r.entries, |e| {
         json!({
             "id": e.id.to_string(),
@@ -280,7 +286,11 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
         .map(|w| json!({"code": w.code, "message": w.message, "fix": w.fix}))
         .into_iter()
         .collect();
+    let status = release
+        .as_ref()
+        .map_or(r.references.status, |(s, _)| r.references.status.max(*s));
     json!({
+        "status": status.as_str(),
         "profile": {
             "id": r.profile.id.as_ref().map(ToString::to_string),
             "version": hash_or_null(r.profile.version),
@@ -302,6 +312,7 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
             "omitted_entries": omitted_entries,
         },
         "references": reference_summary(&r.references),
+        "release": release.map(|(_, v)| v),
         "disclosure": against.map(|(_, d)| disclosure_json(d)),
         "warnings": warnings,
     })
@@ -333,14 +344,19 @@ fn fit_reserving(report: Value, max: usize, reserve: usize) -> Result<Value, Rdy
 /// The baseline is canon, `tag:<name>` or `landing:<hash>` only. Every scope string resolves
 /// through `read`. The profile resolves in the candidate scope first; the baseline then resolves
 /// that profile's stable id, with no fallback to another profile or to current canon. A blocked
-/// reference check is a result, not an error: the caller reads `references.status`.
+/// reference check is a result, not an error: the caller reads `status`, the larger of
+/// `references.status` and the release status. `release` is the candidate's product version
+/// (D-WJ0SJ): when given, the report's `release` object lists the shown content that is `since` a
+/// later version and the retained decisions `built` in one, and a later one blocks the result for
+/// either audience. It is parsed before anything is resolved; `against` never supplies it.
 pub fn check(
     read: &ReadState,
     profile: &str,
     scope: Option<&str>,
     against: Option<&str>,
+    release: Option<&str>,
 ) -> Result<Value, RdyError> {
-    check_reserving(read, profile, scope, against, 0)
+    check_reserving(read, profile, scope, against, release, 0)
 }
 
 /// [`check`], with `reserve` bytes of the report's limit kept for what the caller adds to it.
@@ -349,12 +365,19 @@ pub fn check_reserving(
     profile: &str,
     scope: Option<&str>,
     against: Option<&str>,
+    release: Option<&str>,
     reserve: usize,
 ) -> Result<Value, RdyError> {
+    let release = release.map(release::parse).transpose()?;
     let candidate = candidate(read, scope)?;
     let after = resolve_inspection(read, &candidate.scope, profile)?;
+    let checked = release.as_ref().map(|v| release::report(&after, v));
     let Some(text) = against else {
-        return fit_reserving(report_json(&after, &candidate, None), REPORT_BYTES, reserve);
+        return fit_reserving(
+            report_json(&after, &candidate, None, checked),
+            REPORT_BYTES,
+            reserve,
+        );
     };
     let baseline = baseline(read, text)?;
     let stable = after
@@ -365,7 +388,7 @@ pub fn check_reserving(
     let before = resolve(read, &baseline.scope, &stable)?;
     let diff = disclosure_diff(&before, &after)?;
     fit_reserving(
-        report_json(&after, &candidate, Some((&baseline, &diff))),
+        report_json(&after, &candidate, Some((&baseline, &diff)), checked),
         REPORT_BYTES,
         reserve,
     )

@@ -6,6 +6,10 @@
 //! to a target outside the selection is a link outside it: the report lists it apart, and it
 //! never sets the status. A profiled output drops a reference to a decision outside the
 //! selection (D-7M0YF), so that reference never counts either.
+//!
+//! The selection is the filtered view (D-WJ0SJ, D-69YCN): a block a profile hides is outside it,
+//! so a reference to it is excluded, and a hidden block, which no output shows, is scanned as no
+//! source. A shell is scanned as what it shows: its title, name and key.
 
 use super::select::{Limits, PublicationWarning, limit};
 use crate::error::*;

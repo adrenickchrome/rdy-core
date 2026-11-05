@@ -224,6 +224,9 @@ pub const E_PUBLICATION_REFERENCE: &str = "E_PUBLICATION_REFERENCE";
 /// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
 /// on its output.
 pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
+/// A content block's as-built override disagrees with the status its decisions derive
+/// (D-WJ0SJ, D-YAY1G): a warning on writes and source reads.
+pub const W_AS_BUILT_OVERRIDE: &str = "W_AS_BUILT_OVERRIDE";
 
 /// `E_REDACTION_TARGET` for `target` (its normalized spelling, or `[]` for no targets) and one of
 /// the `REDACTION_CAUSE_*` texts.

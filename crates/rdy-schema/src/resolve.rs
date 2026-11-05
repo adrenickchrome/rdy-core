@@ -464,7 +464,8 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
     ] {
         pack.link_types.insert(l.to_string());
     }
-    inject_everyday(pack)
+    inject_everyday(pack)?;
+    inject_as_built(pack)
 }
 
 /// The field a type that defines something may set to make its mentions count only when linked
@@ -491,6 +492,52 @@ fn inject_everyday(pack: &mut Pack) -> Result<(), SchemaError> {
             }
         }
     }
+    Ok(())
+}
+
+/// D-WJ0SJ: gives the decision the optional string `built`, and counts it among the decision's
+/// tracking fields, so it stays writable on an accepted decision. Gives every content type the
+/// optional bool `planned` and the optional string `since`, and the doc the bool `planned`
+/// (a doc covers the blocks below it). A predeclared field that is exactly that is kept; any
+/// other declaration is refused before anything is injected or marked.
+fn inject_as_built(pack: &mut Pack) -> Result<(), SchemaError> {
+    use crate::as_built::{
+        BUILT_FIELD, PLANNED_FIELD, SINCE_FIELD, is_content_type, optional_bool, optional_str,
+    };
+    let mut wants: Vec<(String, &'static str, FieldDef)> = vec![];
+    wants.push((d::DECISION.to_string(), BUILT_FIELD, optional_str()));
+    let names: Vec<String> = pack.block_types.keys().cloned().collect();
+    for name in names {
+        if is_content_type(pack, &name) {
+            wants.push((name.clone(), PLANNED_FIELD, optional_bool()));
+            wants.push((name, SINCE_FIELD, optional_str()));
+        }
+    }
+    wants.push((tree::DOC.to_string(), PLANNED_FIELD, optional_bool()));
+    for (name, field, want) in &wants {
+        let def = &pack.block_types[name];
+        if let Some(have) = def.fields.get(*field)
+            && have != want
+        {
+            let kind = if want.kind == FieldKind::Bool {
+                "bool"
+            } else {
+                "string"
+            };
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {field} must be an optional {kind}"
+            )));
+        }
+    }
+    for (name, field, want) in wants {
+        let def = pack.block_types.get_mut(&name).expect("listed above");
+        def.fields.entry(field.to_string()).or_insert(want);
+    }
+    pack.block_types
+        .get_mut(d::DECISION)
+        .expect("forced above")
+        .tracking
+        .insert(BUILT_FIELD.to_string());
     Ok(())
 }
 

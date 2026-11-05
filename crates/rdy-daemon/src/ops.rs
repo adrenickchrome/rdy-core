@@ -449,9 +449,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "diff" => diff(cx, parse(op, args, "{from, to?, doc?, detail?}")?),
         "query" => query(cx, parse(op, args, "{filter, scope?}")?),
         "render" => render(cx, parse(op, args, "{out, scope?, profile?}")?),
-        "publication_check" => {
-            publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)
-        }
+        "publication_check" => publication_check(
+            cx,
+            parse(op, args, "{profile, scope?, against?, release?}")?,
+        ),
         "export" => export(cx, parse(op, args, EXPORT_SHAPE)?),
         "dump" => dump(cx, parse(op, args, "{out, after?}")?),
         "clone" => clone(cx, parse(op, args, "{dir, fork?}")?),

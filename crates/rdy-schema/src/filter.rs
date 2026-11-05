@@ -17,11 +17,11 @@ pub const MAX_FIELD_NAME: usize = 64;
 /// The most characters of the input that a refusal repeats.
 const MAX_ERROR_TOKEN: usize = 40;
 
-pub const FILTER_GUIDE: &str = "A filter selects blocks. A test is <field> <op> <value>, has <field>, or a link test. Join tests with and, or, not and parentheses; not binds first, then and, then or. Fields: id, key, type, trait, path, doc, area, lifecycle, status, suspect, tension, coverage and fields.<name>. Ops: = != < <= > >= ^=, where ^= means starts with. A value is a word, a number, true, false, a block id or a quoted string. In a quoted string, backslash-quote is a quote and two backslashes are one backslash. A number is a whole number in the signed 64-bit range; quote a longer run of digits to use it as text. Quote a value that is and, or, not, has, no, in or out. A link test is out <link> or in <link>, with an optional (filter) that a linked block must match. no out <link> and no in <link> hold when no linked block matches. A link is a link kind of the pack, contains or references. Keywords, built-in field names and link kinds are case-insensitive. A name after fields. keeps its case, and values keep their case. status is the derived status. coverage is a score from 0 to 100; suspect and tension take true or false. A test of a field that the block lacks is false, for != too. Limits: 2000 characters, nesting depth 16, 3 nested link tests. Scope is a parameter, never part of the filter. Example: type = decision and status = live and no in implements.";
+pub const FILTER_GUIDE: &str = "A filter selects blocks. A test is <field> <op> <value>, has <field>, or a link test. Join tests with and, or, not and parentheses; not binds first, then and, then or. Fields: id, key, type, trait, path, doc, area, lifecycle, status, suspect, tension, coverage, planned, since and fields.<name>. Ops: = != < <= > >= ^=, where ^= means starts with. A value is a word, a number, true, false, a block id or a quoted string. In a quoted string, backslash-quote is a quote and two backslashes are one backslash. A number is a whole number in the signed 64-bit range; quote a longer run of digits to use it as text. Quote a value that is and, or, not, has, no, in or out. A link test is out <link> or in <link>, with an optional (filter) that a linked block must match. no out <link> and no in <link> hold when no linked block matches. A link is a link kind of the pack, contains or references. Keywords, built-in field names and link kinds are case-insensitive. A name after fields. keeps its case, and values keep their case. status is the derived status. coverage is a score from 0 to 100; suspect and tension take true or false. planned and since are a content block's derived as-built status: planned takes true or false, and since takes a release version such as 1.2.0 or v2.0.0-rc.1, compared in release order. since holds a version only for a block that is since one, so has since is false for planned and unversioned blocks. Other blocks have neither; fields.planned and fields.since read the authored fields. A test of a field that the block lacks is false, for != too. Limits: 2000 characters, nesting depth 16, 3 nested link tests. Scope is a parameter, never part of the filter. Example: type = decision and status = live and no in implements.";
 
 /// The words a bare value cannot be.
 const RESERVED: [&str; 7] = ["and", "or", "not", "has", "no", "in", "out"];
-const FIELD_NAMES: [&str; 12] = [
+const FIELD_NAMES: [&str; 14] = [
     "id",
     "key",
     "type",
@@ -34,6 +34,8 @@ const FIELD_NAMES: [&str; 12] = [
     "suspect",
     "tension",
     "coverage",
+    "planned",
+    "since",
 ];
 const TRAITS: [&str; 7] = [
     "normative",
@@ -84,6 +86,10 @@ pub enum Field {
     Suspect,
     Tension,
     Coverage,
+    /// A content block's derived as-built status is planned (D-WJ0SJ).
+    Planned,
+    /// The release a content block's derived as-built status is since (D-WJ0SJ).
+    Since,
     /// `fields.<name>`, holding the name as written.
     Custom(String),
 }
@@ -481,6 +487,7 @@ impl<'a> Parser<'a> {
                 | Field::Lifecycle
                 | Field::Status
                 | Field::Coverage
+                | Field::Since
                 | Field::Custom(_)
         );
         if !applies {
@@ -614,6 +621,15 @@ impl<'a> Parser<'a> {
             Field::Coverage if !matches!(value, Value::Int { value: 0..=100, .. }) => {
                 "coverage takes a number from 0 to 100".to_string()
             }
+            Field::Planned if !matches!(value, Value::Bool { .. }) => {
+                "planned takes true or false".to_string()
+            }
+            Field::Since if text.len() > crate::as_built::MAX_VERSION_BYTES => {
+                format!("since exceeds {} bytes", crate::as_built::MAX_VERSION_BYTES)
+            }
+            Field::Since if crate::as_built::version_of(text).is_none() => {
+                "since takes a release version".to_string()
+            }
             _ => return Ok(()),
         };
         Err(refuse(column, what))
@@ -663,6 +679,8 @@ fn field_of(token: &Token<'_>) -> Result<Field, FilterError> {
         "suspect" => Field::Suspect,
         "tension" => Field::Tension,
         "coverage" => Field::Coverage,
+        "planned" => Field::Planned,
+        "since" => Field::Since,
         _ => {
             let what = format!("unknown field {}", cut(word));
             return Err(refuse(
@@ -685,8 +703,9 @@ fn takes_op(field: &Field, op: Op) -> bool {
         | Field::Lifecycle
         | Field::Status
         | Field::Suspect
-        | Field::Tension => matches!(op, Op::Eq | Op::Ne),
-        Field::Coverage => op != Op::StartsWith,
+        | Field::Tension
+        | Field::Planned => matches!(op, Op::Eq | Op::Ne),
+        Field::Coverage | Field::Since => op != Op::StartsWith,
         Field::Custom(_) => true,
     }
 }

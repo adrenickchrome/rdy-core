@@ -156,14 +156,8 @@ pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
             "name versions like v1.2.0 or 2.0.0-rc.1 (Semantic Versioning, one optional leading v, no +build metadata)",
         )
     };
-    let bare = name.strip_prefix('v').unwrap_or(name);
-    let v = semver::Version::parse(bare).map_err(|e| bad(e.to_string()))?;
-    if !v.build.is_empty() {
-        return Err(bad(
-            "build metadata (+…) is not allowed: it doesn't take part in version order".into(),
-        ));
-    }
-    Ok(v)
+    // the grammar and order are rdy-schema's (D-WJ0SJ), shared with the as-built fields
+    rdy_schema::as_built::parse_release(name).map_err(bad)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

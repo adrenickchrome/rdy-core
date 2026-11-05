@@ -6,7 +6,7 @@ use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
-const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. This check does not authorize publication or find the last publication. Relay warnings to the person.";
+const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
 
 /// A public profile `open` that refers outside its selection, an org profile `site` over the same
 /// doc, and a tag `v1.0.0`.
@@ -99,7 +99,7 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
         p.sort();
         p
     };
-    assert_eq!(props, ["against", "profile", "scope"]);
+    assert_eq!(props, ["against", "profile", "release", "scope"]);
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 
     // a session is required

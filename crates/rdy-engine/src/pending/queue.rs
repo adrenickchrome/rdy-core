@@ -1369,8 +1369,8 @@ pub(crate) fn rule_inputs_of(
 }
 
 /// What a version's landing projection and its pack rules give readiness (D-JQD5X), at
-/// propose: item 6's issues, the advisory rows, the rows left out, the reach the rules add and
-/// the considered options of a choice.
+/// propose: item 6's issues, the advisory rows, the rows left out, the reach the rules add, the
+/// considered options of a choice and the keys the landing assigns.
 struct Checks {
     /// Readiness item 6: the projection's refusal (`E_ALT_DECISION`, or a view that moved on),
     /// then each kept `E_RULE_CHECK` row.
@@ -1382,6 +1382,8 @@ struct Checks {
     /// The reach the rules add (TASK-946, D-DSPMW); Err: the "too large to assess" issue.
     reach: Result<BTreeSet<BlockId>, Issue>,
     considered: Option<crate::check::ConsideredOptions>,
+    /// TASK-1277: the keys the landing assigns that the version's changes do not write.
+    keys: BTreeMap<BlockId, String>,
 }
 
 impl Checks {
@@ -1393,6 +1395,7 @@ impl Checks {
             omitted: (0, 0),
             reach: Ok(BTreeSet::new()),
             considered: None,
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -1537,17 +1540,21 @@ impl Version {
             .map_err(Clone::clone)
     }
 
-    /// D-JQD5X, review I1: with no pack rule and no choice, nothing. Otherwise the version's
-    /// landing projection ([`crate::check::landing_projection`]); its refusal is item 6's one
-    /// issue. Then every rule on every block of the projected canon, with the graph, areas,
-    /// derived status, suspects, tensions and intrinsic coverage of that canon (only the sets a
-    /// rule needs), and the reach the rules add from canon to it.
+    /// D-JQD5X, review I1: with no pack rule and no choice, only the keys the landing assigns
+    /// ([`crate::check::options::assigned_keys`], TASK-1277). Otherwise the version's landing
+    /// projection ([`crate::check::landing_projection`]); its refusal is item 6's one issue. Then
+    /// every rule on every block of the projected canon, with the graph, areas, derived status,
+    /// suspects, tensions and intrinsic coverage of that canon (only the sets a rule needs), and
+    /// the reach the rules add from canon to it.
     fn compute_checks(&self, st: &ReadState) -> Result<Checks, RdyError> {
         use crate::check::{Stage, evaluate_rules, rules};
         let pack = st.pack();
         let compiled = rules::compiled(pack)?;
         if compiled.is_empty() && self.p.alternative.is_none() {
-            return Ok(Checks::none());
+            return Ok(Checks {
+                keys: crate::check::options::assigned_keys(st, &self.p, &self.next)?,
+                ..Checks::none()
+            });
         }
         let projection = match crate::check::landing_projection(st, &self.pref, &self.p, &self.next)
         {
@@ -1586,6 +1593,7 @@ impl Version {
             return Ok(Checks {
                 issues,
                 considered: projection.considered,
+                keys: projection.keys,
                 ..Checks::none()
             });
         }
@@ -1610,6 +1618,7 @@ impl Version {
         let (canon, canon_g) = (st.materialized(&Scope::Canon)?, st.graph(&Scope::Canon)?);
         let reach = rules::rule_reach(
             &self.pref,
+            pack,
             &compiled,
             (&canon, &canon_g),
             (&built.m, &graph),
@@ -1623,6 +1632,7 @@ impl Version {
             omitted: (scan.blocking_omitted, scan.warnings_omitted),
             reach,
             considered: projection.considered,
+            keys: projection.keys,
         })
     }
 
@@ -2450,8 +2460,12 @@ impl Version {
             fact(JUSTIFICATION_FACT, self.justification()),
             fact("Decisions", decisions),
         ];
-        // D-8GR43: the options the landing writes for a choice, and the set version they bind
         let checks = self.checks(st).ok();
+        // TASK-1277: the keys the landing assigns that the version's changes do not write
+        if let Some(v) = checks.and_then(|c| crate::check::options::keys_fact_value(&c.keys)) {
+            facts.push(fact(KEYS_FACT, v));
+        }
+        // D-8GR43: the options the landing writes for a choice, and the set version they bind
         if let Some(c) = checks.and_then(|c| c.considered.as_ref()) {
             facts.push(fact(CONSIDERED_OPTIONS_FACT, c.fact_value()));
             facts.push(fact(ALTERNATIVE_SET_FACT, c.set_value()));
@@ -3057,7 +3071,7 @@ pub const IMPORTED_FACT: &str = "Imported";
 pub const RULE_CHECK_FACT: &str = "Rule check";
 /// The fact of the rule rows a propose left out, before Policy.
 pub const RULE_CHECKS_OMITTED_FACT: &str = "Rule checks omitted";
-use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT};
+use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT, KEYS_FACT};
 /// The name of the batch fact that gives the canon the version was proposed on; it is the one
 /// fact the approve card reads live, not from the stored assessment (I-d).
 const BASE_FACT: &str = "Base";

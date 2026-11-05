@@ -2,6 +2,8 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod io;
+mod io_asbuilt;
+mod io_asbuilt_publication;
 mod io_authors;
 mod io_check_fixture;
 mod io_clone;

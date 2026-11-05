@@ -14,7 +14,7 @@ fn trk1_a_pack_marks_tracking_fields_and_a_child_adds_to_them() {
         .iter()
         .map(String::as_str)
         .collect();
-    assert_eq!(names, ["disposition", "trigger"]);
+    assert_eq!(names, ["built", "disposition", "trigger"]);
     assert!(p.tracking().is_tracking("decision", "disposition"));
     assert!(p.block_types["claim"].tracking.is_empty());
     set.add_yaml("name: child\nversion: \"1\"\nextends: trk\nblock_types:\n  decision:\n    prefix: D\n    traits: [normative]\n    fields:\n      owner: { kind: str }\n    tracking: [owner]\n").unwrap();
@@ -24,13 +24,23 @@ fn trk1_a_pack_marks_tracking_fields_and_a_child_adds_to_them() {
         .iter()
         .map(String::as_str)
         .collect();
-    assert_eq!(names, ["disposition", "owner", "trigger"]);
+    assert_eq!(names, ["built", "disposition", "owner", "trigger"]);
+    // the standard pack tracks only the decision's `built` (D-WJ0SJ)
+    let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    assert!(std.tracking().is_tracking("decision", "built"));
+    assert_eq!(
+        std.block_types["decision"]
+            .tracking
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["built"]
+    );
     assert!(
-        PackSet::with_builtin()
-            .resolve("rdy-standard")
-            .unwrap()
-            .tracking()
-            .is_empty()
+        std.block_types
+            .iter()
+            .filter(|(n, _)| n.as_str() != "decision")
+            .all(|(_, t)| t.tracking.is_empty())
     );
 }
 

@@ -27,7 +27,7 @@ fn ndh4_a_profile_site_trail_shows_a_governing_decision_with_no_doc() {
             {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$guide", "fields": {"title": "Guide section"}},
             {"op": "create", "type": "decision", "id": "$dec",
-             "fields": {"statement": "ROOTCANARY ruling.", "status": "proposed"}},
+             "fields": {"statement": "ROOTCANARY ruling.", "status": "proposed", "built": "1.0.0"}},
             {"op": "create", "type": "claim", "parent": "$s", "body": "Governed words.",
              "links": {"decided_by": [{"target": "$dec"}]}},
             {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
@@ -132,7 +132,7 @@ fn ndh4_a_decision_under_a_root_question_is_published_without_the_question() {
     assert!(ids.contains(&did), "{ids:?}");
     assert!(!ids.contains(&qid), "{ids:?}");
 
-    let v = rdy_engine::publication::check(&st, "site", None, None)
+    let v = rdy_engine::publication::check(&st, "site", None, None, None)
         .unwrap_or_else(|e| panic!("check: {e}"));
     let entries = v["selection"]["entries"].as_array().unwrap();
     assert!(entries.iter().any(|e| e["id"] == json!(dec)), "{v}");
@@ -307,7 +307,7 @@ fn ndh4_a_public_profile_keeps_the_root_blocks_its_root_decisions_link() {
         assert_eq!(b.parent, None, "{id} sits at the root");
     }
 
-    let v = rdy_engine::publication::check(&st, "pubp", None, None)
+    let v = rdy_engine::publication::check(&st, "pubp", None, None, None)
         .unwrap_or_else(|e| panic!("check: {e}"));
     assert_eq!(v["references"]["status"], json!("clear"), "{v}");
     let entries = v["selection"]["entries"].as_array().unwrap();

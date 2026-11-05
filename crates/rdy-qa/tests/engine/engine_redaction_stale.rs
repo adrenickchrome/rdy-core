@@ -375,6 +375,50 @@ fn fr8_the_erasure_set_is_unchanged_by_the_trim() {
     }
 }
 
+#[test]
+fn fr9_a_proposal_made_before_the_request_that_quotes_the_secret_landing_after_stales_it() {
+    // D-SJBTD (known issue 703): a proposal made before the request copies the secret into a
+    // new block; the request's report lists that quote. Its landing after the request brings
+    // the copy into canon, so the request goes stale
+    let mut p = project_with(|r, other| {
+        let os = r
+            .read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .get(&rdy_model::BlockId::parse(other).unwrap())
+            .unwrap()
+            .parent
+            .clone()
+            .unwrap()
+            .to_string();
+        write(
+            r,
+            "copy",
+            json!([{"op": "create", "type": "prose", "parent": os, "body": SECRET}]),
+        );
+        Some(
+            r.propose(&writer(), "copy", "Copy", Some("Copies the code."))
+                .unwrap(),
+        )
+    });
+    let copy = p.before.clone().unwrap();
+    answer(&mut p, &copy.r#ref, "approve").expect("the earlier proposal lands");
+    let q = queue(&p.r).expect("a stale removal never fails the whole queue");
+    let stale = item(&q, &p.redact.r#ref).expect("the stale item stays in the list");
+    assert!(!stale.card.contains("Content removal"), "{}", stale.card);
+    assert!(stale.card.contains(STALE_MESSAGE), "{}", stale.card);
+    assert!(stale.card.contains(STALE_FIX), "{}", stale.card);
+    let shown = p.r.read().proposal_show(&p.redact.id).unwrap();
+    let row = shown.removal_card_error.expect("the card refuses");
+    assert_eq!(row.code, E_REDACTION_STALE);
+    assert!(shown.removal_card.is_none());
+    let redact_ref = p.redact.r#ref.clone();
+    let e = answer(&mut p, &redact_ref, "approve").unwrap_err();
+    assert_stale(&e, "the approval after the copy landed");
+    let e = p.r.land(&approver(), &p.redact.id).unwrap_err();
+    assert_stale(&e, "rdy approve after the copy landed");
+}
+
 // The m3gate deep-drain finding (swarm seed 1, deep tier): after a removal request is recorded,
 // a later proposal of a view whose change was written before the request makes the request
 // stale. The change updates a claim that the secret's change also wrote, so it depends on that

@@ -4,12 +4,14 @@
 
 use super::references::{self, CheckStatus, ReferenceReport};
 use super::source::{PublicationSource, ReadPublicationSource};
+use crate::as_built::{Resolver, Status};
 use crate::error::*;
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
 use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses, Graph};
-use rdy_model::{Block, BlockId, Hash, StateSnapshot, tree};
-use rdy_schema::publication::{self as schema, Audience};
+use rdy_model::{Block, BlockId, FieldValue, Hash, StateSnapshot, tree};
+use rdy_schema::as_built::PLANNED_FIELD;
+use rdy_schema::publication::{self as schema, Audience, PlannedSetting, SinceSetting};
 use rdy_schema::{Issue, Pack, Severity};
 use rdy_store::kinds::BlobManifest;
 use serde::Serialize;
@@ -137,6 +139,11 @@ pub(crate) fn limit(part: &str, limit: impl std::fmt::Display, unit: &str) -> Rd
 
 /// The profile metadata output and report code read. `id`, `version` and `key` are `None` only
 /// for the implicit profile; a profile block fills all three.
+///
+/// `planned` is the profile's effective planned setting: its own, else the audience's default
+/// (D-WJ0SJ: hide for the public, mark for an org; the implicit profile marks). `since` is the
+/// since setting as written: `None` when the profile sets none, which the per-block
+/// [`ShownStatus::pill`] already resolves (D-69YCN).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedProfile {
     pub id: Option<BlockId>,
@@ -146,6 +153,22 @@ pub struct ResolvedProfile {
     pub description: Option<String>,
     pub audience: Audience,
     pub trail: bool,
+    pub planned: PlannedSetting,
+    pub since: Option<SinceSetting>,
+}
+
+/// The as-built status a resolution shows for one kept content block (D-WJ0SJ, D-69YCN): the
+/// effective status and its normalized version, worked out in the full source scope, and whether
+/// a since pill shows. It holds no derivation and no override, so no excluded decision or block
+/// reaches output through it. A shell has none.
+///
+/// `pill` is true only for a `since` status whose profile shows it: an explicit `show`, or an
+/// omitted setting in a doc whose type is `reference`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ShownStatus {
+    pub status: Status,
+    pub since: Option<String>,
+    pub pill: bool,
 }
 
 /// One retained block: its source version and, for a removed version's stub, the request that
@@ -196,6 +219,12 @@ pub struct PublicationWarning {
 /// `redactions` lists, sorted and once each, the approved removal requests this resolution
 /// applies: those of the selected blocks and of the selected attachments' manifests and chunks.
 ///
+/// `shells` (D-69YCN) lists the planned docs and sections a hiding profile keeps only because a
+/// shown block sits under them: in `m` each is a bare projection with its id, type, parent,
+/// place, title, name and key, and nothing else; its entry keeps the source version. `as_built`
+/// holds the [`ShownStatus`] of every other kept content block. Status comes from the full source
+/// scope, before the filter, and is never worked out again from the selected state.
+///
 /// `removed_outside_docs` lists, in id order, the removed versions of blocks outside a doc that
 /// the source state holds and the selection does not keep (a named profile only; the implicit
 /// profile keeps every block). None of them is published or counted in the selection; the
@@ -215,6 +244,8 @@ pub struct Resolved {
     pub selection_identity: Hash,
     pub redactions: Vec<Hash>,
     pub removed_outside_docs: Vec<SelectionEntry>,
+    pub shells: BTreeSet<BlockId>,
+    pub as_built: BTreeMap<BlockId, ShownStatus>,
 }
 
 impl Resolved {
@@ -1057,6 +1088,8 @@ fn lookup(
                 description: source.description().map(str::to_string),
                 audience,
                 trail: audience == Audience::Org,
+                planned: audience.default_planned(),
+                since: None,
             },
             None,
         )),
@@ -1072,10 +1105,190 @@ fn lookup(
                     description: fields.description,
                     audience: fields.audience,
                     trail: fields.trail,
+                    planned: fields.planned,
+                    since: fields.since,
                 },
                 Some(fields.select),
             ))
         }
+    }
+}
+
+/// The section type: like a doc, a planned section that still holds a shown block stays as a
+/// shell (D-69YCN). The as-built resolver reads the same two container types.
+const SECTION: &str = "section";
+
+/// The doc type in which an omitted `since` setting shows the pill (D-69YCN).
+const REFERENCE_DOC: &str = "reference";
+
+/// The fields a shell keeps: its title, and the name and key its route and references read.
+const SHELL_FIELDS: [&str; 3] = ["key", "name", "title"];
+
+fn is_container(b: &Block) -> bool {
+    b.block_type == tree::DOC || b.block_type == SECTION
+}
+
+/// The selection after the profile's `planned` setting (D-WJ0SJ, D-69YCN): the blocks it hides,
+/// the containers it keeps as shells, and the status of every other kept content block.
+struct Filtered {
+    hidden: BTreeSet<BlockId>,
+    shells: BTreeSet<BlockId>,
+    shown: BTreeMap<BlockId, ShownStatus>,
+}
+
+/// Step 4: the as-built filter over `keep`, the ordinary selection with its outside-doc closure.
+/// Each status is worked out in `m`, the full source state, so a decision outside the selection
+/// still sets it. A hiding profile hides each planned content block, and with a block that is no
+/// doc or section, everything under it; a planned doc (its own `planned: true`) or section that
+/// still holds a shown block is a shell, and one that holds none is hidden. Supporting blocks are
+/// never filtered by status. A marking profile hides nothing. Iterative, and each parent chain is
+/// walked once.
+fn filter(
+    pack: &Pack,
+    m: &Materialized,
+    keep: &BTreeSet<BlockId>,
+    profile: &ResolvedProfile,
+) -> Filtered {
+    let r = Resolver::new(pack, m);
+    let mut statuses = BTreeMap::new();
+    let mut planned = BTreeSet::new();
+    for id in keep {
+        let Some(b) = m.get(id) else { continue };
+        match r.status(id) {
+            Some(s) => {
+                if s.status == Status::Planned {
+                    planned.insert(id.clone());
+                }
+                statuses.insert(id.clone(), s);
+            }
+            None if b.block_type == tree::DOC
+                && !b.is_redacted()
+                && b.fields.get(PLANNED_FIELD) == Some(&FieldValue::Bool(true)) =>
+            {
+                planned.insert(id.clone());
+            }
+            None => {}
+        }
+    }
+    let mut hidden = BTreeSet::new();
+    let mut shells = BTreeSet::new();
+    if profile.planned == PlannedSetting::Hide && !planned.is_empty() {
+        // a hidden block that is no container takes everything under it
+        for id in &planned {
+            if m.get(id).is_some_and(|b| !is_container(b)) {
+                let mut stack = vec![id.clone()];
+                while let Some(cur) = stack.pop() {
+                    if keep.contains(&cur) && hidden.insert(cur.clone()) {
+                        stack.extend(m.children(Some(&cur)).iter().map(|c| c.id.clone()));
+                    }
+                }
+            }
+        }
+        // the kept ancestors of every shown block hold a shown block
+        let mut holds: BTreeSet<&BlockId> = BTreeSet::new();
+        for id in keep {
+            if planned.contains(id) || hidden.contains(id) {
+                continue;
+            }
+            let mut cur = m.get(id).and_then(|b| b.parent.as_ref());
+            while let Some(p) = cur {
+                let Some(p) = keep.get(p) else { break };
+                if !holds.insert(p) {
+                    break;
+                }
+                cur = m.get(p).and_then(|b| b.parent.as_ref());
+            }
+        }
+        for id in &planned {
+            if hidden.contains(id) {
+                continue;
+            }
+            if holds.contains(id) {
+                shells.insert(id.clone());
+            } else {
+                hidden.insert(id.clone());
+            }
+        }
+    }
+    let shown = statuses
+        .into_iter()
+        .filter(|(id, _)| !hidden.contains(id) && !shells.contains(id))
+        .map(|(id, s)| {
+            let pill = s.status == Status::Since
+                && match profile.since {
+                    Some(SinceSetting::Show) => true,
+                    Some(SinceSetting::Off) => false,
+                    None => m
+                        .doc_of(&id)
+                        .and_then(|d| d.field_str("doc_type"))
+                        .is_some_and(|t| t == REFERENCE_DOC),
+                };
+            let shown = ShownStatus {
+                status: s.status,
+                since: s.since,
+                pill,
+            };
+            (id, shown)
+        })
+        .collect();
+    Filtered {
+        hidden,
+        shells,
+        shown,
+    }
+}
+
+/// The shell of the planned container `b` (D-69YCN): its id, type, parent and place, and only its
+/// title, name and key. A presentation projection in the selected state; its entry keeps the
+/// source version. A removed version's stub already holds no content and stays as it is, so it
+/// keeps its removal.
+fn shell_of(b: &Block) -> Block {
+    if b.is_redacted() {
+        return b.clone();
+    }
+    Block {
+        id: b.id.clone(),
+        block_type: b.block_type.clone(),
+        parent: b.parent.clone(),
+        order: b.order.clone(),
+        fields: b
+            .fields
+            .iter()
+            .filter(|(k, _)| SHELL_FIELDS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        read_identity: None,
+    }
+}
+
+/// What the filter shows of `id` beyond its entry, for a digest: a shell mark, or a status other
+/// than unversioned. Nothing for a block with neither, so a selection with no shell and no
+/// status hashes as before.
+fn put_view(
+    out: &mut Vec<u8>,
+    id: &BlockId,
+    shells: &BTreeSet<BlockId>,
+    shown: &BTreeMap<BlockId, ShownStatus>,
+) {
+    if shells.contains(id) {
+        put(out, "shell");
+        put(out, id.as_str());
+    } else if let Some(s) = shown.get(id)
+        && s.status != Status::Unversioned
+    {
+        put(out, "as-built");
+        put(out, id.as_str());
+        put(
+            out,
+            &crate::as_built::Derived {
+                status: s.status,
+                since: s.since.clone(),
+            }
+            .label(),
+        );
     }
 }
 
@@ -1110,6 +1323,14 @@ fn resolve_in(
         }
     };
 
+    // 4. the as-built filter: status from the full source, then hide or mark, once
+    let Filtered {
+        hidden,
+        shells,
+        shown,
+    } = filter(pack, m, &keep, &profile);
+    let keep: BTreeSet<BlockId> = keep.difference(&hidden).cloned().collect();
+
     // the removed versions outside a doc that the selection leaves out, for the comparison
     let removed_outside_docs: Vec<SelectionEntry> = m
         .iter()
@@ -1133,7 +1354,15 @@ fn resolve_in(
         .collect();
     let blocks = keep
         .iter()
-        .filter_map(|id| Some((id.clone(), m.get(id)?.clone())))
+        .filter_map(|id| {
+            let b = m.get(id)?;
+            let kept = if shells.contains(id) {
+                shell_of(b)
+            } else {
+                b.clone()
+            };
+            Some((id.clone(), kept))
+        })
         .collect();
     let sel = Materialized::build(StateSnapshot { blocks: versions }, blocks);
     let chosen = profile.id.as_ref().and_then(|id| m.get(id));
@@ -1155,12 +1384,14 @@ fn resolve_in(
         source.visit_blob_redactions(blob, &mut |request| requests.insert(request))?;
     }
 
-    // 7. entries, paths and digests
+    // 7. entries, paths and digests; an entry is the source block's, a shell's too
     let entries: Vec<SelectionEntry> = sel
         .iter()
         .map(|b| SelectionEntry {
             id: b.id.clone(),
-            version: m.version_of(&b.id).unwrap_or_else(|| b.version_hash()),
+            version: m
+                .version_of(&b.id)
+                .unwrap_or_else(|| m.get(&b.id).unwrap_or(b).version_hash()),
             redaction: b.redaction(),
         })
         .collect();
@@ -1176,11 +1407,15 @@ fn resolve_in(
         let path = paths.remove(&b.id).ok_or_else(invalid_tree)?;
         let mut bytes = b"rdy-publication-doc-1\0".to_vec();
         put(&mut bytes, &path);
-        for id in subtree(&sel, &b.id) {
-            put_entry(&mut bytes, by_id[&id]);
+        let below = subtree(&sel, &b.id);
+        for id in &below {
+            put_entry(&mut bytes, by_id[id]);
         }
         for a in attachments.iter().filter(|a| a.home_doc == b.id) {
             put_attachment(&mut bytes, a);
+        }
+        for id in &below {
+            put_view(&mut bytes, id, &shells, &shown);
         }
         docs.push(DocEntry {
             id: b.id.clone(),
@@ -1209,6 +1444,9 @@ fn resolve_in(
     for a in &attachments {
         put_attachment(&mut bytes, a);
     }
+    for e in &entries {
+        put_view(&mut bytes, &e.id, &shells, &shown);
+    }
     let selection_identity = selection_identity(&entries, l)?;
     Ok(Resolved {
         profile,
@@ -1222,6 +1460,8 @@ fn resolve_in(
         selection_identity,
         redactions: requests.into_sorted(),
         removed_outside_docs,
+        shells,
+        as_built: shown,
     })
 }
 

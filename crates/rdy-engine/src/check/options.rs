@@ -14,9 +14,12 @@ use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
 use rdy_model::{BlockId, Change};
 use rdy_model::{FieldValue, Hash, Op, Proposal, decision};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// The card fact that lists the considered options, after `Decisions`.
+/// The card fact that lists the keys the landing assigns that the version's own changes do not
+/// write (TASK-1277), right after `Decisions`. Absent when every key lands as written.
+pub const KEYS_FACT: &str = "Keys";
+/// The card fact that lists the considered options, after `Keys`.
 pub const CONSIDERED_OPTIONS_FACT: &str = "Considered options";
 /// The card fact that binds the alternative set's version, after `Considered options`.
 pub const ALTERNATIVE_SET_FACT: &str = "Alternative set";
@@ -53,6 +56,48 @@ pub struct LandingProjection {
     pub candidate: Materialized,
     pub updates: Vec<Op>,
     pub considered: Option<ConsideredOptions>,
+    /// The key the landing assigns to each block whose key differs from the one the version's
+    /// own changes write (K1's re-derived keys), by id.
+    pub keys: BTreeMap<BlockId, String>,
+}
+
+/// The `Keys` fact's value of `keys` ([`LandingProjection::keys`]): `<id> <key>` for each block,
+/// in id order, joined with `, `. None when every key lands as written.
+pub fn keys_fact_value(keys: &BTreeMap<BlockId, String>) -> Option<String> {
+    (!keys.is_empty()).then(|| {
+        keys.iter()
+            .map(|(id, k)| format!("{id} {k}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+/// The keys K1 re-derives when version `p` lands on canon, whose authored prospective canon is
+/// `authored`: the [`LandingProjection::keys`] of its projection, without the rest of it.
+pub fn assigned_keys(
+    st: &ReadState,
+    p: &Proposal,
+    authored: &Materialized,
+) -> Result<BTreeMap<BlockId, String>, RdyError> {
+    let changes = changes_of(st, &p.changes)?;
+    let applied = st.landing_order(&changes);
+    let canon = st.materialized(&Scope::Canon)?;
+    let vm = st.materialized(&Scope::View(p.view.clone()))?;
+    Ok(rederived(&changes, &applied, &canon, &vm, authored)
+        .into_iter()
+        .collect())
+}
+
+/// K1 (FW-PR3): the keys rdy derives again, past the keys view `vm` holds, for the blocks the
+/// changes at `applied` create or re-key on `canon`, whose prospective canon is `authored`.
+fn rederived(
+    changes: &[Change],
+    applied: &[usize],
+    canon: &Materialized,
+    vm: &Materialized,
+    authored: &Materialized,
+) -> Vec<(BlockId, String)> {
+    crate::keys::rederive(authored, &rekeyable_in(changes, applied, canon), vm)
 }
 
 /// The decision blocks `changes` create or update.
@@ -199,7 +244,8 @@ pub fn landing_projection(
     }
     // K1 (FW-PR3): a block landed since the proposal can hold a key rdy derived for a block this
     // version creates; the landing re-derives it, past the keys the view holds
-    let re = crate::keys::rederive(authored, &rekeyable_in(&changes, &applied, &canon), &vm);
+    let re = rederived(&changes, &applied, &canon, &vm, authored);
+    let keys: BTreeMap<BlockId, String> = re.iter().cloned().collect();
     for (id, k) in &re {
         let b = authored
             .get(id)
@@ -312,6 +358,7 @@ pub fn landing_projection(
         candidate,
         updates,
         considered,
+        keys,
     })
 }
 

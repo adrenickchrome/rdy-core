@@ -153,13 +153,15 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
 }
 
 /// The closed keys of the report (RULING F4, D-KQ4CA): nothing rides beside them.
-const REPORT_KEYS: [&str; 7] = [
+const REPORT_KEYS: [&str; 9] = [
     "against",
     "disclosure",
     "profile",
     "references",
+    "release",
     "scope",
     "selection",
+    "status",
     "warnings",
 ];
 

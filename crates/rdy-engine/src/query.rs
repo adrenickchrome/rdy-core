@@ -75,6 +75,13 @@ pub struct Context {
     /// checkout (`found`, `missing` or `unchecked`); absent for every other block type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub existence: Option<crate::source_exists::SourceExistence>,
+    /// ab2 (D-WJ0SJ): a content block's as-built status in this scope; absent for every other
+    /// block. `status` above stays the decision's retirement status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub as_built: Option<crate::as_built::AsBuilt>,
+    /// ab2 (D-YAY1G): the block's as-built override warning; absent when it has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<rdy_schema::Issue>,
 }
 
 /// rdx6: the redaction a source block reply names, as `{"id": "<request hash>"}`.
@@ -340,6 +347,8 @@ impl ReadState {
         let mut suspects = g.suspects_of(id);
         suspects.retain(|s| !self.is_presentational_source(&m, s));
         let suspects = self.suspect_rows(scope, suspects, Some(std::slice::from_ref(id)))?;
+        let as_built = self.as_built(scope, [id])?;
+        let warnings = self.as_built_warnings(scope, &as_built)?;
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),
@@ -394,6 +403,8 @@ impl ReadState {
                 .redaction()
                 .map(|h| RedactionRef { id: h.to_string() }),
             existence: self.source_existence_of(&block),
+            as_built: as_built.into_iter().next().map(|(_, s)| s),
+            warnings,
         })
     }
 

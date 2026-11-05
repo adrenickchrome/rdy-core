@@ -160,7 +160,7 @@ fn capped_project(n: usize) -> (tempfile::TempDir, Rdy) {
 fn pub9_reports_cap_rows_but_keep_full_counts() {
     for n in [199usize, 200, 201] {
         let (_dir, r) = capped_project(n);
-        let v = publication::check(&r.read(), "pubsite", None, Some("tag:v1.0.0")).unwrap();
+        let v = publication::check(&r.read(), "pubsite", None, Some("tag:v1.0.0"), None).unwrap();
         let left = n.saturating_sub(200);
         let shown = n.min(200);
 
@@ -239,7 +239,7 @@ fn pub9_reports_cap_rows_but_keep_full_counts() {
             "{n}"
         );
         // without a baseline there is no disclosure
-        let alone = publication::check(&r.read(), "pubsite", None, None).unwrap();
+        let alone = publication::check(&r.read(), "pubsite", None, None, None).unwrap();
         assert!(alone["disclosure"].is_null() && alone["against"].is_null());
         assert_eq!(alone["selection"], v["selection"]);
     }
@@ -268,7 +268,7 @@ fn pub9_default_scope_is_canon_and_baseline_uses_the_same_profile_id() {
     let p1 = id(&w, "$pf");
     land(&mut r, "work");
     tag(&mut r, "v1.0.0");
-    let v1 = publication::check(&r.read(), "site", None, None).unwrap();
+    let v1 = publication::check(&r.read(), "site", None, None, None).unwrap();
     assert_eq!(v1["scope"]["kind"], "canon");
     assert_eq!(v1["profile"]["id"], p1.as_str());
     assert_eq!(v1["profile"]["key"], "site");
@@ -283,10 +283,10 @@ fn pub9_default_scope_is_canon_and_baseline_uses_the_same_profile_id() {
         "agent-view",
         json!([{"op": "update", "id": p1, "fields": {"select": [a, b]}}]),
     );
-    let still = publication::check(&r.read(), "site", None, None).unwrap();
+    let still = publication::check(&r.read(), "site", None, None, None).unwrap();
     assert_eq!(still, v1);
     assert_eq!(
-        publication::check(&r.read(), "site", Some("canon"), None).unwrap(),
+        publication::check(&r.read(), "site", Some("canon"), None, None).unwrap(),
         v1
     );
 
@@ -304,7 +304,7 @@ fn pub9_default_scope_is_canon_and_baseline_uses_the_same_profile_id() {
     land(&mut r, "work");
 
     // the baseline resolves the candidate's stable id: the retired key finds the old profile
-    let v = publication::check(&r.read(), "retired", None, Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(&r.read(), "retired", None, Some("tag:v1.0.0"), None).unwrap();
     assert_eq!(v["profile"]["id"], p1.as_str());
     assert_eq!(v["against"]["kind"], "landing");
     assert_eq!(v["disclosure"]["profile_id"], p1.as_str());
@@ -313,12 +313,12 @@ fn pub9_default_scope_is_canon_and_baseline_uses_the_same_profile_id() {
     assert_eq!(v["disclosure"]["added_docs"][0]["id"], b.as_str());
     // the same profile by id gives the same report
     assert_eq!(
-        publication::check(&r.read(), &p1, None, Some("tag:v1.0.0")).unwrap(),
+        publication::check(&r.read(), &p1, None, Some("tag:v1.0.0"), None).unwrap(),
         v
     );
 
     // the key `site` now names a profile the tag never held: no fallback by key or to canon
-    let e = publication::check(&r.read(), "site", None, Some("tag:v1.0.0")).unwrap_err();
+    let e = publication::check(&r.read(), "site", None, Some("tag:v1.0.0"), None).unwrap_err();
     assert_err(
         &e,
         E_NOT_FOUND,
@@ -327,12 +327,18 @@ fn pub9_default_scope_is_canon_and_baseline_uses_the_same_profile_id() {
     );
 
     // a tag and its landing are one scope kind with the same selection
-    let tagged = publication::check(&r.read(), &p1, Some("tag:v1.0.0"), None).unwrap();
+    let tagged = publication::check(&r.read(), &p1, Some("tag:v1.0.0"), None, None).unwrap();
     let landing = tagged["scope"]["landing"].as_str().unwrap().to_string();
     assert_eq!(tagged["scope"]["kind"], "landing");
     assert!(is_full_hash(&tagged["scope"]["landing"]));
-    let by_landing =
-        publication::check(&r.read(), &p1, Some(&format!("landing:{landing}")), None).unwrap();
+    let by_landing = publication::check(
+        &r.read(),
+        &p1,
+        Some(&format!("landing:{landing}")),
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(by_landing, tagged);
     assert_eq!(tagged["selection"], v1["selection"]);
 }
@@ -361,7 +367,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
     );
     land(&mut r, "work");
     tag(&mut r, "v1.0.0");
-    let v = publication::check(&r.read(), "open", None, Some("canon")).unwrap();
+    let v = publication::check(&r.read(), "open", None, Some("canon"), None).unwrap();
     assert_eq!(v["references"]["status"], "blocked");
     assert_eq!(v["warnings"], json!([]));
     assert_eq!(
@@ -371,11 +377,15 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
             "disclosure",
             "profile",
             "references",
+            "release",
             "scope",
             "selection",
+            "status",
             "warnings"
         ]
     );
+    assert_eq!(v["status"], "blocked");
+    assert!(v["release"].is_null());
     assert_eq!(
         keys(&v["profile"]),
         ["audience", "id", "key", "title", "trail", "version"]
@@ -424,15 +434,15 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
 
     // the candidate is canon, a tag, a landing, an existing view or a proposal version
     // (D-CWC91): a bare and an explicit view name are one candidate
-    let bad = |s: &str| publication::check(&r.read(), "open", Some(s), None).unwrap_err();
-    let in_view = publication::check(&r.read(), "open", Some("work"), None).unwrap();
+    let bad = |s: &str| publication::check(&r.read(), "open", Some(s), None, None).unwrap_err();
+    let in_view = publication::check(&r.read(), "open", Some("work"), None, None).unwrap();
     assert_eq!(
         in_view["scope"],
         json!({"kind": "view", "landing": null, "view": "work"})
     );
     assert_eq!(in_view["references"]["status"], "blocked");
     assert_eq!(
-        publication::check(&r.read(), "open", Some("view:work"), None).unwrap(),
+        publication::check(&r.read(), "open", Some("view:work"), None, None).unwrap(),
         in_view
     );
     // a missing view or proposal is its own lookup's refusal
@@ -461,9 +471,9 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
     );
     assert_eq!(bad("tag:9.9.9").code, E_NOT_FOUND);
     // the candidate resolves first: a missing profile wins over a bad baseline
-    let e = publication::check(&r.read(), "nope", None, Some("work")).unwrap_err();
+    let e = publication::check(&r.read(), "nope", None, Some("work"), None).unwrap_err();
     assert_eq!(e.code, E_NOT_FOUND);
-    let e = publication::check(&r.read(), "open", None, Some("work")).unwrap_err();
+    let e = publication::check(&r.read(), "open", None, Some("work"), None).unwrap_err();
     assert_err(
         &e,
         E_BAD_INPUT,
@@ -478,7 +488,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
         json!([{"op": "update", "id": p.to_string(), "fields": {"audience": "org"}}]),
     );
     land(&mut r, "work");
-    let e = publication::check(&r.read(), "open", None, Some("tag:v1.0.0")).unwrap_err();
+    let e = publication::check(&r.read(), "open", None, Some("tag:v1.0.0"), None).unwrap_err();
     assert_err(
         &e,
         E_BAD_INPUT,
@@ -501,7 +511,7 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
             {"op": "create", "type": "section", "id": "$ins", "parent": "$in", "fields": {"title": "Kept"}},
             {"op": "create", "type": "doc", "id": "$out", "fields": {"name": "out", "title": "Out", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$outs", "parent": "$out", "fields": {"title": "Rulings"}},
-            {"op": "create", "type": "decision", "id": "$d", "parent": "$outs", "fields": {"statement": "The ruling.", "status": "proposed"}},
+            {"op": "create", "type": "decision", "id": "$d", "parent": "$outs", "fields": {"statement": "The ruling.", "status": "proposed", "built": "1.0.0"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$ins", "body": "The claim has no ref.",
                 "links": {"decided_by": [{"target": "$d"}]}},
             {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
@@ -516,7 +526,7 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
             "fields": {"key": "open", "title": "Open", "audience": "public", "select": [inside]}}]),
     );
     land(&mut r, "work");
-    let v = publication::check(&r.read(), "open", None, None).unwrap();
+    let v = publication::check(&r.read(), "open", None, None, None).unwrap();
     let refs = &v["references"];
     assert_eq!(refs["status"], "clear", "{refs}");
     assert_eq!(

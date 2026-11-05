@@ -332,7 +332,11 @@ fn cp5_reaffirm_preserves_every_frozen_field_and_downstream_pin() {
         x_before,
         "the downstream claim is untouched"
     );
-    assert_eq!(block(&r, &w(), &x).pins[&id(&f.d1)], after.content_hash());
+    // a pin holds the hash without the pack's tracking fields (lpin1); `built` is one (trk1)
+    assert_eq!(
+        block(&r, &w(), &x).pins[&id(&f.d1)],
+        after.content_hash_with(r.store().tracking())
+    );
     assert!(
         suspects(&r, &w(), &x).is_empty(),
         "no new suspect downstream"

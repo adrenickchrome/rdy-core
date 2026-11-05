@@ -1893,6 +1893,99 @@ fn options_moved(
     })
 }
 
+/// TASK-1277 (D-DSPMW, p-R7P0W): the refusal message of version `pref` when a key its landing
+/// assigns (`projection`, on `prospective`, the canon with its changes) is not the key its stored
+/// assessment `a` showed: the `Keys` fact, compared as the record stores it (cut to its bound),
+/// and absent when every key lands as written. The message names the first block, in id order,
+/// whose key differs, and the landing since the assessment's base that wrote the block now
+/// holding the assessed key; with none, the newest landing since the base. None when they agree.
+fn keys_moved(
+    st: &ReadState,
+    pref: &ProposalRef,
+    projection: &crate::check::LandingProjection,
+    a: &rdy_model::assessment::Assessment,
+    prospective: &Materialized,
+) -> Result<Option<String>, RdyError> {
+    use crate::check::options::{KEYS_FACT, keys_fact_value};
+    use crate::readiness::assessment::cut_text;
+    let prefix = format!("{KEYS_FACT}: ");
+    let stored = a.card.facts.iter().find(|line| line.starts_with(&prefix));
+    let fresh = keys_fact_value(&projection.keys).map(|v| cut_text(format!("{KEYS_FACT}: {v}")));
+    if fresh.as_ref() == stored {
+        return Ok(None);
+    }
+    // the assessed keys, as the fact lists them (a cut fact loses its last entries)
+    let assessed: BTreeMap<String, String> = stored
+        .and_then(|line| line.strip_prefix(&prefix))
+        .into_iter()
+        .flat_map(|v| v.split(", "))
+        .filter_map(|e| e.split_once(' '))
+        .map(|(id, k)| (id.to_string(), k.to_string()))
+        .collect();
+    let now: BTreeMap<String, &String> = projection
+        .keys
+        .iter()
+        .map(|(id, k)| (id.to_string(), k))
+        .collect();
+    let written = |id: &str| {
+        BlockId::parse(id)
+            .ok()
+            .and_then(|b| prospective.get(&b).and_then(crate::keys::key_of))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ids: BTreeSet<&String> = assessed.keys().chain(now.keys()).collect();
+    let pair = |id: &String| {
+        let was = assessed.get(id).cloned().unwrap_or_else(|| written(id));
+        let is = now.get(id).map_or_else(|| written(id), |k| k.to_string());
+        (id.clone(), was, is)
+    };
+    let pairs: Vec<(String, String, String)> = ids.into_iter().map(pair).collect();
+    // two facts that differ list two keys for one block before their cut; the first block named
+    // stands in for a difference past it
+    let Some((id, was, is)) = pairs
+        .iter()
+        .find(|(_, was, is)| was != is)
+        .or(pairs.first())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let since = Rdy::landings_since(st, a.base)?;
+    let canon = st.materialized(&Scope::Canon)?;
+    let folded = rdy_model::key::fold(&was);
+    let holders: BTreeSet<BlockId> = canon
+        .iter()
+        .filter(|b| b.id.to_string() != id)
+        .filter(|b| crate::keys::key_of(b).is_some_and(|k| rdy_model::key::fold(k) == folded))
+        .map(|b| b.id.clone())
+        .collect();
+    let mut wrote = None;
+    for (l, rec) in since.iter().rev() {
+        let mut hit = false;
+        for c in &rec.changes {
+            hit |= st
+                .reader()
+                .change(c)?
+                .ops
+                .iter()
+                .any(|op| holders.contains(op.block_id()));
+        }
+        if hit {
+            wrote = Some(*l);
+            break;
+        }
+    }
+    let landing = wrote
+        .or_else(|| since.first().map(|(l, _)| *l))
+        .or_else(|| st.canon_head())
+        .map(|l| l.short())
+        .unwrap_or_default();
+    Ok(Some(format!(
+        "proposal {pref} moved: landing {landing} changed the key of {id} ({was} to {is}) after its assessment"
+    )))
+}
+
 /// The canon that landing `changes` would give: canon with their ops, in the order the merge
 /// applies them (as `prepare_landing_as` builds it).
 fn prospective_canon(st: &ReadState, changes: &[Change]) -> Result<Materialized, RdyError> {
@@ -3363,6 +3456,10 @@ impl Rdy {
             return Err(self.moved_fresh(&st, &pref, &p, message)?);
         }
         let projection = projection.expect("an unprojected version refused as moved");
+        // TASK-1277 (p-R7P0W): each key the landing assigns is the key its card showed; a key a
+        // competing landing shifted refuses with a fresh assessment, after the dry run's own
+        // refusal. No rule runs here.
+        let keys_message = keys_moved(&st, &pref, &projection, &record, &prospective)?;
         // the landing alone stamps the accepted decisions' clock
         let now = rfc3339_now();
         let mut accept_ops = projection.updates;
@@ -3426,6 +3523,9 @@ impl Rdy {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
+        }
+        if let Some(message) = keys_message {
+            return Err(self.moved_fresh(&st, &pref, &p, message)?);
         }
         // the version's keys were chosen against the view's base when it was proposed: a pinned
         // view's base (at or before `canon_at`), or `canon_at` for a view a landing has rebased

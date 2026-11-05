@@ -26,7 +26,7 @@ fn caveat(title: &str) -> String {
 /// The tool description of `rdy_site`.
 const SITE_DESCRIPTION: &str = "Get the live docs link for the person. Pass profile to show its selection in canon, a tag, a view or a proposal. Pass only with profile to serve canon on a separate port. This changes presentation, not source access. Relay warning and every entry of warnings. Use the tools to read and write.";
 /// The tool description of `rdy_publication_check`.
-const CHECK_DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. This check does not authorize publication or find the last publication. Relay warnings to the person.";
+const CHECK_DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
 const PROFILE_HELP: &str =
     "A publication profile id or key in this scope, or implicit:org. Omit it for all docs.";
 const ONLY_HELP: &str = "Serve canon through this profile on a separate port. Requires profile and scope canon. This changes presentation, not source access.";

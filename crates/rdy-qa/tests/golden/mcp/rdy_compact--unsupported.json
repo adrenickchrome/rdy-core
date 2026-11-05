@@ -1,13 +1,13 @@
 {
   "by_kind": [
     {
-      "bytes": 3515,
+      "bytes": 3560,
       "kind": 1,
       "name": "block",
       "removed_bytes": 60
     },
     {
-      "bytes": 4781,
+      "bytes": 4826,
       "kind": 2,
       "name": "change",
       "removed_bytes": 179
@@ -115,7 +115,7 @@
       "removed_bytes": 0
     }
   ],
-  "log_bytes": 56879,
+  "log_bytes": 56969,
   "notes": [
     "hole punching is not supported for 2 removed spans; they keep their disk space, and their content stays removed"
   ],

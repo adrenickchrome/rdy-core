@@ -187,13 +187,13 @@ fn ain1_instruction_selectors_and_reasons_are_closed() {
         (
             json!({"applies-to": ["all"], "applies_to": ["all"]}),
             "type instruction has no field \"applies-to\"".to_string(),
-            "remove it, or use one of: applies_to, locked".to_string(),
+            "remove it, or use one of: applies_to, locked, planned, since".to_string(),
             "E_FIELD_UNKNOWN",
         ),
         (
             json!({"applies_to": ["all"], "lockd": true}),
             "type instruction has no field \"lockd\"".to_string(),
-            "remove it, or use one of: applies_to, locked".to_string(),
+            "remove it, or use one of: applies_to, locked, planned, since".to_string(),
             "E_FIELD_UNKNOWN",
         ),
         // a key, which an instruction never has

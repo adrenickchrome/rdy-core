@@ -686,7 +686,7 @@ fn report_lists_a_block_outside_docs() {
         json!([{"op": "update", "id": c, "links": {"decided_by": [dec]}}]),
     );
     land(&mut r, "work");
-    let v = publication::check(&r.read(), "site", None, Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(&r.read(), "site", None, Some("tag:v1.0.0"), None).unwrap();
     let version = v["selection"]["entries"]
         .as_array()
         .unwrap()
@@ -754,7 +754,7 @@ fn ndh4_a_decision_in_a_selected_doc_brings_its_outside_doc_targets() {
         "the finding sits at the root"
     );
 
-    let v = publication::check(&st, "pubsite", None, Some("tag:v1.0.0")).unwrap();
+    let v = publication::check(&st, "pubsite", None, Some("tag:v1.0.0"), None).unwrap();
     assert_eq!(v["references"]["status"], json!("clear"), "{v}");
     let entries = v["selection"]["entries"].as_array().unwrap();
     let version = entries

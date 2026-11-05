@@ -4,11 +4,12 @@
 //! rationale give no mark, no count and no removed line. Every word the review gives is a reader
 //! word (`Edited`, `New`, a count like `2 edited · 1 new · 1 removed`), never an id, a hash or a
 //! type name.
+use crate::prepare::BlockStatus;
 use rdy_engine::view_query::compare_states;
 use rdy_engine::{Compare, CompareEntry, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Block, BlockId, decision, tree};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The word a changed block, doc or folder carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -256,7 +257,28 @@ pub fn between(rdy: &ReadState, from: &Scope, to: &Scope) -> Result<Review, RdyE
 /// reads only the compare's state rows, never its conflicts, so no scope is needed.
 pub(crate) fn between_states(from: &Materialized, to: &Materialized) -> Review {
     let cmp = compare_states(to, from);
-    review(&cmp, to, from)
+    review(&cmp, to, from, &BTreeSet::new())
+}
+
+/// [`between_states`] for prepared sides: a block both sides show whose displayed status words
+/// differ (`Planned`, `since <version>`) reads as edited, even when its selected block is the
+/// same. The words come from each side's own preparation, so a built value changed on an excluded
+/// decision counts.
+pub(crate) fn between_prepared(
+    from: &Materialized,
+    to: &Materialized,
+    from_status: &BTreeMap<BlockId, BlockStatus>,
+    to_status: &BTreeMap<BlockId, BlockStatus>,
+) -> Review {
+    let cmp = compare_states(to, from);
+    let moved: BTreeSet<BlockId> = from_status
+        .keys()
+        .chain(to_status.keys())
+        .filter(|id| from_status.get(id) != to_status.get(id))
+        .filter(|id| from.get(id).is_some() && to.get(id).is_some())
+        .cloned()
+        .collect();
+    review(&cmp, to, from, &moved)
 }
 
 /// What a scope changes, as its change rows read it: the review against its base, else, for a
@@ -309,7 +331,7 @@ pub(crate) fn unreviewed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review
         moved: vec![],
         conflicted: vec![],
     };
-    Ok(Some(review(&cmp, &dm, &empty)))
+    Ok(Some(review(&cmp, &dm, &empty, &BTreeSet::new())))
 }
 
 /// On the page: neither a decision, its rationale, a finding, a source nor a publication profile.
@@ -391,7 +413,12 @@ fn doc_id<'m>(m: &'m Materialized, id: &BlockId) -> Option<&'m BlockId> {
     m.doc_of(id).map(|d| &d.id)
 }
 
-fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
+fn review(
+    cmp: &Compare,
+    dm: &Materialized,
+    bm: &Materialized,
+    status_changed: &BTreeSet<BlockId>,
+) -> Review {
     let mut rv = Review::default();
     // marks: new docs first, so that their blocks carry none of their own
     let added: Vec<(&Block, Mark)> = ids(&cmp.added)
@@ -406,6 +433,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
     let moved_in_place = reordered(cmp, dm, bm);
     let edited: Vec<(&Block, Mark)> = seen_changes(&cmp.changed, dm, bm, &moved_in_place)
         .chain(ids(&cmp.moved))
+        .chain(status_changed.iter().cloned())
         .filter_map(|id| dm.get(&id))
         .map(|b| (b, Mark::Edited))
         .collect();
@@ -621,6 +649,21 @@ mod tests {
         }
     }
 
+    /// A status word that differs on a block both sides lack from the compare reads as nothing:
+    /// only a block both sides hold counts, so a block that is added or removed is not doubled.
+    #[test]
+    fn rv2_a_status_change_needs_the_block_on_both_sides() {
+        let none = Materialized::default();
+        let planned = BlockStatus {
+            planned: true,
+            since: None,
+        };
+        let id = BlockId::parse("p-AAAAA").unwrap();
+        let status = BTreeMap::from([(id, planned)]);
+        let rv = between_prepared(&none, &none, &status, &BTreeMap::new());
+        assert_eq!(rv.changed_blocks(), 0);
+    }
+
     #[test]
     fn rv1_a_pins_only_change_is_not_edited() {
         let e = [entry("p-AAAAA", &[]), entry("p-BBBBB", &["body"])];
@@ -786,7 +829,10 @@ mod tests {
         let none = Materialized::default();
         let to = state(&all);
         let cmp = compare_states(&to, &none);
-        assert_eq!(changed(&review(&cmp, &to, &none)), changed(&rv));
+        assert_eq!(
+            changed(&review(&cmp, &to, &none, &BTreeSet::new())),
+            changed(&rv)
+        );
         // everything leaves: one removed page, its visible content counted
         let gone = between_states(&state(&all), &Materialized::default());
         assert_eq!(gone.removed_pages().len(), 1);

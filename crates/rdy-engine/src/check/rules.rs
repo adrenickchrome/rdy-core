@@ -16,6 +16,7 @@ use crate::check::stages::Stage;
 use crate::error::{E_CONFIG, E_INTERNAL, E_RULE_CHECK, RdyError, W_RULE_CHECK};
 use crate::filter::{FilterContext, FilterInputs};
 use crate::materialize::Materialized;
+use crate::tensions::index::duplicate_eligible;
 use crate::{ReadState, Scope};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::BlockId;
@@ -376,6 +377,12 @@ fn inputs_of(
 ) -> Result<(), ()> {
     out.insert(b)?;
     for rule in rules {
+        // a blocking rule's severity reads the effective lifecycle, inherited from the ancestors
+        if rule.rule.severity == RuleSeverity::Blocking {
+            for a in ancestors(m, b) {
+                out.insert(a)?;
+            }
+        }
         for f in [&rule.select, &rule.require] {
             expr_inputs(&f.expr, m, g, b, out)?;
         }
@@ -473,6 +480,16 @@ fn field_inputs(
             }
             add_ancestors(out)?;
         }
+        // ab2: the as-built status reads the block's direct decisions and its containers
+        Field::Planned | Field::Since => {
+            for e in g.outgoing(b).iter().filter(|e| {
+                matches!(&e.kind, EdgeKind::Link(k)
+                    if k == rdy_model::decision::DECIDED_BY || k == rdy_model::decision::IMPLEMENTS)
+            }) {
+                out.insert(&e.to)?;
+            }
+            add_ancestors(out)?;
+        }
         Field::Id | Field::Key | Field::Type | Field::Trait | Field::Custom(_) => {}
     }
     Ok(())
@@ -483,12 +500,14 @@ fn field_inputs(
 /// included), in canon before (`before`) and in the version's landing projection (`projected`):
 /// the block, its descendants, and the blocks up to the deepest link nesting of any rule (0 to
 /// 3) away through placement edges, explicit links and pinned references, in either direction.
-/// Then, once and without expanding again, the complete rule inputs of every block of that
+/// When a rule reads `tension` and a block of that walk can take part in a duplicate-definition
+/// group, also every block that can (the partners no link joins). Then, once and without expanding again, the complete rule inputs of every block of that
 /// expansion in both states ([`inputs_of`]), and every block a stored rule row reads
 /// (`stored_row_reads`). Sorted and distinct. Err: the walk reached more than [`MAX_ROWS`]
 /// distinct blocks, the "too large to assess" issue of `pref`.
 pub(crate) fn rule_reach(
     pref: &crate::ProposalRef,
+    pack: &Pack,
     rules: &[CompiledRule],
     before: (&Materialized, &Graph),
     projected: (&Materialized, &Graph),
@@ -538,6 +557,23 @@ pub(crate) fn rule_reach(
             }
         }
     }
+    // a tension reads duplicate partners, which no link joins (row 166): the blocks that share
+    // a name key or a text key with a block of the expansion, in either state
+    let reads_tension = rules
+        .iter()
+        .flat_map(|r| [&r.select, &r.require])
+        .any(|f| f.needs().tension);
+    if reads_tension
+        && [before.0, projected.0]
+            .iter()
+            .any(|m| expansion.set.iter().any(|id| can_pair(pack, m, id)))
+    {
+        for (m, _) in [before, projected] {
+            for b in m.iter().filter(|b| duplicate_eligible(pack, b)) {
+                expansion.insert(&b.id).map_err(|_| too_large())?;
+            }
+        }
+    }
     let mut reach = Bounded::new(MAX_ROWS);
     for id in &expansion.set {
         reach.insert(id).map_err(|_| too_large())?;
@@ -553,4 +589,11 @@ pub(crate) fn rule_reach(
         reach.insert(id).map_err(|_| too_large())?;
     }
     Ok(reach.set)
+}
+
+/// Whether block `id` of `m` can take part in a duplicate-definition group. A partner is made by
+/// a competing landing that gives a block the same name or text, and no link joins it, so the
+/// walk cannot know it: reach reads every block that can take part (row 166).
+fn can_pair(pack: &Pack, m: &Materialized, id: &BlockId) -> bool {
+    m.get(id).is_some_and(|b| duplicate_eligible(pack, b))
 }

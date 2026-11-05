@@ -7,6 +7,11 @@
 //! full id in place of its name on both sides, matched by that version's hash, never by id
 //! alone; a version no removal names keeps its name. Digests and selection hashes stay the
 //! recorded facts.
+//!
+//! Both sides are filtered views (D-WJ0SJ, D-69YCN). A block a profile hides is no entry, so a
+//! planned block that ships, or a shown one that turns planned, is added or removed though its
+//! version did not move. A doc's digest also holds its shells and the shown status of its
+//! content, so a shell that becomes whole, or a changed status, changes the doc.
 
 use super::references::{Classification, ReferenceRow};
 use super::select::{

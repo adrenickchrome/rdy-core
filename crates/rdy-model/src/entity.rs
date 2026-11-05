@@ -25,7 +25,8 @@ pub const LITERAL_MIN_CHARS: usize = 2;
 pub const LITERAL_MAX_CHARS: usize = 64;
 /// Fields that hold metadata, not text: a mention scan never reads them (the key, a decision's
 /// kind, status, ruling basis, attestation and dates, a code or diagram block's `lang`, a doc's
-/// type and lifecycle). The engine also skips every field of kind `enum` in the pack.
+/// type and lifecycle, and the as-built release fields of FW-AB1: a decision's `built` and a
+/// content block's `since`). The engine also skips every field of kind `enum` in the pack.
 pub const METADATA_FIELDS: &[&str] = &[
     "key",
     "kind",
@@ -40,6 +41,8 @@ pub const METADATA_FIELDS: &[&str] = &[
     "recorded_at",
     "effective_from",
     "review_by",
+    "built",
+    "since",
 ];
 
 /// One word of a text: its byte range and its case-folded form.

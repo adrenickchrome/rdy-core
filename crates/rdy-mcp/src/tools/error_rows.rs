@@ -482,6 +482,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         COVERAGE_LOWERED_FIX,
     ),
     (
+        W_AS_BUILT_OVERRIDE,
+        "a content block's own planned or since, or planned: true on its nearest section or doc, differs from the planned or since status its decided_by and implements decisions derive",
+        "follow the warning's own fix",
+    ),
+    (
         E_PLAN_ITEM,
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists",

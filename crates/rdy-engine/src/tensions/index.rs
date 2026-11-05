@@ -904,6 +904,13 @@ pub(crate) fn text_key(pack: &Pack, b: &Block, min_words: usize) -> Option<Hash>
     normalize_text(duplicate_text(pack, b)?, min_words)
 }
 
+/// Whether `b` can take part in a duplicate-definition group in some version of its text or
+/// name: it defines a name, or it has text the duplicate check reads ([`duplicate_text`]),
+/// whatever that text's length. A block that is not can never be a duplicate partner.
+pub(crate) fn duplicate_eligible(pack: &Pack, b: &Block) -> bool {
+    defines(pack, b) || duplicate_text(pack, b).is_some()
+}
+
 /// The name keys duplicate definitions group `b` under (D-JDW8A, O4): when it defines a name,
 /// the [`name_keys`] of its name and of each of its at most
 /// [`MAX_ALIASES`](rdy_model::entity::MAX_ALIASES) aliases, sorted,
