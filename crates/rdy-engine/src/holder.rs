@@ -10,12 +10,13 @@
 //! publications capture empty canon, no views and the current tags. Its batches log no tension
 //! or suspect moves, and its fsck checks each tag's own history (`StoreReader::check_holder`).
 use crate::config::{Config, ServeSection, SiteConfig};
-use crate::handle::{Context, io};
+use crate::handle::{Context, check_start, enter, io};
 use crate::pack_load::load_pack_from;
 use crate::{E_BAD_INPUT, E_LIMIT, PackFingerprint, Rdy, RdyError};
 use rdy_model::{Hash, RepoId};
 use rdy_store::check_holder::holder_check_limit;
 use rdy_store::holder::StoreMode;
+use rdy_store::start_lock::StartGuard;
 use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::path::Path;
 
@@ -98,6 +99,8 @@ impl Rdy {
         crate::config_levels::refuse_follower(root)?;
         let dot = root.join(".rdy");
         rdy_store::fsutil::create_dir_durable(&dot).map_err(io)?;
+        // the project's start lock across the creation, which the store's own lock follows
+        let _entry = enter(root)?;
         let store = Store::create_holder(&dot.join(layout::STORE_DIR), repo_id)?;
         Rdy::from_store(root, store, holder_context()?)
     }
@@ -112,7 +115,15 @@ impl Rdy {
     /// Opens the holder at `root` as [`Rdy::open_holder`] does, with upgrade policy `policy`
     /// (see [`Rdy::open_with_policy`]).
     pub fn open_holder_with_policy(root: &Path, policy: OpenPolicy) -> Result<Rdy, RdyError> {
-        Rdy::open_holder_with(root, policy, None)
+        Rdy::open_holder_with(root, policy, None, None)
+    }
+
+    /// Opens the holder at `root` as [`Rdy::open_holder`] does, under `start`, the project's start
+    /// lock, which the caller holds and keeps: the open and any upgrade it runs borrow the guard
+    /// and never take that lock again. A guard of another project is `E_LOCKED`.
+    pub fn open_holder_under_start(root: &Path, start: &StartGuard) -> Result<Rdy, RdyError> {
+        check_start(root, start)?;
+        Rdy::open_holder_with(root, OpenPolicy::AutoUpgrade, None, Some(start))
     }
 
     /// [`Rdy::open_holder_with_policy`] with the upgrade steps `registry` (a test hook's).
@@ -120,7 +131,13 @@ impl Rdy {
         root: &Path,
         policy: OpenPolicy,
         registry: Option<&[rdy_store::upgrade::UpgradeStep]>,
+        start: Option<&StartGuard>,
     ) -> Result<Rdy, RdyError> {
+        // held across the open: start lock before store lock
+        let _entry = match start {
+            Some(_) => None,
+            None => Some(enter(root)?),
+        };
         let store = Rdy::open_store(&root.join(".rdy"), policy, registry)?;
         if store.mode()? != StoreMode::Holder {
             return Err(is_a_project());

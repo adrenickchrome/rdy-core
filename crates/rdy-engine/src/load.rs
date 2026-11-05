@@ -779,10 +779,14 @@ fn check(
     follower: bool,
 ) -> Result<(FsckReport, usize, usize), RdyError> {
     let fails = |e: RdyError| fails_fsck(project, carried, e);
-    let opened = if follower {
-        crate::follower::open_locked(project, lock)
-    } else {
-        Rdy::open_locked(project, lock)
+    let opened = {
+        // the load's start lock, borrowed
+        let start = made.start.as_ref().ok_or_else(no_start)?;
+        if follower {
+            crate::follower::open_locked(project, lock, start)
+        } else {
+            Rdy::open_locked(project, lock, start)
+        }
     };
     let mut r = match opened {
         Ok(r) => r,

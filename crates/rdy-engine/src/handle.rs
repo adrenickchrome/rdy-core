@@ -14,7 +14,7 @@ use rdy_store::start_lock::{ExistingLock, StartGuard};
 use rdy_store::upgrade::{UpgradeReport, UpgradeStep};
 use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub(crate) fn io(e: std::io::Error) -> RdyError {
@@ -114,6 +114,9 @@ impl Rdy {
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
+        // the project's start lock from here to the first open, which borrows it: no start or
+        // load takes the project between the store and its config
+        let entry = enter(project)?;
         // the store first: a directory there that is not empty and not a current-format store is
         // refused before the config makes this a project (fmt3)
         layout::create_project_store(&dot)?.close()?;
@@ -131,7 +134,7 @@ impl Rdy {
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
-        let mut r = Rdy::open(project)?;
+        let mut r = Rdy::open_with(project, OpenPolicy::AutoUpgrade, None, entry.guard())?;
         // plan M2e2: an empty store folds to no move and its state holds none, so the log is
         // reconciled here at no cost, and the first write logs only its own moves
         r.reconcile_transitions()?;
@@ -171,7 +174,7 @@ impl Rdy {
     ) -> Result<Rdy, RdyError> {
         match mode {
             StoreMode::Project => Rdy::open_with(root, policy, Some(registry), None),
-            StoreMode::Holder => Rdy::open_holder_with(root, policy, Some(registry)),
+            StoreMode::Holder => Rdy::open_holder_with(root, policy, Some(registry), None),
         }
     }
 
@@ -194,11 +197,14 @@ impl Rdy {
     /// after the rename of its store until it ends), in the mode its store holds: a holder as
     /// [`Rdy::open_holder`] does, with no config or pack file read; a project as [`Rdy::open`]
     /// does, with its config read once the mode is known. A lock that is not this project's
-    /// store's is `E_LOCKED`.
+    /// store's, or a start guard that is not its start lock, is `E_LOCKED`. The caller holds
+    /// `start` and this open borrows it.
     pub(crate) fn open_locked(
         project: &Path,
         lock: &rdy_store::StoreLock,
+        start: &StartGuard,
     ) -> Result<Rdy, RdyError> {
+        check_start(project, start)?;
         let store = layout::open_project_store_locked(&project.join(".rdy"), lock)?;
         let mode = store.mode()?;
         let context = Rdy::context_of(project, mode)?;
@@ -248,7 +254,7 @@ impl Rdy {
         Ok(r)
     }
 
-    fn open_with(
+    pub(crate) fn open_with(
         project: &Path,
         policy: OpenPolicy,
         registry: Option<&[UpgradeStep]>,
@@ -256,9 +262,9 @@ impl Rdy {
     ) -> Result<Rdy, RdyError> {
         let context = project_context(project)?;
         // held across the open: start lock before store lock
-        let _load_excluded = match start {
+        let _entry = match start {
             Some(_) => None,
-            None => exclude_a_load(project)?,
+            None => Some(enter(project)?),
         };
         let store = Rdy::open_store(&project.join(".rdy"), policy, registry)?;
         // a holder is never read as a project: it has no canon, config or pack (D-BPYN8)
@@ -598,17 +604,76 @@ impl Rdy {
     }
 }
 
-/// What keeps an open without a guard from taking a store that a load has closed and renamed, and
-/// has not opened again: the project's start lock, when its file stands (every load makes it
-/// first). Another holder is `E_LOCKED`, in the store's words. The file is not made here, and a
-/// lock file that cannot be opened (a read-only store's project) leaves the open to its own
-/// checks. The rest of the entry-point inventory takes this lock from its outer call.
-fn exclude_a_load(project: &Path) -> Result<Option<StartGuard>, RdyError> {
+/// The start lock that an outer project entry point (open, init, create a holder, open a
+/// follower) takes once and keeps until it ends; everything it calls borrows it. An entry that
+/// made the project's run objects removes them as it ends, so a direct open leaves no run state
+/// behind. Its drop removes them while the lock is still held, as a load does: a taker that
+/// opened the file before finds that it left its name.
+pub(crate) struct ProjectEntry {
+    start: Option<StartGuard>,
+    new_run: Option<PathBuf>,
+    new_file: Option<PathBuf>,
+}
+
+impl ProjectEntry {
+    /// The guard to borrow, when the project's run directory allows one.
+    pub(crate) fn guard(&self) -> Option<&StartGuard> {
+        self.start.as_ref()
+    }
+}
+
+impl Drop for ProjectEntry {
+    fn drop(&mut self) {
+        if let Some(file) = &self.new_file {
+            let _ = std::fs::remove_file(file);
+        }
+        if let Some(run) = &self.new_run {
+            let _ = std::fs::remove_dir(run);
+        }
+    }
+}
+
+/// Takes the start lock of the project at `project` once, for an outer entry point. Another
+/// holder (a start, a load, a claimed handoff) is `E_LOCKED`, in the store's words. The run
+/// directory and lock file are made when missing. A run directory that cannot be made (a
+/// read-only project, where no start or load can happen either) leaves the entry to the lock
+/// file when one stands, else to the store's own lock.
+pub(crate) fn enter(project: &Path) -> Result<ProjectEntry, RdyError> {
     let dot = project.join(".rdy");
-    match StartGuard::try_take_existing(&dot) {
-        Ok(ExistingLock::Held(start)) => Ok(Some(start)),
-        Ok(ExistingLock::Busy) => Err(StoreError::Locked(dot.join(layout::STORE_DIR)).into()),
-        Ok(ExistingLock::Absent) | Err(_) => Ok(None),
+    let run = dot.join(layout::RUN_DIR);
+    let file = run.join(layout::START_LOCK_FILE);
+    let new_run = std::fs::symlink_metadata(&run)
+        .is_err()
+        .then(|| run.clone());
+    let new_file = std::fs::symlink_metadata(&file)
+        .is_err()
+        .then(|| file.clone());
+    let mut entry = ProjectEntry {
+        start: None,
+        new_run,
+        new_file,
+    };
+    match StartGuard::try_take(&dot) {
+        Ok(Some(start)) => {
+            entry.start = Some(start);
+            Ok(entry)
+        }
+        Ok(None) => Err(StoreError::Locked(dot.join(layout::STORE_DIR)).into()),
+        Err(_) => {
+            // nothing of ours stands: the entry removes only what it made
+            match StartGuard::try_take_existing(&dot) {
+                Ok(ExistingLock::Held(start)) => {
+                    entry.new_run = None;
+                    entry.new_file = None;
+                    entry.start = Some(start);
+                    Ok(entry)
+                }
+                Ok(ExistingLock::Busy) => {
+                    Err(StoreError::Locked(dot.join(layout::STORE_DIR)).into())
+                }
+                Ok(ExistingLock::Absent) | Err(_) => Ok(entry),
+            }
+        }
     }
 }
 

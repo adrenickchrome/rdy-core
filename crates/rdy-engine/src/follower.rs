@@ -16,6 +16,7 @@
 use crate::dump_error;
 use crate::error::{E_ALREADY_EXISTS, E_REDACTION_CORRUPT, FOLLOWER_SEED};
 use crate::fsck::FsckReport;
+use crate::handle::{check_start, enter};
 use crate::load::{check_target, holder_files, open_dump, read_error};
 use crate::load_chain::{LoadPurpose, chain_end, inspect, load_verified, owner_files, scan_error};
 use crate::read_state::Delta;
@@ -30,6 +31,7 @@ use rdy_store::follower::{
 use rdy_store::format::{self, DumpStore};
 use rdy_store::fsutil::{sync_dir, write_private_durable};
 use rdy_store::holder::StoreMode;
+use rdy_store::start_lock::StartGuard;
 use rdy_store::upgrade::{self, UpgradeStep};
 use rdy_store::{Store, StoreError, StoreLock, layout};
 use serde::Serialize;
@@ -120,8 +122,14 @@ fn check_seed_target(dir: &Path) -> Result<(), RdyError> {
     check_target(dir, &[]).map(drop)
 }
 
-/// The follower at `project`, opened under the load's `lock` for its check.
-pub(crate) fn open_locked(project: &Path, lock: &StoreLock) -> Result<Rdy, RdyError> {
+/// The follower at `project`, opened under the load's `lock` for its check. The load holds
+/// `start`, the project's start lock, and this open borrows it.
+pub(crate) fn open_locked(
+    project: &Path,
+    lock: &StoreLock,
+    start: &StartGuard,
+) -> Result<Rdy, RdyError> {
+    check_start(project, start)?;
     let store = Store::open_follower_locked(&project.join(".rdy").join(layout::STORE_DIR), lock)?;
     let mode = store.mode()?;
     let context = Rdy::follower_context(project, mode)?;
@@ -148,6 +156,23 @@ impl FollowerCore {
     /// Opens the follower at `dir`. Every `E_REDACTION_CORRUPT` of the open keeps its code and
     /// message and takes the fix that a host can act on: seed a new follower.
     pub fn open(dir: &Path) -> Result<FollowerCore, RdyError> {
+        FollowerCore::open_with(dir, None)
+    }
+
+    /// Opens the follower at `dir` as [`FollowerCore::open`] does, under `start`, the project's
+    /// start lock, which the caller holds and keeps and the open borrows. A guard of another
+    /// project is `E_LOCKED`.
+    pub fn open_under_start(dir: &Path, start: &StartGuard) -> Result<FollowerCore, RdyError> {
+        check_start(dir, start)?;
+        FollowerCore::open_with(dir, Some(start))
+    }
+
+    fn open_with(dir: &Path, start: Option<&StartGuard>) -> Result<FollowerCore, RdyError> {
+        // held across the open: start lock before store lock
+        let _entry = match start {
+            Some(_) => None,
+            None => Some(enter(dir)?),
+        };
         let state = open_state(dir).map_err(|mut e| {
             if e.code == E_REDACTION_CORRUPT {
                 e.fix = FOLLOWER_SEED.to_string();
