@@ -88,10 +88,13 @@ fn unendorsed() -> tempfile::TempDir {
 
 #[test]
 fn rsig2_cli_selects_and_verifies_the_real_historical_release() {
-    ok(
-        &trust(&["select", "--version", "0.35.0"]),
-        &historical_result("0.35.0", None),
-    );
+    // the historical key covers v0.17.0 through v0.41.0
+    for version in ["0.17.0", "0.35.0", "0.36.0", "0.41.0"] {
+        ok(
+            &trust(&["select", "--version", version]),
+            &historical_result(version, None),
+        );
+    }
     let (manifest, sig) = (
         fixture("real-v0.35.0/SHA256SUMS"),
         fixture("real-v0.35.0/SHA256SUMS.sig"),
@@ -142,11 +145,15 @@ fn rsig2_cli_selects_and_verifies_the_real_historical_release() {
         1,
         "release trust: not a preview version",
     );
-    refused(
-        &trust(&["select", "--version", "0.35.0", "--signing"]),
-        1,
-        "release trust: the key for 0.35.0 is the historical key; it signs no new release",
-    );
+    for version in ["0.35.0", "0.41.0"] {
+        refused(
+            &trust(&["select", "--version", version, "--signing"]),
+            1,
+            &format!(
+                "release trust: the key for {version} is the historical key; it signs no new release"
+            ),
+        );
+    }
     // an empty registry keeps the historical key and repeats the policy commit
     let empty = tempfile::tempdir().expect("tempdir");
     fs::write(empty.path().join(RECORDS_FILE), b"").unwrap();
@@ -254,7 +261,12 @@ fn rsig2_cli_renders_the_historical_trust_section_and_tables() {
     let section = historical.trust_section().unwrap();
     assert!(section.contains("The machine release key is pending"));
     ok(&trust(&["render"]), &section);
+    assert!(section.contains("| v0.17.0 to v0.41.0 |"));
     let versions = historical.versions_txt();
+    assert_eq!(
+        versions,
+        format!("17 41 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n")
+    );
     assert_eq!(
         release_keys::sha256_hex(versions.as_bytes()),
         "5d29df2e931e998ae3a494ccf80b1e5a10c0f572a3c811f9b224ce57c7e249cd"

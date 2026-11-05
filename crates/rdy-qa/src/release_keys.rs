@@ -1,6 +1,6 @@
 //! Version-specific release trust: one release key for each preview version.
 //!
-//! The historical root key signed v0.17.0 through v0.35.0. It is pinned here, and no input can
+//! The historical root key signs v0.17.0 through v0.41.0. It is pinned here, and no input can
 //! replace it. A later machine key enters only through a transition statement that the root
 //! signed. A revocation statement, also signed by the root, ends a machine epoch at its last
 //! good tag. [`ReleaseKeys::load`] reads a `release-keys/` directory, checks every record
@@ -431,15 +431,9 @@ pub struct ReleaseKeys {
 
 /// The historical root's epoch.
 fn historical_epoch() -> Epoch {
-    historical_epoch_to(HISTORICAL_LAST)
-}
-
-/// The historical root's epoch ending at `last` (tests use an earlier end for the immutable
-/// schema vectors).
-fn historical_epoch_to(last: u32) -> Epoch {
     Epoch {
         first: HISTORICAL_FIRST,
-        last: Some(last),
+        last: Some(HISTORICAL_LAST),
         key_type: ROOT_KEY_TYPE.to_string(),
         key_base64: ROOT_KEY_BASE64.to_string(),
         fingerprint: ROOT_FINGERPRINT.to_string(),
@@ -847,15 +841,8 @@ fn parse_revocation(record: &Record, minor: u32) -> Result<Revocation, String> {
 /// Appends the transition `t` after the epochs so far.
 fn enroll(epochs: &mut Vec<Epoch>, t: Transition, record: Record) -> Result<(), TrustError> {
     let refuse = |why: &str| TrustError::Statement(record.name.clone(), why.to_string());
-    let boundary = epochs
-        .first()
-        .and_then(|e| e.last)
-        .unwrap_or(HISTORICAL_LAST);
-    if t.minor <= boundary {
-        return Err(refuse(&format!(
-            "the first machine epoch starts after {}",
-            tag_of(boundary)
-        )));
+    if t.minor <= HISTORICAL_LAST {
+        return Err(refuse("the first machine epoch starts after v0.41.0"));
     }
     let Some(prior) = epochs.last() else {
         return Err(refuse("no historical epoch"));
@@ -1040,16 +1027,6 @@ impl ReleaseKeys {
         }
     }
 
-    /// The historical root only, ending at `last` (tests of the immutable schema vectors).
-    #[cfg(test)]
-    fn historical_through(last: u32) -> ReleaseKeys {
-        ReleaseKeys {
-            epochs: vec![historical_epoch_to(last)],
-            records: String::new(),
-            policy: None,
-        }
-    }
-
     /// Loads and authenticates the complete `release-keys/` directory `dir` against the pinned
     /// root.
     pub fn load(dir: &Path) -> Result<ReleaseKeys, TrustError> {
@@ -1061,16 +1038,6 @@ impl ReleaseKeys {
     pub fn load_checked_by(
         dir: &Path,
         check: &dyn StatementCheck,
-    ) -> Result<ReleaseKeys, TrustError> {
-        ReleaseKeys::load_checked_to(dir, check, HISTORICAL_LAST)
-    }
-
-    /// [`ReleaseKeys::load_checked_by`] with the historical epoch ending at `historical_last`
-    /// (the pinned `HISTORICAL_LAST` in production).
-    fn load_checked_to(
-        dir: &Path,
-        check: &dyn StatementCheck,
-        historical_last: u32,
     ) -> Result<ReleaseKeys, TrustError> {
         let listing = list(dir)?;
         let named = paired(&listing)?;
@@ -1113,7 +1080,7 @@ impl ReleaseKeys {
         }
         // Numeric order, a transition before a revocation at the same minor.
         records.sort_by_key(|r| (r.0, r.1));
-        let mut epochs = vec![historical_epoch_to(historical_last)];
+        let mut epochs = vec![historical_epoch()];
         for (minor, kind, record) in records {
             let refuse = |why: String| TrustError::Statement(record.name.clone(), why);
             match kind {
@@ -1294,15 +1261,9 @@ impl ReleaseKeys {
         }
         out.push_str("\nNo other version has a release key.");
         if self.epochs.len() == 1 {
-            let last = self
-                .epochs
-                .first()
-                .and_then(|e| e.last)
-                .unwrap_or(HISTORICAL_LAST);
-            out.push_str(&format!(
-                " The machine release key is pending: no version after {} has a release key yet.",
-                tag_of(last)
-            ));
+            out.push_str(
+                " The machine release key is pending: no version after v0.41.0 has a release key yet.",
+            );
         }
         out.push('\n');
         for e in self.epochs.iter().filter(|e| e.has_good_release()) {
@@ -1537,16 +1498,14 @@ mod tests {
 
         /// Loads with the structural mock.
         fn load(&self) -> Result<ReleaseKeys, TrustError> {
-            ReleaseKeys::load_checked_to(self.path(), &Structural, SCHEMA_VECTOR_LAST)
+            ReleaseKeys::load_checked_by(self.path(), &Structural)
         }
     }
 
-    /// The three unendorsed receiver records: key 1 from v0.40.0, revoked after v0.41.0, then
-    /// key 2 from v0.44.0.
-    /// The immutable receiver vectors place machine epochs at 36 to 44, so structural loads of
-    /// them end the historical epoch at 35. Production ends it at `HISTORICAL_LAST` (41).
-    const SCHEMA_VECTOR_LAST: u32 = 35;
-
+    /// The three unendorsed receiver records, frozen: key 1 from v0.40.0, revoked after v0.41.0,
+    /// then key 2 from v0.44.0. The historical range now runs through v0.41.0, so a load refuses
+    /// them at their first transition ([`OVERLAP`]). They still pin the bytes, the index and every
+    /// check that comes before a record is enrolled.
     fn unendorsed_records() -> Records {
         [
             "revocation-v0.40.0.json",
@@ -1560,6 +1519,26 @@ mod tests {
 
     fn unendorsed() -> Reg {
         Reg::with_policy(&unendorsed_records(), RDY_FP, 44)
+    }
+
+    /// The refusal of the frozen unendorsed records: their first transition is inside the
+    /// historical range.
+    const OVERLAP: &str =
+        "release trust: transition-v0.40.0.json: the first machine epoch starts after v0.41.0";
+
+    /// STRUCTURAL records with the unendorsed records' shape, after the historical range: key 1
+    /// from v0.50.0, revoked after v0.51.0, then key 2 from v0.54.0.
+    fn structural_records() -> Records {
+        vec![
+            (r_name(50), revocation(50, ID_FP, Some(51))),
+            (t_name(50), transition(50, ID_KEY, ID_FP)),
+            (t_name(54), transition(54, RDY_KEY, RDY_FP)),
+        ]
+    }
+
+    /// [`structural_records`] with a policy for key 2.
+    fn structural() -> Reg {
+        Reg::with_policy(&structural_records(), RDY_FP, 54)
     }
 
     fn refusal(r: Result<ReleaseKeys, TrustError>) -> String {
@@ -1585,6 +1564,8 @@ mod tests {
                 .all(|t| release_install::TARGETS.contains(t))
         );
 
+        // the historical range runs through v0.41.0
+        assert_eq!((HISTORICAL_FIRST, HISTORICAL_LAST), (17, 41));
         let h = ReleaseKeys::historical();
         for v in ["0.17.0", "0.20.0", "0.35.0", "0.36.0", "0.41.0"] {
             let s = h.signer_for(v).expect(v);
@@ -1621,12 +1602,15 @@ mod tests {
             "release trust: no release key for 0.42.0"
         );
 
-        // structural epochs: key 1 for 40-41, key 2 from 44, nothing in the gaps
-        let keys = unendorsed().load().expect("structural load");
+        // the frozen receiver examples overlap the historical range: refused, never two keys
+        assert_eq!(refusal(unendorsed().load()), OVERLAP);
+
+        // structural epochs: key 1 for 50-51, key 2 from 54, nothing in the gaps
+        let keys = structural().load().expect("structural load");
         let expect = |minor: u32| match minor {
-            17..=35 => Some(ROOT_FINGERPRINT),
-            40 | 41 => Some(ID_FP),
-            44.. => Some(RDY_FP),
+            17..=41 => Some(ROOT_FINGERPRINT),
+            50 | 51 => Some(ID_FP),
+            54.. => Some(RDY_FP),
             _ => None,
         };
         for minor in (1..=120).chain([4_294_967_295]) {
@@ -1638,23 +1622,22 @@ mod tests {
                 None => assert_eq!(keys.signer_for(&v), Err(TrustError::NoTrust(v.clone()))),
             }
         }
-        let s = keys.signer_for("0.44.0").unwrap();
+        let s = keys.signer_for("0.54.0").unwrap();
         assert_eq!(
             s.signer_line,
             format!("rdy-release namespaces=\"rdy-release-v1\" {RDY_KEY}")
         );
         assert_eq!(
             s.transition_sha256.as_deref(),
-            Some(sha256_hex(&fixture("unendorsed-schema/transition-v0.44.0.json")).as_str())
+            Some(sha256_hex(&transition(54, RDY_KEY, RDY_FP)).as_str())
         );
         // the public root is not a release signer for new signing
         for k in [&h, &keys] {
-            assert_eq!(
-                k.eligible_signer("0.35.0"),
-                Err(TrustError::Retired("0.35.0".into()))
-            );
+            for v in ["0.35.0", "0.41.0"] {
+                assert_eq!(k.eligible_signer(v), Err(TrustError::Retired(v.into())));
+            }
         }
-        assert_eq!(keys.eligible_signer("0.44.0").unwrap().fingerprint, RDY_FP);
+        assert_eq!(keys.eligible_signer("0.54.0").unwrap().fingerprint, RDY_FP);
 
         // real cryptography: the original v0.35.0 manifest under the root
         let (m, sig) = real_manifest();
@@ -1676,21 +1659,21 @@ mod tests {
         );
         // a valid signature by another epoch's key is refused before anything else
         assert_eq!(
-            keys.verify_release("0.40.0", &m, &sig),
-            Err(TrustError::WrongKey("0.40.0".into()))
+            keys.verify_release("0.50.0", &m, &sig),
+            Err(TrustError::WrongKey("0.50.0".into()))
         );
         let (message, synthetic) = (
             fixture("installed-synthetic/message.txt"),
             fixture("installed-synthetic/sshsig_ed25519"),
         );
         assert_eq!(
-            keys.verify_release("0.44.0", &message, &synthetic),
-            Err(TrustError::WrongKey("0.44.0".into()))
+            keys.verify_release("0.54.0", &message, &synthetic),
+            Err(TrustError::WrongKey("0.54.0".into()))
         );
         // the right key in the wrong domain
         assert_eq!(
-            keys.verify_release("0.40.0", &message, &synthetic),
-            Err(TrustError::BadSignature("0.40.0".into()))
+            keys.verify_release("0.50.0", &message, &synthetic),
+            Err(TrustError::BadSignature("0.50.0".into()))
         );
         assert_eq!(
             h.verify_release("0.35.0", &[b'0'; 1025], &sig),
@@ -1701,8 +1684,8 @@ mod tests {
             Err(TrustError::TooLarge("SHA256SUMS.sig".into(), 4096))
         );
         assert_eq!(
-            TrustError::WrongKey("0.40.0".into()).to_string(),
-            "release trust: the signature is not by the key for 0.40.0"
+            TrustError::WrongKey("0.50.0".into()).to_string(),
+            "release trust: the signature is not by the key for 0.50.0"
         );
 
         // the mechanism, with the installed vector in its own namespace
@@ -1757,47 +1740,54 @@ mod tests {
             "release trust: revocation-v0.40.0.json: the root signature does not verify"
         );
         // the signature is checked before the bytes are parsed
-        let bad = Reg::new(&[(t_name(40), b"{not json".to_vec())]);
+        let bad = Reg::new(&[(t_name(50), b"{not json".to_vec())]);
         assert_eq!(
             ReleaseKeys::load_checked_by(bad.path(), &RefuseAll),
-            Err(TrustError::StatementSignature(t_name(40)))
+            Err(TrustError::StatementSignature(t_name(50)))
         );
         assert_eq!(
             refusal(bad.load()),
-            "release trust: transition-v0.40.0.json: malformed JSON"
+            "release trust: transition-v0.50.0.json: malformed JSON"
         );
 
-        // each record is checked in its own namespace over its exact bytes
+        // each record is checked in its own namespace over its exact bytes, all of them before
+        // any is parsed or enrolled: the frozen records reach the range check only afterwards
+        let in_namespaces = |records: Records| -> Vec<Call> {
+            records
+                .into_iter()
+                .map(|(n, json)| {
+                    let ns = if n.starts_with("transition") {
+                        TRANSITION_NAMESPACE
+                    } else {
+                        REVOCATION_NAMESPACE
+                    };
+                    (ns.to_string(), json, MOCK_SIG.to_vec())
+                })
+                .collect()
+        };
         let rec = Recording::default();
-        ReleaseKeys::load_checked_to(reg.path(), &rec, SCHEMA_VECTOR_LAST)
-            .expect("structural load");
-        let calls = rec.0.into_inner();
-        let want: Vec<Call> = unendorsed_records()
-            .into_iter()
-            .map(|(n, json)| {
-                let ns = if n.starts_with("transition") {
-                    TRANSITION_NAMESPACE
-                } else {
-                    REVOCATION_NAMESPACE
-                };
-                (ns.to_string(), json, MOCK_SIG.to_vec())
-            })
-            .collect();
-        assert_eq!(calls, want);
+        assert_eq!(
+            refusal(ReleaseKeys::load_checked_by(reg.path(), &rec)),
+            OVERLAP
+        );
+        assert_eq!(rec.0.into_inner(), in_namespaces(unendorsed_records()));
+        let rec = Recording::default();
+        ReleaseKeys::load_checked_by(structural().path(), &rec).expect("structural load");
+        assert_eq!(rec.0.into_inner(), in_namespaces(structural_records()));
 
         // whitespace and key order are authenticated as supplied: no reserialization
         let compact = format!(
-            "{{\"scheme\":\"{TRANSITION_NAMESPACE}\",\"repository\":\"{REPOSITORY}\",\"first_machine_tag\":\"v0.40.0\",\"public_key\":\"{ID_KEY}\",\"fingerprint\":\"{ID_FP}\"}}"
+            "{{\"scheme\":\"{TRANSITION_NAMESPACE}\",\"repository\":\"{REPOSITORY}\",\"first_machine_tag\":\"v0.50.0\",\"public_key\":\"{ID_KEY}\",\"fingerprint\":\"{ID_FP}\"}}"
         );
-        let reg = Reg::with_policy(&[(t_name(40), compact.clone().into_bytes())], ID_FP, 40);
+        let reg = Reg::with_policy(&[(t_name(50), compact.clone().into_bytes())], ID_FP, 50);
         let keys = reg.load().expect("compact");
         let t = keys.epochs()[1].transition.as_ref().unwrap();
         assert_eq!(t.json, compact.as_bytes());
         assert_eq!(t.sha256, sha256_hex(compact.as_bytes()));
-        assert_ne!(t.sha256, sha256_hex(&transition(40, ID_KEY, ID_FP)));
+        assert_ne!(t.sha256, sha256_hex(&transition(50, ID_KEY, ID_FP)));
 
         // the closed schema, each refused with its exact reason (structural)
-        let good = String::from_utf8(transition(40, ID_KEY, ID_FP)).unwrap();
+        let good = String::from_utf8(transition(50, ID_KEY, ID_FP)).unwrap();
         let swap = |from: &str, to: &str| {
             assert!(good.contains(from), "{from}");
             good.replacen(from, to, 1).into_bytes()
@@ -1850,15 +1840,15 @@ mod tests {
                 "field 'repository' is invalid",
             ),
             (
-                swap("\"v0.40.0\"", "\"v0.41.0\""),
+                swap("\"v0.50.0\"", "\"v0.51.0\""),
                 "first_machine_tag is not the file name's tag",
             ),
             (
-                swap("\"v0.40.0\"", "\"v0.040.0\""),
+                swap("\"v0.50.0\"", "\"v0.050.0\""),
                 "first_machine_tag is not the file name's tag",
             ),
             (
-                swap("\"v0.40.0\"", "40"),
+                swap("\"v0.50.0\"", "50"),
                 "field 'first_machine_tag' is invalid",
             ),
             (
@@ -1905,167 +1895,180 @@ mod tests {
             ),
         ];
         for (json, why) in cases {
-            let reg = Reg::new(&[(t_name(40), json)]);
+            let reg = Reg::new(&[(t_name(50), json)]);
             assert_eq!(
                 refusal(reg.load()),
-                format!("release trust: transition-v0.40.0.json: {why}")
+                format!("release trust: transition-v0.50.0.json: {why}")
             );
         }
     }
 
     #[test]
     fn rsig2_revocation_preserves_only_last_good_versions() {
-        // last good v0.41.0: archival verification keeps 40 and 41, new signing refuses both
-        let keys = unendorsed().load().expect("structural load");
-        for v in ["0.40.0", "0.41.0"] {
+        // the frozen receiver example starts key 1 inside the historical range: refused
+        assert_eq!(refusal(unendorsed().load()), OVERLAP);
+
+        // last good v0.51.0: archival verification keeps 50 and 51, new signing refuses both
+        let keys = structural().load().expect("structural load");
+        for v in ["0.50.0", "0.51.0"] {
             let s = keys.signer_for(v).unwrap();
             assert_eq!(s.fingerprint, ID_FP);
             assert!(s.revoked && !s.historical);
             assert_eq!(keys.eligible_signer(v), Err(TrustError::Revoked(v.into())));
         }
         assert_eq!(
-            TrustError::Revoked("0.40.0".into()).to_string(),
-            "release trust: the key for 0.40.0 is revoked for new signing"
+            TrustError::Revoked("0.50.0".into()).to_string(),
+            "release trust: the key for 0.50.0 is revoked for new signing"
         );
-        for v in ["0.42.0", "0.43.0"] {
+        for v in ["0.52.0", "0.53.0"] {
             assert_eq!(keys.signer_for(v), Err(TrustError::NoTrust(v.into())));
         }
 
         // a null last-good tag: no good release, no row, and the successor starts after its tag
         let null = Reg::with_policy(
             &[
-                (t_name(40), transition(40, ID_KEY, ID_FP)),
-                (r_name(40), revocation(40, ID_FP, None)),
+                (t_name(50), transition(50, ID_KEY, ID_FP)),
+                (r_name(50), revocation(50, ID_FP, None)),
             ],
             ID_FP,
-            40,
+            50,
         );
         let keys = null.load().expect("null revocation");
-        assert_eq!(keys.epochs()[1].last, Some(39));
+        assert_eq!(keys.epochs()[1].last, Some(49));
         assert_eq!(
-            keys.signer_for("0.40.0"),
-            Err(TrustError::NoTrust("0.40.0".into()))
+            keys.signer_for("0.50.0"),
+            Err(TrustError::NoTrust("0.50.0".into()))
         );
         assert_eq!(
-            keys.eligible_signer("0.40.0"),
-            Err(TrustError::NoTrust("0.40.0".into()))
+            keys.eligible_signer("0.50.0"),
+            Err(TrustError::NoTrust("0.50.0".into()))
         );
         assert_eq!(
             keys.versions_txt(),
-            ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST).versions_txt()
+            ReleaseKeys::historical().versions_txt()
         );
         let next = Reg::with_policy(
             &[
-                (t_name(40), transition(40, ID_KEY, ID_FP)),
-                (r_name(40), revocation(40, ID_FP, None)),
-                (t_name(41), transition(41, RDY_KEY, RDY_FP)),
+                (t_name(50), transition(50, ID_KEY, ID_FP)),
+                (r_name(50), revocation(50, ID_FP, None)),
+                (t_name(51), transition(51, RDY_KEY, RDY_FP)),
             ],
             RDY_FP,
-            41,
+            51,
         );
         let keys = next.load().expect("successor after null");
         assert_eq!(
-            keys.signer_for("0.40.0"),
-            Err(TrustError::NoTrust("0.40.0".into()))
+            keys.signer_for("0.50.0"),
+            Err(TrustError::NoTrust("0.50.0".into()))
         );
-        assert_eq!(keys.eligible_signer("0.41.0").unwrap().fingerprint, RDY_FP);
+        assert_eq!(keys.eligible_signer("0.51.0").unwrap().fingerprint, RDY_FP);
 
         // order rules, each refused at the record that breaks it
-        let t40 = || (t_name(40), transition(40, ID_KEY, ID_FP));
+        let t50 = || (t_name(50), transition(50, ID_KEY, ID_FP));
         let cases: Vec<(Records, String, &str)> = vec![
             (
-                vec![t40(), (t_name(44), transition(44, RDY_KEY, RDY_FP))],
-                t_name(44),
+                vec![t50(), (t_name(54), transition(54, RDY_KEY, RDY_FP))],
+                t_name(54),
                 "the previous epoch has no revocation",
             ),
             (
                 vec![
-                    t40(),
-                    (r_name(40), revocation(40, ID_FP, Some(44))),
-                    (t_name(44), transition(44, RDY_KEY, RDY_FP)),
+                    t50(),
+                    (r_name(50), revocation(50, ID_FP, Some(54))),
+                    (t_name(54), transition(54, RDY_KEY, RDY_FP)),
                 ],
-                t_name(44),
+                t_name(54),
                 "starts at or before the previous epoch's first or last good tag",
             ),
             (
                 vec![
-                    t40(),
-                    (r_name(40), revocation(40, ID_FP, Some(41))),
-                    (t_name(44), transition(44, ID_KEY, ID_FP)),
+                    t50(),
+                    (r_name(50), revocation(50, ID_FP, Some(51))),
+                    (t_name(54), transition(54, ID_KEY, ID_FP)),
                 ],
-                t_name(44),
+                t_name(54),
                 "reuses an enrolled key",
+            ),
+            (
+                vec![(t_name(41), transition(41, ID_KEY, ID_FP))],
+                t_name(41),
+                "the first machine epoch starts after v0.41.0",
+            ),
+            (
+                vec![(t_name(36), transition(36, ID_KEY, ID_FP))],
+                t_name(36),
+                "the first machine epoch starts after v0.41.0",
             ),
             (
                 vec![(t_name(35), transition(35, ID_KEY, ID_FP))],
                 t_name(35),
-                "the first machine epoch starts after v0.35.0",
+                "the first machine epoch starts after v0.41.0",
             ),
             (
                 vec![(t_name(17), transition(17, ID_KEY, ID_FP))],
                 t_name(17),
-                "the first machine epoch starts after v0.35.0",
+                "the first machine epoch starts after v0.41.0",
             ),
             (
-                vec![t40(), (r_name(40), revocation(40, RDY_FP, Some(41)))],
-                r_name(40),
+                vec![t50(), (r_name(50), revocation(50, RDY_FP, Some(51)))],
+                r_name(50),
                 "fingerprint is not the active epoch's key",
             ),
             (
-                vec![t40(), (r_name(41), revocation(41, ID_FP, Some(41)))],
-                r_name(41),
+                vec![t50(), (r_name(51), revocation(51, ID_FP, Some(51)))],
+                r_name(51),
                 "no active machine epoch starts at this tag",
             ),
             (
-                vec![(r_name(40), revocation(40, ID_FP, Some(41)))],
-                r_name(40),
+                vec![(r_name(50), revocation(50, ID_FP, Some(51)))],
+                r_name(50),
                 "no active machine epoch starts at this tag",
             ),
             (
-                vec![t40(), (r_name(40), revocation(40, ID_FP, Some(39)))],
-                r_name(40),
+                vec![t50(), (r_name(50), revocation(50, ID_FP, Some(49)))],
+                r_name(50),
                 "last_good_tag is before first_machine_tag",
             ),
             (
                 vec![
-                    t40(),
+                    t50(),
                     (
-                        r_name(40),
-                        String::from_utf8(revocation(40, ID_FP, Some(41)))
+                        r_name(50),
+                        String::from_utf8(revocation(50, ID_FP, Some(51)))
                             .unwrap()
-                            .replace("\"v0.41.0\"", "\"v0.41.1\"")
+                            .replace("\"v0.51.0\"", "\"v0.51.1\"")
                             .into_bytes(),
                     ),
                 ],
-                r_name(40),
+                r_name(50),
                 "field 'last_good_tag' is invalid",
             ),
             (
                 vec![
-                    t40(),
+                    t50(),
                     (
-                        r_name(40),
-                        String::from_utf8(revocation(40, ID_FP, Some(41)))
+                        r_name(50),
+                        String::from_utf8(revocation(50, ID_FP, Some(51)))
                             .unwrap()
-                            .replace("\"v0.41.0\"", "41")
+                            .replace("\"v0.51.0\"", "51")
                             .into_bytes(),
                     ),
                 ],
-                r_name(40),
+                r_name(50),
                 "field 'last_good_tag' is invalid",
             ),
             (
                 vec![
-                    t40(),
+                    t50(),
                     (
-                        r_name(40),
-                        String::from_utf8(revocation(40, ID_FP, Some(41)))
+                        r_name(50),
+                        String::from_utf8(revocation(50, ID_FP, Some(51)))
                             .unwrap()
-                            .replace("  \"last_good_tag\": \"v0.41.0\",\n", "")
+                            .replace("  \"last_good_tag\": \"v0.51.0\",\n", "")
                             .into_bytes(),
                     ),
                 ],
-                r_name(40),
+                r_name(50),
                 "missing field 'last_good_tag'",
             ),
         ];
@@ -2077,12 +2080,12 @@ mod tests {
             );
         }
         // the first machine tag after the root's range is accepted
-        let first = Reg::with_policy(&[(t_name(36), transition(36, ID_KEY, ID_FP))], ID_FP, 36);
+        let first = Reg::with_policy(&[(t_name(42), transition(42, ID_KEY, ID_FP))], ID_FP, 42);
         assert_eq!(
             first
                 .load()
                 .unwrap()
-                .eligible_signer("0.36.0")
+                .eligible_signer("0.42.0")
                 .unwrap()
                 .fingerprint,
             ID_FP
@@ -2091,18 +2094,18 @@ mod tests {
 
     #[test]
     fn rsig2_bad_or_missing_policy_fails_closed() {
-        let records = unendorsed_records();
+        let records = structural_records();
         let reg = Reg::new(&records);
         assert_eq!(refusal(reg.load()), "release trust: policy.json is missing");
         reg.write(EVIDENCE_POLICY_FILE, EVIDENCE);
         assert_eq!(reg.load(), Err(TrustError::PolicyMissing));
-        reg.bind(RDY_FP, 44);
+        reg.bind(RDY_FP, 54);
         reg.remove(EVIDENCE_POLICY_FILE);
         assert_eq!(
             refusal(reg.load()),
             "release trust: evidence-policy.json is missing"
         );
-        reg.bind(RDY_FP, 44);
+        reg.bind(RDY_FP, 54);
         let keys = reg.load().expect("bound policy");
         let p = keys.policy().unwrap();
         assert_eq!(p.fingerprint, RDY_FP);
@@ -2110,26 +2113,26 @@ mod tests {
         assert_eq!(p.sha256, sha256_hex(&reg.read(POLICY_FILE)));
 
         let index = reg.read(RECORDS_FILE);
-        let good = String::from_utf8(policy(RDY_FP, 44, &index, EVIDENCE)).unwrap();
+        let good = String::from_utf8(policy(RDY_FP, 54, &index, EVIDENCE)).unwrap();
         let swap = |from: &str, to: &str| {
             assert!(good.contains(from), "{from}");
             good.replacen(from, to, 1)
         };
         let cases: Vec<(String, &str)> = vec![
             (
-                String::from_utf8(policy(RDY_FP, 44, b"other", EVIDENCE)).unwrap(),
+                String::from_utf8(policy(RDY_FP, 54, b"other", EVIDENCE)).unwrap(),
                 "records_sha256 does not match records.txt",
             ),
             (
-                String::from_utf8(policy(RDY_FP, 44, &index, b"other")).unwrap(),
+                String::from_utf8(policy(RDY_FP, 54, &index, b"other")).unwrap(),
                 "evidence_policy_sha256 does not match evidence-policy.json",
             ),
             (
-                String::from_utf8(policy(ID_FP, 44, &index, EVIDENCE)).unwrap(),
+                String::from_utf8(policy(ID_FP, 54, &index, EVIDENCE)).unwrap(),
                 "fingerprint is not the current machine key",
             ),
             (
-                String::from_utf8(policy(RDY_FP, 40, &index, EVIDENCE)).unwrap(),
+                String::from_utf8(policy(RDY_FP, 50, &index, EVIDENCE)).unwrap(),
                 "first_machine_tag is not the current machine epoch's",
             ),
             (
@@ -2216,7 +2219,7 @@ mod tests {
                 "{why}"
             );
         }
-        reg.bind(RDY_FP, 44);
+        reg.bind(RDY_FP, 54);
         // the evidence policy's top level is closed and pinned
         let evidence = String::from_utf8(EVIDENCE.to_vec()).unwrap();
         for (bytes, why) in [
@@ -2248,7 +2251,7 @@ mod tests {
                 "{why}"
             );
         }
-        reg.bind(RDY_FP, 44);
+        reg.bind(RDY_FP, 54);
         reg.write(POLICY_FILE, &vec![b' '; 65537]);
         assert_eq!(
             refusal(reg.load()),
@@ -2257,7 +2260,7 @@ mod tests {
 
         // a policy with no machine epoch names no key
         let empty = Reg::new(&[]);
-        empty.bind(RDY_FP, 44);
+        empty.bind(RDY_FP, 54);
         assert_eq!(
             refusal(empty.load()),
             "release trust: policy.json: no machine epoch is enrolled"
@@ -2265,10 +2268,14 @@ mod tests {
         // with no record and no control file, only the historical root remains
         let empty = Reg::new(&[]);
         let keys = empty.load().expect("empty registry");
-        assert_eq!(keys, ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST));
+        assert_eq!(keys, ReleaseKeys::historical());
         assert_eq!(
-            keys.eligible_signer("0.36.0"),
-            Err(TrustError::NoTrust("0.36.0".into()))
+            keys.eligible_signer("0.41.0"),
+            Err(TrustError::Retired("0.41.0".into()))
+        );
+        assert_eq!(
+            keys.eligible_signer("0.42.0"),
+            Err(TrustError::NoTrust("0.42.0".into()))
         );
     }
 
@@ -2294,18 +2301,29 @@ mod tests {
             records_index(records.iter().map(|(n, _)| n.as_str())).as_bytes(),
             expected
         );
+        // the index generator reads names only; a load refuses the frozen records
         let reg = unendorsed();
         assert_eq!(generated_records(reg.path()).unwrap().as_bytes(), expected);
+        assert_eq!(refusal(reg.load()), OVERLAP);
+        // the structural records, with the same shape after the historical range
+        let shifted = String::from_utf8(expected.clone())
+            .unwrap()
+            .replace("v0.40.0", "v0.50.0")
+            .replace("v0.44.0", "v0.54.0");
+        let reg = structural();
         let keys = reg.load().unwrap();
-        assert_eq!(keys.records_txt().as_bytes(), expected);
+        assert_eq!(keys.records_txt(), shifted);
         assert_eq!(records_index([]), "");
 
-        // the receiver's published files: the historical table and the root file (their digests
-        // are in the receiver contract)
-        let historical = ReleaseKeys::historical_through(SCHEMA_VECTOR_LAST);
+        // the published files: the historical table through v0.41.0 and the receiver's root file
+        let historical = ReleaseKeys::historical();
+        assert_eq!(
+            historical.versions_txt(),
+            format!("17 41 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n")
+        );
         assert_eq!(
             sha256_hex(historical.versions_txt().as_bytes()),
-            "028019de9b6f9b2c9f789a291600449a97ed9eab2cf3a34c3b80e32e2cdc3f0b"
+            "5d29df2e931e998ae3a494ccf80b1e5a10c0f572a3c811f9b224ce57c7e249cd"
         );
         assert_eq!(
             sha256_hex(ROOT_ALLOWED_SIGNERS.as_bytes()),
@@ -2314,7 +2332,7 @@ mod tests {
         let id_b64 = ID_KEY.strip_prefix("ssh-ed25519 ").unwrap();
         let rdy_b64 = RDY_KEY.strip_prefix("ssh-ed25519 ").unwrap();
         let versions = format!(
-            "17 35 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n40 41 ssh-ed25519 {id_b64} {ID_FP}\n44 * ssh-ed25519 {rdy_b64} {RDY_FP}\n"
+            "17 41 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n50 51 ssh-ed25519 {id_b64} {ID_FP}\n54 * ssh-ed25519 {rdy_b64} {RDY_FP}\n"
         );
         assert_eq!(keys.versions_txt(), versions);
         // generated files round trip; a changed copy refuses
@@ -2322,7 +2340,7 @@ mod tests {
         reg.write(ROOT_FILE, ROOT_ALLOWED_SIGNERS.as_bytes());
         reg.write(README_FILE, b"Public release keys.\n");
         assert_eq!(reg.load().unwrap(), keys);
-        reg.write(VERSIONS_FILE, versions.replace("44 *", "44 45").as_bytes());
+        reg.write(VERSIONS_FILE, versions.replace("54 *", "54 55").as_bytes());
         assert_eq!(
             refusal(reg.load()),
             "release trust: versions.txt does not match the records"
@@ -2357,7 +2375,7 @@ mod tests {
         assert_eq!(
             keys.versions_txt(),
             format!(
-                "17 35 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n99 99 ssh-ed25519 {id_b64} {ID_FP}\n100 * ssh-ed25519 {rdy_b64} {RDY_FP}\n"
+                "17 41 {ROOT_KEY_TYPE} {ROOT_KEY_BASE64} {ROOT_FINGERPRINT}\n99 99 ssh-ed25519 {id_b64} {ID_FP}\n100 * ssh-ed25519 {rdy_b64} {RDY_FP}\n"
             )
         );
         hundred.write(
@@ -2368,19 +2386,19 @@ mod tests {
 
         // the rendered section: every key, then each statement's exact bytes and signature and
         // the offline root check in that statement's own namespace
-        let section = unendorsed().load().unwrap().trust_section().unwrap();
+        let section = structural().load().unwrap().trust_section().unwrap();
         for part in [
             format!(
-                "| v0.17.0 to v0.35.0 | `{ROOT_KEY_TYPE}` | `{ROOT_FINGERPRINT}` | historical key, retired for new releases |\n"
+                "| v0.17.0 to v0.41.0 | `{ROOT_KEY_TYPE}` | `{ROOT_FINGERPRINT}` | historical key, retired for new releases |\n"
             ),
             format!(
-                "| v0.40.0 to v0.41.0 | `ssh-ed25519` | `{ID_FP}` | machine key, revoked after v0.41.0 |\n"
+                "| v0.50.0 to v0.51.0 | `ssh-ed25519` | `{ID_FP}` | machine key, revoked after v0.51.0 |\n"
             ),
-            format!("| v0.44.0 and later | `ssh-ed25519` | `{RDY_FP}` | machine key, current |\n"),
+            format!("| v0.54.0 and later | `ssh-ed25519` | `{RDY_FP}` | machine key, current |\n"),
             format!("```text\nrdy-release namespaces=\"rdy-release-v1\" {RDY_KEY}\n```\n"),
             format!(
                 "```json\n{}```\n",
-                String::from_utf8(fixture("unendorsed-schema/transition-v0.44.0.json")).unwrap()
+                String::from_utf8(transition(54, RDY_KEY, RDY_FP)).unwrap()
             ),
             format!(
                 "```text\n{}```\n",
@@ -2390,7 +2408,7 @@ mod tests {
                 "'rdy-release namespaces=\"{TRANSITION_NAMESPACE}\" {ROOT_KEY_TYPE} {ROOT_KEY_BASE64}' > '/path/to/release-keys/root-transition-allowed-signers'"
             ),
             format!(
-                "'ssh-keygen' '-Y' 'verify' '-f' 'root-revocation-allowed-signers' '-I' 'rdy-release' '-n' '{REVOCATION_NAMESPACE}' '-s' 'revocation-v0.40.0.json.sig' < '/path/to/release-keys/revocation-v0.40.0.json'"
+                "'ssh-keygen' '-Y' 'verify' '-f' 'root-revocation-allowed-signers' '-I' 'rdy-release' '-n' '{REVOCATION_NAMESPACE}' '-s' 'revocation-v0.50.0.json.sig' < '/path/to/release-keys/revocation-v0.50.0.json'"
             ),
         ] {
             assert!(section.contains(&part), "missing {part}\nin\n{section}");
@@ -2400,46 +2418,46 @@ mod tests {
         assert_eq!(
             historical.trust_section().unwrap(),
             format!(
-                "### Release keys\n\nEach version has exactly one release key. A signature by any other key is refused.\n\n| Versions | Key type | Fingerprint | State |\n| --- | --- | --- | --- |\n| v0.17.0 to v0.35.0 | `{ROOT_KEY_TYPE}` | `{ROOT_FINGERPRINT}` | historical key, retired for new releases |\n\nNo other version has a release key. The machine release key is pending: no version after v0.35.0 has a release key yet.\n\nThe allowed-signers line for v0.17.0 to v0.35.0:\n\n```text\n{}```\n",
+                "### Release keys\n\nEach version has exactly one release key. A signature by any other key is refused.\n\n| Versions | Key type | Fingerprint | State |\n| --- | --- | --- | --- |\n| v0.17.0 to v0.41.0 | `{ROOT_KEY_TYPE}` | `{ROOT_FINGERPRINT}` | historical key, retired for new releases |\n\nNo other version has a release key. The machine release key is pending: no version after v0.41.0 has a release key yet.\n\nThe allowed-signers line for v0.17.0 to v0.41.0:\n\n```text\n{}```\n",
                 ROOT_ALLOWED_SIGNERS
             )
         );
         // a statement without its final LF is not rendered as if it had one
         let compact = Reg::with_policy(
             &[(
-                t_name(40),
-                transition(40, ID_KEY, ID_FP).trim_ascii_end().to_vec(),
+                t_name(50),
+                transition(50, ID_KEY, ID_FP).trim_ascii_end().to_vec(),
             )],
             ID_FP,
-            40,
+            50,
         );
         assert_eq!(
             compact.load().unwrap().trust_section(),
-            Err(TrustError::Render(t_name(40)))
+            Err(TrustError::Render(t_name(50)))
         );
     }
 
     #[test]
     fn rsig2_trust_input_bounds_and_unknown_keys() {
         let padded = |len: usize| {
-            let json = transition(40, ID_KEY, ID_FP);
+            let json = transition(50, ID_KEY, ID_FP);
             let pad = vec![b' '; len - json.len()];
             [b"{".as_slice(), &pad, &json[1..]].concat()
         };
         // 4096 bytes is within the bound, 4097 is not
-        let reg = Reg::with_policy(&[(t_name(40), padded(4096))], ID_FP, 40);
+        let reg = Reg::with_policy(&[(t_name(50), padded(4096))], ID_FP, 50);
         assert!(reg.load().is_ok());
-        reg.write(&format!("{}.sig", t_name(40)), &vec![b'S'; 4096]);
+        reg.write(&format!("{}.sig", t_name(50)), &vec![b'S'; 4096]);
         assert!(reg.load().is_ok());
-        reg.write(&format!("{}.sig", t_name(40)), &vec![b'S'; 4097]);
+        reg.write(&format!("{}.sig", t_name(50)), &vec![b'S'; 4097]);
         assert_eq!(
             refusal(reg.load()),
-            "release trust: transition-v0.40.0.json.sig is over 4096 bytes"
+            "release trust: transition-v0.50.0.json.sig is over 4096 bytes"
         );
-        let reg = Reg::with_policy(&[(t_name(40), padded(4097))], ID_FP, 40);
+        let reg = Reg::with_policy(&[(t_name(50), padded(4097))], ID_FP, 50);
         assert_eq!(
             reg.load(),
-            Err(TrustError::TooLarge(t_name(40), STATEMENT_MAX))
+            Err(TrustError::TooLarge(t_name(50), STATEMENT_MAX))
         );
 
         // 64 pairs pass the count (and fail later); 65 refuse the whole set before any read
@@ -2462,6 +2480,8 @@ mod tests {
         let reg = Reg::new(&many(68));
         assert_eq!(refusal(reg.load()), "release trust: more than 134 entries");
 
+        // the checks below run on the frozen receiver records: each refuses before
+        // any record is enrolled, so none reaches the range refusal
         // support files over their bounds
         for (name, max) in [
             (RECORDS_FILE, 65536),
