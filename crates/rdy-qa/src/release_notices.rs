@@ -75,8 +75,12 @@ pub const MSG_FORMAT_MOVE: &str = "release sources: release notes do not name th
 /// The published releases, oldest first: each version with the dump format and store format it
 /// writes. The changes part of a release's notes covers everything since the newest row before
 /// it (D-7PQEF). A release adds its row once it is published.
-pub const RELEASED: &[(&str, u32, u32)] =
-    &[("0.17.0", 3, 16), ("0.20.0", 3, 18), ("0.25.0", 3, 18)];
+pub const RELEASED: &[(&str, u32, u32)] = &[
+    ("0.17.0", 3, 16),
+    ("0.20.0", 3, 18),
+    ("0.25.0", 3, 18),
+    ("0.35.0", 4, 19),
+];
 /// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
 pub const CHANGES_GROUPS: [&str; 5] = [
     "### New features",
@@ -942,6 +946,15 @@ fn format_move_line(
     let (cd, cs) = match current.into() {
         WrittenStore::Scalar(cd, cs) => (cd, cs),
         WrittenStore::Features(cd) => {
+            // A previous release that already wrote feature stores moves only the dump format.
+            if ps == rdy_store::format::FEATURE_STORE_FORMAT {
+                if pd == cd {
+                    return None;
+                }
+                return Some(format!(
+                    "- **Breaking: the dump format moves from {pd} to {cd} (dump pair ({pd}, {ps}) to ({cd}, {ps})).** rdy {version} opens a store made by rdy {previous} as it is, and loads every earlier dump. rdy {previous} cannot load a dump made by rdy {version}."
+                ));
+            }
             return Some(format!(
                 "- **Breaking: the store format moves from {ps} to feature-based stores (dump pair ({pd}, {ps}) to dump format {cd}).** rdy {version} refuses a store made by rdy {previous} with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy {previous}, then `rdy load <file> <dir>` with rdy {version}, into a directory with no store."
             ));
@@ -2583,6 +2596,48 @@ mod tests {
                 "- **Breaking: the store format moves from 18 to feature-based stores (dump pair (3, 18) to dump format 4).** rdy 0.35.0 refuses a store made by rdy 0.25.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.25.0, then `rdy load <file> <dir>` with rdy 0.35.0, into a directory with no store."
             )
         );
+    }
+
+    /// The published 0.35.0 row is the previous release of later versions, and the notes of a
+    /// later release do not repeat the move to feature-based stores.
+    #[test]
+    fn rsig1_published_035_is_the_previous_release() {
+        assert_eq!(
+            previous_release("0.36.0", RELEASED),
+            Some(("0.35.0", 4, 19))
+        );
+        assert_eq!(
+            previous_release("0.35.0", RELEASED),
+            Some(("0.25.0", 3, 18))
+        );
+        assert_eq!(
+            changes_heading("0.35.0"),
+            changes_heading(previous_release("0.36.0", RELEASED).expect("row").0)
+        );
+        assert!(changes_heading("0.35.0").contains("0.35.0"));
+        assert_eq!(release_format_move_line("0.36.0"), Ok(None));
+    }
+
+    /// A release after 0.35.0 that writes the same formats has no move line; a dump format change
+    /// still has its line.
+    #[test]
+    fn rsig1_post_035_notes_do_not_repeat_the_feature_store_move() {
+        assert_eq!(
+            format_move_line("0.99.0", ("0.35.0", 4, 19), WrittenStore::Features(4)),
+            None
+        );
+        assert_eq!(
+            format_move_line("0.99.0", ("0.36.0", 4, 19), current_store()),
+            None
+        );
+        assert_eq!(
+            format_move_line("0.99.0", ("0.35.0", 4, 19), WrittenStore::Features(5)).as_deref(),
+            Some(
+                "- **Breaking: the dump format moves from 4 to 5 (dump pair (4, 19) to (5, 19)).** rdy 0.99.0 opens a store made by rdy 0.35.0 as it is, and loads every earlier dump. rdy 0.35.0 cannot load a dump made by rdy 0.99.0."
+            )
+        );
+        // A scalar previous store still moves to feature stores.
+        assert!(format_move_line("0.35.0", ("0.25.0", 3, 18), current_store()).is_some());
     }
 
     /// The changes part (D-7PQEF): in place after Try it and before Feedback, with known groups
