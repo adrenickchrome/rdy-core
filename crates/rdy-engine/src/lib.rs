@@ -75,6 +75,7 @@ pub mod mention_review;
 pub mod neighbors;
 mod pack_load;
 mod paths;
+pub use paths::{logical_of, native_join};
 pub mod pending;
 pub mod plan;
 pub mod policy;

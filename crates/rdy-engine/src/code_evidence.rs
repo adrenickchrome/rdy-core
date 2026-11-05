@@ -235,7 +235,10 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
                 "-c",
-                "core.hooksPath=/dev/null",
+                &format!(
+                    "core.hooksPath={}",
+                    crate::code_index::empty_hooks_dir().display()
+                ),
             ])
             .args(args)
             .env_remove("GIT_DIR")
@@ -698,7 +701,12 @@ mod tests {
         remove: &[&str],
         message: &str,
     ) -> String {
-        let blob = git(dir, &["hash-object", "-w", "-t", "blob", "/dev/null"]);
+        let empty = dir.join(".git").join("rdy-empty-file");
+        std::fs::write(&empty, b"").unwrap();
+        let blob = git(
+            dir,
+            &["hash-object", "-w", "-t", "blob", empty.to_str().unwrap()],
+        );
         for path in add {
             git(
                 dir,

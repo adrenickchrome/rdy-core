@@ -67,7 +67,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "-c",
             "tag.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_engine::code_index::empty_hooks_dir().display()
+            ),
             "-c",
             "init.defaultBranch=main",
         ])

@@ -121,6 +121,15 @@ pub fn git_command(root: &Path) -> Command {
     c
 }
 
+/// A private, empty folder for `core.hooksPath` in test repositories: no host path such as
+/// `/dev/null` is needed, so the fixtures run on every host.
+#[cfg(any(test, feature = "test-support"))]
+pub fn empty_hooks_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().expect("empty hooks dir"))
+        .path()
+}
+
 /// What one commit did to one path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileChange {
@@ -927,7 +936,10 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
                 "-c",
-                "core.hooksPath=/dev/null",
+                &format!(
+                    "core.hooksPath={}",
+                    crate::code_index::empty_hooks_dir().display()
+                ),
             ])
             .args(args)
             .env_remove("GIT_DIR")

@@ -398,3 +398,17 @@ fn ck1_empty_rules_do_not_change_a_pack_serialization() {
         assert_ne!(bytes(&other), bytes(&with));
     }
 }
+
+#[test]
+fn wx10_reserved_names_and_trailing_dots_stay_refused() {
+    // Names are checked the same on every host, so a doc made on Unix opens on Windows.
+    for bad in [
+        "con", "NUL", "aux.txt", "com1", "LPT9.md", "prn", "a.", "report.", "x:y", r"a\b", "a/b",
+        "C:", "a b",
+    ] {
+        assert!(rdy_model::tree::name_problem(bad).is_some(), "{bad}");
+    }
+    for ok in ["console", "com0", "com10", "lpt", "a.b", "wallets-2"] {
+        assert!(rdy_model::tree::name_problem(ok).is_none(), "{ok}");
+    }
+}

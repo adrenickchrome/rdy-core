@@ -211,3 +211,20 @@ fn glob1_question_mark_is_one_character_in_a_non_ascii_name() {
     assert!(g("c*?").matches("café"));
     assert!(!g("cafe").matches("café"));
 }
+
+#[test]
+fn wx10_logical_paths_and_globs_keep_slash_semantics() {
+    // Logical paths are slash-separated whatever the host. A backslash or a drive letter is not
+    // a glob character, and a native-looking path never matches a logical one.
+    for bad in [r"src\**", r"C:/x", "a:b"] {
+        assert!(
+            matches!(Glob::compile(bad), Err(GlobError::BadChar { .. })),
+            "{bad}"
+        );
+    }
+    let s = g("src/**/*.rs");
+    assert!(s.matches("src/a/b.rs") && s.matches("src/b.rs"));
+    assert!(!s.matches(r"src\a\b.rs"), "a backslash is not a separator");
+    assert!(!s.matches("src/a/b.rs/"), "no trailing slash");
+    assert!(g("a?c").matches("abc") && !g("a?c").matches("a/c"));
+}

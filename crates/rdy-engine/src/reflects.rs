@@ -418,7 +418,10 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
                 "-c",
-                "core.hooksPath=/dev/null",
+                &format!(
+                    "core.hooksPath={}",
+                    crate::code_index::empty_hooks_dir().display()
+                ),
                 "-c",
                 "init.defaultBranch=main",
             ])

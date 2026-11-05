@@ -330,3 +330,104 @@ fn cp2_fix1_newline_paths_are_kept_byte_for_byte() {
         }]
     );
 }
+
+// ---- wx10: native paths, logical paths and git argv ----
+
+fn wx10_git(dir: &Path, args: &[&str]) -> String {
+    let hooks = rdy_engine::code_index::empty_hooks_dir();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=qa", "-c", "user.email=qa"])
+        .args(["-c", "commit.gpgsign=false"])
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks.display()))
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn wx10_drive_and_unc_code_paths_open_natively() {
+    // A checkout whose folder name holds spaces opens through its native path, and a path inside
+    // it reads back as a slash-separated logical path.
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("my code repo");
+    std::fs::create_dir_all(root.join("src dir")).unwrap();
+    wx10_git(&root, &["init", "-q", "--initial-branch=main"]);
+    std::fs::write(root.join("src dir/a b.rs"), "x\n").unwrap();
+    wx10_git(&root, &["add", "-A"]);
+    wx10_git(&root, &["commit", "-q", "-m", "m\n\nImplements: s-AAAAA\n"]);
+    let repo = CodeRepo {
+        configured: "app".into(),
+        root: std::fs::canonicalize(&root).unwrap(),
+    };
+    let idx = build(&repo).unwrap();
+    assert!(idx.files.contains_key("src dir/a b.rs"), "{:?}", idx.files);
+
+    // Logical to native and back: segments join with the host separator, never a drive or root.
+    let native = rdy_engine::native_join(&repo.root, "src dir/a b.rs");
+    assert!(native.is_file());
+    let rel = native.strip_prefix(&repo.root).unwrap();
+    assert_eq!(
+        rdy_engine::logical_of(rel).as_deref(),
+        Some("src dir/a b.rs")
+    );
+    assert_eq!(rdy_engine::logical_of(Path::new("../x")), None);
+    assert_eq!(rdy_engine::logical_of(Path::new("")), None);
+    #[cfg(windows)]
+    {
+        assert_eq!(rdy_engine::logical_of(Path::new(r"C:\a\b")), None);
+        assert_eq!(rdy_engine::logical_of(Path::new(r"\\srv\share\a")), None);
+        assert_eq!(
+            rdy_engine::logical_of(Path::new(r"a\b c")).as_deref(),
+            Some("a/b c")
+        );
+    }
+}
+
+#[test]
+fn wx10_git_argv_handles_spaces_and_backslashes() {
+    // No shell sits between rdy and git: a root with spaces and a tracked name with a backslash
+    // pass through whole.
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("a b");
+    std::fs::create_dir_all(&root).unwrap();
+    wx10_git(&root, &["init", "-q", "--initial-branch=main"]);
+    #[cfg(unix)]
+    let tricky = "dir/we\\ird name.rs";
+    #[cfg(not(unix))]
+    let tricky = "dir/weird name.rs";
+    let file = rdy_engine::native_join(&root, tricky);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "x\n").unwrap();
+    wx10_git(&root, &["add", "-A"]);
+    wx10_git(&root, &["commit", "-q", "-m", "m\n\nImplements: s-AAAAA\n"]);
+    let repo = CodeRepo {
+        configured: "app".into(),
+        root: std::fs::canonicalize(&root).unwrap(),
+    };
+    let idx = build(&repo).unwrap();
+    assert!(idx.files.contains_key(tricky), "{:?}", idx.files);
+    let c = git_command(&repo.root);
+    let args: Vec<_> = c.get_args().map(|a| a.to_owned()).collect();
+    assert_eq!(args[0], "-C");
+    assert_eq!(Path::new(&args[1]), repo.root.as_path());
+    assert_eq!(c.get_program(), "git");
+}
+
+#[test]
+fn wx10_empty_hooks_dir_is_private_and_empty() {
+    let d = rdy_engine::code_index::empty_hooks_dir();
+    assert!(d.is_dir());
+    assert_eq!(std::fs::read_dir(d).unwrap().count(), 0);
+}
