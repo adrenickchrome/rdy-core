@@ -1,6 +1,7 @@
 //! wx11: the working-copy and export boundaries on Windows text and paths. A working file may
 //! carry CR LF line syntax; a carriage return that is content stays content; an export writes LF
 //! and keeps blob bytes; a case-only rename keeps the file; a failed export rename is `E_IO`.
+#[allow(dead_code)]
 mod common;
 
 use rdy_engine::wc::files::{checkout, dirty_paths};
