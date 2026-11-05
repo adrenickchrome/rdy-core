@@ -188,6 +188,8 @@ fn parse_statements<'a>(
 ) -> Result<(Vec<&'a str>, Vec<&'a str>), String> {
     let heading =
         Regex::new(r"^#### (transition|revocation)-v0\.([1-9][0-9]{0,9})\.0\.json$").unwrap();
+    let fp_re = Regex::new(r#""fingerprint": ?"(SHA256:[A-Za-z0-9+/]{43})""#).unwrap();
+    let key_re = Regex::new(r#""public_key": ?"([^"]*)""#).unwrap();
     let (mut json_lines, mut roots) = (Vec::new(), Vec::new());
     let (mut transitions, mut revocations) = (0usize, 0usize);
     while lines.get(*i).copied() == Some("")
@@ -228,8 +230,7 @@ fn parse_statements<'a>(
         }
         // the statement names one machine key of the list
         let joined = json.join("\n");
-        let fp = Regex::new(r#""fingerprint": ?"(SHA256:[A-Za-z0-9+/]{43})""#)
-            .unwrap()
+        let fp = fp_re
             .captures(&joined)
             .map(|c| c[1].to_string())
             .ok_or_else(|| format!("{file} names no fingerprint"))?;
@@ -243,10 +244,7 @@ fn parse_statements<'a>(
                 .find(|(f, _)| *f == fp)
                 .map(|(_, k)| k.as_str())
                 .ok_or_else(|| format!("{file} names a key with no line in the trust list"))?;
-            let named = Regex::new(r#""public_key": ?"([^"]*)""#)
-                .unwrap()
-                .captures(&joined)
-                .map(|c| c[1].to_string());
+            let named = key_re.captures(&joined).map(|c| c[1].to_string());
             if named.as_deref() != Some(want) {
                 return Err(format!("{file} names a different key than its fingerprint"));
             }
@@ -1428,11 +1426,7 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
         ),
         (
             "ready with the historical line changed",
-            readme_with(&ready_block(&fenced, &fp)).replacen(
-                &format!("{signer}\n```\n\nFingerprint"),
-                &format!("{signer}\n```\n\nFingerprint"),
-                1,
-            ).replacen(&signer, &other_signer(), 2),
+            readme_with(&ready_block(&fenced, &fp)).replacen(&signer, &other_signer(), 2),
         ),
         (
             "ready with text after the trust list",
@@ -1459,7 +1453,7 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
             "ready with a statement JSON naming another public key",
             machine.replacen(
                 &signer_of(8).rsplit(' ').next().unwrap().to_string(),
-                &signer_of(9).rsplit(' ').next().unwrap().to_string(),
+                signer_of(9).rsplit(' ').next().unwrap(),
                 2,
             ),
         ),
