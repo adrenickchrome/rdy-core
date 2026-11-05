@@ -13,9 +13,9 @@
 //!   before anything is extracted.
 //!
 //! The directory holds JSON/signature pairs, `records.txt`, and optionally `versions.txt`,
-//! `README.txt` and `root-allowed-signers`. Core also keeps `policy.json` and
-//! `evidence-policy.json` there, under their own closed schemas. Any other entry refuses. Every
-//! bound refuses the whole set; nothing is truncated or skipped.
+//! `README.txt` and `root-allowed-signers`. Core also keeps `policy.json`, `evidence-policy.json`
+//! and the release controller's `admission.json` there, under their own closed schemas. Any other
+//! entry refuses. Every bound refuses the whole set; nothing is truncated or skipped.
 use crate::release_install::{self, GuideCommand};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::Value;
@@ -67,14 +67,14 @@ pub const PAIRS_MAX: usize = 64;
 pub const ROOT_FILE_MAX: u64 = 4096;
 /// The largest `records.txt`, `versions.txt` and `README.txt`.
 pub const INDEX_MAX: u64 = 65536;
-/// The largest `policy.json` and `evidence-policy.json`.
+/// The largest `policy.json`, `evidence-policy.json` and `admission.json`.
 pub const POLICY_MAX: u64 = 65536;
 /// The largest release manifest: the adapter's limit.
 pub const MANIFEST_MAX: u64 = release_install::MANIFEST_MAX;
 /// The largest release SSHSIG.
 pub const RELEASE_SIG_MAX: u64 = 4096;
-/// The most directory entries: every pair and the six support and control files.
-pub const ENTRIES_MAX: usize = PAIRS_MAX * 2 + 6;
+/// The most directory entries: every pair and the seven support and control files.
+pub const ENTRIES_MAX: usize = PAIRS_MAX * 2 + 7;
 /// The longest string in a policy.
 pub const POLICY_STRING_MAX: usize = 256;
 
@@ -90,6 +90,8 @@ pub const ROOT_FILE: &str = "root-allowed-signers";
 pub const POLICY_FILE: &str = "policy.json";
 /// Core's attestation policy, bound by digest in `policy.json`.
 pub const EVIDENCE_POLICY_FILE: &str = "evidence-policy.json";
+/// The release controller's protected admission record.
+pub const ADMISSION_FILE: &str = "admission.json";
 
 /// The fields of a transition, exactly.
 pub const TRANSITION_FIELDS: [&str; 5] = [
@@ -130,7 +132,24 @@ pub const EVIDENCE_POLICY_FIELDS: [&str; 6] = [
     "release_workflow_path",
     "approval_channel",
 ];
-/// The repository id `evidence-policy.json` pins.
+/// The top-level fields of `admission.json`, exactly. The release controller checks their values
+/// and uses the record; the trust loader takes no authority from it.
+pub const ADMISSION_FIELDS: [&str; 13] = [
+    "schema",
+    "repository_id",
+    "epoch",
+    "state",
+    "signer_workflow_sha",
+    "key_arn",
+    "fingerprint",
+    "policy_commit",
+    "policy_sha256",
+    "trust_sha256",
+    "table_id",
+    "genesis_sha256",
+    "draining_holder",
+];
+/// The repository id `evidence-policy.json` and `admission.json` pin.
 pub const REPOSITORY_ID: u64 = 1_403_751_388;
 /// The release workflow path `evidence-policy.json` pins.
 pub const RELEASE_WORKFLOW_PATH: &str = ".github/workflows/release.yml";
@@ -511,6 +530,7 @@ enum Entry {
     Root,
     Policy,
     EvidencePolicy,
+    Admission,
 }
 
 fn classify(name: &str) -> Option<Entry> {
@@ -521,6 +541,7 @@ fn classify(name: &str) -> Option<Entry> {
         ROOT_FILE => return Some(Entry::Root),
         POLICY_FILE => return Some(Entry::Policy),
         EVIDENCE_POLICY_FILE => return Some(Entry::EvidencePolicy),
+        ADMISSION_FILE => return Some(Entry::Admission),
         _ => {}
     }
     let (stem, sig) = match name.strip_suffix(".json.sig") {
@@ -602,7 +623,7 @@ fn bound(kind: Entry) -> u64 {
         Entry::Sig(..) => STATEMENT_SIG_MAX,
         Entry::Records | Entry::Versions | Entry::Readme => INDEX_MAX,
         Entry::Root => ROOT_FILE_MAX,
-        Entry::Policy | Entry::EvidencePolicy => POLICY_MAX,
+        Entry::Policy | Entry::EvidencePolicy | Entry::Admission => POLICY_MAX,
     }
 }
 
@@ -1006,6 +1027,20 @@ fn check_evidence_policy(bytes: &[u8]) -> Result<(), TrustError> {
     Ok(())
 }
 
+/// `admission.json`'s top level: its closed field set and its frozen scalar pins. The release
+/// controller checks the other values.
+fn check_admission(bytes: &[u8]) -> Result<(), TrustError> {
+    let refuse = |why: String| TrustError::Policy(ADMISSION_FILE.to_string(), why);
+    let fields = closed_object(bytes, &ADMISSION_FIELDS).map_err(refuse)?;
+    if !fields.get("schema").is_some_and(|v| v.as_u64() == Some(1)) {
+        return Err(refuse(invalid("schema")));
+    }
+    if fields.get("repository_id").and_then(Value::as_str) != Some(&REPOSITORY_ID.to_string()) {
+        return Err(refuse(invalid("repository_id")));
+    }
+    Ok(())
+}
+
 impl ReleaseKeys {
     /// The trust with no machine record: the historical root only.
     pub fn historical() -> ReleaseKeys {
@@ -1019,9 +1054,18 @@ impl ReleaseKeys {
     /// The authenticated trust of the repository at `root`: its `release-keys/` directory when
     /// there is one, else the historical root alone (the state before the machine cutover).
     pub fn for_repository(root: &Path) -> Result<ReleaseKeys, TrustError> {
+        ReleaseKeys::for_repository_checked_by(root, &RootCheck)
+    }
+
+    /// [`ReleaseKeys::for_repository`] with the statement check `check`. Production passes
+    /// [`RootCheck`] only; a test's structural mock proves no signature.
+    pub fn for_repository_checked_by(
+        root: &Path,
+        check: &dyn StatementCheck,
+    ) -> Result<ReleaseKeys, TrustError> {
         let dir = root.join("release-keys");
         if dir.is_dir() {
-            ReleaseKeys::load(&dir)
+            ReleaseKeys::load_checked_by(&dir, check)
         } else {
             Ok(ReleaseKeys::historical())
         }
@@ -1106,13 +1150,17 @@ impl ReleaseKeys {
             return Err(TrustError::VersionsMismatch);
         }
         let evidence = files.get(EVIDENCE_POLICY_FILE);
+        let admission = files.get(ADMISSION_FILE);
         match files.get(POLICY_FILE) {
-            None if named.is_empty() && evidence.is_none() => {}
+            None if named.is_empty() && evidence.is_none() && admission.is_none() => {}
             None => return Err(TrustError::PolicyMissing),
             Some(policy) => {
                 let evidence = evidence.ok_or(TrustError::EvidencePolicyMissing)?;
                 check_evidence_policy(evidence)?;
                 keys.policy = Some(parse_policy(policy, &keys.epochs, &index, evidence)?);
+                if let Some(admission) = admission {
+                    check_admission(admission)?;
+                }
             }
         }
         Ok(keys)
@@ -2437,6 +2485,115 @@ mod tests {
         );
     }
 
+    /// `admission.json` is a control file. It is no signed record, it gives the loader no trust,
+    /// and it has its own closed schema. Every other unknown entry still refuses.
+    #[test]
+    fn rsig2_admission_is_a_closed_control_file() {
+        const ADMISSION: &[u8] = include_bytes!("../fixtures/release-keys/control/admission.json");
+
+        // the trust and the generated index are the same with and without it
+        let reg = structural();
+        let without = reg.load().expect("the registry");
+        let index = generated_records(reg.path()).expect("the index");
+        reg.write(ADMISSION_FILE, ADMISSION);
+        assert_eq!(reg.load().as_ref(), Ok(&without));
+        assert_eq!(generated_records(reg.path()).as_ref(), Ok(&index));
+        assert!(!index.contains(ADMISSION_FILE));
+
+        // the signed records still pass the root check first
+        assert_eq!(
+            ReleaseKeys::load_checked_by(reg.path(), &RefuseAll),
+            Err(TrustError::StatementSignature(r_name(50)))
+        );
+
+        // it is a control file of an enrolled registry, like the evidence policy
+        let reg = Reg::new(&[]);
+        reg.write(ADMISSION_FILE, ADMISSION);
+        assert_eq!(reg.load(), Err(TrustError::PolicyMissing));
+
+        // its closed top level and its frozen scalars; the controller checks the rest
+        let text = std::str::from_utf8(ADMISSION).unwrap();
+        for (bytes, why) in [
+            ("[]\n".to_string(), "not a JSON object"),
+            ("{".to_string(), "malformed JSON"),
+            (
+                text.replacen("\"schema\":1", "\"schemas\":1", 1),
+                "unknown field 'schemas'; did you mean 'schema'?",
+            ),
+            (
+                text.replacen("\"schema\":1,", "", 1),
+                "missing field 'schema'",
+            ),
+            (
+                text.replacen("\"schema\":1", "\"schema\":2", 1),
+                "field 'schema' is invalid",
+            ),
+            (
+                text.replacen("\"schema\":1", "\"schema\":1,\"schema\":1", 1),
+                "duplicate field 'schema'",
+            ),
+            (
+                text.replacen(
+                    "\"repository_id\":\"1403751388\"",
+                    "\"repository_id\":\"1\"",
+                    1,
+                ),
+                "field 'repository_id' is invalid",
+            ),
+            (
+                text.replacen(
+                    "\"repository_id\":\"1403751388\"",
+                    "\"repository_id\":1403751388",
+                    1,
+                ),
+                "field 'repository_id' is invalid",
+            ),
+        ] {
+            let reg = structural();
+            reg.write(ADMISSION_FILE, bytes.as_bytes());
+            assert_eq!(
+                refusal(reg.load()),
+                format!("release trust: admission.json: {why}"),
+                "{bytes}"
+            );
+        }
+
+        // a directory is no admission record, and near names stay unknown
+        let reg = structural();
+        fs::create_dir(reg.path().join(ADMISSION_FILE)).unwrap();
+        assert_eq!(
+            refusal(reg.load()),
+            "release trust: admission.json is not a regular file"
+        );
+        for name in ["admission.txt", "admission.json.sig", "admissions.json"] {
+            let reg = structural();
+            reg.write(name, ADMISSION);
+            assert_eq!(
+                refusal(reg.load()),
+                format!("release trust: unknown entry {name}"),
+                "{name}"
+            );
+        }
+
+        // the entry limit holds all 64 pairs and all seven support and control files
+        let records: Records = (36..100).map(|m| (t_name(m), b"{}".to_vec())).collect();
+        let reg = Reg::new(&records);
+        reg.bind(RDY_FP, 44);
+        for (name, bytes) in [
+            (VERSIONS_FILE, &b"x"[..]),
+            (README_FILE, b"x"),
+            (ROOT_FILE, ROOT_ALLOWED_SIGNERS.as_bytes()),
+            (ADMISSION_FILE, ADMISSION),
+        ] {
+            reg.write(name, bytes);
+        }
+        assert_eq!(fs::read_dir(reg.path()).unwrap().count(), ENTRIES_MAX);
+        assert_eq!(
+            ReleaseKeys::load_checked_by(reg.path(), &RefuseAll),
+            Err(TrustError::StatementSignature(t_name(36)))
+        );
+    }
+
     #[test]
     fn rsig2_trust_input_bounds_and_unknown_keys() {
         let padded = |len: usize| {
@@ -2478,7 +2635,7 @@ mod tests {
             Err(TrustError::TooManyRecords)
         );
         let reg = Reg::new(&many(68));
-        assert_eq!(refusal(reg.load()), "release trust: more than 134 entries");
+        assert_eq!(refusal(reg.load()), "release trust: more than 135 entries");
 
         // the checks below run on the frozen receiver records: each refuses before
         // any record is enrolled, so none reaches the range refusal
@@ -2489,6 +2646,7 @@ mod tests {
             (README_FILE, 65536),
             (ROOT_FILE, 4096),
             (EVIDENCE_POLICY_FILE, 65536),
+            (ADMISSION_FILE, 65536),
         ] {
             let reg = unendorsed();
             reg.write(name, &vec![b'x'; max + 1]);

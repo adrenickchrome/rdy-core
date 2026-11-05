@@ -209,6 +209,21 @@ fn rsig2_cli_refuses_unendorsed_records_and_bad_arguments() {
         &trust(&["records".as_ref(), "--keys".as_ref(), keys]),
         &fs::read_to_string(fixture("unendorsed-schema/expected-records.txt")).unwrap(),
     );
+    // the release binary lists the admission control file and keeps it out of the index
+    fs::copy(
+        fixture("../control/admission.json"),
+        dir.path().join("admission.json"),
+    )
+    .unwrap();
+    ok(
+        &trust(&["records".as_ref(), "--keys".as_ref(), keys]),
+        &fs::read_to_string(fixture("unendorsed-schema/expected-records.txt")).unwrap(),
+    );
+    refused(
+        &trust(&["versions".as_ref(), "--keys".as_ref(), keys]),
+        1,
+        first,
+    );
     fs::write(dir.path().join("notes.txt"), b"x").unwrap();
     refused(
         &trust(&["records".as_ref(), "--keys".as_ref(), keys]),

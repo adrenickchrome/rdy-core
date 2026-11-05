@@ -4,9 +4,9 @@
 use rdy_qa::fixtures::output_within;
 use rdy_qa::release_install::{readme_install_section, readme_ready_section};
 use rdy_qa::release_keys::{
-    self, EVIDENCE_POLICY_FILE, HISTORICAL_FIRST, HISTORICAL_LAST, POLICY_FILE, RECORDS_FILE,
-    ROOT_ALLOWED_SIGNERS, ROOT_FINGERPRINT, ROOT_KEY_BASE64, ROOT_KEY_TYPE, ReleaseKeys,
-    StatementCheck, tag_of,
+    self, ADMISSION_FILE, EVIDENCE_POLICY_FILE, HISTORICAL_FIRST, HISTORICAL_LAST, POLICY_FILE,
+    RECORDS_FILE, ROOT_ALLOWED_SIGNERS, ROOT_FINGERPRINT, ROOT_KEY_BASE64, ROOT_KEY_TYPE,
+    ReleaseKeys, StatementCheck, tag_of,
 };
 use regex::Regex;
 use std::path::PathBuf;
@@ -794,8 +794,14 @@ const EVIDENCE: &[u8] = b"{\"approval_channel\":null,\"coordinators\":[],\"evide
 /// policy for the last epoch. The epochs are disposable keys, never release keys.
 fn machine_keys(epochs: &[(u32, Option<u32>, u8)]) -> ReleaseKeys {
     let dir = tempfile::tempdir().expect("tempdir");
+    write_machine_records(dir.path(), epochs);
+    ReleaseKeys::load_checked_by(dir.path(), &Structural).expect("synthetic machine records")
+}
+
+/// Writes the records, the index and the two policies of [`machine_keys`] into `dir`.
+fn write_machine_records(dir: &std::path::Path, epochs: &[(u32, Option<u32>, u8)]) {
     let mut names = Vec::new();
-    let write = |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+    let write = |name: &str, bytes: &[u8]| std::fs::write(dir.join(name), bytes).unwrap();
     let mut last_fp = String::new();
     for (first, last, byte) in epochs {
         let pk = ssh_key::PublicKey::new(
@@ -835,7 +841,6 @@ fn machine_keys(epochs: &[(u32, Option<u32>, u8)]) -> ReleaseKeys {
         )
         .as_bytes(),
     );
-    ReleaseKeys::load_checked_by(dir.path(), &Structural).expect("synthetic machine records")
 }
 
 /// Two machine epochs: key 7 from v0.50.0 through v0.55.0, then key 8 from v0.60.0.
@@ -1005,6 +1010,58 @@ fn rsig3_historical_range_runs_through_v0_41_0() {
         assert!(keys.signer_for(v).is_ok(), "{v}");
     }
     assert!(keys.signer_for("0.42.0").is_err());
+}
+
+/// A complete enrolled `release-keys/` directory, every support and control file included, goes
+/// through the loader the real README tests use. The fixture is the one the Python controller
+/// test parses, so the two readers agree on the file's name and fields.
+#[test]
+fn rsig3_complete_enrolled_directory_reaches_the_readme_checks() {
+    let root_dir = tempfile::tempdir().expect("tempdir");
+    let dir = root_dir.path().join("release-keys");
+    std::fs::create_dir(&dir).unwrap();
+    let epochs = [(50, Some(55), 7), (60, None, 8)];
+    write_machine_records(&dir, &epochs);
+    let versions = ReleaseKeys::for_repository_checked_by(root_dir.path(), &Structural)
+        .expect("the records")
+        .versions_txt();
+    std::fs::write(dir.join(release_keys::VERSIONS_FILE), versions).unwrap();
+    std::fs::write(
+        dir.join(release_keys::README_FILE),
+        "Public release keys.\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(release_keys::ROOT_FILE), ROOT_ALLOWED_SIGNERS).unwrap();
+    std::fs::copy(
+        root()
+            .join("crates/rdy-qa/fixtures/release-keys/control")
+            .join(ADMISSION_FILE),
+        dir.join(ADMISSION_FILE),
+    )
+    .expect("the admission fixture");
+
+    let keys = ReleaseKeys::for_repository_checked_by(root_dir.path(), &Structural)
+        .expect("the complete enrolled directory");
+    assert_eq!(keys, two_epochs());
+    let cutover = ready_readme(&keys, "0.60.0");
+    assert_eq!(trust_state_error(&cutover), Ok(()));
+    assert_eq!(real_trust_list_problem(&cutover, &keys), Ok(()));
+
+    // the real check: the signed records still fail, on the signature, not on the listing
+    let refused = ReleaseKeys::for_repository(root_dir.path()).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "release trust: revocation-v0.50.0.json: the root signature does not verify"
+    );
+
+    // one more unknown entry still refuses the whole directory
+    std::fs::write(dir.join("notes.txt"), "x").unwrap();
+    assert_eq!(
+        ReleaseKeys::for_repository_checked_by(root_dir.path(), &Structural)
+            .unwrap_err()
+            .to_string(),
+        "release trust: unknown entry notes.txt"
+    );
 }
 
 /// The signed release-key fixtures are pinned by the hash of their bytes. No file under

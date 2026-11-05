@@ -595,6 +595,15 @@ class Base(unittest.TestCase):
 
 
 class Reservation(Base):
+    def test_rsig5_admission_fixture_is_the_core_control_file(self):
+        # The Rust trust loader's test copies this exact file into a complete enrolled directory.
+        fixture = (Path(__file__).resolve().parents[2]
+                   / 'crates/rdy-qa/fixtures/release-keys/control/admission.json')
+        self.assertEqual(CONTROLLER.ADMISSION_PATH, 'release-keys/' + fixture.name)
+        value = CONTROLLER._check_admission(
+            CONTROLLER._strict(fixture.read_bytes(), CONTROLLER.ADMISSION_KEYS, 'the admission record'))
+        self.assertEqual(value['state'], 'ACTIVE')
+
     def test_rsig5_create_only_reservation_race(self):
         rig = Rig()
         qualified = rig.qualify()
