@@ -211,7 +211,9 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         crate::spawn::detach().map_err(ServeError::Runtime)?;
     }
     let root = RunDir::of_project(&opts.project).root();
-    // (2) the start first, then the store: start.lock before the store lock
+    // (2) the start first, then the store: start.lock before the store lock. The line comes
+    // first too: a rival start that waits at the lock is a start that opens the store
+    log("opening store");
     let start = match take_start(&opts) {
         Ok(s) => s,
         Err(err) => {
@@ -219,7 +221,6 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
             return Err(err);
         }
     };
-    log("opening store");
     let rdy = match open_store(&opts.project, start.as_ref()) {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
