@@ -3,8 +3,9 @@
 //! every settings level under the locks and saves only the destination. A row's level is its
 //! effective source; removal and mode changes touch only the selected level's entry.
 //!
-//! Its file modes go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected modes are Unix modes,
-//! which FW-XP1 Phase 4 ports with the Windows privacy rules.
+//! Its file modes go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected modes are Unix modes.
+//! Windows has no permission modes, so there a mode reads as 0 and a mode change does nothing;
+//! the tests that depend on real modes (an unreadable file, a umask) run on Unix only.
 
 use rdy_engine::config_levels::{Level, effective};
 use rdy_engine::hub_config::{HubConfig, RemoteMode};
@@ -34,26 +35,34 @@ const USER_MESSAGE: &str = "the user config path is not available";
 const USER_FIX: &str = "set XDG_CONFIG_HOME or HOME before changing remotes";
 const SAVE: &str = "the config file could not be saved durably";
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     pio::mode_of(&fs::symlink_metadata(path).unwrap())
 }
 
+#[cfg(not(unix))]
+fn mode(path: &Path) -> u32 {
+    fs::symlink_metadata(path).unwrap();
+    0
+}
+
+#[cfg(unix)]
 fn chmod(path: &Path, mode: u32) {
     fs::set_permissions(path, pio::permissions(mode)).unwrap();
 }
 
+#[cfg(not(unix))]
+fn chmod(_path: &Path, _mode: u32) {}
+
 /// A directory that group and others cannot write, whatever the umask.
 fn private_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap()
+    let dir = tempfile::tempdir().unwrap();
+    pio::make_private_dir(dir.path()).unwrap();
+    dir
 }
 
 fn mkdir(path: &Path) {
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
-        .create(path)
-        .unwrap();
+    pio::create_private_dir(path).unwrap();
 }
 
 /// A project (`.rdy.yaml` and an entry at `.rdy/store`) and a user config home whose `rdy`
@@ -279,6 +288,7 @@ fn hsa6_all_remote_operations_are_offline() {
     assert_eq!(gone.remote.level, RemoteLevel::User);
 
     // nothing reached the credential side
+    #[cfg(unix)]
     assert_eq!(mode(&cred), 0o000, "the credential file is untouched");
     assert!(fs::symlink_metadata(&cred_lock).unwrap().is_dir());
     chmod(&cred, 0o600);
@@ -595,7 +605,11 @@ fn hsa6_only_the_destination_settings_file_is_saved() {
         (2, Box::new(|| svc.remove("mirror", RemoteLevel::User))),
         (1, Box::new(|| svc.remove("origin", RemoteLevel::Local))),
     ];
-    let modes = [0o664, 0o640, 0o644];
+    let modes = if cfg!(unix) {
+        [0o664, 0o640, 0o644]
+    } else {
+        [0; 3]
+    };
     for (i, (dest, call)) in steps.iter().enumerate() {
         let before = fx.files().map(|f| stamp(&f));
         call().unwrap_or_else(|e| panic!("step {i}: {e}"));
@@ -884,6 +898,7 @@ const UMASK_RUN: &str = "RDY_HSA6_UMASK";
 /// Ruling gate-g3: every hsa6_ test also passes under a umask of 002 (the Ubuntu default for
 /// user private groups, under which `rdy init` makes `.rdy/` 0775) and of 022. The umask is
 /// process-wide, so each runs in its own process, set by `sh`.
+#[cfg(unix)]
 #[test]
 fn hsa6_remote_tests_pass_under_umask_002_and_022() {
     for umask in ["002", "022"] {

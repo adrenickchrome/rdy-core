@@ -1372,7 +1372,11 @@ fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         for e in std::fs::read_dir(&d).unwrap() {
             let e = e.unwrap();
             let p = e.path();
-            let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+            let rel = p
+                .strip_prefix(dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if e.file_type().unwrap().is_dir() {
                 out.insert(format!("{rel}/"), vec![]);
                 stack.push(p);
