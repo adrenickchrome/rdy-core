@@ -504,7 +504,8 @@ fn sig3_openssh_vectors_verify_for_both_key_types() {
         let bin = pem_to_bin(pem);
         assert_eq!(
             bin_to_pem(&bin).trim_end(),
-            pem.trim_end(),
+            // a checkout with CR LF line ends still holds the same PEM
+            pem.replace("\r\n", "\n").trim_end(),
             "PEM round trip"
         );
         let sig = SshSig::decode(&mut &bin[..]).unwrap();

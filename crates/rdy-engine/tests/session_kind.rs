@@ -386,7 +386,15 @@ fn id3_human_fallback_and_config_precedence() {
     let e = human_actor(Some(x.path()), None, Some("x")).unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     assert!(e.fix.starts_with("set actor in "), "{e}");
-    assert!(e.fix.ends_with("rdy/config.yaml to human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>"), "{e}");
+    // the path in the fix is the native form of rdy/config.yaml
+    let native = std::path::Path::new("rdy").join("config.yaml");
+    assert!(
+        e.fix.ends_with(&format!(
+            "{} to human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>",
+            native.display()
+        )),
+        "{e}"
+    );
     assert_eq!(
         human_actor(None, None, Some("Ada Lovelace")).unwrap(),
         "human:ada-lovelace"

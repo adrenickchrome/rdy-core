@@ -20,6 +20,17 @@ use rdy_store::pio;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::BTreeMap;
 use std::fs;
+
+/// An absolute path on every host that names nothing; the settings loader keeps it as written.
+#[cfg(unix)]
+const MISSING_CA: &str = "/nonexistent/hsa6-ca.pem";
+#[cfg(windows)]
+const MISSING_CA: &str = r"C:\nonexistent\hsa6-ca.pem";
+/// A second absolute CA path.
+#[cfg(unix)]
+const HUB_PEM: &str = "/etc/hsa6/hub.pem";
+#[cfg(windows)]
+const HUB_PEM: &str = r"C:\etc\hsa6\hub.pem";
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -190,7 +201,9 @@ fn hsa6_all_remote_operations_are_offline() {
     // read, and a directory where its lock would be, so any credential access fails
     fs::write(
         fx.user_file(),
-        "hub:\n  installs:\n    \"https://unreachable.invalid\":\n      ca_file: /nonexistent/hsa6-ca.pem\n",
+        format!(
+            "hub:\n  installs:\n    \"https://unreachable.invalid\":\n      ca_file: {MISSING_CA}\n"
+        ),
     )
     .unwrap();
     let cred = fx.credential_file();
@@ -298,10 +311,7 @@ fn hsa6_all_remote_operations_are_offline() {
     let install = c
         .install(&Origin::parse("https://unreachable.invalid").unwrap())
         .unwrap();
-    assert_eq!(
-        install.ca_file,
-        Some(PathBuf::from("/nonexistent/hsa6-ca.pem"))
-    );
+    assert_eq!(install.ca_file, Some(PathBuf::from(MISSING_CA)));
     assert!(install.pinned_origins.is_empty());
     for f in fx.files() {
         if let Ok(text) = fs::read_to_string(&f) {
@@ -550,7 +560,7 @@ fn hsa6_only_the_destination_settings_file_is_saved() {
     fs::write(
         fx.user_file(),
         format!(
-            "# user settings\nactor: human:nick\nsigning:\n  sign: auto\n  allowed_signers: {}\nhub:\n  installs:\n    \"https://hub.example.com\":\n      ca_file: /etc/hsa6/hub.pem\n      pinned_origins: [\"https://cdn.example.com\"]\n",
+            "# user settings\nactor: human:nick\nsigning:\n  sign: auto\n  allowed_signers: {}\nhub:\n  installs:\n    \"https://hub.example.com\":\n      ca_file: {HUB_PEM}\n      pinned_origins: [\"https://cdn.example.com\"]\n",
             signers.display()
         ),
     )
@@ -643,7 +653,7 @@ fn hsa6_only_the_destination_settings_file_is_saved() {
     let install = c
         .install(&Origin::parse("https://hub.example.com").unwrap())
         .unwrap();
-    assert_eq!(install.ca_file, Some(PathBuf::from("/etc/hsa6/hub.pem")));
+    assert_eq!(install.ca_file, Some(PathBuf::from(HUB_PEM)));
     assert_eq!(
         install.pinned_origins,
         [Origin::parse("https://cdn2.example.com").unwrap()],

@@ -361,7 +361,15 @@ fn every_file(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 walk(root, &path, out);
             } else {
                 let rel = path.strip_prefix(root).unwrap().to_path_buf();
-                out.insert(rel, fs::read(&path).unwrap());
+                // A held lock file cannot be read on Windows (byte-range locks are mandatory); it holds no
+                // setting, and `tree` drops an empty one.
+                let bytes = match fs::read(&path) {
+                    Err(_) if cfg!(windows) && path.extension().is_some_and(|x| x == "lock") => {
+                        vec![]
+                    }
+                    other => other.unwrap(),
+                };
+                out.insert(rel, bytes);
             }
         }
     }

@@ -1397,7 +1397,7 @@ fn tls() -> Tls {
     fs::write(&ca, server.ca_pem()).unwrap();
     let mut config = fs::read_to_string(&e.user_file).unwrap();
     config.push_str(&format!(
-        "hub:\n  installs:\n    \"{o}\":\n      ca_file: \"{}\"\n",
+        "hub:\n  installs:\n    \"{o}\":\n      ca_file: '{}'\n",
         ca.display()
     ));
     fs::write(&e.user_file, config).unwrap();
