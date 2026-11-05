@@ -1616,10 +1616,13 @@ fn forged_chain(d: &Path) -> Vec<PathBuf> {
 /// A kept target whose `.rdy` already has run state of its own: a start lock and a file.
 fn target_with_run(d: &Path, name: &str) -> (PathBuf, BTreeMap<PathBuf, Option<Vec<u8>>>) {
     let to = d.join(name);
-    let run = to.join(".rdy").join(RUN_DIR);
-    std::fs::create_dir_all(&run).unwrap();
+    let dot = to.join(".rdy");
+    std::fs::create_dir_all(&dot).unwrap();
     std::fs::write(to.join("keep.txt"), b"mine").unwrap();
-    std::fs::write(run.join(START_LOCK_FILE), b"").unwrap();
+    // the start lock an earlier start left
+    drop(StartGuard::try_take(&dot).unwrap().unwrap());
+    let run = dot.join(RUN_DIR);
+    assert!(run.join(START_LOCK_FILE).is_file());
     std::fs::write(run.join("daemon.log"), b"an older run").unwrap();
     let before = tree(&to);
     (to, before)
