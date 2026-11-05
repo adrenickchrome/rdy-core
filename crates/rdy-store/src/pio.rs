@@ -201,14 +201,13 @@ mod tests {
             rest.trim(),
             "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;\n\
              pub use windows_security::*;\n#[path = \"windows_security.rs\"]\n\
-             mod windows_security;",
+             mod windows_security;\n\
+             pub use windows_dir::*;\n#[path = \"windows_dir.rs\"]\nmod windows_dir;",
             "code outside the placeholders"
         );
         assert_eq!(
             found,
             [
-                "rdy_store::pio has no Windows implementation yet of opens, entry kinds and \
-                 listings anchored to an open directory (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of creates and removals \
                  anchored to an open directory (FW-XP1 Phase 4)",
                 "rdy_store::pio has no Windows implementation yet of renames anchored to an \
@@ -321,6 +320,34 @@ mod tests {
                 security.contains(call),
                 "pio/windows_security.rs calls {call}"
             );
+        }
+        // Opens, entry kinds and listings in an open directory are built (Task 5a):
+        // pio/windows_dir.rs opens each entry relative to the directory handle, never following a
+        // reparse point, and lists the directory through a new open of its handle; it holds no
+        // stub body or placeholder before its tests.
+        let dir = source("src/pio/windows_dir.rs");
+        // its test hook is under #[cfg(test)] too: the code ends where its test module starts
+        let dir = code_lines(dir.split("#[cfg(test)]\nmod tests {").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(!dir.contains(word), "pio/windows_dir.rs holds {word}");
+        }
+        assert!(placeholders(&dir).0.is_empty());
+        for call in [
+            "NtOpenFile",
+            "RootDirectory: dir.as_raw_handle()",
+            "OBJ_DONT_REPARSE",
+            "FILE_OPEN_REPARSE_POINT",
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            "FileFullDirectoryRestartInfo",
+            "FileFullDirectoryInfo",
+            "CreateFileW",
+        ] {
+            assert!(dir.contains(call), "pio/windows_dir.rs calls {call}");
         }
     }
 

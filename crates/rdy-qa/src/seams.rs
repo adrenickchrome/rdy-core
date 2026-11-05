@@ -27,6 +27,7 @@ pub const SEAM_FILES: &[&str] = &[
     "crates/rdy-store/src/pio/unix.rs",
     "crates/rdy-store/src/pio/windows.rs",
     "crates/rdy-store/src/pio/windows_security.rs",
+    "crates/rdy-store/src/pio/windows_dir.rs",
     "crates/rdy-store/src/fileid.rs",
     "crates/rdy-store/src/fileid/windows.rs",
     "crates/rdy-daemon/src/sys/unix.rs",

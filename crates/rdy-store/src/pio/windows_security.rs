@@ -72,7 +72,7 @@ const _: () = assert!(SID_MAX_BYTES == SECURITY_MAX_SID_SIZE as usize);
 pub const DESCRIPTOR_MAX_BYTES: usize = 65_624;
 
 /// The longest native path, in UTF-16 code units.
-const NATIVE_PATH_MAX: usize = 32_767;
+pub(super) const NATIVE_PATH_MAX: usize = 32_767;
 
 /// A self-relative descriptor's header: revision, padding, control, then the offsets of the
 /// owner, the group, the SACL and the DACL.
@@ -574,8 +574,23 @@ fn reopen_file(h: RawHandle, access: u32) -> io::Result<OwnedHandle> {
 
 /// The kind of the object `h` is open on, and whether it is a reparse point
 /// (`FILE_ATTRIBUTE_TAG_INFO`). It reads a handle open for reading, writing or appending.
+pub(super) fn kind_of(h: RawHandle) -> io::Result<(ObjectKind, bool)> {
+    let info = attribute_tag(h)?;
+    let kind = if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        ObjectKind::Dir
+    } else {
+        ObjectKind::File
+    };
+    Ok((
+        kind,
+        info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    ))
+}
+
+/// The attributes and the reparse tag of the object `h` is open on (`FileAttributeTagInfo`); `h`
+/// has `FILE_READ_ATTRIBUTES`.
 #[allow(unsafe_code)]
-fn kind_of(h: RawHandle) -> io::Result<(ObjectKind, bool)> {
+pub(super) fn attribute_tag(h: RawHandle) -> io::Result<FILE_ATTRIBUTE_TAG_INFO> {
     let mut info = FILE_ATTRIBUTE_TAG_INFO {
         FileAttributes: 0,
         ReparseTag: 0,
@@ -593,15 +608,7 @@ fn kind_of(h: RawHandle) -> io::Result<(ObjectKind, bool)> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let kind = if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        ObjectKind::Dir
-    } else {
-        ObjectKind::File
-    };
-    Ok((
-        kind,
-        info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
-    ))
+    Ok(info)
 }
 
 /// The owner and the DACL of the object `h` is open on (`h` has `READ_CONTROL`), read whole
@@ -865,7 +872,7 @@ fn reopen_dir(dir: &File, path: &Path, access: u32) -> io::Result<File> {
 /// longer than [`NATIVE_PATH_MAX`] is `ERROR_FILENAME_EXCED_RANGE`, before any buffer for it is
 /// made.
 #[allow(unsafe_code)]
-fn final_path(h: RawHandle) -> io::Result<PathBuf> {
+pub(super) fn final_path(h: RawHandle) -> io::Result<PathBuf> {
     let call = |buf: &mut [u16]| {
         // SAFETY: `h` is open for the call; the buffer is writable for the length passed.
         unsafe {
@@ -911,7 +918,7 @@ fn final_path(h: RawHandle) -> io::Result<PathBuf> {
 /// `path` as a NUL-terminated native path for a call that takes one: made absolute, then
 /// written in the `\\?\` form, so a long path is not cut at 260 units. A NUL in it, or a native
 /// path longer than [`NATIVE_PATH_MAX`], is refused before the native path is made.
-fn native(path: &Path) -> io::Result<Vec<u16>> {
+pub(super) fn native(path: &Path) -> io::Result<Vec<u16>> {
     if path.as_os_str().encode_wide().any(|u| u == 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -952,7 +959,7 @@ fn native(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 /// The OS error `code`.
-fn os_error(code: u32) -> io::Error {
+pub(super) fn os_error(code: u32) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }
 
@@ -975,16 +982,35 @@ fn not_private(path: &Path) -> io::Error {
     )
 }
 
-/// `{path} is a reparse point; rdy will not follow it`.
-fn reparse_point(path: &Path) -> io::Error {
-    io::Error::other(format!(
+/// `{path} is a reparse point; rdy will not follow it`: a refusal that [`is_reparse_refusal`]
+/// knows.
+pub(super) fn reparse_point(path: &Path) -> io::Error {
+    io::Error::other(ReparseRefusal(format!(
         "{} is a reparse point; rdy will not follow it",
         path.display()
-    ))
+    )))
 }
 
+/// Whether `e` is the refusal of a reparse point ([`reparse_point`]).
+pub(super) fn is_reparse_refusal(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|inner| inner.is::<ReparseRefusal>())
+}
+
+/// The refusal of a reparse point; its text is the whole message of the error.
+#[derive(Debug)]
+struct ReparseRefusal(String);
+
+impl fmt::Display for ReparseRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReparseRefusal {}
+
 /// `the directory holding {path} changed during the operation`.
-fn parent_changed(path: &Path) -> io::Error {
+pub(super) fn parent_changed(path: &Path) -> io::Error {
     io::Error::other(format!(
         "the directory holding {} changed during the operation",
         path.display()
