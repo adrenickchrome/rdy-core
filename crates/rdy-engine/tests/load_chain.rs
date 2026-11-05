@@ -1552,7 +1552,7 @@ fn hc7_failed_segments_sync_restores_the_target() {
 
     // a target that holds a file of its own
     let (to, before) = kept_target(d, "sync");
-    let loading = to.join(".rdy/store.loading");
+    let loading = to.join(".rdy").join("store.loading");
     let g = fail_flush(loading.join("segments"));
     let e = chain_err(&files, &to, None);
     drop(g);
@@ -1838,15 +1838,15 @@ fn wx8b_a_held_start_lock_refuses_the_load_before_it_writes() {
     let _clock = pin_clock(1_000_000);
     let t = three();
     let d = t.dir.path();
-    let (to, _) = target_with_run(d, "held");
+    let (to, before) = target_with_run(d, "held");
     let start = StartGuard::try_take(&to.join(".rdy")).unwrap().unwrap();
-    let before = tree(&to);
     let e = chain_err(std::slice::from_ref(&t.f0), &to, None);
     assert_eq!(e.code, E_LOCKED, "{e:?}");
-    assert_eq!(tree(&to), before);
     // the refused load did not touch the holder's lock
     assert!(start.guards(&to.join(".rdy")));
+    // Windows refuses a read of a locked range, so the tree is read once it is free
     drop(start);
+    assert_eq!(tree(&to), before);
     chain_load(std::slice::from_ref(&t.f0), &to, None);
 }
 
