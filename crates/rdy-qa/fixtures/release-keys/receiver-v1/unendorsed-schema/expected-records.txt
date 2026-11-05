@@ -1,0 +1,3 @@
+revocation-v0.40.0.json revocation-v0.40.0.json.sig
+transition-v0.40.0.json transition-v0.40.0.json.sig
+transition-v0.44.0.json transition-v0.44.0.json.sig
