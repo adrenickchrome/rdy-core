@@ -745,6 +745,7 @@ mod tests {
         let _: fn(&mut std::process::Command, &File) -> io::Result<()> = start_in_dir;
         let _: fn(&File, &OsStr, &OsStr) -> io::Result<()> = rename_at;
         let _: fn(&File) -> io::Result<bool> = is_empty_dir;
+        #[allow(clippy::type_complexity)]
         let _: fn(&File, &mut dyn FnMut(&OsStr) -> io::Result<()>) -> io::Result<()> =
             |d, f| for_each_entry(d, f);
         let _: fn(&File, &OsStr) -> io::Result<EntryKind> = entry_kind_at;
