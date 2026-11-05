@@ -1,10 +1,29 @@
 //! sess2: who is human, what an agent may write into, and where a session writes by default.
+use rdy_engine::instructions_config::PathEnv;
 use rdy_engine::intent::IntentFilter;
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_PERMISSION, E_VIEW_OWNER, Rdy, Session, SessionKind, WriteRequest,
-    classify, human_actor, human_actor_for,
+    classify, human_actor_for,
 };
 use rdy_model::Role;
+use std::path::Path;
+
+/// The user-only actor over the places the tests name: `xdg` is `XDG_CONFIG_HOME`; `home` is the
+/// home whose `.config` holds the config (`HOME` on Unix, `%APPDATA%` as `<home>/.config` on
+/// Windows), so one fixture layout serves both.
+fn human_actor(
+    xdg: Option<&Path>,
+    home: Option<&Path>,
+    user: Option<&str>,
+) -> Result<String, rdy_engine::RdyError> {
+    let env = PathEnv {
+        xdg_config_home: xdg.map(|p| p.as_os_str().to_owned()),
+        home: home.map(|p| p.as_os_str().to_owned()),
+        app_data: home.map(|p| p.join(".config").into_os_string()),
+        ..PathEnv::default()
+    };
+    rdy_engine::human_actor(&env, user)
+}
 
 fn project() -> (tempfile::TempDir, Rdy) {
     let dir = tempfile::tempdir().unwrap();
