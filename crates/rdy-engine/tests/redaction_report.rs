@@ -232,7 +232,17 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             } else if meta.is_dir() {
                 stack.push(p);
             } else {
-                out.insert(p.clone(), std::fs::read(&p).unwrap());
+                // a file that the open store holds a byte-range lock on cannot be read on
+                // Windows (os error 33); it is the lock file, which holds no project bytes
+                let bytes = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) if e.raw_os_error() == Some(33) => {
+                        assert_eq!(p.file_name().unwrap(), "lock", "{}", p.display());
+                        vec![]
+                    }
+                    Err(e) => panic!("{}: {e}", p.display()),
+                };
+                out.insert(p.clone(), bytes);
             }
         }
     }
