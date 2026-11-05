@@ -95,12 +95,18 @@ class Malformed(GitHubError):
     """A response that breaks its bound, type or identity."""
 
 
+class ArtifactExpired(Malformed):
+    """An artifact that GitHub reports as expired. It is not approval, and it is not a malformed fact:
+    recovery can tell the two apart."""
+
+
 class ReconcileRequired(GitHubError):
     """A mutation whose outcome is unknown."""
 
     def __init__(self, operation, reason, status=None):
         GitHubError.__init__(self, operation, 'outcome unknown (' + reason
                              + '); read the exact ref and object before any further write', status)
+        self.reason = reason
 
 
 class Timeout(Exception):
@@ -555,7 +561,7 @@ class GitHub(object):
         if fact.run_id != run_id:
             raise Malformed(operation, 'the artifact is not from run ' + str(run_id))
         if fact.expired:
-            raise Malformed(operation, 'the artifact expired')
+            raise ArtifactExpired(operation, 'the artifact expired')
         return fact
 
     def run_artifacts(self, run_id):

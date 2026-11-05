@@ -137,7 +137,7 @@ class FakeFacts(object):
         if fact.run_id != run_id:
             raise GITHUB.Malformed('artifact', 'the artifact is not from run ' + str(run_id))
         if fact.expired:
-            raise GITHUB.Malformed('artifact', 'the artifact expired')
+            raise GITHUB.ArtifactExpired('artifact', 'the artifact expired')
         return fact
 
     def artifact_member(self, fact, name, limit):
@@ -937,7 +937,8 @@ class Eligibility(Base):
         w = first_machine_world()
         receipt = w.add_card('release_1')
         w.archive.clear()
-        self.refuses(w, 'not authorized: the release_1 card has no accepted founder receipt')
+        w.reserve()
+        self.refuses(w, 'not authorized: the release_1 card has no accepted founder receipt', recovery=True)
         # The archived receipt must come from the enrolled archive, through protected lineage.
         for change, message in (
                 (lambda w, r: w.lineage.update(table_id='fedcba98-7654-4321-8fed-cba987654321'),
@@ -960,9 +961,10 @@ class Eligibility(Base):
                  'not authorized: the release_1 card receipt is revoked')):
             w = first_machine_world()
             receipt = w.add_card('release_1')
+            w.reserve()
             change(w, receipt)
             with self.subTest(message=message):
-                self.refuses(w, message)
+                self.refuses(w, message, recovery=True)
         # A card reference outside the pinned archive.
         w = first_machine_world()
         receipt = w.add_card('release_1')
@@ -1026,7 +1028,8 @@ class Eligibility(Base):
         # Valid founder receipts qualify: an archived one, and a first use with its bytes for the archive.
         w = first_machine_world()
         receipt = w.add_card('release_1')
-        q = self.qualifies(w)
+        w.reserve()
+        q = self.qualifies(w, recovery=True)
         self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in q.cards], [('release_1', receipt, 'archive')])
         self.assertEqual(q.cards[0].envelope_bytes, w.archive[receipt])
         w = first_machine_world()
@@ -1039,7 +1042,16 @@ class Eligibility(Base):
         self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['stable_identity_sha256'],
                          stable_identity(card.projection_bytes))
         self.assertEqual(card.request_bytes, w.members[(w.approval_runs[0]['artifact_id'], 'approval-request.json')])
-        # Fresh provider proof is used only after the archive authenticates that no accepted record exists.
+        # Before credentials the archive is never read: this proof says nothing about it.
+        self.assertNotIn('approval_record', [c[0] for c in w.calls])
+        self.assertIsInstance(q, ELIGIBILITY.Preliminary)
+        self.assertNotIsInstance(q, ELIGIBILITY.Qualified)
+        # At the signer phase, fresh provider proof is used only after the archive authenticates that no
+        # accepted record exists.
+        w.reserve()
+        q = self.qualifies(w, recovery=True)
+        self.assertIsInstance(q, ELIGIBILITY.Qualified)
+        self.assertEqual((q.cards[0].source, q.cards[0].receipt_bytes), ('first_use', card.receipt_bytes))
         self.assertIn(('approval_record', receipt), w.calls)
         self.assertEqual(w.archive, {})
 
@@ -1059,9 +1071,10 @@ class Eligibility(Base):
             scope['key_arn'] = NEW_KEY_ARN
             scope[key] = value
             w.add_card('key_change', scope=scope)
+            w.reserve()
             with self.subTest(key=key):
                 self.refuses(w, 'not authorized: the key_change card does not cover the release '
-                                + key.replace('_', ' '))
+                                + key.replace('_', ' '), recovery=True)
         w = key_change_world()
         scope = w.scope_for('key_change')
         scope['key_arn'] = NEW_KEY_ARN
@@ -1072,22 +1085,26 @@ class Eligibility(Base):
         # A card whose receipt is another kind.
         w = key_change_world()
         w.add_card('key_change', receipt_kind='new_platform')
-        self.refuses(w, 'evidence mismatch: the key_change card names a new_platform receipt')
+        w.reserve()
+        self.refuses(w, 'evidence mismatch: the key_change card names a new_platform receipt', recovery=True)
         # Release 1 needs its own card; a key card does not stand in for it, and its scope is exact.
         w = first_machine_world()
         w.add_card('key_change')
         self.refuses(w, 'not authorized: the release needs a release_1 card')
         w = first_machine_world()
         w.add_card('release_1', scope=dict(w.full_scope(), version='0.44.0'))
-        self.refuses(w, 'not authorized: the release_1 card does not cover the release version')
+        w.reserve()
+        self.refuses(w, 'not authorized: the release_1 card does not cover the release version', recovery=True)
         w = first_machine_world()
         w.add_card('release_1', scope=dict(w.full_scope(), manifest_sha256=manifest_sha([archive('0.42.0', MAC)]),
                                            artifacts=[archive('0.42.0', MAC)]))
-        self.refuses(w, 'not authorized: the release_1 card does not cover the release manifest sha256')
+        w.reserve()
+        self.refuses(w, 'not authorized: the release_1 card does not cover the release manifest sha256', recovery=True)
         # A platform card must name the exact complete target set.
         w = World()
         w.add_card('new_platform', scope={'repository': REPO, 'targets': [LINUX]})
-        self.refuses(w, 'not authorized: the new_platform card does not cover the release targets')
+        w.reserve()
+        self.refuses(w, 'not authorized: the new_platform card does not cover the release targets', recovery=True)
         # A new target set needs a card and a qualified adapter: no card makes it signable here.
         for with_card in (False, True):
             w = World()
@@ -1387,13 +1404,16 @@ class FirstUseIdentity(Base):
                 (lambda w, r, a: w.errors.update(approval_responses=ControllerError('approval responses unavailable')),
                  'eligibility incomplete: approval responses unavailable'),
                 (lambda w, r, a: w.reviews[r].clear(),
-                 'not authorized: the release_1 approval run needs exactly one founder review'),
-                (lambda w, r, a: w.errors.update(approval_record=ControllerError('the archive is unavailable')),
-                 'eligibility incomplete: the archive is unavailable')):
+                 'not authorized: the release_1 approval run needs exactly one founder review')):
             w, receipt, r, a = self.first_use()
             change(w, r, a)
             with self.subTest(message=message):
                 self.refuses(w, message)
+        # An unreadable archive is neither absence nor a way back to fresh proof.
+        w, receipt, r, a = self.first_use()
+        w.reserve()
+        w.errors['approval_record'] = ControllerError('the archive is unavailable')
+        self.refuses(w, 'eligibility incomplete: the archive is unavailable', recovery=True)
         # The first acceptance: the signer archives the exact qualified bytes, after the reservation.
         w, receipt, r, a = self.first_use()
         e_bytes = w.members[(EVID_ART, 'release-record.json')]
@@ -1439,22 +1459,18 @@ class FirstUseIdentity(Base):
         # A frozen v1 archive record still authenticates: its receipt binds the whole projection.
         w = first_machine_world()
         receipt = w.add_card('release_1', schema=1)
-        card = self.qualifies(w).cards[0]
+        w.reserve()
+        card = self.qualifies(w, recovery=True).cards[0]
         self.assertEqual((card.source, card.envelope_bytes), ('archive', w.archive[receipt]))
         issuer = EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']
         self.assertEqual(issuer['provider_evidence_sha256'], sha(card.projection_bytes))
-        # A v1 first use rebuilds the v1 receipt from the same live facts.
+        # A new first use writes schema 2 only: a card that names a v1 receipt refuses, in both phases,
+        # before it can take a reservation that nothing can then authorize.
         w = first_machine_world()
-        receipt = w.add_card('release_1', via='first_use', schema=1)
-        card = self.qualifies(w).cards[0]
-        self.assertEqual((card.source, card.receipt_sha256), ('first_use', receipt))
-        projection = EVIDENCE.parse_provider_evidence(card.projection_bytes)
-        self.assertEqual(projection.value['schema'], 1)
-        self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['provider_evidence_sha256'],
-                         projection.sha256)
-        # v1 is byte-sensitive as frozen: a re-rendered response gives another v1 receipt.
-        respond(w, w.approval_runs[0]['run_id'], repository=digest(95))
+        w.add_card('release_1', via='first_use', schema=1)
         self.refuses(w, 'not authorized: the release_1 card does not name the founder-approved receipt')
+        w.reserve()
+        self.refuses(w, 'not authorized: the release_1 card does not name the founder-approved receipt', recovery=True)
 
 
 if __name__ == '__main__':

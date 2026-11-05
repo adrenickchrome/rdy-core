@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-"""Authenticated release eligibility and recovery facts.
+"""Authenticated release eligibility and recovery facts, in stages.
 
-`qualify_new(request, facts)` qualifies a new reservation of version V. `authenticate_recovery(request,
-facts)` authenticates an existing reservation, its original release record E and tuple T, and any
-existing publication, without the new-version predicate. The caller selects recovery before new
-eligibility. Each returns an immutable `Qualified` or raises a named `Refused`.
+Before AWS credentials there is no archive access. `qualify_new(request, facts)` checks a new
+reservation of version V, and `preliminary_recovery(request, facts)` checks an existing one, its
+original release record E and tuple T, and any publication, without the new-version predicate. The
+caller selects recovery before new eligibility. Each returns an immutable `Preliminary`: its cards are
+`ProvisionalCard`s (fresh GitHub proof that says nothing about the archive) or `PendingCard`s (an
+archive reference that only the signer can resolve). It permits only the reservation bookkeeping. It
+is not a `Qualified` value and it carries no signing or promotion capability.
 
-Neither function writes GitHub state, acquires a grant or contacts KMS. `facts` is a read-only source
-of GitHub-owned facts (the read methods of `github.GitHub`, with its fact types and refusals) and a few
+`authenticate_recovery(request, facts)` is the signer phase. It runs only after the sole STS exchange,
+over a fact source whose `approval_record` reads the authenticated table. It resolves every card and
+returns a `Qualified`. Only a `Qualified` can reach KMS.
+
+`authenticate_published(request, facts)` is historical reconciliation. It authenticates the reservation,
+E, T, the caller and the publication state, and it reports the current approval status without acting
+on it. Its `Reconciliation` result is not eligibility for anything.
+
+None of them writes GitHub state, acquires a grant or contacts KMS. `facts` is a read-only source of
+GitHub-owned facts (the read methods of `github.GitHub`, with its fact types and refusals) and a few
 more reads:
 
   artifact_member(artifact_fact, name, limit) -> bytes   the one ZIP member `name` of an authenticated
@@ -17,11 +28,11 @@ more reads:
   approval_responses(run_id, artifact_id) -> list        the nine {kind, sha256, bytes} source-response
                                                           entries of a founder approval run (audit
                                                           data, never the approval's identity)
-  approval_record(receipt_sha256) -> bytes or None        the archived approval envelope, or None for
-                                                          authenticated absence (read before any
-                                                          first-use proof)
-  approval_lineage() -> dict                              the enrolled archive's table_id,
-                                                          genesis_sha256 and authority_sha256
+  approval_record(receipt_sha256) -> bytes or None        signer phase only: the archived approval
+                                                          envelope, or None for authenticated absence
+                                                          (read before any first-use proof)
+  approval_lineage() -> dict                              signer phase only: the enrolled archive's
+                                                          table_id, genesis_sha256 and authority_sha256
 
 Authority never comes from E, a candidate file or the request. It comes from GitHub run, job and
 artifact metadata checked against the protected evidence policy on main, and from founder receipts.
@@ -29,12 +40,12 @@ artifact metadata checked against the protected evidence policy on main, and fro
 A card names a founder receipt by its SHA-256. The producer here writes the successor (schema 2)
 receipt: it binds `stable_identity_sha256`, the hash of the typed provenance and scope facts only,
 never provider response bytes, so the receipt E froze is rebuilt the same way later. The source
-responses go in a separate audit section. A frozen v1 receipt still authenticates with its v1
-meaning (it binds the whole projection, responses included). Before the first durable archive, a
-card needs fresh provider proof; once the archive holds an accepted record, its original bytes are
-used and no fresh observation replaces them. Current authority (the founder, the channel,
-revocation) is checked apart from the identity, from the current policy on main. Later signing and
-promotion still check current authority.
+responses go in a separate audit section. A new first use needs a schema 2 receipt. An archived frozen
+v1 record still authenticates with its v1 meaning (it binds the whole projection, responses included).
+Before the first durable archive, a card needs fresh provider proof; once the archive holds an
+accepted record, its original bytes are used and no fresh observation replaces them. Current authority
+(the founder, the channel, revocation) is checked apart from the identity, from the current policy on
+main. Later signing and promotion still check current authority.
 """
 from dataclasses import dataclass
 import hashlib
@@ -112,6 +123,10 @@ class Refused(ControllerError):
         ControllerError.__init__(self, code + ': ' + reason)
         self.code = code
         self.reason = reason
+
+
+class _Expired(Refused):
+    """The artifact expired. Only preliminary recovery of a named approval run treats this apart."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -195,8 +210,8 @@ def check_request(request):
 
 @dataclass(frozen=True)
 class QualifiedCard(object):
-    """One founder card, authenticated. A first-use card carries the exact request, receipt and
-    provider-evidence bytes for the archive; an archived card carries its envelope."""
+    """One founder card, authenticated at the signer phase. A first-use card carries the exact request,
+    receipt and provider-evidence bytes for the archive; an archived card carries its envelope."""
     kind: str
     receipt_sha256: str
     source: str
@@ -207,8 +222,40 @@ class QualifiedCard(object):
 
 
 @dataclass(frozen=True)
-class Qualified(object):
-    """Immutable qualified facts. `tuple_bytes` is T; every T field is also here, so T can be rebuilt."""
+class ProvisionalCard(object):
+    """Before credentials: fresh GitHub proof of a first-use card. It says nothing about the archive."""
+    kind: str
+    receipt_sha256: str
+    source: str
+    request_bytes: bytes
+    receipt_bytes: bytes
+    projection_bytes: bytes
+    envelope_bytes: object
+
+
+@dataclass(frozen=True)
+class PendingCard(object):
+    """Before credentials: a card that only the signer can resolve from the archive. It holds no
+    approval bytes. `run_id` and `artifact_id` name a run that recovery deferred because its source
+    artifact expired; expiry is not approval."""
+    kind: str
+    receipt_sha256: str
+    source: str
+    run_id: object
+    artifact_id: object
+
+
+@dataclass(frozen=True)
+class HistoricalCard(object):
+    """A card of a published release, with its current status reported apart. It authorizes nothing."""
+    kind: str
+    receipt_sha256: str
+    revoked: bool
+
+
+@dataclass(frozen=True)
+class ReleaseFacts(object):
+    """Immutable release facts. `tuple_bytes` is T; every T field is also here, so T can be rebuilt."""
     mode: str
     version: str
     commit: str
@@ -240,6 +287,22 @@ class Qualified(object):
     def tuple_value(self):
         """T as a new dict (the record itself stays immutable)."""
         return json.loads(self.tuple_bytes.decode('utf-8'))
+
+
+@dataclass(frozen=True)
+class Preliminary(ReleaseFacts):
+    """The pre-credential result. It permits only the reservation bookkeeping, never KMS or promotion."""
+
+
+@dataclass(frozen=True)
+class Qualified(ReleaseFacts):
+    """The signer-phase result: every card is resolved. Only this value reaches KMS."""
+
+
+@dataclass(frozen=True)
+class Reconciliation(ReleaseFacts):
+    """Historical reconciliation of a reservation. It is not eligibility: `cards` report status only."""
+    channel_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -286,6 +349,8 @@ class _Facts(object):
             value = self._read(name)(*args)
         except Refused:
             raise
+        except gh.ArtifactExpired as error:
+            raise _Expired(INCOMPLETE, str(error))
         except ControllerError as error:
             raise Refused(_code_for(str(error), INCOMPLETE), str(error))
         self.cache[key] = value
@@ -618,9 +683,9 @@ def _channel_receipt(card, channel):
 
 
 def _approval_projection(facts, main, evidence_policy, authority, run_ref, card):
-    """Authenticates a first-use founder approval run on GitHub and rebuilds its receipt, as the
-    successor (schema 2) record and as the frozen v1 record, from the same facts. The pins come from
-    E's evidence policy; the founder is current authority."""
+    """Authenticates a first-use founder approval run on GitHub and rebuilds its receipt from those
+    facts. The producer writes the successor (schema 2) record only. The pins come from E's evidence
+    policy; the founder is current authority."""
     channel = evidence_policy.value['approval_channel']
     founder = authority['founder_user_id']
     kind = card['kind']
@@ -692,24 +757,16 @@ def _approval_projection(facts, main, evidence_policy, authority, run_ref, card)
               'environment_name': review.environments[0][1],
               'review_comment_sha256': _sha(review.comment.encode('utf-8'))}
     audit = [dict(r) for r in responses]
-    built = []
-    # The successor (schema 2) first: its identity holds no response digest, so it is stable.
+    # The identity holds no response digest, so it is stable.
     identity = dict(facts_value, schema=2, decision=ev.DECISION, kind=request.value['kind'],
                     policy_commit=request.value['policy_commit'], scope=request.value['scope'])
     projection = _parse(ev.parse_provider_evidence,
                         _canonical({'schema': 2, 'identity': identity, 'audit': {'source_responses': audit}}))
-    built.append((2, projection, dict(issuer, stable_identity_sha256=ev.stable_identity_sha256(identity))))
-    # The frozen v1 record: its receipt binds the whole projection, the source responses included.
-    projection = _parse(ev.parse_provider_evidence, _canonical(dict(facts_value, schema=1, source_responses=audit)))
-    built.append((1, projection, dict(issuer, provider_evidence_sha256=projection.sha256)))
-    candidates = []
-    for schema, projection, receipt_issuer in built:
-        receipt = {'schema': schema, 'decision': ev.DECISION, 'kind': request.value['kind'],
-                   'policy_commit': request.value['policy_commit'], 'workflow_scope_digest': request.sha256,
-                   'scope': request.value['scope'], 'issuer': receipt_issuer}
-        receipt = _parse(ev.parse_approval_receipt, _canonical(receipt))
-        candidates.append((receipt, _canonical(projection.value)))
-    return request_bytes, tuple(candidates)
+    receipt = {'schema': 2, 'decision': ev.DECISION, 'kind': request.value['kind'],
+               'policy_commit': request.value['policy_commit'], 'workflow_scope_digest': request.sha256,
+               'scope': request.value['scope'],
+               'issuer': dict(issuer, stable_identity_sha256=ev.stable_identity_sha256(identity))}
+    return request_bytes, _parse(ev.parse_approval_receipt, _canonical(receipt)), _canonical(projection.value)
 
 
 def _canonical(value):
@@ -719,16 +776,15 @@ def _canonical(value):
         raise Refused(MISMATCH, str(error))
 
 
-def _first_use(facts, main, evidence_policy, authority, run_ref, card, receipt_sha256):
-    """Fresh provider proof, before the first durable archive. The card names a successor (schema 2)
-    or a frozen v1 receipt; each is rebuilt from the same authenticated facts."""
-    request_bytes, candidates = _approval_projection(facts, main, evidence_policy, authority, run_ref, card)
-    for receipt, projection_bytes in candidates:
-        if receipt.sha256 == receipt_sha256:
-            data = _canonical(receipt.value)
-            return QualifiedCard(card['kind'], receipt_sha256, 'first_use', request_bytes, data, projection_bytes,
-                                 None), receipt
-    raise Refused(UNAUTHORIZED, 'the ' + card['kind'] + ' card does not name the founder-approved receipt')
+def _first_use(facts, main, evidence_policy, authority, run_ref, card, receipt_sha256, result=QualifiedCard):
+    """Fresh provider proof, before the first durable archive. The card must name the successor
+    (schema 2) receipt rebuilt from the authenticated facts: a v1 card never takes a new first use."""
+    request_bytes, receipt, projection_bytes = _approval_projection(facts, main, evidence_policy, authority, run_ref,
+                                                                    card)
+    if receipt.sha256 != receipt_sha256:
+        raise Refused(UNAUTHORIZED, 'the ' + card['kind'] + ' card does not name the founder-approved receipt')
+    return result(card['kind'], receipt_sha256, 'first_use', request_bytes, _canonical(receipt.value),
+                  projection_bytes, None), receipt
 
 
 def _archived(facts, main, authority, card, receipt_sha256, data, run_ref):
@@ -762,10 +818,89 @@ def _archived(facts, main, authority, card, receipt_sha256, data, run_ref):
                          data), envelope.receipt
 
 
+def _card_authority(card, channel, authority):
+    """The checks that need no approval bytes. The card's receipt identity is checked against E's
+    evidence policy. Current authority comes from the current policy on main."""
+    kind = card['kind']
+    if kind == 'revocation':
+        raise Refused(UNAUTHORIZED, 'a revocation card never permits signing')
+    receipt_sha256 = _channel_receipt(card, channel)
+    if authority['enabled'] is not True:
+        raise Refused(UNAUTHORIZED, 'the founder approval channel is disabled')
+    if receipt_sha256 in authority['revoked_receipts']:
+        raise Refused(UNAUTHORIZED, 'the ' + kind + ' card receipt is revoked')
+    return receipt_sha256
+
+
+def _card_scope(kind, receipt, expected):
+    if receipt.value['kind'] != kind:
+        raise Refused(MISMATCH, 'the ' + kind + ' card names a ' + receipt.value['kind'] + ' receipt')
+    scope = receipt.value['scope']
+    for key in ev.SCOPE_KEYS[kind]:
+        if scope[key] != expected[key]:
+            raise Refused(UNAUTHORIZED, 'the ' + kind + ' card does not cover the release ' + key.replace('_', ' '))
+
+
+def _preliminary_cards(mode):
+    """Before credentials. A card with a named run gets fresh GitHub proof; a card without one is
+    pending. Nothing here reads the archive or infers its state. Recovery alone defers a named run
+    whose source artifact expired: every other refusal of that proof stays a refusal."""
+    def resolve(facts, main, request, record, evidence_policy, current_evidence_policy, expected, required):
+        basis = record.value['approval_basis']
+        channel = evidence_policy.value['approval_channel']
+        authority = current_evidence_policy.value['approval_channel']
+        if basis['mode'] == 'standing_preview' and required:
+            raise Refused(UNAUTHORIZED, 'a standing preview cannot cover a ' + required[0] + ' release')
+        runs = {r.receipt_sha256: r for r in request.approvals}
+        named = set()
+        cards = []
+        for card in basis['cards']:
+            kind = card['kind']
+            receipt_sha256 = _card_authority(card, channel, authority)
+            run = runs.get(receipt_sha256)
+            if run is None:
+                cards.append(PendingCard(kind, receipt_sha256, 'pending_archive', None, None))
+                continue
+            named.add(receipt_sha256)
+            try:
+                provisional, receipt = _first_use(facts, main, evidence_policy, authority, run, card, receipt_sha256,
+                                                  ProvisionalCard)
+            except _Expired:
+                if mode != 'recovery':
+                    raise
+                cards.append(PendingCard(kind, receipt_sha256, 'pending_archive', run.run_id, run.artifact_id))
+                continue
+            _card_scope(kind, receipt, expected)
+            cards.append(provisional)
+        _closed_cards(runs, named, cards, required)
+        return tuple(cards)
+    return resolve
+
+
+def _closed_cards(runs, named, cards, required):
+    if set(runs) - named:
+        raise Refused(MISMATCH, 'a requested approval run names no card of the release record')
+    kinds = {c.kind for c in cards}
+    for kind in required:
+        if kind not in kinds:
+            raise Refused(UNAUTHORIZED, 'the release needs a ' + kind + ' card')
+
+
+def _historical_cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected, required):
+    """Status only, for a release that already published. Nothing here decides anything."""
+    channel = evidence_policy.value['approval_channel']
+    revoked = current_evidence_policy.value['approval_channel']['revoked_receipts']
+    cards = []
+    for card in record.value['approval_basis']['cards']:
+        receipt_sha256 = _channel_receipt(card, channel)
+        cards.append(HistoricalCard(card['kind'], receipt_sha256, receipt_sha256 in revoked))
+    return tuple(cards)
+
+
 def _cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected, required):
-    """Every card E names, authenticated and in scope; then every required kind is present. The card's
-    receipt identity is checked against E's evidence policy. Current authority (the channel is enabled,
-    the receipt is not revoked, the founder) comes from the current policy on main."""
+    """The signer phase: every card E names, authenticated and in scope; then every required kind is
+    present. Current authority (the channel is enabled, the receipt is not revoked, the founder) comes
+    from the current policy on main."""
     basis = record.value['approval_basis']
     channel = evidence_policy.value['approval_channel']
     authority = current_evidence_policy.value['approval_channel']
@@ -776,13 +911,7 @@ def _cards(facts, main, request, record, evidence_policy, current_evidence_polic
     cards = []
     for card in basis['cards']:
         kind = card['kind']
-        if kind == 'revocation':
-            raise Refused(UNAUTHORIZED, 'a revocation card never permits signing')
-        receipt_sha256 = _channel_receipt(card, channel)
-        if authority['enabled'] is not True:
-            raise Refused(UNAUTHORIZED, 'the founder approval channel is disabled')
-        if receipt_sha256 in authority['revoked_receipts']:
-            raise Refused(UNAUTHORIZED, 'the ' + kind + ' card receipt is revoked')
+        receipt_sha256 = _card_authority(card, channel, authority)
         # The archive first: after the first durable archive its original bytes win. Fresh provider
         # proof is used only when the archive authenticates that no accepted record exists.
         data = facts.call('approval_record', receipt_sha256)
@@ -796,19 +925,9 @@ def _cards(facts, main, request, record, evidence_policy, current_evidence_polic
                                             receipt_sha256)
         else:
             raise Refused(UNAUTHORIZED, 'the ' + kind + ' card has no accepted founder receipt')
-        if receipt.value['kind'] != kind:
-            raise Refused(MISMATCH, 'the ' + kind + ' card names a ' + receipt.value['kind'] + ' receipt')
-        scope = receipt.value['scope']
-        for key in ev.SCOPE_KEYS[kind]:
-            if scope[key] != expected[key]:
-                raise Refused(UNAUTHORIZED, 'the ' + kind + ' card does not cover the release ' + key.replace('_', ' '))
+        _card_scope(kind, receipt, expected)
         cards.append(qualified)
-    if set(runs) - named:
-        raise Refused(MISMATCH, 'a requested approval run names no card of the release record')
-    kinds = {c.kind for c in cards}
-    for kind in required:
-        if kind not in kinds:
-            raise Refused(UNAUTHORIZED, 'the release needs a ' + kind + ' card')
+    _closed_cards(runs, named, cards, required)
     return tuple(cards)
 
 
@@ -816,7 +935,9 @@ def _cards(facts, main, request, record, evidence_policy, current_evidence_polic
 # Qualification
 # ---------------------------------------------------------------------------------------------
 
-def _authenticate(facts, request, mode, releases, reserved):
+def _authenticate(facts, request, mode, releases, reserved, resolve_cards):
+    """Every release fact except the cards, which the stage's `resolve_cards` decides. Returns the
+    fields of a `ReleaseFacts` and the current evidence policy."""
     version = request.version
     main = _Main(facts)
     candidate_ref = facts.call('ref', 'tags/candidate/v' + version)
@@ -874,8 +995,8 @@ def _authenticate(facts, request, mode, releases, reserved):
         if scope[key] != expected[key]:
             raise Refused(MISMATCH, 'the approval scope ' + key.replace('_', ' ')
                           + ' does not match the authenticated release facts')
-    cards = _cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected,
-                   _required_cards(version, policy, releases))
+    cards = resolve_cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected,
+                          _required_cards(version, policy, releases))
 
     signer = {'key_arn': policy.value['key_arn'], 'fingerprint': policy.value['fingerprint'],
               'first_machine_tag': policy.value['first_machine_tag'],
@@ -888,7 +1009,7 @@ def _authenticate(facts, request, mode, releases, reserved):
         tuple_bytes = ev.tuple_bytes(rebuilt)
     except ControllerError as error:
         raise Refused(_code_for(str(error), MISMATCH), str(error))
-    return Qualified(
+    return dict(
         mode=mode, version=version, commit=commit, design_landing=e['design_landing'],
         evidence_sha256=record.sha256, evidence_bytes=evidence_bytes,
         manifest_sha256=e['candidate']['manifest_sha256'],
@@ -902,12 +1023,13 @@ def _authenticate(facts, request, mode, releases, reserved):
         candidate_run=(candidate_run.run_id, candidate_run.run_attempt, candidate_artifact.artifact_id,
                        candidate_artifact.digest),
         fast_gate_ignored=tuple((t['target'], t['fast_gate']['ignored']) for t in e['targets']),
-        install=install, reservation=None, publication=None)
+        install=install, reservation=None, publication=None), current_evidence_policy
 
 
 def qualify_new(request, facts):
-    """Qualifies a new reservation of the requested version: V must be free and newer than every
-    published version. Writes nothing."""
+    """The pre-credential check of a new reservation of the requested version: V must be free and newer
+    than every published version. It reads no archive and writes nothing. Its `Preliminary` permits
+    only the reservation bookkeeping."""
     request = check_request(request)
     facts = _Facts(facts)
     version = request.version
@@ -920,12 +1042,34 @@ def qualify_new(request, facts):
         raise Refused(CONFLICT, 'a release of v' + version + ' already exists')
     if any(m >= _minor(version) for m in _published(releases)):
         raise Refused(CONFLICT, 'v' + version + ' is not newer than every published version')
-    return _authenticate(facts, request, 'new', releases, None)
+    fields, _ = _authenticate(facts, request, 'new', releases, None, _preliminary_cards('new'))
+    return Preliminary(**fields)
+
+
+def preliminary_recovery(request, facts):
+    """The pre-credential check of an existing reservation. It reads no archive and writes nothing."""
+    return _recover(request, facts, Preliminary, _preliminary_cards('recovery'))
 
 
 def authenticate_recovery(request, facts):
-    """Authenticates the existing reservation of the requested version, its original E and T, and
-    any publication, without the new-version predicate. Writes nothing."""
+    """The signer phase, after the sole STS exchange: authenticates the existing reservation of the
+    requested version, its original E and T, and any publication, without the new-version predicate,
+    and resolves every card through the authenticated archive. Writes nothing."""
+    return _recover(request, facts, Qualified, _cards)
+
+
+def authenticate_published(request, facts):
+    """Historical reconciliation: the same reservation, E, T, caller and publication, with no current
+    approval decision. The approval status is reported, never acted on. Writes nothing."""
+    return _recover(request, facts, Reconciliation, _historical_cards)
+
+
+def check_source(facts, evidence_bytes, version, commit):
+    """Cargo and the committed release exports at the reserved commit against E."""
+    _source(_Facts(facts), _parse(ev.parse_release_record, evidence_bytes), version, commit)
+
+
+def _recover(request, facts, result, resolve_cards):
     request = check_request(request)
     facts = _Facts(facts)
     version = request.version
@@ -946,17 +1090,14 @@ def authenticate_recovery(request, facts):
     if reserved['release_evidence_sha256'] != request.evidence_sha256:
         raise Refused(MISMATCH, 'the requested release record is not the reserved one')
     releases = facts.call('releases')
-    qualified = _authenticate(facts, request, 'recovery', releases, reserved)
-    if qualified.tuple_bytes != tag.message_bytes:
+    fields, current_evidence_policy = _authenticate(facts, request, 'recovery', releases, reserved, resolve_cards)
+    if fields['tuple_bytes'] != tag.message_bytes:
         raise Refused(MISMATCH, 'the reservation tuple is not the tuple of the authenticated facts')
-    publication = _publication(facts, releases, version, qualified.commit)
-    return _replace(qualified, reservation=Reservation(ref.sha256, tag.sha), publication=publication)
-
-
-def _replace(qualified, **changes):
-    fields = {name: getattr(qualified, name) for name in Qualified.__dataclass_fields__}
-    fields.update(changes)
-    return Qualified(**fields)
+    fields.update(reservation=Reservation(ref.sha256, tag.sha),
+                  publication=_publication(facts, releases, version, fields['commit']))
+    if result is Reconciliation:
+        fields['channel_enabled'] = current_evidence_policy.value['approval_channel']['enabled'] is True
+    return result(**fields)
 
 
 def _publication(facts, releases, version, commit):
