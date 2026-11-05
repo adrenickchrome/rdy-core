@@ -723,9 +723,17 @@ def parse_approval_receipt(data):
     return Record('approval receipt', digest, len(data), value)
 
 
+def provider_evidence_sha256(value):
+    """The approval identity an approval receipt binds: the SHA-256 of the canonical projection
+    without `source_responses`. Those digests and lengths of the original responses are audit data:
+    GitHub re-renders its responses (pushes, counters, timestamps), so they never form the identity."""
+    return hashlib.sha256(cand.canonical({k: v for k, v in value.items() if k != 'source_responses'})).hexdigest()
+
+
 def parse_provider_evidence(data):
     """The canonical provider-facts projection an approval receipt binds, at most 64 KiB. It holds
-    digests and lengths of the original responses, not the responses."""
+    digests and lengths of the original responses, not the responses. The receipt binds its
+    `provider_evidence_sha256`; the archive acceptance binds its exact bytes."""
     digest, value = read(data, 'provider evidence', RECORD_MAX)
     what = 'the provider evidence'
     closed(value, PROJECTION_KEYS, what)
@@ -849,7 +857,7 @@ def parse_archive_envelope(data):
     if receipt.value['workflow_scope_digest'] != request.sha256 or acceptance['request_sha256'] != request.sha256 \
             or projection.value['artifact']['request_sha256'] != request.sha256:
         raise ControllerError('the approval receipt does not bind its request')
-    if issuer['provider_evidence_sha256'] != projection.sha256 \
+    if issuer['provider_evidence_sha256'] != provider_evidence_sha256(projection.value) \
             or acceptance['provider_projection_sha256'] != projection.sha256:
         raise ControllerError('the approval receipt does not bind its provider evidence')
     for key in ('kind', 'scope', 'policy_commit', 'decision'):

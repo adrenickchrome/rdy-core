@@ -15,7 +15,8 @@ more reads:
   release_trust(version, policy_commit, signing) -> dict  the `qa-release-trust select` result for V
                                                           over release-keys/ at the policy commit
   approval_responses(run_id, artifact_id) -> list        the nine {kind, sha256, bytes} source-response
-                                                          entries of a founder approval run
+                                                          entries of a founder approval run (audit
+                                                          data, never the approval's identity)
   approval_record(receipt_sha256) -> bytes or None        the archived approval envelope, or None for
                                                           authenticated absence
   approval_lineage() -> dict                              the enrolled archive's table_id,
@@ -23,7 +24,10 @@ more reads:
 
 Authority never comes from E, a candidate file or the request. It comes from GitHub run, job and
 artifact metadata checked against the protected evidence policy on main, and from founder receipts.
-Later signing and promotion still check current authority.
+A founder receipt's identity is fixed when E is sealed: it binds the approval's identifying facts,
+never provider response bytes, so qualification and recovery authenticate the same receipt. Current
+authority (the founder, the channel, revocation) is checked apart from it, from the current policy on
+main. Later signing and promotion still check current authority.
 """
 from dataclasses import dataclass
 import hashlib
@@ -606,10 +610,11 @@ def _channel_receipt(card, channel):
         raise Refused(UNAUTHORIZED, 'the ' + card['kind'] + ' card is not in the pinned approval archive')
 
 
-def _approval_projection(facts, main, evidence_policy, run_ref, card):
-    """Authenticates a first-use founder approval run on GitHub and rebuilds its receipt."""
+def _approval_projection(facts, main, evidence_policy, authority, run_ref, card):
+    """Authenticates a first-use founder approval run on GitHub and rebuilds its receipt. The pins come
+    from E's evidence policy; the founder is current authority."""
     channel = evidence_policy.value['approval_channel']
-    founder = channel['founder_user_id']
+    founder = authority['founder_user_id']
     kind = card['kind']
     run = facts.call('run_attempt', run_ref.run_id, 1)
     if (run.workflow_id, run.path, run.event, run.head_branch) != (
@@ -643,16 +648,16 @@ def _approval_projection(facts, main, evidence_policy, run_ref, card):
     if review.comment != 'APPROVE sha256:' + request.sha256:
         raise Refused(UNAUTHORIZED, 'the founder review does not approve the ' + kind + ' request')
     responses = facts.call('approval_responses', run.run_id, artifact.artifact_id)
-    repository = facts.call('repository')
-    known = {'artifact': (artifact.sha256, None), 'protected_policy': (evidence_policy.sha256, evidence_policy.size),
-             'repository': (repository.sha256, None), 'request_archive': (artifact.digest, artifact.size),
-             'run_attempt': (run.sha256, None), 'workflow_source': (workflow.sha256, len(workflow.data))}
+    # Entries that hash exact file or ZIP bytes must equal the live facts. The others hash API responses
+    # that GitHub re-renders (pushes, counters, timestamps): they are audit data only.
+    known = {'protected_policy': (evidence_policy.sha256, evidence_policy.size),
+             'request_archive': (artifact.digest, artifact.size),
+             'workflow_source': (workflow.sha256, len(workflow.data))}
     if not (isinstance(responses, list) and all(isinstance(r, dict) for r in responses)):
         raise Refused(MISMATCH, 'the ' + kind + ' approval source responses are malformed')
     for entry in responses:
         expected = known.get(entry.get('kind'))
-        if expected and (entry.get('sha256') != expected[0] or (expected[1] is not None
-                                                                and entry.get('bytes') != expected[1])):
+        if expected and (entry.get('sha256'), entry.get('bytes')) != expected:
             raise Refused(MISMATCH, 'the ' + kind + ' approval source responses do not match the authenticated facts')
     projection = {
         'schema': 1, 'repository_id': run.repository_id, 'head_repository_id': run.head_repository_id,
@@ -684,7 +689,7 @@ def _approval_projection(facts, main, evidence_policy, run_ref, card):
                    'reviewer_id': review.user_id, 'environment_id': review.environments[0][0],
                    'environment_name': review.environments[0][1],
                    'review_comment_sha256': _sha(review.comment.encode('utf-8')),
-                   'provider_evidence_sha256': projection.sha256},
+                   'provider_evidence_sha256': ev.provider_evidence_sha256(projection.value)},
     }
     receipt = _parse(ev.parse_approval_receipt, _canonical(receipt))
     return request_bytes, receipt, _canonical(projection.value)
@@ -697,15 +702,16 @@ def _canonical(value):
         raise Refused(MISMATCH, str(error))
 
 
-def _first_use(facts, main, evidence_policy, run_ref, card, receipt_sha256):
-    request_bytes, receipt, projection_bytes = _approval_projection(facts, main, evidence_policy, run_ref, card)
+def _first_use(facts, main, evidence_policy, authority, run_ref, card, receipt_sha256):
+    request_bytes, receipt, projection_bytes = _approval_projection(facts, main, evidence_policy, authority, run_ref,
+                                                                    card)
     if receipt.sha256 != receipt_sha256:
         raise Refused(UNAUTHORIZED, 'the ' + card['kind'] + ' card does not name the founder-approved receipt')
     data = _canonical(receipt.value)
     return QualifiedCard(card['kind'], receipt_sha256, 'first_use', request_bytes, data, projection_bytes, None), receipt
 
 
-def _archived(facts, main, evidence_policy, card, receipt_sha256):
+def _archived(facts, main, authority, card, receipt_sha256):
     """A founder receipt accepted earlier, read from the enrolled archive through protected lineage."""
     kind = card['kind']
     data = facts.call('approval_record', receipt_sha256)
@@ -726,7 +732,7 @@ def _archived(facts, main, evidence_policy, card, receipt_sha256):
         raise Refused(UNAUTHORIZED, 'the archived ' + kind + ' approval policy is not the protected policy')
     if _parse(ev.parse_policy, accepted).value['signer_workflow_sha'] != acceptance['signer_workflow_sha']:
         raise Refused(UNAUTHORIZED, 'the archived ' + kind + ' approval was not accepted by its policy signer')
-    founder = evidence_policy.value['approval_channel']['founder_user_id']
+    founder = authority['founder_user_id']
     issuer = envelope.receipt.value['issuer']
     if not (issuer['reviewer_id'] == issuer['actor_id'] == issuer['triggering_actor_id'] == founder):
         raise Refused(UNAUTHORIZED, 'the archived ' + kind + ' approval is not the founder approval')
@@ -736,10 +742,13 @@ def _archived(facts, main, evidence_policy, card, receipt_sha256):
                          data), envelope.receipt
 
 
-def _cards(facts, main, request, record, evidence_policy, expected, required):
-    """Every card E names, authenticated and in scope; then every required kind is present."""
+def _cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected, required):
+    """Every card E names, authenticated and in scope; then every required kind is present. The card's
+    receipt identity is checked against E's evidence policy. Current authority (the channel is enabled,
+    the receipt is not revoked, the founder) comes from the current policy on main."""
     basis = record.value['approval_basis']
     channel = evidence_policy.value['approval_channel']
+    authority = current_evidence_policy.value['approval_channel']
     if basis['mode'] == 'standing_preview' and required:
         raise Refused(UNAUTHORIZED, 'a standing preview cannot cover a ' + required[0] + ' release')
     runs = {r.receipt_sha256: r for r in request.approvals}
@@ -750,15 +759,16 @@ def _cards(facts, main, request, record, evidence_policy, expected, required):
         if kind == 'revocation':
             raise Refused(UNAUTHORIZED, 'a revocation card never permits signing')
         receipt_sha256 = _channel_receipt(card, channel)
-        if channel['enabled'] is not True:
+        if authority['enabled'] is not True:
             raise Refused(UNAUTHORIZED, 'the founder approval channel is disabled')
-        if receipt_sha256 in channel['revoked_receipts']:
+        if receipt_sha256 in authority['revoked_receipts']:
             raise Refused(UNAUTHORIZED, 'the ' + kind + ' card receipt is revoked')
         if receipt_sha256 in runs:
             named.add(receipt_sha256)
-            qualified, receipt = _first_use(facts, main, evidence_policy, runs[receipt_sha256], card, receipt_sha256)
+            qualified, receipt = _first_use(facts, main, evidence_policy, authority, runs[receipt_sha256], card,
+                                            receipt_sha256)
         else:
-            qualified, receipt = _archived(facts, main, evidence_policy, card, receipt_sha256)
+            qualified, receipt = _archived(facts, main, authority, card, receipt_sha256)
         if receipt.value['kind'] != kind:
             raise Refused(MISMATCH, 'the ' + kind + ' card names a ' + receipt.value['kind'] + ' receipt')
         scope = receipt.value['scope']
@@ -837,7 +847,7 @@ def _authenticate(facts, request, mode, releases, reserved):
         if scope[key] != expected[key]:
             raise Refused(MISMATCH, 'the approval scope ' + key.replace('_', ' ')
                           + ' does not match the authenticated release facts')
-    cards = _cards(facts, main, request, record, evidence_policy, expected,
+    cards = _cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected,
                    _required_cards(version, policy, releases))
 
     signer = {'key_arn': policy.value['key_arn'], 'fingerprint': policy.value['fingerprint'],

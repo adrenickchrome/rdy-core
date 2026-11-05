@@ -208,7 +208,8 @@ def receipt(request_value, request_bytes, projection_bytes):
                        'reviewer_id': FOUNDER, 'environment_id': 41,
                        'environment_name': 'release-exception-approval',
                        'review_comment_sha256': sha(proj['review']['comment'].encode()),
-                       'provider_evidence_sha256': sha(projection_bytes)}}
+                       'provider_evidence_sha256': sha(canon({k: v for k, v in proj.items()
+                                                              if k != 'source_responses'}))}}
 
 
 def envelope(kind='key_change'):
@@ -540,6 +541,19 @@ class Schemas(unittest.TestCase):
         value['provider_projection_body'] = canon(proj).decode()
         self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
                            'the provider evidence source responses are not the nine kinds in order')
+        # The receipt binds the approval identity, not the recorded response digests; the acceptance
+        # binds the exact projection bytes that were archived.
+        value = envelope()
+        proj = json.loads(value['provider_projection_body'])
+        proj['source_responses'][4]['sha256'] = digest(41)
+        value['provider_projection_body'] = canon(proj).decode()
+        self.assertRefuses(EVIDENCE.parse_archive_envelope, canon(value),
+                           'the approval receipt does not bind its provider evidence')
+        value['acceptance']['provider_projection_sha256'] = sha(canon(proj))
+        self.assertEqual(EVIDENCE.parse_archive_envelope(canon(value)).receipt.sha256,
+                         envelope()['acceptance']['receipt_sha256'])
+        self.assertEqual(EVIDENCE.provider_evidence_sha256(proj),
+                         EVIDENCE.provider_evidence_sha256(json.loads(envelope()['provider_projection_body'])))
         # Escaping inside the envelope still counts towards its 64 KiB bound.
         value = envelope()
         value['request_body'] = value['request_body'] + '\u0001' * 11000
