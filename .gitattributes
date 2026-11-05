@@ -1,3 +1,35 @@
+# The daemon's source build id (D-CCC6E) hashes the bytes of Cargo.toml, Cargo.lock and every
+# file under crates/. A checkout with core.autocrlf=true must give the bytes the commit holds,
+# so the text kinds below are always LF. The lines after this block win for the released
+# fixtures, which stay -text.
+/Cargo.toml text eol=lf
+/Cargo.lock text eol=lf
+crates/**/*.rs text eol=lf
+crates/**/*.toml text eol=lf
+crates/**/*.lock text eol=lf
+crates/**/*.md text eol=lf
+crates/**/*.json text eol=lf
+crates/**/*.yaml text eol=lf
+crates/**/*.txt text eol=lf
+crates/**/*.html text eol=lf
+crates/**/*.css text eol=lf
+crates/**/*.js text eol=lf
+crates/**/*.py text eol=lf
+crates/**/*.svg text eol=lf
+crates/**/*.mmd text eol=lf
+crates/**/*.log text eol=lf
+crates/**/FORMAT text eol=lf
+crates/**/FEATURES text eol=lf
+crates/**/.gitignore text eol=lf
+# The text goldens are compared byte for byte.
+crates/rdy-qa/tests/golden/** text eol=lf
+# Signed fixtures and binary assets are never converted.
+crates/rdy-engine/tests/fixtures/sshsig/* -text
+crates/rdy-qa/fixtures/pattern-matching/blobs/* -text
+crates/**/*.ttf binary
+crates/**/*.woff2 binary
+crates/**/*.jpg binary
+
 # Each area test binary lists its test files; two branches that add tests merge both lines.
 crates/rdy-qa/tests/*/main.rs merge=union
 # The released dump fixtures are pinned by the hash of their bytes: never convert line endings.

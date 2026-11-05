@@ -7,7 +7,7 @@ use crate::wc::layout::{BLOBS_DIR, FileKind, WcTree};
 use crate::wc::project::Projection;
 use crate::wc::state::{
     Base, BaseBlock, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, Stage, UPDATE_FILE,
-    WcState, new_nonce, stage_paths,
+    WcState, lf_syntax, new_nonce, plain_rel, stage_paths,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -54,14 +54,16 @@ pub fn base_from(proj: &Projection) -> Base {
     }
 }
 
-/// The bytes of the regular file at `path`; `None` when it is missing, is not a regular file
-/// (a link is never followed) or cannot be read.
+/// The bytes of the regular file at `path`, its line syntax as LF (`lf_syntax`); `None` when it
+/// is missing, is not a regular file (a link is never followed) or cannot be read. Every member
+/// file, base copy and staged copy is text, so a copy and a file that differ only in CR LF
+/// against LF line ends read as the same.
 fn regular_bytes(path: &Path) -> Option<Vec<u8>> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() {
         return None;
     }
-    fs::read(path).ok()
+    fs::read(path).ok().map(|b| lf_syntax(&b).into_owned())
 }
 
 /// The paths with edits a checkout would discard, sorted: a tracked file missing, reached
@@ -130,7 +132,7 @@ fn io_err(path: &Path, what: &str, e: impl std::fmt::Display) -> RdyError {
 /// `rel` as a path under the root: only plain names, never `..`, `/` or a prefix.
 pub(crate) fn inside(rel: &str) -> Result<&Path, RdyError> {
     let p = Path::new(rel);
-    if rel.is_empty() || !p.components().all(|c| matches!(c, Component::Normal(_))) {
+    if !plain_rel(rel) || !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("{rel:?} is not a path inside the working copy"),
@@ -239,10 +241,20 @@ fn fix_case(dir: &Path) -> Result<(), RdyError> {
     };
     let from = parent.join(stored);
     let tmp = parent.join(format!(".rdy-case-{}", new_nonce()));
-    fs::rename(&from, &tmp).map_err(|e| io_err(&from, "rename", e))?;
-    if let Err(e) = fs::rename(&tmp, dir) {
-        let _ = fs::rename(&tmp, &from);
-        return Err(io_err(dir, "rename", e));
+    rdy_store::pio::rename_durable(&from, &tmp).map_err(|e| io_err(&from, "rename", e))?;
+    if let Err(e) = rdy_store::pio::rename_durable(&tmp, dir) {
+        // put the original back under its own spelling; when that fails too, say where it is
+        return Err(match rdy_store::pio::rename_durable(&tmp, &from) {
+            Ok(()) => io_err(dir, "rename", e),
+            Err(back) => io_err(
+                dir,
+                "rename",
+                format!("{e}; the original is kept as {} ({back})", tmp.display()),
+            ),
+        });
+    }
+    if let Some(parent) = dir.parent() {
+        rdy_store::fsutil::sync_dir(parent).map_err(|e| io_err(parent, "flush", e))?;
     }
     Ok(())
 }
@@ -337,7 +349,7 @@ pub(crate) fn write_state_copies(
         let path = dir.join(p);
         match fs::symlink_metadata(&path) {
             Ok(m) if m.file_type().is_file() => {
-                if fs::read(&path).is_ok_and(|b| b == text.as_bytes()) {
+                if regular_bytes(&path).is_some_and(|b| b == lf_syntax(text.as_bytes()).as_ref()) {
                     // on a re-run the rename that put these bytes there may not have reached the
                     // disk: flush the directory entry, not the file
                     if flush_skipped
@@ -712,10 +724,10 @@ fn replaceable(place: &Place, st: &WcState, rel: &str, text: Option<&str>) -> bo
     if !meta.file_type().is_file() {
         return false;
     }
-    let Ok(bytes) = fs::read(&path) else {
+    let Some(bytes) = regular_bytes(&path) else {
         return false;
     };
-    if text.is_some_and(|t| t.as_bytes() == bytes.as_slice()) {
+    if text.is_some_and(|t| lf_syntax(t.as_bytes()).as_ref() == bytes.as_slice()) {
         return true;
     }
     let known = |q: &str| {

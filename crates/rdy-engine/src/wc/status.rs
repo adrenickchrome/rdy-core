@@ -4,7 +4,7 @@
 
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::layout::WcTree;
-use crate::wc::state::{ConflictEntry, ConflictKind, Place, WcState, stage_paths};
+use crate::wc::state::{ConflictEntry, ConflictKind, Place, WcState, lf_syntax, stage_paths};
 use rdy_model::{BlockId, Hash};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,7 +125,9 @@ fn classify(
         return Some((ChangeKind::Added, None));
     };
     if st.base.files.get(path) == Some(head) {
-        let base = fs::read(place.base_file(path)).ok().map(|b| Hash::of(&b));
+        let base = fs::read(place.base_file(path))
+            .ok()
+            .map(|b| Hash::of(&lf_syntax(&b)));
         return (base.as_ref() != Some(&item.hash)).then_some((ChangeKind::Modified, None));
     }
     let from = st
@@ -193,7 +195,7 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
                 p,
                 Item {
                     head: head_of(&bytes),
-                    hash: Hash::of(&bytes),
+                    hash: Hash::of(&lf_syntax(&bytes)),
                 },
             );
         }

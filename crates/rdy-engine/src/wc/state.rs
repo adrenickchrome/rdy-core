@@ -519,7 +519,7 @@ impl WcState {
 /// A path under `base`, refused when it is absolute or climbs out.
 fn checked(rel: &str) -> Result<&Path, RdyError> {
     let p = Path::new(rel);
-    if rel.is_empty() || !p.components().all(|c| matches!(c, Component::Normal(_))) {
+    if !plain_rel(rel) || !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("{rel:?} is not a path inside the working copy"),
@@ -529,10 +529,43 @@ fn checked(rel: &str) -> Result<&Path, RdyError> {
     Ok(p)
 }
 
-/// Stages `bytes` as the copy of the file at `rel`.
+/// Whether `rel` is a logical working-copy path on every host: `/`-separated plain names, none
+/// empty, `.` or `..`, and none holding a backslash or a colon (a separator or a drive on
+/// Windows, a plain name character elsewhere). One answer on every host keeps a project that
+/// checks out on one host from failing on another.
+pub(crate) fn plain_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel
+            .split('/')
+            .all(|s| !s.is_empty() && s != "." && s != ".." && !s.contains(['\\', ':']))
+}
+
+/// The text of a member file with its line syntax as LF: each CR LF pair is one LF. A carriage
+/// return that is content never stands raw in a file rdy writes (YAML writes it as an escape),
+/// and a YAML reader reads CR LF as one line break, so this changes no value; a lone CR stays.
+/// An editor or `core.autocrlf` may give a checked-out file CR LF line ends; this is the one form
+/// every comparison, hash and staged copy uses.
+pub(crate) fn lf_syntax(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !bytes.windows(2).any(|w| w == b"\r\n") {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Stages `bytes` as the copy of the file at `rel`, its line syntax as LF (`lf_syntax`).
 pub fn stage_put(place: &Place, rel: &str, bytes: &[u8]) -> Result<(), RdyError> {
     checked(rel)?;
-    put(&place.stage_file(rel), bytes)
+    put(&place.stage_file(rel), &lf_syntax(bytes))
 }
 
 /// Drops the staged copy of `rel`, and the directories it leaves empty.
@@ -658,8 +691,15 @@ mod tests {
             p.state,
             d.path().join("proj").join(WORKTREES_DIR).join("wt1")
         );
-        // an absolute pointer stays as written
-        fs::write(wt.join(POINTER_FILE), "project: /a/b\nname: wt1\n").unwrap();
-        assert_eq!(Place::from_pointer(&wt).unwrap().project, Path::new("/a/b"));
+        // an absolute pointer stays as written, in the host's own form
+        let abs = d.path().join("a").join("b");
+        let ptr = format!(
+            "project: {}\nname: wt1\n",
+            serde_yaml_ng::to_string(abs.to_str().unwrap())
+                .unwrap()
+                .trim_end()
+        );
+        fs::write(wt.join(POINTER_FILE), ptr).unwrap();
+        assert_eq!(Place::from_pointer(&wt).unwrap().project, abs);
     }
 }
