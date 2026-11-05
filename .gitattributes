@@ -8,3 +8,5 @@ crates/rdy-qa/fixtures/sync/* -text
 crates/rdy-diagram/tests/fixtures/** -text
 # The native store fixtures are pinned by the hash of their bytes: FORMAT and expect.json are text, so never convert line endings.
 crates/rdy-qa/fixtures/store/** -text
+# The signed release-key fixtures are pinned by the hash of their bytes: never convert line endings.
+crates/rdy-qa/fixtures/release-keys/** -text

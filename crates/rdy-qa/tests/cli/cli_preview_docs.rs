@@ -1007,6 +1007,52 @@ fn rsig3_historical_range_runs_through_v0_41_0() {
     assert!(keys.signer_for("0.42.0").is_err());
 }
 
+/// The signed release-key fixtures are pinned by the hash of their bytes. No file under
+/// `fixtures/release-keys` may be text-normalised (a Windows checkout with core.autocrlf).
+#[test]
+fn rsig3_release_key_fixtures_are_not_text_normalised() {
+    let attributes = read(".gitattributes");
+    assert!(
+        attributes
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>()
+                == ["crates/rdy-qa/fixtures/release-keys/**", "-text"]),
+        "the release-key fixtures need a `-text` rule in .gitattributes"
+    );
+    let base = root().join("crates/rdy-qa/fixtures/release-keys");
+    let mut files = Vec::new();
+    let mut dirs = vec![base];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "no release-key fixtures found");
+    for file in files {
+        let rel = file.strip_prefix(root()).unwrap().to_owned();
+        let out = std::process::Command::new("git")
+            .args(["check-attr", "text", "--"])
+            .arg(&rel)
+            .current_dir(root())
+            .output();
+        let Ok(out) = out else { continue };
+        if !out.status.success() {
+            continue;
+        }
+        let line = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            line.trim_end().ends_with("text: unset"),
+            "{} is text-normalised: {line}",
+            rel.display()
+        );
+    }
+}
+
 /// The real README holds the trust list that `keys` (the authenticated records) generate. A
 /// README still in the pending key state holds none.
 fn real_trust_list_problem(real: &str, keys: &ReleaseKeys) -> Result<(), String> {
