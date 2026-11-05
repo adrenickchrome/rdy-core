@@ -1988,9 +1988,14 @@ impl<T> SerializesNo for &SerProbe<T> {}
 #[test]
 fn hsa5_refresh_leaves_0644_config_bytes_comments_and_mode_unchanged() {
     let e = env();
-    let ca = "/nonexistent/rdy-test/ca.pem";
-    let config =
-        format!("{CONFIG}hub:\n  installs:\n    {INSTALL}:\n      ca_file: {ca}   # the test CA\n");
+    // a native absolute path, written as a YAML value so Windows backslashes survive
+    let ca_path = std::env::temp_dir().join("rdy-test-missing").join("ca.pem");
+    let ca = ca_path.to_str().unwrap();
+    let ca_yaml = serde_yaml_ng::to_string(ca).unwrap();
+    let ca_yaml = ca_yaml.trim_end();
+    let config = format!(
+        "{CONFIG}hub:\n  installs:\n    {INSTALL}:\n      ca_file: {ca_yaml}   # the test CA\n"
+    );
     fs::write(&e.user_file, &config).unwrap();
     fs::set_permissions(&e.user_file, pio::permissions(0o644)).unwrap();
     let unchanged = |what: &str| {

@@ -42,7 +42,14 @@ fn sess2_human_env_points_xdg_at_a_config_naming_the_actor() {
     let text = std::fs::read_to_string(dir.path().join("rdy/config.yaml")).unwrap();
     assert_eq!(text, "actor: human:qa\n");
     assert_eq!(
-        rdy_engine::human_actor(Some(dir.path()), None, Some("nobody")).unwrap(),
+        rdy_engine::human_actor(
+            &rdy_engine::instructions_config::PathEnv {
+                xdg_config_home: Some(dir.path().as_os_str().to_owned()),
+                ..Default::default()
+            },
+            Some("nobody")
+        )
+        .unwrap(),
         "human:qa"
     );
 }

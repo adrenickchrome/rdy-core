@@ -1040,3 +1040,51 @@ fn hsa2_config_tests_pass_under_umask_002_and_022() {
         );
     }
 }
+
+/// What the privacy query reports for `path`, read from an open handle: the Unix mode bits or
+/// the Windows ACL, through the same call the checks use.
+fn privacy_of(path: &Path) -> pio::Privacy {
+    pio::privacy(&fs::File::open(path).unwrap()).unwrap()
+}
+
+/// A replacement leaves a private file private to its owner (Unix mode 0600, Windows owner-only
+/// ACL), every time, and so does the lock; a failed replacement keeps the old private bytes.
+#[test]
+fn wx9_config_replace_preserves_private_acl() {
+    let d = home_dir();
+    let home = d.path();
+    let creds = home.join("rdy/credentials.yaml");
+    let mut c = open(home, "rdy/credentials.yaml", true).unwrap();
+    for round in 0..3 {
+        c.replace(format!("installs: {{round: {round}}}\n").as_bytes())
+            .unwrap();
+        let p = privacy_of(&creds);
+        assert!(
+            p.mine && p.private && p.owner_only && !p.shared_writable,
+            "round {round}: {p:?}"
+        );
+        assert_eq!(fs::read(&creds).unwrap(), c.bytes());
+    }
+    let lock = privacy_of(&lock_of(&creds));
+    assert!(lock.mine && lock.owner_only, "{lock:?}");
+    drop(c);
+    // reopened as a secret file: the replaced file passes the private check again
+    let mut again = open(home, "rdy/credentials.yaml", true).unwrap();
+    assert_eq!(again.bytes(), b"installs: {round: 2}\n");
+    // a failed replacement (over the limit) leaves the private bytes and no temp file
+    let big = vec![b'x'; LIMIT + 1];
+    assert_eq!(again.replace(&big).unwrap_err().code, E_LIMIT);
+    drop(again);
+    assert_eq!(fs::read(&creds).unwrap(), b"installs: {round: 2}\n");
+    assert!(privacy_of(&creds).private);
+    assert_eq!(
+        names(&home.join("rdy")),
+        ["credentials.yaml", "credentials.yaml.lock"]
+    );
+    // a new settings file is private to its owner too
+    let mut s = open(home, "rdy/config.yaml", false).unwrap();
+    s.replace(b"a: 1\n").unwrap();
+    drop(s);
+    let p = privacy_of(&home.join("rdy/config.yaml"));
+    assert!(p.mine && p.private && p.owner_only, "{p:?}");
+}
