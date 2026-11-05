@@ -1068,7 +1068,7 @@ impl ReleaseKeys {
             records.push((*minor, *kind, record));
         }
         // Numeric order, a transition before a revocation at the same minor.
-        records.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        records.sort_by_key(|r| (r.0, r.1));
         let mut epochs = vec![historical_epoch()];
         for (minor, kind, record) in records {
             let refuse = |why: String| TrustError::Statement(record.name.clone(), why);
@@ -1379,7 +1379,11 @@ mod tests {
 
     /// STRUCTURAL MOCK that records each call's namespace, statement and signature.
     #[derive(Default)]
-    struct Recording(RefCell<Vec<(String, Vec<u8>, Vec<u8>)>>);
+    struct Recording(RefCell<Vec<Call>>);
+    /// One check call: its namespace, statement and signature.
+    type Call = (String, Vec<u8>, Vec<u8>);
+    /// Records by name, with their JSON bytes.
+    type Records = Vec<(String, Vec<u8>)>;
     impl StatementCheck for Recording {
         fn check(&self, namespace: &str, statement: &[u8], signature: &[u8]) -> bool {
             self.0.borrow_mut().push((
@@ -1489,7 +1493,7 @@ mod tests {
 
     /// The three unendorsed receiver records: key 1 from v0.40.0, revoked after v0.41.0, then
     /// key 2 from v0.44.0.
-    fn unendorsed_records() -> Vec<(String, Vec<u8>)> {
+    fn unendorsed_records() -> Records {
         [
             "revocation-v0.40.0.json",
             "transition-v0.40.0.json",
@@ -1713,7 +1717,7 @@ mod tests {
         let rec = Recording::default();
         ReleaseKeys::load_checked_by(reg.path(), &rec).expect("structural load");
         let calls = rec.0.into_inner();
-        let want: Vec<(String, Vec<u8>, Vec<u8>)> = unendorsed_records()
+        let want: Vec<Call> = unendorsed_records()
             .into_iter()
             .map(|(n, json)| {
                 let ns = if n.starts_with("transition") {
@@ -1913,7 +1917,7 @@ mod tests {
 
         // order rules, each refused at the record that breaks it
         let t40 = || (t_name(40), transition(40, ID_KEY, ID_FP));
-        let cases: Vec<(Vec<(String, Vec<u8>)>, String, &str)> = vec![
+        let cases: Vec<(Records, String, &str)> = vec![
             (
                 vec![t40(), (t_name(44), transition(44, RDY_KEY, RDY_FP))],
                 t_name(44),
@@ -2384,9 +2388,8 @@ mod tests {
         );
 
         // 64 pairs pass the count (and fail later); 65 refuse the whole set before any read
-        let many = |n: u32| -> Vec<(String, Vec<u8>)> {
-            (36..36 + n).map(|m| (t_name(m), b"{}".to_vec())).collect()
-        };
+        let many =
+            |n: u32| -> Records { (36..36 + n).map(|m| (t_name(m), b"{}".to_vec())).collect() };
         let reg = Reg::new(&many(64));
         assert_eq!(
             ReleaseKeys::load_checked_by(reg.path(), &RefuseAll),
