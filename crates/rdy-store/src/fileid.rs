@@ -80,7 +80,7 @@ impl std::str::FromStr for FileId {
     /// `{dev}:{ino}`, two decimal numbers, or `w:{volume}:{id}`, exactly 16 and 32 lowercase
     /// hex digits. A Windows text's length is checked before anything else is read.
     fn from_str(s: &str) -> Result<Self, String> {
-        let bad = || format!("{s:?} is not a project identity (dev:ino)");
+        let bad = || format!("{s:?} is not a project identity (dev:ino or w:<volume>:<file id>)");
         if let Some(rest) = s.strip_prefix("w:") {
             return windows_text(s, rest).ok_or_else(bad);
         }
@@ -466,7 +466,9 @@ mod wx2_tests {
         for s in cases {
             assert_eq!(
                 s.parse::<FileId>(),
-                Err(format!("{s:?} is not a project identity (dev:ino)")),
+                Err(format!(
+                    "{s:?} is not a project identity (dev:ino or w:<volume>:<file id>)"
+                )),
                 "{s:?}"
             );
         }
@@ -515,7 +517,9 @@ mod wx2_tests {
         ] {
             assert_eq!(
                 s.parse::<FileId>(),
-                Err(format!("{s:?} is not a project identity (dev:ino)")),
+                Err(format!(
+                    "{s:?} is not a project identity (dev:ino or w:<volume>:<file id>)"
+                )),
                 "{s:?}"
             );
         }
@@ -529,7 +533,7 @@ mod wx2_tests {
         let err = serde_json::from_str::<FileId>(r#""7""#).unwrap_err();
         assert!(
             err.to_string()
-                .contains(r#""7" is not a project identity (dev:ino)"#),
+                .contains(r#""7" is not a project identity (dev:ino or w:<volume>:<file id>)"#),
             "{err}"
         );
         assert!(serde_json::from_str::<FileId>("[7,11]").is_err());

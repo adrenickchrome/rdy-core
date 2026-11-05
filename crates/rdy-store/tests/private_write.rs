@@ -4,8 +4,10 @@
 //! Its file modes and owners go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected modes are
 //! Unix modes, which FW-XP1 Phase 4 ports with the Windows privacy rules.
 
+#[cfg(unix)]
+use rdy_store::fsutil::write_durable;
 use rdy_store::fsutil::{
-    PrivateWriteStage, with_private_write_probe_for_tests, write_durable, write_private_durable,
+    PrivateWriteStage, with_private_write_probe_for_tests, write_private_durable,
     write_settings_durable,
 };
 use rdy_store::pio;
@@ -13,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     pio::mode_of(&fs::symlink_metadata(path).unwrap()) & 0o777
 }
@@ -27,8 +30,11 @@ fn names(dir: &Path) -> Vec<String> {
 }
 
 /// One probe call: the stage, the path, its mode and its length.
+#[cfg(unix)]
 type Seen = (PrivateWriteStage, PathBuf, u32, u64);
 
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_private_bytes_are_private_before_write() {
     let d = tempfile::tempdir().unwrap();
@@ -81,6 +87,8 @@ fn hsa2_private_bytes_are_private_before_write() {
     assert_eq!(names(d.path()), ["credentials.yaml"]);
 }
 
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_settings_writes_keep_the_target_mode_and_new_files_are_0600() {
     let d = tempfile::tempdir().unwrap();
@@ -131,6 +139,7 @@ fn hsa2_a_probe_fault_stops_the_write_and_cleans_the_temp() {
             let d = tempfile::tempdir().unwrap();
             let path = d.path().join("f.yaml");
             fs::write(&path, b"old bytes").unwrap();
+            #[cfg(unix)]
             fs::set_permissions(&path, pio::permissions(0o600)).unwrap();
             let e = with_private_write_probe_for_tests(
                 move |stage, _: &Path| {
@@ -197,6 +206,8 @@ fn hsa2_a_nested_probe_is_refused_and_an_unwind_restores_the_thread() {
     .unwrap();
 }
 
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_pio_privacy_helpers_judge_files_by_owner_kind_and_mode() {
     let d = tempfile::tempdir().unwrap();
@@ -236,6 +247,8 @@ fn hsa2_pio_privacy_helpers_judge_files_by_owner_kind_and_mode() {
 
 // Fix round 1: calls in an open directory.
 
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
     use std::ffi::OsStr;
@@ -318,6 +331,8 @@ fn hsa2_pio_directory_calls_never_follow_a_link_at_the_entry() {
 /// The umask check a config edit runs before it makes a directory: a probe file made with mode
 /// 0o700 tells whether the umask keeps that mode whole, and is removed again. It never follows
 /// a link and never touches what already stands at its name.
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_pio_the_umask_check_keeps_nothing_and_follows_no_link() {
     use std::ffi::OsStr;
@@ -366,6 +381,8 @@ fn hsa2_pio_the_umask_check_keeps_nothing_and_follows_no_link() {
     assert_eq!(seen.unwrap_err().to_string(), "probe");
 }
 
+// Unix modes: the Windows witnesses are the wx4_ pins below.
+#[cfg(unix)]
 #[test]
 fn hsa2_a_replacement_in_a_directory_handle_ignores_later_path_changes() {
     use std::ffi::OsStr;

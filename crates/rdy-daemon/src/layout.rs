@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(ProjectId::Unix { dev: 1, ino: 2 }.to_string(), "1:2");
         assert_eq!(
             "x".parse::<ProjectId>(),
-            Err(r#""x" is not a project identity (dev:ino)"#.to_string())
+            Err(r#""x" is not a project identity (dev:ino or w:<volume>:<file id>)"#.to_string())
         );
     }
 }

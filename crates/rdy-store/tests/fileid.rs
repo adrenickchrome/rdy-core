@@ -4,6 +4,9 @@
 use rdy_store::fileid::FileId;
 use rdy_store::{Store, StoreError, StoreLock};
 
+// Unix only: a store directory moves while its lock is held. Windows refuses to move a directory
+// while a file in it is open; its load closes the loading store under start.lock instead.
+#[cfg(unix)]
 #[test]
 fn ps2_open_locked_takes_its_own_lock_after_the_store_dir_is_renamed() {
     let root = tempfile::tempdir().unwrap();

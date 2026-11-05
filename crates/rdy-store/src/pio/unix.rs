@@ -576,6 +576,12 @@ pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<(
     std::os::unix::fs::symlink(target, link)
 }
 
+/// Binds a Unix socket at `path`, a special file that is neither a regular file nor a directory;
+/// the socket file stays while the listener lives. For test fixtures.
+pub fn bind_socket(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    std::os::unix::net::UnixListener::bind(path)
+}
+
 /// A command that runs `program` under the process umask `umask` (octal text, for example
 /// "002"); the caller adds the program's arguments. The umask is process-wide, so a test that
 /// needs another one runs a child under it. For test fixtures.

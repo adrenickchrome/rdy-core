@@ -514,7 +514,7 @@ fn set_aside(path: &Path) -> Result<(), StoreError> {
         match std::fs::hard_link(path, path.with_file_name(name)) {
             Ok(()) => {
                 std::fs::remove_file(path)?;
-                File::open(path.parent().expect("store dir"))?.sync_all()?;
+                fsutil::sync_dir(path.parent().expect("store dir"))?;
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2718,7 +2718,8 @@ impl Store {
             Ok(old) => old.close_and_erase(),
             Err(_) => Ok(()),
         };
-        // the new index takes the name even when the zeros failed, so the old file is gone
+        // the new index takes the name even when the zeros failed, so the old file is gone; the
+        // rename is not `pio::rename_durable` for the reason `reindex_with` gives
         let renamed = std::fs::rename(tmp, path);
         erased?;
         renamed?;
@@ -2782,6 +2783,10 @@ impl Store {
         if erase_old {
             self.publish_erasing(&path, &tmp, ix)?;
         } else {
+            // The old index is still open here (this store's reader, and maybe a reader cloned
+            // before), and Windows' write-through `MoveFileExW` refuses to replace an open file
+            // (ERROR_ACCESS_DENIED). So the new index takes the name with the platform rename
+            // that replaces an open file, and the directory flush below makes it durable.
             if let Err(e) = std::fs::rename(&tmp, &path) {
                 drop(ix);
                 let _ = remove_if_present(&tmp);

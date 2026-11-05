@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it reads the signal that ended a child. FW-XP1 Phase 4 ports it.
 //! Crash consistency of one flush per write (kill1, roll1). This test binary re-runs itself as a
 //! child (`crash_child`) that makes acknowledged writes and is aborted at a chosen point of a later
 //! one; the parent reopens the store and checks it recovered every acknowledged write, with the
@@ -10,7 +8,6 @@ use rdy_store::segment::{CrashPoint, Location};
 use rdy_store::transition::{Cause, Side, TensionMove, Transitions, Why};
 use rdy_store::{OpenReport, Store};
 use std::io::Write;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -131,9 +128,10 @@ fn crash(dir: &Path, point: CrashPoint, acked: usize, env: &[(&str, &str)]) -> V
         .envs(env.iter().copied())
         .output()
         .unwrap();
+    // the platform's own end of an abort: SIGABRT on Unix, the fail-fast status on Windows
     assert_eq!(
-        out.status.signal(),
-        Some(6),
+        rdy_store::pio::ended(&out.status),
+        rdy_store::pio::Ended::Aborted,
         "the child must abort at {point:?}: {:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)

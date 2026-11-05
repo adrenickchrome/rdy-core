@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! ib14: the TRANSITION record, held batches and the open-move tables.
 use rdy_model::Hash;
 use rdy_store::kinds;
@@ -298,22 +296,80 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// ib14 fix round 1: a close that cannot remove a stale index never closes it cleanly, so the
-/// index on disk stays as a kill leaves it. A copy of the store taken after that close (the
-/// state a process exit leaves) opens, and the whole batch is lost.
-#[test]
-fn ib14_a_close_that_cannot_remove_a_stale_index_never_closes_it_cleanly() {
-    use std::os::unix::fs::PermissionsExt;
-    let (dir, mut st) = fresh();
-    let s = dir.path().join("s");
+/// Makes the store at `s`, fails a held batch's seal, and closes it while the stale index cannot
+/// be removed: on Unix the store directory is read-only (mode 0o555), and on Windows another
+/// handle holds the index file without delete sharing. Whether the close failed.
+fn close_keeping_a_stale_index(s: &std::path::Path) -> bool {
+    let mut st = Store::create(s).unwrap();
     st.set_held(true).unwrap();
     st.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
     st.fail_next_index_apply();
     assert!(st.seal(vec![]).is_err());
-    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o555)).unwrap();
+    #[cfg(unix)]
+    rdy_store::pio::set_mode(s, 0o555).unwrap();
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(s.join("index.redb"))
+            .unwrap()
+    };
     let closed = st.close();
-    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(closed.is_err(), "the removal fails");
+    #[cfg(unix)]
+    rdy_store::pio::set_mode(s, 0o755).unwrap();
+    #[cfg(windows)]
+    drop(held);
+    closed.is_err()
+}
+
+/// The child of `ib14_a_close_that_cannot_remove_a_stale_index_never_closes_it_cleanly` on
+/// Windows: [`close_keeping_a_stale_index`] on `RDY_WX7_CLOSE_DIR`, then the process ends with
+/// what the failed close kept open.
+#[test]
+#[ignore = "ib14_a_close_that_cannot_remove_a_stale_index_never_closes_it_cleanly runs this in a child process"]
+fn wx7_close_child() {
+    let Ok(s) = std::env::var("RDY_WX7_CLOSE_DIR") else {
+        return;
+    };
+    let failed = close_keeping_a_stale_index(std::path::Path::new(&s));
+    println!("WX7-CLOSE-FAILED {failed}");
+    std::process::exit(0);
+}
+
+/// ib14 fix round 1: a close that cannot remove a stale index never closes it cleanly, so the
+/// index on disk stays as a kill leaves it. A copy of the store taken after that close (the
+/// state a process exit leaves) opens, and the whole batch is lost. On Windows the index that
+/// the failed close keeps open stays locked until its process ends, so a child process makes
+/// and closes the store and ends first.
+#[test]
+fn ib14_a_close_that_cannot_remove_a_stale_index_never_closes_it_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = dir.path().join("s");
+    #[cfg(unix)]
+    let failed = close_keeping_a_stale_index(&s);
+    #[cfg(windows)]
+    let failed = {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "wx7_close_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env("RDY_WX7_CLOSE_DIR", &s)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{out:?}");
+        text.contains("WX7-CLOSE-FAILED true")
+    };
+    assert!(failed, "the removal fails");
     assert!(s.join("index.redb").exists());
     let copy = tempfile::tempdir().unwrap();
     copy_dir(&s, copy.path());

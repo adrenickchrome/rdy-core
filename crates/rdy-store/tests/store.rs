@@ -525,3 +525,230 @@ fn hd2_open_removes_a_leftover_temp_index() {
     assert!(!tmp.exists());
     assert_eq!(s.get_blob(&h).unwrap(), b"kept");
 }
+
+/// The child of `wx7_second_process_cannot_take_the_store_lock`: tries to take the lock of the
+/// store at `RDY_WX7_DIR` as `RDY_WX7_TRY` says, prints `WX7 <outcome>`, and with
+/// `RDY_WX7_HOLD` keeps what it took until it is killed.
+#[test]
+#[ignore = "wx7_second_process_cannot_take_the_store_lock runs this in a child process"]
+fn wx7_lock_child() {
+    use std::io::Write;
+    let Ok(dir) = std::env::var("RDY_WX7_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    let outcome = |r: Result<(), StoreError>| match r {
+        Ok(()) => "took".to_string(),
+        Err(StoreError::Locked(p)) if p == dir => "locked".to_string(),
+        Err(e) => format!("error {e}"),
+    };
+    let mut held = vec![];
+    let result = match std::env::var("RDY_WX7_TRY").unwrap().as_str() {
+        "take" => StoreLock::take(dir).map(|l| held.push(Box::new(l) as Box<dyn std::any::Any>)),
+        "take_existing" => {
+            StoreLock::take_existing(dir).map(|l| held.push(Box::new(l) as Box<dyn std::any::Any>))
+        }
+        "open" => Store::open(dir).map(|s| held.push(Box::new(s) as Box<dyn std::any::Any>)),
+        other => panic!("no such try: {other}"),
+    };
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "WX7 {}", outcome(result)).unwrap();
+    out.flush().unwrap();
+    if std::env::var("RDY_WX7_HOLD").is_ok() {
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+/// Starts `wx7_lock_child` on `dir`; `hold` keeps it alive after it reports.
+fn wx7_child(dir: &std::path::Path, try_: &str, hold: bool) -> std::process::Child {
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "wx7_lock_child",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ])
+    .env("RDY_WX7_DIR", dir)
+    .env("RDY_WX7_TRY", try_)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::inherit());
+    if hold {
+        cmd.env("RDY_WX7_HOLD", "1");
+    }
+    cmd.spawn().unwrap()
+}
+
+/// The outcome the child reports: `took`, `locked` or `error <text>`.
+fn wx7_outcome(child: &mut std::process::Child) -> String {
+    use std::io::BufRead;
+    let mut out = std::io::BufReader::new(child.stdout.as_mut().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(
+            out.read_line(&mut line).unwrap() > 0,
+            "the child ended before it reported"
+        );
+        // libtest prints the test's name on the line before its first output
+        if let Some(at) = line.find("WX7 ") {
+            return line[at + 4..].trim_end().to_string();
+        }
+    }
+}
+
+/// Runs the child once, to its end, and returns its outcome.
+fn wx7_try(dir: &std::path::Path, try_: &str) -> String {
+    let mut child = wx7_child(dir, try_, false);
+    let outcome = wx7_outcome(&mut child);
+    assert!(child.wait().unwrap().success());
+    outcome
+}
+
+/// Kills `child` with the platform's own process termination (`SIGKILL`, `TerminateProcess`)
+/// and checks that this is how it ended.
+fn wx7_kill(mut child: std::process::Child) {
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(
+        rdy_store::pio::ended(&status),
+        rdy_store::pio::Ended::Killed,
+        "{status:?}"
+    );
+}
+
+/// lock1 across processes (FW-XP1 phase 4): while one process holds a store's lock, a second
+/// process can neither take it nor open the store, with the lock file there or made new. A
+/// clean close releases it at once, even while a child that this process spawned while it held
+/// the store still runs. A process killed while it holds the lock releases it as it ends.
+#[test]
+fn wx7_second_process_cannot_take_the_store_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    s.put(kinds::BLOCK, &block("b-AAAAA", "one")).unwrap();
+    for try_ in ["take", "take_existing", "open"] {
+        assert_eq!(wx7_try(dir.path(), try_), "locked", "{try_}");
+    }
+    // a child spawned while the store is open never holds its lock
+    let mut bystander = wx7_child(dir.path(), "take", true);
+    assert_eq!(wx7_outcome(&mut bystander), "locked");
+    s.close().unwrap();
+    for try_ in ["take", "take_existing", "open"] {
+        assert_eq!(wx7_try(dir.path(), try_), "took", "{try_}");
+    }
+    let s = Store::open(dir.path()).unwrap();
+    drop(s);
+    wx7_kill(bystander);
+    // a second process holds it: this process can take nothing until that process is killed
+    let mut holder = wx7_child(dir.path(), "open", true);
+    assert_eq!(wx7_outcome(&mut holder), "took");
+    assert!(
+        matches!(StoreLock::take(dir.path()), Err(StoreError::Locked(_))),
+        "the holder's lock"
+    );
+    assert!(matches!(
+        StoreLock::take_existing(dir.path()),
+        Err(StoreError::Locked(_))
+    ));
+    assert!(matches!(
+        Store::open(dir.path()),
+        Err(StoreError::Locked(_))
+    ));
+    wx7_kill(holder);
+    let s = Store::open(dir.path()).unwrap();
+    assert!(s.get_block(&block("b-AAAAA", "one").version_hash()).is_ok());
+    s.close().unwrap();
+}
+
+/// Every file under `dir`, depth first.
+fn wx7_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+            out.extend(wx7_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// No handle to anything under `dir` is open in this process: on Windows each file opens with
+/// no sharing at all (an open handle anywhere makes that a sharing violation); on every platform
+/// the directory is renamed, removed with all it holds, and made again.
+fn wx7_no_handle_left(dir: &std::path::Path, what: &str) {
+    let files = wx7_files(dir);
+    assert!(!files.is_empty(), "{what}");
+    #[cfg(windows)]
+    for f in &files {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(f)
+            .unwrap_or_else(|e| panic!("{what}: {} is still open: {e}", f.display()));
+    }
+    let moved = dir.with_extension("moved");
+    std::fs::rename(dir, &moved).unwrap_or_else(|e| panic!("{what}: rename: {e}"));
+    std::fs::rename(&moved, dir).unwrap_or_else(|e| panic!("{what}: rename back: {e}"));
+    let copy = dir.with_extension("copy");
+    std::fs::create_dir(&copy).unwrap();
+    for f in &files {
+        let to = copy.join(f.strip_prefix(dir).unwrap());
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(f, &to).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap_or_else(|e| panic!("{what}: remove: {e}"));
+    std::fs::rename(&copy, dir).unwrap();
+}
+
+/// A closed store holds no handle (FW-XP1 phase 4): after a clean close, after a reindex, after
+/// a reader that outlived its store drops, after an open that set a damaged index aside, and
+/// after an open refused by a live reader, nothing under the store directory is open, so on
+/// Windows nothing there is locked against a rename or a removal.
+#[test]
+fn wx7_closed_store_releases_every_windows_handle() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let v1 = block("b-AAAAA", "one");
+    let mut s = Store::create(&dir).unwrap();
+    s.set_segment_max(2_000);
+    for i in 0..20u32 {
+        s.put_blob(&vec![i as u8; 300]).unwrap();
+    }
+    s.put(kinds::BLOCK, &v1).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    s.close().unwrap();
+    wx7_no_handle_left(&dir, "a clean close");
+
+    let mut s = Store::open(&dir).unwrap();
+    s.reindex().unwrap();
+    let r = s.reader();
+    s.close().unwrap();
+    assert_eq!(r.get_block(&v1.version_hash()).unwrap(), v1);
+    drop(r);
+    wx7_no_handle_left(&dir, "a reindex and a reader that outlived its store");
+
+    let idx = dir.join("index.redb");
+    let mut bytes = std::fs::read(&idx).unwrap();
+    bytes[..512].fill(0xAB);
+    std::fs::write(&idx, bytes).unwrap();
+    let s = Store::open(&dir).unwrap();
+    assert!(s.open_report().index_rebuilt);
+    let r = s.reader();
+    drop(s);
+    assert!(matches!(
+        Store::open(&dir),
+        Err(StoreError::HeldByReader(_))
+    ));
+    drop(r);
+    wx7_no_handle_left(&dir, "a set-aside index and an open refused by a reader");
+    let s = Store::open(&dir).unwrap();
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+    s.close().unwrap();
+    wx7_no_handle_left(&dir, "the last close");
+}

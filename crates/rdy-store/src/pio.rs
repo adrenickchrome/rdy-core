@@ -28,9 +28,10 @@
 //!   uid (`own_uid`), a file's owner (`owner`), the mode tests `is_private_file`,
 //!   `is_private_dir`, `is_shared_writable`, `is_world_writable_unsticky` and `is_owner_only`,
 //!   and the test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
-//!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
-//!   child process under another umask (`under_umask`), so the store's and the engine's tests
-//!   need no Unix-only call of their own.
+//!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`), a Unix
+//!   socket (`bind_socket`) and a child process under another umask (`under_umask`), so the
+//!   store's and the engine's tests need no Unix-only call of their own;
+//! - on every platform, for tests that kill or abort a child: how the child ended (`ended`).
 //!
 //! Each platform's calls live in a child module: `unix` and `windows`. Every other store module,
 //! and the engine, calls these functions. The daemon's `sys` seam re-exports the no-follow and
@@ -193,6 +194,45 @@ pub(crate) fn durable(
     at(Boundary::Before)?;
     call()?;
     at(Boundary::After)
+}
+
+/// How a test's child process ended, as [`ended`] reads it from its exit status.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// `Child::kill` ended it: `SIGKILL` on Unix; on Windows `TerminateProcess`, which
+    /// `Child::kill` calls with exit code 1.
+    Killed,
+    /// `std::process::abort` ended it: `SIGABRT` on Unix; on Windows the fail-fast status
+    /// `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409).
+    Aborted,
+    /// It ended any other way.
+    Other,
+}
+
+/// How the child process whose exit status is `status` ended: killed, aborted or otherwise. On
+/// Windows a child that exits with code 1 by itself also reads as killed: the test that kills a
+/// child knows that it did. For test fixtures.
+#[doc(hidden)]
+pub fn ended(status: &std::process::ExitStatus) -> Ended {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        match status.signal() {
+            Some(9) => Ended::Killed,
+            Some(6) => Ended::Aborted,
+            _ => Ended::Other,
+        }
+    }
+    #[cfg(windows)]
+    {
+        const STATUS_STACK_BUFFER_OVERRUN: u32 = 0xC000_0409;
+        match status.code().map(|c| c as u32) {
+            Some(1) => Ended::Killed,
+            Some(STATUS_STACK_BUFFER_OVERRUN) => Ended::Aborted,
+            _ => Ended::Other,
+        }
+    }
 }
 
 fn bad_punch_range(why: &str) -> io::Error {

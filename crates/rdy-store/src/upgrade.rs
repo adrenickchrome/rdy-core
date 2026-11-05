@@ -1043,7 +1043,7 @@ fn write_backup(
     from: &StoreFeatures,
     terminal: Hash,
 ) -> Result<(), StoreError> {
-    target.parent.sync_all()?;
+    pio::sync_open_dir(target.parent, target.parent_path)?;
     fsutil::record(target.parent_path);
     let root = open_made_dir(target.parent, target.name)?;
     let copy = make_private_dir_at(&root, BACKUP_STORE.as_ref())?;
@@ -1082,13 +1082,13 @@ fn write_backup(
     // the deepest directories first, then the copy and the backup itself
     for d in listing.dirs.iter().rev() {
         hit(Phase::Sync(d))?;
-        open_rel_dir(&copy, d)?.sync_all()?;
+        pio::sync_open_dir(&open_rel_dir(&copy, d)?, &copy_path.join(d))?;
         fsutil::record(&copy_path.join(d));
     }
     hit(Phase::Sync(""))?;
-    copy.sync_all()?;
+    pio::sync_open_dir(&copy, &copy_path)?;
     fsutil::record(&copy_path);
-    root.sync_all()?;
+    pio::sync_open_dir(&root, target.path)?;
     fsutil::record(target.path);
     let manifest = BackupManifest {
         source_manifest: from.hash().to_string(),
@@ -1100,7 +1100,7 @@ fn write_backup(
     // backup.json and its temp file stand beside the copy, so no store file can take their name
     fsutil::replace_in_dir(&root, target.path, BACKUP_MANIFEST.as_ref(), &json, None)?;
     in_place(source, target, &root, &copy)?;
-    target.parent.sync_all()?;
+    pio::sync_open_dir(target.parent, target.parent_path)?;
     fsutil::record(target.parent_path);
     Ok(())
 }
