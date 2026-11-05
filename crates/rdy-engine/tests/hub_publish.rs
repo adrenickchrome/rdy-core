@@ -41,7 +41,7 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::pio;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::panic::{self, AssertUnwindSafe};

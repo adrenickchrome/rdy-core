@@ -47,7 +47,7 @@ use ssh_encoding::{Decode, Encode};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
 use ssh_key::{Algorithm, HashAlg, Signature, SshSig};
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, TryLockError};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
