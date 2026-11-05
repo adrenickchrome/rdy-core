@@ -1878,3 +1878,42 @@ fn wx8b_an_open_that_holds_the_installed_store_keeps_it() {
     r.fsck().unwrap();
     r.close().unwrap();
 }
+
+// A portable fault fixture, one fault of each kind in turn, restores the target byte for byte,
+// leaves the source log and the dumps as they were, and lets the same chain load after it. The
+// faults are the injected segment write and the injected flush: neither needs a file mode, a
+// link or any other host feature.
+#[test]
+fn wx12a_load_fault_fixture_preserves_rollback() {
+    let _clock = pin_clock(1_000_000);
+    let t = three();
+    let d = t.dir.path();
+    let files = vec![t.f0.clone(), t.i1.clone()];
+    let source = segments(&d.join("p"));
+    let dumps: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    assert!(!source.is_empty());
+    for kind in ["write", "flush"] {
+        let (to, before) = kept_target(d, &format!("wx12a-{kind}"));
+        let loading = to.join(".rdy").join("store.loading");
+        let e = if kind == "write" {
+            let g = fail_write(|_, _| true);
+            let e = chain_err(&files, &to, None);
+            assert!(g.seen.get(), "the write fault fired");
+            e
+        } else {
+            let _g = fail_flush(loading.join("segments"));
+            chain_err(&files, &to, None)
+        };
+        assert_eq!(e.code, E_IO, "{kind}: {e:?}");
+        assert!(e.message.contains("injected"), "{kind}: {e:?}");
+        assert_eq!(tree(&to), before, "{kind}: the target is as it was");
+        assert!(!loading.exists(), "{kind}");
+        assert_eq!(segments(&d.join("p")), source, "{kind}: the source log");
+        for (f, bytes) in files.iter().zip(&dumps) {
+            assert_eq!(&std::fs::read(f).unwrap(), bytes, "{kind}: the dump");
+        }
+        // the same chain then loads there, and its log starts as the source log does
+        chain_load(&files, &to, None);
+        assert_log_is_a_prefix(&to, &d.join("p"));
+    }
+}
