@@ -498,8 +498,7 @@ fn wx8a_an_upgrade_refuses_another_projects_guard() {
         &foreign,
         &registry(),
     )
-    .err()
-    .expect("refused");
+    .expect_err("refused");
     assert_eq!(e.code, rdy_engine::E_LOCKED);
     assert_eq!(format_text(&f), before, "nothing changed");
     let e = failed(Rdy::open_under_start(&f.root, &foreign), "refused");
