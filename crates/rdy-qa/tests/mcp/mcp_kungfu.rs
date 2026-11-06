@@ -72,8 +72,12 @@ fn advisories(body: &Value) -> Vec<Value> {
 }
 
 /// `body` without the kungfu advisory: the warning, and a `warnings` list that holds nothing else.
+/// An overview's `kungfu` count line goes too (kfu5): it follows each miss, and the action is not it.
 fn without_warning(body: &Value) -> Value {
     let mut out = body.clone();
+    if let Some(m) = out.as_object_mut() {
+        m.remove("kungfu");
+    }
     if let Some(all) = out.get_mut("warnings").and_then(Value::as_array_mut) {
         all.retain(|w| w["code"] != "W_KUNGFU");
         if all.is_empty() {
