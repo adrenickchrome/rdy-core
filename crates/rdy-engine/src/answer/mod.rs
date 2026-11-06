@@ -31,7 +31,8 @@
 //!   is ready or the card answered (D-AAQ9Z), so a refused card takes a later acceptance; every
 //!   other check below applies.
 //! - A relayed or presented answer passes `card_hash`. A local answer may omit it, and then
-//!   binds to the version only. A decision version proposed in two views stands beside each batch with the
+//!   binds to the version only. The one exception is a rule's own confirmation ([`RuleContext`]),
+//!   which no caller's input can ask for. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
 //!   no card of the ref has the hash given: `E_PROPOSAL_MOVED` for an `approve` item,
 //!   `E_ITEM_MOVED` for the others. For an `approve` item the landing's freshness check runs
@@ -187,6 +188,49 @@ pub(crate) struct Answerer {
     pub from: Session,
     pub brief: Option<String>,
     pub presented: Option<presented::Presenter>,
+    /// The rule flow this answer belongs to; none for every other answer.
+    pub rule: Option<RuleContext>,
+}
+
+/// Which items an answer in a rule's flow may bind (FW-MH.rules, D-ZSRBN). Only
+/// [`crate::rules::approval`] builds one, from a proposal whose receipt it checked. It reads no
+/// input: no CLI flag, ctl argument or MCP parameter can name it, and it does not deserialize.
+#[derive(Clone, Debug)]
+pub(crate) enum RuleContext {
+    /// The person's words cover the rule's own decision: a confirmation of `decision` beside
+    /// `proposal`, with text evidence. No card was shown, so the record names no card.
+    Text { proposal: String, decision: BlockId },
+    /// The person answers a card this flow returned: any item of `proposal`, bound to its hash.
+    Card { proposal: String },
+}
+
+impl RuleContext {
+    /// Whether `b` is an item this context may bind.
+    fn check(&self, b: &Bound) -> Result<(), RdyError> {
+        let i = &b.item;
+        let beside = |p: &str| i.r#ref == p || i.batch.as_deref() == Some(p);
+        let fits = match self {
+            RuleContext::Text { proposal, decision } => {
+                i.batch.as_deref() == Some(proposal)
+                    && i.kind == ItemKind::Confirm
+                    && b.option.id == "confirm"
+                    && i.r#ref
+                        .split_once('@')
+                        .is_some_and(|(id, _)| id == decision.as_str())
+            }
+            RuleContext::Card { proposal } => beside(proposal),
+        };
+        if fits {
+            Ok(())
+        } else {
+            Err(crate::rule_types::other_flow(&i.r#ref))
+        }
+    }
+
+    /// Whether the person answered with no card, in their own words.
+    pub(crate) fn no_card(&self) -> bool {
+        matches!(self, RuleContext::Text { .. })
+    }
 }
 
 impl Rdy {
@@ -230,16 +274,36 @@ impl Rdy {
             req.card_hash.as_deref(),
             note,
         )?;
-        Ok(match step {
+        Ok(self.with_next(step, person, &by))
+    }
+
+    /// An answer in a rule's flow, as `by` names it, up to its write: the same binding and acts as
+    /// [`Rdy::answer_step`]. `shown` is the card's hash; a rule's own confirmation has none.
+    pub(crate) fn rule_answer_step(
+        &mut self,
+        by: &Answerer,
+        person: &str,
+        r: &str,
+        option: &str,
+        shown: Option<&str>,
+    ) -> Result<AnswerStep, RdyError> {
+        let step = self.answer_one(by, person, r, Pick::Id(option), shown, None)?;
+        Ok(self.with_next(step, person, by))
+    }
+
+    /// `step` with the next item of the queue: now for an act that wrote, after the commit for an
+    /// approval.
+    fn with_next(&self, step: AnswerStep, person: &str, by: &Answerer) -> AnswerStep {
+        match step {
             AnswerStep::Done(mut info) => {
-                info.next = next_of(&self.read(), person, &by);
+                info.next = next_of(&self.read(), person, by);
                 AnswerStep::Done(info)
             }
             AnswerStep::Approval(mut prepared) => {
-                prepared.next_session = Some(session_ref_of(&by));
+                prepared.next_session = Some(session_ref_of(by));
                 AnswerStep::Approval(prepared)
             }
-        })
+        }
     }
 
     /// Lands the approval `prepared` holds, with `signatures` of its landing in the same batch,
@@ -394,8 +458,15 @@ impl Rdy {
         pick: Pick<'_>,
         shown: Option<&str>,
     ) -> Result<Bound, RdyError> {
-        match bind(&self.read(), person, r, shown, by.relay.is_some(), pick)? {
-            Binding::Bound(b) => Ok(*b),
+        // a relayed answer names its card, but for a rule's own confirmation, which showed none
+        let needs_card = by.relay.is_some() && !by.rule.as_ref().is_some_and(RuleContext::no_card);
+        match bind(&self.read(), person, r, shown, needs_card, pick)? {
+            Binding::Bound(b) => {
+                if let Some(rule) = &by.rule {
+                    rule.check(&b)?;
+                }
+                Ok(*b)
+            }
             // RULING F1: the person saw another card of the approval; when the landing's
             // freshness check fails, its refusal (with the fresh card) passes through
             Binding::ShownMoved(e) => Err(match self.check_fresh(r) {
@@ -522,7 +593,28 @@ fn answerer(s: &Session, person: &str, r: &RelayInput) -> Result<Answerer, RdyEr
         from: s.clone(),
         brief: None,
         presented: None,
+        rule: None,
     })
+}
+
+/// The answerer of an answer in a rule's flow: the relay table, then the person's exact words in
+/// its record, as [`crate::rules`] keeps them. Evidence that is only blank never gets here.
+pub(crate) fn rule_answerer(
+    s: &Session,
+    person: &str,
+    input: &RelayInput,
+    rule: RuleContext,
+) -> Result<Answerer, RdyError> {
+    let mut by = answerer(s, person, input)?;
+    if let Some(relay) = &mut by.relay {
+        relay.evidence.quoted = input.evidence.clone().unwrap_or_default();
+        relay.evidence.question.clone_from(&input.question);
+        if let Some(session_ref) = &input.session_ref {
+            relay.evidence.session_ref.clone_from(session_ref);
+        }
+    }
+    by.rule = Some(rule);
+    Ok(by)
 }
 
 /// The note, trimmed: none when blank, refused past [`MAX_QUOTE`] characters.
@@ -779,7 +871,7 @@ fn fresh(q: &Eligible, r: &str) -> Result<Option<Item>, RdyError> {
     q.first_with_prefix(&key)
 }
 
-fn changed(code: &'static str, r: &str) -> RdyError {
+pub(crate) fn changed(code: &'static str, r: &str) -> RdyError {
     RdyError::new(
         code,
         format!("{r} changed since it was shown"),

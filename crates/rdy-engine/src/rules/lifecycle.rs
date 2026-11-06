@@ -9,12 +9,15 @@
 use super::{RuleCaller, RuleMutation, kept_words_parts, selector_list};
 use crate::error::*;
 use crate::gate::{latest_version, open_proposal_of_view, ref_hash, version_number};
-use crate::rule_types::{RuleInfo, RulesetRef};
+use crate::rule_types::{
+    AddRule, EditRule, RelayWords, RemoveRule, RuleInfo, RuleRequest, RulesetRef,
+    Scope as RuleScope,
+};
 use crate::{ProposalRef, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, decision};
 use rdy_schema::instruction::{APPLIES_TO, INSTRUCTION};
 use rdy_store::view::{ViewHead, ViewOpKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
@@ -295,6 +298,198 @@ fn holds_request(st: &ReadState, content: &Change, m: RuleMutation<'_>) -> bool 
     rule.links
         .get(decision::DECIDED_BY)
         .is_some_and(|l| matches!(l.as_slice(), [one] if one.target == *reason))
+}
+
+/// What a change's message holds, read back.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFields {
+    rdy_rule_receipt: u32,
+    repo_id: String,
+    actor: String,
+    run: Option<String>,
+    session_ref: String,
+    op: String,
+    id: String,
+    ruleset: String,
+    applies_to: Option<Vec<String>>,
+    text: String,
+    why: String,
+    evidence: String,
+    question: Option<String>,
+}
+
+impl StoredFields {
+    fn fields(&self) -> Fields<'_> {
+        Fields {
+            rdy_rule_receipt: self.rdy_rule_receipt,
+            repo_id: &self.repo_id,
+            actor: &self.actor,
+            run: self.run.as_deref(),
+            session_ref: &self.session_ref,
+            op: &self.op,
+            id: &self.id,
+            ruleset: &self.ruleset,
+            applies_to: self.applies_to.as_deref(),
+            text: &self.text,
+            why: &self.why,
+            evidence: &self.evidence,
+            question: self.question.as_deref(),
+        }
+    }
+
+    /// The request that wrote this receipt. Its scope spelling is no part of the receipt, and no
+    /// shape check reads it.
+    fn request(&self) -> Option<RuleRequest> {
+        let relay = RelayWords {
+            evidence: self.evidence.clone(),
+            question: self.question.clone(),
+            session_ref: Some(self.session_ref.clone()),
+        };
+        let scope = RuleScope::Project;
+        let ruleset = (!self.ruleset.is_empty()).then(|| match BlockId::parse(&self.ruleset) {
+            Ok(id) => RulesetRef::Doc(id),
+            Err(_) => RulesetRef::Path(self.ruleset.clone()),
+        });
+        Some(match self.op.as_str() {
+            "add" => RuleRequest::Add(AddRule {
+                scope,
+                text: self.text.clone(),
+                why: self.why.clone(),
+                ruleset,
+                applies_to: self.applies_to.clone(),
+                relay,
+            }),
+            "edit" => RuleRequest::Edit(EditRule {
+                scope,
+                id: BlockId::parse(&self.id).ok()?,
+                text: self.text.clone(),
+                why: self.why.clone(),
+                ruleset,
+                applies_to: self.applies_to.clone(),
+                relay,
+            }),
+            "remove" => RuleRequest::Remove(RemoveRule {
+                scope,
+                id: BlockId::parse(&self.id).ok()?,
+                why: self.why.clone(),
+                relay,
+            }),
+            _ => return None,
+        })
+    }
+}
+
+/// A rule request as its view holds it, every check passed: what an answer resolves its item to.
+pub(super) struct StoredRule {
+    pub(super) view: String,
+    /// The complete change, the first commit of the view.
+    pub(super) first: Hash,
+    pub(super) content: Change,
+    /// The chat session the request came from.
+    pub(super) session_ref: String,
+}
+
+/// The request whose view is `view`, read back from what the view holds: its name is its receipt's
+/// digest, its owner the receipt's actor and run, and its change exactly what that receipt asks
+/// for, with only the gate's changes after it. `None` for any other view: it is no rule request.
+pub(super) fn stored_rule(st: &ReadState, view: &str) -> Result<Option<StoredRule>, RdyError> {
+    let Some(digest) = view.strip_prefix("rule-") else {
+        return Ok(None);
+    };
+    let Some(head) = st.view_head(view) else {
+        return Ok(None);
+    };
+    let Some(chain) = commits(st, head)? else {
+        return Ok(None);
+    };
+    let Some((first, rest)) = chain.split_first() else {
+        return Ok(None);
+    };
+    let content = st.reader().change(first)?;
+    let Ok(stored) = serde_json::from_str::<StoredFields>(&content.message) else {
+        return Ok(None);
+    };
+    let fields = stored.fields();
+    let repo = st.repo_id()?.to_string();
+    let owned = head
+        .owner
+        .as_ref()
+        .is_some_and(|o| o.actor == stored.actor && o.run == stored.run);
+    if !owned
+        || stored.rdy_rule_receipt != RECEIPT_VERSION
+        || stored.repo_id != repo
+        || digest_of(&fields) != digest
+        || serde_json::to_string(&fields).ok().as_deref() != Some(content.message.as_str())
+    {
+        return Ok(None);
+    }
+    let Some(request) = stored.request() else {
+        return Ok(None);
+    };
+    let Some(m) = RuleMutation::of(&request) else {
+        return Ok(None);
+    };
+    if !holds_request(st, &content, m) {
+        return Ok(None);
+    }
+    for h in rest {
+        if !is_gate_change(&st.reader().change(h)?) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(StoredRule {
+        view: view.to_string(),
+        first: *first,
+        content,
+        session_ref: stored.session_ref,
+    }))
+}
+
+/// The rule request whose complete change writes the decision `id`: a read of each rule view's
+/// first change, which an answer on a decision card needs and nothing on the normal path does.
+pub(super) fn rule_of_decision(st: &ReadState, id: &str) -> Result<Option<StoredRule>, RdyError> {
+    for view in st.view_names() {
+        if !view.starts_with("rule-") {
+            continue;
+        }
+        let Some(rule) = stored_rule(st, &view)? else {
+            continue;
+        };
+        let writes = rule.content.ops.iter().any(|o| {
+            matches!(o, Op::Create { block } if block.block_type == decision::DECISION && block.id.as_str() == id)
+        });
+        if writes {
+            return Ok(Some(rule));
+        }
+    }
+    Ok(None)
+}
+
+/// The decision that `content` writes, and the rule's earlier reason it supersedes or revokes:
+/// `None` for an add.
+pub(super) fn replaced(content: &Change) -> Option<(BlockId, BlockId, &'static str)> {
+    content.ops.iter().find_map(|o| match o {
+        Op::Create { block } if block.block_type == decision::DECISION => [
+            (decision::SUPERSEDES, "supersedes"),
+            (decision::REVOKES, "revokes"),
+        ]
+        .into_iter()
+        .find_map(|(name, word)| {
+            let old = block.links.get(name)?.first()?;
+            Some((block.id.clone(), old.target.clone(), word))
+        }),
+        _ => None,
+    })
+}
+
+/// The rule that `content` edits or retires.
+pub(super) fn target_rule(content: &Change) -> Option<&BlockId> {
+    content.ops.iter().find_map(|o| match o {
+        Op::Update { block, .. } if block.block_type == INSTRUCTION => Some(&block.id),
+        Op::Delete { id, .. } => Some(id),
+        _ => None,
+    })
 }
 
 /// How far the view of the request with `receipt` got, checked before anything is reused. It

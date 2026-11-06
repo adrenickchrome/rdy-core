@@ -27,6 +27,7 @@ mod gate_readiness;
 mod gate_reaffirm_cards;
 mod gate_rule_checks;
 mod gate_rule_lifecycle;
+mod gate_rules;
 mod gate_semantic;
 mod gate_signing;
 mod gate_tensions;

@@ -703,7 +703,7 @@ fn ref_of(r: &str) -> Result<String, RdyError> {
     Ok(r.to_string())
 }
 
-fn other_flow(r: &str) -> RdyError {
+pub(crate) fn other_flow(r: &str) -> RdyError {
     bad(
         format!("item {r} does not belong to a rules-from-chat proposal"),
         "answer it through rdy_answer in its project".to_string(),

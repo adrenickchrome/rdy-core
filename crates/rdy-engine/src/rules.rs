@@ -6,7 +6,7 @@
 //! dependents and stable content are checked first, on canon, before the view exists. The change's
 //! message is the request's receipt: a repeated request finds its view by name, checks its owner
 //! and its receipt ([`lifecycle`]), and continues from what is durable, never writing the content
-//! again. Landing is the next step's: a rule change stops here at its proposal.
+//! again. A rule change stops here at its proposal; [`approval`] takes it through the gate.
 use crate::decide::{DecisionInput, decision_op, inherited_links};
 use crate::error::*;
 use crate::rule_types::{
@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod approval;
 mod lifecycle;
 
 pub use lifecycle::{MAX_RECEIPT_BYTES, RECEIPT_VERSION};
@@ -453,11 +454,11 @@ fn project_of(st: &ReadState) -> Result<ProjectInfo, RdyError> {
 
 fn shared_refusal(
     st: &ReadState,
-    m: RuleMutation<'_>,
+    scope: RuleScope,
     reason: &BlockId,
     blocks: BTreeSet<String>,
 ) -> Result<RdyError, RdyError> {
-    let corrected = normal_path(m.scope(), &project_of(st)?, blocks.into_iter().collect())?;
+    let corrected = normal_path(scope, &project_of(st)?, blocks.into_iter().collect())?;
     Ok(RdyError::new(
         E_BAD_INPUT,
         format!("decision {reason} also governs other blocks"),
@@ -577,7 +578,7 @@ impl Rdy {
         if let Some(cur) = &current {
             let others = dependents(&st, &cur.reason.id, &cur.rule.id, view)?;
             if !others.is_empty() {
-                return Err(shared_refusal(&st, m, &cur.reason.id, others)?);
+                return Err(shared_refusal(&st, m.scope(), &cur.reason.id, others)?);
             }
         }
         let d = rule_decision(c, m, statement);
@@ -754,8 +755,12 @@ impl Rdy {
         let found = lifecycle::find(&st, &view, s, &receipt, m)?;
         drop(st);
         match found {
-            lifecycle::Found::Nothing => self.rule_draft(c, m, &receipt, view),
+            lifecycle::Found::Nothing => {
+                approval::policy_mode(&self.read())?;
+                self.rule_draft(c, m, &receipt, view)
+            }
             lifecycle::Found::Drafted(content) => {
+                approval::policy_mode(&self.read())?;
                 // an interrupted call left the whole change: it is proposed only if still safe
                 if let Err(e) = self.rule_plan(c, m, &view) {
                     return Err(self.rule_close_failed(s, &view, FAILED_BEFORE_PROPOSAL, e));
@@ -933,5 +938,7 @@ impl Rdy {
 
 /// The reason a view closes with when its change could not be proposed.
 pub(crate) const FAILED_BEFORE_PROPOSAL: &str = "rules_from_chat: failed before proposal";
+/// The reason an automatic flow's view closes with when the relay, the role or the signing refused.
+pub(crate) const RELAY_FAILED: &str = "rules_from_chat: relay failed";
 /// The reason a view closes with once its change landed.
 const LANDED: &str = "rules_from_chat: landed";

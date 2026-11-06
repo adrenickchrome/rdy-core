@@ -3909,6 +3909,32 @@ impl ReadState {
         self.log_page(None, None)
     }
 
+    /// The reply of the stored landing `h`, as its approval gave it: what a request that finds
+    /// its landing already written returns. What only that approval's write knew (its warnings,
+    /// the views it rebased, the keys it gave) is not stored, and reads empty.
+    pub(crate) fn stored_land_info(&self, h: &Hash) -> Result<LandInfo, RdyError> {
+        let rec = self.reader().landing(h)?;
+        let version = rec.approved_version.unwrap_or(rec.proposal);
+        let p = self.reader().proposal(&version)?;
+        Ok(LandInfo {
+            landing: h.to_string(),
+            approved: version_ref(self, &version)?.to_string(),
+            version: version.to_string(),
+            title: p.title,
+            summary: p.summary,
+            changes: p.changes.len(),
+            assurance: rec.assurance.as_str().to_string(),
+            warnings: vec![],
+            rebased: vec![],
+            chosen: rec.chosen.as_ref().map(|c| AltRef {
+                set: alt_label(&c.set),
+                member: c.member.clone(),
+            }),
+            closed: vec![],
+            keys: BTreeMap::new(),
+        })
+    }
+
     /// logt1: a page of the log, newest first. `since` is a landing id (at least 6 hex
     /// characters), `landing:<id>` or `tag:<version>`: only landings after it are listed. `limit`
     /// is at least 1. `since` is resolved first, so a bad one is an error even on an empty page.

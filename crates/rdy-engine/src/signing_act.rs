@@ -36,6 +36,10 @@
 //! land is refused (`E_NO_AGENT`, the UI's cause, with the terminal approval as its fix), and under
 //! `auto` and `never` it lands unsigned with no warning.
 //!
+//! A rule's approval (FW-MH.rules, D-ZSRBN) is a relayed act with its own first step
+//! ([`crate::rules::approval`]). That step can also end the act with no record: the person's card,
+//! the issues of a version that is not ready, or the result an earlier call stored.
+//!
 //! # Later signing
 //!
 //! [`run_sign`] signs a stored landing or tag: a human their own act, an agent a relayed one
@@ -52,6 +56,7 @@ use crate::answer::{
 use crate::config_levels::{effective, user_file_from_env};
 use crate::engine::{Engine, with_writer_result};
 use crate::gate::{LandInfo, LandOptions, PreparedApproval, ProposalRef};
+use crate::rules::approval::{RuleAct, RuleStep};
 use crate::signature_check::{
     CheckContext, SIGNED_VALID, STATEMENT_MATCH, SignatureCheck, SignatureSubject, check_signature,
     repo_ids, state_signatures, subject_context,
@@ -201,6 +206,28 @@ pub(crate) fn run_presented(
     Ok(v)
 }
 
+/// A rule's approval or a rule card's answer through the protocol ([`crate::rules::approval`]):
+/// the reply as `RuleAct` gives it, or its stop ([`crate::rules::approval::is_stop`]), which has no
+/// consequences.
+pub(crate) fn run_rule_act(
+    engine: &dyn Engine,
+    agent: &dyn crate::signing_crypto::SigningAgent,
+    session: &Session,
+    person: &str,
+    act: RuleAct,
+) -> Result<Value, RdyError> {
+    let answer = matches!(act, RuleAct::Answer(_));
+    let mut v = run_single(engine, agent, session, person, Single::Rule(Box::new(act)))?;
+    if !crate::rules::approval::is_stop(&v) {
+        if answer {
+            crate::consequence::report_answer_landings(engine, &mut v);
+        } else {
+            crate::consequence::report_approval(engine, &mut v);
+        }
+    }
+    Ok(v)
+}
+
 /// Each of `refs` with its recommended option: the pre-scan once under the writer (nothing is
 /// answered when it refuses), then each item through the signed-act protocol, in order, stopping
 /// at the first refusal with the answers given before it under `corrected.done`.
@@ -273,6 +300,8 @@ enum Single {
         source: Presentation,
         request: PresentedAnswer,
     },
+    /// A rule's approval, or an answer to one of its cards.
+    Rule(Box<RuleAct>),
 }
 
 /// A prepared act, not yet written.
@@ -476,6 +505,8 @@ enum Done {
     },
     /// A Later in the UI: nothing was written.
     Later,
+    /// A rule's act that ends with no record of its own: the reply as its first step gave it.
+    Stop(Box<Value>),
 }
 
 /// One act through the protocol (module docs), at most [`ATTEMPTS`] times.
@@ -602,6 +633,21 @@ fn prepare(
             )?)),
             StatementKind::Tag,
         ),
+        Single::Rule(act) => match r.rule_step(s, person, &act)? {
+            RuleStep::Stop(v) => return Ok(Step::Done(Box::new(Done::Stop(Box::new(v))))),
+            RuleStep::Landing(l) => (PreparedAct::Landing(l), StatementKind::Approval),
+            RuleStep::Answer(AnswerStep::Done(info)) => {
+                return Ok(Step::Done(Box::new(Done::Answer {
+                    info,
+                    checks: vec![],
+                    warning: None,
+                    approval: false,
+                })));
+            }
+            RuleStep::Answer(AnswerStep::Approval(a)) => {
+                (PreparedAct::Answer(a), StatementKind::Approval)
+            }
+        },
         Single::Presented { source, request } => {
             match r.presented_step(s, person, source, request)? {
                 PresentedStep::Later => return Ok(Step::Done(Box::new(Done::Later))),
@@ -854,6 +900,7 @@ fn reply(done: Done) -> Value {
             v
         }
         Done::Later => json!({"state": "later"}),
+        Done::Stop(v) => *v,
     }
 }
 
