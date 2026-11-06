@@ -169,10 +169,13 @@ async fn wx14_server_checks_client_sid_before_hello() {
             sys::check_client(&server, another_account()).map(drop),
             Err(server_refusal(me))
         );
-        // the daemon closes it: no protocol reply reaches an unverified peer
+        // the daemon closes it: no protocol reply reaches an unverified peer. Linux resets a socket
+        // that closes with bytes unread, as this hello is.
         drop(server);
         let mut heard = Vec::new();
-        client.read_to_end(&mut heard).await.unwrap();
+        if let Err(e) = client.read_to_end(&mut heard).await {
+            assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset);
+        }
         assert!(heard.is_empty(), "the refused client heard {heard:?}");
 
         // its own account: the check takes no byte of the hello that follows
