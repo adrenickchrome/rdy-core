@@ -304,6 +304,7 @@ fn rdx5_quarantine_listing_reuses_both_existing_name_rules() {
     std::fs::create_dir(store.join("index.redb.damaged-2")).unwrap();
     std::fs::write(store.join("index.redb"), b"x").unwrap();
     std::fs::write(store.join("x.torn-1"), b"x").unwrap();
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut expected = vec![
         "index.redb.damaged-1",
         "index.redb.damaged-2",

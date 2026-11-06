@@ -13,7 +13,6 @@ use modes::{chmod, home_dir, identity, link, mkdir, mode};
 use rdy_engine::config_edit::LockedConfig;
 use rdy_engine::{E_IO, E_LIMIT, RdyError};
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
-#[cfg(unix)]
 use rdy_store::pio;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
