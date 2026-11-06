@@ -200,7 +200,20 @@ fn wx15_aliases_reach_one_pipe() {
         // a junction to it
         let through = parent.join("through");
         junction(Path::new(&plain), &through);
-        aliases.push(through);
+        // Windows may refuse to pass a junction an ordinary account made, with error 448. Such a
+        // path reaches no project, and is refused by name, never given a pipe of its own.
+        if fs::read_dir(&through).err().and_then(|e| e.raw_os_error()) == Some(448) {
+            let e = socket::check_socket_path(&RunDir::of_project(&through)).unwrap_err();
+            assert!(
+                e.to_string().starts_with(&format!(
+                    "could not resolve the canonical project path {}: ",
+                    through.display()
+                )),
+                "{e}"
+            );
+        } else {
+            aliases.push(through);
+        }
         // a drive letter for it
         let subst = Subst::of(&canonical);
         aliases.push(subst.0.clone());

@@ -317,7 +317,7 @@ impl std::error::Error for ShortDirError {
 }
 
 /// `e` as a [`ShortDirError`] for `dir`, of `e`'s kind.
-pub(crate) fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
+pub fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
     io::Error::new(
         e.kind(),
         ShortDirError {
