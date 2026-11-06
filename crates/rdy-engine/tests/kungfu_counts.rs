@@ -806,3 +806,49 @@ fn kfu2_worker_flush_and_stop_are_bounded() {
         "the lost count stays lost"
     );
 }
+
+#[test]
+fn kfu2_idle_recorder_observes_another_recorders_flush() {
+    let (_tmp, rdy) = project();
+    let (tx_a, rx_a) = mpsc::channel();
+    let a = Recorder::detached(
+        &rdy,
+        Hooks {
+            clock: Some(Arc::new(|| NOON)),
+            after_cycle: Some(Arc::new(move |c| {
+                let _ = tx_a.send(c);
+            })),
+            poll: Duration::from_millis(20),
+            retry: Duration::from_secs(3600),
+            ..Hooks::default()
+        },
+    )
+    .expect("recorder a");
+    assert_eq!(rx_a.recv_timeout(WAIT).expect("load"), Cycle::Loaded);
+    assert_eq!(a.summary().total, one(0, 0, 0));
+    let b = Recorder::detached(
+        &rdy,
+        Hooks {
+            clock: Some(Arc::new(|| NOON)),
+            poll: Duration::from_secs(3600),
+            retry: Duration::from_secs(3600),
+            ..Hooks::default()
+        },
+    )
+    .expect("recorder b");
+    assert!(b.record(ALICE, None, "write", Case::Lost));
+    let start = std::time::Instant::now();
+    while !b.settled() {
+        assert!(start.elapsed() < WAIT, "b never flushed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // a records nothing; its own poll must pick the flush up, with summary() never reading disk
+    let start = std::time::Instant::now();
+    loop {
+        if a.summary().total == one(0, 1, 0) {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "a never saw b's flush");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

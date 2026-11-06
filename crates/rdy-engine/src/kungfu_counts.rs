@@ -44,6 +44,9 @@ pub const MAX_PENDING_ROWS: usize = 16_384;
 pub const MAX_DEPTH: usize = 4;
 /// How long the worker waits after a failed flush before it tries again.
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long an idle worker waits before it reads the file again, so totals that another process
+/// recorded show up without a local miss.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The count file's name, in `.rdy/run`.
 pub const FILE_NAME: &str = "kungfu-counts.json";
@@ -447,6 +450,7 @@ pub struct Hooks {
     pub fault: Option<FaultFn>,
     pub after_cycle: Option<CycleFn>,
     pub retry: Duration,
+    pub poll: Duration,
 }
 
 impl Default for Hooks {
@@ -457,6 +461,7 @@ impl Default for Hooks {
             fault: None,
             after_cycle: None,
             retry: RETRY_INTERVAL,
+            poll: POLL_INTERVAL,
         }
     }
 }
@@ -702,6 +707,7 @@ impl Core {
         let first = self.cycle();
         self.report(first);
         let mut retry_at: Option<Instant> = self.retry_after(first);
+        let mut poll_at = Instant::now() + self.hooks.poll;
         loop {
             let mut st = self.lock();
             loop {
@@ -710,18 +716,23 @@ impl Core {
                 }
                 let now = Instant::now();
                 let due = st.wake && retry_at.is_none_or(|t| now >= t);
-                if due {
+                // an idle worker re-reads the file; one with counts waiting follows its retry
+                if due || (!st.wake && now >= poll_at) {
                     break;
                 }
-                st = match retry_at {
-                    Some(t) if st.wake => {
-                        self.cv
-                            .wait_timeout(st, t.saturating_duration_since(now))
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .0
+                let until = match retry_at {
+                    Some(t) if st.wake => t,
+                    _ if st.wake => {
+                        st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+                        continue;
                     }
-                    _ => self.cv.wait(st).unwrap_or_else(PoisonError::into_inner),
+                    _ => poll_at,
                 };
+                st = self
+                    .cv
+                    .wait_timeout(st, until.saturating_duration_since(now))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
             let stopping = st.stop;
             st.wake = false;
@@ -734,6 +745,7 @@ impl Core {
                 return;
             }
             retry_at = self.retry_after(out);
+            poll_at = Instant::now() + self.hooks.poll;
         }
     }
 
