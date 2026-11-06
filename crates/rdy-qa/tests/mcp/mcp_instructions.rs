@@ -181,7 +181,7 @@ fn guide_has(set: &str, sentence: &str) {
     let g = guide(&[set]);
     assert!(g.contains(sentence), "rdy:{set} lacks: {sentence}");
     assert!(
-        !short_text().contains(sentence),
+        !rdy_mcp::server::INSTRUCTIONS.contains(sentence),
         "the server text still holds: {sentence}"
     );
 }
@@ -251,7 +251,7 @@ fn agi5_removed_server_guidance_is_loadable() {
         assert!(seen > 0, "{name}");
     }
     // none of them stays in the server text, with or without its code spans
-    let server = short_text();
+    let server = rdy_mcp::server::INSTRUCTIONS;
     for (_, sentence) in MOVED {
         let old = sentence.replace('`', "");
         assert!(!server.contains(sentence), "{sentence}");
@@ -335,7 +335,7 @@ fn di13_the_instructions_present_the_batch_and_relay_with_rdy_answer() {
     // ui10: the elicitation sentence follows the relay sentence
     let elicit = moved("approvals", "Use `rdy_answer` with `elicit: true`");
     assert!(g.find(relay).unwrap() < g.find(elicit).unwrap(), "{g}");
-    assert!(!short_text().contains("Present a batch card"));
+    assert!(!rdy_mcp::server::INSTRUCTIONS.contains("Present a batch card"));
 }
 
 #[test]
