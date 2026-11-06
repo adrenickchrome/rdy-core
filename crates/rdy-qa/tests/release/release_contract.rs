@@ -43,6 +43,7 @@ use rdy_store::{codec, dump, kinds, sync_stream};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -2977,7 +2978,9 @@ fn elicitation_probes(seen: &mut Seen) {
     mcp_probe(seen, &mut c, "rdy_answer", "rdy_answer elicit mixed", mixed);
     let mut raw = |extra: Value| {
         let id = c.next_id();
-        let mut params = json!({"name": "rdy_answer", "arguments": ask, "_meta": {
+        let mut args = ask.clone();
+        rdy_qa::mcp::supply_kungfu("rdy_answer", &mut args);
+        let mut params = json!({"name": "rdy_answer", "arguments": args, "_meta": {
             "rdy/actor": "agent:elc", "rdy/run": "elc",
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
@@ -3071,6 +3074,132 @@ fn write_import_tree(out: &Path) {
         + &row("D-QMAC1", "agent:b", "r2", 200)
         + &row("D-QMPR1", "agent:b", "r2", 200);
     std::fs::write(out.join("authors.yaml"), authors).expect("authors");
+}
+
+/// kfu6 (D-Y18E1): the local kungfu counts as `rdy status` and `rdy_overview` show them, from a
+/// project with fixed rows in its count file. The days are named by their distance from today, so
+/// the capture does not depend on the date. The two zero replies come first: with no count file
+/// neither surface has a member for it.
+fn kungfu_counts_row() -> Value {
+    use rdy_engine::kungfu_counts::{self as kc, Case, Counts, Day, Hooks, Key, Recorder, Rows};
+    let (dir, r) = rdy_qa::fixtures::project();
+    drop(r);
+    let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+    let status = |args: &[&str]| rdy_in(dir.path(), &env, args);
+    let json_status = || -> Value {
+        let (code, out, err) = status(&["--json", "status"]);
+        assert_eq!(code, 0, "{err}");
+        serde_json::from_str(out.trim()).expect("status JSON")
+    };
+    let zero = json_status();
+    assert!(
+        zero.get("kungfu").is_none() && zero.get("kungfu_counts").is_none(),
+        "no count, no member: {zero}"
+    );
+
+    let today = Day::today();
+    let mut rows = Rows::new();
+    let mut put = |back: i64, actor: &str, run: Option<&str>, ruleset: &str, c: (u64, u64, u64)| {
+        rows.insert(
+            Key {
+                day: today.minus(back),
+                actor: actor.into(),
+                run: run.map(Into::into),
+                ruleset: ruleset.into(),
+            },
+            Counts {
+                not_loaded: c.0,
+                lost: c.1,
+                wrong: c.2,
+            },
+        );
+    };
+    put(0, "agent:a1", Some("r1"), "write", (2, 1, 0));
+    put(0, "agent:a1", Some("r1"), "read", (1, 0, 0));
+    put(0, "agent:a2", None, "bootstrap", (0, 2, 1));
+    put(5, "agent:a3", Some("r9"), "approvals", (1, 0, 0));
+    // the recorder makes the private run directory; the rows are then the file as it is
+    let rec = Recorder::detached(&dir.path().join(".rdy"), Hooks::default()).expect("a recorder");
+    rec.record("agent:seed", None, "read", Case::Lost);
+    while !rec.settled() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(rec);
+    std::fs::write(
+        dir.path().join(".rdy/run").join(kc::FILE_NAME),
+        kc::to_bytes(&rows),
+    )
+    .expect("write the count file");
+    let line = "kungfu: 4 not loaded, 3 lost, 1 wrong, in 3 sessions.";
+
+    let by_day = |v: &Value| -> Value {
+        let names: Vec<(String, String)> = [0, 5]
+            .iter()
+            .map(|n| {
+                let name = if *n == 0 {
+                    "today".to_string()
+                } else {
+                    format!("today-{n}")
+                };
+                (today.minus(*n).to_string(), name)
+            })
+            .collect();
+        let mut out = v.clone();
+        for row in out.as_array_mut().expect("rows") {
+            let day = row["day"].as_str().expect("a day").to_string();
+            let name = names.iter().find(|(d, _)| *d == day).expect("a seeded day");
+            row["day"] = json!(name.1);
+        }
+        out
+    };
+    let seeded = json_status();
+    assert_eq!(seeded["kungfu"], line, "{seeded}");
+    let counts = by_day(&seeded["kungfu_counts"]);
+    let mut row_members: Vec<&String> = seeded["kungfu_counts"][0]
+        .as_object()
+        .expect("a row")
+        .keys()
+        .collect();
+    row_members.sort();
+    let (code, text, err) = status(&["status"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(text.lines().filter(|l| *l == line).count(), 1, "{text}");
+    assert_eq!(text.matches("kungfu").count(), 1, "{text}");
+    drop(cfg);
+
+    // the overview of a server in the same project: the recorder reads the file on its own
+    let mut c = isolated_mcp(dir.path());
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:ov", "run": "ov", "role": "writer"}),
+    );
+    assert!(opened.is_ok(), "{opened:?}");
+    let start = std::time::Instant::now();
+    let overview = loop {
+        let o = c.call("rdy_overview", json!({})).ok();
+        if o.get("kungfu").is_some() {
+            break o;
+        }
+        assert!(
+            start.elapsed() < rdy_qa::mcp::DEADLINE,
+            "the overview never showed the counts: {o}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(overview["kungfu"], line, "{overview}");
+    assert!(overview.get("kungfu_counts").is_none(), "{overview}");
+    json!({
+        "sources": ["rdy status --json against a seeded count file", "rdy_overview against the same project"],
+        "template": "kungfu: <not_loaded> not loaded, <lost> lost, <wrong> wrong, in <sessions> sessions.",
+        "zero_omits": ["kungfu", "kungfu_counts"],
+        "status": {
+            "kungfu": line,
+            "kungfu_counts": counts,
+            "row_members": row_members,
+            "text_lines": 1,
+        },
+        "overview": {"kungfu": overview["kungfu"], "kungfu_counts": null},
+    })
 }
 
 fn mcp_row() -> Value {
@@ -3168,6 +3297,7 @@ fn mcp_row() -> Value {
         "result_fields_not_captured": not_captured,
         "ops_not_probed": ops_not_probed,
         "carried_value_refusals": refusals,
+        "kungfu_counts": kungfu_counts_row(),
         "refusal_envelope": refusal,
         "refusal_error_rows": rdy_mcp::tools::ERROR_ROWS.iter().map(|(c, _, _)| *c).collect::<Vec<_>>(),
     })
@@ -5347,16 +5477,45 @@ impl PersonHost for NoStoreHost {
     }
 }
 
-/// The rows and menu that the committed guide bundle says a full reply holds.
-fn bundle_reply(bundle: &Value) -> (Value, Value) {
+/// The rows and menu that the committed guide bundle and tool table say a full reply holds. The
+/// final row of a ruleset that owns tools carries its value's line (D-Y18E1); the value hashes the
+/// bundle's source rows. Computed here and not by the code under test.
+fn bundle_reply(bundle: &Value, table: &Value) -> (Value, Value) {
     let (mut rows, mut menu) = (vec![], vec![]);
     for set in bundle["rulesets"].as_array().expect("rulesets") {
         let handle = format!("rdy:{}", set["name"].as_str().expect("a name"));
+        let tools: Vec<&str> = table
+            .as_array()
+            .expect("the table's rows")
+            .iter()
+            .filter(|row| row["ruleset"] == handle.as_str())
+            .map(|row| row["tool"].as_str().expect("a tool"))
+            .collect();
+        let source_rows = set["rows"].as_array().expect("rows");
+        let source: String = source_rows
+            .iter()
+            .map(|row| row["text"].as_str().expect("a text"))
+            .collect();
+        let digest: String = Sha256::digest(source.as_bytes())
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let mut bytes = 0usize;
-        for row in set["rows"].as_array().expect("rows") {
-            bytes += row["text"].as_str().expect("a text").len();
+        for (index, row) in source_rows.iter().enumerate() {
+            let mut text = row["text"].as_str().expect("a text").to_string();
+            if !tools.is_empty() && index + 1 == source_rows.len() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
+                    "On every call to a tool in this ruleset, pass kungfu: \"kf-{digest}\". Tools: {}.\n",
+                    tools.join(", ")
+                ));
+            }
+            bytes += text.len();
             rows.push(json!({
-                "id": row["id"], "ruleset": handle, "text": row["text"], "layer": "rdy",
+                "id": row["id"], "ruleset": handle, "text": text, "layer": "rdy",
                 "locked": row["locked"], "reason": [],
             }));
         }
@@ -5376,8 +5535,18 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
     let bundle_path = workspace_root().join("release/agent-guide.json");
     let bundle: Value =
         serde_json::from_slice(&std::fs::read(&bundle_path).expect("the bundle")).expect("JSON");
-    let (rows, menu) = bundle_reply(&bundle);
+    let table_path = workspace_root().join("crates/rdy-engine/kungfu-tools.json");
+    let table: Value =
+        serde_json::from_slice(&std::fs::read(&table_path).expect("the table")).expect("JSON");
+    let (rows, menu) = bundle_reply(&bundle, &table);
     assert_eq!(rows.as_array().unwrap().len(), 14);
+    let lines = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["text"].as_str().unwrap().contains("pass kungfu: \"kf-"))
+        .count();
+    assert_eq!(lines, 9, "one line for each ruleset that owns tools");
     assert_eq!(menu.as_array().unwrap().len(), 12);
     let required: Vec<&Value> = rows
         .as_array()
@@ -5480,6 +5649,8 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
         .arg(&bundle_path)
         .arg("--sidecar")
         .arg(workspace_root().join("release/agent-guide.sha256"))
+        .arg("--table")
+        .arg(&table_path)
         .output()
         .expect("run the checker");
     assert!(
@@ -5488,3 +5659,267 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
         String::from_utf8_lossy(&checked.stderr)
     );
 }
+
+/// kfu6 (D-Y18E1): the release surface keeps the argument undisclosed. Every tool's input schema
+/// stays closed and holds no word of it; the errors reference names only the code `W_KUNGFU`,
+/// with no parameter, no way to send a value and no value.
+#[test]
+fn kfu6_release_surface_keeps_argument_undisclosed() {
+    let fixture = read_fixture();
+    let tools = fixture["mcp"]["tools"].as_object().expect("the tools");
+    assert!(tools.len() > 20, "the tools are in the fixture");
+    for (name, tool) in tools {
+        let schema = &tool["input_schema"];
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "{name} is closed"
+        );
+        let text = schema.to_string().to_lowercase();
+        assert!(
+            !text.contains("kungfu") && !text.contains("kf-"),
+            "{name}: {text}"
+        );
+        assert!(
+            schema["properties"].get("kungfu").is_none(),
+            "{name} lists the argument"
+        );
+    }
+    // the live listing is the fixture's
+    let (d, r) = rdy_qa::fixtures::project();
+    drop(r);
+    let mut c = isolated_mcp(d.path());
+    for t in c.tools() {
+        let name = t["name"].as_str().expect("a name");
+        let text = t["inputSchema"].to_string().to_lowercase();
+        assert!(!text.contains("kungfu") && !text.contains("kf-"), "{name}");
+        assert_eq!(
+            t["inputSchema"]["additionalProperties"],
+            json!(false),
+            "{name}"
+        );
+    }
+    drop(c);
+
+    // the code row: the code name, the reference text, and nothing of the argument
+    let rows = fixture["errors_warnings"]["error_rows"]
+        .as_array()
+        .expect("error rows");
+    let row = rows
+        .iter()
+        .find(|r| r[0] == "W_KUNGFU")
+        .expect("a W_KUNGFU row");
+    assert_eq!(
+        row,
+        &json!([
+            "W_KUNGFU",
+            "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+            "Call rdy_instructions and load the ruleset named by the warning."
+        ])
+    );
+    let errors = fixture["errors_warnings"].to_string();
+    assert_eq!(
+        errors.matches("W_KUNGFU").count(),
+        errors.to_lowercase().matches("kungfu").count(),
+        "the code name is the only mention of the word in the errors surface"
+    );
+    assert!(!errors.contains("kf-"), "no value in the errors surface");
+    assert!(
+        fixture["errors_warnings"]["codes"]["W_KUNGFU"].is_string(),
+        "the code constant is listed"
+    );
+    let refusal_rows = fixture["mcp"]["refusal_error_rows"]
+        .as_array()
+        .expect("rows");
+    assert_eq!(
+        refusal_rows.iter().filter(|c| *c == "W_KUNGFU").count(),
+        1,
+        "listed once, before the plan rows"
+    );
+    let at = refusal_rows.iter().position(|c| c == "W_KUNGFU").unwrap();
+    assert_eq!(refusal_rows[at + 1], "E_PLAN_ITEM");
+}
+
+/// kfu6 (D-Y18E1): the packaged binary delivers, through the CLI and both MCP servers (in the
+/// process and through the daemon proxy), the checked source rows plus exact suffixes. The
+/// expectation is computed here from the committed bundle and tool table, byte by byte: the source
+/// stays an exact prefix of each final row, the suffix is the one generated line, and every other
+/// row is the source unchanged.
+#[test]
+fn kfu6_packaged_delivery_matches_checked_source_plus_suffix() {
+    let world = rdy_qa::instructions::World::new();
+    let bundle: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("release/agent-guide.json")).expect("the bundle"),
+    )
+    .expect("JSON");
+    let table: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("crates/rdy-engine/kungfu-tools.json"))
+            .expect("the table"),
+    )
+    .expect("JSON");
+    let (rows, menu) = bundle_reply(&bundle, &table);
+    // the suffix rules, apart from the expectation: source prefix, one line, LF ending
+    let mut sources = vec![];
+    for set in bundle["rulesets"].as_array().expect("rulesets") {
+        sources.extend(set["rows"].as_array().expect("rows").iter().cloned());
+    }
+    assert_eq!(sources.len(), rows.as_array().unwrap().len());
+    let mut suffixed = 0;
+    for (source, row) in sources.iter().zip(rows.as_array().unwrap()) {
+        let (raw, text) = (
+            source["text"].as_str().unwrap(),
+            row["text"].as_str().unwrap(),
+        );
+        assert!(text.starts_with(raw) || text.starts_with(&format!("{raw}\n")));
+        if text == raw {
+            continue;
+        }
+        suffixed += 1;
+        let tail = text.strip_prefix(raw).unwrap();
+        let tail = if raw.ends_with('\n') {
+            tail
+        } else {
+            tail.strip_prefix('\n').expect("one LF")
+        };
+        assert!(
+            tail.starts_with("On every call to a tool in this ruleset, pass kungfu: \"kf-")
+                && tail.ends_with(".\n")
+                && tail.matches('\n').count() == 1
+                && !tail.contains('`'),
+            "{tail:?}"
+        );
+    }
+    assert_eq!(suffixed, 9, "nine owning rulesets, no other row");
+
+    // CLI
+    let dir = world.project();
+    let (ok, cli) = world.json(dir.path(), &["instructions", "--full"]);
+    assert!(ok, "{cli}");
+    assert_eq!(cli["instructions"], rows);
+    assert_eq!(cli["menu"], menu);
+    // MCP in the process
+    let mut c = world.mcp(dir.path());
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:qa", "run": "kfu6", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let direct = c.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(direct["instructions"], rows);
+    assert_eq!(direct["menu"], menu);
+    drop(c);
+    // MCP through the daemon proxy
+    let served = rdy_qa::daemon::Served::new();
+    let mut p = rdy_qa::mcp::McpClient::start_proxy(&served);
+    assert!(
+        p.call(
+            "rdy_session",
+            json!({"actor": "agent:qa", "run": "kfu6p", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let proxied = p.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(proxied["instructions"], rows);
+    assert_eq!(proxied["menu"], menu);
+}
+
+/// kfu6 (D-Y18E1): the contract holds a deterministic nonzero capture. Status carries the summary
+/// and every field of every retained row, in order, with the days named from today; the overview
+/// carries the same summary and no rows.
+#[test]
+fn kfu6_positive_count_rows_are_in_the_contract() {
+    let fixture = read_fixture();
+    let k = &fixture["mcp"]["kungfu_counts"];
+    let line = "kungfu: 4 not loaded, 3 lost, 1 wrong, in 3 sessions.";
+    assert_eq!(
+        k["template"],
+        "kungfu: <not_loaded> not loaded, <lost> lost, <wrong> wrong, in <sessions> sessions."
+    );
+    assert_eq!(k["zero_omits"], json!(["kungfu", "kungfu_counts"]));
+    assert_eq!(k["status"]["kungfu"], line);
+    assert_eq!(k["status"]["text_lines"], 1);
+    assert_eq!(
+        k["status"]["row_members"],
+        json!([
+            "actor",
+            "day",
+            "lost",
+            "not_loaded",
+            "ruleset",
+            "run",
+            "wrong"
+        ])
+    );
+    assert_eq!(
+        k["status"]["kungfu_counts"],
+        json!([
+            {"day": "today-5", "actor": "agent:a3", "run": "r9", "ruleset": "approvals",
+             "not_loaded": 1, "lost": 0, "wrong": 0},
+            {"day": "today", "actor": "agent:a1", "run": "r1", "ruleset": "read",
+             "not_loaded": 1, "lost": 0, "wrong": 0},
+            {"day": "today", "actor": "agent:a1", "run": "r1", "ruleset": "write",
+             "not_loaded": 2, "lost": 1, "wrong": 0},
+            {"day": "today", "actor": "agent:a2", "run": null, "ruleset": "bootstrap",
+             "not_loaded": 0, "lost": 2, "wrong": 1},
+        ])
+    );
+    assert_eq!(
+        k["overview"],
+        json!({"kungfu": line, "kungfu_counts": null})
+    );
+    // the capture is live: the generation made now equals it
+    assert_eq!(rows()["mcp"]["kungfu_counts"], *k);
+}
+
+/// kfu6 (D-Y18E1): the combined diff of the contract is the explained sections alone. The code
+/// row (`errors_warnings`: the code constant, its reference row, its schema shape, and `mcp`: its
+/// place in the refusal rows) and the positive-count capture (`mcp.kungfu_counts`) are the only
+/// movement. The store, dump, sync, signing and export sections keep their bytes: their digests
+/// are pinned here from the baseline before this change.
+#[test]
+fn kfu6_release_contract_keeps_unrelated_bytes() {
+    let fixture = read_fixture();
+    let digest = |v: &Value| -> String {
+        Sha256::digest(serde_json::to_vec(v).expect("encode"))
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    let pinned: [(&str, &str); 6] = PINNED_SECTIONS;
+    for (name, want) in pinned {
+        assert_eq!(digest(&fixture[name]), want, "section {name} moved");
+    }
+    // the explained members are there
+    assert!(fixture["errors_warnings"]["codes"]["W_KUNGFU"].is_string());
+    assert!(fixture["mcp"]["kungfu_counts"].is_object());
+}
+
+/// The digests of the sections that the kungfu change leaves alone.
+const PINNED_SECTIONS: [(&str, &str); 6] = [
+    (
+        "store",
+        "9d2bc039564c6498bbb1b2e6bd66f7317babc1029d7db197b3ef575bdb78c99c",
+    ),
+    (
+        "dump_load",
+        "000ea7a593a8e2f4fb0df14e53c463bb9651cc4ceee54d4578c428a1117107e6",
+    ),
+    (
+        "sync",
+        "e48c8c397ebd123751f4fea45216dc5c16e1a501efc86b67492d3df3101ec480",
+    ),
+    (
+        "signatures",
+        "ae9a90f479e7d64e2eb2156c26d81df4de75524c731cfed245d8e1b82eb07509",
+    ),
+    (
+        "markdown_exports",
+        "218ea793688320c47ee1b3c7e032d9c4bbac52c6404926993148f82e11ce4644",
+    ),
+    (
+        "site_urls",
+        "2d4c1e7028375201fa9569f76ebeef713997a72dde29d93487b3cb203affd78f",
+    ),
+];

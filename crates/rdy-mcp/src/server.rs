@@ -32,6 +32,7 @@ pub use crate::tools::DaemonBuildWarning;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
 pub use resources::{RESOURCES, TEMPLATES};
 
+use crate::kungfu::{self, Check};
 use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
@@ -90,6 +91,8 @@ struct ToolCall {
     cancelled: RequestCancelled,
     /// What the request's `_meta` states about who acts (D-4PHYQ), read once at `call_tool`.
     claim: Option<crate::claims::Asked>,
+    /// What the request's kungfu value was (D-Y18E1), taken once at `call_tool`.
+    kungfu: Check,
 }
 
 /// The signer of one tool call: the session's agent serving that call
@@ -157,6 +160,11 @@ impl RdyServer {
             st.lease_owner = sid;
         }
         st.hub = Arc::clone(&hub);
+        // the kungfu values and the project's recorder are ready before the first call. A project
+        // whose directory cannot be opened counts nothing, and its calls work the same.
+        rdy_engine::kungfu::owners();
+        st.kungfu_counts =
+            rdy_engine::kungfu_counts::Recorder::for_project(&engine.root().join(".rdy")).ok();
         let hub_sid = st.hub_sid();
         RdyServer {
             hub,
@@ -240,7 +248,8 @@ impl RdyServer {
         p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        result(self.claimed(tool, true, p, f).await)
+        let out = self.claimed(tool, true, p, f).await;
+        self.reply(out)
     }
 
     /// `run` for a tool whose reply is a closed, size-checked object: no pack notice rides on
@@ -252,7 +261,18 @@ impl RdyServer {
         p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        result(self.claimed(tool, false, p, f).await)
+        let out = self.claimed(tool, false, p, f).await;
+        self.reply(out)
+    }
+
+    /// The complete tool result of `out`, with the kungfu advisory this request owes. The action
+    /// has used its budget by now, so the advisory moves no page boundary.
+    pub(crate) fn reply(&self, out: Result<serde_json::Value, RdyError>) -> CallToolResult {
+        let check = CALL.try_with(|c| c.kungfu.clone()).ok();
+        match kungfu::finish(self.hub.claims(), check.as_ref(), out) {
+            Ok(v) => CallToolResult::success(vec![ContentBlock::text(v.to_string())]),
+            Err(v) => CallToolResult::error(vec![ContentBlock::text(v.to_string())]),
+        }
     }
 
     /// One claimed tool call on the blocking pool: the claim of the call's `_meta` (from the
@@ -265,8 +285,13 @@ impl RdyServer {
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> Result<serde_json::Value, RdyError> {
         let asked = CALL.try_with(|c| c.claim.clone()).ok().flatten();
+        let check = CALL.try_with(|c| c.kungfu.clone()).ok();
         self.blocking(tool, notice, move |st| {
             let out = crate::claims::call(st, asked.as_ref(), tool, |st| {
+                // the claim succeeded: a miss counts now, a refused call's too
+                if let Some(check) = &check {
+                    kungfu::evaluate(st, check);
+                }
                 // taken before the tool formats, so a bounded reply can reserve its size; an
                 // `rdy_session` binds only as it ends, and takes it below
                 crate::claims::take_build_warning(st);
@@ -407,7 +432,7 @@ impl RdyServer {
 impl ServerHandler for RdyServer {
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
         // every tool call is a new response: a state read before a content removal refuses it
@@ -433,6 +458,8 @@ impl ServerHandler for RdyServer {
             Ok(c) => c,
             Err(e) => return Ok(result(Err(e)).into()),
         };
+        // D-Y18E1: the value leaves the arguments here, so no route below sees it
+        let kungfu = Check::of(&request.name, &mut request.arguments);
         let request = self.reserve_warning(request, claim.as_ref());
         // the call's body signs through a signer that names this request and stops at its
         // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
@@ -454,6 +481,7 @@ impl ServerHandler for RdyServer {
                 Arc::new(move || ct.is_cancelled())
             },
             claim,
+            kungfu,
         };
         // D-6M0AF: an elicited answer is a protocol exchange, so it runs before the tool router,
         // which can only build a complete result
@@ -1374,6 +1402,7 @@ mod tests {
             },
             cancelled: Arc::new(|| false),
             claim: None,
+            kungfu: Check::of("", &mut None),
         };
         let keys = |st: &mut McpState| st.agent.identities().map(|k| serde_json::json!(k.len()));
         let sign = |st: &mut McpState| st.agent.sign(&[1], &[2]).map(|_| serde_json::Value::Null);

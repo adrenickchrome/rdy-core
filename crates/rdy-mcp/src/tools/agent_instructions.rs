@@ -81,7 +81,7 @@ pub fn rdy_instructions(st: &mut McpState, p: InstructionsParams) -> Result<Valu
         p.load,
         p.full,
     )?;
-    // only a complete reply clears the reminder; a refusal leaves it owed
-    st.hub.claims().mark_instructions_read(&(s.actor, s.run));
+    // only a complete reply clears the reminder and marks what it holds; a refusal leaves both
+    crate::kungfu::note_delivered(st.hub.claims(), &(s.actor, s.run), &out);
     Ok(out)
 }

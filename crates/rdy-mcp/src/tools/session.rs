@@ -279,6 +279,15 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     if reminder_tokens > 0 {
         super::add_reminder(&mut out);
     }
+    // D-Y18E1: the local kungfu summary, from the recorder's memory snapshot, after the bounded
+    // content. It describes the current local project at every content scope and waits for no flush.
+    if let Some(line) = st
+        .kungfu_counts
+        .as_ref()
+        .and_then(|r| rdy_engine::kungfu_counts::summary_line(&r.summary()))
+    {
+        out["kungfu"] = Value::String(line);
+    }
     Ok(out)
 }
 

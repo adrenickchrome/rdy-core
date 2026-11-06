@@ -13,6 +13,7 @@
 use crate::embedded_guide;
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, E_NOT_FOUND, E_VALIDATION, RdyError};
 use crate::instructions_config::{PersonPath, PersonSource, resolve_person_from_env};
+use crate::kungfu;
 use crate::query::source_body;
 use crate::read_state::ReadState;
 use crate::session::Scope;
@@ -831,8 +832,9 @@ pub const META_READY_HINT: &str = "Your own rules project is ready. Reconnect th
 
 /// The contribution of the built-in guide (layer `rdy`): every ruleset on the menu, whole when
 /// required, named by `load` or asked for by `load.full()`. It is made from the static
-/// catalogue alone: no store, disk or network is read. Its reply bytes are bounded like a
-/// stored source's (`E_LIMIT`).
+/// catalogue alone: no store, disk or network is read. The final row of a ruleset that owns tools
+/// carries its value's line, and a menu size counts it (D-Y18E1); the catalogue's rows stay as
+/// they are. Its reply bytes, the lines included, are bounded like a stored source's (`E_LIMIT`).
 pub fn builtin(load: &LoadRequest) -> Result<Contribution, RdyError> {
     builtin_with(load, &BOUNDS)
 }
@@ -844,12 +846,20 @@ pub fn builtin_with(load: &LoadRequest, b: &Bounds) -> Result<Contribution, RdyE
     for set in embedded_guide::RULESETS {
         let id = format!("rdy:{}", set.name);
         let whole = set.required || load.full() || load.names_builtin(set.name);
-        let bytes: u64 = set.rows.iter().map(|r| r.text.len() as u64).sum();
+        let owner = kungfu::owner(set.name);
+        let added = owner
+            .zip(set.rows.last())
+            .map_or(0, |(o, last)| o.added_bytes(last.text));
+        let bytes: u64 = set.rows.iter().map(|r| r.text.len() as u64).sum::<u64>() + added;
         if whole {
-            rows.extend(set.rows.iter().map(|r| InstructionRow {
+            let last = set.rows.len().saturating_sub(1);
+            rows.extend(set.rows.iter().enumerate().map(|(i, r)| InstructionRow {
                 id: r.id.to_string(),
                 ruleset: id.clone(),
-                text: r.text.to_string(),
+                text: match owner {
+                    Some(o) if i == last => o.delivered(r.text),
+                    _ => r.text.to_string(),
+                },
                 layer: Layer::Rdy,
                 locked: r.locked,
                 reason: vec![],

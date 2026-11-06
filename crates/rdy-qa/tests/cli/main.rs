@@ -30,6 +30,7 @@ mod cli_instructions;
 mod cli_intake;
 mod cli_intents;
 mod cli_keys;
+mod cli_kungfu;
 mod cli_log;
 mod cli_name_case;
 mod cli_neighbors_plan;

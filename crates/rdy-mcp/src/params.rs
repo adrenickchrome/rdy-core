@@ -39,10 +39,53 @@ where
     }
 }
 
-/// Parses `args` as `P`. On failure, the arguments are checked against `P`'s input schema to
+/// The name of the undeclared argument that carries a ruleset's value (FW-MH.kungfu, D-Y18E1).
+/// No parameter struct and no schema declares it; the extractor removes it first.
+const KUNGFU: &str = "kungfu";
+
+/// What a call's `kungfu` argument was, judged against a ruleset's current value. The supplied
+/// value is not kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kungfu {
+    /// The call has no top-level `kungfu` key.
+    Missing,
+    /// The key is present with a value that is not exactly the expected string: null, a scalar, a
+    /// list, an object, or a string of any other bytes.
+    Wrong,
+    /// The key is a string that equals the expected value.
+    Correct,
+}
+
+/// Removes the top-level `kungfu` key from `args` and classifies it against `expected`. Only that
+/// exact key goes; every other key and value stays, and a nested `kungfu` is left to its own
+/// validator. With no `expected` (the tool is exempt or unknown), a present key is `Wrong`. The
+/// length is checked before any byte is compared, so a long value costs nothing more.
+pub fn take_kungfu(args: &mut JsonObject, expected: Option<&str>) -> Kungfu {
+    match args.remove(KUNGFU) {
+        None => Kungfu::Missing,
+        Some(Value::String(s)) => match expected {
+            Some(e) if s.len() == e.len() && s.as_bytes() == e.as_bytes() => Kungfu::Correct,
+            _ => Kungfu::Wrong,
+        },
+        Some(_) => Kungfu::Wrong,
+    }
+}
+
+/// Parses `args` as `P` after removing the undeclared top-level `kungfu` argument. Use this for
+/// tool arguments; [`parse_params_strict`] is for internal objects.
+pub fn parse_params<P: DeserializeOwned + JsonSchema + 'static>(
+    tool: &str,
+    mut args: JsonObject,
+) -> Result<P, RdyError> {
+    args.remove(KUNGFU);
+    parse_params_strict(tool, args)
+}
+
+/// Parses `args` as `P` and removes nothing: every key must be one of `P`'s. The request's
+/// `_meta` and other internal objects use this. On failure, the arguments are checked against `P`'s input schema to
 /// name the parameter and its shape; if the schema accepts them (an overflow, say), the refusal
 /// carries serde's detail instead.
-pub fn parse_params<P: DeserializeOwned + JsonSchema + 'static>(
+pub fn parse_params_strict<P: DeserializeOwned + JsonSchema + 'static>(
     tool: &str,
     args: JsonObject,
 ) -> Result<P, RdyError> {

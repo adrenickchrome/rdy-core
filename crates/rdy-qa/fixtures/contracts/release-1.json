@@ -14857,6 +14857,7 @@
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
       "W_INSTRUCTION_SELECTOR": "\"W_INSTRUCTION_SELECTOR\"",
+      "W_KUNGFU": "\"W_KUNGFU\"",
       "W_PACK_SEVERITY": "\"W_PACK_SEVERITY\"",
       "W_PLAN_ANSWER_LAPSED": "\"W_PLAN_ANSWER_LAPSED\"",
       "W_PLAN_OPEN": "\"W_PLAN_OPEN\"",
@@ -15414,6 +15415,11 @@
         "follow the warning's own fix"
       ],
       [
+        "W_KUNGFU",
+        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+        "Call rdy_instructions and load the ruleset named by the warning."
+      ],
+      [
         "E_PLAN_ITEM",
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists"
@@ -15909,6 +15915,72 @@
         "message": "request rq-000000000000 is no longer current: a side changed, landed or left every view"
       }
     },
+    "kungfu_counts": {
+      "overview": {
+        "kungfu": "kungfu: 4 not loaded, 3 lost, 1 wrong, in 3 sessions.",
+        "kungfu_counts": null
+      },
+      "sources": [
+        "rdy status --json against a seeded count file",
+        "rdy_overview against the same project"
+      ],
+      "status": {
+        "kungfu": "kungfu: 4 not loaded, 3 lost, 1 wrong, in 3 sessions.",
+        "kungfu_counts": [
+          {
+            "actor": "agent:a3",
+            "day": "today-5",
+            "lost": 0,
+            "not_loaded": 1,
+            "ruleset": "approvals",
+            "run": "r9",
+            "wrong": 0
+          },
+          {
+            "actor": "agent:a1",
+            "day": "today",
+            "lost": 0,
+            "not_loaded": 1,
+            "ruleset": "read",
+            "run": "r1",
+            "wrong": 0
+          },
+          {
+            "actor": "agent:a1",
+            "day": "today",
+            "lost": 1,
+            "not_loaded": 2,
+            "ruleset": "write",
+            "run": "r1",
+            "wrong": 0
+          },
+          {
+            "actor": "agent:a2",
+            "day": "today",
+            "lost": 2,
+            "not_loaded": 0,
+            "ruleset": "bootstrap",
+            "run": null,
+            "wrong": 1
+          }
+        ],
+        "row_members": [
+          "actor",
+          "day",
+          "lost",
+          "not_loaded",
+          "ruleset",
+          "run",
+          "wrong"
+        ],
+        "text_lines": 1
+      },
+      "template": "kungfu: <not_loaded> not loaded, <lost> lost, <wrong> wrong, in <sessions> sessions.",
+      "zero_omits": [
+        "kungfu",
+        "kungfu_counts"
+      ]
+    },
     "ops_not_probed": {
       "rdy_alternatives abandon": "needs an alternative set",
       "rdy_alternatives add": "needs an alternative set",
@@ -16033,6 +16105,7 @@
       "E_POLICY_HUMAN",
       "E_COVERAGE_LOWERED",
       "W_AS_BUILT_OVERRIDE",
+      "W_KUNGFU",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -18275,6 +18348,10 @@
               "when": "string"
             },
             "W_INSTRUCTION_SELECTOR": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_KUNGFU": {
               "fix": "string",
               "when": "string"
             },
