@@ -326,20 +326,20 @@ fn wx15_pipe_record_is_bounded_and_local() {
         ),
         (
             "a remote pipe",
-            format!(r"\\server\pipe\rdy-{HASH}{}", format!("\n{ID}\n")).into(),
+            format!("\\\\server\\pipe\\rdy-{HASH}\n{ID}\n").into(),
         ),
         (
             "an extended name",
-            format!(r"\\?\pipe\rdy-{HASH}{}", format!("\n{ID}\n")).into(),
+            format!("\\\\?\\pipe\\rdy-{HASH}\n{ID}\n").into(),
         ),
         (
             "another case",
-            format!(r"\\.\PIPE\rdy-{HASH}{}", format!("\n{ID}\n")).into(),
+            format!("\\\\.\\PIPE\\rdy-{HASH}\n{ID}\n").into(),
         ),
         ("slashes", format!("//./pipe/rdy-{HASH}\n{ID}\n").into()),
         (
             "another pipe",
-            format!(r"\\.\pipe\other-{HASH}{}", format!("\n{ID}\n")).into(),
+            format!("\\\\.\\pipe\\other-{HASH}\n{ID}\n").into(),
         ),
         ("a file", format!("C:\\run\\rdy.sock\n{ID}\n").into()),
         ("a Unix socket", format!("/tmp/rdy.sock\n{ID}\n").into()),
