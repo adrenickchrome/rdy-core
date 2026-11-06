@@ -18,6 +18,11 @@
 //!   caller waits on both. A named pipe is no filesystem object, so its probe connects, never
 //!   looks for a name;
 //! - stop signals: `SIGINT` and `SIGTERM` in a tokio runtime;
+//! - the caller's SSH agent: `AgentStream`, `AgentCancel`, `agent_connect`, `agent_handle` and
+//!   `agent_close`. A socket on Unix, and on Windows only the local named pipe the caller names.
+//!   Nothing else is looked for, and a cancel or close ends a call that waits;
+//! - the caller's interrupt while it signs (`catch_interrupt`): `SIGINT` on Unix, and Ctrl-C and
+//!   Ctrl-Break on Windows;
 //! - the startup environment: the diagram crate's variables, removed before anything else runs;
 //! - the site socket's option before its bind (D-FPKPS, `configure_site_socket`): `SO_REUSEADDR`
 //!   on Unix, `SO_EXCLUSIVEADDRUSE` on Windows (built and tested on its own by the isolated probe

@@ -44,7 +44,7 @@ libc = "0.2.190"
 # allocated bytes, private security descriptors (a token's user, a protected DACL),
 # reparse-point refusals, and opens relative to a directory handle (NtOpenFile, in Wdk), in
 # rdy_store::pio. The version tokio, mio and socket2 already lock.
-windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading"] }
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"

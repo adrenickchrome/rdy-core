@@ -32,6 +32,9 @@ rdy-render = { workspace = true, features = ["probe"] }
 tempfile.workspace = true
 rdy-schema.workspace = true
 blake3.workspace = true
+# the signing tests sign with fixed in-memory test keys only
+ed25519-dalek.workspace = true
+ssh-key.workspace = true
 
 [lints]
 workspace = true

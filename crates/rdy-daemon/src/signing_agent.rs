@@ -1,5 +1,5 @@
-//! The calling process's own SSH agent, spoken to over its socket (the agent protocol's
-//! identities and sign requests only).
+//! The calling process's own SSH agent, spoken to over its socket, or the named pipe on Windows
+//! (the agent protocol's identities and sign requests only).
 //!
 //! A [`CallerAgent`] belongs to one calling process: the CLI or the MCP proxy makes it from its
 //! own environment with [`CallerAgent::from_env`]. The daemon never reads `SSH_AUTH_SOCK` and
@@ -12,7 +12,7 @@
 //!
 //! A call can be cancelled at any point. It is registered before its connection is set up. Its
 //! connect, request and reply all run on the call's own thread: a cancel ends a pending connect
-//! through the sys seam (which closes that socket), and closes a connection in use. A call made
+//! through the sys seam (which closes that endpoint), and closes a connection in use. A call made
 //! with a [`CallCancel`] also ends at once, before it connects, when that cancel came before the
 //! call started (for example while its worker waited for a thread).
 
@@ -48,7 +48,7 @@ const REFUSALS: [u8; 3] = [
     SSH2_AGENT_FAILURE,
 ];
 
-/// The environment variable that names the caller's agent socket.
+/// The environment variable that names the caller's agent socket or pipe.
 const AUTH_SOCK: &str = "SSH_AUTH_SOCK";
 
 /// The SSH agent of the calling process. A clone reaches the same socket and shares the calls in
@@ -116,7 +116,8 @@ impl Conn for AgentStream {
 
 impl CallerAgent {
     /// The agent `SSH_AUTH_SOCK` names in this process's environment; an unset or empty value
-    /// is no agent. Only the calling process (the CLI, the MCP proxy) calls this.
+    /// is no agent, whatever agent service the system runs. Only the calling process (the CLI,
+    /// the MCP proxy) calls this.
     pub fn from_env() -> CallerAgent {
         let socket = std::env::var_os(AUTH_SOCK)
             .filter(|v| !v.is_empty())
