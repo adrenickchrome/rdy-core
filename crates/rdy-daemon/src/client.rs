@@ -714,9 +714,9 @@ pub fn live_daemon(project: &Path) -> Option<u32> {
 
 /// The pid of the process at the other end of a connection to `socket`, read as
 /// `exchange_hello_at` reads it: `sys::check_daemon` with our own account, then the pid, `p > 1`.
-/// The connection runs on a thread of its own with a
-/// current-thread runtime: `live_daemon`'s caller may have no runtime (`rdy load`), or may be in
-/// one (`rdy_load` on a blocking thread), where `block_on` would panic.
+/// The connection runs on a thread of its own with a current-thread runtime: `live_daemon`'s
+/// caller may have no runtime (`rdy load`), or may be in one (`rdy_load` on a blocking thread),
+/// where `block_on` would panic.
 fn peer_pid(socket: &Path) -> Option<u32> {
     std::thread::scope(|s| {
         s.spawn(|| {

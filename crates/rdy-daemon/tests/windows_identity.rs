@@ -493,9 +493,10 @@ mod peer_process {
             let mut listener = sys::bind(&e.path).unwrap();
             let me = sys::own_account().unwrap();
             let client = sys::connect(&e.path).await.unwrap();
-            let server = listener.accept().await.unwrap();
 
+            // no accept has run yet: a client checks as soon as its connect returns
             let from_client = sys::check_daemon(&client, &e.path, me).unwrap();
+            let server = listener.accept().await.unwrap();
             assert_eq!(from_client.pid(), Some(std::process::id()));
             assert_eq!(from_client.account(), me);
             assert!(from_client.created() > 0);
