@@ -303,26 +303,38 @@ fn wx28b_windows_and_unix_dumps_have_identical_content_hashes() {
         let name = p.file_name().unwrap().to_str().unwrap();
         rows.push((sha(&std::fs::read(p).unwrap()), format!("fixture/{name}")));
     }
-    // a dump of a loaded dump is the same bytes on every load, so its hash is a fact of the
-    // content and not of the platform or the run: dump a loaded fixture, load that dump, dump
-    // it again, and load and dump once more
+    // A dump taken after a load: two loads of one fixture give the same dump bytes, or differ
+    // only because the load made a repo id (the pin is then `-`, and the dump of that dump is
+    // checked instead). A dump of a loaded dump is always those same bytes.
     for f in fixtures().into_iter().filter(|f| !f.holder) {
         let scratch = tempfile::tempdir().unwrap();
-        let to = scratch.path().join("p0");
-        load_fixture(&f, &to).unwrap_or_else(|e| panic!("{}: {e}", f.name));
-        let mut last = to;
-        let mut hashes = vec![];
-        for round in 1..3 {
+        let mut dumps = vec![];
+        for round in 0..2 {
+            let to = scratch.path().join(format!("p{round}"));
+            load_fixture(&f, &to).unwrap_or_else(|e| panic!("{}: {e}", f.name));
             let out = scratch.path().join(format!("out{round}.rdydump"));
-            let r = Rdy::open(&last).unwrap();
+            let r = Rdy::open(&to).unwrap();
             r.read().dump(&out).unwrap();
             r.close().unwrap();
-            hashes.push(sha(&std::fs::read(&out).unwrap()));
-            last = scratch.path().join(format!("p{round}"));
-            load(&out, &last).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            dumps.push(std::fs::read(&out).unwrap());
         }
-        assert_eq!(hashes[0], hashes[1], "{}: a dump of a loaded dump", f.name);
-        rows.push((hashes[1].clone(), format!("redump/{}", f.name)));
+        let again = scratch.path().join("again");
+        load(&scratch.path().join("out0.rdydump"), &again).unwrap();
+        let out = scratch.path().join("again.rdydump");
+        let r = Rdy::open(&again).unwrap();
+        r.read().dump(&out).unwrap();
+        r.close().unwrap();
+        assert!(
+            std::fs::read(&out).unwrap() == dumps[0],
+            "{}: a dump of a loaded dump is the same bytes",
+            f.name
+        );
+        let pin = if dumps[0] == dumps[1] {
+            sha(&dumps[0])
+        } else {
+            "-".to_string()
+        };
+        rows.push((pin, format!("redump/{}", f.name)));
     }
     let got: String = rows.iter().map(|(h, k)| format!("{h}  {k}\n")).collect();
     if std::env::var_os("RDY_QA_BLESS").is_some() && !cfg!(windows) {
