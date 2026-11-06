@@ -117,6 +117,15 @@ const REMOVE_ACCESS: u32 = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 /// sharing, and its sharing would refuse nothing.
 const SHARE_NO_DELETE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
+/// Makes the console program `cmd` start without a console window (`CREATE_NO_WINDOW`). A
+/// detached daemon has no console, so Windows gives each console child a new window unless this
+/// flag is set. Other creation flags of `cmd` are kept.
+pub fn no_console_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test hook: runs after an entry is opened or made and before the object is checked.
@@ -1887,13 +1896,4 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
         assert!(e.to_string().ends_with(" exceeds 32767 UTF-16 code units"));
     }
-}
-
-/// Makes the console program `cmd` start without a console window (`CREATE_NO_WINDOW`). A
-/// detached daemon has no console, so Windows gives each console child a new window unless this
-/// flag is set. Other creation flags of `cmd` are kept.
-pub fn no_console_window(cmd: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt as _;
-    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-    cmd.creation_flags(CREATE_NO_WINDOW);
 }
