@@ -625,6 +625,186 @@ fn rtc2_edit_supersedes_and_remove_retires_revokes() {
     assert_eq!(e.fix, "use the normal decision and instruction workflow");
 }
 
+/// An edit of instruction `id` that keeps its words `text`, with the rest of the request in `more`.
+fn keep_words(id: &str, text: &str, why: &str, more: Value) -> Value {
+    let mut v = json!({"scope": "project", "op": "edit", "id": id, "text": text, "why": why,
+                       "evidence": "change it", "session_ref": "chat-1"});
+    let (out, more) = (
+        v.as_object_mut().unwrap(),
+        more.as_object().unwrap().clone(),
+    );
+    out.extend(more);
+    v
+}
+
+#[test]
+fn rtc2_edit_with_unchanged_wording_lands() {
+    const WORDS: &str = "Run the tests.";
+    let (_dir, mut r) = project();
+    let w = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "page"}}
+    ]))
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    let other = w.created["$o"].clone();
+    let first = added(&mut r, WORDS);
+    let id = first.rule.id.clone();
+    let home = first.rule.ruleset.clone();
+    let mut reason = first.decision.clone();
+
+    // each edit keeps the words, and its statement says what the person changed
+    let steps = [
+        (
+            "selectors only",
+            keep_words(
+                &id,
+                WORDS,
+                "They asked.",
+                json!({"applies_to": ["type:claim", "type:section"]}),
+            ),
+            format!(
+                "Rule: {WORDS} (applies to: type:claim, type:section; ruleset: {home}; because: They asked.)"
+            ),
+            home.clone(),
+        ),
+        (
+            "why only",
+            keep_words(&id, WORDS, "Wider.", json!({})),
+            format!(
+                "Rule: {WORDS} (applies to: type:claim, type:section; ruleset: {home}; because: Wider.)"
+            ),
+            home.clone(),
+        ),
+        (
+            "ruleset only",
+            keep_words(&id, WORDS, "Wider.", json!({"ruleset": "other"})),
+            format!(
+                "Rule: {WORDS} (applies to: type:claim, type:section; ruleset: {other}; because: Wider.)"
+            ),
+            other.clone(),
+        ),
+    ];
+    for (what, request, statement, ruleset) in steps {
+        let p = prepare(&mut r, request.clone()).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let d = block(&r, &Scope::View(p.view.clone()), &p.decision);
+        assert_eq!(text_field(&d, "statement"), statement, "{what}");
+        assert_eq!(link_targets(&d, "supersedes"), [reason.clone()], "{what}");
+        assert_eq!(p.rule.text, WORDS, "{what}");
+
+        // a repeat of the open request finds it, and a repeat after the landing finds that
+        let again = prepare(&mut r, request.clone()).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(again.state, p.state, "{what}");
+        let landing = land_prepared(&mut r, &p);
+        let done = prepare(&mut r, request).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(done.state, PreparedState::Landed { landing }, "{what}");
+
+        let rule = block(&r, &Scope::Canon, &id);
+        assert_eq!(rule.body, WORDS, "{what}");
+        assert_eq!(rule.parent.as_ref().unwrap().to_string(), ruleset, "{what}");
+        assert_eq!(selectors(&rule), ["type:claim", "type:section"], "{what}");
+        assert_eq!(
+            link_targets(&rule, "decided_by"),
+            [p.decision.clone()],
+            "{what}"
+        );
+        let st = r.read();
+        let g = st.graph(&Scope::Canon).unwrap();
+        let status = |i: &str| g.status(&BlockId::parse(i).unwrap()).unwrap().tag();
+        assert_eq!(status(&reason), "superseded", "{what}");
+        assert_eq!(status(&p.decision), "live", "{what}");
+        reason = p.decision.clone();
+    }
+
+    // an edit that changes the words keeps the plain statement
+    let worded = prepare(&mut r, edit(&id, "Run all the tests.")).unwrap();
+    let d = block(&r, &Scope::View(worded.view.clone()), &worded.decision);
+    assert_eq!(text_field(&d, "statement"), "Rule: Run all the tests.");
+    land_prepared(&mut r, &worded);
+}
+
+#[test]
+fn rtc2_edit_with_unchanged_wording_survives_an_interruption() {
+    const WORDS: &str = "Run the tests.";
+    let (dir, mut r) = project();
+    let first = added(&mut r, WORDS);
+    let id = first.rule.id.clone();
+    let request = keep_words(
+        &id,
+        WORDS,
+        "They asked.",
+        json!({"applies_to": ["type:claim"]}),
+    );
+
+    let e = with_rule_fault_for_tests(RuleFault::StopAfterDraft, || {
+        prepare(&mut r, request.clone())
+    })
+    .unwrap_err();
+    assert_eq!(e.code, E_INTERNAL, "{e}");
+    let name = r
+        .read()
+        .view_names()
+        .into_iter()
+        .find(|v| v.starts_with("rule-") && *v != first.view)
+        .unwrap();
+    let change = r.read().included(&name)[0];
+    r.close().unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let p = prepare(&mut r, request).unwrap();
+    assert_eq!(p.view, name);
+    assert_eq!(*r.read().included(&name), vec![change]);
+    land_prepared(&mut r, &p);
+    assert_eq!(selectors(&block(&r, &Scope::Canon, &id)), ["type:claim"]);
+    assert_eq!(block(&r, &Scope::Canon, &id).body, WORDS);
+}
+
+#[test]
+fn rtc2_edit_that_changes_nothing_writes_nothing() {
+    const WORDS: &str = "Run the tests.";
+    let (dir, mut r) = project();
+    let w = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "page"}}
+    ]))
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    let other = w.created["$o"].clone();
+    let first = prepare(
+        &mut r,
+        json!({"scope": "project", "op": "add", "text": WORDS, "why": "They asked.", "evidence": "yes",
+               "ruleset": "other", "applies_to": ["type:claim", "all"]}),
+    )
+    .unwrap();
+    land_prepared(&mut r, &first);
+    let id = first.rule.id.clone();
+    let before = state_of(dir.path(), &r);
+
+    // absent keys, the same values, the same doc by its other name, the same selectors reordered,
+    // and new relay words: none of them changes the rule
+    for more in [
+        json!({}),
+        json!({"applies_to": ["type:claim", "all"]}),
+        json!({"applies_to": ["all", "type:claim"]}),
+        json!({"ruleset": "other"}),
+        json!({"ruleset": other}),
+        json!({"evidence": "other words", "question": "Keep it?", "session_ref": "chat-2"}),
+    ] {
+        let e = prepare(&mut r, keep_words(&id, WORDS, "They asked.", more.clone())).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT, "{more}: {e}");
+        assert_eq!(e.message, "this edit changes nothing", "{more}");
+        assert_eq!(e.fix, "show the person the rule as it stands", "{more}");
+        assert_eq!(state_of(dir.path(), &r), before, "{more}");
+    }
+
+    // each single change is a change
+    for more in [
+        (WORDS, "They asked.", json!({"applies_to": ["all"]})),
+        (WORDS, "Wider.", json!({})),
+        ("run the tests.", "They asked.", json!({})),
+    ] {
+        let (text, why, more) = more;
+        prepare(&mut r, keep_words(&id, text, why, more.clone()))
+            .unwrap_or_else(|e| panic!("{text} {why} {more}: {e}"));
+    }
+}
 #[test]
 fn rtc2_shared_decision_stops_before_any_write() {
     let (dir, mut r) = project();

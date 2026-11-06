@@ -6,7 +6,7 @@
 //! receipt's bytes and the change's shape before it reuses anything; whatever else the view holds
 //! is `E_STALE_BASE`. The lookup reads this view's own chain and its proposal lineage, so its cost
 //! does not grow with the project's history. Nothing here rewrites the log.
-use super::{RuleCaller, RuleMutation};
+use super::{RuleCaller, RuleMutation, kept_words_parts, selector_list};
 use crate::error::*;
 use crate::gate::{latest_version, open_proposal_of_view, ref_hash, version_number};
 use crate::rule_types::{RuleInfo, RulesetRef};
@@ -212,14 +212,43 @@ fn is_gate_change(c: &Change) -> bool {
         && c.ops.iter().all(|o| matches!(o, Op::Update { .. }))
 }
 
+/// Whether `written` is the statement request `m` writes in `content`. An edit that keeps the
+/// words reads that from the version its update replaces, and its selectors from its update. Its
+/// doc was read from canon at the write and a later move can change it, so only its form is read.
+fn statement_fits(st: &ReadState, content: &Change, m: RuleMutation<'_>, written: &str) -> bool {
+    let RuleMutation::Edit(r) = m else {
+        return written == m.statement();
+    };
+    let update = content.ops.iter().find_map(|o| match o {
+        Op::Update { block, base } => Some((block, base)),
+        _ => None,
+    });
+    let Some((rule, base)) = update else {
+        return false;
+    };
+    let Ok(old) = st.reader().get_block(base) else {
+        return false;
+    };
+    if old.body != r.text {
+        return written == m.statement();
+    }
+    let (head, tail) = kept_words_parts(&r.text, &selector_list(rule), &r.why);
+    written
+        .strip_prefix(head.as_str())
+        .and_then(|rest| rest.strip_suffix(tail.as_str()))
+        .is_some_and(|doc| doc.is_empty() || BlockId::parse(doc).is_ok())
+}
+
 /// Whether `content`'s ops are exactly what request `m` writes.
-fn holds_request(content: &Change, m: RuleMutation<'_>) -> bool {
+fn holds_request(st: &ReadState, content: &Change, m: RuleMutation<'_>) -> bool {
     let (mut reason, mut rule) = (None, None);
-    let statement = m.statement();
     for op in &content.ops {
         match op {
             Op::Create { block } if block.block_type == decision::DECISION => {
-                if reason.is_some() || block.field_str("statement") != Some(statement.as_str()) {
+                let fits = block
+                    .field_str("statement")
+                    .is_some_and(|written| statement_fits(st, content, m, written));
+                if reason.is_some() || !fits {
                     return false;
                 }
                 reason = Some(&block.id);
@@ -294,7 +323,7 @@ pub(super) fn find(
         return Err(changed(view));
     };
     let content = st.reader().change(first)?;
-    if content.message != receipt.json() || !holds_request(&content, m) {
+    if content.message != receipt.json() || !holds_request(st, &content, m) {
         return Err(changed(view));
     }
     for h in rest {

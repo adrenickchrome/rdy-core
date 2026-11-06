@@ -144,13 +144,44 @@ impl<'a> RuleMutation<'a> {
 
     /// The statement of the decision this request records. It holds the rule's exact words, but
     /// is not the rule's text: a decision and a rule with one text are a `duplicate_definition`
-    /// tension, which would hold every rule back from landing.
+    /// tension, which would hold every rule back from landing. An edit that keeps the words says
+    /// more ([`kept_words_statement`]), or it would repeat the decision it supersedes.
     fn statement(self) -> String {
         match self {
             RuleMutation::Add(r) => format!("Rule: {}", r.text),
             RuleMutation::Edit(r) => format!("Rule: {}", r.text),
             RuleMutation::Remove(r) => format!("Retire rule {}: {}", r.id, r.why),
         }
+    }
+}
+
+/// What the statement of an edit that keeps the words `text` holds before and after its ruleset.
+/// A decision and the one it supersedes with one statement are a `duplicate_definition` tension,
+/// so this statement states what the person changed. The instruction keeps the exact words.
+fn kept_words_parts(text: &str, selectors: &[String], why: &str) -> (String, String) {
+    (
+        format!(
+            "Rule: {text} (applies to: {}; ruleset: ",
+            selectors.join(", ")
+        ),
+        format!("; because: {why})"),
+    )
+}
+
+/// The statement of an edit that keeps the words `text`, for a rule in the doc `doc`.
+fn kept_words_statement(text: &str, selectors: &[String], doc: &str, why: &str) -> String {
+    let (head, tail) = kept_words_parts(text, selectors, why);
+    format!("{head}{doc}{tail}")
+}
+
+/// The selectors of instruction `b`, as it lists them.
+fn selector_list(b: &Block) -> Vec<String> {
+    match b.fields.get(APPLIES_TO) {
+        Some(rdy_model::FieldValue::List(items)) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(ToString::to_string))
+            .collect(),
+        _ => vec![],
     }
 }
 
@@ -247,6 +278,14 @@ fn no_whole_reason(id: &BlockId) -> RdyError {
         E_BAD_INPUT,
         format!("instruction {id} needs one live whole-rule decision"),
         "use the normal decision and instruction workflow",
+    )
+}
+
+fn changes_nothing() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "this edit changes nothing",
+        "show the person the rule as it stands",
     )
 }
 
@@ -450,7 +489,7 @@ fn link(target: impl ToString) -> LinkInput {
 
 /// The decision of request `m`: a direct ruling on the person's relayed words, under the
 /// destination's decision home.
-fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>) -> DecisionInput {
+fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>, statement: String) -> DecisionInput {
     let relay = m.relay();
     let s = c.session;
     let run = s
@@ -473,7 +512,7 @@ fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>) -> DecisionInput {
         fields.insert("needs_content".to_string(), json!(false));
     }
     DecisionInput {
-        statement: m.statement(),
+        statement,
         why: Some(m.why().to_string()),
         authority_basis: Some("direct_ruling".into()),
         attested_by: Some(format!(
@@ -488,8 +527,9 @@ fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>) -> DecisionInput {
 }
 
 impl Rdy {
-    /// The checks and the ops of request `m` on canon: targets, the rule's one reason, the
-    /// reason's other dependents, then stable content. Nothing is written.
+    /// The checks and the ops of request `m` on canon: targets, the rule's one reason, an edit
+    /// that changes nothing, the reason's other dependents, then stable content. Nothing is
+    /// written.
     fn rule_plan(
         &self,
         c: &RuleCaller<'_>,
@@ -512,13 +552,35 @@ impl Rdy {
             Some(id) => Some(current_rule(&st, &canon, id)?),
             None => None,
         };
+        let mut statement = m.statement();
+        if let (RuleMutation::Edit(r), Some(cur)) = (m, &current)
+            && cur.rule.body == r.text
+        {
+            let here = canon
+                .doc_of(&cur.rule.id)
+                .map(|b| b.id.to_string())
+                .unwrap_or_default();
+            let doc = match &target {
+                Some(Target::Existing(id)) => id.to_string(),
+                _ => here.clone(),
+            };
+            let now = selector_list(&cur.rule);
+            let selectors = r.applies_to.as_ref().unwrap_or(&now);
+            // selectors are a set: their order changes no delivery
+            let same_selectors =
+                selectors.iter().collect::<BTreeSet<_>>() == now.iter().collect::<BTreeSet<_>>();
+            if same_selectors && doc == here && cur.reason.field_str("why") == Some(&r.why) {
+                return Err(changes_nothing());
+            }
+            statement = kept_words_statement(&r.text, selectors, &doc, &r.why);
+        }
         if let Some(cur) = &current {
             let others = dependents(&st, &cur.reason.id, &cur.rule.id, view)?;
             if !others.is_empty() {
                 return Err(shared_refusal(&st, m, &cur.reason.id, others)?);
             }
         }
-        let d = rule_decision(c, m);
+        let d = rule_decision(c, m, statement);
         let mut extra = vec![];
         if let Some(cur) = &current {
             if matches!(m, RuleMutation::Edit(_)) {
