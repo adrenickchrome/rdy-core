@@ -117,12 +117,11 @@ fn kfu5_errors_reference_names_code_without_parameter() {
             "Call rdy_instructions and load the ruleset named by the warning."
         )
     );
-    let n = ERROR_ROWS.len();
-    assert_eq!(
-        ERROR_ROWS[n - 3].0,
-        "W_KUNGFU",
-        "before the publication rows"
-    );
+    let at = ERROR_ROWS
+        .iter()
+        .position(|r| r.0 == "W_KUNGFU")
+        .expect("a W_KUNGFU row");
+    assert_eq!(ERROR_ROWS[at + 1].0, "E_PLAN_ITEM", "before the plan rows");
 
     let w = World::new();
     let pd = w.project();
