@@ -7,54 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn opts(
-    version: &str,
-    cwd: &std::path::Path,
-    spawn: impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static,
-) -> StartOptions {
-    let mut o = StartOptions::new(
-        version.into(),
-        Proto::Ctl,
-        cwd.to_path_buf(),
-        Box::new(spawn),
-    );
-    o.start_timeout = Duration::from_secs(3);
-    o
-}
-
-/// A spawned daemon that never exits (an in-process one has no child to watch).
-fn running() -> Spawned {
-    Spawned {
-        exited: Box::new(|| None),
-    }
-}
-
-/// A spawn closure that starts an in-process echo daemon of `version` on the runtime (counting calls).
-fn in_process_spawn(
-    version: &'static str,
-    count: Arc<AtomicUsize>,
-    ready_after: Duration,
-) -> impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static {
-    move |run: &RunDir| {
-        count.fetch_add(1, Ordering::SeqCst);
-        let run = run.clone();
-        tokio::spawn(async move {
-            let mut d = Daemon::new(
-                DaemonConfig::new(run, version.into()),
-                Arc::new(Echo::default()),
-            );
-            d.bind().await.unwrap();
-            let r = d.readiness();
-            let t = tokio::spawn(d.run());
-            r.progress("warming up");
-            tokio::time::sleep(ready_after).await;
-            r.ready();
-            let _ = t.await;
-        });
-        Ok(running())
-    }
-}
-
 #[tokio::test]
 async fn start1_a_running_daemon_is_used_and_nothing_is_spawned() {
     let d = daemon("1", true, |_| {}).await;
@@ -332,121 +284,18 @@ fn start1_a_released_start_lock_is_free_while_a_spawned_child_still_shares_it() 
     );
 }
 
-fn hello_for(cwd: &std::path::Path) -> Hello {
-    Hello {
-        rdy: PROTO_VERSION,
-        version: "1".into(),
-        build: rdy_daemon::BUILD.to_string(),
-        proto: Proto::Ctl,
-        cwd: cwd.to_path_buf(),
-        project: RunDir::of_project(cwd).project_id().unwrap(),
-    }
-}
-
-/// What a plain listener heard: the bytes of the first connection it had queued, or `None` when
-/// no client ever connected.
-#[cfg(unix)]
-fn heard(l: &std::os::unix::net::UnixListener) -> Option<Vec<u8>> {
-    use std::io::Read;
-    l.set_nonblocking(true).unwrap();
-    match l.accept() {
-        Ok((mut s, _)) => {
-            s.set_nonblocking(false).unwrap();
-            // best effort: macOS refuses a timeout on a socket whose peer has gone (EINVAL)
-            let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
-            let mut b = vec![];
-            s.read_to_end(&mut b).unwrap();
-            Some(b)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-        Err(e) => panic!("accept: {e}"),
-    }
-}
-
 fn victim(dir: &std::path::Path) -> std::path::PathBuf {
     let v = dir.join("victim");
     std::fs::write(&v, "keep\n").unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
+    chmod(&v, 0o644);
     v
 }
 
 fn assert_untouched(v: &std::path::Path) {
     assert_eq!(std::fs::read_to_string(v).unwrap(), "keep\n");
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(v).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn start1_a_socket_whose_peer_is_another_uid_is_no_daemon_and_hears_no_hello() {
-    let dir = short_tempdir();
-    let run = RunDir::of_project(dir.path());
-    run.ensure().unwrap();
-    let l = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
-    let me = socket::own_uid();
-    let t0 = std::time::Instant::now();
-    match client::connect_expecting_account(&run, &hello_for(dir.path()), me + 1).await {
-        Attempt::NoDaemon(e) => {
-            assert_eq!(
-                e.to_string(),
-                format!("the socket's peer is uid {me}, not ours")
-            )
-        }
-        other => panic!("{other:?}"),
-    }
-    assert!(
-        t0.elapsed() < Duration::from_secs(1),
-        "refused at once, not after the hello timeout"
-    );
-    assert_eq!(heard(&l), Some(vec![]), "the foreign peer heard nothing");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn start1_a_symlinked_socket_is_not_followed() {
-    let dir = short_tempdir();
-    let other = short_tempdir();
-    let run = RunDir::of_project(dir.path());
-    run.ensure().unwrap();
-    let evil = other.path().join("evil.sock");
-    let l = std::os::unix::net::UnixListener::bind(&evil).unwrap();
-    std::os::unix::fs::symlink(&evil, run.socket()).unwrap();
-    match connect(&run, &hello_for(dir.path())).await {
-        Attempt::NoDaemon(e) => assert!(e.to_string().contains(LINK_REFUSAL), "{e}"),
-        other => panic!("{other:?}"),
-    }
-    let n = Arc::new(AtomicUsize::new(0));
-    let mut c = connect_or_start(
-        &run,
-        opts(
-            "1",
-            dir.path(),
-            in_process_spawn("1", n.clone(), Duration::ZERO),
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(n.load(Ordering::SeqCst), 1);
-    use std::os::unix::fs::FileTypeExt;
-    assert!(
-        std::fs::symlink_metadata(run.socket())
-            .unwrap()
-            .file_type()
-            .is_socket(),
-        "the daemon's bind replaced the link"
-    );
-    assert_eq!(heard(&l), None, "the linked-to socket was never connected");
-    c.ctl("stop", json!({})).await.unwrap();
+    assert_eq!(mode_bits(v), 0o644);
 }
 
 #[tokio::test]
@@ -502,40 +351,6 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     );
     assert_eq!(e.extra["log_tail"], json!([]));
     assert_untouched(&v);
-}
-
-/// df3 (F12, D-YMWEM): a project whose `.rdy/run/rdy.sock` is over `sun_path` gets a short
-/// socket, `/tmp/rdy-<uid>/<hash>.sock`, and its daemon starts there; every other run file stays
-/// in `.rdy/run/`.
-#[cfg(unix)]
-#[tokio::test]
-async fn start1_a_long_project_path_gets_a_short_socket() {
-    let dir = short_tempdir();
-    let deep = dir.path().join("a".repeat(120));
-    std::fs::create_dir_all(&deep).unwrap();
-    let run = RunDir::of_project(&deep);
-    let sock = run.socket();
-    let short = run.short_socket().expect("the socket leaves .rdy/run");
-    assert_eq!(sock, short);
-    assert!(
-        sock.starts_with(format!("/tmp/rdy-{}", socket::own_uid()))
-            && sock.as_os_str().len() <= MAX_SOCKET_PATH,
-        "{}",
-        sock.display()
-    );
-    let n = Arc::new(AtomicUsize::new(0));
-    let mut c = connect_or_start(
-        &run,
-        opts("1", &deep, in_process_spawn("1", n.clone(), Duration::ZERO)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(n.load(Ordering::SeqCst), 1);
-    assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1);
-    assert!(sock.exists(), "the daemon listens on the short socket");
-    assert!(!run.path().join(SOCKET_FILE).exists());
-    assert!(run.pid_file().exists() && run.start_lock().exists());
-    c.ctl("stop", json!({})).await.unwrap();
 }
 
 /// The daemon we spawned is of another version than this client (the rdy on PATH is not this

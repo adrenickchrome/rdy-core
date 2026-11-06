@@ -124,27 +124,15 @@ fn mh2_walk_refuses_links_and_bounds_before_allocation() {
     let d = tempfile::tempdir().unwrap();
     tiny(d.path());
     let link = d.path().join("crates/x/src/link");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("lib.rs", &link).unwrap();
     // The ordinary account that runs the Windows tests holds the symbolic-link privilege.
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file("lib.rs", &link).unwrap();
+    rdy_store::pio::symlink("lib.rs", &link).unwrap();
     assert_eq!(
         reason(source_build_id(d.path())),
         "input is not a regular file: crates/x/src/link"
     );
     fs::remove_file(&link).unwrap();
-    #[cfg(unix)]
-    let bad = {
-        use std::os::unix::ffi::OsStrExt;
-        std::ffi::OsStr::from_bytes(b"bad\xff").to_os_string()
-    };
-    // An unpaired surrogate is the Windows name that has no UTF-8 form.
-    #[cfg(windows)]
-    let bad = {
-        use std::os::windows::ffi::OsStringExt;
-        std::ffi::OsString::from_wide(&[0x62, 0x61, 0x64, 0xD800])
-    };
+    // The name has no UTF-8 form: a stray byte on Unix, an unpaired surrogate on Windows.
+    let bad = rdy_store::pio::not_unicode("bad");
     // Some file systems refuse such names; the check applies where they exist.
     if fs::write(d.path().join("crates/x").join(&bad), b"z").is_ok() {
         assert_eq!(reason(source_build_id(d.path())), "input path is not UTF-8");

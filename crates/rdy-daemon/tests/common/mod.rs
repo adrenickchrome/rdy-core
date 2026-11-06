@@ -171,14 +171,8 @@ pub async fn ctl(r: &mut BufReader<Conn>, id: u64, op: &str, args: Value) -> Val
 
 /// Makes a symbolic link to a file at `link`. Windows needs the symbolic-link privilege, which the
 /// ordinary test account holds.
-#[cfg(unix)]
 pub fn symlink_file(target: &Path, link: &Path) {
-    std::os::unix::fs::symlink(target, link).unwrap();
-}
-
-#[cfg(windows)]
-pub fn symlink_file(target: &Path, link: &Path) {
-    std::os::windows::fs::symlink_file(target, link).unwrap();
+    rdy_store::pio::symlink(target, link).unwrap();
 }
 
 /// An endpoint name that once had a listener and has none now. On Unix the socket file stays; a
@@ -268,4 +262,75 @@ pub async fn pid_file_gone(run: &RunDir) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     true
+}
+
+pub fn opts(
+    version: &str,
+    cwd: &std::path::Path,
+    spawn: impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static,
+) -> StartOptions {
+    let mut o = StartOptions::new(
+        version.into(),
+        Proto::Ctl,
+        cwd.to_path_buf(),
+        Box::new(spawn),
+    );
+    o.start_timeout = std::time::Duration::from_secs(3);
+    o
+}
+
+/// A spawned daemon that never exits (an in-process one has no child to watch).
+pub fn running() -> Spawned {
+    Spawned {
+        exited: Box::new(|| None),
+    }
+}
+
+/// A spawn closure that starts an in-process echo daemon of `version` on the runtime (counting calls).
+pub fn in_process_spawn(
+    version: &'static str,
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    ready_after: std::time::Duration,
+) -> impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static {
+    move |run: &RunDir| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let run = run.clone();
+        tokio::spawn(async move {
+            let mut d = Daemon::new(
+                DaemonConfig::new(run, version.into()),
+                Arc::new(Echo::default()),
+            );
+            d.bind().await.unwrap();
+            let r = d.readiness();
+            let t = tokio::spawn(d.run());
+            r.progress("warming up");
+            tokio::time::sleep(ready_after).await;
+            r.ready();
+            let _ = t.await;
+        });
+        Ok(running())
+    }
+}
+
+pub fn hello_for(cwd: &std::path::Path) -> Hello {
+    Hello {
+        rdy: PROTO_VERSION,
+        version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
+        proto: Proto::Ctl,
+        cwd: cwd.to_path_buf(),
+        project: RunDir::of_project(cwd).project_id().unwrap(),
+    }
+}
+
+/// The permission bits of `p`, the bits below the set-id bits (a Unix mode).
+#[cfg(unix)]
+pub fn mode_bits(p: &Path) -> u32 {
+    rdy_store::pio::mode_of(&std::fs::metadata(p).unwrap()) & 0o777
+}
+
+/// Sets `p` to `mode` (a Unix mode).
+#[cfg(unix)]
+pub fn chmod(p: &Path, mode: u32) {
+    rdy_store::pio::set_mode(p, mode).unwrap();
 }

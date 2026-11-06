@@ -5,20 +5,14 @@ use rdy_daemon::*;
 #[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-#[cfg(unix)]
-fn mode(p: &std::path::Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-}
-
 #[tokio::test]
 async fn sock1_bind_makes_a_private_run_dir_socket_and_pid_file() {
     let d = daemon("1", true, |_| {}).await;
     #[cfg(unix)]
     {
-        assert_eq!(mode(d.run.path()), 0o700);
-        assert_eq!(mode(&d.run.socket()), 0o600);
-        assert_eq!(mode(&d.run.pid_file()), 0o600);
+        assert_eq!(mode_bits(d.run.path()), 0o700);
+        assert_eq!(mode_bits(&d.run.socket()), 0o600);
+        assert_eq!(mode_bits(&d.run.pid_file()), 0o600);
     }
     let pid = d
         .run
@@ -40,11 +34,10 @@ async fn sock1_bind_makes_a_private_run_dir_socket_and_pid_file() {
 async fn sock1_an_existing_run_dir_is_tightened_and_a_file_is_refused() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(run.path()).unwrap();
-    std::fs::set_permissions(run.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    chmod(run.path(), 0o755);
     run.ensure().unwrap();
-    assert_eq!(mode(run.path()), 0o700);
+    assert_eq!(mode_bits(run.path()), 0o700);
     let dir2 = short_tempdir();
     let run2 = RunDir::of_project(dir2.path());
     std::fs::create_dir_all(run2.path().parent().unwrap()).unwrap();
@@ -110,8 +103,8 @@ async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
         "{}",
         sock.display()
     );
-    assert_eq!(mode(&sock), 0o600);
-    assert_eq!(mode(sock.parent().unwrap()), 0o700);
+    assert_eq!(mode_bits(&sock), 0o600);
+    assert_eq!(mode_bits(sock.parent().unwrap()), 0o700);
     assert!(run.pid_file().exists());
     drop(listener);
     std::fs::remove_file(&sock).unwrap();
@@ -156,16 +149,13 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
     let victim = dir.path().join("victim");
     std::fs::write(&victim, "keep\n").unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
+    chmod(&victim, 0o644);
     symlink_file(&victim, &run.path().join(format!("{PID_FILE}.tmp")));
     let e = socket::bind(&run).await.unwrap_err();
     assert!(e.to_string().contains(LINK_REFUSAL), "{e}");
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
     #[cfg(unix)]
-    assert_eq!(mode(&victim), 0o644);
+    assert_eq!(mode_bits(&victim), 0o644);
     assert!(
         !run.pid_file().exists(),
         "no pid file for a daemon that did not bind"
@@ -186,16 +176,19 @@ async fn df3_the_daemon_records_its_socket_and_removes_the_record_on_exit() {
     let record = d.run.path().join("daemon.sock");
     assert_eq!(d.run.socket_record(), record);
     // fix round 2: the second line is the `.rdy` identity, `dev:ino` of its lstat
-    use std::os::unix::fs::MetadataExt;
-    let rdy = std::fs::symlink_metadata(d.dir.path().join(".rdy")).unwrap();
+    let rdy_store::fileid::FileId::Unix { dev, ino } =
+        rdy_store::fileid::FileId::lstat(&d.dir.path().join(".rdy")).unwrap()
+    else {
+        panic!("a Unix identity")
+    };
     let mut line = d.run.socket().into_os_string().into_encoded_bytes();
-    line.extend_from_slice(format!("\n{}:{}\n", rdy.dev(), rdy.ino()).as_bytes());
+    line.extend_from_slice(format!("\n{}:{}\n", dev, ino).as_bytes());
     assert_eq!(std::fs::read(&record).unwrap(), line);
     assert_eq!(
         d.run.project_id().unwrap().to_string(),
-        format!("{}:{}", rdy.dev(), rdy.ino())
+        format!("{}:{}", dev, ino)
     );
-    assert_eq!(mode(&record), 0o600);
+    assert_eq!(mode_bits(&record), 0o600);
     assert_eq!(d.run.recorded_socket(), Some(d.run.socket()));
     d.handle.stop();
     d.task.await.unwrap().unwrap();
