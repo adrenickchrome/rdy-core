@@ -114,6 +114,7 @@ fn msw11_a_torn_blob_file_is_repaired_by_checkout() {
     assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG chart");
 }
 
+#[cfg(unix)]
 /// Commits one figure and returns the blob's working-copy path and its temp-file name.
 fn msw11_committed_blob(s: &Served, section: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     std::fs::create_dir_all(at(s, "guides/img")).unwrap();

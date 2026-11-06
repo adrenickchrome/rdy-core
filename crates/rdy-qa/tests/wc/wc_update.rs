@@ -1023,6 +1023,7 @@ fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
     let (s, seed) = seeded();
