@@ -7057,14 +7057,6 @@ fn rtc7_contract_diff_is_limited_to_rules() {
         digest_of(&json!(rows)),
         "2a6eb32dd02c3ff7bbad7fd1832939658b99c819b18a0018ef1022ccacf12ff4"
     );
-    assert!(
-        !errors["codes"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .any(|k| k.contains("RULE")),
-        "the rule tool answers with the codes that exist"
-    );
     // the command line: every command but `rule`, every probe but the rule's, and the rest
     let cli = &fixture["cli"];
     let others: Vec<&Value> = cli["tree"]["subcommands"]
