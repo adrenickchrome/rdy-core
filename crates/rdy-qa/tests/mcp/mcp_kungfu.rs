@@ -667,7 +667,8 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
         json!({"out": s("export"), "format": "md", "scope": "canon"}),
     );
     x.step("rdy_remote", json!({"op": "list"}));
-    x.step("rdy_auth", json!({"op": "installs"}));
+    // a credential store differs by host: this refusal comes before any store or hub
+    x.step("rdy_auth", json!({"op": "state"}));
     x.step("rdy_key_show", json!({}));
     x.step("rdy_key_bind", json!({"kind": "agent", "remote": "none"}));
     x.step("rdy_key_retire", json!({"key": "none", "remote": "none"}));
@@ -733,12 +734,13 @@ fn import_tree(out: &Path) {
 }
 
 /// The steps whose call the script cannot complete, with each one's own refusal, in script order.
-/// Each needs what this world does not hold: a tension, a person's answer, a hub, a key, a review
-/// request, a stream or an SSH agent. Every other step succeeds.
+/// Each needs what this world does not hold: a tension, a person's answer, a hub, a credential store,
+/// a key, a review request, a stream or an SSH agent. Every other step succeeds.
 const REFUSED: &[(&str, &str)] = &[
     ("rdy_resolve", "E_NOT_FOUND"),
     ("rdy_land", "E_EXCEPTION_OPEN"),
     ("rdy_publish", "E_BAD_TAG_NAME"),
+    ("rdy_auth", "E_BAD_INPUT"),
     ("rdy_key_bind", "E_NOT_FOUND"),
     ("rdy_key_retire", "E_BAD_INPUT"),
     ("rdy_key_revoke", "E_BAD_INPUT"),
