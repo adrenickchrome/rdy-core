@@ -1,44 +1,17 @@
 //! What the server tells a host about rdy.
 
-/// The server instructions, one sentence per element, in reading order. A plan that adds guidance
-/// adds an element where it belongs. `INSTRUCTIONS` joins them with one space at compile time.
+/// The server instructions, one element per entry, in reading order. They stay short: the rules
+/// for each kind of work live in the built-in rulesets, which `rdy_instructions` delivers. Do not
+/// add guidance here; add it to the guide. `INSTRUCTIONS` joins the elements with one space at
+/// compile time.
 pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.",
-    "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview.",
+    "State rdy/actor and rdy/run in _meta, or call rdy_session.",
     "Call rdy_instructions at the start of every task.",
+    "Call it before rdy_overview, and load the rulesets your task needs.",
     "Read and write through rdy's tools, not the working-copy files.",
-    "Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>).",
-    // plan Redaction: four sentences in this element, and plan Change plan adds three before them,
-    // so that the existing sentence guards (their count and their positions) hold
-    "Write with rdy_write; propose with rdy_propose. Before proposing, read rdy_plan and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a reaffirm op, and supersede one that does not. Before proposing content removal, call rdy_redact with dry_run true. Show its report and warnings. Record the request, then use rdy_propose and rdy_pending. Only a person can approve it.",
-    "Work in your own view; include others' changes, never write into their views.",
-    "Conflicts are recorded, not errors: resolve one by writing the block.",
-    "When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan.",
-    "Before editing a block, read it with format markdown or yaml: compact lines are a summary.",
-    "When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.",
-    "Before a larger change, post an intent (rdy_intent) on its area or blocks; write responses name other sessions' intents on what you wrote, and nothing is ever locked.",
-    "Tensions: rdy_tensions lists disagreements between changes and with canon; resolve one with a change, or dismiss it with rdy_resolve and a reason; a blocking one refuses a landing that has a side in it and would put every side into canon.",
-    "Read rdy_inbox at session start and when rdy://inbox changes, and ack what you have handled; notifications are best effort, the inbox is reliable.",
-    "At session start, also call rdy_pending and tell the person in one line what waits; do not list it unless asked.",
-    "When the person states something that should hold, record it at once with rdy_decide as a proposed decision, in their words, and say so in one line.",
-    "A decision is worth recording when every agent should keep to it next month; a passing preference is not.",
-    "Propose at the point rdy_session's propose.cadence sets, by default at a natural break; under changes, propose when a write reply says propose_due.",
-    "Present a batch card from rdy_pending at the end of an iteration, then each exception on its own; show each option label word for word and never change the options, the recommendation or the version.",
-    "Relay the person's answer with rdy_answer: pass the card_hash you showed, their words as evidence and your question; interrupt the person only for a blocking item.",
-    "Use rdy_answer with elicit: true to ask a supporting client to show the card. Never send a request to /~ui/. Use rdy_answer, with elicitation or the person's relayed words.",
-    "While coding, a change within the design is just code; a gap is a proposed decision plus the doc update; a contradiction is a finding plus a superseding decision, and you stop when it is blocking or one_way.",
-    "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions recorded with rdy_decide and no parent, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
-    // rf5 (TASK-507 (4)): the Finding line sits in this element, so that the existing sentence
-    // guards (their count and their positions) hold
-    "Record a decision with rdy_decide and no parent: it goes to the decision home, or to the project root when the project names none; link content to it with decided_by, and never put a decision in a content doc or create a doc to hold decisions. Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on. Why: to learn why a block says what it says, call rdy_trace.",
-    "Search a thing's name, key or alias with rdy_search to get its fact sheet.",
-    "Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.",
-    "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",
-    "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss).",
-    // O27 (M3c): the agent's landing act
-    "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.",
-    // ck8 (D-JQD5X): the authoring checks
-    "Run an authoring check only when the author or a person asks. Show its verdict on the current approval card before relaying a person's answer.",
+    "Never approve, tag or answer on your own judgment. Relay the person's exact words.",
+    "If rdy_instructions refuses, follow its fix and call again before you work.",
 ];
 
 /// What the server tells a host about rdy: [`INSTRUCTION_SENTENCES`] joined with one space.
@@ -95,11 +68,17 @@ mod tests {
 
     #[test]
     fn ap11_the_instructions_name_rdy_land() {
-        // O27: one element, directly before ck8's authoring-check sentence at the end
-        let s = "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.";
-        assert!(INSTRUCTIONS.contains(s), "{INSTRUCTIONS}");
-        let at = INSTRUCTION_SENTENCES.len() - 2;
-        assert_eq!(INSTRUCTION_SENTENCES.get(at), Some(&s));
+        // O27: the sentence now lives in the approvals ruleset, not in the server text
+        let s = "When `rdy_propose` reports policy accepts, land with `rdy_land`; else show the card to the person.";
+        let approvals = rdy_engine::embedded_guide::RULESETS
+            .iter()
+            .find(|r| r.name == "approvals")
+            .expect("the approvals ruleset");
+        assert!(
+            approvals.rows.iter().any(|r| r.text.contains(s)),
+            "the approvals ruleset lacks the rdy_land sentence"
+        );
+        assert!(!INSTRUCTIONS.contains("rdy_land"), "{INSTRUCTIONS}");
     }
 
     #[test]

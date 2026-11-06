@@ -226,9 +226,10 @@ enum Cmd {
     /// ruleset with its estimated tokens. Only landed rules are given. The chat path is
     /// rdy_instructions.
     Instructions(instructions_cmd::InstructionsArgs),
-    /// Write the three-line stub that tells agents to call rdy_instructions into CLAUDE.md and
-    /// AGENTS.md of the project root (or the current directory outside a project), before your
-    /// own text. A file that has the stub is left alone.
+    /// Create your own empty rules project if none exists, then write the three-line stub that
+    /// tells agents to call rdy_instructions into CLAUDE.md and AGENTS.md of the project root,
+    /// before your own text. Outside a project, and in your rules project, it writes no stub. A
+    /// file that has the stub is left alone.
     Setup,
     /// Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a
     /// checkout, with no path or a path in the working tree, it lints the working copy against
@@ -421,7 +422,7 @@ fn main() -> ExitCode {
     };
     // ain5: `rdy setup` writes in the project root, or here outside every project
     if let Cmd::Setup = cli.cmd {
-        let out = setup_cmd::root(cli.project.as_deref(), &cwd).and_then(|r| setup_cmd::setup(&r));
+        let out = setup_cmd::choose(cli.project.as_deref(), &cwd).and_then(setup_cmd::setup);
         return match out {
             Ok((v, text)) => {
                 if as_json {

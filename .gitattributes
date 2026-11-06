@@ -42,3 +42,6 @@ crates/rdy-diagram/tests/fixtures/** -text
 crates/rdy-qa/fixtures/store/** -text
 # The signed release-key fixtures are pinned by the hash of their bytes: never convert line endings.
 crates/rdy-qa/fixtures/release-keys/** -text
+# The compiled agent guide is pinned by the hash of its bytes: never convert line endings.
+release/agent-guide.json -text
+release/agent-guide.sha256 -text

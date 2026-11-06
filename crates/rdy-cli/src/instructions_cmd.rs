@@ -24,6 +24,10 @@ pub(crate) struct InstructionsArgs {
     /// Required rules arrive without it.
     #[arg(long, num_args = 1.., value_name = "ID")]
     load: Vec<String>,
+    /// Give every built-in rdy ruleset whole. Required rules of every layer still arrive; stored
+    /// optional rulesets still need --load.
+    #[arg(long)]
+    full: bool,
 }
 
 /// A project directory found from the working directory: the directory whose marker was found
@@ -108,11 +112,12 @@ pub(crate) fn run(
     a: InstructionsArgs,
     projectless: bool,
 ) -> Result<(Value, String), ErrorReply> {
+    let full = a.full;
     let load = (!a.load.is_empty()).then_some(a.load);
     let v = if projectless {
-        outside(env, load)?
+        outside(env, load, full)?
     } else {
-        call(env, "instructions", json!({"load": load}))?
+        call(env, "instructions", json!({"load": load, "full": full}))?
     };
     // the reply carries the user config's warnings; the others of this project go to stderr,
     // as every command prints them
@@ -135,14 +140,14 @@ pub(crate) fn run(
 
 /// The reply outside every project, with no meta project to serve: the person layer through
 /// this process's reader, asked as this process's actor and run.
-fn outside(env: &Env, load: Option<Vec<String>>) -> Result<Value, ErrorReply> {
+fn outside(env: &Env, load: Option<Vec<String>>, full: bool) -> Result<Value, ErrorReply> {
     let (actor, run) = session_env()?;
     let actor = match actor {
         Some(a) => a,
         None => rdy_engine::human_actor_for_env(&env.project)?,
     };
     let caller = Caller { actor, run };
-    let load = LoadRequest::parse(&load.unwrap_or_default())?;
+    let load = LoadRequest::parse(&load.unwrap_or_default())?.with_full(full);
     let host = person_reader(env.no_daemon);
     let reply = instructions::deliver(None, &load, &caller, Some(&host))?;
     let bytes = reply.to_json()?;
@@ -250,6 +255,11 @@ mod tests {
             all.extend_from_slice(args);
             T::try_parse_from(all).map(|t| t.a.load)
         };
+        let full = |args: &[&str]| {
+            let mut all = vec!["t"];
+            all.extend_from_slice(args);
+            T::try_parse_from(all).map(|t| (t.a.load, t.a.full))
+        };
         assert_eq!(p(&[]).unwrap(), Vec::<String>::new());
         assert_eq!(p(&["--load", "a", "b"]).unwrap(), ["a", "b"]);
         assert_eq!(
@@ -257,6 +267,19 @@ mod tests {
             ["a", "b", "c"]
         );
         assert!(p(&["--load"]).is_err());
+        // --full is a switch that takes no value and combines with --load in either order
+        assert_eq!(full(&[]).unwrap(), (Vec::<String>::new(), false));
+        assert_eq!(full(&["--full"]).unwrap(), (Vec::<String>::new(), true));
+        assert_eq!(
+            full(&["--full", "--load", "a", "b"]).unwrap(),
+            (vec!["a".to_string(), "b".to_string()], true)
+        );
+        assert_eq!(
+            full(&["--load", "a", "--full", "--load", "b"]).unwrap(),
+            (vec!["a".to_string(), "b".to_string()], true)
+        );
+        assert!(full(&["--full", "x"]).is_err());
+        assert!(full(&["--full=false"]).is_err());
         for flag in [
             "--scope",
             "--acts",

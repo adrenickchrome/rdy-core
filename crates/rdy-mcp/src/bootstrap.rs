@@ -139,7 +139,7 @@ fn instructions(
         actor: key.0.clone(),
         run: key.1.clone(),
     };
-    let out = tools::instructions_reply(None, Some(st.host.as_ref()), &caller, p.load)?;
+    let out = tools::instructions_reply(None, Some(st.host.as_ref()), &caller, p.load, p.full)?;
     st.hub.claims().mark_instructions_read(&key);
     Ok(out)
 }

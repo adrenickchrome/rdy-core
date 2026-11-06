@@ -11,6 +11,21 @@ fn session(c: &mut McpClient, actor: &str) {
     assert!(r.code().is_none(), "{:?}", r.ok());
 }
 
+/// The text of the built-in rulesets `sets`, from a real `rdy_instructions` call (the session
+/// exists).
+fn guide_text(c: &mut McpClient, sets: &[&str]) -> String {
+    let load: Vec<String> = sets.iter().map(|s| format!("rdy:{s}")).collect();
+    let v = c.call("rdy_instructions", json!({"load": load})).ok();
+    v["instructions"]
+        .as_array()
+        .expect("instructions")
+        .iter()
+        .filter(|i| i["layer"] == "rdy")
+        .map(|i| i["text"].as_str().expect("row text"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn served_stable() -> (Served, Spec) {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
@@ -215,29 +230,37 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
             "{name}: {t}"
         );
     }
+    // the server text keeps the tools-only rule; the rest is loaded from the built-in rulesets
     let i = rdy_mcp::server::INSTRUCTIONS;
     assert!(
         i.contains("Read and write through rdy's tools, not the working-copy files"),
         "{i}"
     );
-    // rf5: the supporting types, in the instructions and the text guide
     assert!(
-        i.contains("Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on"),
-        "{i}"
+        !i.contains("Brief before editing") && !i.contains("Finding:") && !i.contains("Why:"),
+        "the long guidance left the server text: {i}"
+    );
+    let write = guide_text(&mut c, &["write"]);
+    let built = guide_text(&mut c, &["as-built"]);
+    let read = guide_text(&mut c, &["read"]);
+    // rf5: the supporting types, in the loaded guide and the text guide
+    assert!(
+        built.contains("Finding: record what surfaced with `rdy_write`, type finding, statement and 1 to 20 evidence entries; cite it from a decision with `depends_on`"),
+        "{built}"
     );
     assert!(
         sch["text"].as_str().unwrap().contains("A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home, or the project root when the project names none."),
         "{sch}"
     );
     assert!(
-        i.contains("Brief before editing") && i.contains("must cite a briefing"),
-        "{i}"
+        write.contains("Brief before editing") && write.contains("must cite a briefing"),
+        "{write}"
     );
     // rf12 (D-1876T): the Why sentence follows the Finding sentence, and the briefing guide
     // places the new sections and says where trace differs
     assert!(
-        i.contains("cite it from a decision with depends_on. Why: to learn why a block says what it says, call rdy_trace."),
-        "{i}"
+        read.contains("Why: to learn why a block says what it says, call `rdy_trace`."),
+        "{read}"
     );
     let brief = sch["brief"].as_str().unwrap();
     assert!(

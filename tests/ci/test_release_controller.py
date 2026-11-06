@@ -680,11 +680,55 @@ class Reservation(Base):
              'evidence mismatch: release/source.json does not match the release record'),
             ('notes differ', lambda r: r.w.put(S, 'release/notes.md', b'other\n'),
              'evidence mismatch: release/notes.md does not match its digest'),
-            ('guide differs', lambda r: (r.w.put(S, 'release/AGENTS.md', b'o\n'), r.w.put(S, 'release/CLAUDE.md', b'o\n')),
+            ('guide differs', lambda r: r.w.put(S, 'release/agent-guide.json', b'o\n'),
+             'evidence mismatch: the release guide does not match its digest'),
+            ('guide sidecar differs', lambda r: r.w.put(S, 'release/agent-guide.sha256', digest(1).encode() + b'\n'),
              'evidence mismatch: the release guide does not match its digest'),
             ('source file missing', lambda r: drop(r, 'release/notes.md'),
              'eligibility incomplete: GitHub contents: not found'),
         )
+
+    def test_agi6_guide_mismatch_never_reaches_sign(self):
+        digest_text = 'evidence mismatch: the release guide does not match its digest'
+        names_text = 'evidence mismatch: the release guide does not name this version and design landing'
+
+        def old(r):
+            r.w.coherent_guide(base.guide_bundle('0.42.0', 'e' * 64))
+            r.w.seal()
+
+        for label, change, message in (
+                ('bundle bytes', lambda r: r.w.put(S, 'release/agent-guide.json', r.w.guide + b' '), digest_text),
+                ('sidecar', lambda r: r.w.put(S, 'release/agent-guide.sha256', digest(1).encode() + b'\n'), digest_text),
+                ('evidence digest', lambda r: (r.w.e['source'].update(guide_sha256=digest(1)), r.w.seal()), digest_text),
+                ('coherent old bundle', old, names_text)):
+            # Refused while qualifying: no reservation exists, and nothing reached the table or the key.
+            rig = Rig()
+            change(rig)
+            before = dict(rig.table.items)
+            with self.subTest(label, step='qualify'):
+                self.refused(message, rig.qualify)
+                self.assertEqual(rig.git.created, [])
+                self.assertEqual(rig.kms.calls, [])
+                self.assertEqual(rig.table.items, before)
+                self.assertEqual(rig.w.mutations, [])
+        for label, change in (
+                ('bundle bytes', lambda r: r.w.put(S, 'release/agent-guide.json', r.w.guide + b' ')),
+                ('sidecar', lambda r: r.w.put(S, 'release/agent-guide.sha256', digest(1).encode() + b'\n'))):
+            # A guide changed under a live reservation: the signer's own read refuses, the tuple stays.
+            rig = Rig()
+            ctrl = rig.ready()
+            before = dict(rig.table.items)
+            created = list(rig.git.created)
+            tag = dict(rig.w.tags)
+            change(rig)
+            with self.subTest(label, step='sign'):
+                with self.assertRaises(Refused) as caught:
+                    rig.sign(ctrl)
+                self.assertEqual(str(caught.exception), digest_text)
+                self.assertEqual(rig.kms.calls, [], 'zero signing calls')
+                self.assertEqual(rig.table.items, before, 'no tuple mutation')
+                self.assertEqual(rig.git.created, created)
+                self.assertEqual(rig.w.tags, tag)
 
     def test_rsig5_successful_create_requires_exact_readback_before_any_kms(self):
         for label, change, message in self.changes():
