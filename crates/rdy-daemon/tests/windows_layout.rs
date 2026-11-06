@@ -10,7 +10,7 @@ use rdy_daemon::sys::records::{
 };
 use rdy_daemon::{RunDir, socket};
 use rdy_store::fileid::FileId;
-use rdy_store::fsutil::write_private_durable;
+use rdy_store::fsutil::{record_syncs, write_private_durable};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -488,7 +488,12 @@ fn wx15_pid_record_requires_creation_time() {
         .enable_all()
         .build()
         .unwrap();
-    let (listener, _, _) = rt.block_on(socket::bind(&run)).unwrap();
+    let ((listener, endpoint, _), synced) =
+        record_syncs(|| rt.block_on(socket::bind(&run)).unwrap());
+    assert!(
+        synced.contains(&run.path().to_path_buf()),
+        "the run dir is flushed: {synced:?}"
+    );
     let record = run.pid_record().expect("the record of this process");
     assert_eq!(record.pid(), std::process::id());
     #[cfg(windows)]
@@ -496,7 +501,12 @@ fn wx15_pid_record_requires_creation_time() {
         let bytes = fs::read(run.pid_file()).unwrap();
         assert_eq!(bytes, pipe_pid_record(std::process::id(), record.created()));
         assert_eq!(bytes, rdy_daemon::sys::own_pid_record().unwrap());
-        assert!(record.created() > 0);
+        // the system's word for the daemon at the other end of the pipe is the record's
+        let stream = rt.block_on(rdy_daemon::sys::connect(&endpoint)).unwrap();
+        let me = rdy_daemon::sys::own_account().unwrap();
+        let peer = rdy_daemon::sys::check_daemon(&stream, &endpoint, me).unwrap();
+        assert!(peer.is_process(record.pid(), record.created()));
+        drop(stream);
         // a pid alone proves nothing here
         write_private_durable(&run.pid_file(), format!("{}\n", record.pid()).as_bytes()).unwrap();
         assert!(run.pid_record().is_none(), "a pid with no creation time");
@@ -508,6 +518,7 @@ fn wx15_pid_record_requires_creation_time() {
         }
     }
     drop(listener);
+    let _ = endpoint;
     #[cfg(unix)]
     {
         assert_eq!(
