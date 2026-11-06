@@ -226,6 +226,12 @@ pub const MAX_ENDPOINT_RECORD: usize = MAX_SOCKET_PATH + 1 + 2 * 20 + 2;
 /// The longest `daemon.pid`.
 pub const MAX_PID_RECORD: usize = 64;
 
+/// What the project check watches beside `.rdy`: nothing. A delete here takes every file, held or
+/// not, and `.rdy` goes with them (D-A6ZZA).
+pub fn project_parts(_rdy_dir: &Path) -> Vec<(PathBuf, FileId)> {
+    Vec::new()
+}
+
 /// The socket of the canonical project root `root` (D-YMWEM), and whether it is the short one:
 /// `<root>/.rdy/run/rdy.sock` when that is at most `MAX_SOCKET_PATH` bytes, else
 /// `/tmp/rdy-<uid>/<hash of the root>.sock`.
@@ -502,6 +508,11 @@ pub fn terminate(pid: u32) -> io::Result<bool> {
     } else {
         Err(e)
     }
+}
+
+/// Where a daemon that `serve_command` starts runs: in its project.
+pub fn daemon_start_dir(_rdy_bin: &Path, project: &Path) -> PathBuf {
+    project.to_path_buf()
 }
 
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process

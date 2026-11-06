@@ -246,10 +246,8 @@ fn df3_a_copied_project_never_talks_to_the_originals_daemon() {
 }
 
 /// Ends process `pid` when dropped, so a failed assertion leaves no orphan daemon.
-#[cfg(unix)]
-struct KillOnDrop(u32);
+pub(crate) struct KillOnDrop(pub(crate) u32);
 
-#[cfg(unix)]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if rdy_daemon::process_alive(self.0) {
@@ -258,14 +256,23 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Final ruling (c) + (a), the reviewer's probe: a long-path project (its socket is the short
-/// one in `/tmp/rdy-<uid>`) is moved away, copied back with `cp -R` and the old copy removed,
-/// while its daemon lives. That daemon's `.rdy` is gone, so the restored project's `status`
-/// makes it refuse (stopping) and exit; the client retries once and starts the restored
-/// project's own daemon within its start poll. The old process exits. Unix only: Windows refuses to
-/// move or delete a directory while a process holds a file in it without sharing its delete, as a
-/// real daemon holds its log; `wx25b_a_restored_project_replaces_its_old_daemon` is its counterpart.
-#[cfg(unix)]
+/// A person moves a project away, whole. Windows refuses to rename a directory with an open file
+/// below it (code 5, however the file is shared), so a move there is what `Move-Item` then does: a
+/// copy and a delete.
+fn move_project_away(project: &Path, away: &Path) {
+    if cfg!(windows) {
+        assert!(copy_project(project, away), "the copy failed");
+        std::fs::remove_dir_all(project).unwrap();
+    } else {
+        std::fs::rename(project, away).unwrap();
+    }
+}
+
+/// Final ruling (c) + (a), the reviewer's probe: a long-path project (on Unix its socket is the
+/// short one in `/tmp/rdy-<uid>`) is moved away, copied back and the old copy removed, while its
+/// daemon lives. That daemon's `.rdy` is gone, so the restored project's `status` makes it refuse
+/// (stopping) and exit; the client retries once and starts the restored project's own daemon
+/// within its start poll. The old process exits.
 #[test]
 fn df3_a_restored_project_replaces_its_old_daemon() {
     let base = short_tempdir();
@@ -277,8 +284,8 @@ fn df3_a_restored_project_replaces_its_old_daemon() {
     let old = ping_pid(&project) as u32;
     let _kill = KillOnDrop(old);
     let away = base.path().join("away");
-    std::fs::rename(&project, &away).unwrap();
-    assert!(copy_project(&away, &project), "cp -R failed");
+    move_project_away(&project, &away);
+    assert!(copy_project(&away, &project), "the copy back failed");
     std::fs::remove_dir_all(&away).unwrap();
     ok(&human_command(&project, &[], &["--json", "status"])
         .output()
@@ -297,6 +304,33 @@ fn df3_a_restored_project_replaces_its_old_daemon() {
     ok(&human_command(&project, &[], &["serve", "--stop"])
         .output()
         .unwrap());
+}
+
+/// A person deletes a project while its real daemon lives. The delete succeeds, whatever the daemon
+/// holds, and no client comes: the daemon's own idle tick finds the project gone, and it ends.
+#[test]
+fn wx25c_deleting_a_project_stops_its_daemon() {
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let _stop = StopOnDrop(&project);
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let daemon = ping_pid(&project) as u32;
+    let _kill = KillOnDrop(daemon);
+    let endpoint = RunDir::of_project(&project);
+    std::fs::remove_dir_all(&project).unwrap();
+    assert!(!project.exists());
+    // a bound on the wait, for a failure message: never a measure
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while rdy_daemon::process_alive(daemon) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the daemon {daemon} lives on"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    wait_endpoint_gone(&endpoint);
 }
 
 /// Final ruling (c): a daemon whose project is deleted exits on its next idle tick (driven

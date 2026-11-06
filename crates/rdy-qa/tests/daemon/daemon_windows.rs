@@ -5,7 +5,7 @@
 //! `cli_daemon_unix`, and the native repeats of Task 8a's upgrade witnesses (`start_handoff.rs` in
 //! rdy-daemon is Unix only).
 use crate::daemon_short_socket::{
-    StopOnDrop, copy_project, long_project, ok, one_daemon_through, ping_pid,
+    KillOnDrop, StopOnDrop, copy_project, long_project, ok, one_daemon_through, ping_pid,
 };
 use rdy_daemon::lock::FileLock;
 use rdy_daemon::maintenance::{
@@ -563,10 +563,10 @@ fn wx25b_every_spelling_of_a_project_reaches_one_pipe() {
     wait_endpoint_gone(&RunDir::of_project(&project));
 }
 
-/// The counterpart of `df3_a_restored_project_replaces_its_old_daemon`. The old daemon runs in this
-/// process, which holds no log for it, so the system lets its project go. A person copies the
-/// project away, deletes it and copies it back. The old daemon's `.rdy` is gone, so the restored
-/// project's `status` makes it refuse and leave, and the client starts the project's own daemon.
+/// `df3_a_restored_project_replaces_its_old_daemon` with the old daemon in this process, whose end
+/// can be read. A person copies the project away, deletes it and copies it back. The old daemon's
+/// `.rdy` is gone, so the restored project's `status` makes it refuse and leave, and the client
+/// starts the project's own daemon.
 #[test]
 fn wx25b_a_restored_project_replaces_its_old_daemon() {
     let base = short_tempdir();
@@ -616,4 +616,90 @@ fn wx25b_a_pipe_nobody_serves_is_no_daemon() {
         assert!(matches!(connect(&run, &hello).await, Attempt::NoDaemon(_)));
     });
     assert!(endpoint_gone(&run));
+}
+
+/// A project whose `.rdy` still stands has lost its store under a real daemon, as a delete that
+/// stopped part way leaves it. `.rdy` is the one the daemon bound, and the daemon still ends.
+#[test]
+fn wx25c_a_store_gone_under_a_standing_rdy_dir_stops_the_daemon() {
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let _stop = StopOnDrop(&project);
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let daemon = ping_pid(&project) as u32;
+    let _kill = KillOnDrop(daemon);
+    let endpoint = RunDir::of_project(&project);
+    std::fs::remove_dir_all(project.join(".rdy").join("store")).unwrap();
+    assert!(project.join(".rdy").join("run").is_dir());
+    wait_for("the daemon's exit", || exited(daemon));
+    wait_endpoint_gone(&endpoint);
+}
+
+/// A daemon in this process, on a new project, and the project's store directory.
+fn daemon_on_a_new_project(dir: &Path) -> (rdy_daemon::ServeRun, PathBuf) {
+    drop(Rdy::init(dir, "rdy-standard").unwrap());
+    let run = rdy_daemon::start(rdy_daemon::ServeOptions {
+        project: dir.to_path_buf(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        detach: false,
+        idle_timeout: None,
+        human_actor: None,
+        site_lan_override: None,
+    })
+    .unwrap();
+    (run, dir.join(".rdy").join("store"))
+}
+
+/// A new directory in the store's place is another store, and the store that stands is no reason
+/// to stop.
+#[test]
+fn wx25c_a_store_replaced_under_a_standing_rdy_dir_stops_the_daemon() {
+    let dir = short_tempdir();
+    let (run, store) = daemon_on_a_new_project(dir.path());
+    assert!(!run.handle().check_project(), "its store stands");
+    std::fs::remove_dir_all(&store).unwrap();
+    std::fs::create_dir(&store).unwrap();
+    assert!(run.handle().check_project());
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+}
+
+/// `del /s` leaves every directory and takes every file: the store directory stands, and no store
+/// is in it.
+#[test]
+fn wx25c_a_store_emptied_in_its_own_directory_stops_the_daemon() {
+    fn remove_files(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                remove_files(&entry.path());
+            } else {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+    let dir = short_tempdir();
+    let (run, store) = daemon_on_a_new_project(dir.path());
+    remove_files(&store);
+    assert!(store.is_dir());
+    assert!(run.handle().check_project());
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+}
+
+/// The system refuses to move `.rdy` while a daemon has files open below it, however they are
+/// shared. Nothing has moved, so the daemon serves on.
+#[test]
+fn wx25c_a_refused_move_of_rdy_leaves_the_daemon_serving() {
+    let base = short_tempdir();
+    let project = long_project(base.path());
+    let _stop = StopOnDrop(&project);
+    ok(&human_command(&project, &[], &["--json", "status"])
+        .output()
+        .unwrap());
+    let daemon = ping_pid(&project);
+    let _kill = KillOnDrop(daemon as u32);
+    let refused = std::fs::rename(project.join(".rdy"), project.join(".rdy-away")).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    assert_eq!(ping_pid(&project), daemon);
 }

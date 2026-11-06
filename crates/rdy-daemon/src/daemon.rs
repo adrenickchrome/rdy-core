@@ -198,8 +198,9 @@ pub enum ExitReason {
     /// A client of the same version and another build arrived with no other connection, or the
     /// last connection closed after one came.
     BuildReplaced,
-    /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy): the
-    /// daemon serves nothing there and exits without writing to its store.
+    /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy), or on
+    /// Windows its store is (`sys::project_parts`): the daemon serves nothing there and exits
+    /// without writing to its store.
     ProjectGone,
 }
 
@@ -335,9 +336,10 @@ impl DaemonHandle {
         self.info.stop.subscribe()
     }
 
-    /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` is gone or
-    /// replaced, removes this daemon's run files that still name it and stops the daemon with
-    /// `ProjectGone`. True when the project is gone. False before the bind.
+    /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` or another of its
+    /// parts (`sys::project_parts`) is gone or replaced, removes this daemon's run files that still
+    /// name it and stops the daemon with `ProjectGone`. True when the project is gone. False before
+    /// the bind.
     pub fn check_project(&self) -> bool {
         self.check.check()
     }
@@ -354,8 +356,8 @@ pub struct Daemon {
     keepers: Keepers,
     files: RunFiles,
     listener: Option<sys::Listener>,
-    /// The project check; it holds the identity of the project's `.rdy` from the bind on, and
-    /// hellos from another project are refused.
+    /// The project check; it holds the identity of the project's `.rdy` and of its other parts
+    /// from the bind on, and hellos from another project are refused.
     check: Arc<ProjectCheck>,
     /// `DaemonHandle::tick`: an idle tick now.
     tick: Arc<Notify>,
@@ -384,6 +386,7 @@ impl Daemon {
         let check = Arc::new(ProjectCheck {
             root: config.run.root(),
             project: OnceLock::new(),
+            parts: OnceLock::new(),
             reason: Arc::clone(&reason),
             run: config.run.clone(),
             files: files.clone(),
@@ -424,6 +427,10 @@ impl Daemon {
         let (listener, path, project) = socket::bind(&self.config.run).await?;
         self.files.bound(path, project);
         let _ = self.check.project.set(project);
+        let _ = self
+            .check
+            .parts
+            .set(sys::project_parts(&self.check.root.join(".rdy")));
         self.listener = Some(listener);
         Ok(())
     }
@@ -670,6 +677,8 @@ struct ProjectCheck {
     root: PathBuf,
     /// The identity of the project's `.rdy` at the bind; unset before it.
     project: OnceLock<ProjectId>,
+    /// What else stands for the project, with its identity at the bind (`sys::project_parts`).
+    parts: OnceLock<Vec<(PathBuf, FileId)>>,
     reason: Arc<OnceLock<ExitReason>>,
     run: RunDir,
     files: RunFiles,
@@ -678,12 +687,18 @@ struct ProjectCheck {
 
 impl ProjectCheck {
     /// Whether `<root>/.rdy` (from `lstat`) is no longer `project`, the `.rdy` this daemon bound
-    /// with: gone, or another directory (a restore, a copy moved into place).
+    /// with: gone, or another directory (a restore, a copy moved into place). The same for each of
+    /// the project's other parts.
     fn gone(&self, project: ProjectId) -> bool {
-        match FileId::lstat(&self.root.join(".rdy")) {
-            Ok(id) => id != project,
+        let changed = |path: &Path, bound: FileId| match FileId::lstat(path) {
+            Ok(id) => id != bound,
             Err(_) => true,
-        }
+        };
+        changed(&self.root.join(".rdy"), project)
+            || self
+                .parts
+                .get()
+                .is_some_and(|parts| parts.iter().any(|(path, id)| changed(path, *id)))
     }
 
     /// When the project is gone, removes this daemon's run files that still name it

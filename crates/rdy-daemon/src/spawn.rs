@@ -116,15 +116,15 @@ fn serve_stdin() -> Stdio {
 }
 
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
-/// --spawned --project <project>` in `project` (`--spawned` tells `rdy serve --detach` to serve
-/// in that process rather than spawn another), stdin from /dev/null (or, under a start armed on
+/// --spawned --project <project>` in `sys::daemon_start_dir` (`--spawned` tells `rdy serve --detach`
+/// to serve in that process rather than spawn another), stdin from /dev/null (or, under a start armed on
 /// this thread, the private pipe of its token), stdout and stderr appended to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
 /// variable removed from its environment, and a new session (so a new process group) of its own
 /// from before its exec. The run dir is made absolute first, and a socket path the daemon could
 /// not bind (`socket::check_socket_path`) is refused on that absolute path, before anything is
 /// created, rather than spawning a daemon that would only die at its bind. A relative `project`
-/// is made absolute against the caller's working directory too: the child runs in the project,
-/// where the relative path would name `<project>/<project>`.
+/// is made absolute against the caller's working directory too: where the child runs, the relative
+/// path would name something else, such as `<project>/<project>`.
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     let run = run.absolute()?;
     check_socket_path(&run)?;
@@ -143,7 +143,7 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
         .arg("--spawned")
         .arg("--project")
         .arg(&project)
-        .current_dir(&project)
+        .current_dir(sys::daemon_start_dir(rdy_bin, &project))
         .stdin(serve_stdin())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));

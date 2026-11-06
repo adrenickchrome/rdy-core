@@ -14,6 +14,7 @@ use super::super::Liveness;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, HANDLE_FLAG_INHERIT,
@@ -106,6 +107,18 @@ pub fn alive(pid: u32) -> bool {
     process_liveness(pid) != Liveness::Gone
 }
 
+/// Where a daemon that `serve_command` starts runs: the folder of its program, never its project.
+/// The system refuses to delete a process's current directory, so a daemon that ran in its project
+/// would stand in the way of a person who deletes it. The running program holds its own folder
+/// already, so this holds nothing new. A program given by a bare or relative name has no folder to
+/// name here, and its daemon runs in the project.
+pub fn daemon_start_dir(rdy_bin: &Path, project: &Path) -> PathBuf {
+    match rdy_bin.parent() {
+        Some(folder) if rdy_bin.is_absolute() => folder.to_path_buf(),
+        _ => project.to_path_buf(),
+    }
+}
+
 /// Leaves the caller's console. A process with none (a child of `serve_command`) has nothing to
 /// leave, and is `Ok`. Called by `rdy serve --detach` after its argument parsing and before it
 /// opens the store.
@@ -119,5 +132,23 @@ pub fn detach() -> io::Result<()> {
     match e.raw_os_error().and_then(|n| u32::try_from(n).ok()) {
         Some(ERROR_INVALID_PARAMETER | ERROR_INVALID_HANDLE) => Ok(()),
         _ => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daemon_start_dir;
+    use std::path::Path;
+
+    #[test]
+    fn wx25c_a_started_daemon_runs_in_the_folder_of_its_program() {
+        let project = Path::new(r"C:\work\project");
+        assert_eq!(
+            daemon_start_dir(Path::new(r"C:\tools\rdy.exe"), project),
+            Path::new(r"C:\tools")
+        );
+        for no_folder in ["rdy.exe", r"bin\rdy.exe"] {
+            assert_eq!(daemon_start_dir(Path::new(no_folder), project), project);
+        }
     }
 }
