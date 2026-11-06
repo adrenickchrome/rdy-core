@@ -83,6 +83,11 @@ pub(crate) fn status(env: &Env, as_json: bool) -> Result<(Value, String), ErrorR
     let mut v = call(env, "status", args)?;
     let mut t = status_text(&v);
     wc::status::attach(env, &mut v, &mut t)?;
+    // agi4: the missing-meta prompt, before the reminder
+    if let Some(h) = crate::setup_cmd::status_prompt(&env.project) {
+        v["setup_hint"] = json!(h);
+        t.push_str(&format!("\n{h}"));
+    }
     // ain5: the reminder, last, while it is owed
     if let Some(r) = v[rdy_engine::instructions::REMINDER_KEY].as_str() {
         t.push_str(&format!("\n{r}"));

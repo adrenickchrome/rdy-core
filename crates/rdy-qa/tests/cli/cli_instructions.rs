@@ -4,9 +4,12 @@
 //! estimated tokens. `rdy status` and `rdy brief` carry the reminder until a complete reply goes
 //! out for the session's actor and run. `rdy new instruction` writes one instruction through the
 //! ordinary write, with the write's own checks. Every person here lives in an isolated home.
+use rdy_qa::daemon::short_tempdir;
 use rdy_qa::instructions::{REMINDER, Set, World, author};
+use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 use std::path::Path;
+use std::process::Stdio;
 
 const PROJECT_SETS: &[Set] = &[
     Set {
@@ -50,6 +53,47 @@ const META_SETS: &[Set] = &[
         )],
     },
 ];
+
+/// The built-in rulesets, in menu order.
+const BUILTIN: [&str; 12] = [
+    "rdy:bootstrap",
+    "rdy:write",
+    "rdy:after-write",
+    "rdy:approvals",
+    "rdy:as-built",
+    "rdy:read",
+    "rdy:publish",
+    "rdy:review",
+    "rdy:diagrams",
+    "rdy:parallel",
+    "rdy:project-ops",
+    "rdy:troubleshoot",
+];
+
+/// The rows of `key` that a project or a person wrote.
+fn authored(v: &Value, key: &str) -> Vec<Value> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} in {v}"))
+        .iter()
+        .filter(|r| r["layer"] != "rdy")
+        .cloned()
+        .collect()
+}
+
+/// The rulesets the built-in rows of `v` belong to, without repeats, in reply order.
+fn builtin_sets(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for r in v["instructions"].as_array().unwrap() {
+        if r["layer"] == "rdy" {
+            let s = r["ruleset"].as_str().unwrap().to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
 
 fn p(id: &str) -> String {
     format!("project:{id}")
@@ -104,18 +148,29 @@ fn ain5_cli_json_and_mcp_return_the_same_rules_and_menu() {
         .is_ok()
     );
     let mcp = c.call("rdy_instructions", json!({})).ok();
+    // the built-in bootstrap comes first and whole, then the project's rules, then the person's
+    assert_eq!(builtin_sets(&mcp), ["rdy:bootstrap"], "{mcp}");
     assert_eq!(
-        mcp["instructions"]
+        mcp["menu"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|r| r["id"].as_str().unwrap())
+            .take(BUILTIN.len())
+            .map(|m| m["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        BUILTIN
+    );
+    assert_eq!(
+        authored(&mcp, "instructions")
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
             .collect::<Vec<_>>(),
         [
             pa.rules[0][0].as_str(),
             pa.rules[0][1].as_str(),
             ma.rules[0][0].as_str()
         ]
+        .map(String::from)
     );
     let cli = ok_json(&w, pd.path(), &["instructions"]);
     assert_eq!(cli, mcp);
@@ -131,7 +186,7 @@ fn ain5_cli_json_and_mcp_return_the_same_rules_and_menu() {
             json!({"load": [p(&pa.docs[1]), q(&ma.docs[1])]}),
         )
         .ok();
-    assert_eq!(loaded["instructions"].as_array().unwrap().len(), 5);
+    assert_eq!(authored(&loaded, "instructions").len(), 5);
     for args in [
         vec!["instructions", "--load", &p(&pa.docs[1]), &q(&ma.docs[1])],
         vec![
@@ -440,4 +495,184 @@ fn ain5_new_instruction_uses_the_same_write_and_reason_checks() {
         let out = w.rdy(pd.path(), &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: clap refuses it");
     }
+}
+
+/// `rdy mcp` started in `cwd` with no project, as the world's human, for its reply to a tool.
+fn mcp_outside(w: &World, cwd: &Path) -> McpClient {
+    let mut cmd = rdy_qa::fixtures::rdy_command();
+    cmd.arg("mcp")
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(w.env())
+        .current_dir(cwd)
+        .stderr(Stdio::piped());
+    for name in w.removed_env() {
+        cmd.env_remove(name);
+    }
+    McpClient::launch(cmd)
+}
+
+/// `rdy --json <args>` in `cwd` with no `--project`: the reply, which must succeed.
+fn json_at(w: &World, cwd: &Path, args: &[&str]) -> Value {
+    let mut cmd = rdy_qa::fixtures::rdy_command();
+    cmd.arg("--json")
+        .args(args)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(w.env())
+        .current_dir(cwd);
+    for name in w.removed_env() {
+        cmd.env_remove(name);
+    }
+    let out = rdy_qa::fixtures::output_within(&mut cmd, std::time::Duration::from_secs(120))
+        .expect("rdy ran");
+    assert!(
+        out.status.success(),
+        "rdy {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("JSON")
+}
+
+#[test]
+fn agi4_cli_full_matches_mcp_inside_and_outside_projects() {
+    let w = World::new();
+    let (pd, md) = (w.project(), w.project());
+    let pa = author(pd.path(), "Small changes keep review cheap", PROJECT_SETS);
+    let ma = author(md.path(), "One spelling in every reply", META_SETS);
+    w.person(md.path());
+    let mut c = w.mcp(pd.path());
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:a", "run": "a1", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let base = c.call("rdy_instructions", json!({})).ok();
+    assert_eq!(builtin_sets(&base), ["rdy:bootstrap"], "{base}");
+    // full: the same JSON from both, every built-in ruleset whole, nothing else added
+    let full = c.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(ok_json(&w, pd.path(), &["instructions", "--full"]), full);
+    assert_eq!(builtin_sets(&full), BUILTIN, "{full}");
+    assert_eq!(
+        authored(&full, "instructions"),
+        authored(&base, "instructions")
+    );
+    assert_eq!(full["menu"], base["menu"]);
+    assert_eq!(full["hint"], base["hint"]);
+    assert_eq!(full["warnings"], base["warnings"]);
+    // an explicit load can add a stored optional ruleset; full still adds no stored one
+    let (l1, l2) = (p(&pa.docs[1]), q(&ma.docs[1]));
+    let loaded = c
+        .call("rdy_instructions", json!({"full": true, "load": [l1, l2]}))
+        .ok();
+    assert_eq!(authored(&loaded, "instructions").len(), 5, "{loaded}");
+    assert_eq!(builtin_sets(&loaded), BUILTIN);
+    let rows = |v: &Value| -> Vec<String> {
+        v["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut seen = rows(&loaded);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), loaded["instructions"].as_array().unwrap().len());
+    for args in [
+        vec!["instructions", "--full", "--load", &l1, &l2],
+        vec!["instructions", "--load", &l1, "--full", "--load", &l2],
+        vec!["instructions", "--load", &l1, &l2, "--full"],
+    ] {
+        assert_eq!(ok_json(&w, pd.path(), &args), loaded, "{args:?}");
+    }
+    // a built-in handle with full is deduplicated, and one without full adds just that ruleset
+    let both = c
+        .call(
+            "rdy_instructions",
+            json!({"full": true, "load": ["rdy:write", "rdy:bootstrap"]}),
+        )
+        .ok();
+    assert_eq!(both, full);
+    assert_eq!(
+        ok_json(
+            &w,
+            pd.path(),
+            &[
+                "instructions",
+                "--full",
+                "--load",
+                "rdy:write",
+                "rdy:bootstrap"
+            ]
+        ),
+        full
+    );
+    let one = c
+        .call("rdy_instructions", json!({"load": ["rdy:write"]}))
+        .ok();
+    assert_eq!(builtin_sets(&one), ["rdy:bootstrap", "rdy:write"]);
+    assert_eq!(
+        ok_json(&w, pd.path(), &["instructions", "--load", "rdy:write"]),
+        one
+    );
+    // the text names the built-in rows and the whole menu
+    let t = ok_text(&w, pd.path(), &["instructions", "--full"]);
+    for id in BUILTIN {
+        assert!(t.contains(id), "{id} in\n{t}");
+    }
+    // outside every project: the person's project is the project; the same replies
+    let outside = short_tempdir();
+    let mut o = mcp_outside(&w, outside.path());
+    assert!(
+        o.call(
+            "rdy_session",
+            json!({"actor": "agent:a", "run": "o1", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let o_base = o.call("rdy_instructions", json!({})).ok();
+    assert_eq!(json_at(&w, outside.path(), &["instructions"]), o_base);
+    let o_full = o.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(
+        json_at(&w, outside.path(), &["instructions", "--full"]),
+        o_full
+    );
+    assert_eq!(builtin_sets(&o_full), BUILTIN);
+    assert_eq!(
+        authored(&o_full, "instructions"),
+        authored(&o_base, "instructions")
+    );
+    // with no rules project either: the projectless server and the CLI agree too
+    let w2 = World::new();
+    let nowhere = short_tempdir();
+    let mut n = mcp_outside(&w2, nowhere.path());
+    assert!(
+        n.call(
+            "rdy_session",
+            json!({"actor": "agent:a", "run": "n1", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let n_full = n.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(builtin_sets(&n_full), BUILTIN);
+    assert_eq!(
+        json_at(&w2, nowhere.path(), &["instructions", "--full"]),
+        n_full
+    );
+    let n_one = n
+        .call("rdy_instructions", json!({"load": ["rdy:review"]}))
+        .ok();
+    assert_eq!(
+        json_at(
+            &w2,
+            nowhere.path(),
+            &["instructions", "--load", "rdy:review"]
+        ),
+        n_one
+    );
 }
