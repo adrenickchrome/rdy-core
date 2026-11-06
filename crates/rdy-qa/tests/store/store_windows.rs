@@ -13,7 +13,7 @@ use rdy_qa::fixtures::*;
 use rdy_qa::{invariants, platform, reindex_check};
 use rdy_store::pio::{self, Boundary, DurableStep, Ended};
 use serde_json::json;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -131,7 +131,9 @@ fn with_durable<T>(
 }
 
 /// A write is acknowledged only after its sync, and a failed flush or rename at any durable step
-/// of a roll, a reindex or a dump fails that operation and costs no acknowledged byte.
+/// of a roll, a reindex, a dump, an export or a features replacement fails that operation and
+/// costs no acknowledged byte. A reindex's own rename is no durable step, and a dump takes no
+/// rename: `wx28a_a_read_only_store_fails_and_keeps_acknowledged_data` fails the first for real.
 #[test]
 fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
     // the segment's sync: the write fails, and so does every later write of the handle
@@ -146,7 +148,7 @@ fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
 
     // every durable step of each operation, each failed in its turn on either side of its call
     type Op = fn(&mut Rdy, &Path, &str) -> Result<(), RdyError>;
-    let ops: [(&str, Op); 3] = [
+    let ops: [(&str, Op); 5] = [
         ("roll", |r, _, section| {
             r.store_mut().set_segment_max(1);
             claim(r, section, "Rolled.").map(|_| ())
@@ -155,42 +157,65 @@ fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
         ("dump", |r, project, _| {
             r.read().dump(&project.join("out.dump")).map(|_| ())
         }),
+        ("export", |r, project, _| {
+            r.read()
+                .export(&Scope::View(VIEW.into()), &project.join("out.export"))
+                .map(|_| ())
+        }),
+        ("the features file", |r, project, _| {
+            let features = r.store().features().clone();
+            rdy_store::format::write_format_file(&store_dir(project), &features)
+                .map_err(RdyError::from)
+        }),
     ];
     for (name, op) in ops {
-        let mut failed_steps = 0;
+        let (mut flushes, mut renames) = (0, 0);
         for at in [Boundary::Before, Boundary::After] {
             for nth in 0.. {
                 let (d, mut r, section, acked) = project_with_acked();
                 let seen = Rc::new(Cell::new(0usize));
-                let fired = Rc::new(Cell::new(false));
+                let fired = Rc::new(RefCell::new(None));
                 let (count, fire) = (seen.clone(), fired.clone());
                 let result = with_durable(
-                    move |_, boundary| {
+                    move |step, boundary| {
                         if boundary != at {
                             return Ok(());
                         }
                         count.set(count.get() + 1);
                         if count.get() == nth + 1 {
-                            fire.set(true);
+                            *fire.borrow_mut() = Some(step.clone());
                             return Err(std::io::Error::other("injected durable failure"));
                         }
                         Ok(())
                     },
                     || op(&mut r, d.path(), &section),
                 );
-                if !fired.get() {
+                let Some(step) = fired.borrow().clone() else {
                     result.unwrap_or_else(|e| panic!("{name}: no step failed: {e}"));
                     drop(r);
                     break;
+                };
+                let rename = matches!(step, DurableStep::Rename { .. });
+                if rename {
+                    renames += 1;
+                } else {
+                    flushes += 1;
                 }
-                failed_steps += 1;
                 let case = format!("{name}: step {nth} failed {at:?} its call");
                 assert!(result.is_err(), "{case}: the operation succeeded");
+                if name == "export" && rename && at == Boundary::Before {
+                    assert!(!d.path().join("out.export").exists(), "{case}: it is out");
+                }
                 rdy_store::unclean_closes_for_tests(d.path(), || drop(r));
                 acked.assert_kept(d.path(), &case);
             }
         }
-        assert!(failed_steps >= 2, "{name}: it took no durable step");
+        assert!(flushes >= 2, "{name}: no flush failed");
+        assert_eq!(
+            renames > 0,
+            matches!(name, "export" | "the features file"),
+            "{name}: {renames} renames failed"
+        );
     }
 }
 
