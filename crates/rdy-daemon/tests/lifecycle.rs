@@ -20,7 +20,7 @@ async fn life1_a_detached_daemon_exits_after_the_idle_timeout() {
         .unwrap();
     assert!(matches!(reason, ExitReason::Idle), "{reason:?}");
     assert!(start.elapsed() >= Duration::from_millis(600));
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    assert!(socket_gone(&d.run).await && !d.run.pid_file().exists());
 }
 
 #[tokio::test]
@@ -88,7 +88,7 @@ async fn life1_stop_drains_an_in_flight_request_then_closes() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let t0 = Instant::now();
     d.handle.stop();
-    assert!(!d.run.socket().exists(), "the socket goes first");
+    assert!(socket_gone(&d.run).await, "the socket goes first");
     let mut out = String::new();
     r.read_line(&mut out).await.unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -188,7 +188,7 @@ async fn life1_a_stop_closes_a_connection_still_in_its_hello() {
 async fn life1_a_handle_stop_leaves_a_successors_run_files_alone() {
     let d = daemon("1", true, |_| {}).await;
     d.handle.stop();
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    assert!(socket_gone(&d.run).await && !d.run.pid_file().exists());
     // a successor binds the same paths before the old `run` gets to its cleanup
     let successor = rdy_daemon::sys::bind(&d.run.socket()).unwrap();
     std::fs::write(d.run.pid_file(), "424242\n").unwrap();
@@ -196,7 +196,7 @@ async fn life1_a_handle_stop_leaves_a_successors_run_files_alone() {
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(d.run.socket().exists(), "the successor's socket is kept");
+    assert!(socket_live(&d.run).await, "the successor's socket is kept");
     assert_eq!(
         std::fs::read_to_string(d.run.pid_file()).unwrap(),
         "424242\n"
@@ -216,7 +216,7 @@ async fn life1_the_stop_op_removes_the_run_files() {
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    assert!(socket_gone(&d.run).await && !d.run.pid_file().exists());
 }
 
 /// A client that hears `exiting` spawns a successor at once; the old daemon must have removed
@@ -238,7 +238,7 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
             r.get_mut().write_all(line.as_bytes()).await.unwrap();
             let mut first = String::new();
             r.read_line(&mut first).await.unwrap();
-            let present = (run.socket().exists(), run.pid_file().exists());
+            let present = (!socket_gone(&run).await, run.pid_file().exists());
             (first, present)
         })
     })
@@ -258,7 +258,7 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
         d.task.await.unwrap().unwrap(),
         ExitReason::VersionReplaced
     ));
-    assert!(d.run.socket().exists(), "the successor's socket is kept");
+    assert!(socket_live(&d.run).await, "the successor's socket is kept");
     assert_eq!(
         std::fs::read_to_string(d.run.pid_file()).unwrap(),
         "424242\n"

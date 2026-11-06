@@ -422,7 +422,7 @@ async fn start1_a_symlinked_socket_is_not_followed() {
     let l = std::os::unix::net::UnixListener::bind(&evil).unwrap();
     std::os::unix::fs::symlink(&evil, run.socket()).unwrap();
     match connect(&run, &hello_for(dir.path())).await {
-        Attempt::NoDaemon(e) => assert!(e.to_string().contains("symbolic link"), "{e}"),
+        Attempt::NoDaemon(e) => assert!(e.to_string().contains(LINK_REFUSAL), "{e}"),
         other => panic!("{other:?}"),
     }
     let n = Arc::new(AtomicUsize::new(0));
@@ -457,7 +457,7 @@ async fn start1_a_symlinked_start_lock_is_refused_and_its_target_is_untouched() 
     let v = victim(dir.path());
     symlink_file(&v, &run.start_lock());
     match lock::FileLock::try_take(&run.start_lock()) {
-        Err(e) => assert!(e.to_string().contains("symbolic link"), "{e}"),
+        Err(e) => assert!(e.to_string().contains(LINK_REFUSAL), "{e}"),
         Ok(got) => panic!("took a symlinked lock: {}", got.is_some()),
     }
     let n = Arc::new(AtomicUsize::new(0));
@@ -475,7 +475,7 @@ async fn start1_a_symlinked_start_lock_is_refused_and_its_target_is_untouched() 
     assert!(
         e.message
             .starts_with(&format!("could not lock {}: ", run.start_lock().display()))
-            && e.message.contains("symbolic link"),
+            && e.message.contains(LINK_REFUSAL),
         "{e}"
     );
     assert_eq!(n.load(Ordering::SeqCst), 0);
@@ -657,10 +657,15 @@ async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
         run.ensure().unwrap();
         let _held = hold_store_lock(dir.path());
         let pid = std::process::id();
-        std::fs::write(run.pid_file(), format!("{pid}\n")).unwrap();
+        std::fs::write(run.pid_file(), rdy_daemon::sys::own_pid_record().unwrap()).unwrap();
         let tried = if recorded {
             let dead = dead_endpoint(dir.path());
             write_record(&run, &dead, &run.project_id().unwrap());
+            assert_eq!(
+                run.recorded_socket(),
+                Some(dead.clone()),
+                "the fixture's record is a valid one"
+            );
             dead
         } else {
             run.socket()

@@ -182,7 +182,7 @@ async fn hello1_another_version_with_no_sessions_makes_the_daemon_exit() {
         .unwrap();
     assert!(matches!(reason, ExitReason::VersionReplaced), "{reason:?}");
     assert!(
-        !d.run.socket().exists(),
+        socket_gone(&d.run).await,
         "the socket is gone, so the client's next connect fails and it spawns"
     );
 }

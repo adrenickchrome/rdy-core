@@ -180,7 +180,8 @@ pub fn symlink_file(target: &Path, link: &Path) {
 }
 
 /// An endpoint name that once had a listener and has none now. On Unix the socket file stays; a
-/// pipe leaves no trace, so on Windows it is a pipe name that nothing ever bound.
+/// pipe leaves no trace, so on Windows it is the valid, project-derived pipe name of a root that
+/// nothing ever served.
 #[cfg(unix)]
 pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
     let dead = dir.join("dead.sock");
@@ -190,6 +191,37 @@ pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
 
 #[cfg(windows)]
 pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
-    let tag = dir.file_name().unwrap().to_string_lossy().into_owned();
-    std::path::PathBuf::from(format!(r"\\.\pipe\rdy-dead-{tag}"))
+    rdy_daemon::sys::project_endpoint(&dir.join("never-served")).0
+}
+
+/// What a refusal to follow a link says on this platform (`open_no_follow`).
+#[cfg(unix)]
+pub const LINK_REFUSAL: &str = "symbolic link";
+#[cfg(windows)]
+pub const LINK_REFUSAL: &str = "is a reparse point; rdy will not follow it";
+
+/// Whether the project's endpoint answers. A named pipe is not a file, so on Windows this asks the
+/// system's pipe namespace (`sys::endpoint_liveness`), not the file system.
+pub async fn socket_live(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        rdy_daemon::sys::endpoint_liveness(&run.socket()).await == rdy_daemon::sys::Liveness::Live
+    }
+}
+
+/// Whether the project's endpoint is proved gone: no socket file on Unix, no pipe of that name on
+/// Windows (`Liveness::Gone`, which is only ever a proved end).
+pub async fn socket_gone(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        !run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        rdy_daemon::sys::endpoint_liveness(&run.socket()).await == rdy_daemon::sys::Liveness::Gone
+    }
 }

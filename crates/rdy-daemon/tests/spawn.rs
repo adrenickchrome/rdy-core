@@ -232,7 +232,7 @@ fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
     }
     symlink_file(&victim, &run.log_file());
     let e = serve_command(std::path::Path::new("/bin/sh"), dir.path(), &run).unwrap_err();
-    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert!(e.to_string().contains(LINK_REFUSAL), "{e}");
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
     #[cfg(unix)]
     {

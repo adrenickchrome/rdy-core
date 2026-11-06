@@ -19,18 +19,18 @@ async fn sock1_bind_makes_a_private_run_dir_socket_and_pid_file() {
         assert_eq!(mode(&d.run.socket()), 0o600);
         assert_eq!(mode(&d.run.pid_file()), 0o600);
     }
-    let pid: u32 = std::fs::read_to_string(d.run.pid_file())
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = d
+        .run
+        .pid_record()
+        .expect("a pid record of this account")
+        .pid();
     assert_eq!(pid, std::process::id());
     d.handle.stop();
     assert!(matches!(
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(!d.run.socket().exists(), "stop unlinks the socket");
+    assert!(socket_gone(&d.run).await, "stop unlinks the socket");
     assert!(!d.run.pid_file().exists(), "stop removes the pid file");
 }
 
@@ -59,7 +59,7 @@ async fn sock1_a_stale_socket_file_is_replaced_by_bind() {
     run.ensure().unwrap();
     drop(rdy_daemon::sys::bind(&run.socket()).unwrap()); // dead listener, a socket file stays
     #[cfg(unix)]
-    assert!(run.socket().exists());
+    assert!(socket_live(&run).await);
     assert!(
         rdy_daemon::sys::connect(&run.socket()).await.is_err(),
         "stale: refused"
@@ -161,7 +161,7 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
     }
     symlink_file(&victim, &run.path().join(format!("{PID_FILE}.tmp")));
     let e = socket::bind(&run).await.unwrap_err();
-    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert!(e.to_string().contains(LINK_REFUSAL), "{e}");
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
     #[cfg(unix)]
     assert_eq!(mode(&victim), 0o644);
@@ -170,7 +170,7 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
         "no pid file for a daemon that did not bind"
     );
     assert!(
-        !run.socket().exists(),
+        socket_gone(&run).await,
         "the socket of a failed bind is removed"
     );
 }
