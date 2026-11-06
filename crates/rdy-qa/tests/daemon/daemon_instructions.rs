@@ -6,8 +6,10 @@
 //! creation hint; a broken one is a visible refusal. A direct run's reader opens an unused meta
 //! store itself and reads a held one through its daemon. Every person lives in an isolated home.
 use rdy_daemon::instructions::PersonReader;
+use rdy_daemon::{Proto, RunDir, StartOptions, connect_or_start, serve_command, spawn_serve};
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::instructions::{self, Caller, LoadRequest};
+use rdy_qa::fixtures::rdy_bin;
 use rdy_qa::instructions::{REMINDER, Set, World, author};
 use rdy_qa::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
@@ -59,12 +61,24 @@ fn session(c: &mut McpClient, actor: &str, run: &str, role: &str) {
     assert!(s.is_ok(), "{s:?}");
 }
 
-/// Each instruction row's id and layer.
+/// The id of each built-in (layer `rdy`) row.
+fn builtin_ids(v: &Value) -> Vec<String> {
+    v["instructions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("instructions in {v}"))
+        .iter()
+        .filter(|r| r["layer"] == "rdy")
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Each stored instruction row's id and layer; the built-in rows are read with [`builtin_ids`].
 fn rows(v: &Value) -> Vec<(String, String)> {
     v["instructions"]
         .as_array()
         .unwrap_or_else(|| panic!("instructions in {v}"))
         .iter()
+        .filter(|r| r["layer"] != "rdy")
         .map(|r| {
             (
                 r["id"].as_str().unwrap().to_string(),
@@ -167,7 +181,16 @@ fn ain4_meta_reads_share_its_daemon_and_never_reopen_its_writer() {
             row(&ma.rules[0][0], "person")
         ]
     );
-    assert_eq!(replies[0]["instructions"][1], replies[1]["instructions"][1]);
+    let person = |v: &Value| -> Value {
+        v["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["layer"] == "person")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(person(&replies[0]), person(&replies[1]));
     // the same meta daemon served both, and it still holds its store: nothing reopened it
     assert_eq!(w.daemon_pid(md.path()), Some(meta_pid));
     let held = rdy_engine::Rdy::open(md.path()).map(drop).unwrap_err();
@@ -205,12 +228,18 @@ fn ain4_same_project_is_read_once_and_later_landings_are_seen() {
     session(&mut c, "agent:s", "s1", "writer");
     let v = c.call("rdy_instructions", json!({})).ok();
     assert_eq!(rows(&v), [row(&a.rules[0][0], "person")]);
+    let stored: Vec<&Value> = v["menu"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["layer"] != "rdy")
+        .collect();
     assert_eq!(
-        v["menu"][0]["id"],
+        stored[0]["id"],
         format!("person:{}", a.docs[0]),
         "read once, as the person layer: {v}"
     );
-    assert_eq!(v["menu"].as_array().unwrap().len(), 1);
+    assert_eq!(stored.len(), 1, "{v}");
     let late = land_rule(&w, pd.path(), &mut c, "later", &a.decision);
     let v = c.call("rdy_instructions", json!({})).ok();
     assert_eq!(
@@ -229,13 +258,19 @@ fn ain4_missing_meta_is_empty_but_bad_meta_is_a_visible_failure() {
     session(&mut c, "agent:m", "m1", "writer");
     let v = c.call("rdy_instructions", json!({})).ok();
     assert_eq!(rows(&v), [row(&a.rules[0][0], "project")]);
+    // the person contribution is empty; the built-in layer is in the complete reply
+    assert_eq!(
+        builtin_ids(&v),
+        [
+            "rdy:bootstrap:before",
+            "rdy:bootstrap:approval",
+            "rdy:bootstrap:after"
+        ]
+    );
     let meta = w.default_meta();
     assert_eq!(
         v["hint"].as_str().unwrap(),
-        format!(
-            "Create your meta project with rdy init {}, then write its rules with rdy's tools.",
-            meta.display()
-        )
+        instructions::create_hint(&meta)
     );
     assert!(
         c.call("rdy_overview", json!({}))
@@ -294,4 +329,153 @@ fn ain4_missing_meta_is_empty_but_bad_meta_is_a_visible_failure() {
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert_eq!(c.call("rdy_overview", json!({})).ok()["reminder"], REMINDER);
+}
+
+/// One ctl exchange with the daemon of `dir` as `actor` and `run`: a session, then `args` to
+/// the `instructions` op.
+fn ctl_instructions(w: &World, dir: &Path, actor: &str, run: &str, args: Value) -> Value {
+    let (project, env) = (dir.to_path_buf(), w.env());
+    let opts = StartOptions::new(
+        env!("CARGO_PKG_VERSION").to_string(),
+        Proto::Ctl,
+        dir.to_path_buf(),
+        Box::new(move |r| {
+            let mut cmd = serve_command(&rdy_bin(), &project, r)?;
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
+            spawn_serve(&mut cmd)
+        }),
+    );
+    let run_dir = RunDir::of_project(dir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut c = connect_or_start(&run_dir, opts)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        c.ctl("session", json!({"actor": actor, "run": run}))
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let v = c.ctl("instructions", args).await;
+        c.close();
+        v.unwrap_or_else(|e| panic!("{e:?}"))
+    })
+}
+
+#[test]
+fn agi3_full_crosses_ctl_without_duplicating_person_reads() {
+    let w = World::new();
+    let (pd, md) = (w.project(), w.project());
+    let pa = author(pd.path(), "Small changes keep review cheap", PROJECT_SETS);
+    let ma = author(md.path(), "One spelling in every reply", META_SETS);
+    w.person(md.path());
+    // meta's daemon has a writer session before any project reads it
+    let mut mw = w.mcp(md.path());
+    session(&mut mw, "agent:meta", "m1", "writer");
+    let meta_pid = w.daemon_pid(md.path()).expect("meta's daemon");
+    // a reader on the project, whose reminder the ctl calls may or may not clear
+    let mut c = w.mcp(pd.path());
+    session(&mut c, "agent:p", "p1", "reader");
+    assert_eq!(c.call("rdy_overview", json!({})).ok()["reminder"], REMINDER);
+    let stored = [
+        row(&pa.rules[0][0], "project"),
+        row(&ma.rules[0][0], "person"),
+    ];
+    // the private form returns the person rows alone, whatever else the call carries
+    for args in [
+        json!({"part": true}),
+        json!({"part": true, "full": true}),
+        json!({"part": true, "full": true, "load": ["rdy:write"]}),
+    ] {
+        let v = ctl_instructions(&w, pd.path(), "agent:p", "p1", args);
+        let part = &v["contribution"];
+        assert_eq!(part["layer"], "person", "{v}");
+        assert_eq!(rows(part), [row(&ma.rules[0][0], "person")], "{v}");
+        assert_eq!(part["menu"].as_array().unwrap().len(), 2, "{v}");
+        assert!(builtin_ids(part).is_empty(), "{v}");
+        assert!(v.get("instructions").is_none() && v.get("menu").is_none());
+    }
+    // and it marks nothing complete
+    assert_eq!(c.call("rdy_overview", json!({})).ok()["reminder"], REMINDER);
+    // the public form: one built-in source, each row once, beside the stored rows
+    let plain = ctl_instructions(&w, pd.path(), "agent:q", "q1", json!({}));
+    assert_eq!(builtin_ids(&plain).len(), 3, "{plain}");
+    assert_eq!(rows(&plain), stored);
+    let full = ctl_instructions(&w, pd.path(), "agent:p", "p1", json!({"full": true}));
+    let built = builtin_ids(&full);
+    assert_eq!(built.len(), 14, "{full}");
+    let mut once = built.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), 14, "{full}");
+    assert_eq!(rows(&full), stored);
+    let menu: Vec<&Value> = full["menu"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["layer"] == "rdy")
+        .collect();
+    assert_eq!(menu.len(), 12, "{full}");
+    // full with load adds the stored optional rules and repeats nothing
+    let both = ctl_instructions(
+        &w,
+        pd.path(),
+        "agent:p",
+        "p1",
+        json!({"full": true, "load": [format!("person:{}", ma.docs[1]), "rdy:write".to_string()]}),
+    );
+    assert_eq!(builtin_ids(&both), built);
+    assert_eq!(
+        rows(&both),
+        [
+            stored[0].clone(),
+            stored[1].clone(),
+            row(&ma.rules[1][0], "person")
+        ]
+    );
+    // closed arguments
+    let bad = ctl_instructions_err(&w, pd.path(), json!({"ful": true}));
+    assert!(bad.contains("ful"), "{bad}");
+    // the complete public reply cleared that actor and run only
+    assert!(
+        c.call("rdy_overview", json!({}))
+            .ok()
+            .get("reminder")
+            .is_none()
+    );
+    // the writer on meta stays the one writer, and its daemon served every read
+    assert_eq!(w.daemon_pid(md.path()), Some(meta_pid));
+    let held = rdy_engine::Rdy::open(md.path()).map(drop).unwrap_err();
+    assert_eq!(held.code, "E_LOCKED", "{held:?}");
+    mw.alive();
+}
+
+fn ctl_instructions_err(w: &World, dir: &Path, args: Value) -> String {
+    // the same exchange as [`ctl_instructions`], whose last call must be refused
+    let (project, env) = (dir.to_path_buf(), w.env());
+    let opts = StartOptions::new(
+        env!("CARGO_PKG_VERSION").to_string(),
+        Proto::Ctl,
+        dir.to_path_buf(),
+        Box::new(move |r| {
+            let mut cmd = serve_command(&rdy_bin(), &project, r)?;
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
+            spawn_serve(&mut cmd)
+        }),
+    );
+    let run_dir = RunDir::of_project(dir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut c = connect_or_start(&run_dir, opts).await.unwrap();
+        c.ctl("session", json!({"actor": "agent:e", "run": "e1"}))
+            .await
+            .unwrap();
+        let e = c.ctl("instructions", args).await.unwrap_err();
+        c.close();
+        format!("{e:?}")
+    })
 }

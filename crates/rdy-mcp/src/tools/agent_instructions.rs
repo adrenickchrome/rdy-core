@@ -12,6 +12,9 @@ use serde_json::Value;
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionsParams {
+    /// Set true to get every built-in ruleset in full. Your project's and person layer's required rules arrive either way; pass load for their optional rulesets. Default false.
+    #[serde(default)]
+    pub full: bool,
     /// Rulesets to load, by their menu ids (project:<doc-id> or person:<doc-id>); a bare doc id loads when only one layer holds it. Required rules arrive without asking.
     pub load: Option<Vec<String>>,
 }
@@ -55,8 +58,9 @@ pub(crate) fn instructions_reply(
     host: Option<&dyn instructions::PersonHost>,
     caller: &Caller,
     load: Option<Vec<String>>,
+    full: bool,
 ) -> Result<Value, RdyError> {
-    let load = LoadRequest::parse(&load.unwrap_or_default())?;
+    let load = LoadRequest::parse(&load.unwrap_or_default())?.with_full(full);
     let reply = instructions::deliver(project, &load, caller, host)?;
     reply_value(&reply)
 }
@@ -70,7 +74,13 @@ pub fn rdy_instructions(st: &mut McpState, p: InstructionsParams) -> Result<Valu
     let state = st.engine.read();
     let root = st.engine.root();
     let host = st.engine.person_host();
-    let out = instructions_reply(Some((&state, &root)), host.as_deref(), &caller, p.load)?;
+    let out = instructions_reply(
+        Some((&state, &root)),
+        host.as_deref(),
+        &caller,
+        p.load,
+        p.full,
+    )?;
     // only a complete reply clears the reminder; a refusal leaves it owed
     st.hub.claims().mark_instructions_read(&(s.actor, s.run));
     Ok(out)
