@@ -14,7 +14,7 @@ use rdy_schema::supporting::{EVIDENCE_FIX, EVIDENCE_MESSAGE};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
-const FINDING_LINE: &str = "Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on";
+const FINDING_LINE: &str = "Finding: record what surfaced with `rdy_write`, type finding, statement and 1 to 20 evidence entries; cite it from a decision with `depends_on`";
 const TEXT_GUIDE: &str = "A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home, or the project root when the project names none.";
 
 /// A served project whose canon holds the doc `register` (the decision home) and a source keyed
@@ -79,11 +79,19 @@ fn rf5_supporting_mcp_schema_and_cli_match() {
     let mut c = McpClient::start_proxy(&s);
     let r = c.call("rdy_session", json!({"actor": "agent:p", "role": "writer"}));
     assert!(r.code().is_none(), "{:?}", r.ok());
-    assert!(
-        rdy_mcp::server::INSTRUCTIONS.contains(FINDING_LINE),
-        "{}",
-        rdy_mcp::server::INSTRUCTIONS
-    );
+    let v = c
+        .call("rdy_instructions", json!({"load": ["rdy:as-built"]}))
+        .ok();
+    let built: String = v["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["layer"] == "rdy")
+        .map(|i| i["text"].as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(built.contains(FINDING_LINE), "{built}");
+    assert!(!rdy_mcp::server::INSTRUCTIONS.contains("Finding:"));
     let sch = c.call("rdy_schema", json!({})).ok();
     assert!(sch["text"].as_str().unwrap().contains(TEXT_GUIDE), "{sch}");
     let rule = sch["decisions"]["rule"].as_str().unwrap();

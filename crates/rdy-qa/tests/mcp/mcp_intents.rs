@@ -104,5 +104,7 @@ fn mint1_schema_row_doc_and_instruction() {
             .contains("post a new one")
     );
     assert!(ERROR_ROWS.iter().any(|(c, _, _)| *c == "E_INTENT_EXPIRED"));
-    assert!(rdy_mcp::server::INSTRUCTIONS.contains("post an intent (rdy_intent)"));
+    let guide = crate::mcp_instructions::guide(&["parallel"]);
+    assert!(guide.contains("post an intent (`rdy_intent`)"), "{guide}");
+    assert!(!rdy_mcp::server::INSTRUCTIONS.contains("rdy_intent"));
 }

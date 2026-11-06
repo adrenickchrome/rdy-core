@@ -233,9 +233,7 @@ fn ui5_every_tool_and_resource_read_requires_a_claim() {
         c.initialize_result()["result"]["instructions"]
             .as_str()
             .unwrap()
-            .contains(
-                "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."
-            )
+            .contains("State rdy/actor and rdy/run in _meta, or call rdy_session.")
     );
     let tools = c.tools();
     assert!(tools.len() > 20, "{} tools", tools.len());

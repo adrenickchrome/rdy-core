@@ -95,11 +95,17 @@ mod tests {
 
     #[test]
     fn ap11_the_instructions_name_rdy_land() {
-        // O27: one element, directly before ck8's authoring-check sentence at the end
-        let s = "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.";
-        assert!(INSTRUCTIONS.contains(s), "{INSTRUCTIONS}");
-        let at = INSTRUCTION_SENTENCES.len() - 2;
-        assert_eq!(INSTRUCTION_SENTENCES.get(at), Some(&s));
+        // O27: the sentence now lives in the approvals ruleset, not in the server text
+        let s = "When `rdy_propose` reports policy accepts, land with `rdy_land`; else show the card to the person.";
+        let approvals = rdy_engine::embedded_guide::RULESETS
+            .iter()
+            .find(|r| r.name == "approvals")
+            .expect("the approvals ruleset");
+        assert!(
+            approvals.rows.iter().any(|r| r.text.contains(s)),
+            "the approvals ruleset lacks the rdy_land sentence"
+        );
+        assert!(!INSTRUCTIONS.contains("rdy_land"), "{INSTRUCTIONS}");
     }
 
     #[test]

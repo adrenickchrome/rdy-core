@@ -574,25 +574,29 @@ fn queue_guidance() -> [&'static str; 6] {
 
 #[test]
 fn cp14_instructions_publish_the_change_plan_rule_at_initialization() {
-    let prose = "Before proposing, read rdy_plan and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a reaffirm op, and supersede one that does not.";
-    // the compiled sentences, with the proposing guidance
-    let at = rdy_mcp::server::INSTRUCTION_SENTENCES
-        .iter()
-        .position(|s| s.contains(prose))
-        .expect("an instruction element carries the change-plan rule");
-    assert!(
-        rdy_mcp::server::INSTRUCTION_SENTENCES[at].contains("propose with rdy_propose."),
-        "the rule sits with the proposing guidance"
-    );
-    // the stdio server's initialize reply publishes it
+    let prose = "Before proposing, read `rdy_plan` and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a `reaffirm` op, and supersede one that does not.";
+    // the after-write ruleset carries the rule with the proposing guidance
     let (dir, r) = project();
     drop(r);
-    let c = McpClient::start(dir.path());
+    let mut c = McpClient::start(dir.path());
+    let g = crate::mcp_instructions::loaded(&mut c, &["after-write"]);
+    let at = g
+        .find(prose)
+        .expect("the loaded guide carries the change-plan rule");
+    assert!(
+        g[..at].ends_with("Write with `rdy_write`; propose with `rdy_propose`. "),
+        "the rule sits with the proposing guidance"
+    );
+    // the server's initialize reply no longer holds it; it points at rdy_instructions
     let i = c.initialize_result()["result"]["instructions"]
         .as_str()
         .unwrap()
         .to_string();
-    assert!(i.contains(prose), "{i}");
+    assert!(!i.contains("rdy_plan"), "{i}");
+    assert!(
+        i.contains("Call rdy_instructions at the start of every task."),
+        "{i}"
+    );
 }
 
 #[test]

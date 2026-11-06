@@ -421,12 +421,12 @@ fn ck8_tool_and_error_texts_are_exact() {
 
     // the one new server instruction
     let instruction = "Run an authoring check only when the author or a person asks. Show its verdict on the current approval card before relaying a person's answer.";
-    let sentences = rdy_mcp::server::INSTRUCTION_SENTENCES;
-    assert_eq!(sentences.iter().filter(|s| **s == instruction).count(), 1);
-    assert_eq!(sentences.last(), Some(&instruction));
-    assert!(rdy_mcp::server::INSTRUCTIONS.ends_with(instruction));
+    let review = crate::mcp_instructions::guide(&["review"]);
+    assert_eq!(review.matches(instruction).count(), 1, "{review}");
+    assert!(!rdy_mcp::server::INSTRUCTIONS.contains(instruction));
     assert!(
-        !rdy_mcp::server::INSTRUCTIONS.contains("execute a reviewer"),
+        !rdy_mcp::server::INSTRUCTIONS.contains("execute a reviewer")
+            && !review.contains("execute a reviewer"),
         "nothing tells an agent to run a reviewer by itself"
     );
 
