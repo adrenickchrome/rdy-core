@@ -865,9 +865,7 @@ fn rtc4_destination_failure_leaves_other_project_untouched() {
 
     // draft: the daemon refuses before any write
     call(&src, &s, add("person", "A rule to stand there.")).unwrap();
-    let e = call(&src, &s, edit("person", "ai-ZZZZZ", "No such rule."))
-        .map(|v| format!("{v}"))
-        .unwrap_err();
+    let e = call(&src, &s, edit("person", "ai-ZZZZZ", "No such rule.")).unwrap_err();
     assert_eq!(e.code, E_NOT_FOUND, "{e}");
     assert_eq!(state(&src), before);
 
