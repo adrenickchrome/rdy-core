@@ -276,7 +276,7 @@ fn cbrief1_a_new_file_in_a_new_folder_under_a_symlinked_prefix_is_inside_the_rep
     let tmp = tempfile::tempdir().unwrap();
     let g = GitRepo::at(&tmp.path().join("real"));
     g.link(r.root());
-    std::os::unix::fs::symlink(g.path(), tmp.path().join("link")).unwrap();
+    rdy_store::pio::symlink(g.path(), tmp.path().join("link")).unwrap();
     let new = tmp.path().join("link/src/newdir/new.rs");
     let cb = r
         .read()
