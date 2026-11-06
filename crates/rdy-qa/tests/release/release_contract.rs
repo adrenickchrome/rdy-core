@@ -5773,10 +5773,10 @@ fn kfu6_release_surface_keeps_argument_undisclosed() {
     assert_eq!(
         refusal_rows.iter().filter(|c| *c == "W_KUNGFU").count(),
         1,
-        "listed once, before the two publication rows"
+        "listed once, before the plan rows"
     );
     let at = refusal_rows.iter().position(|c| c == "W_KUNGFU").unwrap();
-    assert_eq!(at + 3, refusal_rows.len());
+    assert_eq!(refusal_rows[at + 1], "E_PLAN_ITEM");
 }
 
 /// kfu6 (D-Y18E1): the packaged binary delivers, through the CLI and both MCP servers (in the
