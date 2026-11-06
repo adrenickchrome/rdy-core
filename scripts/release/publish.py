@@ -9,8 +9,9 @@ Each subcommand is one job of .github/workflows/release.yml, in this order:
                   job's success in this exact run attempt.
   draft           Copies the verified signature and the reserved bytes into the one private draft. It uploads
                   a missing asset once, accepts an existing asset only by its exact bytes, then downloads every
-                  asset anew. It never removes or replaces anything.
-  genuine         Runs the genuine checker over the draft's exact bytes on one native target.
+                  asset anew. It never removes or replaces anything. Current authority comes before each write.
+  genuine         Runs the genuine checker over the draft's exact bytes on one native target. Current authority
+                  comes before the checker and again before the receipt.
   final-tag       Checks everything again, then creates v<V> at S once. An existing tag at S is a recorded retry:
                   no write, and its evidence says so.
   promote         Checks everything again through the publisher App's view, then flips that same draft id.
@@ -19,6 +20,10 @@ Each subcommand is one job of .github/workflows/release.yml, in this order:
 
 The scripts run from the trusted checkout at the caller's literal signer revision, never from candidate data.
 Failures are one `release controller: <reason>` line on stderr and exit 1; invalid arguments exit 2.
+
+Two checks stay separate. Historical policy proves the original signature and exact bytes. A current protected-main
+snapshot authorizes each remaining act of an unfinished release. Neither stands in for the other, and a previous job's
+success authorizes nothing. A published release is a separate, read-only observation that authorizes no act.
 """
 import argparse
 from dataclasses import dataclass
@@ -832,10 +837,11 @@ def _receipt_bytes(fact, plan):
                    'release_id': fact.release_id, 'notes_sha256': _sha(plan.notes.encode('utf-8')), 'assets': assets})
 
 
-def prepare_draft(api, plan, work, receipted=False):
+def prepare_draft(api, plan, work, authorize, receipted=False):
     """The one private draft. An existing draft keeps its id. It uploads a missing asset once, accepts an existing
     asset only by its exact bytes and repairs nothing. Once a receipt or the final tag exists, the draft was complete:
-    nothing here writes, and a missing draft or asset is a changed draft."""
+    nothing here writes, and a missing draft or asset is a changed draft. `authorize()` reads current authority again
+    just before each write, so a closure after any read, a reconciliation read too, refuses the next write."""
     tag = 'v' + plan.version
     fact = _find_draft(api, plan.version)
     tagged = _final_tag_commit(api, plan.version) is not None
@@ -844,6 +850,7 @@ def prepare_draft(api, plan, work, receipted=False):
             raise Refused(CONFLICT, 'the final tag ' + tag + ' exists without its draft')
         if receipted:
             raise Refused(CONFLICT, 'the draft changed after a prior receipt')
+        authorize()
         try:
             fact = api.create_draft(tag, plan.commit, tag, plan.notes)
         except gh.ReconcileRequired:
@@ -859,6 +866,7 @@ def prepare_draft(api, plan, work, receipted=False):
     for name in sorted(set(plan.wants) - present):
         if tagged or receipted:
             raise Refused(CONFLICT, 'the draft lacks ' + name)
+        authorize()
         try:
             api.upload_asset(fact.release_id, name, plan.folder / name)
         except gh.ReconcileRequired:
@@ -870,16 +878,31 @@ def prepare_draft(api, plan, work, receipted=False):
     return DraftResult(fact, _receipt_bytes(fact, plan), folder)
 
 
-def run_draft(facts, api, request, transfers, run_id, attempt, signer_sha, verifier, fetch_crate, work):
-    """The draft job. Real-signature verification comes first: an unverified signature reaches no draft."""
+def _current_authority(facts, enrollment, request, run_id, attempt, authorization):
+    """This job's check of current authority, to call again before each act. Only the read of main's immutable
+    history carries between calls."""
+    history = ctl.PolicyHistory()
+
+    def authorize():
+        return ctl.check_current_authority(facts, enrollment, request, run_id, attempt, authorization, history)
+    return authorize
+
+
+def run_draft(facts, api, enrollment, request, transfers, run_id, attempt, signer_sha, verifier, fetch_crate, work):
+    """The draft job. Real-signature verification comes first: an unverified signature reaches no draft. Current
+    authority comes next and again before each write and before the receipt: with nothing left to write, a complete
+    draft still gets no receipt without it."""
     check_pin(signer_sha)
     release = _lifted(elig.preliminary_recovery, request, facts)
     _check_release_pin(release, signer_sha)
     trust = ctl._signing_trust(facts, release, release.policy_commit)
-    signature, _ = _signature_transfer(facts, release, transfers, run_id, attempt, verifier, trust['signer_line'])
+    signature, authorization = _signature_transfer(facts, release, transfers, run_id, attempt, verifier, trust['signer_line'])
+    authorize = _current_authority(facts, enrollment, request, run_id, attempt, authorization)
+    authorize()
     plan = _gather(facts, request, release, signature, fetch_crate, work)
-    result = prepare_draft(api, plan, work, bool(_prior_receipts(facts, release.version)))
+    result = prepare_draft(api, plan, work, authorize, bool(_prior_receipts(facts, release.version)))
     _check_prior_receipts(facts, release.version, _parse_draft_receipt(result.receipt))
+    authorize()
     return result
 
 
@@ -905,12 +928,16 @@ def _run_install(checker, boundary, signer_line, version, commit, target, env):
     return rehearse.check_install_report(rehearse.run_checker(checker, argv, boundary, child), target, version, commit)
 
 
-def genuine_check(facts, request, target, assets_id, receipt_id, run_id, attempt, checker, work, env):
+def genuine_check(facts, enrollment, request, transfers, target, assets_id, run_id, attempt, verifier, checker, work, env):
     """One native target: the draft's exact bytes, from this attempt's transfer, through the genuine checker
-    with the version-selected key. S and V must match. Nothing is rebuilt."""
+    with the version-selected key. S and V must match. Nothing is rebuilt. The checker creates evidence for an
+    unfinished release, so current authority comes right before it runs and again before its receipt. The historical
+    proof of the signature stays beside that check. This job holds no AWS identity and no write."""
     release = _lifted(elig.preliminary_recovery, request, facts)
-    receipt, raw = _draft_receipt(facts, release, Transfers(0, '', draft_receipt_id=receipt_id), run_id, attempt)
+    receipt, raw = _draft_receipt(facts, release, transfers, run_id, attempt)
     trust = ctl._signing_trust(facts, release, release.policy_commit)
+    _, authorization = _signature_transfer(facts, release, transfers, run_id, attempt, verifier, trust['signer_line'])
+    authorize = _current_authority(facts, enrollment, request, run_id, attempt, authorization)
     entries = {e['name']: e for e in receipt['assets']}
     archive_name = cand.archive_name(release.version, target)
     wrong = Refused(MISMATCH, 'the draft assets artifact is not the draft receipt')
@@ -933,7 +960,9 @@ def genuine_check(facts, request, target, assets_id, receipt_id, run_id, attempt
     except (zipfile.BadZipFile, OSError):
         raise wrong
     signature = (download / SIGNATURE).read_bytes()
+    authorize()
     install = _run_install(checker, boundary, trust['signer_line'], release.version, release.commit, target, env)
+    authorize()
     return _canon({'schema': 1, 'version': release.version, 'commit': release.commit, 'target': target,
                    'tuple_sha256': release.tuple_sha256, 'manifest_sha256': release.manifest_sha256,
                    'signature_sha256': _sha(signature), 'release_id': receipt['release_id'],
@@ -1234,8 +1263,8 @@ def cmd_reserve(args, environ):
 def cmd_draft(args, environ):
     facts, work, _ = _start(args, environ)
     run_id, attempt = _where(environ)
-    result = run_draft(facts, facts, _parsed_request(environ), _transfers(environ), run_id, attempt, args.signer_sha,
-                       sign.SshVerifier(), _fetch_crate(AnonymousTransport()), work)
+    result = run_draft(facts, facts, _enrollment(environ, args.signer_sha), _parsed_request(environ), _transfers(environ),
+                       run_id, attempt, args.signer_sha, sign.SshVerifier(), _fetch_crate(AnonymousTransport()), work)
     _write(args.out, DRAFT_RECEIPT_MEMBER, result.receipt)
     shutil.move(str(result.folder), str(args.assets))
 
@@ -1250,8 +1279,9 @@ def cmd_genuine(args, environ):
     assets, receipt = environ.get('RDY_DRAFT_ASSETS_ARTIFACT_ID', ''), environ.get('RDY_DRAFT_RECEIPT_ARTIFACT_ID', '')
     if not (assets.isdigit() and receipt.isdigit()):
         raise ControllerError('the draft transfer ids are not numbers')
-    _write(args.out, GENUINE_MEMBER, genuine_check(facts, _parsed_request(environ), args.target, int(assets), int(receipt),
-                                                   run_id, attempt, args.checker, work, environ))
+    _write(args.out, GENUINE_MEMBER, genuine_check(facts, _enrollment(environ, args.signer_sha), _parsed_request(environ),
+                                                   _transfers(environ), args.target, int(assets), run_id, attempt,
+                                                   sign.SshVerifier(), args.checker, work, environ))
 
 
 def _enrollment(environ, signer_sha):

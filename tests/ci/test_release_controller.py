@@ -2542,6 +2542,65 @@ class Approval(Base):
         self.assertEqual(rig.kms.signs, 1)
 
 
+class CurrentAuthorityCheck(Base):
+    """The GitHub-only check that promotion, the draft and the genuine check share."""
+
+    def signed(self):
+        rig = Rig()
+        rig.reserve_version()
+        ctrl = rig.session()
+        rig.sign(ctrl)
+        return rig, ctrl.authorization()
+
+    def test_rsig13_current_authority_is_github_only_and_keeps_the_rules(self):
+        rig, authorization = self.signed()
+        check = CONTROLLER.check_current_authority
+        table, created, signs = dict(rig.table.items), list(rig.git.created), rig.kms.signs
+        self.assertEqual(check(rig.git, rig.enrollment, rig.request(), DISPATCH_RUN, 1, authorization).state, 'ACTIVE')
+        # The named holder passes. The holder is this run and attempt, as promotion has it.
+        rig.add_job(DISPATCH_RUN, 2, SIGN_JOB + 9)
+        rig.install(state='DRAINING', mirror=False,
+                    holder={'run_id': str(DISPATCH_RUN), 'run_attempt': '1', 'job_id': '1',
+                            'grant_id': '00000000-0000-4000-8000-000000000009'})
+        self.assertEqual(check(rig.git, rig.enrollment, rig.request(), DISPATCH_RUN, 1, authorization).state, 'DRAINING')
+        for name, call in (('current', check), ('promotion', CONTROLLER.check_promotion)):
+            with self.subTest(name):
+                self.refused('authority unavailable: admission is DRAINING for another holder', call, rig.git, rig.enrollment,
+                             rig.w.request(dispatch_run_attempt=2), DISPATCH_RUN, 2, authorization)
+                self.refused('authority unavailable: the request is not this run attempt', call, rig.git, rig.enrollment,
+                             rig.request(), DISPATCH_RUN, 2, authorization)
+        rig.install(state='CLOSED', mirror=False)
+        self.refused('authority unavailable: admission is CLOSED', check, rig.git, rig.enrollment, rig.request(), DISPATCH_RUN,
+                     1, authorization)
+        # It wrote nothing, reached no journal and signed nothing.
+        self.assertEqual((dict(rig.table.items), list(rig.git.created), rig.kms.signs), (table, created, signs))
+        # Only promotion has the "no authorization yet" state.
+        self.refused('authority unavailable: the promotion needs the signer authorization', CONTROLLER.check_promotion,
+                     rig.git, rig.enrollment, rig.request(), DISPATCH_RUN, 1, None)
+
+    def test_rsig13_a_shared_history_keeps_nothing_but_the_immutable_chain(self):
+        rig, authorization = self.signed()
+        for _ in range(3):
+            Repairs.advance(rig)
+        history = CONTROLLER.PolicyHistory()
+
+        def check():
+            return CONTROLLER.check_current_authority(rig.git, rig.enrollment, rig.request(), DISPATCH_RUN, 1, authorization,
+                                                      history)
+        def reads():
+            rig.w.calls.clear()
+            check()
+            calls = rig.w.calls
+            return [c for c in calls if c[0] == 'commit'], [c for c in calls if c[0] == 'ref' and c[1] == 'heads/main']
+        first_chain, first_main = reads()
+        later_chain, later_main = reads()
+        self.assertLess(len(later_chain), len(first_chain), 'the chain is read once per process')
+        self.assertEqual(len(later_main), len(first_main), 'main is read every time')
+        # An earlier pass carries no authority into the next check.
+        rig.install(state='CLOSED')
+        self.refused('authority unavailable: admission is CLOSED', check)
+
+
 class Lineage(Base):
     """Immutable lineage, the bound admission mirror and the reserve job constants."""
 

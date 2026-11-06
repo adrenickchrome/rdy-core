@@ -10,6 +10,10 @@
 # promote job mints the publisher App's token, and only its one script uses it. Contents:write also permits pushes
 # and ref changes; rulesets bind the App with no bypass, and the workflow uses the App only to publish the verified
 # draft. The public checks hold no credentials at all. A failure after publication is an incident, not a retry.
+#
+# Each remaining act checks current authority from protected main first. The enrolled identity lives in environment
+# release. The enrollment job passes that one nonsecret variable on, so the draft and genuine jobs stay out of the
+# environment and gain no permission.
 name: release
 on:
   workflow_dispatch:
@@ -175,6 +179,19 @@ jobs:
           path: ${{ runner.temp }}/reserve-out/reserve-receipt.json
           if-no-files-found: error
           retention-days: 90
+  enrollment:
+    name: Release enrollment
+    needs: eligibility
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions: {}
+    outputs:
+      value: ${{ vars.RDY_RELEASE_ENROLLMENT }}
+    steps:
+      - name: Pass the enrollment variable to the later jobs
+        run: exit 0
   # The one reusable call. Claims mode takes only this job, with the deny-all key policy still in force. Its results
   # are read by name, so a skipped or failed earlier job can never reach a live signing request.
   sign:
@@ -196,7 +213,7 @@ jobs:
       reserve_artifact_id: ${{ needs.reserve.outputs.artifact_id }}
   draft:
     name: Prepare private draft
-    needs: [verifier, eligibility, sign]
+    needs: [verifier, eligibility, enrollment, sign]
     if: needs.eligibility.outputs.state == 'ready'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -221,6 +238,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
           RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
           RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
           VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
@@ -247,7 +265,7 @@ jobs:
           retention-days: 7
   genuine-mac:
     name: Genuine check (aarch64-apple-darwin)
-    needs: [eligibility, draft]
+    needs: [eligibility, enrollment, sign, draft]
     if: needs.eligibility.outputs.state == 'ready'
     runs-on: macos-26
     timeout-minutes: 90
@@ -272,6 +290,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
           RDY_DRAFT_ASSETS_ARTIFACT_ID: ${{ needs.draft.outputs.assets_artifact_id }}
           RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
         run: >-
@@ -289,7 +310,7 @@ jobs:
           retention-days: 90
   genuine-linux:
     name: Genuine check (x86_64-unknown-linux-gnu)
-    needs: [eligibility, draft]
+    needs: [eligibility, enrollment, sign, draft]
     if: needs.eligibility.outputs.state == 'ready'
     runs-on: ubuntu-26.04
     timeout-minutes: 90
@@ -314,6 +335,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
           RDY_DRAFT_ASSETS_ARTIFACT_ID: ${{ needs.draft.outputs.assets_artifact_id }}
           RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
         run: >-

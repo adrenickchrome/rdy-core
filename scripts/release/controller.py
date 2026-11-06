@@ -1771,20 +1771,19 @@ def canonical_refusals(controller):
 # Promotion
 # ---------------------------------------------------------------------------------------------
 
-def check_promotion(facts, enrollment, request, run_id, run_attempt, authorization):
-    """Before promotion: the current caller, reservation, E, T, channel, revocations and admission, read
-    again from GitHub, plus the signer's authorization of this tuple and these exact cards. The promotion
-    job has no AWS identity. It cannot read the archive, and a pending card never reaches it. It writes
-    nothing. Returns the admission snapshot."""
-    if authorization is None:
-        raise Refused(AUTHORITY, 'the promotion needs the signer authorization')
+def check_current_authority(facts, enrollment, request, run_id, run_attempt, authorization, history=None):
+    """Before any remaining act of an unfinished release: the current caller, reservation, E, T, channel,
+    revocations and admission, read again from GitHub, plus the signer's authorization of this tuple and these
+    exact cards. The caller has no AWS identity. It cannot read the archive, and a pending card never reaches it.
+    It writes nothing. `history` keeps only what one process read of main's immutable chain. An earlier pass
+    authorizes nothing later. Returns the admission snapshot."""
     if (request.dispatch_run_id, request.dispatch_run_attempt) != (run_id, run_attempt):
         raise Refused(AUTHORITY, 'the request is not this run attempt')
     preliminary = _eligibility(elig.preliminary_recovery, request, facts)
 
     def named(holder):
         return (holder['run_id'], holder['run_attempt']) == (str(run_id), str(run_attempt))
-    snapshot, _ = check_authority(facts, enrollment, preliminary, named)
+    snapshot, _ = check_authority(facts, enrollment, preliminary, named, history)
     try:
         value = _strict(authorization, AUTHORIZATION_KEYS, 'the signer authorization')
         _schema_one(value, 'the signer authorization')
@@ -1802,6 +1801,13 @@ def check_promotion(facts, enrollment, request, run_id, run_attempt, authorizati
     if set(cards) != {(c.kind, c.receipt_sha256) for c in preliminary.cards}:
         raise Refused(MISMATCH, 'the signer authorization does not cover these cards')
     return snapshot
+
+
+def check_promotion(facts, enrollment, request, run_id, run_attempt, authorization):
+    """Current authority for the promotion, which also needs the signer's authorization to exist."""
+    if authorization is None:
+        raise Refused(AUTHORITY, 'the promotion needs the signer authorization')
+    return check_current_authority(facts, enrollment, request, run_id, run_attempt, authorization)
 
 
 # ---------------------------------------------------------------------------------------------

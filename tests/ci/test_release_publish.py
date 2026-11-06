@@ -275,8 +275,8 @@ class Stage(object):
 
     def draft(self, attempt=1):
         """The draft job: it gathers, syncs, reads back and transfers both artifacts."""
-        result = PUBLISH.run_draft(self.git, self.releases, self.request(attempt), self.transfers(), DISPATCH_RUN, attempt,
-                                   H, self.rig.verifier, self.fetch_crate, self.work())
+        result = PUBLISH.run_draft(self.git, self.releases, self.rig.enrollment, self.request(attempt), self.transfers(),
+                                   DISPATCH_RUN, attempt, H, self.rig.verifier, self.fetch_crate, self.work())
         self.w.job(DISPATCH_RUN, attempt, DRAFT_JOB_ID + 1000 * (attempt - 1), PUBLISH.DRAFT_JOB)
         self.w.artifacts[RECEIPT_ART] = self.w.artifact(RECEIPT_ART, 'draft-receipt-a' + str(attempt), DISPATCH_RUN,
                                                         digest(22), 512)
@@ -306,8 +306,9 @@ class Stage(object):
         return canon(value)
 
     def genuine(self, target, attempt=1):
-        data = PUBLISH.genuine_check(self.git, self.request(attempt), target, ASSETS_ART, RECEIPT_ART, DISPATCH_RUN, attempt,
-                                     self.checker(target), self.work(), {'PATH': '/usr/bin'})
+        data = PUBLISH.genuine_check(self.git, self.rig.enrollment, self.request(attempt), self.transfers(), target, ASSETS_ART,
+                                     DISPATCH_RUN, attempt, self.rig.verifier, self.checker(target), self.work(),
+                                     {'PATH': '/usr/bin'})
         self.w.job(DISPATCH_RUN, attempt, GENUINE_JOB[target] + 1000 * (attempt - 1), PUBLISH.GENUINE_JOBS[target])
         art = GENUINE_ART[target]
         self.w.artifacts[art] = self.w.artifact(art, PUBLISH.GENUINE_ARTIFACT + target + '-a' + str(attempt), DISPATCH_RUN,
@@ -2317,6 +2318,506 @@ class SignerRepairs(unittest.TestCase):
                 value = json.loads(out.getvalue())
                 self.assertEqual(value['signer_status'], shown)
                 self.assertNotIn('signer_revoked', value)
+
+
+class CurrentAuthority(Base):
+    """A remaining act of an unfinished release needs current authority. Historical policy proves the original
+    signature and bytes; a protected-main snapshot, read again now, authorizes the act. Neither stands in for the other."""
+
+    GRANT = '00000000-0000-4000-8000-000000000009'
+
+    @staticmethod
+    def closed(s):
+        s.rig.install(state='CLOSED')
+
+    @classmethod
+    def draining(cls, run_id=DISPATCH_RUN, run_attempt=1):
+        def apply(s):
+            s.rig.install(state='DRAINING', holder={'run_id': str(run_id), 'run_attempt': str(run_attempt), 'job_id': '1',
+                                                    'grant_id': cls.GRANT})
+        return apply
+
+    @staticmethod
+    def other_h(s):
+        s.rig.install(signer_workflow_sha='4' * 40)
+
+    @staticmethod
+    def other_running_h(s):
+        s.rig.enrollment = dataclasses.replace(s.rig.enrollment, signer_workflow_sha='4' * 40)
+
+    @staticmethod
+    def other_key(s):
+        arn = s.w.policy['key_arn']
+        s.rig.install(key_arn=arn[:-1] + ('0' if arn[-1] != '0' else '1'))
+
+    @staticmethod
+    def other_fingerprint(s):
+        s.rig.install(fingerprint='SHA256:' + 'B' * 43)
+
+    @staticmethod
+    def revoked_signer(s):
+        good = s.git.release_trust
+
+        def trust(version, policy_commit, signing):
+            if signing:
+                raise ControllerError('the key for v0.43.0 is revoked for new signing')
+            return good(version, policy_commit, signing)
+        s.git.release_trust = trust
+
+    @staticmethod
+    def admission_gone(s):
+        s.w.files.pop((ctl.ADMISSION, s.rig.head()), None)
+
+    @staticmethod
+    def admission_malformed(s):
+        s.w.put(s.rig.head(), ctl.ADMISSION, b'{}\n')
+
+    @staticmethod
+    def trust_unavailable(s):
+        s.git.release_trust = mock.Mock(side_effect=ControllerError('offline'))
+
+    def refusals(self):
+        return (('closed', self.closed, 'authority unavailable: admission is CLOSED'),
+                ('another holder run', self.draining(run_id=DISPATCH_RUN + 1),
+                 'authority unavailable: admission is DRAINING for another holder'),
+                ('another holder attempt', self.draining(run_attempt=2),
+                 'authority unavailable: admission is DRAINING for another holder'),
+                ('changed H', self.other_h, 'authority unavailable: the admission record names another signer'),
+                ('changed running H', self.other_running_h, 'authority unavailable: the admission record names another signer'),
+                ('changed key', self.other_key, 'authority unavailable: the admission record names another key'),
+                ('changed fingerprint', self.other_fingerprint, 'authority unavailable: the admission record names another key'),
+                ('revoked signer', self.revoked_signer, 'signer revoked: the key for v0.43.0 is revoked for new signing'),
+                ('admission unavailable', self.admission_gone, 'authority unavailable: the admission record is unavailable'),
+                ('admission malformed', self.admission_malformed, 'authority unavailable: the admission record is malformed'),
+                ('trust unavailable', self.trust_unavailable, 'eligibility incomplete: offline'))
+
+    def later_changes(self):
+        """What can change while a job runs. The running H is fixed for the life of the process."""
+        return [case for case in self.refusals() if case[1] is not self.other_running_h]
+
+    def signed(self):
+        stage = self.stage()
+        stage.sign()
+        return stage
+
+    def drafted(self):
+        stage = self.signed()
+        stage.draft()
+        return stage
+
+    @staticmethod
+    def after_gather_read(stage, change):
+        """`change` lands after the job's entry reads and before its first write."""
+        real = stage.fetch_crate
+        done = []
+
+        def fetch(name):
+            if not done:
+                done.append(change(stage))
+            return real(name)
+        stage.fetch_crate = fetch
+
+    @staticmethod
+    def after_transfer_read(stage, change):
+        """`change` lands after the genuine job's entry reads and before its checker."""
+        real = stage.git.artifact_path
+
+        def path(fact):
+            change(stage)
+            return real(fact)
+        stage.git.artifact_path = path
+
+    def no_draft_effect(self, stage):
+        self.assertEqual(stage.releases.mutations, [])
+        self.assertEqual(stage.releases.rows, [])
+        self.assertEqual(stage.rig.kms.signs, 1, 'no second Sign')
+
+    def no_genuine_effect(self, stage, target=MAC):
+        self.assertEqual(stage.checker_calls, [])
+        self.assertNotIn(GENUINE_ART[target], stage.w.artifacts)
+
+    def card_stage(self):
+        """Release 1 under an approval the signer archived, signed, with the card in its authorization."""
+        world = release_world(base.first_machine_world)
+        transition = b'{"scheme":"filler"}\n'
+        world.put(P, 'release-keys/transition-v0.42.0.json', transition)
+        world.put(P, 'release-keys/transition-v0.42.0.json.sig', b'filler endorsement\n')
+        world.trust['transition_sha256'] = sha(transition)
+        world.e['approval_basis']['scope'] = world.full_scope()
+        world.seal()
+        stage = self.stage(world)
+        receipt = stage.w.add_card('release_1')
+        stage.rig.seed_archive(receipt)
+        stage.rig.install()
+        stage.sign()
+        return stage, receipt
+
+    @staticmethod
+    def revoke_card(receipt):
+        def apply(s):
+            ctl.Repairs().land(s.rig, ctl.Repairs.channel(revoked_receipts=[receipt]))
+        return apply
+
+    # -- the draft ------------------------------------------------------------------------------
+
+    def test_rsig13_closed_admission_refuses_before_any_draft_write(self):
+        stage = self.signed()
+        self.closed(stage)
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+        self.no_draft_effect(stage)
+
+    def test_rsig13_each_refusal_stops_the_draft_at_entry_and_before_its_first_write(self):
+        for label, change, text in self.refusals():
+            stage = self.signed()
+            change(stage)
+            with self.subTest(label, when='entry'):
+                self.refused(text, stage.draft)
+                self.no_draft_effect(stage)
+        for label, change, text in self.later_changes():
+            stage = self.signed()
+            self.after_gather_read(stage, change)
+            with self.subTest(label, when='before the first write'):
+                self.refused(text, stage.draft)
+                self.no_draft_effect(stage)
+
+    def test_rsig13_a_change_between_uploads_refuses_the_next_upload(self):
+        for label, change, text in self.later_changes():
+            stage = self.signed()
+            real = stage.releases.upload_asset
+
+            def upload(*args, stage=stage, change=change, real=real):
+                answer = real(*args)
+                change(stage)
+                return answer
+            stage.releases.upload_asset = upload
+            with self.subTest(label):
+                self.refused(text, stage.draft)
+                self.assertEqual(stage.releases.mutations.count('create_draft'), 1)
+                self.assertEqual(len([m for m in stage.releases.mutations if m.startswith('upload ')]), 1)
+
+    def test_rsig13_a_change_after_draft_creation_refuses_the_first_upload(self):
+        stage = self.signed()
+        real = stage.releases.create_draft
+
+        def create(*args):
+            answer = real(*args)
+            self.closed(stage)
+            return answer
+        stage.releases.create_draft = create
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+        self.assertEqual(stage.releases.mutations, ['create_draft'])
+
+    def test_rsig13_a_closure_after_a_reconciliation_read_refuses_the_next_write(self):
+        # The upload's answer is lost. The read that reconciles it finds the asset; admission closes after that read.
+        stage = self.signed()
+        stage.releases.faults['upload AGENTS.md'] = (True, 1)
+        real = stage.releases.release_full
+
+        def read(release_id):
+            answer = real(release_id)
+            self.closed(stage)
+            return answer
+        stage.releases.release_full = read
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+        uploads = [m for m in stage.releases.mutations if m.startswith('upload ')]
+        self.assertEqual(uploads, ['upload AGENTS.md'])
+        # The draft's creation: its answer is lost, its read finds it, and admission closes after that read.
+        stage = self.signed()
+        stage.releases.faults['create_draft'] = (True, 1)
+        real_rows = stage.releases.full_releases
+        calls = []
+
+        def rows():
+            answer = real_rows()
+            calls.append(1)
+            if len(calls) == 2:
+                self.closed(stage)
+            return answer
+        stage.releases.full_releases = rows
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+        self.assertEqual(stage.releases.mutations, ['create_draft'])
+
+    def test_rsig13_a_previous_job_success_authorizes_no_later_write(self):
+        # An unfinished draft from an earlier attempt, then a closure: the retry writes nothing.
+        stage = self.signed()
+        stage.releases.faults['upload SHA256SUMS'] = (False, 1)
+        with self.assertRaises(ControllerError):
+            stage.draft()
+        before = list(stage.releases.mutations)
+        self.closed(stage)
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+        self.assertEqual(stage.releases.mutations, before)
+
+    def test_rsig13_a_complete_draft_under_a_refusal_gets_no_receipt(self):
+        # Nothing is left to write, and the reads may run. Their output is not a usable draft receipt.
+        for label, change, text in self.refusals():
+            stage = self.drafted()
+            kept = stage.draft_result
+            before = list(stage.releases.mutations)
+            change(stage)
+            with self.subTest(label):
+                self.refused(text, stage.draft)
+                self.assertEqual(stage.releases.mutations, before)
+                self.assertIs(stage.draft_result, kept)
+        # A closure during the last read-back also stops the receipt.
+        stage = self.signed()
+        real = stage.releases.download_asset
+
+        def download(asset, out, limit, stage=stage, real=real):
+            answer = real(asset, out, limit)
+            self.closed(stage)
+            return answer
+        stage.releases.download_asset = download
+        self.refused('authority unavailable: admission is CLOSED', stage.draft)
+
+    def test_rsig13_active_and_the_named_holder_proceed_with_the_original_bytes(self):
+        outcomes = []
+        for label, change in (('active', lambda s: None), ('named holder', self.draining())):
+            stage = self.signed()
+            reservation = stage.w.refs['tags/reserve/v0.43.0']
+            tuple_bytes = stage.w.tags[reservation[1]]['message_bytes']
+            record = stage.w.members[(base.EVID_ART, 'release-record.json')]
+            authorization = stage.w.members[(SIG_ART, 'authorization.json')]
+            change(stage)
+            with self.subTest(label):
+                result = stage.draft()
+                stage.both_genuine()
+                self.assertEqual(len(stage.checker_calls), 2)
+                self.assertEqual((result.folder / 'SHA256SUMS.sig').read_bytes(), SIGNATURE)
+                self.assertEqual((result.folder / 'SHA256SUMS').read_bytes(), manifest_of(stage.w))
+                self.assertEqual(stage.w.refs['tags/reserve/v0.43.0'], reservation)
+                self.assertEqual(stage.w.tags[reservation[1]]['message_bytes'], tuple_bytes)
+                self.assertEqual(stage.w.members[(base.EVID_ART, 'release-record.json')], record)
+                self.assertEqual(stage.w.members[(SIG_ART, 'authorization.json')], authorization)
+                self.assertEqual(stage.rig.kms.signs, 1)
+                stage.final_tag()
+                stage.promote()
+                self.assertEqual(stage.releases.mutations[-2:], ['create_final_tag', 'publish_draft'])
+            outcomes.append((result.receipt, stage.w.members[(GENUINE_ART[MAC], PUBLISH.GENUINE_MEMBER)]))
+        self.assertEqual(outcomes[0], outcomes[1], 'the same bytes and the same evidence under both states')
+
+    def test_rsig13_a_revoked_approval_refuses_the_draft_and_the_genuine_check(self):
+        text = 'not authorized: the release_1 card receipt is revoked'
+        stage, receipt = self.card_stage()
+        self.after_gather_read(stage, self.revoke_card(receipt))
+        self.refused(text, stage.draft)
+        self.no_draft_effect(stage)
+        stage, receipt = self.card_stage()
+        stage.draft()
+        done = []
+
+        def once(s):
+            if not done:
+                done.append(self.revoke_card(receipt)(s))
+        self.after_transfer_read(stage, once)
+        self.refused(text, stage.genuine, MAC)
+        self.no_genuine_effect(stage)
+
+    def test_rsig13_the_accepted_approval_bytes_survive_the_checks(self):
+        for label, change in (('active', lambda s: None), ('named holder', self.draining())):
+            stage, receipt = self.card_stage()
+            key = ('APPROVAL#' + receipt, 'RECORD')
+            accepted = stage.rig.table.items[key]
+            authorization = stage.w.members[(SIG_ART, 'authorization.json')]
+            change(stage)
+            with self.subTest(label):
+                stage.draft()
+                stage.both_genuine()
+                self.assertEqual(len(stage.checker_calls), 2)
+                self.assertEqual(stage.rig.table.items[key], accepted)
+                self.assertEqual(stage.w.members[(SIG_ART, 'authorization.json')], authorization)
+                self.assertEqual(stage.rig.kms.signs, 1)
+
+    def test_rsig13_the_authorization_must_be_this_tuple_and_its_cards(self):
+        def tampered(**changes):
+            def apply(s):
+                key = (SIG_ART, 'authorization.json')
+                s.w.members[key] = canon(dict(json.loads(s.w.members[key]), **changes))
+            return apply
+        stage, _ = self.card_stage()
+        tampered(cards=[])(stage)
+        self.refused('evidence mismatch: the signer authorization does not cover these cards', stage.draft)
+        self.no_draft_effect(stage)
+        stage, _ = self.card_stage()
+        stage.draft()
+        tampered(cards=[])(stage)
+        self.refused('evidence mismatch: the signer authorization does not cover these cards', stage.genuine, MAC)
+        self.no_genuine_effect(stage)
+
+    def test_rsig13_historical_trust_is_no_fallback(self):
+        # The historical signature check passes on every read here. Only current evidence is missing.
+        for label, change in (('admission', self.admission_gone), ('malformed', self.admission_malformed)):
+            stage = self.signed()
+            change(stage)
+            trust = stage.git.release_trust(stage.w.v, P, True)
+            self.assertEqual(trust['version'], stage.w.v)
+            with self.subTest(label, job='draft'):
+                with self.assertRaises(ControllerError) as caught:
+                    stage.draft()
+                self.assertTrue(str(caught.exception).startswith('authority unavailable: '), str(caught.exception))
+                self.no_draft_effect(stage)
+            stage = self.drafted()
+            change(stage)
+            with self.subTest(label, job='genuine'):
+                with self.assertRaises(ControllerError) as caught:
+                    stage.genuine(MAC)
+                self.assertTrue(str(caught.exception).startswith('authority unavailable: '), str(caught.exception))
+                self.no_genuine_effect(stage)
+        # A main branch that moves during the read is no snapshot.
+        stage = self.signed()
+        real = stage.git.contents
+
+        def contents(path, ref_sha, limit=GITHUB.CONTENTS_MAX):
+            answer = real(path, ref_sha, limit)
+            if path == CONTROLLER.ADMISSION_PATH:
+                ctl.Repairs.advance(stage.rig)
+            return answer
+        stage.git.contents = contents
+        self.refused('authority unavailable: main moved during the admission read', stage.draft)
+        self.no_draft_effect(stage)
+
+    # -- the genuine check ----------------------------------------------------------------------
+
+    def test_rsig13_genuine_check_under_each_refusal_runs_no_checker_and_emits_no_receipt(self):
+        for label, change, text in self.refusals():
+            stage = self.drafted()
+            change(stage)
+            with self.subTest(label, when='entry'):
+                self.refused(text, stage.genuine, MAC)
+                self.no_genuine_effect(stage)
+        for label, change, text in self.later_changes():
+            stage = self.drafted()
+            self.after_transfer_read(stage, change)
+            with self.subTest(label, when='before the checker'):
+                self.refused(text, stage.genuine, MAC)
+                self.no_genuine_effect(stage)
+
+    def test_rsig13_a_change_during_the_checker_emits_no_receipt(self):
+        for label, change, text in self.later_changes():
+            stage = self.drafted()
+            real = stage.checker
+
+            def checker(target, stage=stage, change=change, real=real):
+                run = real(target)
+
+                def closing(argv, boundary):
+                    answer = run(argv, boundary)
+                    change(stage)
+                    return answer
+                return closing
+            stage.checker = checker
+            with self.subTest(label):
+                self.refused(text, stage.genuine, MAC)
+                self.assertEqual(len(stage.checker_calls), 1)
+                self.assertNotIn(GENUINE_ART[MAC], stage.w.artifacts)
+
+    def test_rsig13_the_genuine_check_keeps_its_historical_signature_proof(self):
+        # Current authority does not replace the proof: a signature that does not verify stops the check.
+        stage = self.drafted()
+        stage.rig.verifier.verify = lambda *_: False
+        self.refused('evidence mismatch: the transferred signature does not verify', stage.genuine, MAC)
+        self.no_genuine_effect(stage)
+        # And a genuine receipt from before the closure is not accepted after it.
+        stage = self.drafted()
+        stage.both_genuine()
+        self.closed(stage)
+        self.refused('authority unavailable: admission is CLOSED', stage.final_tag)
+        self.assertNotIn('create_final_tag', stage.releases.mutations)
+
+    # -- the terminal observation ---------------------------------------------------------------
+
+    def test_rsig13_a_published_observation_still_works_and_gives_no_authority(self):
+        stage = self.stage()
+        stage.ready()
+        stage.final_tag()
+        stage.git.runs_of_release = [(DISPATCH_RUN, 1)]
+        stage.promote()
+        self.closed(stage)
+        self.revoked_signer(stage)
+        result = PUBLISH.reconcile(stage.request(), stage.git, stage.releases, stage.rig.verifier, H, stage.work())
+        self.assertEqual((result.state, result.mode), ('already_published_matching', None))
+        self.assertEqual((result.terminal.version, result.terminal.commit), ('0.43.0', S))
+        self.assertIs(result.terminal.signer_revoked, True, 'the current status is reported, never acted on')
+        calls = len(stage.checker_calls)
+        before = (list(stage.releases.mutations), copy.deepcopy(stage.releases.rows), copy.deepcopy(stage.w.refs))
+        for job, args in ((stage.draft, ()), (stage.genuine, (MAC,)), (stage.final_tag, ()), (stage.promote, ())):
+            with self.subTest(job=job.__name__):
+                with self.assertRaises(ControllerError):
+                    job(*args)
+                self.assertEqual(len(stage.checker_calls), calls)
+                self.assertEqual((list(stage.releases.mutations), stage.releases.rows, stage.w.refs), before)
+        # Nothing repairs a release that has gone, even with the observation in hand.
+        stage.releases.rows.clear()
+        stage.w.releases[:] = [r for r in stage.w.releases if r['tag_name'] != 'v0.43.0']
+        with self.assertRaises(ControllerError):
+            stage.draft()
+        self.assertEqual(stage.releases.mutations, before[0])
+        # Each later job, and the published checks behind them, runs only for an unfinished release.
+        for name in ('enrollment', 'reserve', 'draft', 'genuine-mac', 'genuine-linux', 'final-tag', 'promote'):
+            self.assertIn("    if: needs.eligibility.outputs.state == 'ready'\n", job_text(name), name)
+        self.assertEqual(needs_of('published-mac'), ['promote'])
+        self.assertEqual(needs_of('published-linux'), ['promote'])
+
+    # -- the wiring -----------------------------------------------------------------------------
+
+    def test_rsig13_the_jobs_take_only_existing_authenticated_data(self):
+        # The enrollment stays in environment release. One job with no token permission and no code passes it on.
+        job = job_text('enrollment')
+        self.assertIn('    environment: release\n', job)
+        self.assertIn('    permissions: {}\n', job)
+        self.assertIn('      value: ${{ vars.RDY_RELEASE_ENROLLMENT }}\n', job)
+        for word in ('secrets.', 'github.token', 'GITHUB_TOKEN', 'id-token', 'uses:', 'python', 'trusted'):
+            self.assertNotIn(word, job)
+        for name in ('draft', 'genuine-mac', 'genuine-linux'):
+            job = job_text(name)
+            with self.subTest(name):
+                self.assertIn('enrollment', needs_of(name))
+                self.assertIn('sign', needs_of(name))
+                self.assertIn('RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}\n', job)
+                self.assertIn('RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}\n', job)
+                self.assertIn('RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}\n', job)
+                for word in ('environment:', 'id-token', 'secrets.', 'vars.', 'aws', 'AWS', 'create-github-app-token', 'sts'):
+                    self.assertNotIn(word, job)
+        # The genuine jobs keep exactly their read permissions, and the candidate's process never sees the enrollment.
+        for name in ('genuine-mac', 'genuine-linux'):
+            self.assertEqual(permissions_of(name), {'actions': 'read', 'contents': 'read'})
+        self.assertEqual(permissions_of('draft'), {'actions': 'read', 'contents': 'write'})
+        self.assertNotIn('RDY_RELEASE_ENROLLMENT', PUBLISH.rehearse.PASSED_ENV)
+        self.assertEqual(WORKFLOW.count('id-token: write'), 1)
+        self.assertEqual(sorted(n for n in job_ids() if 'vars.RDY_RELEASE_ENROLLMENT' in job_text(n)),
+                         ['enrollment', 'final-tag', 'promote'])
+
+    def test_rsig13_no_enrollment_stops_the_jobs_before_any_effect(self):
+        stage = self.signed()
+        with mock.patch.object(PUBLISH, '_start', lambda *_: (stage.releases, stage.work(), stage.rig.verifier)), \
+                mock.patch.object(PUBLISH, '_parsed_request', lambda _: stage.request()), \
+                mock.patch.object(PUBLISH, '_transfers', lambda _: stage.transfers()), \
+                mock.patch.object(PUBLISH.sign, 'SshVerifier', lambda: stage.rig.verifier):
+            args = mock.Mock(signer_sha=H, out=stage.root / 'out', assets=stage.root / 'assets')
+            with self.assertRaises(ControllerError):
+                PUBLISH.cmd_draft(args, {'GITHUB_RUN_ID': str(DISPATCH_RUN), 'GITHUB_RUN_ATTEMPT': '1'})
+        self.no_draft_effect(stage)
+        self.assertFalse((stage.root / 'out').exists())
+        stage = self.drafted()
+        out = stage.root / 'genuine'
+        with mock.patch.object(PUBLISH, 'Releases', lambda *_: stage.git), \
+                mock.patch.object(PUBLISH, 'Transport', lambda *_: None), \
+                mock.patch.object(PUBLISH.sign, '_check_trusted', lambda *_: None), \
+                mock.patch.object(PUBLISH, '_parsed_request', lambda _: stage.request()), \
+                mock.patch.object(PUBLISH, '_transfers', lambda _: stage.transfers()), \
+                mock.patch.object(PUBLISH.sign, 'SshVerifier', lambda: stage.rig.verifier):
+            args = mock.Mock(signer_sha=H, out=out, work=stage.work() / 'genuine', target=MAC, checker=stage.checker(MAC))
+            environ = {'GITHUB_RUN_ID': str(DISPATCH_RUN), 'GITHUB_RUN_ATTEMPT': '1',
+                       'RDY_DRAFT_ASSETS_ARTIFACT_ID': str(ASSETS_ART), 'RDY_DRAFT_RECEIPT_ARTIFACT_ID': str(RECEIPT_ART)}
+            with self.assertRaises(ControllerError):
+                PUBLISH.cmd_genuine(args, environ)
+            self.no_genuine_effect(stage)
+            self.assertFalse(out.exists())
+            # With the enrollment, the job's command runs and writes its receipt.
+            with mock.patch.object(PUBLISH, '_enrollment', lambda *_: stage.rig.enrollment):
+                args.work = stage.work() / 'genuine'
+                PUBLISH.cmd_genuine(args, environ)
+        self.assertEqual(json.loads((out / PUBLISH.GENUINE_MEMBER).read_bytes())['target'], MAC)
 
 
 if __name__ == '__main__':
