@@ -130,6 +130,12 @@ fn with_durable<T>(
     out
 }
 
+/// Whether a walk's operation renames over a file that stands, on the one platform that refuses
+/// that while a handle is open.
+fn replaces_a_file(name: &str) -> bool {
+    cfg!(windows) && name == "the features file"
+}
+
 /// A write is acknowledged only after its sync, and a failed flush or rename at any durable step
 /// of a roll, a reindex, a dump, an export or a features replacement fails that operation and
 /// costs no acknowledged byte. A reindex's own rename is no durable step, and a dump takes no
@@ -169,7 +175,7 @@ fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
         }),
     ];
     for (name, op) in ops {
-        let (mut flushes, mut renames) = (0, 0);
+        let (mut flushes, mut renames, mut refusals) = (0, 0, 0);
         for at in [Boundary::Before, Boundary::After] {
             for nth in 0.. {
                 let (d, mut r, section, acked) = project_with_acked();
@@ -191,9 +197,23 @@ fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
                     || op(&mut r, d.path(), &section),
                 );
                 let Some(step) = fired.borrow().clone() else {
-                    result.unwrap_or_else(|e| panic!("{name}: no step failed: {e}"));
-                    drop(r);
-                    break;
+                    match result {
+                        Ok(()) => {
+                            drop(r);
+                            break;
+                        }
+                        // The system refuses to replace a file that any handle holds, however
+                        // that handle shares it, and a handle from outside this test can hold
+                        // one for a moment. It is a real failed rename, with the same promise.
+                        Err(e) if replaces_a_file(name) && e.message.contains("(os error 5)") => {
+                            refusals += 1;
+                            assert!(refusals <= 2, "{name}: always refused: {e}");
+                            rdy_store::unclean_closes_for_tests(d.path(), || drop(r));
+                            acked.assert_kept(d.path(), &format!("{name}: refused: {e}"));
+                            continue;
+                        }
+                        Err(e) => panic!("{name}: no step failed: {e}"),
+                    }
                 };
                 let rename = matches!(step, DurableStep::Rename { .. });
                 if rename {
