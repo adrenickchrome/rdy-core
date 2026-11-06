@@ -1,0 +1,514 @@
+# The release caller. It is dispatched on refs/tags/candidate/v<V>, never main. It holds the one
+# rdy-core-release-authority lane for the whole path: signing, private-draft verification and promotion.
+#
+# Every script runs from the trusted checkout at the literal signer revision, never from candidate data. Each
+# occurrence of the literal below is the same full SHA. The all-zero value means "not activated": GitHub resolves
+# no reusable workflow at it, so a run starts no job, and scripts/release/publish.py refuses it too. The pin commit
+# replaces it after the reviewed signer revision is on main. No expression or movable ref can stand in.
+#
+# Token scopes stay at job level. The reserve, draft and final-tag jobs use the built-in repository token. Only the
+# promote job mints the publisher App's token, and only its one script uses it. Contents:write also permits pushes
+# and ref changes; rulesets bind the App with no bypass, and the workflow uses the App only to publish the verified
+# draft. The public checks hold no credentials at all. A failure after publication is an incident, not a retry.
+#
+# Each remaining act checks current authority from protected main first. The enrolled identity lives in environment
+# release. The enrollment job passes that one nonsecret variable on, so the draft and genuine jobs stay out of the
+# environment and gain no permission.
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: live releases the candidate; claims only measures the signer identity
+        type: choice
+        options: [live, claims]
+        required: true
+        default: live
+      version:
+        description: The candidate's plain version, 0.<minor>.0
+        type: string
+        required: false
+      candidate_run_id:
+        description: The candidate run
+        type: string
+        required: false
+      candidate_run_attempt:
+        description: The candidate run attempt
+        type: string
+        required: false
+      candidate_artifact_id:
+        description: The candidate artifact
+        type: string
+        required: false
+      evidence_run_id:
+        description: The release record's run
+        type: string
+        required: false
+      evidence_run_attempt:
+        description: The release record's run attempt
+        type: string
+        required: false
+      evidence_artifact_id:
+        description: The release record's artifact
+        type: string
+        required: false
+      evidence_sha256:
+        description: The release record's SHA-256
+        type: string
+        required: false
+      approvals:
+        description: JSON list of first-use approval runs, usually empty
+        type: string
+        required: false
+        default: "[]"
+permissions: {}
+concurrency:
+  group: rdy-core-release-authority
+  cancel-in-progress: false
+jobs:
+  verifier:
+    name: Caller trusted verifier
+    if: inputs.mode == 'live'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build qa-release-trust at the trusted revision
+        id: build
+        working-directory: trusted
+        run: |
+          cargo build --locked --release -p rdy-qa --bin qa-release-trust
+          echo "sha256=$(sha256sum target/release/qa-release-trust | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: trusted/target/release/qa-release-trust
+          if-no-files-found: error
+          retention-days: 1
+  eligibility:
+    name: Release eligibility
+    needs: verifier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: read
+    outputs:
+      state: ${{ steps.reconcile.outputs.state }}
+      request: ${{ steps.reconcile.outputs.request }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-verifier
+      # An exactly matching published release stops here: state already_published_matching, and every later job
+      # is skipped. Its proof is public bytes, read with no credentials.
+      - name: Reconcile, then authenticate this release
+        id: reconcile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_INPUT_VERSION: ${{ inputs.version }}
+          RDY_INPUT_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          RDY_INPUT_CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          RDY_INPUT_CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          RDY_INPUT_EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          RDY_INPUT_EVIDENCE_RUN_ATTEMPT: ${{ inputs.evidence_run_attempt }}
+          RDY_INPUT_EVIDENCE_ARTIFACT_ID: ${{ inputs.evidence_artifact_id }}
+          RDY_INPUT_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          RDY_INPUT_APPROVALS: ${{ inputs.approvals }}
+          VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
+        run: >-
+          /usr/bin/python3 -I -B trusted/scripts/release/publish.py eligibility
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
+          --work "$RUNNER_TEMP/rdy-release-work" --github-output "$GITHUB_OUTPUT"
+  reserve:
+    name: Reserve release tuple
+    needs: [verifier, eligibility]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-verifier
+      - name: Create the reservation once, or read it back
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
+        run: >-
+          /usr/bin/python3 -I -B trusted/scripts/release/publish.py reserve
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/reserve-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: reserve-receipt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reserve-out/reserve-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+  enrollment:
+    name: Release enrollment
+    needs: eligibility
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions: {}
+    outputs:
+      value: ${{ vars.RDY_RELEASE_ENROLLMENT }}
+    steps:
+      - name: Pass the enrollment variable to the later jobs
+        run: exit 0
+  # The one reusable call. Claims mode takes only this job, with the deny-all key policy still in force. Its results
+  # are read by name, so a skipped or failed earlier job can never reach a live signing request.
+  sign:
+    name: Sign
+    needs: [eligibility, reserve]
+    if: >-
+      ${{ !cancelled() && (inputs.mode == 'claims' || (needs.eligibility.result == 'success'
+      && needs.reserve.result == 'success' && needs.eligibility.outputs.state == 'ready')) }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: read
+    uses: adrenickchrome/rdy-core/.github/workflows/release-sign.yml@07e75951eb5f4551d5c324d1fefb1d3044f65213
+    with:
+      mode: ${{ inputs.mode }}
+      signer_sha: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+      request: ${{ needs.eligibility.outputs.request }}
+      reserve_artifact_id: ${{ needs.reserve.outputs.artifact_id }}
+  draft:
+    name: Prepare private draft
+    needs: [verifier, eligibility, enrollment, sign]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      receipt_artifact_id: ${{ steps.receipt.outputs.artifact-id }}
+      assets_artifact_id: ${{ steps.assets.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-verifier
+      - name: Copy the verified signature and the reserved bytes into the one draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
+          VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
+        run: >-
+          /usr/bin/python3 -I -B trusted/scripts/release/publish.py draft
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/draft-receipt" --assets "$RUNNER_TEMP/draft-assets"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: receipt
+        with:
+          name: draft-receipt-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/draft-receipt/draft-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      # A read-only token cannot list a draft, so the native checks take these freshly downloaded bytes.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: assets
+        with:
+          name: draft-assets-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/draft-assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  genuine-mac:
+    name: Genuine check (aarch64-apple-darwin)
+    needs: [eligibility, enrollment, sign, draft]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the checker at the trusted revision
+        working-directory: trusted
+        run: cargo build --locked --release -p rdy-qa --bin qa-release-trust --bin qa-release-install
+      - name: Run the genuine checker over the draft's exact bytes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
+          RDY_DRAFT_ASSETS_ARTIFACT_ID: ${{ needs.draft.outputs.assets_artifact_id }}
+          RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
+        run: >-
+          python3 -I -B trusted/scripts/release/publish.py genuine
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$GITHUB_WORKSPACE/trusted/target/release/qa-release-trust"
+          --checker "$GITHUB_WORKSPACE/trusted/target/release/qa-release-install"
+          --target aarch64-apple-darwin --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/genuine-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: genuine-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/genuine-out/genuine-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+  genuine-linux:
+    name: Genuine check (x86_64-unknown-linux-gnu)
+    needs: [eligibility, enrollment, sign, draft]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the checker at the trusted revision
+        working-directory: trusted
+        run: cargo build --locked --release -p rdy-qa --bin qa-release-trust --bin qa-release-install
+      - name: Run the genuine checker over the draft's exact bytes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ needs.enrollment.outputs.value }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
+          RDY_DRAFT_ASSETS_ARTIFACT_ID: ${{ needs.draft.outputs.assets_artifact_id }}
+          RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
+        run: >-
+          python3 -I -B trusted/scripts/release/publish.py genuine
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$GITHUB_WORKSPACE/trusted/target/release/qa-release-trust"
+          --checker "$GITHUB_WORKSPACE/trusted/target/release/qa-release-install"
+          --target x86_64-unknown-linux-gnu --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/genuine-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: genuine-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/genuine-out/genuine-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+  final-tag:
+    name: Create final tag
+    needs: [verifier, eligibility, sign, draft, genuine-mac, genuine-linux]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-verifier
+      - name: Check everything again, then create v<V> at S once or record the retry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ vars.RDY_RELEASE_ENROLLMENT }}
+          RDY_RELEASE_SETTINGS_READBACK: ${{ vars.RDY_RELEASE_SETTINGS_READBACK }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
+          RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
+          RDY_GENUINE_MAC_ARTIFACT_ID: ${{ needs.genuine-mac.outputs.artifact_id }}
+          RDY_GENUINE_LINUX_ARTIFACT_ID: ${{ needs.genuine-linux.outputs.artifact_id }}
+          VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
+        run: >-
+          /usr/bin/python3 -I -B trusted/scripts/release/publish.py final-tag
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/final-tag-evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: final-tag-evidence-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/final-tag-evidence/final-tag-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+  promote:
+    name: Promote verified draft
+    needs: [verifier, eligibility, sign, draft, genuine-mac, genuine-linux, final-tag]
+    if: needs.eligibility.outputs.state == 'ready'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      receipt: ${{ steps.promote.outputs.receipt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: caller-verifier-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-verifier
+      - name: Mint the publisher token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2, checked 2026-10-31
+        with:
+          app-id: ${{ vars.RDY_RELEASE_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RDY_RELEASE_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: adrenickchrome
+          repositories: rdy-core
+          permission-contents: write
+      - name: Check everything again, then promote that same draft id
+        id: promote
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RDY_PUBLISHER_TOKEN: ${{ steps.token.outputs.token }}
+          RDY_RELEASE_REQUEST: ${{ needs.eligibility.outputs.request }}
+          RDY_RELEASE_ENROLLMENT: ${{ vars.RDY_RELEASE_ENROLLMENT }}
+          RDY_RELEASE_SETTINGS_READBACK: ${{ vars.RDY_RELEASE_SETTINGS_READBACK }}
+          RDY_SIGNATURE_ARTIFACT_ID: ${{ needs.sign.outputs.signature_artifact_id }}
+          RDY_SIGNATURE_ARTIFACT_DIGEST: ${{ needs.sign.outputs.signature_artifact_digest }}
+          RDY_DRAFT_RECEIPT_ARTIFACT_ID: ${{ needs.draft.outputs.receipt_artifact_id }}
+          RDY_GENUINE_MAC_ARTIFACT_ID: ${{ needs.genuine-mac.outputs.artifact_id }}
+          RDY_GENUINE_LINUX_ARTIFACT_ID: ${{ needs.genuine-linux.outputs.artifact_id }}
+          VERIFIER_SHA256: ${{ needs.verifier.outputs.sha256 }}
+        run: >-
+          /usr/bin/python3 -I -B trusted/scripts/release/publish.py promote
+          --signer-sha 07e75951eb5f4551d5c324d1fefb1d3044f65213 --trusted trusted
+          --verifier "$RUNNER_TEMP/rdy-release-verifier/qa-release-trust" --verifier-sha256 "$VERIFIER_SHA256"
+          --work "$RUNNER_TEMP/rdy-release-work" --github-output "$GITHUB_OUTPUT"
+  published-mac:
+    name: Published check (aarch64-apple-darwin)
+    needs: [promote]
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the checker at the trusted revision
+        working-directory: trusted
+        run: cargo build --locked --release -p rdy-qa --bin qa-release-install
+      - name: Check every public asset anonymously and run the native quick start
+        env:
+          RDY_PUBLISH_RECEIPT: ${{ needs.promote.outputs.receipt }}
+        run: >-
+          python3 -I -B trusted/scripts/release/publish.py check-published
+          --target aarch64-apple-darwin --checker "$GITHUB_WORKSPACE/trusted/target/release/qa-release-install"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/published-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/published-out/published-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+  published-linux:
+    name: Published check (x86_64-unknown-linux-gnu)
+    needs: [promote]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 07e75951eb5f4551d5c324d1fefb1d3044f65213
+          path: trusted
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Build the checker at the trusted revision
+        working-directory: trusted
+        run: cargo build --locked --release -p rdy-qa --bin qa-release-install
+      - name: Check every public asset anonymously and run the native quick start
+        env:
+          RDY_PUBLISH_RECEIPT: ${{ needs.promote.outputs.receipt }}
+        run: >-
+          python3 -I -B trusted/scripts/release/publish.py check-published
+          --target x86_64-unknown-linux-gnu --checker "$GITHUB_WORKSPACE/trusted/target/release/qa-release-install"
+          --work "$RUNNER_TEMP/rdy-release-work" --out "$RUNNER_TEMP/published-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/published-out/published-receipt.json
+          if-no-files-found: error
+          retention-days: 90

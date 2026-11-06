@@ -24,6 +24,7 @@ pub mod platform;
 pub mod publication_scenario;
 pub mod reindex_check;
 pub mod release_install;
+pub mod release_keys;
 pub mod release_notices;
 pub mod report;
 pub mod seams;

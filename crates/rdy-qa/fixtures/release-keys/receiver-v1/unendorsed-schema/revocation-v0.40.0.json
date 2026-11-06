@@ -1,0 +1,7 @@
+{
+  "fingerprint": "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ",
+  "first_machine_tag": "v0.40.0",
+  "last_good_tag": "v0.41.0",
+  "repository": "adrenickchrome/rdy-core",
+  "scheme": "rdy-release-signer-revocation-v1"
+}

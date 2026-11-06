@@ -7,6 +7,7 @@
 //!
 //! `qa-release-package` is the command; [`package`] does the work.
 use crate::platform::{self, RELEASE_CHILD_DEADLINE, RELEASE_CHILD_OUTPUT_MAX};
+use crate::release_keys::ReleaseKeys;
 use crate::release_notices;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -1027,6 +1028,33 @@ pub fn readme_install_section(version: &str, signer_line: &str) -> Result<String
         block(TARGETS[0], false)?,
         block(TARGETS[1], false)?,
         block(TARGETS[0], true)?,
+    ))
+}
+
+/// The README's install section for `version` under the one release key that signs it: the
+/// key comes from the authenticated records, never from the README. A thin wrapper around
+/// [`readme_install_section`], which the isolated rehearsal keeps using with a bare signer line.
+pub fn readme_version_section(keys: &ReleaseKeys, version: &str) -> Result<String, String> {
+    let signer = keys.signer_for(version).map_err(|e| e.to_string())?;
+    readme_install_section(version, &signer.signer_line)
+}
+
+/// The README's ready state for `version`: the selected release key with its fingerprint, the
+/// trust list of every key and range (historical and machine epochs, their statements and the
+/// root verification commands), then the install blocks for the selected key. All of it comes
+/// from the authenticated records. `notes_url` is the release notes link.
+pub fn readme_ready_section(
+    keys: &ReleaseKeys,
+    version: &str,
+    notes_url: &str,
+) -> Result<String, String> {
+    let signer = keys.signer_for(version).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "### Release signing key\n\n```text\n{}\n```\n\nFingerprint: {}.\n\nCompare this line and fingerprint with the ones in the [GitHub release notes]({notes_url}). Use the key only when both match.\n\n{}\n{}",
+        signer.signer_line,
+        signer.fingerprint,
+        keys.trust_section().map_err(|e| e.to_string())?,
+        readme_version_section(keys, version)?,
     ))
 }
 
@@ -3095,6 +3123,8 @@ mod tests {
     // ----- the install check -----
 
     const IV: &str = "0.14.0";
+    /// A version the historical key signed: the README tests use it.
+    const RV: &str = "0.20.0";
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     /// The hang guard of a test helper's own tool runs.
     const GUARD: std::time::Duration = std::time::Duration::from_secs(600);
@@ -3925,12 +3955,15 @@ esac
         format!("{SIGNER_PREFIX}{}", key.to_openssh().expect("openssh"))
     }
 
-    /// What is wrong with the README's install blocks: in the pending state there are none; in
-    /// the ready state the README holds the generated section for its V and signer line.
-    fn readme_install_problem(readme: &str) -> Result<(), String> {
+    /// What is wrong with the README's trust and install blocks: in the pending state there are
+    /// none; in the ready state the README holds the generated ready section for its V, built
+    /// from `keys`: the one key that signs V, the trust list of every key and range, and the
+    /// install blocks for that key.
+    fn readme_install_problem(readme: &str, keys: &ReleaseKeys) -> Result<(), String> {
         let generated_marks = [
             "'ssh-keygen' '-Y' 'verify'",
             "### Install\n",
+            "### Release keys\n",
             "export PATH=\"<version-prefix>/bin:$PATH\"",
             "'install' '-m' '755'",
         ];
@@ -3940,22 +3973,81 @@ esac
                 None => Ok(()),
             };
         }
-        let signer = readme
-            .split("### Release signing key\n")
-            .nth(1)
-            .and_then(|rest| rest.split("```text\n").nth(1))
-            .and_then(|rest| rest.lines().next())
-            .ok_or("no signer line in the ready state")?;
         let v = readme
             .split("/releases/download/v")
             .nth(1)
             .and_then(|rest| rest.split('/').next())
             .ok_or("no V in the README")?;
-        let section = readme_install_section(v, signer)?;
+        let notes = format!("https://github.com/adrenickchrome/rdy-core/releases/tag/v{v}");
+        let section = readme_ready_section(keys, v, &notes)?;
         if readme.contains(&section) {
             Ok(())
         } else {
-            Err("the README's install blocks are not the renderer's".into())
+            Err("the README's trust and install blocks are not the renderer's".into())
+        }
+    }
+
+    #[test]
+    fn rsig3_generated_install_blocks_stay_exact() {
+        let keys = ReleaseKeys::historical();
+        let line = keys.signer_for(RV).expect("signer").signer_line;
+        // the version wrapper adds nothing to the lower-level renderer
+        let section = readme_version_section(&keys, RV).expect("section");
+        assert_eq!(section, readme_install_section(RV, &line).expect("section"));
+        // three native blocks, byte for byte what the renderer prints for the example paths
+        assert_eq!(
+            section.matches("```sh\n").count(),
+            4,
+            "three installs and the PATH line"
+        );
+        let mut want = String::new();
+        for (label, target, browser) in [
+            (
+                "On macOS arm64, for an archive downloaded with curl:",
+                TARGETS[0],
+                false,
+            ),
+            ("On Linux amd64:", TARGETS[1], false),
+            (
+                "On macOS arm64, for an archive downloaded with a web browser:",
+                TARGETS[0],
+                true,
+            ),
+        ] {
+            let block = render_commands(
+                &commands(&InstallInput {
+                    download: "/path/to/download".into(),
+                    signer_line: line.clone(),
+                    version: RV.into(),
+                    commit: "0".repeat(40),
+                    target: target.into(),
+                    unpack: "/path/to/unpack".into(),
+                    prefix: format!("/path/to/rdy-{RV}").into(),
+                    browser,
+                })
+                .expect("commands"),
+            )
+            .expect("render");
+            want.push_str(&format!("{label}\n\n```sh\n{block}\n```\n\n"));
+        }
+        assert!(section.starts_with("### Install\n\n"));
+        let body = &section["### Install\n\n".len()..];
+        assert!(body.starts_with(want.trim_end_matches('\n')), "{body}");
+        // each block passes the one selected line as one quoted token, in the manifest namespace
+        assert_eq!(section.matches(&format!("'{line}'")).count(), 3);
+        assert_eq!(section.matches("'-n' 'rdy-release-v1'").count(), 3);
+        // the ready section holds the same install blocks after the trust list
+        let ready =
+            readme_ready_section(&keys, RV, "https://example.invalid/notes").expect("ready");
+        assert!(ready.ends_with(&section));
+        assert!(ready.contains("### Release keys\n"));
+        // a version with no key has no section: before v0.17.0, in a gap, a patch release
+        for v in ["0.14.0", "0.42.0", "0.20.1", "1.0.0", "v0.20.0"] {
+            assert!(readme_version_section(&keys, v).is_err(), "{v}");
+            assert!(
+                readme_ready_section(&keys, v, "https://example.invalid/notes").is_err(),
+                "{v}"
+            );
         }
     }
 
@@ -4125,24 +4217,43 @@ esac
         let out = run_bounded(cmd, None, 1 << 20, GUARD).expect("printf");
         assert_eq!(out.stdout, format!("{signer}\n").into_bytes());
 
-        // The README: no install block while the key is pending; the generated section when
-        // ready.
+        // The README: no install block while the key is pending; the generated ready section
+        // (the selected key, the trust list and the install blocks) when ready. A version's key
+        // comes from the authenticated records, not from the README.
+        let keys = ReleaseKeys::for_repository(&repository_root()).expect("repository trust");
         let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
-        assert_eq!(readme_install_problem(&readme), Ok(()), "the real README");
+        assert_eq!(
+            readme_install_problem(&readme, &keys),
+            Ok(()),
+            "the real README"
+        );
         let pending = "Release signing key: pending founder confirmation.\n\
                        Preview downloads are not ready.\n\
                        Do not install a preview until this README and its GitHub release notes show the same key and fingerprint.\n";
         let synthetic = format!(
-            "# rdy\n\nhttps://github.com/x/releases/download/v{IV}/SHA256SUMS\n\n{pending}"
+            "# rdy\n\nhttps://github.com/x/releases/download/v{RV}/SHA256SUMS\n\n{pending}"
         );
-        assert_eq!(readme_install_problem(&synthetic), Ok(()));
-        let section = readme_install_section(IV, &signer).expect("section");
-        assert!(readme_install_problem(&format!("{synthetic}\n{section}")).is_err());
-        let ready = synthetic.replace(
-            pending,
-            &format!("### Release signing key\n\n```text\n{signer}\n```\n\n{section}"),
+        assert_eq!(readme_install_problem(&synthetic, &keys), Ok(()));
+        let section = readme_version_section(&keys, RV).expect("section");
+        assert!(readme_install_problem(&format!("{synthetic}\n{section}"), &keys).is_err());
+        let notes = format!("https://github.com/adrenickchrome/rdy-core/releases/tag/v{RV}");
+        let ready_section = readme_ready_section(&keys, RV, &notes).expect("ready section");
+        let ready = synthetic.replace(pending, &ready_section);
+        assert_eq!(readme_install_problem(&ready, &keys), Ok(()));
+        // a key that is not the selected one, a missing trust list and a trust list for other
+        // records are caught
+        let other = keys.signer_for(RV).expect("signer").signer_line;
+        assert!(
+            readme_install_problem(&ready.replacen(&other, &sample_signer(), 1), &keys).is_err()
         );
-        assert_eq!(readme_install_problem(&ready), Ok(()));
+        assert!(
+            readme_install_problem(
+                &ready.replacen("### Release keys\n", "### Keys\n", 1),
+                &keys
+            )
+            .is_err()
+        );
+        assert!(readme_install_problem(&ready.replacen("v0.17.0", "v0.18.0", 1), &keys).is_err());
         // the section holds the three blocks for the example paths, in order, each after its
         // label; a browser download on macOS keeps its quarantine mark until the third block
         let mut from = 0;
@@ -4162,7 +4273,9 @@ esac
             let example = InstallInput {
                 download: "/path/to/download".into(),
                 unpack: "/path/to/unpack".into(),
-                prefix: "/path/to/rdy-0.14.0".into(),
+                prefix: format!("/path/to/rdy-{RV}").into(),
+                version: RV.into(),
+                signer_line: other.clone(),
                 ..input(target, browser)
             };
             let block = render_commands(&commands(&example).expect("commands")).expect("render");
@@ -4175,7 +4288,7 @@ esac
         assert!(section.contains("Add the version's bin directory to PATH in this shell.\n"));
         let edited = ready.replacen("'--version'", "'-V'", 1);
         assert!(
-            readme_install_problem(&edited).is_err(),
+            readme_install_problem(&edited, &keys).is_err(),
             "a hand edit is caught"
         );
 

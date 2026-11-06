@@ -1,0 +1,1 @@
+UNENDORSED SYNTHETIC SCHEMA EXAMPLES. Existing public test keys only. No private key was read and no signature created. Versions 0.40.0/0.41.0/0.44.0 are arbitrary schema test values, not selected cutovers or release approvals. No files in this directory may be enrolled in a real trust list. Structural tests bypass signature verification explicitly.

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "verified_at": "2026-11-05",
+  "source": "The official AWS CLI v2 package. The digest was measured from the download and its detached signature was verified under the AWS CLI Team key FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C.",
+  "tools": {
+    "aws-cli": {
+      "version": "2.34.25",
+      "max_archive_bytes": 134217728,
+      "max_expanded_bytes": 536870912,
+      "max_entries": 20000,
+      "platforms": {
+        "Linux-x86_64": {
+          "url": "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.34.25.zip",
+          "sha256": "87e0e8fe3b73ff174eeef3b3ddf376fa4182a3e6af654dd989f1ffd2cef44a0c",
+          "size": 69664276
+        }
+      }
+    }
+  }
+}

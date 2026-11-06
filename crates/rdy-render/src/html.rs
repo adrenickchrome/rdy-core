@@ -812,8 +812,11 @@ fn table_html(b: &Block, ctx: &BlockCtx, ictx: &inline::Ctx) -> String {
     let normative = matches!(b.fields.get("normative"), Some(FieldValue::Bool(true)));
     // the marker sits just before the scrolling wrapper: it stays in view, and the wrapper holds
     // nothing but the table
+    // the body, when it has one, follows the table as a paragraph (D-7VCB9); a table with no
+    // body adds nothing
+    let text = inline::body_html(&b.body, ictx);
     format!(
-        "{}<div class=\"table-wrap{}\"><table><caption>{caption}</caption><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>",
+        "{}<div class=\"table-wrap{}\"><table><caption>{caption}</caption><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>{text}",
         if normative {
             marker(ctx, "table", "Normative")
         } else {

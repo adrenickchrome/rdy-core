@@ -1,0 +1,7 @@
+{
+  "fingerprint": "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ",
+  "first_machine_tag": "v0.40.0",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti",
+  "repository": "adrenickchrome/rdy-core",
+  "scheme": "rdy-release-signer-transition-v1"
+}
