@@ -581,9 +581,9 @@ fn wx18_cancel_set_stays_set_and_wakes_a_wait() {
     assert!(cancel.is_set());
     // A set cancel stops a connect before it starts.
     let f = fake(Act::Reply(holding(KEY_A)));
-    let e = sys::agent_connect(&f.path, &cancel)
-        .err()
-        .expect("a set cancel refuses");
+    let Err(e) = sys::agent_connect(&f.path, &cancel) else {
+        panic!("a set cancel refuses");
+    };
     assert_eq!(e.kind(), std::io::ErrorKind::Interrupted);
 }
 
