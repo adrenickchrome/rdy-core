@@ -796,6 +796,9 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
             PRIVACY,
         ),
         ("a same-owner 0300 directory", 0o300, false, SAVE),
+        // on Windows this account cannot open a directory it may only pass through, even for its
+        // security, so the fixture cannot read it back
+        #[cfg(unix)]
         ("a same-owner 0100 directory", 0o100, false, SAVE),
     ];
     for (what, pre_mode, with_file, refusal) in cases {
