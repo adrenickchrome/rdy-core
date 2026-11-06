@@ -157,8 +157,11 @@ fn children(r: &Rdy, scope: &Scope, id: &BlockId) -> Vec<rdy_model::Block> {
     m.children(Some(id)).into_iter().cloned().collect()
 }
 
+/// One line of the menu: its doc, whether it is required, and its hints.
+type MenuRow = (String, bool, Vec<String>);
+
 /// The ids of the required rows and the menu's hints of doc `doc`, from canon.
-fn delivered(r: &Rdy) -> (Vec<String>, Vec<(String, bool, Vec<String>)>) {
+fn delivered(r: &Rdy) -> (Vec<String>, Vec<MenuRow>) {
     let load = LoadRequest::default();
     let part = collect_with(&r.read(), Layer::Project, &load, &BOUNDS).unwrap();
     let reply = merge_with(vec![part], &load, &BOUNDS).unwrap();
@@ -234,7 +237,10 @@ fn rtc2_add_creates_required_draft_default_once() {
     assert_eq!(selectors(&rule), ["all"]);
     assert_eq!(rule.fields.get("locked"), Some(&FieldValue::Bool(false)));
     assert_eq!(rule.parent, Some(doc.id.clone()));
-    assert_eq!(link_targets(&rule, "decided_by"), [p.decision.clone()]);
+    assert_eq!(
+        link_targets(&rule, "decided_by"),
+        std::slice::from_ref(&p.decision)
+    );
     assert_eq!(p.rule.text, text);
     assert!(!p.rule.retired);
 
@@ -267,7 +273,7 @@ fn rtc2_add_creates_required_draft_default_once() {
     // it lands, is delivered as required, and activates no store feature
     land_prepared(&mut r, &p);
     let (rows, menu) = delivered(&r);
-    assert_eq!(rows, [p.rule.id.clone()]);
+    assert_eq!(rows, std::slice::from_ref(&p.rule.id));
     assert_eq!(menu.len(), 1);
     assert!(menu[0].1, "a default doc is required");
     assert_eq!(store_format(dir.path()), format);
@@ -417,7 +423,7 @@ fn rtc2_named_ruleset_keeps_required_and_selector_semantics() {
     )
     .unwrap();
     land_prepared(&mut r, &all);
-    assert_eq!(delivered(&r).0, [all.rule.id.clone()]);
+    assert_eq!(delivered(&r).0, std::slice::from_ref(&all.rule.id));
 
     // a narrow rule in the required default doc is delivered, and keeps its hint
     let default = prepare(
@@ -495,14 +501,20 @@ fn rtc2_edit_supersedes_and_remove_retires_revokes() {
     assert_eq!(edited.rule.ruleset, first.rule.ruleset);
     assert_eq!(edited.rule.text, "Run all the tests.");
     let d = block(&r, &Scope::View(edited.view.clone()), &edited.decision);
-    assert_eq!(link_targets(&d, "supersedes"), [first.decision.clone()]);
+    assert_eq!(
+        link_targets(&d, "supersedes"),
+        std::slice::from_ref(&first.decision)
+    );
     assert_eq!(text_field(&d, "statement"), "Rule: Run all the tests.");
     assert_eq!(text_field(&d, "why"), "Wider.");
     land_prepared(&mut r, &edited);
     let rule = block(&r, &Scope::Canon, &id);
     assert_eq!(rule.body, "Run all the tests.");
     assert_eq!(selectors(&rule), ["type:claim", "all"]);
-    assert_eq!(link_targets(&rule, "decided_by"), [edited.decision.clone()]);
+    assert_eq!(
+        link_targets(&rule, "decided_by"),
+        std::slice::from_ref(&edited.decision)
+    );
     let st = r.read();
     let g = st.graph(&Scope::Canon).unwrap();
     let status = |i: &str| g.status(&BlockId::parse(i).unwrap()).unwrap().tag();
@@ -513,7 +525,7 @@ fn rtc2_edit_supersedes_and_remove_retires_revokes() {
     assert_eq!(st.reader().get_block(&old).unwrap().body, "Run the tests.");
     drop(g);
     drop(st);
-    assert_eq!(delivered(&r).0, [id.clone()]);
+    assert_eq!(delivered(&r).0, std::slice::from_ref(&id));
 
     // an edit with new selectors replaces them
     let narrowed = prepare(
@@ -531,7 +543,10 @@ fn rtc2_edit_supersedes_and_remove_retires_revokes() {
     assert!(gone.rule.retired);
     assert_eq!(gone.rule.text, "Run every test.");
     let d = block(&r, &Scope::View(gone.view.clone()), &gone.decision);
-    assert_eq!(link_targets(&d, "revokes"), [narrowed.decision.clone()]);
+    assert_eq!(
+        link_targets(&d, "revokes"),
+        std::slice::from_ref(&narrowed.decision)
+    );
     assert_eq!(
         text_field(&d, "statement"),
         format!("Retire rule {id}: No longer wanted.")
@@ -688,7 +703,11 @@ fn rtc2_edit_with_unchanged_wording_lands() {
         let p = prepare(&mut r, request.clone()).unwrap_or_else(|e| panic!("{what}: {e}"));
         let d = block(&r, &Scope::View(p.view.clone()), &p.decision);
         assert_eq!(text_field(&d, "statement"), statement, "{what}");
-        assert_eq!(link_targets(&d, "supersedes"), [reason.clone()], "{what}");
+        assert_eq!(
+            link_targets(&d, "supersedes"),
+            std::slice::from_ref(&reason),
+            "{what}"
+        );
         assert_eq!(p.rule.text, WORDS, "{what}");
 
         // a repeat of the open request finds it, and a repeat after the landing finds that
@@ -704,7 +723,7 @@ fn rtc2_edit_with_unchanged_wording_lands() {
         assert_eq!(selectors(&rule), ["type:claim", "type:section"], "{what}");
         assert_eq!(
             link_targets(&rule, "decided_by"),
-            [p.decision.clone()],
+            std::slice::from_ref(&p.decision),
             "{what}"
         );
         let st = r.read();
@@ -828,7 +847,8 @@ fn rtc2_shared_decision_stops_before_any_write() {
                "session_ref": "probe"}),
     )
     .unwrap();
-    r.view_close(&me(), &[probe.view.clone()], "probe").unwrap();
+    r.view_close(&me(), std::slice::from_ref(&probe.view), "probe")
+        .unwrap();
 
     // dependents in canon and in other open views
     let canon = write(&mut r, "dependent", json!([
@@ -1113,7 +1133,8 @@ fn rtc2_complete_change_has_no_partial_decision_or_rule() {
         }
         drop(m);
         drop(st);
-        r.view_close(&me(), &[p.view.clone()], "next case").unwrap();
+        r.view_close(&me(), std::slice::from_ref(&p.view), "next case")
+            .unwrap();
     }
 }
 
