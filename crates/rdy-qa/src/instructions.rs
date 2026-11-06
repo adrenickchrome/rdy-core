@@ -126,6 +126,8 @@ fn person_env(platform: Platform, home: Option<&Path>, cfg: &Path) -> PathEnv {
         home_drive: drive.map(|(d, _)| d.into()),
         home_path: drive.map(|(_, p)| p.into()),
         app_data: home.map(|h| h.join("AppData").into()),
+        // The account name places nothing: a world's config names the human.
+        ..PathEnv::default()
     }
 }
 
