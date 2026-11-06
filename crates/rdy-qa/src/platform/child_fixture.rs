@@ -11,13 +11,21 @@
 //! - `hang`: never exit by itself.
 //! - `descendants:<count>`: start `count` hanging copies of this child, write their process IDs to
 //!   the file named by [`TARGET_ENV`], one per line, and hang. The copies share the streams.
-//! - `holder`: the escaped pipe holder. Start one hanging copy that shares the streams, write its
+//! - `holder`: the escaped pipe holder. Start one hanging copy that shares the streams and is
+//!   outside the starter's process tree (its own process group, or a job breakaway), write its
 //!   process ID to the file named by [`TARGET_ENV`] and exit 0 at once.
 //! - `editor`: write [`TEXT_ENV`] to the file named by [`TARGET_ENV`], as an editor does, and
 //!   exit 0.
 //!
 //! libtest prints its own header to stdout before a test starts, so a mode that needs exact bytes
 //! writes them to stderr, or the caller accounts for the header.
+//!
+//! Reuse: this file uses only `std`. An integration binary includes it with
+//! `#[path = "../src/platform/child_fixture.rs"] mod child_fixture;`, which installs
+//! [`fixture_entry`] in that binary, and builds its children with [`fixture_command`], which
+//! selects the entry by [`entry_selector`].
+
+#![allow(dead_code)]
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -32,8 +40,14 @@ pub const TEXT_ENV: &str = "RDY_QA_CHILD_TEXT";
 /// The bytes of the `invalid` mode: not valid UTF-8, with a newline and a NUL between them.
 pub const INVALID_BYTES: &[u8] = &[0xff, 0xfe, 0x80, b'\n', 0xc0, 0xaf, 0x00, 0xed, 0xa0, 0x80];
 
-/// The libtest name that `--exact` selects.
-pub(crate) const ENTRY_SELECTOR: &str = "platform::child_fixture::fixture_entry";
+/// The libtest name that `--exact` selects for [`fixture_entry`] in the binary this file is in:
+/// the module path without the crate name. A binary that includes this file under another module
+/// name gets its own selector.
+pub fn entry_selector() -> String {
+    let path = module_path!();
+    let inside = path.split_once("::").map_or("", |(_, rest)| rest);
+    format!("{inside}::fixture_entry")
+}
 
 /// A stream a mode writes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,14 +117,38 @@ fn target() -> Result<String, String> {
     std::env::var(TARGET_ENV).map_err(|_| format!("{TARGET_ENV} is not set"))
 }
 
+/// Makes the command's child leave the process tree a bounded runner stops when its direct child
+/// ends: on Unix a process group of its own, on Windows a new group that breaks away from the
+/// job. A job that forbids breakaway refuses the start, and the caller sees that error.
+fn leave_runner_tree(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = command;
+}
+
 /// Starts one hanging copy of this child that shares the streams, and returns its process ID.
-fn start_hanger() -> Result<u32, String> {
+/// With `escaped`, the copy is outside the process tree of the child that starts it.
+fn start_hanger(escaped: bool) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let mut command = Command::new(exe);
     command
-        .args(["--exact", ENTRY_SELECTOR, "--nocapture"])
+        .args(["--exact", &entry_selector(), "--nocapture"])
         .env(MODE_ENV, "hang")
         .stdin(Stdio::null());
+    if escaped {
+        leave_runner_tree(&mut command);
+    }
     let child = command.spawn().map_err(|e| format!("spawn: {e}"))?;
     Ok(child.id())
 }
@@ -143,7 +181,7 @@ pub fn run_mode(mode: &Mode) -> Result<i32, String> {
         Mode::Descendants(count) => {
             let mut ids = String::new();
             for _ in 0..*count {
-                ids.push_str(&format!("{}\n", start_hanger()?));
+                ids.push_str(&format!("{}\n", start_hanger(false)?));
             }
             std::fs::write(target()?, ids).map_err(|e| format!("write ids: {e}"))?;
             loop {
@@ -151,7 +189,7 @@ pub fn run_mode(mode: &Mode) -> Result<i32, String> {
             }
         }
         Mode::Holder => {
-            let id = start_hanger()?;
+            let id = start_hanger(true)?;
             std::fs::write(target()?, format!("{id}\n")).map_err(|e| format!("write id: {e}"))?;
             Ok(0)
         }
@@ -189,7 +227,7 @@ fn fixture_entry() {
 pub(crate) fn fixture_command(mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test executable"));
     command
-        .args(["--exact", ENTRY_SELECTOR, "--nocapture"])
+        .args(["--exact", &entry_selector(), "--nocapture"])
         .env(MODE_ENV, mode);
     command
 }
@@ -199,196 +237,4 @@ pub(crate) fn fixture_command_for(mode: &str, target: &Path) -> Command {
     let mut command = fixture_command(mode);
     command.env(TARGET_ENV, target);
     command
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::platform::{kill_hard, process_exited, process_running, run_bounded};
-    use std::time::Duration;
-
-    fn stdout_without_header(bytes: &[u8]) -> &[u8] {
-        // libtest prints "\nrunning 1 test\n" first; the mode's bytes follow it
-        let header = b"\nrunning 1 test\n";
-        bytes.strip_prefix(header.as_slice()).unwrap_or(bytes)
-    }
-
-    fn ids(path: &Path) -> Vec<u32> {
-        std::fs::read_to_string(path)
-            .expect("the id file")
-            .lines()
-            .map(|line| line.parse().expect("an id"))
-            .collect()
-    }
-
-    #[test]
-    fn wx23c_native_child_modes_are_deterministic() {
-        // the parser is closed: a bad mode is an error that names it
-        assert_eq!(parse_mode("exit:7"), Ok(Mode::Exit(7)));
-        assert_eq!(
-            parse_mode("output:stderr:12"),
-            Ok(Mode::Output(Stream::Stderr, 12))
-        );
-        assert!(parse_mode("output:tty:1").unwrap_err().contains("tty"));
-        assert!(parse_mode("hold").unwrap_err().contains("hold"));
-        assert!(parse_mode("exit:x").unwrap_err().contains("exit code"));
-
-        // exit codes
-        for code in [0, 3, 101] {
-            let status = fixture_command(&format!("exit:{code}"))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("run the exit fixture");
-            assert_eq!(status.code(), Some(code));
-        }
-
-        // a bad mode ends 101 and says why on stderr
-        let out = fixture_command("nonsense").output().expect("run");
-        assert_eq!(out.status.code(), Some(101));
-        assert!(String::from_utf8_lossy(&out.stderr).contains("unknown fixture mode `nonsense`"));
-
-        // capped output: the exact count, on the chosen stream, the same on every run
-        for _ in 0..2 {
-            let out = fixture_command("output:stderr:20000")
-                .output()
-                .expect("run");
-            assert_eq!(out.status.code(), Some(0));
-            assert_eq!(out.stderr, vec![b'x'; 20000]);
-            let out = fixture_command("output:stdout:5").output().expect("run");
-            assert_eq!(stdout_without_header(&out.stdout)[..5], *b"xxxxx");
-        }
-
-        // the bounded runner caps the same output
-        let err = run_bounded(
-            fixture_command("output:stderr:200000"),
-            None,
-            1000,
-            Duration::from_secs(60),
-        )
-        .expect_err("the cap trips");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-
-        // raw invalid bytes arrive unchanged
-        let out = fixture_command("invalid:stderr").output().expect("run");
-        assert_eq!(out.stderr, INVALID_BYTES);
-        assert!(String::from_utf8(out.stderr).is_err());
-
-        // an editor write
-        let dir = tempfile::tempdir().expect("temp dir");
-        let file = dir.path().join("edited.txt");
-        let status = fixture_command_for("editor", &file)
-            .env(TEXT_ENV, "title: edited\n")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("run the editor fixture");
-        assert!(status.success());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "title: edited\n");
-
-        // a hang ends only when it is killed
-        let mut hanging = fixture_command("hang")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start the hang fixture");
-        assert!(hanging.try_wait().expect("poll").is_none());
-        hanging.kill().expect("kill");
-        hanging.wait().expect("reap");
-
-        // descendants: two live copies, killed one by one
-        let list = dir.path().join("pids");
-        let mut parent = fixture_command_for("descendants:2", &list)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start the descendants fixture");
-        // the file appears once both copies run; wait on its content, not on time
-        let pids = loop {
-            if let Ok(text) = std::fs::read_to_string(&list)
-                && text.lines().count() == 2
-            {
-                break ids(&list);
-            }
-            assert!(
-                parent.try_wait().expect("poll").is_none(),
-                "the parent died"
-            );
-            std::thread::yield_now();
-        };
-        assert_ne!(pids[0], pids[1]);
-        for pid in &pids {
-            assert!(process_running(*pid));
-        }
-        parent.kill().expect("kill the parent");
-        parent.wait().expect("reap");
-        for pid in pids {
-            kill_hard(pid);
-            while !process_exited(pid) {
-                std::thread::yield_now();
-            }
-        }
-    }
-
-    #[test]
-    fn wx23c_escaped_holder_does_not_hold_the_bounded_run() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let file = dir.path().join("holder");
-        let out = run_bounded(
-            fixture_command_for("holder", &file),
-            None,
-            1 << 20,
-            Duration::from_secs(60),
-        )
-        .expect("the run ends when the direct child exits");
-        assert_eq!(out.status.code(), Some(0));
-        let pids = ids(&file);
-        assert_eq!(pids.len(), 1);
-        // the runner stopped the holder with the tree
-        let pid = pids[0];
-        let mut tries = 0;
-        while !process_exited(pid) && tries < 1_000_000 {
-            std::thread::yield_now();
-            tries += 1;
-        }
-        if !process_exited(pid) {
-            kill_hard(pid);
-            panic!("the holder survived the run");
-        }
-    }
-
-    #[test]
-    fn wx23c_fixture_is_absent_from_product_release() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(root.join("src/platform/child_fixture.rs"))
-            .expect("the fixture source");
-        // the module is registered only in a test build
-        let platform = std::fs::read_to_string(root.join("src/platform.rs")).expect("platform.rs");
-        let at = platform
-            .find("mod child_fixture;")
-            .expect("the registration");
-        let lines: Vec<&str> = platform[..at].lines().collect();
-        assert!(
-            lines
-                .last()
-                .is_some_and(|line| line.contains("#[cfg(test)]")),
-            "mod child_fixture is not behind cfg(test)"
-        );
-        assert!(source.contains("fn fixture_entry()"));
-        // no product binary names the fixture, and the crate adds no binary target
-        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("manifest");
-        assert!(!manifest.contains("[[bin]]"));
-        for entry in std::fs::read_dir(root.join("src/bin")).expect("bins") {
-            let path = entry.expect("entry").path();
-            let text = std::fs::read_to_string(&path).expect("bin source");
-            assert!(
-                !text.contains("child_fixture") && !text.contains(MODE_ENV),
-                "{} names the fixture",
-                path.display()
-            );
-        }
-        // the test selector in the source and the constant agree
-        assert!(source.contains("fn fixture_entry()"));
-        assert_eq!(ENTRY_SELECTOR, "platform::child_fixture::fixture_entry");
-    }
 }

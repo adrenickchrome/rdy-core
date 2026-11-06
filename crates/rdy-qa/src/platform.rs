@@ -7,6 +7,8 @@ mod child_fixture;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use child_fixture::*;
+#[cfg(test)]
+mod child_fixture_tests;
 
 #[cfg(unix)]
 mod unix;
