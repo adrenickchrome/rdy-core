@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcfg1: a figure enters through a file: commit stores the image as a blob, copies it to
 //! _blobs/<hash>.<ext> and rewrites the reference to the hash (spec §12.1, D-7BKK5).
 use rdy_engine::*;
@@ -77,6 +75,7 @@ fn wcfg1_a_missing_outside_or_untyped_image_is_e_wc_invalid() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn msw11_blobs_are_never_written_through_a_linked_blobs_dir() {
     let (s, seed) = seeded();
@@ -132,6 +131,7 @@ fn msw11_committed_blob(s: &Served, section: &str) -> (std::path::PathBuf, std::
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn msw11_checkout_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let (s, seed) = seeded();
@@ -148,6 +148,7 @@ fn msw11_checkout_never_writes_a_blob_through_a_link_at_its_temp_name() {
     assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
 }
 
+#[cfg(unix)]
 #[test]
 fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let (s, seed) = seeded();

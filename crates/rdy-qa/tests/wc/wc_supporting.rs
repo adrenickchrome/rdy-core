@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it runs the working-copy CLI against a served project. FW-XP1 Phase 4 ports it.
 //! rf5 (D-Z8P09, n-QJ36D): findings and sources live only in the store. A checkout and a refresh
 //! write neither, nor a link to one; an entry of either type put in a file by hand is refused
 //! with the supporting diagnostic; a normal commit, deletions included, keeps both. The

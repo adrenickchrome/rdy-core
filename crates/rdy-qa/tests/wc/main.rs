@@ -18,4 +18,5 @@ mod wc_state;
 mod wc_status;
 mod wc_supporting;
 mod wc_update;
+mod wc_windows;
 mod wc_worktree;

@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it runs the working-copy CLI against a served project. FW-XP1 Phase 4 ports it.
 //! ain1 fix round 1 (D-4W1ZR): an instruction's `decided_by` is a store-only link, so its file
 //! never shows it. The file lint trusts the hidden link: an untouched checkout checks clean, and
 //! a commit of an unrelated edit with an instruction in the tree lands and keeps the reason.

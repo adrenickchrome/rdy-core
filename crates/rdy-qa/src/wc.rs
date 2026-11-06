@@ -171,3 +171,33 @@ pub fn store_block(s: &Served, view: &str, id: &str) -> rdy_model::Block {
     r.close().expect("close");
     b
 }
+
+/// Copies the directory `from` to `to` (which must not exist), keeping links as links and file
+/// bytes as they are. The portable stand-in for `cp -R`.
+pub fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            let target = std::fs::read_link(&src)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &dst)?;
+            #[cfg(windows)]
+            {
+                let dir = std::fs::metadata(&src).map(|m| m.is_dir()).unwrap_or(false);
+                if dir {
+                    std::os::windows::fs::symlink_dir(&target, &dst)?;
+                } else {
+                    std::os::windows::fs::symlink_file(&target, &dst)?;
+                }
+            }
+        } else if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}

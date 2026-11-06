@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks and uses path bytes. FW-XP1 Phase 4 ports it.
 //! wcly1: which files belong to the working tree (spec §12.1, D-7BKK5), what is untracked, and the
 //! working-copy reader, where new entries need no id, order or parent.
 use rdy_engine::wc::ignore::Ignore;
@@ -119,6 +117,7 @@ fn wcly1_new_entries_need_no_id_order_or_parent() {
     assert_eq!(body.block.parent.as_ref(), Some(&fresh.head));
 }
 
+#[cfg(unix)]
 #[test]
 fn wcly1_hostile_entries_are_untracked_never_followed() {
     let t = tempfile::tempdir().unwrap();

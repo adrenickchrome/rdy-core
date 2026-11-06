@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcup1: rdy update brings in the view's changes made elsewhere, keeps local edits, merges disjoint
 //! ones, writes conflicts beside the file as .theirs.yaml, handles a folder renamed on both sides,
 //! and resolution goes through rdy add (spec §12.4, D-WY79P).
@@ -559,9 +557,11 @@ fn wcup1_a_folder_the_store_deleted_stays_while_a_doc_in_it_is_edited_here() {
     );
 }
 
+#[cfg(unix)]
 /// Why a test skips when a read-only directory takes writes.
 const READ_ONLY_REASON: &str = "a read-only directory takes writes here (running as root?)";
 
+#[cfg(unix)]
 /// Whether `dir` takes a write although its mode is read-only (running as root). The probe file
 /// is removed again.
 fn takes_writes_when_read_only(dir: &std::path::Path) -> bool {
@@ -573,6 +573,7 @@ fn takes_writes_when_read_only(dir: &std::path::Path) -> bool {
     wrote
 }
 
+#[cfg(unix)]
 #[test]
 fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
     use std::os::unix::fs::PermissionsExt;
@@ -610,6 +611,7 @@ fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
     use std::os::unix::fs::PermissionsExt;
@@ -907,6 +909,7 @@ fn wcup1_update_of_a_kept_rename_asks_for_the_file_in_the_way_first() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
     use std::os::unix::fs::PermissionsExt;
@@ -952,6 +955,7 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
     assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
 }
 
+#[cfg(unix)]
 /// Stops an update midway, as `msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes`
 /// does: the claim and the note change with `extra`, the root goes read-only, so
 /// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
@@ -985,6 +989,7 @@ fn msw5_interrupt(
     true
 }
 
+#[cfg(unix)]
 #[test]
 fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
     let (s, seed) = seeded();
@@ -1051,6 +1056,7 @@ fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
     assert_eq!(read(&s, "zfold.mine"), "mine\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() {
     let (s, seed) = seeded();

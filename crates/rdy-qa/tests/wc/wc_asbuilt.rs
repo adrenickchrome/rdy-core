@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it runs the working-copy CLI against a served project. FW-XP1 Phase 4 ports it.
 //! ab1 (D-WJ0SJ): a content block's `planned` and `since` overrides are ordinary fields of its
 //! working-copy entry. They round-trip through a checkout and a commit; a typo or an invalid
 //! version is refused whole, and nothing in the store moves. A decision, with its `built`,

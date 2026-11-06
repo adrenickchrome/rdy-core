@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcco1: rdy checkout writes the view as files with the metadata split (MS, FW-D10, FW-D14,
 //! FW-F2a), refuses over edits and untracked files, writes blobs, and the checked-out tree reads
 //! back as the view (invariant 7). The bound view is the CLI default view (D-874AS).
@@ -236,6 +234,7 @@ fn wcco1_rdys_own_fields_stay_in_the_store() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn wcco1_a_symlinked_tracked_folder_is_never_read_or_deleted_through() {
     let (s, seed) = seeded();
@@ -275,6 +274,7 @@ fn wcco1_a_symlinked_tracked_folder_is_never_read_or_deleted_through() {
     ok(&s, &["checkout", "other"]);
 }
 
+#[cfg(unix)]
 /// Sets `dir`'s mode; returns whether a write in it is now refused (never for root).
 fn read_only(dir: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -285,11 +285,13 @@ fn read_only(dir: &std::path::Path) -> bool {
     refused
 }
 
+#[cfg(unix)]
 fn writable(dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn wcco1_an_interrupted_checkout_is_refused_until_forced() {
     let (s, seed) = seeded();
@@ -462,6 +464,7 @@ fn msw10_damaged_wc_state_refuses_rdy_new_before_it_lands() {
     r.close().unwrap();
 }
 
+#[cfg(unix)]
 /// #695: a damaged `bound.yaml` stops `rdy edit` before the editor opens; the block is unchanged
 /// in the bound view and in the default view.
 #[test]
