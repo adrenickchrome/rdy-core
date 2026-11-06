@@ -198,6 +198,12 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// Makes `link` a second name for the existing directory `target`: a junction here, which needs
+/// no privilege. The other platform's counterpart is a symbolic link.
+pub fn dir_alias(target: &Path, link: &Path) -> io::Result<()> {
+    junction(target, link)
+}
+
 /// Makes `link` a junction to the existing directory `target`. A new empty directory takes the
 /// reparse data, and it is removed again if that fails. No privilege is needed.
 #[allow(unsafe_code)]

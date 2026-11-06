@@ -138,6 +138,12 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
+/// Makes `link` a second name for the existing directory `target`: a symbolic link here. The
+/// other platform's counterpart needs no privilege.
+pub fn dir_alias(target: &Path, link: &Path) -> io::Result<()> {
+    symlink(target, link)
+}
+
 /// Sets the permission bits of `path` to `mode` (for example `0o555` for a read-only directory).
 pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

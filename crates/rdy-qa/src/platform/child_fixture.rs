@@ -20,6 +20,9 @@
 //!   is complete.
 //! - `editor`: write [`TEXT_ENV`] to the file named by [`TARGET_ENV`], as an editor does, and
 //!   exit 0.
+//! - `script`: a scripted stdio peer, for the MCP stubs (see [`Step`]). The steps are the lines
+//!   of [`SCRIPT_ENV`]. They replace every shell stub of the MCP area: the same bytes run on
+//!   every platform and no shell, `cat`, `head`, `tr` or `sleep` is needed.
 //!
 //! libtest prints its own header to stdout before a test starts, so a mode that needs exact bytes
 //! writes them to stderr, or the caller accounts for the header.
@@ -44,6 +47,11 @@ pub const TEXT_ENV: &str = "RDY_QA_CHILD_TEXT";
 /// The environment variable that names the independent process (a process ID) the `holder` mode
 /// lends its streams to. Windows only; Unix starts its own holder.
 pub const HOLDER_ENV: &str = "RDY_QA_CHILD_HOLDER";
+/// The environment variable that holds the steps of the `script` mode, one per line.
+pub const SCRIPT_ENV: &str = "RDY_QA_CHILD_SCRIPT";
+/// The first bytes libtest writes to stdout before it runs the entry test. A reader of a
+/// fixture's stdout that must see only the fixture's own bytes drops exactly these.
+pub const BANNER: &[u8] = b"\nrunning 1 test\n";
 /// The bytes of the `invalid` mode: not valid UTF-8, with a newline and a NUL between them.
 pub const INVALID_BYTES: &[u8] = &[0xff, 0xfe, 0x80, b'\n', 0xc0, 0xaf, 0x00, 0xed, 0xa0, 0x80];
 
@@ -73,6 +81,7 @@ pub enum Mode {
     Descendants(usize),
     Holder,
     Editor,
+    Script,
 }
 
 fn stream(word: &str) -> Result<Stream, String> {
@@ -101,6 +110,7 @@ pub fn parse_mode(text: &str) -> Result<Mode, String> {
         ["descendants", count] => Ok(Mode::Descendants(number(count)?)),
         ["holder"] => Ok(Mode::Holder),
         ["editor"] => Ok(Mode::Editor),
+        ["script"] => Ok(Mode::Script),
         _ => Err(format!("unknown fixture mode `{text}`")),
     }
 }
@@ -314,6 +324,251 @@ pub fn holder_keeps(held: &Held) -> Result<(), String> {
     Ok(())
 }
 
+/// One step of the `script` mode. A script is lines; a line is a word, then (for some words) a
+/// space and the rest of the line, taken as it is.
+///
+/// - `read`: read one line of stdin into the last line. The end of stdin ends the process, exit 0.
+/// - `say TEXT`: write `TEXT` and LF to stdout. `put TEXT`: the same with no LF.
+/// - `rawout HEX` and `rawerr HEX`: write those bytes (hex pairs) to stdout or stderr.
+/// - `fill out|err COUNT HEXBYTE`: write `COUNT` copies of the byte.
+/// - `drain`: read stdin to its end.
+/// - `exit CODE`, `hang`.
+/// - `closein`: close the process's own stdin, so the writer of the pipe sees it broken.
+/// - `bghang`: start a hanging copy that shares the streams; its process ID is the last line.
+/// - `note TEXT`: write `TEXT` and LF to the file named by [`TARGET_ENV`], replacing it.
+/// - `record`: write the last line and LF to that file, replacing it. `append`: add them.
+/// - `loopsay TEXT`: say `TEXT`, read a line, and again, until stdin ends.
+/// - `askforever`: for each line read, say an `input_required` reply to the call with the number of
+///   lines read so far as its id and `h<number>` as its state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Read,
+    Say(String),
+    Put(String),
+    Raw(Stream, Vec<u8>),
+    Fill(Stream, usize, u8),
+    Drain,
+    Exit(i32),
+    Hang,
+    CloseIn,
+    BgHang,
+    Note(String),
+    Record,
+    Append,
+    LoopSay(String),
+    AskForever,
+}
+
+fn hex_bytes(text: &str) -> Result<Vec<u8>, String> {
+    if text.len() % 2 != 0 || !text.is_ascii() {
+        return Err(format!("bad hex `{text}`"));
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|_| format!("bad hex `{text}`")))
+        .collect()
+}
+
+fn out_err(word: &str) -> Result<Stream, String> {
+    match word {
+        "out" => Ok(Stream::Stdout),
+        "err" => Ok(Stream::Stderr),
+        other => Err(format!("unknown stream `{other}`")),
+    }
+}
+
+/// Parses a script; a line that is not a step is an error that names it.
+pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let step = match word {
+            "read" => Step::Read,
+            "say" => Step::Say(rest.to_string()),
+            "put" => Step::Put(rest.to_string()),
+            "rawout" => Step::Raw(Stream::Stdout, hex_bytes(rest)?),
+            "rawerr" => Step::Raw(Stream::Stderr, hex_bytes(rest)?),
+            "fill" => {
+                let parts: Vec<&str> = rest.split(' ').collect();
+                let [which, count, byte] = parts.as_slice() else {
+                    return Err(format!("bad fill step `{line}`"));
+                };
+                let count = count
+                    .parse::<usize>()
+                    .map_err(|_| format!("bad number in `{line}`"))?;
+                let byte = hex_bytes(byte)?;
+                let [byte] = byte.as_slice() else {
+                    return Err(format!("bad byte in `{line}`"));
+                };
+                Step::Fill(out_err(which)?, count, *byte)
+            }
+            "drain" => Step::Drain,
+            "exit" => Step::Exit(
+                rest.parse::<i32>()
+                    .map_err(|_| format!("bad exit code in `{line}`"))?,
+            ),
+            "hang" => Step::Hang,
+            "closein" => Step::CloseIn,
+            "bghang" => Step::BgHang,
+            "note" => Step::Note(rest.to_string()),
+            "record" => Step::Record,
+            "append" => Step::Append,
+            "loopsay" => Step::LoopSay(rest.to_string()),
+            "askforever" => Step::AskForever,
+            _ => return Err(format!("unknown script step `{line}`")),
+        };
+        steps.push(step);
+    }
+    Ok(steps)
+}
+
+/// Reads one line of stdin, without its LF; `None` at the end of stdin.
+fn read_input_line() -> Option<String> {
+    use std::io::BufRead;
+    let mut raw = Vec::new();
+    match io::stdin().lock().read_until(b'\n', &mut raw) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => {
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+            }
+            Some(String::from_utf8_lossy(&raw).into_owned())
+        }
+    }
+}
+
+/// Closes this process's standard input.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn close_input() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: descriptor 0 is the process's own stdin; nothing here reads it afterwards.
+    drop(unsafe { OwnedFd::from_raw_fd(0) });
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn close_input() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+    // SAFETY: the handle is the process's own stdin; nothing here reads it afterwards.
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        if !handle.is_null() {
+            CloseHandle(handle);
+        }
+    }
+}
+
+fn write_target(text: &str, append: bool) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(target()?)
+        .map_err(|e| format!("open target: {e}"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|_| file.flush())
+        .map_err(|e| format!("write target: {e}"))
+}
+
+fn forever() -> ! {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+/// Runs the steps. The end of the script is exit 0. A closed stdout or stderr ends the process
+/// the way a closed pipe ends a shell peer: exit 0.
+fn run_script(steps: &[Step]) -> Result<i32, String> {
+    let mut last = String::new();
+    let mut lines = 0usize;
+    for step in steps {
+        let wrote = match step {
+            Step::Read => match read_input_line() {
+                Some(line) => {
+                    last = line;
+                    lines += 1;
+                    Ok(())
+                }
+                None => return Ok(0),
+            },
+            Step::Say(text) => write_stream(Stream::Stdout, format!("{text}\n").as_bytes()),
+            Step::Put(text) => write_stream(Stream::Stdout, text.as_bytes()),
+            Step::Raw(which, bytes) => write_stream(*which, bytes),
+            Step::Fill(which, count, byte) => {
+                let chunk = vec![*byte; 8192];
+                let mut left = *count;
+                let mut result = Ok(());
+                while left > 0 && result.is_ok() {
+                    let n = left.min(chunk.len());
+                    result = write_stream(*which, &chunk[..n]);
+                    left -= n;
+                }
+                result
+            }
+            Step::Drain => {
+                let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+                Ok(())
+            }
+            Step::Exit(code) => return Ok(*code),
+            Step::Hang => forever(),
+            Step::CloseIn => {
+                close_input();
+                Ok(())
+            }
+            Step::BgHang => {
+                // its streams are nobody's: its own libtest banner must not reach the reader
+                let child = hanger_command()?
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("spawn: {e}"))?;
+                last = child.id().to_string();
+                Ok(())
+            }
+            Step::Note(text) => {
+                write_target(&format!("{text}\n"), false)?;
+                Ok(())
+            }
+            Step::Record => {
+                write_target(&format!("{last}\n"), false)?;
+                Ok(())
+            }
+            Step::Append => {
+                write_target(&format!("{last}\n"), true)?;
+                Ok(())
+            }
+            Step::LoopSay(text) => loop {
+                if write_stream(Stream::Stdout, format!("{text}\n").as_bytes()).is_err() {
+                    return Ok(0);
+                }
+                if read_input_line().is_none() {
+                    return Ok(0);
+                }
+            },
+            Step::AskForever => {
+                while read_input_line().is_some() {
+                    lines += 1;
+                    let reply = format!(
+                        r#"{{"jsonrpc":"2.0","id":{lines},"result":{{"resultType":"input_required","requestState":"h{lines}","inputRequests":{{"answer":{{"method":"elicitation/create","params":{{"mode":"form","message":"m","requestedSchema":{{"type":"object"}}}}}}}}}}}}"#
+                    );
+                    if write_stream(Stream::Stdout, format!("{reply}\n").as_bytes()).is_err() {
+                        return Ok(0);
+                    }
+                }
+                return Ok(0);
+            }
+        };
+        if wrote.is_err() {
+            // the reader closed the stream: the cap or a stop did its work
+            return Ok(0);
+        }
+    }
+    Ok(0)
+}
+
 /// Runs `mode` in this process. Returns the exit code the process should end with; a hanging
 /// mode never returns.
 pub fn run_mode(mode: &Mode) -> Result<i32, String> {
@@ -364,6 +619,10 @@ pub fn run_mode(mode: &Mode) -> Result<i32, String> {
                 .map_err(|e| format!("write report: {e}"))?;
             Ok(0)
         }
+        Mode::Script => {
+            let text = std::env::var(SCRIPT_ENV).map_err(|_| format!("{SCRIPT_ENV} is not set"))?;
+            run_script(&parse_script(&text)?)
+        }
         Mode::Editor => {
             let text = std::env::var(TEXT_ENV).map_err(|_| format!("{TEXT_ENV} is not set"))?;
             std::fs::write(target()?, text).map_err(|e| format!("write: {e}"))?;
@@ -399,7 +658,20 @@ pub(crate) fn fixture_command(mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test executable"));
     command
         .args(["--exact", &entry_selector(), "--nocapture"])
+        // a single test thread would make libtest print the test's name before it runs
+        .env_remove("RUST_TEST_THREADS")
         .env(MODE_ENV, mode);
+    command
+}
+
+/// A scripted stdio peer (the `script` mode). `arg` is the file the steps `note`, `record` and
+/// `append` write to.
+pub(crate) fn script_command(script: &str, arg: Option<&Path>) -> Command {
+    let mut command = fixture_command("script");
+    command.env(SCRIPT_ENV, script);
+    if let Some(arg) = arg {
+        command.env(TARGET_ENV, arg);
+    }
     command
 }
 

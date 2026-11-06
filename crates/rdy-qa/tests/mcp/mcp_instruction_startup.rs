@@ -692,9 +692,10 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
         ["person", "person"]
     );
     drop(c);
-    // meta under another spelling of the same directory is read once
+    // meta under another spelling of the same directory (a native alias: a symbolic link, or a
+    // junction where a link needs a privilege) is read once
     let alias: PathBuf = w.home.path().join("meta-link");
-    rdy_qa::platform::symlink(&meta, &alias).unwrap();
+    rdy_qa::platform::dir_alias(&meta, &alias).unwrap();
     w.person(&alias);
     let mut c = w.mcp(&meta);
     session(&mut c, "reader");
