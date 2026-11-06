@@ -494,6 +494,7 @@ fn wx15_pid_record_requires_creation_time() {
         synced.contains(&run.path().to_path_buf()),
         "the run dir is flushed: {synced:?}"
     );
+    assert_eq!(endpoint, run.socket());
     let record = run.pid_record().expect("the record of this process");
     assert_eq!(record.pid(), std::process::id());
     #[cfg(windows)]
@@ -518,7 +519,6 @@ fn wx15_pid_record_requires_creation_time() {
         }
     }
     drop(listener);
-    let _ = endpoint;
     #[cfg(unix)]
     {
         assert_eq!(
