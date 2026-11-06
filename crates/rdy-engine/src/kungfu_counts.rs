@@ -233,7 +233,7 @@ pub fn summarize(rows: &Rows, today: Day) -> Summary {
     let mut all: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
     let mut now: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
     for (k, c) in rows {
-        if !k.day.retained_at(today) {
+        if !k.day.retained_at(today) || c.total() == 0 {
             continue;
         }
         s.total.add(c);
@@ -246,6 +246,67 @@ pub fn summarize(rows: &Rows, today: Day) -> Summary {
     s.sessions = all.len() as u64;
     s.today_sessions = now.len() as u64;
     s
+}
+
+/// The one summary line of `rdy status` and `rdy_overview`, over every retained day, or `None`
+/// when every count is zero. Every caller uses this formatter.
+pub fn summary_line(s: &Summary) -> Option<String> {
+    let t = &s.total;
+    (t.total() > 0).then(|| {
+        format!(
+            "kungfu: {} not loaded, {} lost, {} wrong, in {} sessions.",
+            t.not_loaded, t.lost, t.wrong, s.sessions
+        )
+    })
+}
+
+/// The retained rows as JSON objects with exactly the file's row fields, in key order.
+pub fn rows_json(rows: &Rows, today: Day) -> Vec<serde_json::Value> {
+    rows.iter()
+        .filter(|(k, c)| k.day.retained_at(today) && c.total() > 0)
+        .map(|(k, c)| {
+            serde_json::json!({
+                "day": k.day.to_string(),
+                "actor": k.actor,
+                "run": k.run,
+                "ruleset": k.ruleset,
+                "not_loaded": c.not_loaded,
+                "lost": c.lost,
+                "wrong": c.wrong,
+            })
+        })
+        .take(MAX_ROWS)
+        .collect()
+}
+
+/// The rows a status shows for the project at `rdy_dir`: the process recorder's memory snapshot
+/// when one exists, else one bounded best-effort read of the count file. It never waits for a
+/// flush or a lock, never makes a recorder, and never fails: any problem reads as no rows.
+pub fn status_rows(rdy_dir: &Path) -> Rows {
+    let Ok(dir) = pio::open_dir(rdy_dir) else {
+        return Rows::new();
+    };
+    if let Ok(id) = FileId::of_file(&dir) {
+        let found = registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .and_then(Weak::upgrade);
+        if let Some(h) = found {
+            return Recorder(h).rows();
+        }
+    }
+    let today = Day::today();
+    let Ok(run) = pio::open_dir_at(&dir, OsStr::new(RUN_DIR)) else {
+        return Rows::new();
+    };
+    match run.metadata() {
+        Ok(m) if pio::is_private_dir(&m) => {}
+        _ => return Rows::new(),
+    }
+    let mut rows = read_counts(&run, today).unwrap_or_default();
+    retain(&mut rows, today);
+    rows
 }
 
 #[derive(Serialize, Deserialize)]

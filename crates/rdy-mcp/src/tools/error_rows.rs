@@ -1,6 +1,6 @@
 //! ERROR_ROWS: the error code table that rdy_schema reports.
 
-use super::common::W_DAEMON_BUILD;
+use super::common::{W_DAEMON_BUILD, W_KUNGFU};
 use rdy_engine::*;
 
 /// `rdy_schema`'s error rows: `(code, when, fix)`.
@@ -520,6 +520,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         E_HELD_BY_READER,
         "the project store is still open in this process through a read state of an earlier open",
         HELD_BY_READER_FIX,
+    ),
+    (
+        W_KUNGFU,
+        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+        "Call rdy_instructions and load the ruleset named by the warning.",
     ),
     (
         E_PUBLICATION_REFERENCE,

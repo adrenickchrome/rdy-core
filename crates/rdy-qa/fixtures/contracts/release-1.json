@@ -15450,6 +15450,11 @@
         "release the earlier read state, then try again"
       ],
       [
+        "W_KUNGFU",
+        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+        "Call rdy_instructions and load the ruleset named by the warning."
+      ],
+      [
         "E_PUBLICATION_REFERENCE",
         "a public profile refers to blocks outside its selection",
         "Include the target docs or remove these references. Run the publication check again."
@@ -16041,6 +16046,7 @@
       "W_REFLECTS_NO_CODE",
       "E_FROZEN",
       "E_HELD_BY_READER",
+      "W_KUNGFU",
       "E_PUBLICATION_REFERENCE",
       "W_PUBLICATION_REFERENCE"
     ],
@@ -18276,6 +18282,10 @@
               "when": "string"
             },
             "W_INSTRUCTION_SELECTOR": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_KUNGFU": {
               "fix": "string",
               "when": "string"
             },
