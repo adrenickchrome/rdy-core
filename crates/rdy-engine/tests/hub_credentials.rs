@@ -3,9 +3,13 @@
 //! sign-out. A fake transport records every request; channels, barriers and child-process
 //! marks order the races. Nothing sleeps or measures time.
 //!
-//! Its file modes and 0600 fixtures go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected
-//! modes are Unix modes, which FW-XP1 Phase 4 ports with the Windows privacy rules.
+//! Its file modes and 0600 fixtures go through the `modes` fixture (FW-XP1 D-1RXEA), which stands
+//! for the Windows privacy rules there.
 
+#[allow(dead_code)]
+mod modes;
+
+use modes::{chmod, home_dir, mkdir, mode, open_secret};
 use rdy_engine::answer::relay::{RelayInput, relayed};
 use rdy_engine::hub_config::{
     Credential, CredentialFile, PendingSignIn, ReadyCredential, encode_credentials,
@@ -27,7 +31,6 @@ use rdy_engine::{
 };
 use rdy_model::Role;
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
-use rdy_store::pio;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -102,22 +105,16 @@ struct Env {
 
 /// A private temp root with `cfg/rdy/config.yaml` (0644, with comments) and a project.
 fn env() -> Env {
-    let dir = tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap();
+    let dir = home_dir();
     let root = dir.path().to_path_buf();
-    let rdy = root.join("cfg/rdy");
-    pio::dir_mode(fs::DirBuilder::new().recursive(true), 0o700)
-        .create(&rdy)
-        .unwrap();
+    let rdy = root.join("cfg").join("rdy");
+    mkdir(root.join("cfg")).unwrap();
+    mkdir(&rdy).unwrap();
     let user_file = rdy.join("config.yaml");
     fs::write(&user_file, CONFIG).unwrap();
-    fs::set_permissions(&user_file, pio::permissions(0o644)).unwrap();
+    chmod(&user_file, 0o644);
     let project = root.join("project");
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
-        .create(&project)
-        .unwrap();
+    mkdir(&project).unwrap();
     Env {
         _dir: dir,
         creds: rdy.join("credentials.yaml"),
@@ -132,10 +129,6 @@ fn svc<'a>(e: &Env, t: &'a Fake, c: &'a Clock) -> HubCredentials<'a> {
     HubCredentials::new(Some(&e.project), &e.user_file, t, c)
 }
 
-fn mode(p: &Path) -> u32 {
-    pio::mode_of(&fs::symlink_metadata(p).unwrap())
-}
-
 /// Writes the credential file (0600) holding exactly `records`.
 fn seed(e: &Env, records: &[(&str, Credential)]) {
     seed_at(&e.creds, records);
@@ -148,14 +141,10 @@ fn seed_at(creds: &Path, records: &[(&str, Credential)]) {
         file.set(origin(o), Some(c.clone()));
     }
     let bytes = encode_credentials(&file).unwrap();
-    let mut f = pio::file_mode(
-        OpenOptions::new().write(true).create(true).truncate(true),
-        0o600,
-    )
-    .open(creds)
-    .unwrap();
+    let mut f = open_secret(creds);
     f.write_all(&bytes).unwrap();
-    fs::set_permissions(creds, pio::permissions(0o600)).unwrap();
+    drop(f);
+    chmod(creds, 0o600);
 }
 
 /// The record of `install` on disk, read without the lock (a replacement is a rename).
@@ -1997,7 +1986,7 @@ fn hsa5_refresh_leaves_0644_config_bytes_comments_and_mode_unchanged() {
         "{CONFIG}hub:\n  installs:\n    {INSTALL}:\n      ca_file: {ca_yaml}   # the test CA\n"
     );
     fs::write(&e.user_file, &config).unwrap();
-    fs::set_permissions(&e.user_file, pio::permissions(0o644)).unwrap();
+    chmod(&e.user_file, 0o644);
     let unchanged = |what: &str| {
         assert_eq!(fs::read_to_string(&e.user_file).unwrap(), config, "{what}");
         assert_eq!(mode(&e.user_file), 0o644, "{what}");

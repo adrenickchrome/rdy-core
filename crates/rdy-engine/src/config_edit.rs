@@ -181,10 +181,19 @@ fn too_large(limit: usize) -> RdyError {
 /// not empty, with no `.`, `..` or empty component (a programming error guard: callers pass
 /// constants).
 fn split_rel(rel: &Path) -> Result<(Vec<&OsStr>, &OsStr), RdyError> {
+    // `components` drops an inner `.`, an empty part and a trailing separator, so these are read
+    // from the text
+    let text = rel.to_str().ok_or_else(not_private)?;
+    if text
+        .split(std::path::is_separator)
+        .any(|part| part.is_empty() || part == ".")
+    {
+        return Err(not_private());
+    }
     let mut parts: Vec<&OsStr> = vec![];
     for part in rel.components() {
         match part {
-            Component::Normal(name) if name.to_str().is_some() => parts.push(name),
+            Component::Normal(name) => parts.push(name),
             _ => return Err(not_private()),
         }
     }
@@ -402,6 +411,21 @@ mod split_rel_tests {
         assert_eq!(dirs, [OsStr::new("a"), OsStr::new("b")]);
         assert_eq!(name, OsStr::new("c"));
         assert!(split_rel(Path::new(r"a\..\c")).is_err());
+    }
+
+    #[test]
+    fn wx12d_refuses_what_path_components_drop() {
+        for bad in ["a/./b", "a/.", "a//b", "a/"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wx12d_refuses_what_path_components_drop_with_backslashes() {
+        for bad in [r"a\.\b", r"a\\b", r"a\", r"C:a"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

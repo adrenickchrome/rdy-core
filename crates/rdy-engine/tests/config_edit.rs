@@ -3,12 +3,17 @@
 //! entry below the caller's config home is checked without following links, and the
 //! replacement goes through the directory checked at open.
 //!
-//! Its file modes, owners and inodes go through `rdy_store::pio` (FW-XP1 D-1RXEA); the expected
-//! modes are Unix modes, which FW-XP1 Phase 4 ports with the Windows privacy rules.
+//! Its file modes and links go through the `modes` fixture (FW-XP1 D-1RXEA), which stands for the
+//! Windows privacy rules there. A umask has no Windows form, so the umask tests are Unix only.
 
+#[allow(dead_code)]
+mod modes;
+
+use modes::{chmod, home_dir, identity, link, mkdir, mode};
 use rdy_engine::config_edit::LockedConfig;
 use rdy_engine::{E_IO, E_LIMIT, RdyError};
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
+#[cfg(unix)]
 use rdy_store::pio;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
@@ -21,14 +26,9 @@ const PRIVACY_FIX: &str =
     "use owner-only permissions and remove symbolic links from the config path";
 const SAVE: &str = "the config file could not be saved durably";
 const SAVE_FIX: &str = "check the config path and available disk space, then try again";
-
-fn mode(path: &Path) -> u32 {
-    pio::mode_of(&fs::symlink_metadata(path).unwrap())
-}
-
-fn chmod(path: &Path, mode: u32) {
-    fs::set_permissions(path, pio::permissions(mode)).unwrap();
-}
+/// The mode a 0o644 settings file has after a replacement. On Windows a replacement keeps only
+/// the read-only attribute, and the file takes the private descriptor of its temp file.
+const REPLACED_0644: u32 = if cfg!(windows) { 0o600 } else { 0o644 };
 
 fn names(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(dir)
@@ -43,22 +43,6 @@ fn lock_of(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".lock");
     PathBuf::from(s)
-}
-
-/// A fresh config home that group and others cannot write, whatever the umask: `tempdir()` asks
-/// for 0o777, so a umask of 002 (the Linux default for user private groups) would make it a
-/// shared-writable home, which `LockedConfig` refuses. 0o700 minus any umask has no such bit.
-fn home_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap()
-}
-
-/// Makes the directory `path` 0o700 minus the umask, so a fixture directory is never
-/// group-writable under a umask of 002; a test that needs a wider mode sets it with [`chmod`].
-fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700).create(path)
 }
 
 /// Opens `rel` below `home` with the usual limit.
@@ -146,7 +130,7 @@ fn hsa2_settings_mode_is_preserved_and_secrets_require_0600() {
     c.replace(b"# mine\nremotes: {a: 1}\n").unwrap();
     assert_eq!(c.bytes(), b"# mine\nremotes: {a: 1}\n");
     drop(c);
-    assert_eq!(mode(&config), 0o644);
+    assert_eq!(mode(&config), REPLACED_0644);
     assert_eq!(mode(&lock_of(&config)), 0o600, "a lock is 0600");
     assert_eq!(
         mode(&rdy),
@@ -164,7 +148,7 @@ fn hsa2_settings_mode_is_preserved_and_secrets_require_0600() {
     assert_eq!(mode(&creds), 0o600);
     assert_eq!(mode(&lock_of(&creds)), 0o600);
     assert_eq!(fs::read(&config).unwrap(), config_bytes);
-    assert_eq!(mode(&config), 0o644);
+    assert_eq!(mode(&config), REPLACED_0644);
     // a 0644 secret file is refused and left as it is
     chmod(&creds, 0o644);
     assert_privacy(
@@ -198,25 +182,21 @@ fn hsa2_lock_inode_survives_replacement() {
     let path = d.path().join("config.yaml");
     let lock = lock_of(&path);
     let mut c = open(d.path(), "config.yaml", false).unwrap();
-    let ino = pio::inode(&fs::symlink_metadata(&lock).unwrap());
+    let ino = identity(&lock);
     c.replace(b"one").unwrap();
-    let target_ino = pio::inode(&fs::symlink_metadata(&path).unwrap());
+    let target_ino = identity(&path);
     c.replace(b"two").unwrap();
     assert_ne!(
-        pio::inode(&fs::symlink_metadata(&path).unwrap()),
+        identity(&path),
         target_ino,
         "the target is replaced by a rename"
     );
-    assert_eq!(pio::inode(&fs::symlink_metadata(&lock).unwrap()), ino);
+    assert_eq!(identity(&lock), ino);
     drop(c);
-    assert_eq!(
-        pio::inode(&fs::symlink_metadata(&lock).unwrap()),
-        ino,
-        "a lock file is never unlinked"
-    );
+    assert_eq!(identity(&lock), ino, "a lock file is never unlinked");
     let c = open(d.path(), "config.yaml", false).unwrap();
     assert_eq!(c.bytes(), b"two", "the next open rereads the target");
-    assert_eq!(pio::inode(&fs::symlink_metadata(&lock).unwrap()), ino);
+    assert_eq!(identity(&lock), ino);
     drop(c);
     assert_eq!(names(d.path()), ["config.yaml", "config.yaml.lock"]);
 }
@@ -280,12 +260,12 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
     for private in [true, false] {
         // a link at the target
         let target = format!("rdy/target-{private}.yaml");
-        pio::symlink(&victim, home.join(&target)).unwrap();
+        link(&victim, home.join(&target)).unwrap();
         assert_privacy(open(home, &target, private), "a target link");
         // a link at the lock
         let locked = format!("rdy/locked-{private}.yaml");
         let victim_lock = elsewhere.join(format!("planted-{private}.lock"));
-        pio::symlink(&victim_lock, lock_of(&home.join(&locked))).unwrap();
+        link(&victim_lock, lock_of(&home.join(&locked))).unwrap();
         assert_privacy(open(home, &locked, private), "a lock link");
         assert!(
             !victim_lock.exists(),
@@ -293,7 +273,7 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
         );
         // a link at the directory that holds the file
         let linked = format!("linked-{private}");
-        pio::symlink(&elsewhere, home.join(&linked)).unwrap();
+        link(&elsewhere, home.join(&linked)).unwrap();
         assert_privacy(
             open(home, &format!("{linked}/victim.yaml"), private),
             "a parent link",
@@ -302,8 +282,24 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
         let dir_target = format!("rdy/dir-{private}.yaml");
         mkdir(home.join(&dir_target)).unwrap();
         assert_privacy(open(home, &dir_target, private), "a directory target");
+        // an intermediate directory owned by another account (the Windows directory), with the
+        // volume root as the home
+        #[cfg(windows)]
+        {
+            let windows = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+            let sub = format!("rdy-hsa2-{}-{private}", std::process::id());
+            let rel = Path::new(windows.file_name().unwrap())
+                .join(&sub)
+                .join("credentials.yaml");
+            assert_privacy(
+                LockedConfig::open(windows.parent().unwrap(), &rel, private, LIMIT),
+                "a foreign intermediate directory",
+            );
+            assert!(!windows.join(&sub).exists(), "nothing is made there");
+        }
         // an intermediate directory owned by another user (the system's temp directory,
         // owned by root), with the directory above it as the home
+        #[cfg(unix)]
         if pio::own_uid() != 0 {
             let root_tmp = fs::canonicalize("/tmp").unwrap();
             if pio::owner(&fs::symlink_metadata(&root_tmp).unwrap()) != pio::own_uid() {
@@ -319,15 +315,18 @@ fn hsa2_symlinks_and_foreign_paths_are_refused() {
             }
         }
         // a target owned by another user, where this system lets a hard link reach one
-        let theirs = format!("rdy/theirs-{private}.yaml");
-        let linked = ["/private/etc/hosts", "/etc/hosts", "/etc/passwd"]
-            .iter()
-            .filter_map(|p| fs::canonicalize(p).ok())
-            .filter(|p| fs::metadata(p).is_ok_and(|m| pio::owner(&m) != pio::own_uid()))
-            .any(|p| fs::hard_link(&p, home.join(&theirs)).is_ok());
-        if linked {
-            assert_privacy(open(home, &theirs, private), "a foreign target");
-            fs::remove_file(home.join(&theirs)).unwrap();
+        #[cfg(unix)]
+        {
+            let theirs = format!("rdy/theirs-{private}.yaml");
+            let linked = ["/private/etc/hosts", "/etc/hosts", "/etc/passwd"]
+                .iter()
+                .filter_map(|p| fs::canonicalize(p).ok())
+                .filter(|p| fs::metadata(p).is_ok_and(|m| pio::owner(&m) != pio::own_uid()))
+                .any(|p| fs::hard_link(&p, home.join(&theirs)).is_ok());
+            if linked {
+                assert_privacy(open(home, &theirs, private), "a foreign target");
+                fs::remove_file(home.join(&theirs)).unwrap();
+            }
         }
     }
     assert_eq!(fs::read(&victim).unwrap(), b"keep");
@@ -451,7 +450,7 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
     b.replace(b"b bytes").unwrap();
     // a is renamed aside and replaced by a link to b
     fs::rename(home.join("a"), home.join("a-aside")).unwrap();
-    pio::symlink(home.join("b"), home.join("a")).unwrap();
+    link(home.join("b"), home.join("a")).unwrap();
     assert_privacy(a.replace(b"redirected"), "a directory replaced by a link");
     assert_eq!(
         fs::read(home.join("b/credentials.yaml")).unwrap(),
@@ -483,7 +482,7 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
         move |stage, _: &Path| {
             if stage == PrivateWriteStage::Written {
                 fs::rename(swap_home.join("a"), swap_home.join("a-aside"))?;
-                pio::symlink(swap_home.join("b"), swap_home.join("a"))?;
+                link(swap_home.join("b"), swap_home.join("a"))?;
             }
             Ok(())
         },
@@ -509,7 +508,7 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
     let outside = home.join("outside.yaml");
     fs::write(&outside, b"outside").unwrap();
     fs::remove_file(home.join("b/credentials.yaml")).unwrap();
-    pio::symlink(&outside, home.join("b/credentials.yaml")).unwrap();
+    link(&outside, home.join("b/credentials.yaml")).unwrap();
     assert_privacy(
         c.replace(b"through the link"),
         "a target link planted after open",
@@ -535,7 +534,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
     chmod(&home, 0o755);
     let elsewhere = d.path().join("elsewhere");
     mkdir(&elsewhere).unwrap();
-    pio::symlink(&elsewhere, home.join("link")).unwrap();
+    link(&elsewhere, home.join("link")).unwrap();
     // H/link -> E, target H/link/sub/credentials.yaml: sub missing, then present
     assert_privacy(
         open(&home, "link/sub/credentials.yaml", true),
@@ -562,7 +561,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
         "a link as the last directory",
     );
     mkdir(home.join("a")).unwrap();
-    pio::symlink(&elsewhere, home.join("a/mid")).unwrap();
+    link(&elsewhere, home.join("a/mid")).unwrap();
     assert_privacy(
         open(&home, "a/mid/sub/credentials.yaml", true),
         "a link as an intermediate directory",
@@ -603,7 +602,7 @@ fn hsa2_every_component_below_the_home_is_checked() {
     );
     // a home reached through a link works, and its files are where the link points
     let via = d.path().join("via");
-    pio::symlink(&home, &via).unwrap();
+    link(&home, &via).unwrap();
     let mut c = open(&via, "rdy/credentials.yaml", true).unwrap();
     c.replace(b"through the home link").unwrap();
     drop(c);
@@ -644,9 +643,11 @@ fn hsa2_a_lock_open_to_group_or_others_is_refused() {
 }
 
 /// The home of the child half of the umask test; without it the child does nothing.
+#[cfg(unix)]
 const UMASK_CHILD: &str = "RDY_HSA2_UMASK_CHILD";
 
 /// The child's expectation: `made` (the directories are made 0700) or `refused`.
+#[cfg(unix)]
 const UMASK_EXPECT: &str = "RDY_HSA2_UMASK_EXPECT";
 
 /// Round 1 finding 5, and round 3: a directory this open makes is never chmodded (no call proves
@@ -655,6 +656,7 @@ const UMASK_EXPECT: &str = "RDY_HSA2_UMASK_EXPECT";
 /// 700) is refused before anything is made, so it cannot leave an unusable config directory or a
 /// probe file. Each umask runs in its own process, set by `sh`, twice against the same home: the
 /// second process finds the first one's directories usable, or finds nothing made.
+#[cfg(unix)]
 #[test]
 fn hsa2_new_directories_are_0700_or_not_made_at_all() {
     let exe = std::env::current_exe().unwrap();
@@ -696,6 +698,7 @@ fn hsa2_new_directories_are_0700_or_not_made_at_all() {
 }
 
 /// The child half of the test above: it runs only in the process that test starts.
+#[cfg(unix)]
 #[test]
 fn hsa2_new_directories_child() {
     let Some(home) = std::env::var_os(UMASK_CHILD) else {
@@ -778,7 +781,7 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                 fs::write(pre.join("keep"), b"keep").unwrap();
             }
             chmod(&pre, pre_mode);
-            let pre_ino = pio::inode(&fs::symlink_metadata(&pre).unwrap());
+            let pre_ino = identity(&pre);
             let link = what.starts_with("a link");
             let made = home.join("rdy");
             let (h, m, p) = (home.clone(), made.clone(), pre.clone());
@@ -791,7 +794,7 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                         assert_eq!(path, m, "the probe gets the new directory's path");
                         fs::rename(&m, h.join("aside"))?;
                         if link {
-                            pio::symlink(&p, &m)?;
+                            modes::link(&p, &m)?;
                         } else {
                             fs::rename(&p, &m)?;
                         }
@@ -819,11 +822,7 @@ fn hsa2_a_directory_put_in_place_of_a_new_one_is_refused_and_never_chmodded() {
                 (made.clone(), if with_file { vec!["keep"] } else { vec![] })
             };
             assert_eq!(mode(&stands), pre_mode, "{what}: never chmodded");
-            assert_eq!(
-                pio::inode(&fs::symlink_metadata(&stands).unwrap()),
-                pre_ino,
-                "{what}"
-            );
+            assert_eq!(identity(&stands), pre_ino, "{what}");
             // the test lists it, and the temp dir removes it, only with the owner's bits back
             chmod(&stands, 0o700);
             assert_eq!(
@@ -854,7 +853,7 @@ fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchange
         let pre = home.join("pre");
         mkdir(&pre).unwrap();
         chmod(&pre, 0o700);
-        let pre_ino = pio::inode(&fs::symlink_metadata(&pre).unwrap());
+        let pre_ino = identity(&pre);
         let made = home.join("rdy");
         let (h, m, p) = (home.clone(), made.clone(), pre.clone());
         let c = with_private_write_probe_for_tests(
@@ -870,7 +869,7 @@ fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchange
         .unwrap();
         drop(c);
         assert_eq!(mode(&made), 0o700, "never chmodded");
-        assert_eq!(pio::inode(&fs::symlink_metadata(&made).unwrap()), pre_ino);
+        assert_eq!(identity(&made), pre_ino);
         assert_eq!(names(&made), ["credentials.yaml.lock"]);
         assert!(names(&home.join("aside")).is_empty());
         // the same directory standing there before the open: the same outcome
@@ -891,13 +890,16 @@ fn hsa2_an_empty_0700_directory_put_in_place_is_used_as_an_existing_one_unchange
 // runs in its own process, set by `sh`.
 
 /// The home of the child half of the group-write test; without it the child does nothing.
+#[cfg(unix)]
 const GROUP_CHILD: &str = "RDY_HSA2_GROUP_CHILD";
 
 /// The umask the child of the group-write test runs under, in octal.
+#[cfg(unix)]
 const GROUP_UMASK: &str = "RDY_HSA2_GROUP_UMASK";
 
 /// Runs this test binary under `umask` with the libtest `args`; panics unless it passes with at
 /// least `min` tests run, and returns its output.
+#[cfg(unix)]
 fn run_under_umask(umask: &str, args: &[&str], envs: &[(&str, &Path)], min: usize) -> String {
     let mut cmd = pio::under_umask(umask, &std::env::current_exe().unwrap());
     cmd.args(args)
@@ -922,6 +924,7 @@ fn run_under_umask(umask: &str, args: &[&str], envs: &[(&str, &Path)], min: usiz
     stdout
 }
 
+#[cfg(unix)]
 #[test]
 fn hsa2_a_group_writable_folder_takes_settings_not_secrets_under_umask_002_and_022() {
     for umask in ["002", "022"] {
@@ -940,6 +943,7 @@ fn hsa2_a_group_writable_folder_takes_settings_not_secrets_under_umask_002_and_0
 }
 
 /// The child half of the test above: it runs only in the process that test starts.
+#[cfg(unix)]
 #[test]
 fn hsa2_group_writable_folder_child() {
     let Some(home) = std::env::var_os(GROUP_CHILD) else {
@@ -964,6 +968,20 @@ fn hsa2_group_writable_folder_child() {
         "a new settings file is 0600"
     );
     assert_eq!(mode(&dot), 0o777 & !umask, "no silent chmod");
+    shared_folders_take_settings_not_secrets(home);
+    println!("HSA2 group child done");
+}
+
+/// The Windows form of the group-write cases: `Power Users` in place of the group, and `Everyone`
+/// without the right to remove an entry in place of the sticky bit.
+#[cfg(windows)]
+#[test]
+fn wx12d_shared_folders_take_settings_not_secrets() {
+    let d = home_dir();
+    shared_folders_take_settings_not_secrets(d.path());
+}
+
+fn shared_folders_take_settings_not_secrets(home: &Path) {
     // a 0775 directory below the home: settings yes, secrets no
     let group = home.join("group");
     mkdir(&group).unwrap();
@@ -1018,11 +1036,11 @@ fn hsa2_group_writable_folder_child() {
         "a secret file in a 1777 directory",
     );
     assert_eq!(mode(&sticky), 0o1777, "no silent chmod");
-    println!("HSA2 group child done");
 }
 
 /// Ruling gate-g3: every hsa2_ config test also passes under a umask of 002 and of 022, each in
 /// its own process.
+#[cfg(unix)]
 #[test]
 fn hsa2_config_tests_pass_under_umask_002_and_022() {
     for umask in ["002", "022"] {
