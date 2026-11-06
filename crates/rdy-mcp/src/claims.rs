@@ -7,7 +7,7 @@
 //! the actor and run in the [`Registry`] its server's hub owns; a call's `rdy/role` holds for that
 //! call only. Saved settings expire one hour after the last call that used them.
 use crate::notify::NotifyHub;
-use crate::params::parse_params;
+use crate::params::parse_params_strict as parse_params;
 use crate::tools::{McpState, no_session};
 use rdy_engine::{E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, Session};
 use rdy_model::Role;
