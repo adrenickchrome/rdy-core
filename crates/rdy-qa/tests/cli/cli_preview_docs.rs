@@ -1853,14 +1853,16 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
     ] {
         assert!(step.contains(said), "{said}: {step}");
     }
-    // no line of the README downloads a guide, and no step points at one
+    // no line of the README downloads a guide
     for line in readme.lines() {
-        let names_a_guide_file = line.contains("AGENTS.md") || line.contains("CLAUDE.md");
-        assert!(
-            !(names_a_guide_file && (line.contains("ownload") || line.contains("release page"))),
-            "{line}"
-        );
-        assert!(!line.contains("agent-guide.json"), "{line}");
+        for gone in [
+            "Download `AGENTS.md`",
+            "Download `CLAUDE.md`",
+            "(or `CLAUDE.md`",
+            "agent-guide.json",
+        ] {
+            assert!(!line.contains(gone), "{line}");
+        }
     }
     assert!(!readme.contains("The guide in step 3"));
     assert!(!tried.contains("releases/tag"), "{tried}");

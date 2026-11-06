@@ -1749,7 +1749,6 @@ fn agent_cli_probe(
 /// have labels of their own. One process holds the project at a time: each MCP session ends before the
 /// next command.
 fn check_loop(seen: &mut Seen, dir: &Path, env: &[(String, String)], a: &BlockId) {
-    use rdy_qa::mcp::McpClient;
     use rdy_qa::tensions::{ag, j_typo, put_j, upd};
     let author = ("agent:chk9", "chk9");
     let (pref, version) = {
@@ -2930,7 +2929,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
 /// client that states the 2026-07-28 context in its requests.
 fn elicitation_probes(seen: &mut Seen) {
     use rdy_qa::fixtures::{approver, project, seed_doc, write, writer};
-    use rdy_qa::mcp::{DEADLINE, McpClient};
+    use rdy_qa::mcp::DEADLINE;
     let (dir, mut r) = project();
     let (_, section, _) = seed_doc(&mut r, "seed");
     let p = r
@@ -3075,7 +3074,7 @@ fn write_import_tree(out: &Path) {
 }
 
 fn mcp_row() -> Value {
-    use rdy_qa::mcp::{McpClient, Reply};
+    use rdy_qa::mcp::Reply;
     let rich = rich_project();
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
@@ -4840,7 +4839,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// have no enum values, so their `values` are empty.
 /// ain4/ain5: the unknown load refusal states no issue rows. agi6: the instruction probes run
 /// with a home of their own and a project with no instruction set, so every row and menu entry
-/// is built in, and those store no reason and name no selector.
+/// is built in, and those store no reason and name no selector; setup in a clean home warns of
+/// nothing.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4894,6 +4894,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/review request/stdout/requests[]/case/code",
     "cli/review run/stdout/case/code",
     "cli/review run/stdout/requests[]/case/code",
+    "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
     "cli/show landing/stdout/diff/entries[]/repinned",
@@ -5432,8 +5433,13 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
     assert_eq!(mcp_base, cli_base);
     drop(c);
     let elsewhere = tempfile::tempdir().expect("a folder with no project");
-    let mut outside = world.command(elsewhere.path(), &["--json", "instructions", "--full"]);
-    outside.current_dir(elsewhere.path());
+    let mut outside = rdy_qa::fixtures::rdy_command();
+    outside
+        .args(["--json", "instructions", "--full"])
+        .envs(world.env())
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .current_dir(elsewhere.path());
     let out = output_within(&mut outside, Duration::from_secs(120)).expect("run rdy");
     assert!(out.status.success(), "{out:?}");
     let reply: Value = serde_json::from_slice(&out.stdout).expect("JSON");
@@ -5450,7 +5456,7 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
         .iter()
         .find(|c| c["name"] == "instructions")
         .expect("the instructions command");
-    assert_eq!(own_args(command), ["full", "load"]);
+    assert_eq!(own_args(command), ["load", "full"]);
 
     // the check that the release runs on the packaged binary accepts this binary as it stands
     let python = std::process::Command::new("python3")

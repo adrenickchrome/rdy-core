@@ -50,7 +50,6 @@
         "render-stream": "renders a stream file",
         "repin": "needs a pinned reference to move",
         "serve": "starts a daemon",
-        "setup": "writes CLAUDE.md and AGENTS.md; cli_instruction_setup pins its replies",
         "sign": "needs a signing key",
         "site": "starts or reads the live site",
         "stream": "checks a stream file; the sync row covers it",
@@ -529,8 +528,56 @@
           ],
           "stdout": {
             "hint": "string",
-            "instructions": [],
-            "menu": []
+            "instructions": [
+              {
+                "id": "string",
+                "layer": "string",
+                "locked": "bool",
+                "reason": [],
+                "ruleset": "string",
+                "text": "string"
+              }
+            ],
+            "menu": [
+              {
+                "hints": [],
+                "id": "string",
+                "layer": "string",
+                "name": "string",
+                "required": "bool",
+                "tokens": "number",
+                "when": "string"
+              }
+            ]
+          }
+        },
+        "instructions full": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "hint": "string",
+            "instructions": [
+              {
+                "id": "string",
+                "layer": "string",
+                "locked": "bool",
+                "reason": [],
+                "ruleset": "string",
+                "text": "string"
+              }
+            ],
+            "menu": [
+              {
+                "hints": [],
+                "id": "string",
+                "layer": "string",
+                "name": "string",
+                "required": "bool",
+                "tokens": "number",
+                "when": "string"
+              }
+            ]
           }
         },
         "intent list": {
@@ -1366,6 +1413,28 @@
             }
           }
         },
+        "setup": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "files": [
+              {
+                "path": "string",
+                "result": "string"
+              }
+            ],
+            "meta": {
+              "message": "string",
+              "path": "string",
+              "result": "string"
+            },
+            "stub": {
+              "result": "string"
+            },
+            "warnings": []
+          }
+        },
         "show": {
           "exits": [
             0,
@@ -1576,6 +1645,7 @@
               "offset": "number",
               "segment": "number"
             },
+            "setup_hint": "string",
             "suspects": "number",
             "version_position": {
               "frozen": "bool",
@@ -11070,6 +11140,18 @@
               "defaults": [
                 "false"
               ],
+              "id": "full",
+              "long": "full",
+              "num_args": "0",
+              "value_names": [
+                "FULL"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
               "global": true,
               "id": "json",
               "long": "json",
@@ -11112,6 +11194,7 @@
           "groups": [
             {
               "args": [
+                "full",
                 "load"
               ],
               "id": "InstructionsArgs",
@@ -15472,6 +15555,7 @@
       "NO_USER_FILE_FIX": "\"set XDG_CONFIG_HOME or HOME before signing in\"",
       "NO_USER_FILE_MESSAGE": "\"the user config path is not available\"",
       "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
+      "OCCUPIED_FIX": "\"Choose an unused absolute path with instructions.person, or move this path aside, then run rdy setup.\"",
       "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_FIX": "\"Search these pages, or go to the home page.\"",
@@ -16676,8 +16760,53 @@
       "rdy_instructions": {
         "ok": {
           "hint": "string",
-          "instructions": [],
-          "menu": []
+          "instructions": [
+            {
+              "id": "string",
+              "layer": "string",
+              "locked": "bool",
+              "reason": [],
+              "ruleset": "string",
+              "text": "string"
+            }
+          ],
+          "menu": [
+            {
+              "hints": [],
+              "id": "string",
+              "layer": "string",
+              "name": "string",
+              "required": "bool",
+              "tokens": "number",
+              "when": "string"
+            }
+          ]
+        }
+      },
+      "rdy_instructions full": {
+        "ok": {
+          "hint": "string",
+          "instructions": [
+            {
+              "id": "string",
+              "layer": "string",
+              "locked": "bool",
+              "reason": [],
+              "ruleset": "string",
+              "text": "string"
+            }
+          ],
+          "menu": [
+            {
+              "hints": [],
+              "id": "string",
+              "layer": "string",
+              "name": "string",
+              "required": "bool",
+              "tokens": "number",
+              "when": "string"
+            }
+          ]
         }
       },
       "rdy_instructions unknown load": {
@@ -20034,6 +20163,11 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "full": {
+              "default": false,
+              "description": "Set true to get every built-in ruleset in full. Your project's and person layer's required rules arrive either way; pass load for their optional rulesets. Default false.",
+              "type": "boolean"
+            },
             "load": {
               "description": "Rulesets to load, by their menu ids (project:<doc-id> or person:<doc-id>); a bare doc id loads when only one layer holds it. Required rules arrive without asking.",
               "items": {
