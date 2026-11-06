@@ -198,11 +198,11 @@ fn wx14_session_identity_matches_the_settled_schema() {
         PathBuf::from("cwd"),
         me,
     );
-    let (own_field, other_field, value) = if cfg!(windows) {
-        ("peer_sid", "peer_uid", serde_json::json!(me.to_string()))
-    } else {
-        ("peer_uid", "peer_sid", serde_json::json!(me))
-    };
+    #[cfg(windows)]
+    let (own_field, other_field, value) =
+        ("peer_sid", "peer_uid", serde_json::json!(me.to_string()));
+    #[cfg(not(windows))]
+    let (own_field, other_field, value) = ("peer_uid", "peer_sid", serde_json::json!(me));
     let shown = serde_json::to_value(&session).unwrap();
     assert_eq!(shown[own_field], value);
     assert!(shown.get(other_field).is_none(), "{shown}");
