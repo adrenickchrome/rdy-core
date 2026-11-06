@@ -7,12 +7,16 @@
 //! message is the request's receipt: a repeated request finds its view by name, checks its owner
 //! and its receipt ([`lifecycle`]), and continues from what is durable, never writing the content
 //! again. A rule change stops here at its proposal; [`approval`] takes it through the gate.
+use crate::answer::relay::RelayRefusal;
 use crate::decide::{DecisionInput, decision_op, inherited_links};
+use crate::engine::Engine;
 use crate::error::*;
+use crate::instructions::{ForwardedRule, PersonHost, PersonPlace, no_rule_host, place_person};
 use crate::rule_types::{
     AddRule, EditRule, ProjectInfo, RelayWords, RemoveRule, RuleInfo, RuleRequest, RulesetRef,
     Scope as RuleScope, normal_path,
 };
+use crate::signing_crypto::SigningAgent;
 use crate::write::{LinkInput, MoveTo, OpInput, WriteRequest};
 use crate::{Materialized, Rdy, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, decision};
@@ -21,9 +25,13 @@ use rdy_schema::instruction::{ALL, APPLIES_TO, INSTRUCTION, LOCKED, REQUIRED_FIE
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub mod approval;
 mod lifecycle;
+
+use approval::{RuleCall, run_rule};
 
 pub use lifecycle::{MAX_RECEIPT_BYTES, RECEIPT_VERSION};
 
@@ -207,6 +215,130 @@ pub struct Prepared {
     pub state: PreparedState,
     /// The warnings of this call's own write and propose, and of a cleanup that could not write.
     pub warnings: Vec<Issue>,
+}
+
+/// Who asks for a rule, in the project or the host the call comes through.
+#[derive(Clone, Copy, Debug)]
+pub struct RuleOrigin<'a> {
+    pub session: &'a Session,
+    /// The agent a command line names; absent over MCP, where the session is the relay.
+    pub relayed_by: Option<&'a str>,
+}
+
+impl RuleOrigin<'_> {
+    /// The call this origin makes in the destination, whose configured human is `person`. The
+    /// session reference a request without one reads follows from how the relay is named.
+    pub fn call(&self, person: String, destination: Destination) -> RuleCall {
+        RuleCall {
+            session: self.session.clone(),
+            person,
+            surface: if self.relayed_by.is_some() {
+                "cli"
+            } else {
+                "mcp"
+            }
+            .to_string(),
+            destination,
+            relayed_by: self.relayed_by.map(ToString::to_string),
+        }
+    }
+}
+
+/// Where a rule request goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleRoute {
+    /// The project the call is in, which is the destination.
+    Here(Destination),
+    /// Another project, the meta project at its path as configured.
+    Meta(PathBuf),
+}
+
+/// The route of a request with `scope`, for a call whose project root is `root` (none outside a
+/// project). The person source is the one `rdy_instructions` reads, so a meta project under
+/// another spelling is this project. A project rule needs no meta project.
+pub fn rule_route(
+    root: Option<&Path>,
+    host: Option<&dyn PersonHost>,
+    scope: RuleScope,
+) -> Result<RuleRoute, RdyError> {
+    let source = match host {
+        Some(h) => h.locate()?,
+        None => crate::instructions_config::resolve_person_from_env()?,
+    };
+    let place = place_person(root, &source.path)?;
+    Ok(match (scope, place) {
+        (_, PersonPlace::ThisProject) => RuleRoute::Here(Destination::Meta),
+        (RuleScope::Project, _) if root.is_some() => RuleRoute::Here(Destination::Project),
+        (RuleScope::Project, _) => {
+            return Err(RdyError::new(
+                E_NO_PROJECT,
+                "this session has no project",
+                "use scope person, or run rdy init in a folder and reconnect",
+            ));
+        }
+        (RuleScope::Person, PersonPlace::Elsewhere(meta)) => RuleRoute::Meta(meta),
+        (RuleScope::Person, PersonPlace::Missing(_)) => {
+            return Err(RdyError::new(
+                E_NO_PROJECT,
+                "the meta project does not exist",
+                "run rdy setup",
+            ));
+        }
+    })
+}
+
+/// Runs one `rdy_rule` request where it belongs: in `project` (none outside a project) or, through
+/// `host`, in the meta project. This runs before any writer: no store, view or lock of the source
+/// spans a forwarded request. A session the destination's connection could only misstate stops
+/// here: a reader, since a ctl session's role is a writer's, and a person, since no connection
+/// claims the person's actor.
+pub fn route_rule(
+    project: Option<&dyn Engine>,
+    host: Option<&dyn PersonHost>,
+    origin: &RuleOrigin<'_>,
+    request: &RuleRequest,
+    agent: Arc<dyn SigningAgent>,
+) -> Result<Value, RdyError> {
+    let root = project.map(Engine::root);
+    match rule_route(root.as_deref(), host, request.scope())? {
+        RuleRoute::Here(destination) => {
+            let (Some(engine), Some(root)) = (project, root) else {
+                return Err(RdyError::new(
+                    E_INTERNAL,
+                    "a rule was routed to a project the call does not have",
+                    "report this as a bug in rdy",
+                ));
+            };
+            let person = match host {
+                Some(h) => h.person_actor(&root)?,
+                None => crate::config_levels::human_actor_for_env(&root)?,
+            };
+            let call = origin.call(person, destination);
+            run_rule(engine, &*agent, &call, request).map(|r| r.to_json())
+        }
+        RuleRoute::Meta(meta) => {
+            let s = origin.session;
+            if !s.role.can_write() {
+                return Err(RdyError::new(
+                    E_PERMISSION,
+                    format!("role {:?} cannot write", s.role),
+                    "start the session as a writer",
+                ));
+            }
+            if s.is_human() {
+                return Err(RelayRefusal::HumanRelays.error());
+            }
+            host.ok_or_else(no_rule_host)?.write_rule(
+                &meta,
+                &ForwardedRule {
+                    session: s,
+                    relayed_by: origin.relayed_by,
+                    request,
+                    agent,
+                },
+            )
+        }
+    }
 }
 
 /// A failure a test injects into [`Rdy::rule_prepare`].

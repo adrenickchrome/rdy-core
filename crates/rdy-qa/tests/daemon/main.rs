@@ -13,6 +13,7 @@ mod daemon_notify;
 mod daemon_pack_reads;
 mod daemon_redaction_reads;
 mod daemon_reload;
+mod daemon_rules;
 mod daemon_serve;
 mod daemon_short_socket;
 mod daemon_site_http;

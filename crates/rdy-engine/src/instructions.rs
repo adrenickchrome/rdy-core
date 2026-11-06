@@ -16,7 +16,9 @@ use crate::instructions_config::{PersonPath, PersonSource, resolve_person_from_e
 use crate::kungfu;
 use crate::query::source_body;
 use crate::read_state::ReadState;
-use crate::session::Scope;
+use crate::rule_types::RuleRequest;
+use crate::session::{Scope, Session};
+use crate::signing_crypto::SigningAgent;
 use rdy_model::{Block, BlockId, FieldValue, decision};
 use rdy_schema::instruction::{ALL, APPLIES_TO, INSTRUCTION, LOCKED, REQUIRED_FIELD};
 use rdy_schema::{Issue, Severity, validate_read_block};
@@ -25,6 +27,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The fix of every collector bound.
 pub const LIMIT_FIX: &str = "reduce the selected rulesets or the required instruction set, then call rdy_instructions again";
@@ -897,13 +900,42 @@ pub struct Caller {
     pub run: Option<String>,
 }
 
+/// A rule request for the meta project (FW-MH.rules, D-ZSRBN), with all a host needs to carry it:
+/// who asks, what they ask, and the signer of this one call.
+#[derive(Clone)]
+pub struct ForwardedRule<'a> {
+    /// The caller's whole session. A host checks its role here, before any connection, and never
+    /// claims the person's actor.
+    pub session: &'a Session,
+    /// The agent a command line names; absent over MCP, where the session is the relay.
+    pub relayed_by: Option<&'a str>,
+    pub request: &'a RuleRequest,
+    /// The caller's signer for this call: meta's daemon asks it while no writer waits.
+    pub agent: Arc<dyn SigningAgent>,
+}
+
+/// The refusal of a rule for the meta project on a host that cannot write it.
+pub fn no_rule_host() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "rdy_rule needs a host that can write the meta project",
+        "use rdy mcp or rdy rule with the daemon",
+    )
+}
+
 /// The host's reader of the person layer (D-YQPB6): where the meta project is, and its
 /// contribution. The engine never opens another project's store itself; the host reads it
-/// through that project's own daemon, or opens it when no process holds it.
+/// through that project's own daemon, or opens it when no process holds it. A host that can also
+/// write that project implements [`PersonHost::write_rule`].
 pub trait PersonHost: Send + Sync {
     /// The person source, from the user config alone.
     fn locate(&self) -> Result<PersonSource, RdyError> {
         resolve_person_from_env()
+    }
+
+    /// The human actor of the project at `project`, from the same config as [`PersonHost::locate`].
+    fn person_actor(&self, project: &Path) -> Result<String, RdyError> {
+        crate::config_levels::human_actor_for_env(project)
     }
 
     /// The contribution of the meta project at `meta`, its path as configured, as the person
@@ -914,6 +946,18 @@ pub trait PersonHost: Send + Sync {
         load: &LoadRequest,
         caller: &Caller,
     ) -> Result<Contribution, RdyError>;
+
+    /// Runs `rule` in the meta project at `meta`, its path as configured, and returns the reply as
+    /// `rdy_rule` gives it. A refusal of that project stays the refusal, whole. The default opens
+    /// nothing and refuses: a host that only reads cannot write another project.
+    fn write_rule(
+        &self,
+        meta: &Path,
+        rule: &ForwardedRule<'_>,
+    ) -> Result<serde_json::Value, RdyError> {
+        let _ = (meta, rule);
+        Err(no_rule_host())
+    }
 }
 
 /// Where the person layer is for one call.

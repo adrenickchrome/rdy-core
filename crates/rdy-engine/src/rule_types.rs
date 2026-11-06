@@ -173,6 +173,136 @@ impl RuleRequest {
             RuleRequest::Answer(r) => r.scope,
         }
     }
+
+    /// The request as a call sends it: [`parse_request`] reads it back as this request, whichever
+    /// process does it.
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"scope": self.scope().as_str()});
+        let m = v.as_object_mut().expect("an object");
+        let mut put = |k: &str, x: Value| {
+            m.insert(k.to_string(), x);
+        };
+        let scope = self.scope();
+        let ruleset = |r: &RulesetRef| {
+            // always the destination's own handle, so a path that reads like a handle stays itself
+            let name = match r {
+                RulesetRef::Doc(id) => id.as_str(),
+                RulesetRef::Path(p) => p.as_str(),
+            };
+            json!(format!("{}:{name}", scope.handle()))
+        };
+        match self {
+            RuleRequest::Add(r) => {
+                put("op", json!("add"));
+                put("text", json!(r.text));
+                put("why", json!(r.why));
+                if let Some(x) = &r.ruleset {
+                    put("ruleset", ruleset(x));
+                }
+                if let Some(x) = &r.applies_to {
+                    put("applies_to", json!(x));
+                }
+                r.relay.put_into(&mut put);
+            }
+            RuleRequest::Edit(r) => {
+                put("op", json!("edit"));
+                put("id", json!(r.id.as_str()));
+                put("text", json!(r.text));
+                put("why", json!(r.why));
+                if let Some(x) = &r.ruleset {
+                    put("ruleset", ruleset(x));
+                }
+                if let Some(x) = &r.applies_to {
+                    put("applies_to", json!(x));
+                }
+                r.relay.put_into(&mut put);
+            }
+            RuleRequest::Remove(r) => {
+                put("op", json!("remove"));
+                put("id", json!(r.id.as_str()));
+                put("why", json!(r.why));
+                r.relay.put_into(&mut put);
+            }
+            RuleRequest::Answer(r) => {
+                let mut a = json!({
+                    "ref": r.item_ref,
+                    "option": r.option,
+                    "card_hash": r.card_hash.to_string(),
+                    "evidence": r.relay.evidence,
+                });
+                if let Some(q) = &r.relay.question {
+                    a["question"] = json!(q);
+                }
+                put("answer", a);
+            }
+        }
+        v
+    }
+}
+
+impl RelayWords {
+    fn put_into(&self, put: &mut impl FnMut(&str, Value)) {
+        put("evidence", json!(self.evidence));
+        if let Some(q) = &self.question {
+            put("question", json!(q));
+        }
+        if let Some(r) = &self.session_ref {
+            put("session_ref", json!(r));
+        }
+    }
+}
+
+/// The keys the ctl op `rule` takes beside a request's own: the relayer a command line names, and
+/// `part`, which says the caller resolved this store as its meta project.
+const CTL_KEYS: [&str; 2] = ["relayed_by", "part"];
+
+/// The arguments of the ctl op `rule`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CtlRule {
+    pub request: RuleRequest,
+    pub relayed_by: Option<String>,
+    /// This store is the destination, whatever this process's config says, and the session is the
+    /// relay when no `relayed_by` names one. A host's forwarded form: it never goes on to another
+    /// project.
+    pub part: bool,
+}
+
+/// The checked arguments of the ctl op `rule` in `v`: a request, and [`CTL_KEYS`].
+pub fn parse_ctl(v: &Value) -> Result<CtlRule, RdyError> {
+    let Value::Object(top) = v else {
+        return parse_request(v).map(|request| CtlRule {
+            request,
+            relayed_by: None,
+            part: false,
+        });
+    };
+    let known: Vec<&str> = KEYS.iter().chain(CTL_KEYS.iter()).copied().collect();
+    if let Some(k) = top.keys().find(|k| !known.contains(&k.as_str())) {
+        return Err(unknown(k, k, &known));
+    }
+    let relayed_by = match top.get("relayed_by") {
+        None => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(x) => return Err(wrong_type("relayed_by", "a string", x)),
+    };
+    let part = match top.get("part") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(x) => return Err(wrong_type("part", "a boolean", x)),
+    };
+    let mut rest = top.clone();
+    for k in CTL_KEYS {
+        rest.remove(k);
+    }
+    let request = parse_request(&Value::Object(rest))?;
+    if part && request.scope() != Scope::Person {
+        return Err(not_allowed("part", "scope project"));
+    }
+    Ok(CtlRule {
+        request,
+        relayed_by,
+        part,
+    })
 }
 
 impl AddRule {
