@@ -338,3 +338,46 @@ fn wx23c_fixture_is_absent_from_product_release() {
     assert!(source.contains("fn fixture_entry()"));
     assert_eq!(entry_selector(), "platform::child_fixture::fixture_entry");
 }
+
+#[test]
+fn wx26b_edit_mode_steps_are_closed_and_edit_the_last_argument() {
+    assert_eq!(
+        parse_edit("replace a\tb\nafter fields:\t  k: v\\n\nstop o\te\t\n").unwrap(),
+        vec![
+            EditStep::Replace("a".into(), "b".into()),
+            EditStep::After("fields:".into(), "  k: v\n".into()),
+            EditStep::Stop("o".into(), "e".into(), String::new()),
+        ]
+    );
+    assert!(parse_edit("sed s/a/b/").unwrap_err().contains("sed"));
+    assert!(
+        parse_edit("replace only-one")
+            .unwrap_err()
+            .contains("replace")
+    );
+    assert_eq!(parse_mode("edit"), Ok(Mode::Edit));
+
+    // the buffer is the last argument, the steps change it in order, and the file keeps its
+    // indentation and line ends
+    let dir = tempfile::tempdir().unwrap();
+    let buffer = dir.path().join("buf");
+    std::fs::write(&buffer, "fields:\n  name: d\n  title: Before\n").unwrap();
+    let seen = dir.path().join("seen");
+    let script = format!(
+        "copy {}\nswapline name: d\tname: e\nafter   title: \t  more: 1\nappend end\n",
+        seen.display()
+    );
+    let mut command = fixture_command("edit");
+    command.env(EDIT_ENV, script).arg(&buffer);
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "fields:\n  name: d\n  title: Before\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&buffer).unwrap(),
+        "fields:\n  name: e\n  title: Before\n  more: 1\nend\n"
+    );
+    assert_eq!(without_banner(&out.stdout), b"");
+}

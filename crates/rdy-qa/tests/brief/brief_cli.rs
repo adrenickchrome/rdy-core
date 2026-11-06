@@ -1,36 +1,46 @@
-#![cfg(unix)]
-// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! cbrf1: rdy edit briefs, shows the briefing, cites its token and prints consequences.
+use crate::brief_editor::child_fixture::{edit_output, set_editor, set_editor_rdy};
 use rdy_engine::Rdy;
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::rdy_bin;
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::process::Command;
 
-fn script(s: &Served, name: &str, body: &str) -> PathBuf {
-    let p = s.dir.path().join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-    p
-}
-
-/// `rdy --project <dir> [--json] edit <id>` as the human, with `EDITOR=editor`.
-fn edit(s: &Served, editor: &Path, id: &str, json: bool) -> std::process::Output {
+/// `rdy --project <dir>` as the human, with `script` as the editor. `inner` is the script of an
+/// editor that a `nest` step starts.
+fn editing(s: &Served, script: &str, inner: Option<&str>) -> Command {
     let mut cmd = rdy_qa::fixtures::rdy_command();
-    cmd.arg("--project").arg(s.dir.path());
-    if json {
-        cmd.arg("--json");
-    }
-    cmd.args(["edit", id])
-        .env("EDITOR", editor)
+    cmd.arg("--project")
+        .arg(s.dir.path())
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
         .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap()
+        .envs(s.env_pairs());
+    set_editor(&mut cmd, script);
+    set_editor_rdy(&mut cmd, &rdy_bin(), s.dir.path(), inner);
+    cmd
+}
+
+/// `rdy --project <dir> [--json] edit <id>` as the human, with the editor script `script`.
+fn edit(s: &Served, script: &str, id: &str, json: bool) -> std::process::Output {
+    edit_nested(s, script, None, id, json)
+}
+
+/// The same, where the script may `nest` an edit whose editor runs `inner`.
+fn edit_nested(
+    s: &Served,
+    script: &str,
+    inner: Option<&str>,
+    id: &str,
+    json: bool,
+) -> std::process::Output {
+    let mut cmd = editing(s, script, inner);
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.args(["edit", id]);
+    edit_output(&mut cmd).unwrap()
 }
 
 fn new_doc(s: &Served) -> String {
@@ -47,12 +57,7 @@ fn new_doc(s: &Served) -> String {
 
 /// Marks the doc stable through rdy edit (the CLI briefs it: setting stable needs a briefing).
 fn make_stable(s: &Served, id: &str) {
-    let ed = script(
-        s,
-        "stable.sh",
-        "awk '{print} /^  title: /{print \"  lifecycle: stable\"}' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n",
-    );
-    let out = edit(s, &ed, id, true);
+    let out = edit(s, "after   title: \t  lifecycle: stable\n", id, true);
     assert!(
         out.status.success(),
         "{}",
@@ -66,13 +71,9 @@ fn cbrf1_rdy_edit_shows_the_briefing_header_and_its_token_lands_a_stable_edit() 
     let id = new_doc(&s);
     make_stable(&s, &id);
     let seen = s.dir.path().join("seen.yaml");
-    let ed = script(
-        &s,
-        "title.sh",
-        &format!(
-            "cp \"$1\" '{}'\nsed -i.bak 's/title: Before/title: After/' \"$1\"\n",
-            seen.display()
-        ),
+    let ed = format!(
+        "copy {}\nreplace title: Before\ttitle: After\n",
+        seen.display()
     );
     let out = edit(&s, &ed, &id, true);
     assert!(
@@ -103,19 +104,14 @@ fn cbrf1_an_edit_whose_briefing_moved_while_the_editor_was_open_is_brief_stale_a
     let s = Served::new();
     let id = new_doc(&s);
     make_stable(&s, &id);
-    let inner = script(
+    let outer = format!("nest {id}\nreplace title: Before\ttitle: Outer\n");
+    let out = edit_nested(
         &s,
-        "inner.sh",
-        "sed -i.bak 's/title: Before/title: Inner/' \"$1\"\n",
+        &outer,
+        Some("replace title: Before\ttitle: Inner\n"),
+        &id,
+        true,
     );
-    let nested = format!(
-        "if [ -z \"$RDY_NESTED\" ]; then RDY_NESTED=1 EDITOR='{}' '{}' --project '{}' edit {id} >/dev/null; fi\nsed -i.bak 's/title: Before/title: Outer/' \"$1\"\n",
-        inner.display(),
-        rdy_bin().display(),
-        s.dir.path().display()
-    );
-    let outer = script(&s, "outer.sh", &nested);
-    let out = edit(&s, &outer, &id, true);
     assert!(!out.status.success());
     let e: Value = serde_json::from_str(
         String::from_utf8_lossy(&out.stderr)
@@ -148,12 +144,8 @@ fn cbrf1_rdy_edit_prints_consequences_after_saving() {
         r.close().unwrap();
         spec
     };
-    let ed = script(
-        &s,
-        "a.sh",
-        "sed -i.bak 's/A holds./A holds firmly./' \"$1\"\n",
-    );
-    let out = edit(&s, &ed, &spec.a.to_string(), false);
+    let ed = "replace A holds.\tA holds firmly.\n";
+    let out = edit(&s, ed, &spec.a.to_string(), false);
     assert!(
         out.status.success(),
         "{}",
@@ -179,23 +171,10 @@ fn cbrf1_rdy_edit_in_a_fresh_view_briefs_it_as_a_write_target() {
         r.close().unwrap();
         spec
     };
-    let ed = script(
-        &s,
-        "fresh.sh",
-        "sed -i.bak 's/A holds./A holds in fresh./' \"$1\"\n",
-    );
     let id = spec.a.to_string();
-    let out = rdy_qa::fixtures::rdy_command()
-        .arg("--project")
-        .arg(s.dir.path())
-        .args(["--json", "edit", &id, "--view", "fresh"])
-        .env("EDITOR", &ed)
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap();
+    let mut cmd = editing(&s, "replace A holds.\tA holds in fresh.\n", None);
+    cmd.args(["--json", "edit", &id, "--view", "fresh"]);
+    let out = edit_output(&mut cmd).unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -325,12 +304,8 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
         r.close().unwrap();
         d.created["$decision"].clone()
     };
-    let ed = script(
-        &s,
-        "disposition.sh",
-        "sed -i.bak 's/disposition: M2d1/disposition: M2d2/' \"$1\"\n",
-    );
-    let out = edit(&s, &ed, &dec, true);
+    let ed = "replace disposition: M2d1\tdisposition: M2d2\n";
+    let out = edit(&s, ed, &dec, true);
     assert!(!out.status.success());
     let e: Value = serde_json::from_str(
         String::from_utf8_lossy(&out.stderr)
@@ -349,17 +324,9 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
         "{e}"
     );
     assert!(e["saved_edit"].is_string(), "the edit is kept: {e}");
-    let out = rdy_qa::fixtures::rdy_command()
-        .arg("--project")
-        .arg(s.dir.path())
-        .args(["--json", "edit", &dec, "--reason", "re-sliced into M2d2"])
-        .env("EDITOR", &ed)
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap();
+    let mut cmd = editing(&s, ed, None);
+    cmd.args(["--json", "edit", &dec, "--reason", "re-sliced into M2d2"]);
+    let out = edit_output(&mut cmd).unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -382,12 +349,7 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
 fn kroot1_rdy_edit_prints_each_new_key() {
     let s = Served::new();
     let id = new_doc(&s);
-    let ed = script(
-        &s,
-        "rename.sh",
-        "sed -i.bak -E 's/^( *)name: d$/\\1name: renamed/' \"$1\"\n",
-    );
-    let out = edit(&s, &ed, &id, false);
+    let out = edit(&s, "swapline name: d\tname: renamed\n", &id, false);
     assert!(
         out.status.success(),
         "{}",
@@ -404,19 +366,14 @@ fn kroot1_rdy_edit_prints_each_new_key() {
 fn msw8_a_stale_rdy_edit_of_a_draft_is_stale_base_and_keeps_the_concurrent_change() {
     let s = Served::new();
     let id = new_doc(&s);
-    let inner = script(
+    let outer = format!("nest {id}\nreplace title: Before\ttitle: Outer\n");
+    let out = edit_nested(
         &s,
-        "inner.sh",
-        "sed -i.bak 's/title: Before/title: Second/' \"$1\"\n",
+        &outer,
+        Some("replace title: Before\ttitle: Second\n"),
+        &id,
+        true,
     );
-    let nested = format!(
-        "if [ -z \"$RDY_NESTED\" ]; then RDY_NESTED=1 EDITOR='{}' '{}' --project '{}' edit {id} >/dev/null; fi\nsed -i.bak 's/title: Before/title: Outer/' \"$1\"\n",
-        inner.display(),
-        rdy_bin().display(),
-        s.dir.path().display()
-    );
-    let outer = script(&s, "outer.sh", &nested);
-    let out = edit(&s, &outer, &id, true);
     assert!(
         !out.status.success(),
         "the stale edit landed: {}",
@@ -448,16 +405,14 @@ fn msw8_rdy_edit_text_mode_prints_a_stale_briefing_warning() {
         r.close().unwrap();
         spec
     };
-    let inner = script(&s, "inner.sh", "sed -i.bak 's/A holds./A moved./' \"$1\"\n");
-    let nested = format!(
-        "if [ -z \"$RDY_NESTED\" ]; then RDY_NESTED=1 EDITOR='{}' '{}' --project '{}' edit {} >/dev/null; fi\nsed -i.bak 's/B builds on/B now builds on/' \"$1\"\n",
-        inner.display(),
-        rdy_bin().display(),
-        s.dir.path().display(),
-        spec.a
+    let outer = format!("nest {}\nreplace B builds on\tB now builds on\n", spec.a);
+    let out = edit_nested(
+        &s,
+        &outer,
+        Some("replace A holds.\tA moved.\n"),
+        &spec.b.to_string(),
+        false,
     );
-    let outer = script(&s, "outer.sh", &nested);
-    let out = edit(&s, &outer, &spec.b.to_string(), false);
     assert!(
         out.status.success(),
         "{}",
@@ -619,12 +574,8 @@ mod msw8_conflicts {
 fn hd8_rdy_edit_refuses_a_misspelt_key_and_keeps_the_buffer() {
     let s = Served::new();
     let id = new_doc(&s);
-    let ed = script(
-        &s,
-        "typo.sh",
-        "sed -i.bak 's/title: Before/title: After/' \"$1\"\nprintf 'bdoy: x\\n' >> \"$1\"\n",
-    );
-    let out = edit(&s, &ed, &id, true);
+    let ed = "replace title: Before\ttitle: After\nappend bdoy: x\n";
+    let out = edit(&s, ed, &id, true);
     assert!(
         !out.status.success(),
         "a misspelt key is refused, not dropped"

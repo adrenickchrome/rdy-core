@@ -19,6 +19,7 @@ mod cli_diff;
 mod cli_dispute;
 mod cli_dump;
 mod cli_dump_chain;
+mod cli_editor;
 mod cli_entities;
 mod cli_export;
 mod cli_hub_auth;

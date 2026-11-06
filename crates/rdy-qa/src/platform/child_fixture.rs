@@ -24,6 +24,11 @@
 //!   of [`SCRIPT_ENV`]. They replace every shell stub of the MCP area: the same bytes run on
 //!   every platform and no shell, `cat`, `head`, `tr` or `sleep` is needed.
 //!
+//! - `edit`: a scripted editor (see [`EditStep`]). It edits the file that is the last argument on
+//!   its command line, as an editor does, so `rdy edit` starts it with the buffer path as its own
+//!   argument on every platform. The steps are the lines of [`EDIT_ENV`]. They replace every
+//!   shell editor script of the CLI and brief areas.
+//!
 //! libtest prints its own header to stdout before a test starts, so a mode that needs exact bytes
 //! writes them to stderr, or the caller accounts for the header.
 //!
@@ -49,6 +54,15 @@ pub const TEXT_ENV: &str = "RDY_QA_CHILD_TEXT";
 pub const HOLDER_ENV: &str = "RDY_QA_CHILD_HOLDER";
 /// The environment variable that holds the steps of the `script` mode, one per line.
 pub const SCRIPT_ENV: &str = "RDY_QA_CHILD_SCRIPT";
+/// The environment variable that holds the steps of the `edit` mode, one per line.
+pub const EDIT_ENV: &str = "RDY_QA_CHILD_EDIT";
+/// The environment variable that holds the steps the `nest` step of the `edit` mode gives to the
+/// editor it starts inside the first one.
+pub const INNER_ENV: &str = "RDY_QA_CHILD_INNER";
+/// The environment variable that names the product executable the `nest` and `stop` steps run.
+pub const RDY_ENV: &str = "RDY_QA_CHILD_RDY";
+/// The environment variable that names the project those steps run against.
+pub const PROJECT_ENV: &str = "RDY_QA_CHILD_PROJECT";
 /// The first bytes libtest writes to stdout before it runs the entry test. A reader of a
 /// fixture's stdout that must see only the fixture's own bytes drops exactly these.
 pub const BANNER: &[u8] = b"\nrunning 1 test\n";
@@ -82,6 +96,7 @@ pub enum Mode {
     Holder,
     Editor,
     Script,
+    Edit,
 }
 
 fn stream(word: &str) -> Result<Stream, String> {
@@ -111,6 +126,7 @@ pub fn parse_mode(text: &str) -> Result<Mode, String> {
         ["holder"] => Ok(Mode::Holder),
         ["editor"] => Ok(Mode::Editor),
         ["script"] => Ok(Mode::Script),
+        ["edit"] => Ok(Mode::Edit),
         _ => Err(format!("unknown fixture mode `{text}`")),
     }
 }
@@ -623,6 +639,14 @@ pub fn run_mode(mode: &Mode) -> Result<i32, String> {
             let text = std::env::var(SCRIPT_ENV).map_err(|_| format!("{SCRIPT_ENV} is not set"))?;
             run_script(&parse_script(&text)?)
         }
+        Mode::Edit => {
+            let text = std::env::var(EDIT_ENV).map_err(|_| format!("{EDIT_ENV} is not set"))?;
+            let buffer = std::env::args_os()
+                .last()
+                .map(std::path::PathBuf::from)
+                .ok_or("no buffer path on the command line")?;
+            run_edit(&parse_edit(&text)?, &buffer)
+        }
         Mode::Editor => {
             let text = std::env::var(TEXT_ENV).map_err(|_| format!("{TEXT_ENV} is not set"))?;
             std::fs::write(target()?, text).map_err(|e| format!("write: {e}"))?;
@@ -680,4 +704,235 @@ pub(crate) fn fixture_command_for(mode: &str, target: &Path) -> Command {
     let mut command = fixture_command(mode);
     command.env(TARGET_ENV, target);
     command
+}
+
+/// One step of the `edit` mode. A script is lines; a line is a word, then a space and the rest of
+/// the line, taken as it is. Where a step has several parts they are separated by a tab. In a
+/// TEXT part the two characters `\n` stand for a line feed; a path is taken as it is.
+///
+/// - `copy PATH`: write the buffer as it is now to `PATH`.
+/// - `replace FROM<tab>TO`: replace every `FROM` in the buffer with `TO`.
+/// - `swapline FROM<tab>TO`: a line that is `FROM` after its indentation becomes `TO`, with the
+///   same indentation.
+/// - `after PREFIX<tab>TEXT`: after each line that starts with `PREFIX`, add the line `TEXT`.
+/// - `append TEXT`: add `TEXT` and a line feed at the end. `write TEXT`: the buffer becomes
+///   `TEXT` and a line feed.
+/// - `nest ID`: run `rdy --project P edit ID`, with this editor and the steps of [`INNER_ENV`], and
+///   wait for it. Its output is dropped. `P` is [`PROJECT_ENV`] and `rdy` is [`RDY_ENV`].
+/// - `stop OUT<tab>ERR<tab>NOTICE`: run `rdy --project P serve --stop` with stdout in the file
+///   `OUT` and stderr in the file `ERR`, behind the line `NOTICE` there when it is not empty;
+///   then add the line `exit=CODE` to `OUT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditStep {
+    Copy(String),
+    Replace(String, String),
+    SwapLine(String, String),
+    After(String, String),
+    Append(String),
+    Write(String),
+    Nest(String),
+    Stop(String, String, String),
+}
+
+fn edit_text(text: &str) -> String {
+    text.replace("\\n", "\n")
+}
+
+fn parts<const N: usize>(rest: &str, line: &str) -> Result<[String; N], String> {
+    let found: Vec<String> = rest.splitn(N, '\t').map(str::to_string).collect();
+    found
+        .try_into()
+        .map_err(|_| format!("bad edit step `{line}`"))
+}
+
+/// Parses an edit script; a line that is not a step is an error that names it.
+pub fn parse_edit(text: &str) -> Result<Vec<EditStep>, String> {
+    let mut steps = Vec::new();
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let step = match word {
+            "copy" => EditStep::Copy(rest.to_string()),
+            "replace" => {
+                let [from, to] = parts(rest, line)?;
+                EditStep::Replace(from, to)
+            }
+            "swapline" => {
+                let [from, to] = parts(rest, line)?;
+                EditStep::SwapLine(from, to)
+            }
+            "after" => {
+                let [prefix, add] = parts(rest, line)?;
+                EditStep::After(prefix, edit_text(&add))
+            }
+            "append" => EditStep::Append(edit_text(rest)),
+            "write" => EditStep::Write(edit_text(rest)),
+            "nest" => EditStep::Nest(rest.to_string()),
+            "stop" => {
+                let [out, err, notice] = parts(rest, line)?;
+                EditStep::Stop(out, err, notice)
+            }
+            _ => return Err(format!("unknown edit step `{line}`")),
+        };
+        steps.push(step);
+    }
+    Ok(steps)
+}
+
+fn env_path(name: &str) -> Result<std::path::PathBuf, String> {
+    std::env::var_os(name)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("{name} is not set"))
+}
+
+fn run_nested(id: &str) -> Result<(), String> {
+    let inner = std::env::var(INNER_ENV).map_err(|_| format!("{INNER_ENV} is not set"))?;
+    let own = std::env::var_os("EDITOR").ok_or("EDITOR is not set")?;
+    Command::new(env_path(RDY_ENV)?)
+        .arg("--project")
+        .arg(env_path(PROJECT_ENV)?)
+        .args(["edit", id])
+        .env("EDITOR", own)
+        .env(EDIT_ENV, inner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("nested edit: {e}"))
+}
+
+fn run_stop(out: &str, err: &str, notice: &str) -> Result<(), String> {
+    let mut errf = std::fs::File::create(err).map_err(|e| format!("create {err}: {e}"))?;
+    if !notice.is_empty() {
+        writeln!(errf, "{notice}").map_err(|e| format!("write {err}: {e}"))?;
+    }
+    let outf = std::fs::File::create(out).map_err(|e| format!("create {out}: {e}"))?;
+    let status = Command::new(env_path(RDY_ENV)?)
+        .arg("--project")
+        .arg(env_path(PROJECT_ENV)?)
+        .args(["serve", "--stop"])
+        .stdin(Stdio::null())
+        .stdout(outf)
+        .stderr(errf)
+        .status()
+        .map_err(|e| format!("serve --stop: {e}"))?;
+    let mut outf = std::fs::OpenOptions::new()
+        .append(true)
+        .open(out)
+        .map_err(|e| format!("open {out}: {e}"))?;
+    writeln!(outf, "exit={}", status.code().unwrap_or(-1)).map_err(|e| format!("write {out}: {e}"))
+}
+
+/// Runs the steps on the file `buffer`. The file is written after each step that changes it.
+fn run_edit(steps: &[EditStep], buffer: &Path) -> Result<i32, String> {
+    let mut text =
+        std::fs::read_to_string(buffer).map_err(|e| format!("read {}: {e}", buffer.display()))?;
+    for step in steps {
+        let before = text.clone();
+        match step {
+            EditStep::Copy(path) => {
+                std::fs::write(path, &text).map_err(|e| format!("copy to {path}: {e}"))?;
+            }
+            EditStep::Replace(from, to) => text = text.replace(from.as_str(), to),
+            EditStep::SwapLine(from, to) => {
+                text = text
+                    .split_inclusive('\n')
+                    .map(|line| {
+                        let body = line.trim_end_matches(['\r', '\n']);
+                        let rest = body.trim_start();
+                        if rest == from {
+                            let indent = &body[..body.len() - rest.len()];
+                            let end = &line[body.len()..];
+                            format!("{indent}{to}{end}")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect();
+            }
+            EditStep::After(prefix, add) => {
+                text = text
+                    .split_inclusive('\n')
+                    .map(|line| {
+                        if line.starts_with(prefix.as_str()) {
+                            let end = if line.ends_with('\n') { "" } else { "\n" };
+                            format!("{line}{end}{add}\n")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect();
+            }
+            EditStep::Append(add) => text.push_str(&format!("{add}\n")),
+            EditStep::Write(new) => text = format!("{new}\n"),
+            EditStep::Nest(id) => run_nested(id)?,
+            EditStep::Stop(out, err, notice) => run_stop(out, err, notice)?,
+        }
+        if text != before {
+            std::fs::write(buffer, &text)
+                .map_err(|e| format!("write {}: {e}", buffer.display()))?;
+        }
+    }
+    Ok(0)
+}
+
+/// The value of `EDITOR` that starts the test executable `exe` as an `edit` fixture. Where the
+/// platform splits the value itself (Windows) the program is in double quotes, so a path with
+/// spaces works. On Unix `sh` splits the value at white space, so such a path cannot be named.
+pub fn editor_value(exe: &Path) -> String {
+    let selector = entry_selector();
+    if cfg!(windows) {
+        format!("\"{}\" --exact {selector} --nocapture", exe.display())
+    } else {
+        let shown = exe.display().to_string();
+        assert!(
+            !shown.contains(char::is_whitespace),
+            "{shown}: sh splits an editor path at white space"
+        );
+        format!("{shown} --exact {selector} --nocapture")
+    }
+}
+
+/// Makes `command` run `script` as its editor: `EDITOR` starts the test executable `exe`, and
+/// `VISUAL` is removed so that no person's setting wins on Windows.
+pub fn set_editor_at<'a>(command: &'a mut Command, exe: &Path, script: &str) -> &'a mut Command {
+    command
+        .env_remove("VISUAL")
+        .env("EDITOR", editor_value(exe))
+        .env(MODE_ENV, "edit")
+        .env(EDIT_ENV, script)
+}
+
+/// [`set_editor_at`] with this test executable.
+pub fn set_editor<'a>(command: &'a mut Command, script: &str) -> &'a mut Command {
+    let exe = std::env::current_exe().expect("the test executable");
+    set_editor_at(command, &exe, script)
+}
+
+/// Names the product executable and project that the `nest` and `stop` steps run, and the steps
+/// the nested editor runs.
+pub fn set_editor_rdy<'a>(
+    command: &'a mut Command,
+    rdy: &Path,
+    project: &Path,
+    inner: Option<&str>,
+) -> &'a mut Command {
+    command.env(RDY_ENV, rdy).env(PROJECT_ENV, project);
+    if let Some(inner) = inner {
+        command.env(INNER_ENV, inner);
+    }
+    command
+}
+
+/// `bytes` without the libtest header that an editor child writes to the stdout it shares with
+/// the command that started it.
+pub fn without_banner(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(BANNER).unwrap_or(bytes)
+}
+
+/// Runs `command` to its end and returns its output with the editor child's header dropped.
+pub fn edit_output(command: &mut Command) -> io::Result<std::process::Output> {
+    let mut out = command.output()?;
+    out.stdout = without_banner(&out.stdout).to_vec();
+    Ok(out)
 }
