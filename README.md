@@ -84,9 +84,15 @@ To check the signature of the download first, see "Verify the download" at the b
    { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"] } } }
    ```
 
-   The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. The guide in step 3 tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
+   The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. The guide built into rdy tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
 
-3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.41.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
+3. **Prepare your agent.**
+
+   ```sh
+   rdy setup
+   ```
+
+   This writes a short `CLAUDE.md` and `AGENTS.md` in the project folder. It also creates your own rules project if you have none. These files tell the agent to call `rdy_instructions` at the start of every task. The guide ships inside rdy, so you download nothing. To read the whole guide yourself, see the [docs site](https://getrdy.dev). The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
 4. **Ask your agent for something real.** For example:
 

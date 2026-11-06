@@ -46,6 +46,13 @@ tempfile.workspace = true
 # own tests turn it on, through the dev-dependency below.
 test-support = []
 
+[build-dependencies]
+# build/guide.rs: the closed check of the compiled agent guide.
+rdy-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
 [dev-dependencies]
 rdy-engine = { path = ".", features = ["test-support"] }
 rdy-graph.workspace = true
@@ -56,6 +63,8 @@ criterion.workspace = true
 ed25519-dalek.workspace = true
 # the hub transport tests' local TLS fixture (with rustls, a normal dependency)
 rcgen.workspace = true
+# tests/embedded_guide.rs includes the build's validator and rehashes the export.
+sha2.workspace = true
 
 [[bench]]
 name = "core"

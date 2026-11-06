@@ -1,4 +1,4 @@
-//! The instructions op (ain4, D-A8N0E): `{load?}` is one public instructions call, this project
+//! The instructions op (ain4, D-A8N0E): `{full?, load?}` is one public instructions call, this project
 //! and the person layer merged, as `rdy_instructions` answers it. `{load?, part: true}` is the
 //! private form a host's reader of the person layer sends ([`crate::instructions`]): this
 //! store's own canon as the person layer, never another source, and it marks no call complete.
@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 pub(super) struct InstructionsArgs {
     load: Option<Vec<String>>,
     #[serde(default)]
+    full: bool,
+    #[serde(default)]
     part: bool,
 }
 
@@ -22,6 +24,7 @@ pub(super) fn instructions(cx: &OpContext, a: InstructionsArgs) -> Result<Value,
         let part = instructions::collect(&state, Layer::Person, &load)?;
         return Ok(json!({ "contribution": part }));
     }
+    let load = load.with_full(a.full);
     let caller = Caller {
         actor: cx.session.actor.clone(),
         run: cx.session.run.clone(),

@@ -94,6 +94,78 @@ fn col(v: &Value, key: &str, field: &str) -> Vec<String> {
         .collect()
 }
 
+/// The built-in menu, in order (design section 5): the same ids on every reply.
+const BUILTIN_MENU: [&str; 12] = [
+    "rdy:bootstrap",
+    "rdy:write",
+    "rdy:after-write",
+    "rdy:approvals",
+    "rdy:as-built",
+    "rdy:read",
+    "rdy:publish",
+    "rdy:review",
+    "rdy:diagrams",
+    "rdy:parallel",
+    "rdy:project-ops",
+    "rdy:troubleshoot",
+];
+
+/// The rows of `key` that a project or a person wrote: the built-in layer is checked apart.
+fn authored(v: &Value, key: &str) -> Vec<Value> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} in {v}"))
+        .iter()
+        .filter(|r| r["layer"] != "rdy")
+        .cloned()
+        .collect()
+}
+
+/// [`col`] over the authored rows alone.
+fn authored_col(v: &Value, key: &str, field: &str) -> Vec<String> {
+    authored(v, key)
+        .iter()
+        .map(|r| r[field].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Every reply carries the built-in bootstrap whole and the built-in menu, before every other
+/// layer, and nothing else of the built-in layer.
+fn assert_builtins_first(v: &Value) {
+    let rows = col(v, "instructions", "id");
+    assert_eq!(
+        rows[..3],
+        [
+            "rdy:bootstrap:before",
+            "rdy:bootstrap:approval",
+            "rdy:bootstrap:after"
+        ],
+        "{v}"
+    );
+    assert_eq!(col(v, "instructions", "layer")[..3], ["rdy", "rdy", "rdy"]);
+    assert_eq!(
+        col(v, "menu", "id")[..BUILTIN_MENU.len()],
+        BUILTIN_MENU,
+        "{v}"
+    );
+    assert!(
+        v["menu"].as_array().unwrap()[..BUILTIN_MENU.len()]
+            .iter()
+            .all(|m| m["layer"] == "rdy"),
+        "{v}"
+    );
+    assert_eq!(
+        v["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["layer"] == "rdy")
+            .count(),
+        3,
+        "{v}"
+    );
+}
+
 /// Every stdout line is one JSON-RPC message: no warning or progress text reaches it.
 fn protocol_only(c: McpClient) -> String {
     let t = c.finish(BUDGET);
@@ -142,16 +214,24 @@ fn ain5_mcp_outside_a_project_uses_meta_for_all_tools() {
         );
         // meta is read once, as the person layer
         let v = c.call("rdy_instructions", json!({})).ok();
-        assert_eq!(col(&v, "instructions", "id"), [ma.rules[0][0].clone()]);
-        assert_eq!(col(&v, "instructions", "layer"), ["person"]);
+        assert_builtins_first(&v);
         assert_eq!(
-            col(&v, "menu", "id"),
+            authored_col(&v, "instructions", "id"),
+            [ma.rules[0][0].clone()]
+        );
+        assert_eq!(authored_col(&v, "instructions", "layer"), ["person"]);
+        assert_eq!(
+            authored_col(&v, "menu", "id"),
             [
                 format!("person:{}", ma.docs[0]),
                 format!("person:{}", ma.docs[1])
             ]
         );
-        assert!(v.get("hint").is_none(), "{v}");
+        assert_eq!(
+            v["hint"],
+            "This session is on your own rules project. Use it for your rules. For other work, run rdy init in a folder and reconnect.",
+            "{v}"
+        );
         // the CLI from the same directory gives the same reply
         let mut args = vec!["--json"];
         args.extend_from_slice(&extra);
@@ -202,12 +282,25 @@ fn ain5_missing_meta_startup_returns_the_creation_hint() {
         assert_eq!(names, ["rdy_instructions", "rdy_session"]);
         session(&mut c, "writer");
         let v = c.call("rdy_instructions", json!({})).ok();
-        let hint = create_hint(&w.default_meta());
+        let hint = format!(
+            "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes. Reconnect this MCP server after setup.",
+            w.default_meta().display()
+        );
         assert_eq!(
-            v,
-            json!({"instructions": [], "menu": [], "hint": hint}),
+            hint,
+            format!(
+                "{} Reconnect this MCP server after setup.",
+                create_hint(&w.default_meta())
+            )
+        );
+        assert_builtins_first(&v);
+        assert_eq!(
+            v["menu"].as_array().unwrap().len(),
+            BUILTIN_MENU.len(),
             "{v}"
         );
+        assert_eq!(v["instructions"].as_array().unwrap().len(), 3, "{v}");
+        assert_eq!(v["hint"], hint, "{v}");
         match c.call("rdy_overview", json!({})) {
             Reply::ToolError(e) => assert_eq!(e["code"], "E_NO_PROJECT", "{e}"),
             other => panic!("expected E_NO_PROJECT, got {other:?}"),
@@ -236,7 +329,82 @@ fn ain5_missing_meta_startup_returns_the_creation_hint() {
     let named = elsewhere.path().join("rules");
     w.person(&named);
     let v = json_of(&rdy_at(&w, outside.path(), &["--json", "instructions"]));
-    assert_eq!(v["hint"], create_hint(&named), "{v}");
+    assert_eq!(
+        v["hint"],
+        format!(
+            "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes. Reconnect this MCP server after setup.",
+            named.display()
+        ),
+        "{v}"
+    );
+}
+
+/// agi4: a projectless server stays projectless after `rdy setup` made the rules project. Its
+/// instructions call sees the new source and says to reconnect; every other tool still refuses.
+/// A new connection from the same place selects the rules project and serves every tool.
+#[test]
+fn agi4_setup_requires_reconnect_for_the_old_projectless_server() {
+    let w = World::new();
+    let outside = short_tempdir();
+    let missing = format!(
+        "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes. Reconnect this MCP server after setup.",
+        w.default_meta().display()
+    );
+    let ready = "Your own rules project is ready. Reconnect this MCP server to use it. For other work, run rdy init in a folder and reconnect.";
+    let meta_session = "This session is on your own rules project. Use it for your rules. For other work, run rdy init in a folder and reconnect.";
+    for extra in [vec![], vec!["--no-daemon"]] {
+        // before setup: the two tools and the creation hint
+        let mut old = mcp_at(&w, outside.path(), &extra);
+        let names = |c: &mut McpClient| {
+            let mut n: Vec<String> = c
+                .tools()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&mut old), ["rdy_instructions", "rdy_session"]);
+        session(&mut old, "reader");
+        let v = old.call("rdy_instructions", json!({})).ok();
+        assert_builtins_first(&v);
+        assert_eq!(v["hint"], missing, "{v}");
+        // setup runs on the person's side
+        let out = rdy_at(&w, outside.path(), &["--json", "setup"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let s = json_of(&out);
+        assert_eq!(s["meta"]["result"], "created", "{s}");
+        // the same connection: the new source is seen, the tools are the same, the hint says to
+        // reconnect
+        let v = old.call("rdy_instructions", json!({})).ok();
+        assert_builtins_first(&v);
+        assert_eq!(v["hint"], ready, "{v}");
+        assert!(authored(&v, "instructions").is_empty(), "{v}");
+        assert_eq!(names(&mut old), ["rdy_instructions", "rdy_session"]);
+        match old.call("rdy_overview", json!({})) {
+            Reply::ToolError(e) => assert_eq!(e["code"], "E_NO_PROJECT", "{e}"),
+            other => panic!("expected E_NO_PROJECT, got {other:?}"),
+        }
+        let stderr = protocol_only(old);
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        // a fresh connection selects the rules project and serves its normal tools
+        let mut fresh = mcp_at(&w, outside.path(), &extra);
+        assert!(names(&mut fresh).len() > 2, "{:?}", names(&mut fresh));
+        session_as(&mut fresh, "r2", "reader");
+        let v = fresh.call("rdy_instructions", json!({})).ok();
+        assert_builtins_first(&v);
+        assert_eq!(v["hint"], meta_session, "{v}");
+        assert!(fresh.call("rdy_overview", json!({})).is_ok());
+        let stderr = protocol_only(fresh);
+        assert!(!stderr.contains("panicked"), "{stderr}");
+        // the next round starts again with no rules project
+        w.stop(&w.default_meta());
+        std::fs::remove_dir_all(w.default_meta()).unwrap();
+    }
 }
 
 #[test]
@@ -427,8 +595,9 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
         session(&mut c, "reader");
         assert_eq!(ok(&mut c, "rdy_overview", json!({}))["reminder"], REMINDER);
         let v = ok(&mut c, "rdy_instructions", json!({}));
+        assert_builtins_first(&v);
         assert_eq!(
-            col(&v, "instructions", "id"),
+            authored_col(&v, "instructions", "id"),
             [
                 prules[0].clone(),
                 prules[1].clone(),
@@ -437,33 +606,33 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
             ]
         );
         assert_eq!(
-            col(&v, "instructions", "layer"),
+            authored_col(&v, "instructions", "layer"),
             ["project", "project", "person", "person"]
         );
         assert!(
-            v["instructions"][1]["text"]
+            authored(&v, "instructions")[1]["text"]
                 .as_str()
                 .unwrap()
                 .ends_with("proj sentinel: the last paragraph arrives."),
             "{v}"
         );
         assert!(
-            v["instructions"][3]["text"]
+            authored(&v, "instructions")[3]["text"]
                 .as_str()
                 .unwrap()
                 .ends_with("meta sentinel: the last paragraph arrives."),
             "{v}"
         );
         assert_eq!(
-            v["instructions"][0]["reason"][0]["statement"],
+            authored(&v, "instructions")[0]["reason"][0]["statement"],
             "proj: small changes keep review cheap"
         );
         assert_eq!(
-            v["instructions"][2]["reason"][0]["statement"],
+            authored(&v, "instructions")[2]["reason"][0]["statement"],
             "meta: small changes keep review cheap"
         );
         assert_eq!(
-            col(&v, "menu", "id"),
+            authored_col(&v, "menu", "id"),
             [
                 pid(&pdocs[0]),
                 pid(&pdocs[1]),
@@ -471,14 +640,18 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
                 qid(&mdocs[1])
             ]
         );
-        assert_eq!(col(&v, "menu", "when")[1], "Load this for test work.");
+        assert_eq!(
+            authored_col(&v, "menu", "when")[1],
+            "Load this for test work."
+        );
         // load the optional sets
         let loaded = ok(
             &mut c,
             "rdy_instructions",
             json!({"load": [pid(&pdocs[1]), qid(&mdocs[1])]}),
         );
-        assert_eq!(loaded["instructions"].as_array().unwrap().len(), 6);
+        assert_eq!(authored(&loaded, "instructions").len(), 6);
+        assert_builtins_first(&loaded);
         assert!(
             ok(&mut c, "rdy_overview", json!({}))
                 .get("reminder")
@@ -509,11 +682,15 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
     let mut c = w.mcp(pd2.path());
     session(&mut c, "reader");
     let v = ok(&mut c, "rdy_instructions", json!({}));
+    assert_builtins_first(&v);
     assert_eq!(
-        col(&v, "instructions", "id"),
+        authored_col(&v, "instructions", "id"),
         [mrules[0].clone(), mrules[1].clone()]
     );
-    assert_eq!(col(&v, "instructions", "layer"), ["person", "person"]);
+    assert_eq!(
+        authored_col(&v, "instructions", "layer"),
+        ["person", "person"]
+    );
     drop(c);
     // meta under another spelling of the same directory is read once
     let alias: PathBuf = w.home.path().join("meta-link");
@@ -522,7 +699,10 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
     let mut c = w.mcp(&meta);
     session(&mut c, "reader");
     let v = ok(&mut c, "rdy_instructions", json!({}));
-    assert_eq!(col(&v, "instructions", "layer"), ["person", "person"]);
+    assert_eq!(
+        authored_col(&v, "instructions", "layer"),
+        ["person", "person"]
+    );
     let cli = rdy_at(&w, &meta, &["--json", "instructions"]);
     assert_eq!(json_of(&cli), v);
 }

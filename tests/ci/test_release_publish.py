@@ -531,6 +531,49 @@ class Caller(Base):
 
 
 class Draft(Base):
+    def test_agi6_first_embedded_release_has_no_guide_assets(self):
+        # The exact set has neither legacy guide nor a replacement: only archives, manifest, signature, crates.
+        stage = self.stage()
+        stage.sign()
+        result = stage.draft()
+        expected = sorted(list(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig'] + list(CRATES))
+        row = stage.releases.draft_row()
+        self.assertEqual(sorted(a['name'] for a in row['assets']), expected)
+        self.assertEqual(sorted(p.name for p in result.folder.iterdir()), expected)
+        self.assertEqual([a['name'] for a in json.loads(result.receipt)['assets']], expected)
+        uploaded = [m for m in stage.releases.mutations if m.startswith('upload ')]
+        forbidden = ('AGENTS.md', 'CLAUDE.md', 'agent-guide.json', 'agent-guide.sha256')
+        for name in forbidden:
+            self.assertNotIn('upload ' + name, uploaded)
+        # The old assets at S are not read; S no longer holds them, and the set does not depend on it.
+        read = [c[1] for c in stage.w.calls if c[0] == 'contents']
+        self.assertNotIn('release/AGENTS.md', read)
+        self.assertNotIn('release/CLAUDE.md', read)
+        # Each of the four names is an unexpected asset of the draft, the old two and the new two.
+        for name in forbidden:
+            fresh = self.stage()
+            fresh.sign()
+            fresh.draft()
+            fresh.releases.add_asset(fresh.releases.draft_row(), name, b'# Agent guide\n')
+            before = list(fresh.releases.mutations)
+            with self.subTest(name):
+                with self.assertRaises(ControllerError) as caught:
+                    fresh.draft()
+                self.assertEqual(str(caught.exception), 'reservation conflict: the draft holds the unexpected asset ' + name)
+                self.assertEqual(fresh.releases.mutations, before, 'a refusal writes nothing')
+        # S may still hold the old files: the exact set does not read them or any other guide file.
+        w = release_world()
+        w.put(S, 'release/AGENTS.md', b'# Agent guide\n')
+        w.put(S, 'release/CLAUDE.md', b'# Agent guide\n')
+        release = mock.Mock(version='0.43.0', commit=S, first_machine_tag='v0.42.0', policy_commit=P,
+                            transition_sha256=digest(7), manifest_sha256=w.manifest,
+                            artifacts=tuple((f['name'], f['sha256'], f['size']) for f in w.archives),
+                            candidate_run=(base.CAND_RUN, 1, base.CAND_ART, digest(5)))
+        release.tuple_value.return_value = {'artifacts': w.archives}
+        wants, files = PUBLISH.wanted_assets(Git(w), release, SIGNATURE)
+        self.assertEqual(sorted(wants), expected)
+        self.assertEqual(sorted(files), ['SHA256SUMS'])
+
     def test_rsig7_draft_target_body_and_asset_set_are_exact(self):
         stage = self.stage()
         stage.sign()
@@ -539,7 +582,7 @@ class Draft(Base):
         self.assertEqual((row['tag'], row['target'], row['draft'], row['prerelease'], row['name']),
                          ('v0.43.0', S, True, True, 'v0.43.0'))
         self.assertEqual(row['body'], stage.w.notes.decode())
-        names = sorted(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md'] + sorted(CRATES)
+        names = sorted(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig'] + sorted(CRATES)
         self.assertEqual(sorted(a['name'] for a in row['assets']), sorted(names))
         self.assertEqual(stage.releases.mutations.count('create_draft'), 1)
         self.assertEqual(sorted(p.name for p in result.folder.iterdir()), sorted(names))
@@ -569,15 +612,15 @@ class Draft(Base):
 
         def resize(s):
             row = s.releases.draft_row()
-            asset = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            asset = [a for a in row['assets'] if a['name'] == 'imbl-sized-chunks-0.2.0.crate'][0]
             asset['size'] += 1
 
         def twice(s):
-            s.releases.add_asset(s.releases.draft_row(), 'AGENTS.md', b'# Agent guide\n\nUse rdy.\n')
+            s.releases.add_asset(s.releases.draft_row(), 'imbl-sized-chunks-0.2.0.crate', CRATES['imbl-sized-chunks-0.2.0.crate'])
 
         def incomplete(s):
             row = s.releases.draft_row()
-            [a for a in row['assets'] if a['name'] == 'CLAUDE.md'][0]['state'] = 'starter'
+            [a for a in row['assets'] if a['name'] == 'imbl-7.0.2.crate'][0]['state'] = 'starter'
 
         def second(s):
             s.releases.next_id += 1
@@ -592,9 +635,9 @@ class Draft(Base):
                 (add_extra('test-root.pub'), 'reservation conflict: the draft holds the unexpected asset test-root.pub'),
                 (add_extra('allowed_signers'), 'reservation conflict: the draft holds the unexpected asset allowed_signers'),
                 (clobber, 'reservation conflict: the draft asset SHA256SUMS is not its exact bytes'),
-                (resize, 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
-                (twice, 'reservation conflict: the draft holds AGENTS.md twice'),
-                (incomplete, 'reservation conflict: the draft asset CLAUDE.md is incomplete'),
+                (resize, 'reservation conflict: the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes'),
+                (twice, 'reservation conflict: the draft holds imbl-sized-chunks-0.2.0.crate twice'),
+                (incomplete, 'reservation conflict: the draft asset imbl-7.0.2.crate is incomplete'),
                 (second, 'reservation conflict: more than one release names v0.43.0')):
             fresh = self.stage()
             fresh.sign()
@@ -611,9 +654,9 @@ class Draft(Base):
         fresh = self.stage()
         fresh.ready()
         row = fresh.releases.draft_row()
-        row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
-        self.refused('reservation conflict: the draft lacks CLAUDE.md', fresh.final_tag)
-        self.assertEqual(fresh.releases.mutations.count('upload CLAUDE.md'), 1)
+        row['assets'] = [a for a in row['assets'] if a['name'] != 'imbl-7.0.2.crate']
+        self.refused('reservation conflict: the draft lacks imbl-7.0.2.crate', fresh.final_tag)
+        self.assertEqual(fresh.releases.mutations.count('upload imbl-7.0.2.crate'), 1)
 
         # The signature artifact supplies only verified bytes.
         for change_signature, text in (
@@ -668,7 +711,7 @@ class Draft(Base):
         release.tuple_value.return_value = {'artifacts': w.archives}
         wants, files = PUBLISH.wanted_assets(Git(w), release, SIGNATURE)
         self.assertEqual(sorted(wants), sorted(list(archive_files(w)) + [
-            'SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md', 'transition-v0.42.0.json',
+            'SHA256SUMS', 'SHA256SUMS.sig', 'transition-v0.42.0.json',
             'transition-v0.42.0.json.sig'] + list(CRATES)))
         self.assertEqual(files['transition-v0.42.0.json'], transition)
         release.transition_sha256 = digest(1)
@@ -951,7 +994,7 @@ class Drift(Base):
                 (other_signer, 'authority unavailable: the admission record names another signer'),
                 (rollback, None),
                 (asset('SHA256SUMS', b'other'), 'reservation conflict: the draft asset SHA256SUMS is not its exact bytes'),
-                (asset('AGENTS.md', b'other'), 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
+                (asset('imbl-sized-chunks-0.2.0.crate', b'other'), 'reservation conflict: the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes'),
                 (asset('imbl-7.0.2.crate', b'other'), 'reservation conflict: the draft asset imbl-7.0.2.crate is not its exact bytes'),
                 (extra, 'reservation conflict: the draft holds the unexpected asset unexpected.bin'),
                 (replaced_asset, 'reservation conflict: the draft changed after its receipt'),
@@ -1024,15 +1067,15 @@ class Retry(Base):
         stage = self.stage()
         stage.sign()
         signature_bytes = stage.w.members[(SIG_ART, 'SHA256SUMS.sig')]
-        stage.releases.faults['upload SHA256SUMS'] = (False, 1)
-        self.refused('reservation conflict: the upload of SHA256SUMS is unresolved; reconcile again before any upload',
+        stage.releases.faults['upload imbl-7.0.2.crate'] = (False, 1)
+        self.refused('reservation conflict: the upload of imbl-7.0.2.crate is unresolved; reconcile again before any upload',
                      stage.draft)
         first = list(stage.releases.mutations)
         self.assertEqual(first.count('create_draft'), 1)
         draft_id = stage.releases.draft_row()['id']
         kept = {a['name']: a['asset_id'] for a in stage.releases.draft_row()['assets']}
-        self.assertTrue(kept)
-        self.assertNotIn('SHA256SUMS', kept)
+        self.assertEqual(sorted(kept), ['SHA256SUMS', 'SHA256SUMS.sig'])
+        self.assertNotIn('imbl-7.0.2.crate', kept)
         stage.rig.w.runs.setdefault((DISPATCH_RUN, 2), dict(stage.w.runs[(DISPATCH_RUN, 1)], run_attempt=2))
         # The signer's second attempt recovers the retained signature with no second Sign. Its bytes are the same.
         signs = stage.rig.kms.signs
@@ -1057,9 +1100,9 @@ class Retry(Base):
         # An upload whose acknowledgement was lost reads back; never a second upload.
         stage = self.stage()
         stage.sign()
-        stage.releases.faults['upload AGENTS.md'] = (True, 1)
+        stage.releases.faults['upload imbl-sized-chunks-0.2.0.crate'] = (True, 1)
         stage.draft()
-        self.assertEqual(stage.releases.mutations.count('upload AGENTS.md'), 1)
+        self.assertEqual(stage.releases.mutations.count('upload imbl-sized-chunks-0.2.0.crate'), 1)
         # A create that did not apply: a later attempt must reconcile. Nothing else happens now.
         stage = self.stage()
         stage.sign()
@@ -1157,10 +1200,10 @@ class Retry(Base):
         for apply, text in (
                 (blob(archive, b'different'), 'reservation conflict: the published archives differ from the reserved tuple'),
                 (blob('SHA256SUMS', b'different'), 'reservation conflict: the published manifest differs from the reserved tuple'),
-                (blob('AGENTS.md', b'different'), 'reservation conflict: the published asset set is not the expected set'),
+                (blob('imbl-sized-chunks-0.2.0.crate', b'different'), 'reservation conflict: the published asset set is not the expected set'),
                 (blob('imbl-7.0.2.crate', b'different'), 'reservation conflict: the published asset set is not the expected set'),
                 (extra, 'reservation conflict: the published asset set is not the expected set'),
-                (drop('CLAUDE.md'), 'reservation conflict: the published asset set is not the expected set'),
+                (drop('imbl-7.0.2.crate'), 'reservation conflict: the published asset set is not the expected set'),
                 (drop('SHA256SUMS.sig'), 'eligibility incomplete: the published signature is missing'),
                 (drop(archive), 'eligibility incomplete: the published archive ' + archive + ' is missing'),
                 (bad_sig, 'reservation conflict: the published signature does not verify'),
@@ -1335,7 +1378,7 @@ class FinalTagRetry(Base):
 
         def asset_bytes(s):
             row = s.releases.draft_row()
-            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            entry = [a for a in row['assets'] if a['name'] == 'imbl-sized-chunks-0.2.0.crate'][0]
             s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
 
         def closed(s):
@@ -1343,7 +1386,7 @@ class FinalTagRetry(Base):
         for apply, text in (
                 (drop_genuine, 'eligibility incomplete: the ' + MAC + ' genuine receipt artifact is unavailable'),
                 (bad_signature, 'evidence mismatch: the transferred signature does not verify'),
-                (asset_bytes, 'reservation conflict: the draft asset AGENTS.md is not its exact bytes'),
+                (asset_bytes, 'reservation conflict: the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes'),
                 (closed, 'authority unavailable: admission is CLOSED')):
             fresh = self.interrupted()
             apply(fresh)
@@ -1377,14 +1420,14 @@ class FinalTagRetry(Base):
 
         def missing_asset(s):
             row = s.releases.draft_row()
-            row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
+            row['assets'] = [a for a in row['assets'] if a['name'] != 'imbl-7.0.2.crate']
 
         def extra_asset(s):
             s.releases.add_asset(s.releases.draft_row(), 'unexpected.bin', b'z')
 
         def asset_bytes(s):
             row = s.releases.draft_row()
-            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            entry = [a for a in row['assets'] if a['name'] == 'imbl-sized-chunks-0.2.0.crate'][0]
             s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
 
         def notes(s):
@@ -1403,11 +1446,11 @@ class FinalTagRetry(Base):
         changed = 'the draft changed after its receipt'
         for apply, draft, final in (
                 (missing, tag, changed),
-                (missing_asset, 'the draft lacks CLAUDE.md', 'the draft lacks CLAUDE.md'),
+                (missing_asset, 'the draft lacks imbl-7.0.2.crate', 'the draft lacks imbl-7.0.2.crate'),
                 (extra_asset, 'the draft holds the unexpected asset unexpected.bin',
                  'the draft holds the unexpected asset unexpected.bin'),
-                (asset_bytes, 'the draft asset AGENTS.md is not its exact bytes',
-                 'the draft asset AGENTS.md is not its exact bytes'),
+                (asset_bytes, 'the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes',
+                 'the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes'),
                 (notes, 'the draft of v0.43.0 is not the exact draft', 'the draft of v0.43.0 is not the exact draft'),
                 (target, 'the release of v0.43.0 does not target the reserved commit', None),
                 (second, 'more than one release names v0.43.0', None),
@@ -1575,13 +1618,13 @@ class FinalTagRetry(Base):
 
         def other_asset(s):
             row = s.releases.draft_row()
-            entry = [a for a in row['assets'] if a['name'] == 'AGENTS.md'][0]
+            entry = [a for a in row['assets'] if a['name'] == 'imbl-sized-chunks-0.2.0.crate'][0]
             s.releases.blobs[entry['asset_id']] = b'o' * entry['size']
         for change, text in ((duplicate, 'more than one release names v0.43.0'),
                              (other_target, 'the release of v0.43.0 does not target the reserved commit'),
                              (other_notes, 'the draft of v0.43.0 is not the exact draft'),
                              (other_id, 'the draft changed after a prior receipt'),
-                             (other_asset, 'the draft asset AGENTS.md is not its exact bytes')):
+                             (other_asset, 'the draft asset imbl-sized-chunks-0.2.0.crate is not its exact bytes')):
             fresh = self.interrupted()
             fresh.git.runs_of_release = [(DISPATCH_RUN, 1)]
             fresh.later_attempt(2)
@@ -1675,8 +1718,8 @@ class FinalTagRetry(Base):
 
         def lost_an_asset(s):
             row = s.releases.draft_row()
-            row['assets'] = [a for a in row['assets'] if a['name'] != 'CLAUDE.md']
-        for change, text in ((removed, 'the draft changed after a prior receipt'), (lost_an_asset, 'the draft lacks CLAUDE.md')):
+            row['assets'] = [a for a in row['assets'] if a['name'] != 'imbl-7.0.2.crate']
+        for change, text in ((removed, 'the draft changed after a prior receipt'), (lost_an_asset, 'the draft lacks imbl-7.0.2.crate')):
             stage = self.stage()
             stage.sign()
             stage.draft()
@@ -1799,7 +1842,7 @@ class FinalTagSigner(sgn.Base):
 
 
 def stage_names(stage):
-    return list(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig', 'AGENTS.md', 'CLAUDE.md'] + list(CRATES)
+    return list(archive_files(stage.w)) + ['SHA256SUMS', 'SHA256SUMS.sig'] + list(CRATES)
 
 
 class FakeResponse(io.BytesIO):
@@ -2050,8 +2093,8 @@ class Public(Base):
                 (blob('SHA256SUMS', b'other'), 'SHA256SUMS is not its exact bytes'),
                 (blob(real_archive('0.43.0', LINUX)['name'], b'other'),
                  real_archive('0.43.0', LINUX)['name'] + ' is not its exact bytes'),
-                (blob('AGENTS.md', b'other'), 'AGENTS.md is not its exact bytes'),
-                (drop('CLAUDE.md'), 'the public asset set is not the expected set'),
+                (blob('imbl-sized-chunks-0.2.0.crate', b'other'), 'imbl-sized-chunks-0.2.0.crate is not its exact bytes'),
+                (drop('imbl-7.0.2.crate'), 'the public asset set is not the expected set'),
                 (extra, 'the public asset set is not the expected set'),
                 (body, 'the public notes are not the release notes'),
                 (tag, 'the tag is not at the release commit'),
@@ -2510,7 +2553,7 @@ class CurrentAuthority(Base):
     def test_rsig13_a_closure_after_a_reconciliation_read_refuses_the_next_write(self):
         # The upload's answer is lost. The read that reconciles it finds the asset; admission closes after that read.
         stage = self.signed()
-        stage.releases.faults['upload AGENTS.md'] = (True, 1)
+        stage.releases.faults['upload SHA256SUMS'] = (True, 1)
         real = stage.releases.release_full
 
         def read(release_id):
@@ -2520,7 +2563,7 @@ class CurrentAuthority(Base):
         stage.releases.release_full = read
         self.refused('authority unavailable: admission is CLOSED', stage.draft)
         uploads = [m for m in stage.releases.mutations if m.startswith('upload ')]
-        self.assertEqual(uploads, ['upload AGENTS.md'])
+        self.assertEqual(uploads, ['upload SHA256SUMS'])
         # The draft's creation: its answer is lost, its read finds it, and admission closes after that read.
         stage = self.signed()
         stage.releases.faults['create_draft'] = (True, 1)

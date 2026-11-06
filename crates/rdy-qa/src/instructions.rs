@@ -1,14 +1,17 @@
 //! Gate helpers for agent instructions (ain4): projects whose canon holds rulesets, and an
-//! isolated person's world (a temporary home and user config) whose `rdy` processes and
-//! daemons never read the real user config or the real meta project.
+//! isolated person's world (a temporary home and user config, or no home at all) whose `rdy`
+//! processes and daemons never read the real user config or the real meta project.
 use crate::daemon::{human_command, short_tempdir};
 use crate::fixtures::{land, write, writer};
 use crate::mcp::McpClient;
-use rdy_engine::instructions_config::{PathEnv, Platform};
+use rdy_engine::instructions_config::{
+    PathEnv, PersonPath, PersonSource, Platform, resolve_person,
+};
 use rdy_engine::{DecisionInput, Rdy};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 
 /// The reminder line, as the plan gives it.
@@ -95,11 +98,45 @@ pub fn author(dir: &Path, statement: &str, sets: &[Set]) -> Authored {
     }
 }
 
-/// A person's isolated world: `HOME` and `XDG_CONFIG_HOME` are temporary, the user config names
-/// the human `human:qa`, and every project made here has its daemon stopped at drop.
+/// Every variable that places a person's home, config or meta project (`PathEnv`). A process of a
+/// [`World`] gets each one from the world or has it removed, so it inherits none.
+const PERSON_VARS: [&str; 6] = [
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "XDG_CONFIG_HOME",
+];
+
+/// The person variables of a world, as data. With no `home`, only the config place remains. The
+/// drive form exists only where the home has a drive, which is `platform`'s text rule.
+fn person_env(platform: Platform, home: Option<&Path>, cfg: &Path) -> PathEnv {
+    let drive = home.and_then(|h| {
+        let text = h.to_str()?;
+        let is_drive = platform == Platform::Windows
+            && text.as_bytes().first()?.is_ascii_alphabetic()
+            && text.as_bytes().get(1) == Some(&b':');
+        is_drive.then(|| text.split_at(2))
+    });
+    PathEnv {
+        xdg_config_home: Some(cfg.into()),
+        home: home.map(Into::into),
+        user_profile: home.map(Into::into),
+        home_drive: drive.map(|(d, _)| d.into()),
+        home_path: drive.map(|(_, p)| p.into()),
+        app_data: home.map(|h| h.join("AppData").into()),
+    }
+}
+
+/// A person's isolated world: every home and config variable is temporary or removed, the user
+/// config names the human `human:qa`, and every project made here, and the meta project a process
+/// may have made, has its daemon stopped at drop.
 pub struct World {
     pub home: tempfile::TempDir,
     cfg: tempfile::TempDir,
+    /// No home at all: the "no home directory" case, with the config place alone.
+    no_home: bool,
     projects: Mutex<Vec<PathBuf>>,
     /// The project directories [`World::project`] made: removed only after their daemons stop.
     dirs: Mutex<Vec<tempfile::TempDir>>,
@@ -123,9 +160,19 @@ impl Default for World {
 
 impl World {
     pub fn new() -> World {
+        World::with_home(true)
+    }
+
+    /// A world whose processes have no home variable at all.
+    pub fn without_home() -> World {
+        World::with_home(false)
+    }
+
+    fn with_home(home: bool) -> World {
         let w = World {
             home: short_tempdir(),
             cfg: short_tempdir(),
+            no_home: !home,
             projects: Mutex::new(vec![]),
             dirs: Mutex::new(vec![]),
         };
@@ -143,9 +190,15 @@ impl World {
         .expect("user config");
     }
 
-    /// The user config with `instructions.person` set to `path`.
+    /// The user config with `instructions.person` set to `path`, as one YAML string.
     pub fn person(&self, path: &Path) {
-        self.config(&format!("instructions:\n  person: {}\n", path.display()));
+        let value = serde_yaml_ng::to_string(&path.to_string_lossy()).expect("a YAML string");
+        self.config(&format!("instructions:\n  person: {value}"));
+    }
+
+    /// The directory `XDG_CONFIG_HOME` names.
+    pub fn config_dir(&self) -> PathBuf {
+        self.cfg.path().to_path_buf()
     }
 
     /// The default meta project's place: `<home>/.rdy/meta`.
@@ -153,30 +206,66 @@ impl World {
         self.home.path().join(".rdy").join("meta")
     }
 
-    /// The environment of every process of this world.
+    /// The person variables of this world, from its own temporary roots alone.
+    fn person_vars(&self) -> PathEnv {
+        let home = (!self.no_home).then(|| self.home.path());
+        person_env(Platform::HOST, home, self.cfg.path())
+    }
+
+    /// The environment of every process of this world. [`World::removed_env`] names the rest.
     pub fn env(&self) -> Vec<(String, String)> {
-        vec![
-            (
-                "HOME".to_string(),
-                self.home.path().to_string_lossy().into_owned(),
-            ),
-            (
-                "XDG_CONFIG_HOME".to_string(),
-                self.cfg.path().to_string_lossy().into_owned(),
-            ),
-        ]
+        let vars = self.person_vars();
+        let pairs = [
+            ("HOME", vars.home),
+            ("USERPROFILE", vars.user_profile),
+            ("HOMEDRIVE", vars.home_drive),
+            ("HOMEPATH", vars.home_path),
+            ("APPDATA", vars.app_data),
+            ("XDG_CONFIG_HOME", vars.xdg_config_home),
+        ];
+        pairs
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.to_string(), v?.to_string_lossy().into_owned())))
+            .collect()
+    }
+
+    /// The person variables this world leaves unset: a process must not inherit them.
+    pub fn removed_env(&self) -> Vec<&'static str> {
+        let set = self.env();
+        PERSON_VARS
+            .into_iter()
+            .filter(|k| !set.iter().any(|(name, _)| name == k))
+            .collect()
     }
 
     /// The same environment as data, for an in-process reader.
     pub fn path_env(&self) -> (Platform, PathEnv) {
-        (
-            Platform::HOST,
-            PathEnv {
-                xdg_config_home: Some(self.cfg.path().into()),
-                home: Some(self.home.path().into()),
-                ..PathEnv::default()
-            },
-        )
+        (Platform::HOST, self.person_vars())
+    }
+
+    /// Every project whose daemon this world stops at drop: those it made, the default meta
+    /// project, and the meta project the user config moves. A process may create either of the
+    /// last two, and no later step tells the world.
+    pub fn teardown_paths(&self) -> Vec<PathBuf> {
+        let mut all = self
+            .projects
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if !self.no_home {
+            all.push(self.default_meta());
+        }
+        let (platform, env) = self.path_env();
+        if let Ok(PersonSource {
+            path: PersonPath::Override(p),
+            ..
+        }) = resolve_person(platform, &env)
+        {
+            all.push(p);
+        }
+        let mut seen = BTreeSet::new();
+        all.retain(|p| seen.insert(p.clone()));
+        all
     }
 
     /// A fresh `rdy-standard` project at `dir` (made if missing), with a 60 s idle timeout; its
@@ -206,11 +295,18 @@ impl World {
         Dir(path)
     }
 
+    /// The command `rdy --project <dir> <args>` as the human of this world.
+    pub fn command(&self, dir: &Path, args: &[&str]) -> Command {
+        let mut cmd = human_command(dir, &self.env(), args);
+        for name in self.removed_env() {
+            cmd.env_remove(name);
+        }
+        cmd
+    }
+
     /// `rdy --project <dir> <args>` as the human of this world.
     pub fn rdy(&self, dir: &Path, args: &[&str]) -> Output {
-        human_command(dir, &self.env(), args)
-            .output()
-            .expect("run rdy")
+        self.command(dir, args).output().expect("run rdy")
     }
 
     /// The JSON of `rdy --project <dir> --json <args>`: stdout on success, else stderr.
@@ -228,7 +324,21 @@ impl World {
 
     /// `rdy mcp --project <dir>` in this world: the proxy to the project's daemon.
     pub fn mcp(&self, dir: &Path) -> McpClient {
-        McpClient::start_proxy_at(dir, &self.env())
+        if !self.no_home {
+            return McpClient::start_proxy_at(dir, &self.env());
+        }
+        let mut cmd = crate::fixtures::rdy_command();
+        cmd.args(["mcp", "--project"])
+            .arg(dir)
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(self.env())
+            .stderr(Stdio::piped());
+        for name in self.removed_env() {
+            cmd.env_remove(name);
+        }
+        McpClient::launch(cmd)
     }
 
     /// The pid of the daemon serving `dir`, while one runs.
@@ -245,7 +355,7 @@ impl World {
     /// Stops the daemon of `dir` (`rdy serve --stop`).
     pub fn stop(&self, dir: &Path) {
         // never a panic: a drop may run while a test unwinds
-        if let Err(e) = human_command(dir, &self.env(), &["serve", "--stop"]).output() {
+        if let Err(e) = self.command(dir, &["serve", "--stop"]).output() {
             eprintln!("rdy serve --stop did not run in {}: {e}", dir.display());
         }
     }
@@ -253,11 +363,150 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        let dirs = std::mem::take(&mut *self.projects.lock().unwrap_or_else(|p| p.into_inner()));
-        for d in dirs {
+        for d in self.teardown_paths() {
             if self.daemon_pid(&d).is_some() {
                 self.stop(&d);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_engine::instructions_config::{default_meta_path, user_config_path};
+
+    fn text(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn agi1_world_isolates_all_person_paths() {
+        let w = World::new();
+        let (home, cfg) = (w.home.path().to_path_buf(), w.config_dir());
+        let vars = w.env();
+        let value = |k: &str| {
+            vars.iter()
+                .find(|(name, _)| name == k)
+                .map(|(_, v)| v.clone())
+        };
+
+        // The process environment: every variable that places a person path, below a temp root.
+        assert_eq!(value("HOME"), Some(text(&home)));
+        assert_eq!(value("USERPROFILE"), Some(text(&home)));
+        assert_eq!(value("XDG_CONFIG_HOME"), Some(text(&cfg)));
+        assert!(Path::new(&value("APPDATA").unwrap()).starts_with(&home));
+        for (name, v) in &vars {
+            assert!(PERSON_VARS.contains(&name.as_str()), "{name}");
+            if name != "HOMEDRIVE" && name != "HOMEPATH" {
+                assert!(
+                    Path::new(v).starts_with(&home) || Path::new(v).starts_with(&cfg),
+                    "{name}={v}"
+                );
+            }
+        }
+        for name in w.removed_env() {
+            assert!(value(name).is_none(), "{name} is both set and removed");
+        }
+        let mut all: Vec<&str> = vars.iter().map(|(n, _)| n.as_str()).collect();
+        all.extend(w.removed_env());
+        all.sort_unstable();
+        let mut closed = PERSON_VARS.to_vec();
+        closed.sort_unstable();
+        assert_eq!(
+            all, closed,
+            "each variable is set or removed, none inherited"
+        );
+
+        // This host: the default and the user config resolve below the temp roots.
+        let (platform, env) = w.path_env();
+        assert_eq!(default_meta_path(platform, &env), Some(w.default_meta()));
+        assert!(w.default_meta().starts_with(&home));
+        assert!(user_config_path(platform, &env).unwrap().starts_with(&cfg));
+        match resolve_person(platform, &env).unwrap().path {
+            PersonPath::Default(p) => assert_eq!(p, w.default_meta()),
+            other => panic!("{other:?}"),
+        }
+
+        // A configured path is one YAML string, whatever it holds, and stays where it says.
+        let other = short_tempdir();
+        let tricky = other.path().join("a: b #c 'd\"");
+        w.person(&tricky);
+        let source = resolve_person(platform, &env).unwrap();
+        assert_eq!(source.path, PersonPath::Override(tricky.clone()));
+        assert!(source.warnings.is_empty(), "{:?}", source.warnings);
+
+        // Both platform families, as data: a Windows home needs its drive form to stay below too.
+        for (platform, home, cfg) in [
+            (Platform::Unix, "/tmp/qa/home", "/tmp/qa/cfg"),
+            (Platform::Windows, r"C:\qa\home", r"C:\qa\cfg"),
+        ] {
+            let env = person_env(platform, Some(Path::new(home)), Path::new(cfg));
+            let meta = default_meta_path(platform, &env).unwrap();
+            assert!(text(&meta).starts_with(home), "{meta:?}");
+            let config = user_config_path(platform, &env).unwrap();
+            assert!(text(&config).starts_with(cfg), "{config:?}");
+            let no_profile = PathEnv {
+                user_profile: None,
+                ..env.clone()
+            };
+            let meta = default_meta_path(platform, &no_profile);
+            if platform == Platform::Windows {
+                assert!(text(&meta.unwrap()).starts_with(home));
+            }
+            let no_xdg = PathEnv {
+                xdg_config_home: None,
+                ..env.clone()
+            };
+            let config = user_config_path(platform, &no_xdg).unwrap();
+            assert!(text(&config).starts_with(home), "{config:?}");
+
+            // No home: no default anywhere, and no value left behind for a process to read.
+            let none = person_env(platform, None, Path::new(cfg));
+            assert_eq!(default_meta_path(platform, &none), None);
+            assert!(none.home.is_none());
+            assert!(none.user_profile.is_none());
+            assert!(none.home_drive.is_none());
+            assert!(none.home_path.is_none());
+            assert!(none.app_data.is_none());
+            assert!(text(&user_config_path(platform, &none).unwrap()).starts_with(cfg));
+        }
+
+        // No home on this host: the alternatives are removed from every process.
+        let bare = World::without_home();
+        let names: Vec<String> = bare.env().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["XDG_CONFIG_HOME"]);
+        for name in ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA"] {
+            assert!(bare.removed_env().contains(&name), "{name}");
+        }
+        let (platform, env) = bare.path_env();
+        assert_eq!(
+            resolve_person(platform, &env).unwrap().path,
+            PersonPath::Unavailable
+        );
+        assert!(!bare.teardown_paths().contains(&bare.default_meta()));
+
+        // Cleanup knows a meta project nobody made through `project_at`: the default one, and a
+        // configured one.
+        let w = World::new();
+        assert!(w.teardown_paths().contains(&w.default_meta()));
+        drop(Rdy::init(&w.default_meta(), "rdy-standard").expect("init the default meta"));
+        assert!(w.teardown_paths().contains(&w.default_meta()));
+        let moved = short_tempdir();
+        let configured = moved.path().join("rules");
+        w.person(&configured);
+        assert!(w.teardown_paths().contains(&configured));
+        let tracked = w.project();
+        let paths = w.teardown_paths();
+        assert!(paths.contains(&tracked.path().to_path_buf()));
+        w.project_at(&w.default_meta().with_file_name("again"));
+        w.project_at(&configured);
+        let paths = w.teardown_paths();
+        let unique: std::collections::BTreeSet<_> = paths.iter().collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "a path is stopped once: {paths:?}"
+        );
     }
 }

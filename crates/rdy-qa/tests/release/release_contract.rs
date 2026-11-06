@@ -21,6 +21,9 @@
 //!
 //! To write a candidate baseline, run the test with `RDY_CONTRACT_CAPTURE=1`: it replaces every
 //! row but `cli.tree` (rdy-cli writes that member the same way) and then compares as usual.
+use rdy_engine::RdyError;
+use rdy_engine::instructions::{Caller, Contribution, LoadRequest, PersonHost, deliver};
+use rdy_engine::instructions_config::{PersonPath, PersonSource};
 use rdy_engine::tensions::{Involved, SideRef, tension_id, tension_label, tension_vkey};
 use rdy_engine::{Scope, config_levels};
 use rdy_model::semantic::{PairItem, pair_key};
@@ -30,6 +33,7 @@ use rdy_model::{
     signature::{StatementKind, StatementSource, statement},
 };
 use rdy_qa::fixtures::{output_within, project};
+use rdy_qa::skip::{self, Why};
 use rdy_schema::{PackSet, TensionKind, TensionSeverity};
 use rdy_store::format::{
     FeatureClass, MANIFEST_VERSION, MAX_FEATURES, MAX_MANIFEST_BYTES, REF_STORE_FEATURES,
@@ -940,6 +944,12 @@ fn store_row() -> Value {
 
 // ---- dump and load ----
 
+/// An MCP client on `dir` whose home and config are the empty home of this test binary: a probe
+/// reads no operator file on any platform, and its replies cannot depend on one.
+fn isolated_mcp(dir: &Path) -> rdy_qa::mcp::McpClient {
+    rdy_qa::mcp::McpClient::start_isolated(dir, rdy_qa::fixtures::empty_home())
+}
+
 /// Runs the release binary in `dir` without a daemon; returns its exit value, stdout and stderr.
 fn rdy_in(dir: &Path, env: &[(String, String)], args: &[&str]) -> (i32, String, String) {
     let mut cmd = rdy_qa::fixtures::rdy_command();
@@ -1739,7 +1749,6 @@ fn agent_cli_probe(
 /// have labels of their own. One process holds the project at a time: each MCP session ends before the
 /// next command.
 fn check_loop(seen: &mut Seen, dir: &Path, env: &[(String, String)], a: &BlockId) {
-    use rdy_qa::mcp::McpClient;
     use rdy_qa::tensions::{ag, j_typo, put_j, upd};
     let author = ("agent:chk9", "chk9");
     let (pref, version) = {
@@ -1783,7 +1792,7 @@ fn check_loop(seen: &mut Seen, dir: &Path, env: &[(String, String)], a: &BlockId
     // the reviewer claims the independent request and answers it with a concern
     let session =
         |actor: &str, run: &str, role: &str| json!({"actor": actor, "run": run, "role": role});
-    let mut rv = McpClient::start(dir);
+    let mut rv = isolated_mcp(dir);
     rv.call("rdy_session", session("agent:rev9", "rev9", "reviewer"))
         .ok();
     let next = rv
@@ -1799,7 +1808,7 @@ fn check_loop(seen: &mut Seen, dir: &Path, env: &[(String, String)], a: &BlockId
     .ok();
     drop(rv);
     // the author answers its own run with a pass
-    let mut w = McpClient::start(dir);
+    let mut w = isolated_mcp(dir);
     w.call("rdy_session", session("agent:chk9", "chk9", "writer"))
         .ok();
     w.call(
@@ -1956,10 +1965,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("render-stream", "renders a stream file"),
     ("repin", "needs a pinned reference to move"),
     ("serve", "starts a daemon"),
-    (
-        "setup",
-        "writes CLAUDE.md and AGENTS.md; cli_instruction_setup pins its replies",
-    ),
     ("sign", "needs a signing key"),
     ("site", "starts or reads the live site"),
     ("stream", "checks a stream file; the sync row covers it"),
@@ -2144,6 +2149,22 @@ fn cli_runtime() -> Value {
     home_env.push(("HOME".to_string(), home_text.clone()));
     home_env.push(("USERPROFILE".to_string(), home_text));
     cli_probe(&mut seen, dir, &home_env, "instructions", &["instructions"]);
+    cli_probe(
+        &mut seen,
+        dir,
+        &home_env,
+        "instructions full",
+        &["instructions", "--full"],
+    );
+    // agi6: setup, in a project and a home of its own, so it writes nothing the others read
+    let (setup_dir, setup_project) = project();
+    drop(setup_project);
+    let setup_home = tempfile::tempdir().expect("a home");
+    let setup_text = setup_home.path().to_string_lossy().into_owned();
+    let mut setup_env = env.clone();
+    setup_env.push(("HOME".to_string(), setup_text.clone()));
+    setup_env.push(("USERPROFILE".to_string(), setup_text));
+    cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2283,7 +2304,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         |who: &str, role: &str| json!({"actor": format!("agent:{who}"), "run": who, "role": role});
 
     // the writer reads
-    let mut w = McpClient::start(dir);
+    let mut w = isolated_mcp(dir);
     let mut batch_session = session("batch", "writer");
     batch_session["areas"] = json!(["spec"]);
     mcp_probe(
@@ -2407,7 +2428,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     drop(w);
 
     // a reviewer dismisses the advice (the person wrote the other side, so the writer cannot)
-    let mut rv = McpClient::start(dir);
+    let mut rv = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut rv,
@@ -2426,7 +2447,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     drop(rv);
 
     // the writer approves, tags and writes
-    let mut w = McpClient::start(dir);
+    let mut w = isolated_mcp(dir);
     mcp_probe(seen, &mut w, "rdy_session", "rdy_session", batch_session);
     let queue = ok_of(&mcp_probe(
         seen,
@@ -2633,7 +2654,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     drop(w);
 
     // a reviewer judges requests: a tension with advice to block, a settled request, no tension
-    let mut rv = McpClient::start(dir);
+    let mut rv = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut rv,
@@ -2695,7 +2716,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     // asks for an independent review; a reviewer answers it, and the writer answers its own
     // run. These calls come last, so the tension probes above do not meet the new view. One
     // server holds the project at a time, so each session ends before the next starts.
-    let mut ck = McpClient::start(dir);
+    let mut ck = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut ck,
@@ -2765,7 +2786,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     drop(ck);
     // the independent request: a concern with its reason and citations. Each verdict has a label
     // of its own, so the tension probes above keep their shapes.
-    let mut rv = McpClient::start(dir);
+    let mut rv = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut rv,
@@ -2795,7 +2816,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     );
     drop(rv);
     // the author's own run: a pass; then both requests are answered, and the list shows each verdict
-    let mut ck = McpClient::start(dir);
+    let mut ck = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut ck,
@@ -2824,7 +2845,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     let tree = tempfile::tempdir().expect("a tree directory");
     write_import_tree(tree.path());
     let tree_dir = tree.path().to_string_lossy().into_owned();
-    let mut im = McpClient::start(dir);
+    let mut im = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut im,
@@ -2851,7 +2872,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         "the writer's import succeeds: {imported}"
     );
     drop(im);
-    let mut rdr = McpClient::start(dir);
+    let mut rdr = isolated_mcp(dir);
     mcp_probe(
         seen,
         &mut rdr,
@@ -2889,6 +2910,13 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         seen,
         &mut ins,
         "rdy_instructions",
+        "rdy_instructions full",
+        json!({"full": true}),
+    );
+    mcp_probe(
+        seen,
+        &mut ins,
+        "rdy_instructions",
         "rdy_instructions unknown load",
         json!({"load": ["project:d-ZZZZZ"]}),
     );
@@ -2901,7 +2929,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
 /// client that states the 2026-07-28 context in its requests.
 fn elicitation_probes(seen: &mut Seen) {
     use rdy_qa::fixtures::{approver, project, seed_doc, write, writer};
-    use rdy_qa::mcp::{DEADLINE, McpClient};
+    use rdy_qa::mcp::DEADLINE;
     let (dir, mut r) = project();
     let (_, section, _) = seed_doc(&mut r, "seed");
     let p = r
@@ -2919,7 +2947,7 @@ fn elicitation_probes(seen: &mut Seen) {
         .unwrap();
     drop(r);
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
-    let mut c = McpClient::start(dir.path());
+    let mut c = isolated_mcp(dir.path());
     mcp_probe(
         seen,
         &mut c,
@@ -3046,13 +3074,13 @@ fn write_import_tree(out: &Path) {
 }
 
 fn mcp_row() -> Value {
-    use rdy_qa::mcp::{McpClient, Reply};
+    use rdy_qa::mcp::Reply;
     let rich = rich_project();
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
-    let mut c = McpClient::start(d.path());
+    let mut c = isolated_mcp(d.path());
     let mut tools = c.tools();
     tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     assert!(tools.len() > 20, "the server lists its tools");
@@ -3105,7 +3133,7 @@ fn mcp_row() -> Value {
     drop(c);
     // a fabricated request is no request (E_REVIEW_STALE whatever the verdict), and `check` is
     // an unknown check
-    let mut rv = McpClient::start(d.path());
+    let mut rv = isolated_mcp(d.path());
     let opened = rv.call(
         "rdy_session",
         json!({"actor": "agent:qa", "run": "qa", "role": "reviewer"}),
@@ -4809,9 +4837,10 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
 /// ab1 (FW-AB1): `rdy_schema` lists the content fields `planned` (bool) and `since` (str), which
 /// have no enum values, so their `values` are empty.
-/// ain4/ain5: the instruction probes run with a home of their own and a project with no
-/// instruction set, so `instructions` and `menu` are empty, and the unknown load refusal
-/// states no issue rows.
+/// ain4/ain5: the unknown load refusal states no issue rows. agi6: the instruction probes run
+/// with a home of their own and a project with no instruction set, so every row and menu entry
+/// is built in, and those store no reason and name no selector; setup in a clean home warns of
+/// nothing.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4832,8 +4861,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/inbox/stdout/entries",
-    "cli/instructions/stdout/instructions",
-    "cli/instructions/stdout/menu",
+    "cli/instructions full/stdout/instructions[]/reason",
+    "cli/instructions full/stdout/menu[]/hints",
+    "cli/instructions/stdout/instructions[]/reason",
+    "cli/instructions/stdout/menu[]/hints",
     "cli/log/stdout[]/dispute/disputes",
     "cli/log/stdout[]/rebased_from",
     "cli/new doc/stdout/consequences",
@@ -4863,6 +4894,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/review request/stdout/requests[]/case/code",
     "cli/review run/stdout/case/code",
     "cli/review run/stdout/requests[]/case/code",
+    "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
     "cli/show landing/stdout/diff/entries[]/repinned",
@@ -4929,9 +4961,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_import/ok/on_change/tensions",
     "mcp/rdy_import/ok/related_decisions",
     "mcp/rdy_import/ok/suggestions",
+    "mcp/rdy_instructions full/ok/instructions[]/reason",
+    "mcp/rdy_instructions full/ok/menu[]/hints",
     "mcp/rdy_instructions unknown load/refused/issues",
-    "mcp/rdy_instructions/ok/instructions",
-    "mcp/rdy_instructions/ok/menu",
+    "mcp/rdy_instructions/ok/instructions[]/reason",
+    "mcp/rdy_instructions/ok/menu[]/hints",
     "mcp/rdy_log landing/ok/diff/entries[]/fields",
     "mcp/rdy_log landing/ok/diff/entries[]/links",
     "mcp/rdy_log landing/ok/diff/entries[]/repinned",
@@ -5014,6 +5048,24 @@ fn ok14_probes_see_populated_replies() {
     assert!(cli["suspects"]["stdout"]["items"][0]["target"].is_string());
     assert!(cli["pending"]["stdout"]["items"][0]["card_hash"].is_string());
     assert!(cli["tags"]["stdout"]["versions"][0]["name"].is_string());
+    // agi6: the instruction replies hold rows and a menu, with their fields in the shape
+    for reply in [
+        &mcp["rdy_instructions"]["ok"],
+        &mcp["rdy_instructions full"]["ok"],
+        &cli["instructions"]["stdout"],
+        &cli["instructions full"]["stdout"],
+    ] {
+        assert_eq!(
+            shape_keys(&reply["instructions"][0]),
+            ["id", "layer", "locked", "reason", "ruleset", "text"],
+            "{reply}"
+        );
+        assert_eq!(
+            shape_keys(&reply["menu"][0]),
+            ["hints", "id", "layer", "name", "required", "tokens", "when"],
+            "{reply}"
+        );
+    }
     // the writer, answer and review tools were called and answered
     for tool in [
         "rdy_write",
@@ -5269,5 +5321,170 @@ fn mh7_new_surfaces_preserve_the_release_contract() {
     assert_eq!(
         shape_keys(&runtime["compact"]["stdout"]),
         shape_keys(report)
+    );
+}
+
+/// The default person place of an isolated home, with a store that must never be read.
+struct NoStoreHost(PathBuf);
+
+impl PersonHost for NoStoreHost {
+    fn locate(&self) -> Result<PersonSource, RdyError> {
+        Ok(PersonSource {
+            path: PersonPath::Default(self.0.clone()),
+            origin: None,
+            warnings: vec![],
+            config_file: None,
+        })
+    }
+
+    fn fetch(
+        &self,
+        _meta: &Path,
+        _load: &LoadRequest,
+        _caller: &Caller,
+    ) -> Result<Contribution, RdyError> {
+        panic!("a missing rules project is not read");
+    }
+}
+
+/// The rows and menu that the committed guide bundle says a full reply holds.
+fn bundle_reply(bundle: &Value) -> (Value, Value) {
+    let (mut rows, mut menu) = (vec![], vec![]);
+    for set in bundle["rulesets"].as_array().expect("rulesets") {
+        let handle = format!("rdy:{}", set["name"].as_str().expect("a name"));
+        let mut bytes = 0usize;
+        for row in set["rows"].as_array().expect("rows") {
+            bytes += row["text"].as_str().expect("a text").len();
+            rows.push(json!({
+                "id": row["id"], "ruleset": handle, "text": row["text"], "layer": "rdy",
+                "locked": row["locked"], "reason": [],
+            }));
+        }
+        menu.push(json!({
+            "id": handle, "name": set["title"], "when": set["when"], "layer": "rdy",
+            "required": set["required"], "tokens": bytes.div_ceil(4), "hints": [],
+        }));
+    }
+    (Value::Array(rows), Value::Array(menu))
+}
+
+/// agi6 (D-GEKKY): in an isolated home the CLI, MCP and the engine deliver the same built-in rows
+/// and menu, and those are the committed bundle's; the release's own checker accepts this binary.
+#[test]
+fn agi6_release_surface_exposes_full_and_builtin_rows() {
+    let world = rdy_qa::instructions::World::new();
+    let bundle_path = workspace_root().join("release/agent-guide.json");
+    let bundle: Value =
+        serde_json::from_slice(&std::fs::read(&bundle_path).expect("the bundle")).expect("JSON");
+    let (rows, menu) = bundle_reply(&bundle);
+    assert_eq!(rows.as_array().unwrap().len(), 14);
+    assert_eq!(menu.as_array().unwrap().len(), 12);
+    let required: Vec<&Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["ruleset"] == "rdy:bootstrap")
+        .collect();
+    assert_eq!(required.len(), 3);
+
+    // the engine, with no project
+    let load = LoadRequest::parse(&[]).expect("no load");
+    let caller = Caller {
+        actor: "agent:qa".into(),
+        run: None,
+    };
+    let host = NoStoreHost(world.default_meta());
+    let engine = |load: &LoadRequest| {
+        serde_json::to_value(deliver(None, load, &caller, Some(&host)).expect("deliver"))
+            .expect("a reply")
+    };
+    let full = engine(&load.clone().with_full(true));
+    assert_eq!(full["instructions"], rows);
+    assert_eq!(full["menu"], menu);
+    let base = engine(&load);
+    assert_eq!(
+        base["instructions"],
+        Value::Array(required.iter().map(|r| (*r).clone()).collect()),
+        "the bootstrap alone arrives without full"
+    );
+    assert_eq!(base["menu"], menu, "the menu is the same either way");
+
+    // the CLI and both shapes of MCP, in a project and with no project
+    let dir = world.project();
+    let (ok, cli) = world.json(dir.path(), &["instructions", "--full"]);
+    assert!(ok, "{cli}");
+    assert_eq!(cli["instructions"], rows);
+    assert_eq!(cli["menu"], menu);
+    let (ok, cli_base) = world.json(dir.path(), &["instructions"]);
+    assert!(ok, "{cli_base}");
+    assert_eq!(cli_base["instructions"], base["instructions"]);
+    assert_eq!(cli_base["menu"], menu);
+    let mut c = world.mcp(dir.path());
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:qa", "run": "agi6", "role": "reader"})
+        )
+        .is_ok()
+    );
+    let mcp = c.call("rdy_instructions", json!({"full": true})).ok();
+    assert_eq!(mcp, cli, "the same JSON from MCP and the CLI");
+    let mcp_base = c.call("rdy_instructions", json!({})).ok();
+    assert_eq!(mcp_base, cli_base);
+    drop(c);
+    let elsewhere = tempfile::tempdir().expect("a folder with no project");
+    let mut outside = rdy_qa::fixtures::rdy_command();
+    outside
+        .args(["--json", "instructions", "--full"])
+        .envs(world.env())
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .current_dir(elsewhere.path());
+    let out = output_within(&mut outside, Duration::from_secs(120)).expect("run rdy");
+    assert!(out.status.success(), "{out:?}");
+    let reply: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(reply["instructions"], rows);
+    assert_eq!(reply["menu"], menu);
+
+    // the input and the flag are in the public surface
+    let fixture = read_fixture();
+    let schema = &fixture["mcp"]["tools"]["rdy_instructions"]["input_schema"]["properties"];
+    assert_eq!(shape_keys(schema), ["full", "load"]);
+    let command = fixture["cli"]["tree"]["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "instructions")
+        .expect("the instructions command");
+    assert_eq!(own_args(command), ["load", "full"]);
+
+    // the check that the release runs on the packaged binary accepts this binary as it stands
+    let python = std::process::Command::new("python3")
+        .arg("--version")
+        .output();
+    if !python.is_ok_and(|o| o.status.success()) {
+        skip::skip(
+            &rdy_qa::test_name!("agi6_release_surface_exposes_full_and_builtin_rows"),
+            Why::Prerequisite,
+            "python3 is not on PATH",
+        );
+        return;
+    }
+    let checked = std::process::Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(workspace_root().join("scripts/release/guide.py"))
+        .arg("check-binary")
+        .arg("--binary")
+        .arg(rdy_qa::fixtures::rdy_bin())
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--sidecar")
+        .arg(workspace_root().join("release/agent-guide.sha256"))
+        .output()
+        .expect("run the checker");
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
     );
 }

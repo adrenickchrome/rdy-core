@@ -72,6 +72,11 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def guide_bundle(edition, landing=None):
+    """The fields of a guide bundle that eligibility reads. The build and its tests own the rest."""
+    return canon({'schema': 1, 'edition': edition, 'design_landing': landing or LANDING, 'rulesets': []})
+
+
 def canon(value):
     return (json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False) + '\n').encode('utf-8')
 
@@ -234,12 +239,12 @@ class World(object):
 
         # Release sources at S.
         self.notes = ('# rdy ' + version + '\n\nRelease notes.\n').encode()
-        self.guide = b'# Agent guide\n\nUse rdy.\n'
+        self.guide = guide_bundle(version)
         self.put(S, 'Cargo.toml', ('[workspace]\nmembers = []\n\n[workspace.package]\nversion = "' + version
                                    + '"\n').encode())
         self.put(S, 'release/notes.md', self.notes)
-        self.put(S, 'release/AGENTS.md', self.guide)
-        self.put(S, 'release/CLAUDE.md', self.guide)
+        self.put(S, 'release/agent-guide.json', self.guide)
+        self.put(S, 'release/agent-guide.sha256', sha(self.guide).encode() + b'\n')
         self.source = {'schema': 1, 'version': version, 'design_landing': LANDING, 'notes_sha256': sha(self.notes),
                        'guide_sha256': sha(self.guide)}
         self.put(S, 'release/source.json', canon(self.source))
@@ -348,6 +353,15 @@ class World(object):
 
     def put(self, commit, path, data):
         self.files[(path, commit)] = data
+
+    def coherent_guide(self, data):
+        """`data` as the guide of S: its digest in the sidecar, release/source.json and E, all in agreement."""
+        self.guide = data
+        self.put(S, 'release/agent-guide.json', data)
+        self.put(S, 'release/agent-guide.sha256', sha(data).encode() + b'\n')
+        self.source['guide_sha256'] = sha(data)
+        self.put(S, 'release/source.json', canon(self.source))
+        self.e['source'].update(guide_sha256=sha(data), source_json_sha256=sha(canon(self.source)))
 
     def publish_policy(self, commit):
         ep = canon(self.ep)
@@ -837,14 +851,93 @@ class Eligibility(Base):
             with self.subTest(message=message):
                 self.refuses(w, message)
 
+    def test_agi6_guide_digest_binds_source_and_evidence(self):
+        message = 'evidence mismatch: the release guide does not match its digest'
+        other = guide_bundle('0.43.0') + b' '
+
+        def both(w):
+            # Bundle and sidecar agree with each other, but neither source.json nor E names them.
+            w.put(S, 'release/agent-guide.json', other)
+            w.put(S, 'release/agent-guide.sha256', sha(other).encode() + b'\n')
+
+        def source_only(w):
+            w.source['guide_sha256'] = digest(97)
+            w.put(S, 'release/source.json', canon(w.source))
+            w.e['source'].update(source_json_sha256=sha(canon(w.source)))
+
+        def source_and_evidence(w):
+            source_only(w)
+            w.e['source'].update(guide_sha256=digest(97))
+
+        def no_newline(w):
+            w.put(S, 'release/agent-guide.sha256', sha(w.guide).encode())
+
+        def upper_case(w):
+            w.put(S, 'release/agent-guide.sha256', sha(w.guide).upper().encode() + b'\n')
+
+        def crlf(w):
+            w.put(S, 'release/agent-guide.sha256', sha(w.guide).encode() + b'\r\n')
+
+        for change in (
+                lambda w: w.put(S, 'release/agent-guide.json', w.guide + b' '),
+                lambda w: w.put(S, 'release/agent-guide.sha256', digest(98).encode() + b'\n'),
+                both, no_newline, upper_case, crlf, source_only, source_and_evidence,
+                lambda w: w.e['source'].update(guide_sha256=digest(97))):
+            w = World()
+            change(w)
+            w.seal()
+            with self.subTest(change=change):
+                self.refuses(w, message)
+        # A missing file is unreadable evidence. The two old guide files are not read at all.
+        for path in ('release/agent-guide.json', 'release/agent-guide.sha256'):
+            w = World()
+            del w.files[(path, S)]
+            w.put(S, 'release/AGENTS.md', w.guide)
+            w.put(S, 'release/CLAUDE.md', w.guide)
+            self.refuses(w, 'eligibility incomplete: GitHub contents: not found')
+        w = World()
+        w.put(S, 'release/AGENTS.md', b'an old guide\n')
+        w.put(S, 'release/CLAUDE.md', b'a different old guide\n')
+        self.qualifies(w)
+        w = World()
+        self.qualifies(w)
+        read = [c[1] for c in w.calls if c[0] == 'contents']
+        self.assertIn('release/agent-guide.json', read)
+        self.assertIn('release/agent-guide.sha256', read)
+        self.assertNotIn('release/AGENTS.md', read)
+        self.assertNotIn('release/CLAUDE.md', read)
+
+    def test_agi6_coherent_old_bundle_is_refused(self):
+        message = 'evidence mismatch: the release guide does not name this version and design landing'
+        for label, data in (
+                ('old edition', guide_bundle('0.42.0')),
+                ('old landing', guide_bundle('0.43.0', 'e' * 64)),
+                ('old edition and landing', guide_bundle('0.42.0', 'e' * 64)),
+                ('a development bundle', guide_bundle('0.43.0-dev')),
+                ('no edition', canon({'schema': 1, 'design_landing': LANDING, 'rulesets': []})),
+                ('no landing', canon({'schema': 1, 'edition': '0.43.0', 'rulesets': []})),
+                ('not an object', b'[]\n'),
+                ('not JSON', b'# Agent guide\n\nUse rdy.\n'),
+                ('not UTF-8', b'\xff\n')):
+            w = World()
+            w.coherent_guide(data)
+            w.seal()
+            with self.subTest(label):
+                self.refuses(w, message)
+        # The same check with every digest in agreement passes for the guide of this release.
+        w = World()
+        w.coherent_guide(guide_bundle('0.43.0'))
+        w.seal()
+        self.qualifies(w)
+
     def test_rsig5_notes_and_tutorials_bind_exact_digests(self):
         cases = (
             ('evidence mismatch: release/notes.md does not match its digest',
              lambda w: w.put(S, 'release/notes.md', w.notes + b'changed\n')),
-            ('evidence mismatch: release/AGENTS.md and release/CLAUDE.md differ',
-             lambda w: w.put(S, 'release/CLAUDE.md', w.guide + b'x')),
             ('evidence mismatch: the release guide does not match its digest',
-             lambda w: [w.put(S, 'release/CLAUDE.md', b'other guide\n'), w.put(S, 'release/AGENTS.md', b'other guide\n')]),
+             lambda w: w.put(S, 'release/agent-guide.json', w.guide + b'x')),
+            ('evidence mismatch: the release guide does not match its digest',
+             lambda w: w.put(S, 'release/agent-guide.sha256', digest(98).encode() + b'\n')),
             ('evidence mismatch: release/source.json does not match the release record',
              lambda w: w.put(S, 'release/source.json', canon(dict(w.source, design_landing='e' * 64)))),
             ('evidence mismatch: the release guide does not match its digest',

@@ -117,6 +117,12 @@ impl Conn {
     }
 }
 
+/// The built-in layer as a reply carries it: its rows and its menu (the bootstrap whole).
+fn builtin_set(full: bool) -> Value {
+    let part = instructions::builtin(&LoadRequest::parse(&[]).unwrap().with_full(full)).unwrap();
+    serde_json::to_value(part).unwrap()
+}
+
 fn claim(actor: &str, run: &str) -> Value {
     json!({"rdy/actor": actor, "rdy/run": run})
 }
@@ -157,9 +163,24 @@ async fn ain4_projectless_mcp_can_claim_and_read_empty_instructions() {
         .await;
     assert!(!err, "{v}");
     let meta = home.path().join(".rdy").join("meta");
+    let built = builtin_set(false);
+    assert_eq!(
+        built["instructions"].as_array().unwrap().len(),
+        3,
+        "{built}"
+    );
+    assert_eq!(built["menu"].as_array().unwrap().len(), 12, "{built}");
     assert_eq!(
         v,
-        json!({"instructions": [], "menu": [], "hint": instructions::create_hint(&meta)})
+        json!({
+            "instructions": built["instructions"],
+            "menu": built["menu"],
+            "hint": format!(
+                "{} {}",
+                instructions::create_hint(&meta),
+                instructions::PROJECTLESS_SUFFIX
+            )
+        })
     );
     // the connection is bound: another actor is refused, the same one is accepted
     let (err, e) = c
@@ -218,5 +239,80 @@ async fn ain4_projectless_mcp_can_claim_and_read_empty_instructions() {
     assert!(!err, "{v}");
     let (err, v) = c.call("rdy_instructions", json!({}), None).await;
     assert!(!err, "{v}");
-    assert_eq!(v, json!({"instructions": [], "menu": []}));
+    let built = builtin_set(false);
+    assert_eq!(
+        v,
+        json!({
+            "instructions": built["instructions"],
+            "menu": built["menu"],
+            "hint": instructions::META_READY_HINT
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agi3_projectless_session_then_builtin_instructions() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Conn::start(dir.path(), home.path()).await;
+    // no session: the existing refusal and fix, for every form of the call
+    let (err, e) = c.call("rdy_instructions", json!({}), None).await;
+    assert!(err);
+    assert_eq!(e["code"], "E_NO_SESSION", "{e}");
+    let fix = e["fix"].clone();
+    assert!(fix.as_str().is_some_and(|f| !f.is_empty()), "{e}");
+    let (err, e2) = c
+        .call("rdy_instructions", json!({"full": true}), None)
+        .await;
+    assert!(err);
+    assert_eq!((&e2["code"], &e2["fix"]), (&e["code"], &fix), "{e2}");
+    // a reader session reads bootstrap, menu and the setup hint
+    let (err, v) = c
+        .call(
+            "rdy_session",
+            json!({"actor": "agent:p", "run": "p1", "role": "reader"}),
+            None,
+        )
+        .await;
+    assert!(!err, "{v}");
+    let (err, v) = c.call("rdy_instructions", json!({}), None).await;
+    assert!(!err, "{v}");
+    let ids: Vec<&str> = v["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "rdy:bootstrap:before",
+            "rdy:bootstrap:approval",
+            "rdy:bootstrap:after"
+        ]
+    );
+    assert_eq!(v["menu"].as_array().unwrap().len(), 12, "{v}");
+    assert!(
+        v["hint"]
+            .as_str()
+            .unwrap()
+            .ends_with(instructions::PROJECTLESS_SUFFIX),
+        "{v}"
+    );
+    // full adds every optional built-in body, in menu order, once each
+    let (err, f) = c
+        .call("rdy_instructions", json!({"full": true}), None)
+        .await;
+    assert!(!err, "{f}");
+    assert_eq!(f["instructions"], builtin_set(true)["instructions"], "{f}");
+    assert_eq!(f["instructions"].as_array().unwrap().len(), 14, "{f}");
+    // closed: a typed null or string is refused, nothing is read
+    for bad in [
+        json!({"full": null}),
+        json!({"full": "yes"}),
+        json!({"ful": true}),
+    ] {
+        let (err, e) = c.call("rdy_instructions", bad, None).await;
+        assert!(err, "{e}");
+    }
 }

@@ -30,6 +30,7 @@ pub mod dispute;
 pub mod dump;
 pub mod dump_error;
 pub mod dump_stop;
+pub mod embedded_guide;
 pub mod engine;
 mod error;
 pub mod events;

@@ -252,6 +252,9 @@ E_KEYS = ('schema', 'repository', 'version', 'commit', 'design_landing', 'source
           'security', 'audit', 'tutorials', 'approval_basis')
 JOB_KEYS = ('run_id', 'run_attempt', 'job_id', 'job_url', 'conclusion')
 ARTIFACT_KEYS = ('id', 'name', 'digest', 'size')
+# guide_sha256, here and in release/source.json: the SHA-256 of the exact bytes of release/agent-guide.json
+# at S, the public guide bundle that the binary embeds. Evidence sealed before the first embedding release
+# keeps its own meaning, the shared digest of the two guide assets of that release.
 SOURCE_DIGEST_KEYS = ('notes_sha256', 'guide_sha256', 'source_json_sha256', 'export_receipt_sha256')
 CANDIDATE_KEYS = ('ref', 'run_id', 'run_attempt', 'artifact', 'manifest_sha256', 'artifacts')
 TARGET_KEYS = ('target', 'archive', 'build', 'package', 'fast_gate', 'install')

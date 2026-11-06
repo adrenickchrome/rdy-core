@@ -94,6 +94,25 @@ pub fn source_build_inputs(
             &mut rerun,
         )?;
     }
+    // The engine compiles the guide in, so a changed guide is a changed binary. Only these two
+    // files of `release/` count, and only when present: the engine's build refuses them missing.
+    for name in ["release/agent-guide.json", "release/agent-guide.sha256"] {
+        let abs = root.join(name);
+        if matches!(fs::symlink_metadata(&abs), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        admit_file(
+            name.to_string(),
+            abs,
+            limits,
+            &mut seen,
+            &mut files,
+            &mut total,
+            &mut entries,
+            &mut rerun,
+        )?;
+    }
     let crates = root.join("crates");
     let mut stack: Vec<(String, PathBuf)> = Vec::new();
     reserve(&mut stack, 1)?;

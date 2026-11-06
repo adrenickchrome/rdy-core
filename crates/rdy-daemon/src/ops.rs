@@ -645,7 +645,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             let req = parse(op, args, "{tag, to, site, keep_latest?}")?;
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
         }
-        "instructions" => instructions(cx, parse(op, args, "{load?, part?}")?),
+        "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

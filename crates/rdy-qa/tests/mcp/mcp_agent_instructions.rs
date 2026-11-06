@@ -9,12 +9,14 @@ use rdy_engine::instructions::create_hint;
 use rdy_mcp::claims::{self, Registry, SETTINGS_IDLE};
 use rdy_mcp::notify::NotifyHub;
 use rdy_mcp::tools::{self, McpState};
+use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::{land, write};
 use rdy_qa::git_repo::GitRepo;
 use rdy_qa::instructions::{Authored, REMINDER, Set, World, author};
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -107,6 +109,41 @@ fn ids(v: &Value, key: &str, field: &str) -> Vec<String> {
         .collect()
 }
 
+/// The reply with its built-in rows and menu entries (layer `rdy`) taken out.
+fn without_rdy(v: &Value) -> Value {
+    let mut v = v.clone();
+    for key in ["instructions", "menu"] {
+        if let Some(a) = v[key].as_array_mut() {
+            a.retain(|r| r["layer"] != "rdy");
+        }
+    }
+    v
+}
+
+/// The built-in rows or menu entries of a reply, as delivered.
+fn rdy_part(v: &Value, key: &str) -> Vec<Value> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} in {v}"))
+        .iter()
+        .filter(|r| r["layer"] == "rdy")
+        .cloned()
+        .collect()
+}
+
+fn rdy_ids(v: &Value, key: &str) -> Vec<String> {
+    rdy_part(v, key)
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+const BOOTSTRAP_ROWS: [&str; 3] = [
+    "rdy:bootstrap:before",
+    "rdy:bootstrap:approval",
+    "rdy:bootstrap:after",
+];
+
 fn p(id: &str) -> String {
     format!("project:{id}")
 }
@@ -136,7 +173,11 @@ fn ain4_one_tool_delivers_required_and_selected_rules_over_mcp() {
         .unwrap()
         .keys()
         .collect();
-    assert_eq!(keys, ["load"]);
+    assert_eq!(keys, ["full", "load"]);
+    assert_eq!(
+        listed[0]["inputSchema"]["properties"]["full"]["type"],
+        "boolean"
+    );
     // the first claim, by _meta, gets the required rules of both layers and the whole menu
     let v = call_meta(
         &mut c,
@@ -145,6 +186,12 @@ fn ain4_one_tool_delivers_required_and_selected_rules_over_mcp() {
         claim("agent:a", "a1"),
     )
     .ok();
+    // the required built-in bootstrap and the whole built-in menu come first; the stored
+    // layers follow unchanged
+    let built = v.clone();
+    assert_eq!(rdy_ids(&built, "instructions"), BOOTSTRAP_ROWS);
+    assert_eq!(rdy_part(&built, "menu").len(), 12, "{built}");
+    let v = without_rdy(&v);
     assert_eq!(
         ids(&v, "instructions", "id"),
         [
@@ -200,10 +247,8 @@ fn ain4_one_tool_delivers_required_and_selected_rules_over_mcp() {
             "hints": ["type:claim"]})
     );
     assert_eq!(v["menu"][3]["when"], "");
-    assert!(
-        v.get("hint").is_none() && v.get("warnings").is_none(),
-        "{v}"
-    );
+    assert!(v.get("warnings").is_none(), "{v}");
+    assert!(built.get("hint").is_none(), "{built}");
     // load: a qualified handle and a bare id that one layer holds; the required rules stay
     let v = c
         .call(
@@ -211,6 +256,7 @@ fn ain4_one_tool_delivers_required_and_selected_rules_over_mcp() {
             json!({"load": [p(&pa.docs[1]), ma.docs[1].clone()]}),
         )
         .ok();
+    let v = without_rdy(&v);
     assert_eq!(
         ids(&v, "instructions", "id"),
         [
@@ -381,7 +427,16 @@ fn ain4_reminder_is_per_actor_and_run_and_clears_after_success() {
         open(&mut a1, "agent:a", "r1", "writer");
         assert!(overview(&mut a1, json!({})).get("reminder").is_none());
         let again = instructions(&mut a1, json!({})).unwrap();
-        assert_eq!(again["instructions"].as_array().unwrap().len(), 2);
+        assert_eq!(again["instructions"].as_array().unwrap().len(), 5);
+        assert_eq!(rdy_ids(&again, "instructions"), BOOTSTRAP_ROWS);
+        assert_eq!(
+            ids(&without_rdy(&again), "instructions", "id"),
+            [pa.rules[0][0].clone(), pa.rules[0][1].clone()]
+        );
+        assert_eq!(
+            ids(&without_rdy(&again), "instructions", "layer"),
+            ["project", "project"]
+        );
         // the bit lives with the saved settings: an idle hour drops both
         at(SETTINGS_IDLE.as_secs() - 1);
         assert!(overview(&mut a1, json!({})).get("reminder").is_none());
@@ -483,6 +538,19 @@ fn ain4_tool_inputs_are_closed_and_reader_calls_write_no_content() {
     assert_eq!(code, "E_BAD_INPUT");
     assert_eq!(message, "rdy_instructions: unknown parameter \"lod\"");
     assert!(fix.starts_with("did you mean \"load\"?"), "{fix}");
+    for bad in [
+        json!({"full": null}),
+        json!({"full": "true"}),
+        json!({"full": 1}),
+        json!({"full": [true]}),
+    ] {
+        let (code, message, _) = refusal(c.call("rdy_instructions", bad));
+        assert_eq!(code, "E_BAD_INPUT");
+        assert!(
+            message.starts_with("rdy_instructions: parameter \"full"),
+            "{message}"
+        );
+    }
     for bad in [json!({"load": "x"}), json!({"load": [1]})] {
         let (code, message, _) = refusal(c.call("rdy_instructions", bad));
         assert_eq!(code, "E_BAD_INPUT");
@@ -524,7 +592,161 @@ fn ain4_tool_inputs_are_closed_and_reader_calls_write_no_content() {
     };
     let (p0, m0) = (seen(&mut c), seen(&mut m));
     let v = c.call("rdy_instructions", json!({})).ok();
-    assert_eq!(v["instructions"].as_array().unwrap().len(), 3, "{v}");
+    assert_eq!(v["instructions"].as_array().unwrap().len(), 6, "{v}");
+    assert_eq!(without_rdy(&v)["instructions"].as_array().unwrap().len(), 3);
     assert_eq!((seen(&mut c), seen(&mut m)), (p0, m0));
     c.alive();
+}
+
+/// A projectless `rdy mcp` in an empty folder of `w`, its reader session claimed.
+fn projectless(w: &World, cwd: &Path) -> McpClient {
+    let mut cmd = rdy_qa::fixtures::rdy_command();
+    cmd.args(["mcp", "--no-daemon"])
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(w.env())
+        .current_dir(cwd)
+        .stderr(Stdio::piped());
+    let mut c = McpClient::launch(cmd);
+    let r = c.call(
+        "rdy_session",
+        json!({"actor": "agent:p", "run": "p1", "role": "reader"}),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    c
+}
+
+#[test]
+fn agi3_both_servers_share_full_and_closed_inputs() {
+    let w = World::new();
+    let pd = w.project();
+    let pa = author(pd.path(), "Small changes keep review cheap", PROJECT_SETS);
+    let outside = short_tempdir();
+    let mut served = w.mcp(pd.path());
+    let r = served.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a1", "role": "reader"}),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    let mut bare = projectless(&w, outside.path());
+    // both schemas name the same two closed inputs
+    for c in [&mut served, &mut bare] {
+        let tools = c.tools();
+        let t = tools
+            .iter()
+            .find(|t| t["name"] == "rdy_instructions")
+            .unwrap();
+        assert_eq!(t["inputSchema"]["additionalProperties"], false);
+        let mut keys: Vec<&String> = t["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["full", "load"]);
+    }
+    // false and absent read the same: the bootstrap whole, the menu, no optional body
+    let (a, b) = (
+        served.call("rdy_instructions", json!({})).ok(),
+        bare.call("rdy_instructions", json!({})).ok(),
+    );
+    let a_false = served.call("rdy_instructions", json!({"full": false})).ok();
+    assert_eq!(a, a_false);
+    assert_eq!(rdy_part(&a, "instructions"), rdy_part(&b, "instructions"));
+    assert_eq!(rdy_part(&a, "menu"), rdy_part(&b, "menu"));
+    assert_eq!(rdy_ids(&a, "instructions"), BOOTSTRAP_ROWS);
+    // true gives every built-in body once, the same on both servers; stored required rules stay
+    let (a, b) = (
+        served.call("rdy_instructions", json!({"full": true})).ok(),
+        bare.call("rdy_instructions", json!({"full": true})).ok(),
+    );
+    let built = rdy_ids(&a, "instructions");
+    assert_eq!(built.len(), 14, "{built:?}");
+    assert_eq!(rdy_part(&a, "instructions"), rdy_part(&b, "instructions"));
+    assert_eq!(rdy_part(&a, "menu"), rdy_part(&b, "menu"));
+    let mut once = built.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), 14);
+    assert_eq!(
+        ids(&without_rdy(&a), "instructions", "id"),
+        [pa.rules[0][0].clone(), pa.rules[0][1].clone()]
+    );
+    // full plus load: the stored optional ruleset arrives as well, built-ins are not repeated
+    let both = served
+        .call(
+            "rdy_instructions",
+            json!({"full": true, "load": [p(&pa.docs[1]), "rdy:write"]}),
+        )
+        .ok();
+    assert_eq!(rdy_ids(&both, "instructions"), built);
+    assert_eq!(
+        ids(&without_rdy(&both), "instructions", "id"),
+        [
+            pa.rules[0][0].clone(),
+            pa.rules[0][1].clone(),
+            pa.rules[1][0].clone()
+        ]
+    );
+    // every handle is still checked under full
+    let (code, message, _) = refusal(served.call(
+        "rdy_instructions",
+        json!({"full": true, "load": ["rdy:nowhere"]}),
+    ));
+    assert_eq!(
+        (code.as_str(), message.as_str()),
+        ("E_NOT_FOUND", "ruleset rdy:nowhere was not found")
+    );
+    // closed inputs: same refusals on both servers
+    for c in [&mut served, &mut bare] {
+        for bad in [
+            json!({"full": null}),
+            json!({"full": "true"}),
+            json!({"full": 0}),
+            json!({"fulll": true}),
+            json!({"full": true, "extra": 1}),
+        ] {
+            let (code, message, _) = refusal(c.call("rdy_instructions", bad));
+            assert_eq!(code, "E_BAD_INPUT");
+            assert!(message.starts_with("rdy_instructions:"), "{message}");
+        }
+    }
+    let (_, message, fix) = refusal(bare.call("rdy_instructions", json!({"ful": true})));
+    assert_eq!(message, "rdy_instructions: unknown parameter \"ful\"");
+    assert!(fix.starts_with("did you mean \"full\"?"), "{fix}");
+    served.alive();
+    bare.alive();
+}
+
+#[test]
+fn agi3_refused_instructions_keep_the_reminder_due() {
+    let w = World::new();
+    let pd = w.project();
+    author(pd.path(), "Small changes keep review cheap", PROJECT_SETS);
+    let engine = local(&w, pd.path());
+    let hub = NotifyHub::new();
+    let (mut a1, mut a2) = (state(&engine, &hub), state(&engine, &hub));
+    open(&mut a1, "agent:a", "r1", "reader");
+    open(&mut a2, "agent:a", "r2", "reader");
+    assert_eq!(overview(&mut a1, json!({}))["reminder"], REMINDER);
+    // a bad handle, a handle of the wrong kind, and a failed limit check: all owed
+    let many: Vec<String> = (0..1025).map(|i| format!("d-{i:05}")).collect();
+    for args in [
+        json!({"full": true, "load": ["rdy:nowhere"]}),
+        json!({"full": true, "load": ["project:d-ZZZZZ"]}),
+        json!({"full": true, "load": many}),
+        json!({"load": ["team:x"]}),
+    ] {
+        assert!(instructions(&mut a1, args).is_err());
+        assert_eq!(overview(&mut a1, json!({}))["reminder"], REMINDER);
+    }
+    // a complete full reply clears it for that actor and run only
+    let v = instructions(&mut a1, json!({"full": true})).unwrap();
+    assert_eq!(rdy_ids(&v, "instructions").len(), 14);
+    assert!(overview(&mut a1, json!({})).get("reminder").is_none());
+    assert_eq!(overview(&mut a2, json!({}))["reminder"], REMINDER);
+    // a later refusal does not bring it back
+    assert!(instructions(&mut a1, json!({"load": ["rdy:nowhere"]})).is_err());
+    assert!(overview(&mut a1, json!({})).get("reminder").is_none());
 }

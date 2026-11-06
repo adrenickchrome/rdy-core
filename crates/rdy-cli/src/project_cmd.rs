@@ -59,10 +59,15 @@ pub(crate) fn init(
     let InitArgs { dir, pack } = a;
     let dir = dir.or(project).unwrap_or_else(|| env.cwd.clone());
     Rdy::init(&dir, &pack)?;
-    Ok((
-        json!({"project": dir, "pack": pack}),
-        format!("Initialized rdy project in {} (pack {pack})", dir.display()),
-    ))
+    let mut v = json!({"project": dir, "pack": pack});
+    let mut t = format!("Initialized rdy project in {} (pack {pack})", dir.display());
+    // agi4: the prompt follows what is present; one that cannot be computed is none
+    if let Some(h) = crate::setup_cmd::init_prompt(&dir) {
+        v["setup_hint"] = json!(h);
+        t.push('\n');
+        t.push_str(h);
+    }
+    Ok((v, t))
 }
 
 pub(crate) fn pack(env: &Env, cmd: PackCmd) -> Result<(Value, String), ErrorReply> {
