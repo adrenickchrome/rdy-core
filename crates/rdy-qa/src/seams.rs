@@ -37,6 +37,9 @@ pub const SEAM_FILES: &[&str] = &[
     "crates/rdy-daemon/src/sys/windows/pipe.rs",
     "crates/rdy-daemon/src/sys/windows/run_state.rs",
     "crates/rdy-qa/src/platform.rs",
+    "crates/rdy-qa/src/platform/unix.rs",
+    "crates/rdy-qa/src/platform/windows.rs",
+    "crates/rdy-qa/src/platform/windows_process.rs",
     "crates/rdy-qa/src/seams.rs",
 ];
 
@@ -746,6 +749,32 @@ mod tests {
             )
         };
         assert_eq!(got, vec![cycle("a"), cycle("b")]);
+    }
+
+    /// `crates/rdy-qa/src/platform/` and the seam list name the same files: a child with no
+    /// Unix token yet still registers, so that the scan never has to guess at one.
+    #[test]
+    fn wx23a_every_platform_child_is_an_exact_seam() {
+        const DIR: &str = "crates/rdy-qa/src/platform/";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut on_disk: Vec<String> = std::fs::read_dir(root.join(DIR))
+            .expect("list the platform children")
+            .map(|entry| {
+                let name = entry.expect("an entry").file_name();
+                format!("{DIR}{}", name.to_string_lossy())
+            })
+            .collect();
+        on_disk.sort();
+        let mut registered: Vec<String> = SEAM_FILES
+            .iter()
+            .filter(|seam| seam.starts_with(DIR))
+            .map(ToString::to_string)
+            .collect();
+        registered.sort();
+        assert_eq!(registered, on_disk);
+        for child in ["unix.rs", "windows.rs", "windows_process.rs"] {
+            assert!(on_disk.contains(&format!("{DIR}{child}")), "{child}");
+        }
     }
 
     #[test]
