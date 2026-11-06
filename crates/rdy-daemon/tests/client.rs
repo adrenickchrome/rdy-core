@@ -657,7 +657,11 @@ async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
         run.ensure().unwrap();
         let _held = hold_store_lock(dir.path());
         let pid = std::process::id();
-        std::fs::write(run.pid_file(), rdy_daemon::sys::own_pid_record().unwrap()).unwrap();
+        rdy_store::fsutil::write_private_durable(
+            &run.pid_file(),
+            &rdy_daemon::sys::own_pid_record().unwrap(),
+        )
+        .unwrap();
         let tried = if recorded {
             let dead = dead_endpoint(dir.path());
             write_record(&run, &dead, &run.project_id().unwrap());

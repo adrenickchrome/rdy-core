@@ -101,7 +101,7 @@ fn start_options(
 async fn run_files_gone(run: &RunDir) {
     assert!(socket_gone(run).await, "the socket is gone");
     assert!(!run.socket_record().exists(), "the socket record is gone");
-    assert!(!run.pid_file().exists(), "the pid file is gone");
+    assert!(pid_file_gone(run).await, "the pid file is gone");
 }
 
 #[tokio::test]
@@ -281,6 +281,9 @@ async fn mh5_idle_other_build_is_replaced_before_retry() {
     let v = parsed(&first);
     assert_eq!(v["status"], "exiting");
     assert_eq!(v["version"], "1");
+    // on Windows the open connection holds an instance of the pipe, so its name stays until it closes
+    #[cfg(windows)]
+    drop(_r);
     run_files_gone(&d.run).await;
     let reason = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
     assert_eq!(reason.unwrap(), ExitReason::BuildReplaced);

@@ -144,7 +144,8 @@ pub fn write_record(run: &RunDir, socket: &Path, project: &ProjectId) {
     let mut bytes = endpoint_bytes(socket);
     bytes.push(b'\n');
     bytes.extend_from_slice(format!("{project}\n").as_bytes());
-    std::fs::write(run.socket_record(), bytes).unwrap();
+    // private to this account, as a daemon writes it: a client believes no other record
+    rdy_store::fsutil::write_private_durable(&run.socket_record(), &bytes).unwrap();
 }
 
 /// Connects, sends `line` as the hello, and returns the reader and the first reply line.
@@ -214,7 +215,9 @@ pub async fn socket_live(run: &RunDir) -> bool {
 }
 
 /// Whether the project's endpoint is proved gone: no socket file on Unix, no pipe of that name on
-/// Windows (`Liveness::Gone`, which is only ever a proved end).
+/// Windows (`Liveness::Gone`, which is only ever a proved end). A pipe's name lasts until the last
+/// instance of it closes, so on Windows this waits up to 3 s for that; it cannot show an unlink
+/// while any connection to the daemon is open (the connection holds an instance).
 pub async fn socket_gone(run: &RunDir) -> bool {
     #[cfg(unix)]
     {
@@ -222,6 +225,29 @@ pub async fn socket_gone(run: &RunDir) -> bool {
     }
     #[cfg(windows)]
     {
-        rdy_daemon::sys::endpoint_liveness(&run.socket()).await == rdy_daemon::sys::Liveness::Gone
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if rdy_daemon::sys::endpoint_liveness(&run.socket()).await
+                == rdy_daemon::sys::Liveness::Gone
+            {
+                return true;
+            }
+            if std::time::Instant::now() > end {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
+}
+
+/// Whether `daemon.pid` is gone; on Windows it waits up to 3 s, as `socket_gone` does.
+pub async fn pid_file_gone(run: &RunDir) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while run.pid_file().exists() {
+        if cfg!(unix) || std::time::Instant::now() > end {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    true
 }
