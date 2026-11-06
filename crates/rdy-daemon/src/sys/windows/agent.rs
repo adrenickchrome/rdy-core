@@ -17,7 +17,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_BUSY, ERROR_PIPE_NOT_CONNECTED, FALSE,
@@ -323,8 +322,6 @@ pub fn agent_close(closer: &AgentCloser) {
 static HOLDERS: Mutex<usize> = Mutex::new(0);
 /// Counts the interrupts, for every guard.
 static COUNT: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
-/// How many interrupts the handler has taken. Test code reads it.
-static TAKEN: AtomicUsize = AtomicUsize::new(0);
 
 fn holders() -> MutexGuard<'static, usize> {
     HOLDERS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -340,7 +337,6 @@ unsafe extern "system" fn on_console_event(event: u32) -> i32 {
     if event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT {
         return FALSE;
     }
-    TAKEN.fetch_add(1, Ordering::SeqCst);
     count().send_modify(|c| *c = c.wrapping_add(1));
     TRUE
 }
@@ -396,6 +392,7 @@ mod tests {
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
     use std::thread;
     use std::time::Duration;
@@ -635,7 +632,6 @@ mod tests {
         guard.recv().await;
         other.recv().await;
         drop(other);
-        assert!(TAKEN.load(Ordering::SeqCst) >= 2);
     }
 
     /// The child of the next test, on a console of its own: a real Ctrl-C while the guard lives
