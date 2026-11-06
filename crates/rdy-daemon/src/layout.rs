@@ -103,9 +103,10 @@ impl RunDir {
     }
 
     /// `.rdy/run/daemon.sock`: the endpoint the running daemon bound, then the identity of the
-    /// project's `.rdy` at its bind (`{dev}:{ino}`, or `w:{volume}:{id}`), one line each. Every spelling of a project
-    /// reaches this one run dir, so a client of any spelling finds the daemon there, also when
-    /// its own spelling would compute another socket (a macOS firmlink, a bind mount).
+    /// project's `.rdy` at its bind (`{dev}:{ino}`, or `w:{volume}:{id}`), one line each. Every
+    /// spelling of a project reaches this one run dir, so a client of any spelling finds the
+    /// daemon there, also when its own spelling would compute another endpoint (a macOS firmlink,
+    /// a bind mount).
     pub fn socket_record(&self) -> PathBuf {
         self.0.join(SOCKET_RECORD_FILE)
     }
@@ -161,11 +162,12 @@ impl RunDir {
 
     /// Creates `.rdy/run` (and `.rdy` if missing), private to this account; tightens an existing
     /// `run` directory of this account; refuses anything else (a file, a link, on Windows any
-    /// reparse point or a directory of another account) in its place. Then writes the run dir's `.gitignore` (`*`) when it is missing, so git ignores the socket, pid,
-    /// lock and log; whatever already stands at that name, a link included, is left untouched.
-    /// When the socket is the short one, makes sure its directory is private to this user
-    /// (`sys::prepare_endpoint_place`); a refusal is a [`NotPrivateDir`] error, and a directory that cannot
-    /// be created or checked is a [`ShortDirError`].
+    /// reparse point or a directory of another account) in its place. Then writes the run dir's
+    /// `.gitignore` (`*`) when it is missing, so git ignores the socket, pid, lock and log;
+    /// whatever already stands at that name, a link included, is left untouched. When the socket
+    /// is the short one, makes sure its directory is private to this user
+    /// (`sys::prepare_endpoint_place`); a refusal is a [`NotPrivateDir`] error, and a directory
+    /// that cannot be created or checked is a [`ShortDirError`].
     pub fn ensure(&self) -> io::Result<()> {
         self.ensure_dir()?;
         self.ignore_self()?;
