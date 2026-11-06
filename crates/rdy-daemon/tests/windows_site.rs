@@ -112,7 +112,7 @@ fn wx19_canonical_aliases_choose_the_same_port() {
     #[cfg(unix)]
     {
         let link = d.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        rdy_store::pio::symlink(&real, &link).unwrap();
         assert_eq!(addr::derived_port(&real), addr::derived_port(&link));
     }
     #[cfg(windows)]
