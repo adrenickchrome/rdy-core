@@ -487,6 +487,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "follow the warning's own fix",
     ),
     (
+        W_KUNGFU,
+        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+        "Call rdy_instructions and load the ruleset named by the warning.",
+    ),
+    (
         E_PLAN_ITEM,
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists",
@@ -515,11 +520,6 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         E_FROZEN,
         "a write changes an accepted or rejected decision beyond its tracking fields, or beyond its pins and reaffirmed field through a reaffirm op, or a conflict on one cannot be resolved by an edit",
         "take the landed side of a conflict (rdy view resolve <view> <id> --landed; rdy_view {op: \"resolve\", block, landed: true}), or write a new decision that supersedes or revokes it. For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.",
-    ),
-    (
-        W_KUNGFU,
-        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
-        "Call rdy_instructions and load the ruleset named by the warning.",
     ),
     (
         E_HELD_BY_READER,
