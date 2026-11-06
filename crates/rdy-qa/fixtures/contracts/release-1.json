@@ -23032,6 +23032,14 @@
               "kind": "map",
               "required": false,
               "values": []
+            },
+            "rules_from_chat": {
+              "kind": "enum",
+              "required": false,
+              "values": [
+                "land",
+                "card"
+              ]
             }
           },
           "prefix": "ap",
@@ -24254,6 +24262,38 @@
       "coverage_level_too_high": "invalid pack: coverage.max_docs_per_level is 100001; it must be 1 to 100000",
       "coverage_level_too_low": "invalid pack: coverage.max_docs_per_level is 0; it must be 1 to 100000",
       "duplicate_pack_name": "pack \"rdy-standard\" is defined twice: in the built-in pack and in x.yaml",
+      "policy_rules_from_chat_bad_kind": {
+        "issues": [
+          [
+            "E_FIELD_KIND",
+            "field \"rules_from_chat\" must be Enum",
+            "write rules_from_chat as a enum value"
+          ]
+        ],
+        "reads": null
+      },
+      "policy_rules_from_chat_bad_value": {
+        "issues": [
+          [
+            "E_FIELD_ENUM",
+            "field \"rules_from_chat\" has value \"later\"",
+            "use one of: land, card"
+          ]
+        ],
+        "reads": null
+      },
+      "policy_rules_from_chat_card": {
+        "issues": [],
+        "reads": "card"
+      },
+      "policy_rules_from_chat_default": {
+        "issues": [],
+        "reads": "land"
+      },
+      "policy_rules_from_chat_land": {
+        "issues": [],
+        "reads": "land"
+      },
       "unknown_field_kind": "pack YAML is invalid: block_types.t.fields.f.kind: unknown variant `nope`, expected one of `str`, `int`, `bool`, `list`, `map`, `enum` at line 8 column 15",
       "unknown_pack_key": "pack YAML is invalid: unknown field `bogus`, expected one of `name`, `version`, `extends`, `link_types`, `block_types`, `doc_types`, `default_doc_type`, `tensions`, `duplicate_text_min_words`, `areas`, `coverage`, `rules` at line 3 column 1"
     }

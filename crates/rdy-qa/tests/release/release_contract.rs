@@ -3526,6 +3526,40 @@ fn packs_row() -> Value {
             .to_string()
     };
     let pack_keys: Vec<String> = pack_json.as_object().unwrap().keys().cloned().collect();
+    // rtc1 (D-ZSRBN): the policy field `rules_from_chat`: absent reads land, both values, and the
+    // two refusals of a value outside the field
+    let policy_probe = |value: Option<rdy_model::FieldValue>| -> Value {
+        let mut block = rdy_model::Block {
+            id: BlockId::parse("ap-APQ01").expect("a policy id"),
+            block_type: rdy_schema::policy::POLICY_TYPE.to_string(),
+            parent: Some(BlockId::parse("d-D0C11").expect("a doc id")),
+            order: "V".to_string(),
+            fields: rdy_schema::policy::template_fields(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            read_identity: None,
+        };
+        if let Some(v) = value {
+            block.fields.insert("rules_from_chat".to_string(), v);
+        }
+        let mut doc = block.clone();
+        doc.id = BlockId::parse("d-D0C11").expect("a doc id");
+        doc.block_type = "doc".to_string();
+        doc.parent = None;
+        doc.fields = [("name", "plan"), ("title", "Plan"), ("doc_type", "page")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), rdy_model::FieldValue::Str(v.to_string())))
+            .collect();
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &block, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        let read = rdy_schema::policy::policy_fields(&std_pack, &block)
+            .map(|f| f.rules_from_chat.as_str());
+        json!({"issues": issues, "reads": read})
+    };
+    let text = |s: &str| Some(rdy_model::FieldValue::Str(s.to_string()));
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -3559,6 +3593,11 @@ fn packs_row() -> Value {
             "duplicate_pack_name": duplicate,
             "coverage_level_too_low": level_refusal(0),
             "coverage_level_too_high": level_refusal(100_001),
+            "policy_rules_from_chat_default": policy_probe(None),
+            "policy_rules_from_chat_land": policy_probe(text("land")),
+            "policy_rules_from_chat_card": policy_probe(text("card")),
+            "policy_rules_from_chat_bad_value": policy_probe(text("later")),
+            "policy_rules_from_chat_bad_kind": policy_probe(Some(rdy_model::FieldValue::Int(3))),
         },
     })
 }
