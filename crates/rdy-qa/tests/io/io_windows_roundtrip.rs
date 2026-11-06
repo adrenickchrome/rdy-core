@@ -171,7 +171,7 @@ fn wx28b_hostile_trees_remain_bounded() {
         let r = load(&part, &to);
         let e = r.expect_err(&format!("a dump cut at {cut} of {len} bytes loaded"));
         assert!(
-            ["E_DUMP", "E_BAD_INPUT", "E_IO"].contains(&e.code.as_ref()),
+            ["E_DUMP", "E_BAD_INPUT", "E_IO"].contains(&e.code),
             "cut {cut}: {e}"
         );
         assert!(
@@ -245,13 +245,12 @@ fn wx28b_hostile_trees_remain_bounded() {
         deep.push("a-directory-name-of-some-length");
     }
     deep.push("project");
-    let r = load(&file, &deep);
-    if r.is_ok() {
-        Rdy::open(&deep).unwrap().close().unwrap();
-    } else {
-        let e = r.unwrap_err();
-        assert!(e.message.len() < 1024, "{e}");
-        assert!(!deep.join(".rdy/store").exists(), "a half-built store");
+    match load(&file, &deep) {
+        Ok(_) => Rdy::open(&deep).unwrap().close().unwrap(),
+        Err(e) => {
+            assert!(e.message.len() < 1024, "{e}");
+            assert!(!deep.join(".rdy/store").exists(), "a half-built store");
+        }
     }
 
     // names Windows refuses: the load is an error, and nothing is written for the name
