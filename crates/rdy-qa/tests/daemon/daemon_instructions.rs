@@ -393,7 +393,7 @@ fn agi3_full_crosses_ctl_without_duplicating_person_reads() {
         let part = &v["contribution"];
         assert_eq!(part["layer"], "person", "{v}");
         assert_eq!(rows(part), [row(&ma.rules[0][0], "person")], "{v}");
-        assert_eq!(part["menu"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(part["menu"].as_array().unwrap().len(), 1, "{v}");
         assert!(builtin_ids(part).is_empty(), "{v}");
         assert!(v.get("instructions").is_none() && v.get("menu").is_none());
     }
@@ -418,23 +418,16 @@ fn agi3_full_crosses_ctl_without_duplicating_person_reads() {
         .filter(|m| m["layer"] == "rdy")
         .collect();
     assert_eq!(menu.len(), 12, "{full}");
-    // full with load adds the stored optional rules and repeats nothing
+    // full with load repeats no row, built-in or stored
     let both = ctl_instructions(
         &w,
         pd.path(),
         "agent:p",
         "p1",
-        json!({"full": true, "load": [format!("person:{}", ma.docs[1]), "rdy:write".to_string()]}),
+        json!({"full": true, "load": [format!("person:{}", ma.docs[0]), "rdy:write".to_string()]}),
     );
     assert_eq!(builtin_ids(&both), built);
-    assert_eq!(
-        rows(&both),
-        [
-            stored[0].clone(),
-            stored[1].clone(),
-            row(&ma.rules[1][0], "person")
-        ]
-    );
+    assert_eq!(rows(&both), stored);
     // closed arguments
     let bad = ctl_instructions_err(&w, pd.path(), json!({"ful": true}));
     assert!(bad.contains("ful"), "{bad}");
