@@ -1410,15 +1410,7 @@
               "summary": "string",
               "title": "string",
               "version": "string",
-              "warnings": [
-                {
-                  "block": "string",
-                  "code": "string",
-                  "fix": "string",
-                  "message": "string",
-                  "severity": "string"
-                }
-              ]
+              "warnings": []
             },
             "project": {
               "name": "string",
@@ -1436,7 +1428,7 @@
             "view?": "string",
             "warnings?": [
               {
-                "block": "null|string",
+                "block": "null",
                 "code": "string",
                 "fix": "string",
                 "message": "string",
@@ -1503,16 +1495,7 @@
             },
             "scope": "string",
             "state": "string",
-            "view": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "view": "string"
           }
         },
         "rule add person": {
@@ -1542,15 +1525,7 @@
               "summary": "string",
               "title": "string",
               "version": "string",
-              "warnings": [
-                {
-                  "block": "string",
-                  "code": "string",
-                  "fix": "string",
-                  "message": "string",
-                  "severity": "string"
-                }
-              ]
+              "warnings": []
             },
             "project": {
               "name": "string",
@@ -1698,15 +1673,7 @@
               "summary": "string",
               "title": "string",
               "version": "string",
-              "warnings": [
-                {
-                  "block": "string",
-                  "code": "string",
-                  "fix": "string",
-                  "message": "string",
-                  "severity": "string"
-                }
-              ]
+              "warnings": []
             },
             "project": {
               "name": "string",
@@ -1816,16 +1783,7 @@
             },
             "scope": "string",
             "state": "string",
-            "view": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "view": "string"
           }
         },
         "rule remove": {
@@ -1861,15 +1819,7 @@
               "summary": "string",
               "title": "string",
               "version": "string",
-              "warnings": [
-                {
-                  "block": "string",
-                  "code": "string",
-                  "fix": "string",
-                  "message": "string",
-                  "severity": "string"
-                }
-              ]
+              "warnings": []
             },
             "project": {
               "name": "string",
@@ -19127,15 +19077,7 @@
             "summary": "string",
             "title": "string",
             "version": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "warnings": []
           },
           "project": {
             "name": "string",
@@ -19153,7 +19095,7 @@
           "view?": "string",
           "warnings?": [
             {
-              "block": "null|string",
+              "block": "null",
               "code": "string",
               "fix": "string",
               "message": "string",
@@ -19196,15 +19138,7 @@
             "summary": "string",
             "title": "string",
             "version": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "warnings": []
           },
           "project": {
             "name": "string",
@@ -19419,16 +19353,7 @@
           },
           "scope": "string",
           "state": "string",
-          "view": "string",
-          "warnings": [
-            {
-              "block": "string",
-              "code": "string",
-              "fix": "string",
-              "message": "string",
-              "severity": "string"
-            }
-          ]
+          "view": "string"
         }
       },
       "rdy_rule edit": {
@@ -19455,15 +19380,7 @@
             "summary": "string",
             "title": "string",
             "version": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "warnings": []
           },
           "project": {
             "name": "string",
@@ -19502,15 +19419,7 @@
             "summary": "string",
             "title": "string",
             "version": "string",
-            "warnings": [
-              {
-                "block": "string",
-                "code": "string",
-                "fix": "string",
-                "message": "string",
-                "severity": "string"
-              }
-            ]
+            "warnings": []
           },
           "project": {
             "name": "string",
