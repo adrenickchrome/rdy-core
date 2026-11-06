@@ -6430,3 +6430,659 @@ const PINNED_SECTIONS: [(&str, &str); 6] = [
         "2d4c1e7028375201fa9569f76ebeef713997a72dde29d93487b3cb203affd78f",
     ),
 ];
+
+/// The SHA-256 of `v`'s compact encoding. Objects have sorted keys, so the bytes are the same on
+/// every run.
+fn digest_of(v: &Value) -> String {
+    Sha256::digest(serde_json::to_vec(v).expect("encode"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// rtc7 (D-ZSRBN): the release contract holds every stop of `rdy_rule`. A guard: Tasks 1, 5 and 6
+/// captured the rows, and this pins them together. The input has two closed forms and one tool
+/// list; the policy field has two values; the command line has four commands with every flag;
+/// and the success, the card, the not-ready stop and the refusals each hold a populated reply, so
+/// no stop is pinned by an empty array alone.
+#[test]
+fn rtc7_release_contract_covers_every_rule_stop() {
+    let fixture = read_fixture();
+    let mcp = &fixture["mcp"];
+
+    // the tool list and the input: eleven keys, one closed object, `scope` alone required
+    let names = mcp["tool_names"].as_array().expect("names");
+    assert_eq!(names.len(), 60);
+    assert_eq!(names.iter().filter(|n| *n == "rdy_rule").count(), 1);
+    let schema = &mcp["tools"]["rdy_rule"]["input_schema"];
+    assert_eq!(schema["additionalProperties"], json!(false));
+    assert_eq!(schema["required"], json!(["scope"]));
+    assert_eq!(
+        shape_keys(&schema["properties"]),
+        [
+            "answer",
+            "applies_to",
+            "evidence",
+            "id",
+            "op",
+            "question",
+            "ruleset",
+            "scope",
+            "session_ref",
+            "text",
+            "why"
+        ]
+    );
+    let answer = &schema["$defs"]["RuleAnswerArgs"];
+    assert_eq!(answer["additionalProperties"], json!(false));
+    assert_eq!(
+        answer["required"],
+        json!(["card_hash", "evidence", "option", "ref"])
+    );
+    assert_eq!(
+        shape_keys(&answer["properties"]),
+        ["card_hash", "evidence", "option", "question", "ref"]
+    );
+    assert_eq!(answer["properties"]["card_hash"]["minLength"], json!(64));
+    assert_eq!(answer["properties"]["card_hash"]["maxLength"], json!(64));
+
+    // success: add, edit and remove carry the rule, the decision and a landing
+    let results = &mcp["result_fields"];
+    for label in [
+        "rdy_rule add",
+        "rdy_rule add person",
+        "rdy_rule edit",
+        "rdy_rule remove",
+    ] {
+        let ok = &results[label]["ok"];
+        assert_eq!(
+            shape_keys(&ok["rule"]),
+            ["id", "retired", "ruleset", "text"],
+            "{label}"
+        );
+        assert_eq!(shape_keys(&ok["project"]), ["name", "repo_id"], "{label}");
+        for key in ["decision", "scope"] {
+            assert!(ok[key].is_string(), "{label} lacks {key}");
+        }
+        let landing = if ok["landing"].is_object() {
+            &ok["landing"]
+        } else {
+            &ok["landing?"]
+        };
+        assert!(landing["landing"].is_string(), "{label}: {ok}");
+        assert_eq!(landing["relayed_by"]["actor"], "string", "{label}");
+    }
+
+    // the not-ready stop: a ref and issues that hold a row, with the fields of a row
+    let stop = &results["rdy_rule add"]["ok"];
+    assert!(stop["ref?"].is_string(), "{stop}");
+    assert!(stop["view?"].is_string(), "{stop}");
+    assert!(stop["state?"].is_string(), "{stop}");
+    assert_eq!(
+        shape_keys(&stop["issues?"][0]),
+        ["block", "code", "fix", "message", "severity"],
+        "a populated issue row"
+    );
+
+    // the card stop: the card, its hash, and the attached cards in a row of their own
+    let card = &results["rdy_rule card"]["ok"];
+    for key in ["card_hash", "proposal_ref", "ref", "state", "view"] {
+        assert!(card[key].is_string(), "{key} in {card}");
+    }
+    assert!(card["card"]["card_hash"].is_string());
+    assert!(
+        card["card"]["options"][0]["id"].is_string(),
+        "a card with options"
+    );
+    assert_eq!(
+        shape_keys(&card["cards"][0]),
+        ["card", "card_hash", "ref"],
+        "an attached card"
+    );
+    assert!(card["cards"][0]["card"]["options"][0]["id"].is_string());
+    assert!(card["warnings"].is_array());
+
+    // the answer: a landing or the remaining cards, and its answer record
+    let answered = &results["rdy_rule answer"]["ok"];
+    assert_eq!(
+        shape_keys(&answered["answer?"]),
+        [
+            "act",
+            "answer",
+            "assurance",
+            "label",
+            "landing",
+            "next",
+            "option",
+            "ref",
+            "relayed_by"
+        ]
+    );
+    assert_eq!(
+        shape_keys(&answered["remaining_cards?"][0]),
+        ["card", "card_hash", "ref"]
+    );
+    assert!(answered["landing?"]["landing"].is_string());
+
+    // the refusals: each probed tool names its codes, and the envelope has its four members
+    for (label, code) in [
+        ("rdy_rule add", "E_BAD_INPUT"),
+        ("rdy_rule add", "E_PERMISSION"),
+        ("rdy_rule answer", "E_BAD_INPUT"),
+        ("rdy_rule remove", "E_NOT_FOUND"),
+    ] {
+        let codes = results[label]["refusal_codes"].as_array().expect("codes");
+        assert!(codes.iter().any(|c| c == code), "{label}: {code}");
+        assert_eq!(
+            shape_keys(&results[label]["refused"]),
+            ["code", "fix", "issues", "message"],
+            "{label}"
+        );
+    }
+
+    // the policy: an optional enum field with the two values, and a probe for each reading
+    let policy = &fixture["schema_packs"]["rdy_standard"]["block_types"]["authority_policy"]["fields"]
+        ["rules_from_chat"];
+    assert_eq!(
+        policy,
+        &json!({"kind": "enum", "required": false, "values": ["land", "card"]})
+    );
+    let validation = &fixture["schema_packs"]["validation"];
+    for probe in [
+        "policy_rules_from_chat_default",
+        "policy_rules_from_chat_land",
+        "policy_rules_from_chat_card",
+        "policy_rules_from_chat_bad_kind",
+        "policy_rules_from_chat_bad_value",
+    ] {
+        assert!(!validation[probe].is_null(), "{probe}");
+    }
+
+    // the command line: four commands, in this order, with every flag and positional
+    let tree = &fixture["cli"]["tree"]["subcommands"];
+    let rule = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "rule")
+        .expect("the rule command");
+    assert_eq!(rule["subcommand_required"], json!(true));
+    let commands: Vec<&str> = rule["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, ["add", "edit", "remove", "answer"]);
+    let words = ["why", "evidence", "relayed_by", "question", "session_ref"];
+    let content = ["scope", "text", "ruleset", "applies_to"];
+    let flags = |name: &str| -> Vec<String> {
+        let c = rule["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        let mut got = own_args(c);
+        got.sort();
+        got
+    };
+    let sorted = |mut v: Vec<&str>| -> Vec<String> {
+        v.sort();
+        v.into_iter().map(String::from).collect()
+    };
+    assert_eq!(flags("add"), sorted([&content[..], &words[..]].concat()));
+    assert_eq!(
+        flags("edit"),
+        sorted([&["id"][..], &content[..], &words[..]].concat())
+    );
+    assert_eq!(
+        flags("remove"),
+        sorted(vec![
+            "id",
+            "scope",
+            "why",
+            "evidence",
+            "relayed_by",
+            "question",
+            "session_ref"
+        ])
+    );
+    assert_eq!(
+        flags("answer"),
+        sorted(vec![
+            "ref",
+            "option",
+            "scope",
+            "card",
+            "evidence",
+            "relayed_by",
+            "question"
+        ])
+    );
+    // the commands that need an agent's words require them, and the rest are optional
+    for command in rule["subcommands"].as_array().unwrap() {
+        for arg in command["args"].as_array().unwrap() {
+            let id = arg["id"].as_str().unwrap();
+            if matches!(id, "evidence" | "relayed_by" | "scope") {
+                assert_eq!(arg["required"], json!(true), "{} {id}", command["name"]);
+            }
+            if matches!(id, "question" | "session_ref" | "ruleset" | "applies_to") {
+                assert_ne!(arg["required"], json!(true), "{} {id}", command["name"]);
+            }
+        }
+    }
+
+    // the command line's replies, run by the release binary: each stop has a populated probe
+    let probes = &fixture["cli"]["runtime"]["probes"];
+    for label in [
+        "rule add",
+        "rule add card",
+        "rule add person",
+        "rule edit",
+        "rule edit card",
+        "rule remove",
+        "rule answer",
+    ] {
+        assert!(probes[label]["stdout"].is_object(), "{label}");
+    }
+    assert_eq!(probes["rule answer"]["exits"], json!([0, 1]));
+    assert_eq!(probes["rule remove"]["exits"], json!([0, 1]));
+    assert!(
+        probes["rule answer"]["stderr"]["code"].is_string(),
+        "an answer that refuses names its code"
+    );
+    assert_eq!(
+        shape_keys(&probes["rule add"]["stdout"]["issues?"][0]),
+        ["block", "code", "fix", "message", "severity"]
+    );
+    assert!(probes["rule add card"]["stdout"]["card"]["options"][0]["id"].is_string());
+    assert!(
+        probes["rule edit card"]["stdout"]["cards"][0]["card"]["options"][0]["id"].is_string(),
+        "the edit's confirm card"
+    );
+    assert!(probes["rule answer"]["stdout"]["remaining_cards?"][0]["ref"].is_string());
+
+    // the probes run again give the same shapes
+    let live = rows();
+    assert_eq!(
+        live["mcp"]["result_fields"],
+        fixture["mcp"]["result_fields"]
+    );
+    assert_eq!(
+        live["cli"]["runtime"]["probes"],
+        fixture["cli"]["runtime"]["probes"]
+    );
+}
+
+/// rtc7 (D-ZSRBN): a guard. The packaged tools keep the card hash for every ordinary text answer.
+/// `rdy_answer` refuses a relayed answer that names no card, with the same words in text and card
+/// kinds, and lands nothing; the card's own hash answers it. Only `rdy_rule`'s own cards take a
+/// text relay.
+#[test]
+fn rtc7_release_surface_keeps_other_answer_hashes() {
+    use rdy_qa::fixtures::write;
+    let (dir, mut r) = project();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$d",
+                "fields": {"name": "plain", "title": "Plain", "doc_type": "page"}}]),
+    )
+    .expect("write the doc");
+    let p = r
+        .propose(
+            &rdy_qa::fixtures::writer(),
+            "work",
+            "Add a doc",
+            Some(rdy_qa::intake::TEST_SUMMARY),
+        )
+        .expect("propose it");
+    drop(r);
+    let mut c = isolated_mcp(dir.path());
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:rtc7", "run": "rtc7", "role": "writer"})
+        )
+        .is_ok()
+    );
+    let queue = c.call("rdy_pending", json!({})).ok();
+    let item = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["ref"] == p.r#ref.as_str()))
+        .cloned()
+        .unwrap_or_else(|| panic!("the proposal is pending: {queue}"));
+    let landings_before = c.call("rdy_log", json!({})).ok();
+    for kind in [json!(null), json!("card"), json!("text")] {
+        let mut args = json!({"ref": item["ref"], "option": item["options"][0]["id"],
+            "evidence": "Yes, that is fine.", "question": "Shall I approve it?"});
+        if !kind.is_null() {
+            args["kind"] = kind.clone();
+        }
+        match c.call("rdy_answer", args) {
+            rdy_qa::mcp::Reply::ToolError(e) => {
+                assert_eq!(e["code"], "E_BAD_INPUT", "{kind}: {e}");
+                assert_eq!(
+                    e["message"], "a relayed answer names the card the person was shown",
+                    "{kind}"
+                );
+            }
+            other => panic!("{kind}: a text answer with no card hash was not refused: {other:?}"),
+        }
+    }
+    // the rule tool's answer form needs the hash by its schema, before any call reaches a store
+    match c.call(
+        "rdy_rule",
+        json!({"scope": "project", "answer": {"ref": item["ref"], "option": "approve",
+            "evidence": "Yes."}}),
+    ) {
+        rdy_qa::mcp::Reply::ToolError(e) => assert_eq!(e["code"], "E_BAD_INPUT", "{e}"),
+        rdy_qa::mcp::Reply::RpcError(_) => {}
+        other => panic!("an answer with no card hash was not refused: {other:?}"),
+    }
+    assert_eq!(
+        c.call("rdy_log", json!({})).ok(),
+        landings_before,
+        "nothing landed"
+    );
+    // an ordinary proposal is no rule proposal: the rule tool will not answer it
+    match c.call(
+        "rdy_rule",
+        json!({"scope": "project", "answer": {"ref": item["ref"], "option": "approve",
+            "card_hash": item["card_hash"], "evidence": "Yes."}}),
+    ) {
+        rdy_qa::mcp::Reply::ToolError(e) => assert_eq!(e["code"], "E_BAD_INPUT", "{e}"),
+        other => panic!("another flow's proposal was routed: {other:?}"),
+    }
+    // the card's own hash answers it
+    let done = c.call(
+        "rdy_answer",
+        json!({"ref": item["ref"], "option": item["options"][0]["id"],
+            "card_hash": item["card_hash"], "evidence": "Yes, that is fine.",
+            "question": "Shall I approve it?"}),
+    );
+    assert!(done.is_ok(), "{done:?}");
+}
+
+/// rtc7 (D-GEKKY, D-Y18E1): the guide keeps its source apart from the lines that the build
+/// generates. The committed bundle is a development source: its edition ends in `-dev`, so no
+/// release of this version can name it, and no source row holds a generated line. The delivered
+/// write ruleset ends with the source plus one exact suffix, whose tool list holds `rdy_rule`
+/// beside the other write tools and no other ruleset's tool.
+#[test]
+fn rtc7_release_guide_keeps_source_and_generated_suffix_separate() {
+    let bundle: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("release/agent-guide.json")).expect("the bundle"),
+    )
+    .expect("JSON");
+    let table: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("crates/rdy-engine/kungfu-tools.json"))
+            .expect("the table"),
+    )
+    .expect("JSON");
+    let sidecar = std::fs::read_to_string(workspace_root().join("release/agent-guide.sha256"))
+        .expect("the sidecar");
+
+    // development source: the edition says so and cannot equal the package version, which is
+    // the check that production eligibility makes against the release it ships
+    let edition = bundle["edition"].as_str().expect("an edition");
+    assert!(edition.ends_with("-dev"), "{edition}");
+    assert_ne!(edition, env!("CARGO_PKG_VERSION"));
+    assert!(
+        edition
+            .trim_end_matches("-dev")
+            .split('.')
+            .all(|n| n.parse::<u64>().is_ok()),
+        "{edition}"
+    );
+    // the source holds no generated line and no digest of its own
+    let mut sources = vec![];
+    for set in bundle["rulesets"].as_array().expect("rulesets") {
+        sources.extend(set["rows"].as_array().expect("rows").iter().cloned());
+    }
+    for row in &sources {
+        let text = row["text"].as_str().expect("a text");
+        assert!(
+            !text.contains("pass kungfu:") && !text.contains("kf-") && !text.contains("Tools: "),
+            "{}",
+            row["id"]
+        );
+    }
+    let digest: String =
+        Sha256::digest(std::fs::read(workspace_root().join("release/agent-guide.json")).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+    assert_eq!(
+        sidecar,
+        format!("{digest}\n"),
+        "the sidecar names these bytes"
+    );
+
+    // the write ruleset's tools, from the table, in order
+    let write_tools: Vec<&str> = table
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|row| row["ruleset"] == "rdy:write")
+        .map(|row| row["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        write_tools,
+        [
+            "rdy_accept",
+            "rdy_asset",
+            "rdy_decide",
+            "rdy_intent",
+            "rdy_revoke",
+            "rdy_rule",
+            "rdy_supersede",
+            "rdy_write"
+        ]
+    );
+    // no other ruleset lists the rule tool
+    assert_eq!(
+        table
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["tool"] == "rdy_rule")
+            .count(),
+        1
+    );
+
+    // delivered: the packaged binary's write row is the source and the exact suffix
+    let world = rdy_qa::instructions::World::new();
+    let dir = world.project();
+    let (ok, full) = world.json(dir.path(), &["instructions", "--full"]);
+    assert!(ok, "{full}");
+    let rows = full["instructions"].as_array().expect("rows");
+    let delivered = rows
+        .iter()
+        .find(|r| r["id"] == "rdy:write:body")
+        .expect("the write row");
+    let source = sources
+        .iter()
+        .find(|r| r["id"] == "rdy:write:body")
+        .expect("the write source");
+    let raw = source["text"].as_str().unwrap();
+    let text = delivered["text"].as_str().unwrap();
+    let kf: String = Sha256::digest(
+        bundle["rulesets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "write")
+            .unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect::<String>()
+            .as_bytes(),
+    )
+    .iter()
+    .take(4)
+    .map(|b| format!("{b:02x}"))
+    .collect();
+    let suffix = format!(
+        "On every call to a tool in this ruleset, pass kungfu: \"kf-{kf}\". Tools: rdy_accept, rdy_asset, rdy_decide, rdy_intent, rdy_revoke, rdy_rule, rdy_supersede, rdy_write.\n"
+    );
+    let joiner = if raw.ends_with('\n') { "" } else { "\n" };
+    assert_eq!(text, format!("{raw}{joiner}{suffix}"));
+    // the generated line is in no other row, and the rule tool is named in one suffix alone
+    let named = rows
+        .iter()
+        .filter(|r| r["text"].as_str().unwrap().contains("rdy_rule, "))
+        .count();
+    assert_eq!(named, 1, "one generated list names rdy_rule");
+
+    // the checker accepts the committed bundle and its sidecar
+    let python = std::process::Command::new("python3")
+        .arg("--version")
+        .output();
+    if !python.is_ok_and(|o| o.status.success()) {
+        skip::skip(
+            &rdy_qa::test_name!("rtc7_release_guide_keeps_source_and_generated_suffix_separate"),
+            Why::Prerequisite,
+            "python3 is not on PATH",
+        );
+        return;
+    }
+    let checked = std::process::Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(workspace_root().join("scripts/release/guide.py"))
+        .arg("check")
+        .arg("--bundle")
+        .arg(workspace_root().join("release/agent-guide.json"))
+        .arg("--sidecar")
+        .arg(workspace_root().join("release/agent-guide.sha256"))
+        .output()
+        .expect("run the checker");
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&checked.stdout).trim(), digest);
+}
+
+/// rtc7 (D-ZSRBN): the contract moves for the rules and for nothing else of this plan. A guard:
+/// the sections that hold the store's encodings, the dump promise, the stream and the signing
+/// contracts keep their bytes, and so does every tool, command and probe except the rule's own.
+/// The digests are of the baseline before the rules, taken from the contract at the plan's base
+/// (the kungfu change moved only `W_KUNGFU` and `mcp.kungfu_counts`, and those are left out of the
+/// error rows and the schema reply).
+#[test]
+fn rtc7_contract_diff_is_limited_to_rules() {
+    let fixture = read_fixture();
+    // the frozen sections
+    for (name, want) in PINNED_SECTIONS {
+        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
+    }
+    for (name, want) in [
+        (
+            "working_copy",
+            "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
+        ),
+        (
+            "config",
+            "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
+        ),
+    ] {
+        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
+    }
+    // the tools: every tool but the rule's, the names but its own, the results but its own
+    // (and `rdy_schema`, which only the kungfu change moved)
+    let mcp = fixture["mcp"].as_object().expect("mcp");
+    let without = |v: &Value, keep: &dyn Fn(&str) -> bool| -> Value {
+        Value::Object(
+            v.as_object()
+                .expect("an object")
+                .iter()
+                .filter(|(k, _)| keep(k))
+                .map(|(k, x)| (k.clone(), x.clone()))
+                .collect::<Map<String, Value>>(),
+        )
+    };
+    assert_eq!(
+        digest_of(&without(&mcp["tools"], &|k| k != "rdy_rule")),
+        "63407687adbe2695ceeaef2447414197f3a1a5ff1a170dc8c6cb9e2a1c4d5fa9"
+    );
+    let names: Vec<&Value> = mcp["tool_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| *n != "rdy_rule")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(names)),
+        "4d8cdbccd36dafb6e37c9bb020e103aa7c3d288d183ae0bcd53afccb59ffdf46"
+    );
+    assert_eq!(
+        digest_of(&without(&mcp["result_fields"], &|k| {
+            !k.starts_with("rdy_rule") && k != "rdy_schema"
+        })),
+        "854e7292a55cd4ab9ed0bda185267e218ce9aecb77e2c27223592cd974a2b565"
+    );
+    for key in [
+        "carried_value_refusals",
+        "ops_not_probed",
+        "refusal_envelope",
+        "result_fields_not_captured",
+    ] {
+        assert!(mcp.contains_key(key), "{key}");
+    }
+    // the error codes: no code but the kungfu one is new, and no row is
+    let errors = &fixture["errors_warnings"];
+    let codes: Map<String, Value> = errors["codes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| *k != "W_KUNGFU")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(
+        digest_of(&Value::Object(codes)),
+        "f614f31ede7a20703bfe3acf7a2e2605f4713a94a2c2f98e50a5d82a355b716e"
+    );
+    let rows: Vec<&Value> = errors["error_rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r[0] != "W_KUNGFU")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(rows)),
+        "2a6eb32dd02c3ff7bbad7fd1832939658b99c819b18a0018ef1022ccacf12ff4"
+    );
+    assert!(
+        !errors["codes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|k| k.contains("RULE")),
+        "the rule tool answers with the codes that exist"
+    );
+    // the command line: every command but `rule`, every probe but the rule's, and the rest
+    let cli = &fixture["cli"];
+    let others: Vec<&Value> = cli["tree"]["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] != "rule")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(others)),
+        "91020aeffb2e3b0d48b86c76abba05c5348f95be31f69f3ce699abee373668e6"
+    );
+    assert_eq!(
+        digest_of(&without(&cli["runtime"]["probes"], &|k| !k.starts_with("rule "))),
+        "31041518cd31060f84815d85a99fa6193f25b0d807d8d53fd0a1651c842a9c85"
+    );
+    assert_eq!(
+        digest_of(&without(&cli["runtime"], &|k| k != "probes")),
+        "8d518aab09e1206edfb24fd47a7dca339e54af78df76cf6d029e5626435f59be"
+    );
+}
