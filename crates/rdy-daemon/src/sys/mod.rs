@@ -16,7 +16,9 @@
 //! names. `make_private_path` stays here;
 //! - the project's endpoint and run state: which endpoint a canonical project root has
 //!   (`project_endpoint`), its lifecycle (`clear_endpoint`, `bind_endpoint`, `seal_endpoint`,
-//!   `remove_endpoint`; a pipe is no file, so these do nothing to the file system on Windows), the
+//!   `remove_endpoint`; a pipe is no file, so these do nothing to the file system on Windows), what
+//!   may be asked of a name without connecting to it (`endpoint_is_link`, `endpoint_identity`),
+//!   how a bind can fail (`BIND_REFUSED`, `name_is_held`), the
 //!   exact grammars of `daemon.sock` and `daemon.pid` (`parse_endpoint_record`, `parse_pid_record`,
 //!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`)
 //!   and whether a run file may be believed (`run_file_is_private`);
@@ -28,7 +30,9 @@
 //!   caller waits on both. A named pipe is no filesystem object, so its probe connects, never
 //!   looks for a name;
 //! - stop signals, installed for one project's canonical root: `SIGINT` and `SIGTERM` in a tokio
-//!   runtime on Unix, and the project's private named event, Ctrl-C and Ctrl-Break on Windows;
+//!   runtime on Unix, and the project's private named event, Ctrl-C and Ctrl-Break on Windows. A
+//!   daemon registers what holds no name before its store opens (`early`) and takes the project's
+//!   name once it has the store (`claim_project`);
 //! - the stop of a daemon of another version (`stop_refused_daemon`, under the proofs of
 //!   [`stop_proof`]): a signal on Unix, and on Windows the event, then after a grace period a
 //!   forced end through a handle held since the peer check;

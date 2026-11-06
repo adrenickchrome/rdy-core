@@ -161,9 +161,7 @@ fn log_len(run: &RunDir) -> u64 {
 /// The pid `daemon.pid` names when that process is alive: a daemon (starting, or draining its
 /// store) that a held store lock may belong to.
 fn live_daemon_pid(run: &RunDir) -> Option<u32> {
-    fs::read_to_string(run.pid_file())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok())
+    run.pid_named()
         .filter(|&pid| crate::spawn::process_alive(pid))
 }
 
@@ -530,7 +528,7 @@ async fn exchange_hello(run: &RunDir, hello: &Hello, account: sys::Account) -> i
 /// `exchange_hello` on the socket `path`.
 async fn exchange_hello_at(path: &Path, hello: &Hello, account: sys::Account) -> io::Result<Found> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if sys::endpoint_is_link(path) {
         return Err(io::Error::other(format!(
             "{} is a symbolic link, which rdy does not follow",
             path.display()
@@ -720,11 +718,7 @@ fn stop_reply(socket: PathBuf, outcome: StopOutcome) -> Result<StopRequest, Erro
 pub fn live_daemon(project: &Path) -> Option<u32> {
     let run = RunDir::of_project(project);
     let recorded = run.recorded_socket()?;
-    if fs::symlink_metadata(&recorded)
-        .ok()?
-        .file_type()
-        .is_symlink()
-    {
+    if sys::endpoint_is_link(&recorded) {
         return None;
     }
     let pid = peer_pid(&recorded)?;
@@ -834,6 +828,9 @@ fn ensure_error(run: &RunDir, e: io::Error) -> ErrorReply {
                 failed.dir.display()
             ),
         );
+    }
+    if sys::names_its_path(&e) {
+        return start_error(format!("could not start the daemon: {e}"));
     }
     start_error(format!(
         "could not create the run directory {}: {e}",
@@ -1273,6 +1270,88 @@ mod tests {
             e.fix,
             "remove /tmp/rdy-501, or move the project to a shorter path"
         );
+    }
+
+    /// A connection that fails under a request is that request's end: the client says a write may
+    /// or may not have committed, sends it nowhere else, and never connects again by itself.
+    #[tokio::test]
+    async fn wx17_connection_failure_does_not_retry_a_write() {
+        use crate::hello::read_hello;
+        use tokio::io::AsyncBufReadExt;
+
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join(".rdy")).unwrap();
+        let run = RunDir::of_project(d.path());
+        let (mut listener, _, project) = crate::socket::bind(&run).await.unwrap();
+        let (done, finished) = tokio::sync::oneshot::channel::<()>();
+        let daemon = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            read_hello(&mut stream).await.unwrap();
+            let ready = HelloReply::Ready {
+                version: "1.0.0".into(),
+                build: crate::BUILD.into(),
+                session: SessionId(1),
+            };
+            let mut line = serde_json::to_vec(&ready).unwrap();
+            line.push(b'\n');
+            stream.write_all(&line).await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            stream.read_line(&mut request).await.unwrap();
+            // the daemon dies under the request: no reply
+            drop(stream);
+            let connected_again = tokio::select! {
+                _ = listener.accept() => true,
+                _ = finished => false,
+            };
+            (request, connected_again)
+        });
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "1.0.0".into(),
+            build: crate::BUILD.into(),
+            proto: Proto::Ctl,
+            cwd: d.path().to_path_buf(),
+            project,
+        };
+        let Attempt::Ready(mut client) = connect(&run, &hello).await else {
+            panic!("the daemon answers ready");
+        };
+        let e = client.ctl("write", json!({"n": 1})).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_GONE);
+        assert_eq!(e.message, "the daemon closed the connection during write");
+        assert_eq!(
+            e.fix,
+            "check rdy status; a write may or may not have committed; it is not retried"
+        );
+        // and the next call goes nowhere
+        let e = client.ctl("write", json!({"n": 2})).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_GONE);
+        done.send(()).unwrap();
+        let (request, connected_again) = daemon.await.unwrap();
+        assert!(request.contains(r#""n":1"#), "{request}");
+        assert!(!connected_again);
+    }
+
+    /// `ensure_error`'s words for a failure that has no path of its own.
+    #[test]
+    fn wx17_a_run_dir_failure_names_the_run_dir() {
+        let run = RunDir::of_project(Path::new("/p"));
+        let other = ensure_error(&run, io::Error::from(io::ErrorKind::OutOfMemory));
+        assert!(
+            other
+                .message
+                .starts_with("could not create the run directory "),
+            "{}",
+            other.message
+        );
+        assert_eq!(other.fix, START_FIX);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn df3_a_short_socket_dir_that_cannot_be_prepared_names_it() {
+        let run = RunDir::of_project(Path::new("/p"));
         let other = ensure_error(&run, io::Error::other("no space"));
         assert_eq!(
             other.message,

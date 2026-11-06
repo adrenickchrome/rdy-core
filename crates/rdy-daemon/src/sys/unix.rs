@@ -325,6 +325,31 @@ pub fn remove_endpoint(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
+/// Whether the endpoint `path` is a symbolic link, which may lead anywhere: rdy does not follow it.
+pub fn endpoint_is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// What tells the socket at `path` from a later one at the same path. `None` when none stands.
+pub fn endpoint_identity(path: &Path) -> Option<FileId> {
+    FileId::lstat(path).ok()
+}
+
+/// How a failed bind of the daemon starts its message.
+pub const BIND_REFUSED: &str = "could not bind the socket";
+
+/// Whether a refused bind or stop object means another process holds the name for now. A socket's
+/// path is cleared first and a signal has no name, so never here.
+pub fn name_is_held(_e: &io::Error) -> bool {
+    false
+}
+
+/// Whether `e`, from making a run directory, is a whole sentence that names its own path. Here the
+/// caller names the directory, or `layout` has its own error type.
+pub fn names_its_path(_e: &io::Error) -> bool {
+    false
+}
+
 /// The socket a `daemon.sock` line names: an absolute path of at most `MAX_SOCKET_PATH` bytes.
 fn endpoint_from_line(line: &[u8]) -> Option<PathBuf> {
     let well_formed =
@@ -369,6 +394,13 @@ pub fn parse_pid_record(bytes: &[u8]) -> Option<PidRecord> {
     Some(PidRecord {
         pid: text.parse().ok()?,
     })
+}
+
+/// Test hook: sets the named stop object of the project at the canonical `root`. Signals have
+/// none: `Ok(false)`.
+#[doc(hidden)]
+pub fn signal_project_stop(_root: &Path) -> io::Result<bool> {
+    Ok(false)
 }
 
 // 5. Process lifecycle
@@ -513,13 +545,27 @@ pub struct StopSignals {
 }
 
 impl StopSignals {
+    /// Whether a daemon may not start without these: it may here, as `rdy serve --stop` needs none
+    /// of them.
+    pub const REQUIRED: bool = false;
+
     /// Registers the handlers in the current tokio runtime; call it inside one.
     pub fn install(_root: &Path) -> io::Result<StopSignals> {
+        Self::early()
+    }
+
+    /// What can be registered before the store opens: all of it here.
+    pub fn early() -> io::Result<StopSignals> {
         use tokio::signal::unix::{SignalKind, signal};
         Ok(StopSignals {
             int: signal(SignalKind::interrupt())?,
             term: signal(SignalKind::terminate())?,
         })
+    }
+
+    /// Signals name no project, so nothing is left to claim.
+    pub fn claim_project(&mut self, _root: &Path) -> io::Result<()> {
+        Ok(())
     }
 
     /// Waits for the next signal and names it: "SIGINT" or "SIGTERM".

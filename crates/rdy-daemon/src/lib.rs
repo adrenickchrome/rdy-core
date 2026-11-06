@@ -1,4 +1,4 @@
-//! The rdy daemon transport: a per-project Unix socket serving `ctl` (line-delimited JSON
+//! The rdy daemon transport: a per-project local endpoint (`sys`) serving `ctl` (line-delimited JSON
 //! requests) and `mcp` connections, with a session table and a handler trait the host fills in.
 
 /// The build id: the first 16 hex digits of the BLAKE3 hash of the workspace sources.

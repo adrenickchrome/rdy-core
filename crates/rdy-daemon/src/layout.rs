@@ -148,6 +148,14 @@ impl RunDir {
         sys::parse_pid_record(&bytes)
     }
 
+    /// The pid `daemon.pid` names, however private the file is: for what only waits on a process
+    /// and ends none. `None` when missing, a link, unreadable or anything else.
+    pub(crate) fn pid_named(&self) -> Option<u32> {
+        let f = open_no_follow(OpenOptions::new().read(true), &self.pid_file()).ok()?;
+        let bytes = read_capped(f, sys::MAX_PID_RECORD).ok()??;
+        sys::parse_pid_record(&bytes).map(|r| r.pid())
+    }
+
     pub fn start_lock(&self) -> PathBuf {
         self.0.join(START_LOCK_FILE)
     }

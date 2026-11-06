@@ -90,6 +90,13 @@ pub fn signal_stop_event(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Test hook: sets the stop event of the project at the canonical `root`. `Ok(true)` when it stood;
+/// an event that does not stand is the system's error.
+#[doc(hidden)]
+pub fn signal_project_stop(root: &Path) -> io::Result<bool> {
+    signal_stop_event(&stop_event_name(&project_hash(root))).map(|()| true)
+}
+
 /// The thread that waits on the event and tells [`StopSignals::recv`]. It holds the event, so the
 /// name lasts as long as this does.
 struct EventWaiter {
@@ -140,25 +147,45 @@ fn wait_on_event(event: &OwnedHandle, quit: &Event, heard: &UnboundedSender<()>)
 /// The project's stop event, Ctrl-C and Ctrl-Break, registered in the current tokio runtime.
 pub struct StopSignals {
     heard: UnboundedReceiver<()>,
-    _waiter: EventWaiter,
+    tell: UnboundedSender<()>,
+    /// Holds the event, once [`claim_project`](Self::claim_project) has made it.
+    waiter: Option<EventWaiter>,
     ctrl_c: CtrlC,
     ctrl_break: CtrlBreak,
 }
 
 impl StopSignals {
+    /// Whether a daemon may not start without these: a client's fallback stop needs the event.
+    pub const REQUIRED: bool = true;
+
     /// Makes the stop event of the project at the canonical `root` and registers the console's
     /// handlers in the current tokio runtime; call it inside one.
     pub fn install(root: &Path) -> io::Result<StopSignals> {
-        let ctrl_c = ctrl_c()?;
-        let ctrl_break = ctrl_break()?;
-        let event = create_stop_event(&stop_event_name(&project_hash(root)))?;
-        let (tx, heard) = unbounded_channel();
+        let mut signals = Self::early()?;
+        signals.claim_project(root)?;
+        Ok(signals)
+    }
+
+    /// Registers the console's handlers in the current tokio runtime; call it inside one. This goes
+    /// before the store opens, and holds no name.
+    pub fn early() -> io::Result<StopSignals> {
+        let (tell, heard) = unbounded_channel();
         Ok(StopSignals {
             heard,
-            _waiter: EventWaiter::start(event, tx)?,
-            ctrl_c,
-            ctrl_break,
+            tell,
+            waiter: None,
+            ctrl_c: ctrl_c()?,
+            ctrl_break: ctrl_break()?,
         })
+    }
+
+    /// Makes the stop event of the project at the canonical `root`. A daemon does this once it holds
+    /// the store, so a project's own live daemon is refused first, in the store's words. The event
+    /// stays until this value is dropped.
+    pub fn claim_project(&mut self, root: &Path) -> io::Result<()> {
+        let event = create_stop_event(&stop_event_name(&project_hash(root)))?;
+        self.waiter = Some(EventWaiter::start(event, self.tell.clone())?);
+        Ok(())
     }
 
     /// Waits for the next signal and names it: "the stop event", "Ctrl-C" or "Ctrl-Break".

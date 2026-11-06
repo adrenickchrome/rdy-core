@@ -1,7 +1,7 @@
 //! The host: opens the store, binds the socket, warms canon, answers `ready`; classifies each
 //! ctl session with the `session` op and serves MCP per connection over the socket.
 use crate::ctl::CtlRequest;
-use crate::daemon::{Daemon, DaemonConfig, DaemonHandle, ExitReason, Readiness, log};
+use crate::daemon::{Daemon, DaemonConfig, DaemonHandle, ExitReason, Readiness, STOP_GRACE, log};
 use crate::error::{E_BAD_INPUT, E_NO_SESSION, ErrorReply};
 use crate::handler::Handler;
 use crate::layout::RunDir;
@@ -41,6 +41,11 @@ pub const WARM_SCOPES: &[Scope] = &[Scope::Canon];
 pub const LOCKED_RETRY: Duration = Duration::from_secs(2);
 /// The interval of those retries.
 const LOCKED_RETRY_EVERY: Duration = Duration::from_millis(25);
+/// How long a daemon waits for a name a daemon that is leaving still holds, its pipe or its stop
+/// event: that one's whole drain, then a store's release. Past this the name is someone else's, or
+/// stuck, and the start fails.
+const HELD_NAME_RETRY: Duration =
+    Duration::from_secs(STOP_GRACE.as_secs() + LOCKED_RETRY.as_secs());
 /// The pause between two tries at a start's claim or lock.
 const START_RETRY_EVERY: Duration = Duration::from_millis(2);
 
@@ -56,6 +61,10 @@ pub enum StartPoint {
     Guarded,
     /// The store is open, with the start still held.
     Opened,
+    /// The project's stop event stands (a foreground or detached `serve`), and no endpoint does.
+    StopEvent,
+    /// The endpoint is bound and recorded, with the start still held.
+    Bound,
 }
 
 type StartHook = Box<dyn FnMut(StartPoint) -> io::Result<()>>;
@@ -117,6 +126,8 @@ pub enum ServeError {
     AlreadyRunning(PathBuf),
     Open(RdyError),
     Bind(io::Error),
+    /// What a daemon must have before it answers could not be had: its stop event.
+    Start(io::Error),
     Runtime(io::Error),
 }
 
@@ -129,7 +140,8 @@ impl fmt::Display for ServeError {
                 p.display()
             ),
             ServeError::Open(e) => write!(f, "could not open the store: {e}"),
-            ServeError::Bind(e) => write!(f, "could not bind the socket: {e}"),
+            ServeError::Bind(e) => write!(f, "{}: {e}", sys::BIND_REFUSED),
+            ServeError::Start(e) => write!(f, "could not start the daemon: {e}"),
             ServeError::Runtime(e) => write!(f, "{e}"),
         }
     }
@@ -200,12 +212,30 @@ impl ServeRun {
 /// Opens the store, binds the socket and starts serving on a thread of its own. Returns once
 /// the socket is bound; clients are answered `starting` until canon is built.
 pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
-    start_checked(opts, None)
+    start_checked(opts, None, None)
+}
+
+/// `make`, tried again while another process holds the name it makes (`sys::name_is_held`).
+fn outlasting_a_held_name<T>(mut make: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let until = Instant::now() + HELD_NAME_RETRY;
+    loop {
+        match make() {
+            Err(e) if sys::name_is_held(&e) && Instant::now() < until => {
+                std::thread::sleep(LOCKED_RETRY_EVERY);
+            }
+            out => return out,
+        }
+    }
 }
 
 /// [`start`], refusing before either HTTP site binds when canon does not hold `profile` (the
-/// foreground profile-only start).
-fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, ServeError> {
+/// foreground profile-only start). `signals` claim the project between the store's open and the
+/// bind: a client that can reach this daemon can always stop it.
+fn start_checked(
+    opts: ServeOptions,
+    profile: Option<&str>,
+    signals: Option<&mut StopSignals>,
+) -> Result<ServeRun, ServeError> {
     // (1)
     if opts.detach {
         crate::spawn::detach().map_err(ServeError::Runtime)?;
@@ -255,6 +285,18 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         say(&root, &err.to_string());
         return Err(err);
     }
+    // (3c) the project's stop event, once the store is this process's. A daemon that is leaving may
+    // hold it until its process has ended
+    if let Some(signals) = signals {
+        let claimed = outlasting_a_held_name(|| signals.signals.claim_project(&root))
+            .map_err(ServeError::Start)
+            .and_then(|()| start_point(StartPoint::StopEvent));
+        if let Err(err) = claimed {
+            close(&shared);
+            say(&root, &err.to_string());
+            return Err(err);
+        }
+    }
     // (4)
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -275,12 +317,19 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
     };
     let handler = ServeHandler::new(Arc::clone(&shared), opts.human_actor.clone());
     let mut daemon = Daemon::new(config, Arc::new(handler));
-    if let Err(e) = rt.block_on(daemon.bind()) {
+    let daemon_bind = outlasting_a_held_name(|| rt.block_on(daemon.bind()));
+    if let Err(e) = daemon_bind {
         close(&shared);
         return Err(ServeError::Bind(e));
     }
     let handle = daemon.handle();
     let readiness = daemon.readiness();
+    if let Err(err) = start_point(StartPoint::Bound) {
+        handle.stop();
+        drop(daemon);
+        close(&shared);
+        return Err(err);
+    }
     // (4b) the site, once the daemon owns the project: the store lock is held and the socket is
     // bound and recorded (D-WZ4ZP, D-R7N9J). No loopback port leaves the daemon without a site.
     // The profile-only listeners start later, on request, on this runtime.
@@ -456,14 +505,15 @@ fn open_store(project: &Path, start: Option<&StartGuard>) -> Result<Rdy, RdyErro
 /// first one stops the daemon (it drains, the store closes cleanly and this returns `Stopped`);
 /// a second one while it drains exits the process at once, which loses nothing (the log is
 /// durable) and leaves the next open to catch up. The handlers are installed before the store
-/// opens, so no signal finds the store open without them.
+/// opens, so no signal finds the store open without them. The project's stop event comes once the
+/// store is open and before the endpoint is bound (Windows, D-FPKPS), and goes when this returns.
 pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
-    let signals = StopSignals::install(&opts.project);
-    let run = start(opts)?;
-    if let Some(s) = signals {
-        s.stop_on_signal(run.handle());
-    }
-    run.wait()
+    let mut signals = StopSignals::install(&opts.project)?;
+    let run = start_checked(opts, None, signals.as_mut())?;
+    let watch = signals.and_then(|s| s.stop_on_signal(run.handle()));
+    let out = run.wait();
+    drop(watch);
+    out
 }
 
 /// What a foreground profile-only start has once its listener is open: the folded key, the
@@ -488,12 +538,10 @@ pub fn serve_with_profile(
     key: &str,
     on_ready: impl FnOnce(ProfileSiteReady) -> Result<(), RdyError>,
 ) -> Result<ExitReason, ServeError> {
-    let signals = StopSignals::install(&opts.project);
+    let mut signals = StopSignals::install(&opts.project)?;
     let root = RunDir::of_project(&opts.project).root();
-    let run = start_checked(opts, Some(key))?;
-    if let Some(s) = signals {
-        s.stop_on_signal(run.handle());
-    }
+    let run = start_checked(opts, Some(key), signals.as_mut())?;
+    let _watch = signals.and_then(|s| s.stop_on_signal(run.handle()));
     let ready = profile_ready(run.shared(), key).and_then(on_ready);
     if let Err(e) = ready {
         let err = ServeError::Open(e);
@@ -533,56 +581,91 @@ fn profile_ready(sh: &Arc<Shared>, key: &str) -> Result<ProfileSiteReady, RdyErr
     })
 }
 
-/// SIGINT and SIGTERM, registered on a runtime of their own (the daemon's runtime moves to the
-/// `rdy-serve` thread).
+/// SIGINT and SIGTERM, or the stop event, Ctrl-C and Ctrl-Break, registered on a runtime of their
+/// own (the daemon's runtime moves to the `rdy-serve` thread).
 struct StopSignals {
     rt: tokio::runtime::Runtime,
     signals: sys::StopSignals,
 }
 
+/// The `rdy-signals` thread. Dropping this ends it, once the daemon has stopped, and with it the
+/// project's stop event.
+struct SignalWatch {
+    done: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for SignalWatch {
+    fn drop(&mut self) {
+        drop(self.done.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl StopSignals {
-    /// `None` (logged) if the handlers cannot be installed: the daemon then runs without them,
-    /// and `rdy serve --stop` still stops it cleanly. `project` names what they stop.
-    fn install(project: &Path) -> Option<StopSignals> {
-        let root = RunDir::of_project(project).root();
+    /// Installs what can go before the store opens. A failure that the daemon can live with is
+    /// logged and is `None`: it then runs without them, and `rdy serve --stop` still stops it
+    /// cleanly. `project` names what they stop.
+    fn install(project: &Path) -> Result<Option<StopSignals>, ServeError> {
         let installed = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .and_then(|rt| {
                 let signals = {
                     let _g = rt.enter();
-                    sys::StopSignals::install(&root)?
+                    sys::StopSignals::early()?
                 };
                 Ok(StopSignals { rt, signals })
             });
         match installed {
-            Ok(s) => Some(s),
+            Ok(s) => Ok(Some(s)),
+            Err(e) if sys::StopSignals::REQUIRED => {
+                let err = ServeError::Start(e);
+                say(&RunDir::of_project(project).root(), &err.to_string());
+                Err(err)
+            }
             Err(e) => {
                 log(&format!(
                     "could not install the SIGINT/SIGTERM handlers: {e}"
                 ));
-                None
+                Ok(None)
             }
         }
     }
 
-    /// Waits on a thread of its own (`rdy-signals`, alive until the process exits).
-    fn stop_on_signal(self, handle: DaemonHandle) {
+    /// Waits on a thread of its own (`rdy-signals`), until the watch this returns is dropped.
+    fn stop_on_signal(self, handle: DaemonHandle) -> Option<SignalWatch> {
         let StopSignals { rt, mut signals } = self;
+        let (done, mut finished) = tokio::sync::oneshot::channel::<()>();
         let spawned = std::thread::Builder::new()
             .name("rdy-signals".into())
             .spawn(move || {
                 rt.block_on(async move {
-                    let name = signals.recv().await;
+                    let name = tokio::select! {
+                        name = signals.recv() => name,
+                        _ = &mut finished => return,
+                    };
                     log(&format!("{name}: stopping"));
                     handle.stop();
-                    let name = signals.recv().await;
+                    let name = tokio::select! {
+                        name = signals.recv() => name,
+                        _ = &mut finished => return,
+                    };
                     log(&format!("{name} again: exiting without draining"));
                     std::process::exit(130);
                 })
             });
-        if let Err(e) = spawned {
-            log(&format!("could not start the signal thread: {e}"));
+        match spawned {
+            Ok(thread) => Some(SignalWatch {
+                done: Some(done),
+                thread: Some(thread),
+            }),
+            Err(e) => {
+                log(&format!("could not start the signal thread: {e}"));
+                None
+            }
         }
     }
 }
@@ -898,6 +981,86 @@ impl Handler for ServeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{Attempt, connect};
+    use crate::hello::{Hello, PROTO_VERSION};
+    use crate::session::Proto;
+
+    /// A client that hears `ready` can reach the pipe, and the stop event already stands: the
+    /// event comes before the pipe, so what a client can reach can always be stopped. The event
+    /// goes when the daemon has stopped. Unix has no such object: it stops over the socket.
+    #[test]
+    fn wx17_ready_means_pipe_and_stop_event_exist() {
+        let d = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(d.path()).unwrap();
+        Rdy::init(&project, "rdy-standard")
+            .unwrap()
+            .close()
+            .unwrap();
+        let run = RunDir::of_project(&project);
+        let root = run.root();
+        let (points, seen) = mpsc::channel();
+        let serving = {
+            let project = project.clone();
+            std::thread::spawn(move || {
+                with_start_hook_for_tests(
+                    move |point| {
+                        points.send(point).unwrap();
+                        Ok(())
+                    },
+                    || {
+                        serve(ServeOptions {
+                            project,
+                            version: "1.0.0".into(),
+                            detach: false,
+                            idle_timeout: None,
+                            human_actor: None,
+                            site_lan_override: None,
+                        })
+                    },
+                )
+            })
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let hello = |project| Hello {
+            rdy: PROTO_VERSION,
+            version: "1.0.0".into(),
+            build: crate::BUILD.into(),
+            proto: Proto::Ctl,
+            cwd: root.clone(),
+            project,
+        };
+        let long = Instant::now() + Duration::from_secs(120);
+        let mut client = loop {
+            assert!(Instant::now() < long, "the daemon never answered ready");
+            let Ok(id) = run.project_id() else { continue };
+            match rt.block_on(connect(&run, &hello(id))) {
+                Attempt::Ready(c) => break c,
+                Attempt::Starting(p) => {
+                    break rt.block_on(p.wait(long, &mut |_: &str| {})).unwrap();
+                }
+                Attempt::NoDaemon(_) => std::thread::sleep(LOCKED_RETRY_EVERY),
+                Attempt::Exiting => panic!("this daemon has no reason to leave"),
+                Attempt::Refused(e) => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(
+            seen.try_iter().collect::<Vec<_>>(),
+            [StartPoint::Opened, StartPoint::StopEvent, StartPoint::Bound]
+        );
+        if !sys::signal_project_stop(&root).unwrap() {
+            rt.block_on(client.ctl("stop", json!({}))).unwrap();
+        }
+        assert!(matches!(serving.join().unwrap(), Ok(ExitReason::Stopped)));
+        client.close();
+        match sys::signal_project_stop(&root) {
+            Ok(signalled) => assert!(!signalled),
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}"),
+        }
+    }
+
     #[test]
     fn msw9_a_warm_up_that_panics_still_answers_ready() {
         let log = crate::daemon::capture_log_for_tests(&["warm-up test panic"]);

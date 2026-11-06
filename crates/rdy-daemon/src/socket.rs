@@ -81,7 +81,7 @@ fn write_pid_file(run: &RunDir) -> io::Result<()> {
 
 /// Makes `bytes` the durable content of the run-dir file `target`, private to this account: to
 /// `<target>.tmp`, never through a link, flushed, then renamed into place and the run dir flushed.
-fn write_run_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_run_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = target.with_file_name(format!(
         "{}.tmp",
         target.file_name().unwrap_or_default().to_string_lossy()

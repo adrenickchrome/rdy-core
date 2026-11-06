@@ -137,6 +137,7 @@ mod tests {
         let _ = lan_address();
     }
 
+    #[cfg(unix)]
     #[test]
     fn ls4_two_spellings_give_one_port() {
         let d = tempfile::tempdir().unwrap();

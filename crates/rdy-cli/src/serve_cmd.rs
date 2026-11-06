@@ -103,13 +103,13 @@ fn configured_actor(env: &Env) -> Result<(), ErrorReply> {
 }
 
 /// The exit code of a daemon run: 0, or 2 when another rdy process holds the store, else 1. The
-/// host already logged an `AlreadyRunning` or `Open` error to stderr; the others are printed
+/// host already logged an `AlreadyRunning`, `Open` or `Start` error to stderr; the others are printed
 /// here.
 fn serve_exit(r: Result<rdy_daemon::ExitReason, ServeError>) -> ExitCode {
     match r {
         Ok(_) => ExitCode::SUCCESS,
         Err(ServeError::AlreadyRunning(_)) => ExitCode::from(2),
-        Err(ServeError::Open(_)) => ExitCode::FAILURE,
+        Err(ServeError::Open(_) | ServeError::Start(_)) => ExitCode::FAILURE,
         Err(e) => {
             // a closed stderr loses the line, never panics
             let _ = writeln!(std::io::stderr(), "{e}");
@@ -466,7 +466,11 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
             "the daemon is another rdy version and has other clients; sent a stop signal to its process {p}"
         );
     }
-    let gone = || exited(pid, || socket.exists(), process_alive);
+    // a pipe's name is no file: only a connect can say whether it still stands
+    let endpoint_stands = || {
+        rt.block_on(rdy_daemon::sys::endpoint_liveness(&socket)) != rdy_daemon::sys::Liveness::Gone
+    };
+    let gone = || exited(pid, endpoint_stands, process_alive);
     let quiet = STOP_GRACE + Duration::from_secs(1);
     let said = |p: Option<u32>| {
         let who = p.map_or_else(String::new, |p| format!(" (pid {p})"));

@@ -81,6 +81,36 @@ pub fn remove_endpoint(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A pipe's name is never looked at as a file: opening it would be a connection, and would take the
+/// instance that waits for the next client. It cannot be a link.
+pub fn endpoint_is_link(_path: &Path) -> bool {
+    false
+}
+
+/// A pipe has no identity: only its first instance holds the name, and a later daemon's pipe stands
+/// there only once this one's has gone. So there is nothing to tell apart.
+pub fn endpoint_identity(_path: &Path) -> Option<FileId> {
+    None
+}
+
+/// How a failed bind of the daemon starts its message; what follows names the pipe or the path.
+pub const BIND_REFUSED: &str = "could not start the daemon";
+
+/// Whether a refused pipe or stop event means another process holds the name for now: a daemon that
+/// is leaving keeps both until its last handle closes.
+pub fn name_is_held(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::AlreadyExists
+    )
+}
+
+/// Whether `e`, from making a run directory, is a whole sentence that names its own path: the
+/// store's privacy refusals are. A bare system error is not.
+pub fn names_its_path(e: &io::Error) -> bool {
+    e.get_ref().is_some()
+}
+
 /// See [`records::parse_pipe_record`].
 pub fn parse_endpoint_record(bytes: &[u8]) -> Option<(PathBuf, FileId)> {
     records::parse_pipe_record(bytes)
