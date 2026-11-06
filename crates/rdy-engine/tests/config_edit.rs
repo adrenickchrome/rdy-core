@@ -621,6 +621,16 @@ fn hsa2_every_component_below_the_home_is_checked() {
     // a home reached through a link works, and its files are where the link points
     let via = d.path().join("via");
     link(&home, &via).unwrap();
+    // Windows may refuse to pass a link an ordinary account made, with error 448: that home is
+    // then refused like any path that cannot be opened, and nothing is made
+    if fs::read_dir(&via).err().and_then(|e| e.raw_os_error()) == Some(448) {
+        assert_privacy(
+            open(&via, "rdy/credentials.yaml", true),
+            "a home link the system will not pass",
+        );
+        assert!(!home.join("rdy").exists());
+        return;
+    }
     let mut c = open(&via, "rdy/credentials.yaml", true).unwrap();
     c.replace(b"through the home link").unwrap();
     drop(c);

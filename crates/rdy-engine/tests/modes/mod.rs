@@ -158,13 +158,13 @@ mod host {
     fn rights(bits: u32, sticky: bool) -> &'static str {
         match (bits, sticky) {
             (7, true) => "(RX,W)",
-            (7, false) | (6, false) => "(F)",
-            (6, true) => "(R,W)",
+            (7, false) => "(F)",
+            (6, _) => "(R,W)",
             (5, _) => "(RX)",
             (4, _) => "(R)",
-            (3, _) => "(W,X)",
+            (3, _) => "(W,X,RA)",
             (2, _) => "(W)",
-            (1, _) => "(X)",
+            (1, _) => "(X,RA)",
             _ => unreachable!("a class with no bits has no ACE"),
         }
     }
