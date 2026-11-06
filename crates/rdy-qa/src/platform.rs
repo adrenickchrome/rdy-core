@@ -1,6 +1,13 @@
 //! The harness's platform helpers, in one place (FW-XP1 D-1RXEA). Each platform's calls live in a
 //! child module, `unix` or `windows`; nothing else in the harness names a platform's mechanism.
 
+// the child fixtures are the same on every platform and exist only in a test build
+#[cfg(test)]
+mod child_fixture;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use child_fixture::*;
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
