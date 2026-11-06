@@ -7226,7 +7226,7 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
         Attempt::Ready(c) => c.into_stream(),
         other => panic!("the daemon did not answer the mcp hello: {other:?}"),
     };
-    let (r, mut w) = stream.into_split();
+    let (r, mut w) = rdy_daemon::sys::split(stream);
     let mut r = tokio::io::BufReader::new(r);
     let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "perf", "version": "0"}}});
     w.write_all(format!("{init}\n").as_bytes())

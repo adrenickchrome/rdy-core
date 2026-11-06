@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// A byte stream an MCP session runs on: the daemon's socket today, any transport later.
+/// A byte stream an MCP session runs on: the daemon's local endpoint today, any transport later.
 pub trait DuplexStream:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static
 {

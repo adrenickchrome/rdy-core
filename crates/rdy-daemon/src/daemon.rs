@@ -434,7 +434,7 @@ impl Daemon {
     /// the pid file (unless `DaemonHandle::stop` already did), tells every connection to finish,
     /// and waits for them up to `STOP_GRACE`.
     pub async fn run(mut self) -> io::Result<ExitReason> {
-        let (listener, project) = self
+        let (mut listener, project) = self
             .listener
             .take()
             .zip(self.check.project.get().copied())
@@ -504,7 +504,7 @@ impl Daemon {
                     self.info.stop.send_replace(true);
                 }
                 accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         self.keepers.update(|k| {
                             k.connections.fetch_add(1, Ordering::SeqCst);
                         });
@@ -983,7 +983,7 @@ impl Conn {
         // (f) the protocol
         match hello.proto {
             Proto::Ctl => {
-                let (r, w) = stream.split();
+                let (r, w) = sys::split(stream);
                 let handler = Arc::clone(&self.handler);
                 if let Err(e) = serve_ctl(r, w, session, handler, self.info.clone()).await
                     && !is_hang_up(&e)

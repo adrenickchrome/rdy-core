@@ -569,7 +569,8 @@ fn always_exiting(dir: &Path) -> (tokio::runtime::Runtime, Arc<AtomicUsize>) {
     let n = Arc::clone(&count);
     rt.spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        while let Ok((stream, _)) = listener.accept().await {
+        let mut listener = listener;
+        while let Ok(stream) = listener.accept().await {
             let n = Arc::clone(&n);
             tokio::spawn(async move {
                 let mut stream = tokio::io::BufReader::new(stream);
@@ -633,7 +634,8 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
     let n = Arc::clone(&accepts);
     rt.spawn(async move {
         let mut script = Some((hello_tx, sent_tx, released, req_tx, site));
-        while let Ok((stream, _)) = listener.accept().await {
+        let mut listener = listener;
+        while let Ok(stream) = listener.accept().await {
             n.fetch_add(1, Ordering::SeqCst);
             // a later connection is counted and closed: the client must not need one
             let Some((hello_tx, sent_tx, released, req_tx, site)) = script.take() else {

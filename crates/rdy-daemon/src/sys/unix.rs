@@ -14,27 +14,27 @@ use tokio::net::{UnixListener, UnixStream};
 // 1. Transport
 
 /// The daemon's listener: a Unix socket.
-pub type Listener = UnixListener;
+#[derive(Debug)]
+pub struct Listener(UnixListener);
+
+impl Listener {
+    /// The next connection. Cancel safe: a future dropped before it ends loses no connection.
+    pub async fn accept(&mut self) -> io::Result<Stream> {
+        self.0.accept().await.map(|(stream, _)| stream)
+    }
+}
+
 /// One connection to or from the daemon.
 pub type Stream = UnixStream;
-/// The read half of a `Stream`.
-pub type ReadHalf = tokio::net::unix::OwnedReadHalf;
-/// The write half of a `Stream`.
-pub type WriteHalf = tokio::net::unix::OwnedWriteHalf;
 
 /// Binds a listener at `path`.
 pub fn bind(path: &Path) -> io::Result<Listener> {
-    UnixListener::bind(path)
+    UnixListener::bind(path).map(Listener)
 }
 
 /// Connects to the listener at `path`.
 pub async fn connect(path: &Path) -> io::Result<Stream> {
     UnixStream::connect(path).await
-}
-
-/// Splits `stream` into halves that can move to different tasks.
-pub fn split(stream: Stream) -> (ReadHalf, WriteHalf) {
-    stream.into_split()
 }
 
 /// The bytes of `p`, as the operating system holds them.
@@ -753,10 +753,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("s.sock");
         rt().block_on(async {
-            let listener = bind(&path).unwrap();
+            let mut listener = bind(&path).unwrap();
             let (client, accepted) = tokio::join!(connect(&path), listener.accept());
             let client = client.unwrap();
-            let (server, _) = accepted.unwrap();
+            let server = accepted.unwrap();
             for s in [&client, &server] {
                 assert_eq!(peer_uid(s).unwrap(), own_uid());
                 assert_eq!(peer_pid(s), Some(std::process::id()));

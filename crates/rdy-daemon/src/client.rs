@@ -717,7 +717,7 @@ fn peer_pid(socket: &Path) -> Option<u32> {
     std::thread::scope(|s| {
         s.spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_io()
+                .enable_all()
                 .build()
                 .ok()?;
             rt.block_on(async {

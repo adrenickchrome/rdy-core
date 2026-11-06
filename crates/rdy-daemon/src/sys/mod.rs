@@ -1,5 +1,7 @@
 //! The daemon's platform calls, one seam for every Unix-only call the daemon makes (FW-XP1):
-//! - transport: the local socket's listener, stream and halves, and paths as bytes;
+//! - transport: the local endpoint's listener and stream, and paths as bytes. A named pipe on
+//!   Windows and a socket elsewhere; `Listener::accept` gives a connected `Stream`, and `split`
+//!   gives its halves, the same types on every platform;
 //! - peer identity: the uid and pid at the other end of a stream, and this process's uid;
 //! - no-follow opens: a run-dir file that is a symbolic link is refused;
 //! - private files and directories: modes 0o600 and 0o700, the owner, and hard-link support;
@@ -24,12 +26,27 @@
 mod site_socket;
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 pub(crate) use site_socket::configure_site_socket;
 #[cfg(unix)]
 pub use unix::*;
+#[cfg(windows)]
+pub use windows::*;
 
-#[cfg(not(unix))]
-compile_error!("rdy_daemon::sys has no implementation for this platform yet (FW-XP1 Phase 4)");
+#[cfg(not(any(unix, windows)))]
+compile_error!("rdy_daemon::sys has no implementation for this platform (FW-XP1 D-1RXEA)");
+
+/// The read half of a `Stream`.
+pub type ReadHalf = tokio::io::ReadHalf<Stream>;
+/// The write half of a `Stream`.
+pub type WriteHalf = tokio::io::WriteHalf<Stream>;
+
+/// Splits `stream` into halves that can move to different tasks. Shutting down the write half
+/// ends the peer's reads; the connection itself closes when both halves are gone.
+pub fn split(stream: Stream) -> (ReadHalf, WriteHalf) {
+    tokio::io::split(stream)
+}
 
 /// What is known of an old daemon's process or endpoint while a stop waits for it to end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
