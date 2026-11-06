@@ -2,11 +2,11 @@
 //! file is also included by the QA integration binaries that reuse it.
 
 use super::child_fixture::*;
-use crate::platform::{kill_hard, process_exited, process_running, run_bounded};
+use crate::platform::{kill_hard, process_exited, process_running, run_bounded, run_bounded_inner};
 use std::io;
 use std::path::Path;
-use std::process::Stdio;
-use std::time::Duration;
+use std::process::{Child, Stdio};
+use std::time::{Duration, Instant};
 
 fn stdout_without_header(bytes: &[u8]) -> &[u8] {
     // libtest prints "\nrunning 1 test\n" first; the mode's bytes follow it
@@ -131,43 +131,172 @@ fn wx23c_native_child_modes_are_deterministic() {
     }
 }
 
+/// The holder of the escaped-holder test, and its cleanup. On Windows the holder is a process
+/// this test starts, outside the runner's job; on Unix it is the group the fixture child starts.
+/// `Drop` ends it whatever the test found, so no holder outlives the test.
+#[derive(Default)]
+struct Apart {
+    child: Option<Child>,
+    pid: Option<u32>,
+}
+
+impl Apart {
+    fn clean_up(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(pid) = self.pid.take() {
+            if process_running(pid) {
+                kill_hard(pid);
+            }
+            let guard = Instant::now() + Duration::from_secs(60);
+            while !process_exited(pid) && Instant::now() < guard {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+impl Drop for Apart {
+    fn drop(&mut self) {
+        self.clean_up();
+    }
+}
+
+/// The report the holder child writes, read once it says it is complete, and then the end of the
+/// child that wrote it. Waits on the file and on the process, under a hang guard that is never a
+/// speed check. From here on only the holder can keep a stream of the run open.
+fn wait_for_held_and_child_gone(file: &Path) -> Option<Held> {
+    let guard = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < guard {
+        if let Ok(text) = std::fs::read_to_string(file)
+            && let Some(held) = parse_held(&text)
+        {
+            while !process_exited(held.from) && Instant::now() < guard {
+                std::thread::yield_now();
+            }
+            return Some(held);
+        }
+        std::thread::yield_now();
+    }
+    None
+}
+
+#[test]
+fn wx23c_held_report_is_complete_only_when_it_says_ready() {
+    assert_eq!(HOLDER_ENV, "RDY_QA_CHILD_HOLDER");
+    assert_eq!(parse_held(""), None);
+    assert_eq!(parse_held("12\n7\n"), None);
+    assert_eq!(parse_held("12\n7\n34\n56\nrea"), None);
+    assert_eq!(parse_held("12\nready\n"), None);
+    assert_eq!(
+        parse_held("12\n7\nready\n"),
+        Some(Held {
+            pid: 12,
+            from: 7,
+            handles: vec![]
+        })
+    );
+    assert_eq!(
+        parse_held("12\n7\n34\n56\nready\n"),
+        Some(Held {
+            pid: 12,
+            from: 7,
+            handles: vec![34, 56]
+        })
+    );
+    assert_eq!(parse_held("x\n7\nready\n"), None);
+    assert_eq!(parse_held("12\n7\nx\nready\n"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn wx23c_holder_needs_an_independent_process_on_windows() {
+    // a child inside a job without breakaway cannot start a process outside it: without the
+    // independent holder the mode says so and starts nothing
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("holder");
+    let out = fixture_command_for("holder", &file)
+        .output()
+        .expect("run the holder fixture");
+    assert_eq!(out.status.code(), Some(101));
+    assert!(String::from_utf8_lossy(&out.stderr).contains(HOLDER_ENV));
+    assert!(!file.exists());
+}
+
 #[test]
 fn wx23c_escaped_holder_does_not_hold_the_bounded_run() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = dir.path().join("holder");
-    let deadline = Duration::from_secs(2);
-    let started = std::time::Instant::now();
-    let out = run_bounded(
-        fixture_command_for("holder", &file),
-        None,
-        1 << 20,
-        deadline,
-    );
-    let took = started.elapsed();
-    // the holder id file is written before the direct child exits, so it is ready here
-    let pids = ids(&file);
-    assert_eq!(pids.len(), 1);
-    let pid = pids[0];
+    let mut apart = Apart::default();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut command = fixture_command_for("holder", &file);
+    #[cfg(windows)]
+    {
+        // The runner's job allows no breakaway, so the child cannot start a process outside it.
+        // This test starts the holder, outside the job and under its own ownership, before the
+        // run. The child lends it both streams, then reports.
+        let mut hold = fixture_command("hang");
+        hold.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = crate::platform::spawn_apart(&mut hold).expect("start the independent holder");
+        command.env(HOLDER_ENV, child.id().to_string());
+        apart.child = Some(child);
+    }
+    // The run has no deadline of its own beyond a hang guard: the expiry comes once the child has
+    // reported that the streams are held and has ended, so no timing decides the outcome. What
+    // proves the hold is what the holder still has once the run is over, checked below.
+    let guard = Instant::now() + Duration::from_secs(120);
+    let report = file.clone();
+    let (seen_tx, seen) = std::sync::mpsc::channel();
+    let run = run_bounded_inner(command, None, None, 1 << 20, Some(guard), move |expiry| {
+        std::thread::spawn(move || {
+            let _ = seen_tx.send(wait_for_held_and_child_gone(&report));
+            expiry.expire();
+        });
+    });
+    let held = seen
+        .recv()
+        .expect("the waiter reported")
+        .expect("the child reported before the guard");
+    #[cfg(not(windows))]
+    {
+        apart.pid = Some(held.pid);
+    }
     // look first, clean up always: the holder must not outlive this test
-    let alive = process_running(pid);
-    if alive {
-        kill_hard(pid);
+    let alive = process_running(held.pid);
+    #[cfg(windows)]
+    let keeps = holder_keeps(&held);
+    #[cfg(windows)]
+    {
+        assert_eq!(apart.child.as_ref().map(Child::id), Some(held.pid));
     }
-    while !process_exited(pid) {
-        std::thread::yield_now();
-    }
-    // the holder keeps the streams open outside the runner's tree: the runner cannot reach it,
-    // so the deadline ends the run, and it ends it in bounded time
-    let err = out.expect_err("a stream held outside the tree ends the run at its deadline");
+    apart.clean_up();
+    assert!(process_exited(held.pid), "the holder was not cleaned up");
+    // the holder is outside the runner's tree and keeps the streams open: the runner cannot reach
+    // it, so only the expiry ends the run
+    let err = run
+        .result
+        .expect_err("the expiry ends a run whose streams a holder outside the tree keeps");
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(run.drains_joined, 2, "both drains were joined");
+    assert!(
+        process_exited(run.pid.expect("the child started")),
+        "the direct child was reaped"
+    );
     assert!(
         alive,
         "the runner's cleanup stopped the holder: it did not escape the tree"
     );
-    assert!(
-        took >= deadline && took < Duration::from_secs(30),
-        "the run was not bounded by its deadline ({took:?})"
-    );
+    #[cfg(windows)]
+    {
+        assert_eq!(held.handles.len(), 2);
+        keeps.expect("the holder kept the lent streams after the run returned");
+    }
+    #[cfg(not(windows))]
+    assert!(held.handles.is_empty());
 }
 
 #[test]

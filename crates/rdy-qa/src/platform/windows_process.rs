@@ -10,7 +10,8 @@
 //!   ending too), leaves nothing running. It gives no breakaway, so no descendant can leave.
 //! - **A job nests.** A process that is already in a job gets a job inside it. It stays in the
 //!   outer one: ending the inner job leaves the outer's other processes, and ending the outer job
-//!   ends the inner's too. No start here asks to break away.
+//!   ends the inner's too. No start here asks to break away. A test that needs a process outside
+//!   every job of the runner starts it with [`spawn_apart`], never by breakaway.
 //! - **A child that is refused never runs.** It is ended while still suspended, and the failure
 //!   is the start's result, unless the cleanup itself failed: a cleanup failure comes first, as
 //!   in the bounded runner.
@@ -480,6 +481,17 @@ static PIPE_NUMBER: AtomicUsize = AtomicUsize::new(0);
 /// child inherits every inheritable handle of its parent, so two starts at once could give one
 /// run's stream to another run's child, which would then hold it open.
 static START: Mutex<()> = Mutex::new(());
+
+/// Starts `command` as an ordinary process that no [`Job`] of this module owns: a child of this
+/// process that the bounded runner never reaches, which is what a test needs for a process that
+/// must outlive a run. It takes the runner's start lock, so no run's inheritable stream ends are
+/// open while it starts; it could otherwise hold another run's streams open.
+pub fn spawn_apart(command: &mut Command) -> io::Result<Child> {
+    let _one_start = START
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    command.spawn()
+}
 
 /// What one overlapped read found.
 enum Chunk {
