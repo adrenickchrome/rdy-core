@@ -181,6 +181,31 @@ fn edit_runs_editor_with_args_and_failure_changes_nothing() {
 }
 
 #[test]
+fn wx20_failed_edit_keeps_its_recovery_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, id) = project_with_term();
+    let script = dir.path().join("bad.sh");
+    // the editor saves a file the write refuses
+    std::fs::write(&script, "#!/bin/sh\nprintf 'type: [unclosed\\n' > \"$1\"\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (ok, _, err) = rdy_env(
+        dir.path(),
+        script.to_str().unwrap(),
+        &["edit", &id, "--view", "work"],
+    );
+    assert!(!ok);
+    let marker = "your edit is saved at ";
+    let at = err
+        .find(marker)
+        .unwrap_or_else(|| panic!("no recovery path: {err}"))
+        + marker.len();
+    let path = err[at..].split(':').next().unwrap().trim();
+    let kept = std::fs::read_to_string(path).unwrap();
+    assert!(kept.contains("type: [unclosed"), "{kept}");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn fsck_detects_corruption() {
     let (dir, _) = project_with_term();
     // Seal segment 0 by starting segment 1: Store::open only repairs (truncates) the tail of the

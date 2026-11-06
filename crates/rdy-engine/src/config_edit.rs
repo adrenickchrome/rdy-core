@@ -16,8 +16,9 @@
 //! under a umask of 002, `rdy init` makes `.rdy/` group-writable, and a group that can write it
 //! can already change the store. All users may write such a directory only when its sticky bit
 //! is set, so no other user can remove or replace this user's entries. A secret file must also
-//! be mode 0o600, and a lock must give group and others no access; a settings file keeps its mode
-//! through a replacement. Nothing here changes the mode of any directory, or of an existing
+//! be mode 0o600, and a lock must give group and others no access; on Unix a settings file keeps
+//! its mode through a replacement. On Windows a replaced file keeps the read-only attribute and
+//! ends private. Nothing here changes the mode of any directory, or of an existing
 //! file. mkdir returns no handle, so no call proves that the directory opened after it is the one
 //! it made: a directory is made only when the umask keeps 0o700 whole, and what then stands at
 //! its name is used only if it is a 0o700 directory of this user, as that mkdir makes it.
@@ -98,8 +99,9 @@ impl LockedConfig {
     }
 
     /// Replaces the file's bytes durably while the lock is held: the old bytes stay until the
-    /// complete new bytes are renamed into place. A secret file ends 0o600; a settings file keeps
-    /// its mode, and a new one is 0o600. Bytes over the limit are `E_LIMIT`, refused before any
+    /// complete new bytes are renamed into place. A secret file ends 0o600. On Unix a settings
+    /// file keeps its mode; on Windows a replaced file keeps the read-only attribute and ends
+    /// private. A new file is 0o600 on Unix. Bytes over the limit are `E_LIMIT`, refused before any
     /// temp file is made.
     ///
     /// The path must still lead to the directory checked at open, with the same checks, and a
