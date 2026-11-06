@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! ctl2, the read half: each op reads one snapshot; paths resolve against the session cwd;
 //! status reports the open and quarantine files; errors carry the M1 shape.
 use rdy_daemon::{ErrorReply, OPS, OpContext, clean_quarantine, dispatch, quarantine};
@@ -7,6 +5,8 @@ use rdy_engine::engine::{Engine, Local, write_typed};
 use rdy_engine::{E_BAD_INPUT, Rdy, RdyError, Scope, Session, WriteRequest};
 use rdy_model::Role;
 use serde_json::{Value, json};
+
+mod common;
 
 fn project() -> (tempfile::TempDir, Local) {
     let dir = tempfile::tempdir().unwrap();
@@ -609,7 +609,7 @@ fn qclean1_clean_quarantine_removes_regular_quarantine_files_and_nothing_else() 
     std::fs::write(store.join("index.redb.damaged-1"), b"old index").unwrap();
     let outside = d.path().join("keep.txt");
     std::fs::write(&outside, b"keep").unwrap();
-    std::os::unix::fs::symlink(&outside, store.join("segments/link.torn-5")).unwrap();
+    rdy_store::pio::symlink(&outside, store.join("segments/link.torn-5")).unwrap();
     std::fs::create_dir(store.join("index.redb.damaged-dir")).unwrap();
     std::fs::write(store.join("index.redb.damaged-dir/inner"), b"x").unwrap();
     let c = clean_quarantine(d.path());
@@ -1293,7 +1293,7 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
     let store = d.path().join(".rdy/store");
     std::fs::write(store.join("segments/seg-000000.log.torn-8"), b"x").unwrap();
     std::fs::create_dir(store.join("index.redb.damaged-8")).unwrap();
-    std::os::unix::fs::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-9")).unwrap();
+    rdy_store::pio::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-9")).unwrap();
     assert_eq!(
         quarantine(d.path()),
         rdy_engine::quarantine::names(d.path())
@@ -1827,4 +1827,93 @@ fn mh7_the_compact_op_is_strict_and_guards_the_role() {
     assert_eq!(dry["punched_bytes"], 0);
     assert_eq!(dry["log_bytes"], real["log_bytes"]);
     assert_eq!(dry["by_kind"], real["by_kind"]);
+}
+
+/// Runs the real `dispatch` for a ctl connection over the seam's own endpoint. A request's
+/// `as` key (taken out before dispatch) picks the role, as a session's role does in the server.
+struct OpsOverPipe {
+    engine: Local,
+    dir: std::path::PathBuf,
+}
+
+impl rdy_daemon::Handler for OpsOverPipe {
+    fn ctl(
+        &self,
+        _s: &rdy_daemon::SessionInfo,
+        mut r: rdy_daemon::CtlRequest,
+        agent: std::sync::Arc<dyn rdy_engine::signing_crypto::SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
+        let role = match r.args.as_object_mut().and_then(|o| o.remove("as")) {
+            Some(Value::String(x)) if x == "reader" => Role::Reader,
+            _ => Role::Writer,
+        };
+        let session = Session::human("human:t".into(), role).unwrap();
+        let c = OpContext {
+            engine: &self.engine,
+            session: &session,
+            human: "human:t",
+            cwd: &self.dir,
+            agent: &*agent,
+        };
+        dispatch(&c, &r.op, r.args).map_err(ErrorReply::from)
+    }
+}
+
+#[tokio::test]
+async fn wx21c_pipe_ops_keep_roles_errors_and_results() {
+    use std::sync::Arc;
+    let dir = common::short_tempdir();
+    let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    std::fs::write(dir.path().join("chart.png"), b"\x89PNG chart").unwrap();
+    let handler = Arc::new(OpsOverPipe {
+        engine: Local::new(r),
+        dir: dir.path().to_path_buf(),
+    });
+    let run = rdy_daemon::RunDir::of_project(dir.path());
+    let mut d = rdy_daemon::Daemon::new(
+        rdy_daemon::DaemonConfig::new(run.clone(), "1.0.0".to_string()),
+        handler,
+    );
+    d.bind().await.expect("bind");
+    let (handle, readiness) = (d.handle(), d.readiness());
+    readiness.ready();
+    let task = tokio::spawn(d.run());
+    let (mut c, first) =
+        common::connect_with(&run, &common::hello("1.0.0", "ctl", dir.path())).await;
+    let first: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(first["status"], json!("ready"), "{first}");
+
+    // a result: the writer's blob is stored, and the reply carries the same fields as dispatch
+    let v = common::ctl(&mut c, 1, "wc_put_blob", json!({"path": "chart.png"})).await;
+    assert_eq!(v["ok"]["bytes"], 10, "{v}");
+    assert_eq!(v["ok"]["hash"].as_str().unwrap().len(), 64, "{v}");
+    // a role: the same op is refused to a reader, with the engine's code
+    let v = common::ctl(
+        &mut c,
+        2,
+        "wc_put_blob",
+        json!({"path": "chart.png", "as": "reader"}),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], rdy_engine::E_PERMISSION, "{v}");
+    // strict input: an unknown key is refused
+    let v = common::ctl(
+        &mut c,
+        3,
+        "wc_put_blob",
+        json!({"path": "chart.png", "x": 1}),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], E_BAD_INPUT, "{v}");
+    // an unknown op names the real ops
+    let v = common::ctl(&mut c, 4, "frobnicate", json!({})).await;
+    assert_eq!(v["error"]["code"], E_BAD_INPUT, "{v}");
+    assert!(
+        v["error"]["fix"].as_str().unwrap().contains("status"),
+        "{v}"
+    );
+    drop(c);
+    handle.stop();
+    task.await.unwrap().unwrap();
+    dir.close().unwrap();
 }

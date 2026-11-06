@@ -907,6 +907,20 @@ fn kind_from(attributes: u32, tag: u32) -> EntryKind {
     }
 }
 
+/// Makes `link` a symbolic link to `target`: a directory link when `target` is a directory, a
+/// file link otherwise (also when `target` is missing). Needs the symbolic-link privilege. For
+/// test fixtures.
+pub fn symlink(
+    target: impl AsRef<std::path::Path>,
+    link: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    if target.as_ref().is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
 /// Native NTFS cases of the provider itself: the exported signatures, a swap at the boundary
 /// between an open and its check, every reparse tag at an entry, and hostile listing records.
 #[cfg(test)]
