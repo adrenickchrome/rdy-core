@@ -388,9 +388,15 @@ mod native {
                     Attempt::Refused(_) | Attempt::Starting(_) => false,
                 }
             });
-            let next = f.start(None).unwrap();
+            // this start did not hear `exiting` itself, so it gives a store still held only
+            // `HELD_GRACE`; it may then have to come again
+            let mut next = None;
+            wait_for("the successor", || {
+                next = f.start(None).ok();
+                next.is_some()
+            });
+            let mut next = next.unwrap();
             wait_for("the old daemon's exit", || !process_alive(pid));
-            let mut next = next;
             assert_ne!(pid_of(&f.rt, &mut next), pid);
             f.stop(next);
             f.assert_nothing_left();

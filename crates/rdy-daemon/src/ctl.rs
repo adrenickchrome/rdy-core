@@ -390,8 +390,11 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
             "stop" => {
                 let reply = CtlReply::ok(id, json!({"stopping": true}));
-                answer(&mut w, &handler, &session, reply).await?;
+                // the stop stands whatever becomes of its reply: a client that closes as soon as
+                // it has read the reply can fail its flush here
+                let answered = answer(&mut w, &handler, &session, reply).await;
                 info.stop.send_replace(true);
+                answered?;
             }
             _ => {
                 // the request's signer names it in each callback
@@ -467,5 +470,78 @@ async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::session::{Proto, SessionId, Sessions};
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Context;
+    use std::time::Instant;
+    use tokio::sync::watch;
+
+    struct Quiet;
+
+    impl Handler for Quiet {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn SigningAgent>,
+        ) -> Result<Value, ErrorReply> {
+            Ok(Value::Null)
+        }
+    }
+
+    /// A writer whose client has gone: on Windows a client that closes as soon as it has read its
+    /// reply can fail the daemon's flush of that same reply.
+    struct Gone;
+
+    impl AsyncWrite for Gone {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// `rdy serve --stop` sends the op and closes as soon as it hears the reply. The stop stands
+    /// whatever became of that reply.
+    #[tokio::test]
+    async fn wx17_a_stop_stands_when_its_reply_cannot_be_flushed() {
+        let info = DaemonInfo {
+            pid: 1,
+            version: "1.0.0".into(),
+            build: crate::BUILD.into(),
+            started_at: Instant::now(),
+            sessions: Sessions::default(),
+            connections: Arc::new(AtomicUsize::new(0)),
+            stop: Arc::new(watch::channel(false).0),
+        };
+        let session = SessionInfo {
+            id: SessionId(1),
+            proto: Proto::Ctl,
+            version: "1.0.0".into(),
+            build: crate::BUILD.into(),
+            cwd: "/".into(),
+            peer: crate::sys::own_account().unwrap().into(),
+            connected_at_ms: 0,
+        };
+        let request = br#"{"id":1,"op":"stop","args":{}}
+"#;
+        let _ = serve_ctl(&request[..], Gone, session, Arc::new(Quiet), info.clone()).await;
+        assert!(*info.stop.borrow());
     }
 }
