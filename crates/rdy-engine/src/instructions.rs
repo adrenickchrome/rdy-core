@@ -10,6 +10,7 @@
 //! A ruleset is a doc with instructions under it. Its menu entry gives the doc's title, the
 //! text of its first prose block (its lead), its layer, whether it is required, the estimated
 //! tokens of its bodies and its selectors as hints. A hint never selects a rule.
+use crate::embedded_guide;
 use crate::error::{E_BAD_INPUT, E_INTERNAL, E_IO, E_LIMIT, E_NOT_FOUND, E_VALIDATION, RdyError};
 use crate::instructions_config::{PersonPath, PersonSource, resolve_person_from_env};
 use crate::query::source_body;
@@ -80,13 +81,14 @@ pub fn estimate_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(4)
 }
 
-/// A source's place in the layer order: organization, team sets, cited sets, project, person.
-/// A later layer overrides an earlier one, except that a locked organization or team rule wins.
-/// Delivery shows every layer's rules and removes none. Teams sort by name for display only:
-/// every team has one precedence. This build emits only `project` and `person`; the others are
-/// reserved.
+/// A source's place in the layer order: rdy, organization, team sets, cited sets, project,
+/// person. A later layer overrides an earlier one, except that a locked rdy, organization or team
+/// rule wins. Delivery shows every layer's rules and removes none. Teams sort by name for display
+/// only: every team has one precedence. This build emits `rdy` (the built-in guide), `project`
+/// and `person`; the others are reserved.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Layer {
+    Rdy,
     Organization,
     Team(String),
     Cited(String),
@@ -95,25 +97,27 @@ pub enum Layer {
 }
 
 impl Layer {
-    /// The layer's precedence: 0 for organization up to 4 for person; equal for every team.
+    /// The layer's precedence: 0 for rdy up to 5 for person; equal for every team.
     pub fn precedence(&self) -> u8 {
         match self {
-            Layer::Organization => 0,
-            Layer::Team(_) => 1,
-            Layer::Cited(_) => 2,
-            Layer::Project => 3,
-            Layer::Person => 4,
+            Layer::Rdy => 0,
+            Layer::Organization => 1,
+            Layer::Team(_) => 2,
+            Layer::Cited(_) => 3,
+            Layer::Project => 4,
+            Layer::Person => 5,
         }
     }
 
-    /// Whether a locked rule of this layer wins over a later layer: only organization and team
-    /// locks do. A local `locked: true` is shown and has no force.
+    /// Whether a locked rule of this layer wins over a later layer: only rdy, organization and
+    /// team locks do. A local `locked: true` is shown and has no force.
     pub fn locks_have_force(&self) -> bool {
-        matches!(self, Layer::Organization | Layer::Team(_))
+        matches!(self, Layer::Rdy | Layer::Organization | Layer::Team(_))
     }
 
     fn parse(s: &str) -> Option<Layer> {
         match s {
+            "rdy" => Some(Layer::Rdy),
             "organization" => Some(Layer::Organization),
             "project" => Some(Layer::Project),
             "person" => Some(Layer::Person),
@@ -138,6 +142,7 @@ impl Layer {
 impl fmt::Display for Layer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Layer::Rdy => f.write_str("rdy"),
             Layer::Organization => f.write_str("organization"),
             Layer::Team(n) => write!(f, "team:{n}"),
             Layer::Cited(a) => write!(f, "cited:{a}"),
@@ -160,21 +165,30 @@ impl<'de> Deserialize<'de> for Layer {
     }
 }
 
-/// One requested ruleset: `project:<doc-id>`, `person:<doc-id>`, or a bare doc id that loads
-/// only when one layer holds it (D-A8N0E).
+/// What a load id names: a stored doc, or a built-in ruleset by name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LoadTarget {
+    /// A stored doc: its layer when the handle is qualified (`None` for a bare id) and its id.
+    Doc { layer: Option<Layer>, doc: BlockId },
+    /// A built-in ruleset: the name after `rdy:`.
+    Builtin(String),
+}
+
+/// One requested ruleset: `project:<doc-id>`, `person:<doc-id>`, a bare doc id that loads only
+/// when one layer holds it (D-A8N0E), or `rdy:<name>` for a built-in ruleset.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LoadId {
-    /// The layer a qualified handle names; `None` for a bare id.
-    pub layer: Option<Layer>,
-    pub doc: BlockId,
+    pub target: LoadTarget,
     /// The id as the caller gave it.
     pub given: String,
 }
 
-/// The load ids of one call, without duplicates, in first-occurrence order.
+/// The load ids of one call, without duplicates, in first-occurrence order, and whether the call
+/// asks for every built-in ruleset (`full`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadRequest {
     ids: Vec<LoadId>,
+    full: bool,
 }
 
 impl LoadRequest {
@@ -204,7 +218,22 @@ impl LoadRequest {
                 out.push(id);
             }
         }
-        Ok(LoadRequest { ids: out })
+        Ok(LoadRequest {
+            ids: out,
+            full: false,
+        })
+    }
+
+    /// This request with `full` set: every built-in ruleset arrives whole. Stored sources are
+    /// unaffected.
+    pub fn with_full(mut self, full: bool) -> LoadRequest {
+        self.full = full;
+        self
+    }
+
+    /// Whether the call asks for every built-in ruleset.
+    pub fn full(&self) -> bool {
+        self.full
     }
 
     /// The request of a tool's `load` value under [`BOUNDS`]: absent or null loads nothing; any
@@ -246,9 +275,19 @@ impl LoadRequest {
 
     /// Whether this request loads doc `doc` of `layer`, qualified or bare.
     fn names(&self, layer: &Layer, doc: &BlockId) -> bool {
+        self.ids.iter().any(|i| match &i.target {
+            LoadTarget::Doc { layer: l, doc: d } => {
+                d == doc && l.as_ref().is_none_or(|l| l == layer)
+            }
+            LoadTarget::Builtin(_) => false,
+        })
+    }
+
+    /// Whether this request loads built-in ruleset `name`.
+    fn names_builtin(&self, name: &str) -> bool {
         self.ids
             .iter()
-            .any(|i| i.doc == *doc && i.layer.as_ref().is_none_or(|l| l == layer))
+            .any(|i| matches!(&i.target, LoadTarget::Builtin(n) if n == name))
     }
 }
 
@@ -256,14 +295,36 @@ fn bad_load() -> RdyError {
     RdyError::new(E_BAD_INPUT, BAD_LOAD, BAD_LOAD_FIX)
 }
 
+/// Whether `n` is a built-in name: 1-64 ASCII kebab-case bytes.
+fn builtin_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 64
+        && !n.starts_with('-')
+        && !n.ends_with('-')
+        && !n.contains("--")
+        && n.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
 fn parse_load_id(s: &str) -> Option<LoadId> {
-    let (layer, doc) = match s.split_once(':') {
-        Some((l, doc)) => (Some(Layer::of_handle(l)?), doc),
-        None => (None, s),
+    let target = match s.split_once(':') {
+        Some(("rdy", name)) => {
+            if !builtin_name(name) {
+                return None;
+            }
+            LoadTarget::Builtin(name.to_string())
+        }
+        Some((l, doc)) => LoadTarget::Doc {
+            layer: Some(Layer::of_handle(l)?),
+            doc: BlockId::parse(doc).ok()?,
+        },
+        None => LoadTarget::Doc {
+            layer: None,
+            doc: BlockId::parse(s).ok()?,
+        },
     };
     Some(LoadId {
-        layer,
-        doc: BlockId::parse(doc).ok()?,
+        target,
         given: s.to_string(),
     })
 }
@@ -378,9 +439,9 @@ pub fn json_len<T: Serialize + ?Sized>(v: &T) -> u64 {
 
 /// The borrowed shape of a reply, for counting a source's bytes before anything is copied.
 #[derive(Serialize)]
-struct ReplyView<'a> {
-    instructions: &'a [InstructionRow<Cow<'a, str>>],
-    menu: &'a [MenuEntry<Cow<'a, str>>],
+struct ReplyView<'a, S: Serialize> {
+    instructions: &'a [InstructionRow<S>],
+    menu: &'a [MenuEntry<S>],
 }
 
 /// One doc met on the walk: its block, its first prose block and its instructions.
@@ -411,6 +472,13 @@ pub fn collect_with(
     load: &LoadRequest,
     b: &Bounds,
 ) -> Result<Contribution, RdyError> {
+    if layer == Layer::Rdy {
+        return Err(RdyError::new(
+            E_INTERNAL,
+            "a stored source cannot be the rdy layer",
+            "report this as a bug in the host",
+        ));
+    }
     let m = state.materialized(&Scope::Canon)?;
     if m.len() > b.visits {
         return Err(exceeded(
@@ -691,9 +759,17 @@ pub fn merge_with(
     for id in load.ids() {
         let holders: Vec<&Layer> = sources
             .iter()
-            .filter(|s| id.layer.as_ref().is_none_or(|l| *l == s.layer))
+            .filter(|s| match &id.target {
+                LoadTarget::Builtin(_) => s.layer == Layer::Rdy,
+                LoadTarget::Doc { layer, .. } => {
+                    s.layer != Layer::Rdy && layer.as_ref().is_none_or(|l| *l == s.layer)
+                }
+            })
             .filter(|s| {
-                let h = handle(&s.layer, &id.doc);
+                let h = match &id.target {
+                    LoadTarget::Builtin(name) => format!("rdy:{name}"),
+                    LoadTarget::Doc { doc, .. } => handle(&s.layer, doc),
+                };
                 s.menu.iter().any(|m| m.id == h)
             })
             .map(|s| &s.layer)
@@ -736,12 +812,71 @@ pub const REMINDER: &str = "Call rdy_instructions at the start of every task.";
 /// The reply key that carries [`REMINDER`].
 pub const REMINDER_KEY: &str = "reminder";
 
-/// The hint of a person layer with no meta project at `path`: the existing CLI fallback.
+/// The hint of a person layer with no meta project at `path`.
 pub fn create_hint(path: &Path) -> String {
     format!(
-        "Create your meta project with rdy init {}, then write its rules with rdy's tools.",
+        "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes.",
         path.display()
     )
+}
+
+/// What a projectless connection adds to [`create_hint`]: its server needs a new connection.
+pub const PROJECTLESS_SUFFIX: &str = "Reconnect this MCP server after setup.";
+
+/// The hint of a session whose project is the meta project.
+pub const META_SESSION_HINT: &str = "This session is on your own rules project. Use it for your rules. For other work, run rdy init in a folder and reconnect.";
+
+/// The hint of a projectless connection whose meta project now exists.
+pub const META_READY_HINT: &str = "Your own rules project is ready. Reconnect this MCP server to use it. For other work, run rdy init in a folder and reconnect.";
+
+/// The contribution of the built-in guide (layer `rdy`): every ruleset on the menu, whole when
+/// required, named by `load` or asked for by `load.full()`. It is made from the static
+/// catalogue alone: no store, disk or network is read. Its reply bytes are bounded like a
+/// stored source's (`E_LIMIT`).
+pub fn builtin(load: &LoadRequest) -> Result<Contribution, RdyError> {
+    builtin_with(load, &BOUNDS)
+}
+
+/// [`builtin`] under bounds `b`.
+pub fn builtin_with(load: &LoadRequest, b: &Bounds) -> Result<Contribution, RdyError> {
+    let mut menu = Vec::with_capacity(embedded_guide::RULESETS.len());
+    let mut rows = vec![];
+    for set in embedded_guide::RULESETS {
+        let id = format!("rdy:{}", set.name);
+        let whole = set.required || load.full() || load.names_builtin(set.name);
+        let bytes: u64 = set.rows.iter().map(|r| r.text.len() as u64).sum();
+        if whole {
+            rows.extend(set.rows.iter().map(|r| InstructionRow {
+                id: r.id.to_string(),
+                ruleset: id.clone(),
+                text: r.text.to_string(),
+                layer: Layer::Rdy,
+                locked: r.locked,
+                reason: vec![],
+            }));
+        }
+        menu.push(MenuEntry {
+            id,
+            name: set.title.to_string(),
+            when: set.when.to_string(),
+            layer: Layer::Rdy,
+            required: set.required,
+            tokens: estimate_tokens(bytes),
+            hints: vec![],
+        });
+    }
+    let n = json_len(&ReplyView {
+        instructions: &rows,
+        menu: &menu,
+    });
+    if n > b.reply_bytes {
+        return Err(exceeded(b.reply_bytes, "bytes of reply JSON", n));
+    }
+    Ok(Contribution {
+        layer: Layer::Rdy,
+        menu,
+        instructions: rows,
+    })
 }
 
 /// Who asks for instructions: the caller's actor and run. A host that reads another source
@@ -784,7 +919,7 @@ pub enum PersonPlace {
 
 /// The place of `person` for a call whose project root is `project` (none outside a project).
 /// A path with neither `.rdy.yaml` nor `.rdy` is no project (an empty person layer and the
-/// creation hint naming it); any other path is a project, and its open says what is wrong with
+/// setup hint naming it); any other path is a project, and its open says what is wrong with
 /// it. The same directory under another spelling is the same project.
 pub fn place_person(project: Option<&Path>, person: &PersonPath) -> Result<PersonPlace, RdyError> {
     let meta = match person {
@@ -797,7 +932,12 @@ pub fn place_person(project: Option<&Path>, person: &PersonPath) -> Result<Perso
     };
     let marked = |p: &Path| std::fs::symlink_metadata(p).is_ok();
     if !marked(&meta.join(crate::config_levels::PROJECT_FILE)) && !marked(&meta.join(".rdy")) {
-        return Ok(PersonPlace::Missing(create_hint(meta)));
+        let mut hint = create_hint(meta);
+        if project.is_none() {
+            hint.push(' ');
+            hint.push_str(PROJECTLESS_SUFFIX);
+        }
+        return Ok(PersonPlace::Missing(hint));
     }
     let canonical = |p: &Path| {
         std::fs::canonicalize(p).map_err(|e| {
@@ -845,8 +985,8 @@ pub fn deliver(
 /// person layer, each read once, merged into one reply. The person source is located first (a
 /// config refusal is the call's); the project's contribution is collected from its captured
 /// state before the host reads another project. A missing meta project is an empty person
-/// layer with the creation hint. The user config's warnings ride on the reply. The whole reply
-/// is bounded (`E_LIMIT`).
+/// layer with the setup hint. The built-in guide (layer `rdy`) is added here once, so no host
+/// adds it. The user config's warnings ride on the reply. The whole reply is bounded (`E_LIMIT`).
 pub fn deliver_with(
     project: Option<(&ReadState, &Path)>,
     load: &LoadRequest,
@@ -859,15 +999,20 @@ pub fn deliver_with(
         None => resolve_person_from_env()?,
     };
     let place = place_person(project.map(|p| p.1), &source.path)?;
-    let mut sources = Vec::with_capacity(2);
+    let mut sources = Vec::with_capacity(3);
+    sources.push(builtin_with(load, b)?);
     let mut hint = None;
     match place {
         PersonPlace::ThisProject => {
             if let Some((state, _)) = project {
                 sources.push(collect_with(state, Layer::Person, load, b)?);
             }
+            hint = Some(META_SESSION_HINT.to_string());
         }
         PersonPlace::Elsewhere(meta) => {
+            if project.is_none() {
+                hint = Some(META_READY_HINT.to_string());
+            }
             if let Some((state, _)) = project {
                 sources.push(collect_with(state, Layer::Project, load, b)?);
             }
@@ -921,6 +1066,7 @@ mod tests {
     fn ain3_layer_order_is_reserved_and_teams_share_a_rank() {
         let mut ls = [
             Layer::Person,
+            Layer::Rdy,
             Layer::Project,
             Layer::Cited("c".into()),
             Layer::Team("b".into()),
@@ -931,6 +1077,7 @@ mod tests {
         assert_eq!(
             ls.iter().map(Layer::to_string).collect::<Vec<_>>(),
             vec![
+                "rdy",
                 "organization",
                 "team:a",
                 "team:b",

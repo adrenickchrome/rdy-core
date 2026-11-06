@@ -7,7 +7,13 @@
 #[path = "../../../rdy-store/tests/support/redaction.rs"]
 mod redaction_fixture;
 
-use rdy_engine::instructions::{self, BOUNDS, Bounds, InstructionRow, Layer, LoadRequest, Reply};
+use rdy_engine::embedded_guide::RULESETS;
+use rdy_engine::instructions::{
+    self, BOUNDS, Bounds, Caller, Contribution, InstructionRow, Layer, LoadRequest,
+    META_READY_HINT, META_SESSION_HINT, PROJECTLESS_SUFFIX, PersonHost, Reply, create_hint,
+    estimate_tokens,
+};
+use rdy_engine::instructions_config::{NO_HOME_MESSAGE, PersonPath, PersonSource};
 use rdy_engine::{DecisionInput, Rdy, RdyError, Scope};
 use rdy_model::BlockId;
 use rdy_model::redaction::RedactTarget;
@@ -611,6 +617,7 @@ fn ain3_hints_never_filter_and_tokens_use_utf8_bytes() {
 fn ain3_layers_remain_visible_and_local_locks_do_not_gain_force() {
     // the reserved order: organization, team sets, cited, project, person
     let order = [
+        Layer::Rdy,
         Layer::Organization,
         Layer::Team("beta".into()),
         Layer::Team("alpha".into()),
@@ -619,7 +626,7 @@ fn ain3_layers_remain_visible_and_local_locks_do_not_gain_force() {
         Layer::Person,
     ];
     let ranks: Vec<u8> = order.iter().map(Layer::precedence).collect();
-    assert_eq!(ranks, vec![0, 1, 1, 2, 3, 4]);
+    assert_eq!(ranks, vec![0, 1, 2, 2, 3, 4, 5]);
     // team names give display order, not precedence
     assert_eq!(
         Layer::Team("alpha".into()).precedence(),
@@ -632,9 +639,10 @@ fn ain3_layers_remain_visible_and_local_locks_do_not_gain_force() {
             .iter()
             .map(Layer::locks_have_force)
             .collect::<Vec<_>>(),
-        vec![true, true, true, false, false, false]
+        vec![true, true, true, true, false, false, false]
     );
     for (l, text) in order.iter().zip([
+        "rdy",
         "organization",
         "team:beta",
         "team:alpha",
@@ -1334,4 +1342,658 @@ fn ain3_work_and_reply_bounds_refuse_without_partial_rules() {
     );
     assert_eq!(base_ids.len(), 1);
     r.close().unwrap();
+}
+
+// ---- agi2: the built-in layer (D-GEKKY) ----
+
+const HANDLES: [&str; 12] = [
+    "rdy:bootstrap",
+    "rdy:write",
+    "rdy:after-write",
+    "rdy:approvals",
+    "rdy:as-built",
+    "rdy:read",
+    "rdy:publish",
+    "rdy:review",
+    "rdy:diagrams",
+    "rdy:parallel",
+    "rdy:project-ops",
+    "rdy:troubleshoot",
+];
+
+/// A person host with a fixed place. `reads` says whether a store may be opened.
+struct Host {
+    path: PersonPath,
+    reads: bool,
+}
+
+impl PersonHost for Host {
+    fn locate(&self) -> Result<PersonSource, RdyError> {
+        Ok(PersonSource {
+            path: self.path.clone(),
+            origin: None,
+            warnings: vec![],
+            config_file: None,
+        })
+    }
+
+    fn fetch(
+        &self,
+        meta: &Path,
+        load: &LoadRequest,
+        _caller: &Caller,
+    ) -> Result<Contribution, RdyError> {
+        assert!(self.reads, "this call may not read a store");
+        let r = Rdy::open(meta)?;
+        let part = instructions::collect(&r.read(), Layer::Person, load);
+        r.close()?;
+        part
+    }
+}
+
+fn caller() -> Caller {
+    Caller {
+        actor: "agent".into(),
+        run: None,
+    }
+}
+
+fn req(ids: &[&str], full: bool) -> LoadRequest {
+    LoadRequest::parse(&strings(ids)).unwrap().with_full(full)
+}
+
+fn at(meta: &Path, reads: bool) -> Host {
+    Host {
+        path: PersonPath::Override(meta.to_path_buf()),
+        reads,
+    }
+}
+
+/// A call outside any project.
+fn projectless(host: &Host, load: &LoadRequest) -> Result<Reply, RdyError> {
+    instructions::deliver_with(None, load, &caller(), Some(host), &BOUNDS)
+}
+
+/// The built-in rows `names` deliver, in catalogue order: the ids, with the layer checked.
+fn builtin_ids(reply: &Reply) -> Vec<String> {
+    reply
+        .instructions
+        .iter()
+        .filter(|i| i.layer == Layer::Rdy)
+        .map(|i| i.id.clone())
+        .collect()
+}
+
+fn catalogue_ids(names: &[&str]) -> Vec<String> {
+    RULESETS
+        .iter()
+        .filter(|s| names.contains(&s.name))
+        .flat_map(|s| s.rows.iter().map(|r| r.id.to_string()))
+        .collect()
+}
+
+/// A closed project that holds a required ruleset `req` and an optional ruleset `opt`.
+fn rules_project(
+    reason: &str,
+    req_body: &str,
+    opt_body: &str,
+    locked: Option<bool>,
+) -> (Src, String, String, Vec<String>, Vec<String>) {
+    let mut s = source(reason);
+    let d = s.decision.clone();
+    let (req_doc, req_ids) = ruleset(
+        &mut s.r,
+        "w",
+        "must",
+        "Must",
+        Some(true),
+        Some("Always."),
+        &[Rule {
+            locked,
+            ..rule(&["act:write"], req_body)
+        }],
+        &d,
+    );
+    let (opt_doc, opt_ids) = ruleset(
+        &mut s.r,
+        "w",
+        "maybe",
+        "Maybe",
+        None,
+        Some("Sometimes."),
+        &[rule(&["act:write"], opt_body)],
+        &d,
+    );
+    land(&mut s.r, "w").unwrap();
+    (s, req_doc, opt_doc, req_ids, opt_ids)
+}
+
+fn closed(s: Src) -> tempfile::TempDir {
+    s.r.close().unwrap();
+    s.dir
+}
+
+#[test]
+fn agi2_fresh_delivery_has_bootstrap_menu_and_setup_hint() {
+    let home = tempfile::tempdir().unwrap();
+    let meta = home.path().join("meta");
+    let host = at(&meta, false);
+    let reply = projectless(&host, &req(&[], false)).unwrap();
+
+    // the bootstrap, in three ordered rows, and nothing else
+    let boot = &RULESETS[0];
+    assert_eq!(boot.name, "bootstrap");
+    assert_eq!(boot.rows.len(), 3);
+    assert_eq!(reply.instructions.len(), 3);
+    for (got, want) in reply.instructions.iter().zip(boot.rows) {
+        assert_eq!(got.id, want.id);
+        assert_eq!(got.text, want.text);
+        assert_eq!(got.locked, want.locked);
+        assert_eq!(got.ruleset, "rdy:bootstrap");
+        assert_eq!(got.layer, Layer::Rdy);
+        assert!(got.reason.is_empty());
+    }
+    assert_eq!(
+        reply
+            .instructions
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "rdy:bootstrap:before",
+            "rdy:bootstrap:approval",
+            "rdy:bootstrap:after"
+        ]
+    );
+    assert_eq!(
+        reply
+            .instructions
+            .iter()
+            .map(|i| i.locked)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+
+    // the menu lists all twelve in order; only the bootstrap is required
+    assert_eq!(menu_ids(&reply), HANDLES);
+    for (m, set) in reply.menu.iter().zip(RULESETS) {
+        assert_eq!(m.name, set.title);
+        assert_eq!(m.when, set.when);
+        assert_eq!(m.layer, Layer::Rdy);
+        assert_eq!(m.required, set.name == "bootstrap");
+        assert!(m.hints.is_empty());
+        let bytes: usize = set.rows.iter().map(|r| r.text.len()).sum();
+        assert_eq!(m.tokens, estimate_tokens(bytes as u64));
+        assert!(m.tokens > 0);
+    }
+
+    // the hint names the configured path and says to reconnect
+    let want = format!(
+        "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes. Reconnect this MCP server after setup.",
+        meta.display()
+    );
+    assert_eq!(reply.hint.as_deref(), Some(want.as_str()));
+    assert_eq!(
+        want,
+        format!("{} {}", create_hint(&meta), PROJECTLESS_SUFFIX)
+    );
+    assert!(reply.warnings.is_empty());
+    // no store was made
+    assert!(!meta.exists());
+}
+
+#[test]
+fn agi2_each_builtin_loads_and_full_deduplicates() {
+    let home = tempfile::tempdir().unwrap();
+    let host = at(&home.path().join("meta"), false);
+    let boot = catalogue_ids(&["bootstrap"]);
+
+    for h in HANDLES {
+        let name = h.strip_prefix("rdy:").unwrap();
+        let want = [boot.clone(), catalogue_ids(&[name])]
+            .concat()
+            .into_iter()
+            .fold(vec![], |mut v, id| {
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+                v
+            });
+        let once = projectless(&host, &req(&[h], false)).unwrap();
+        assert_eq!(builtin_ids(&once), want, "{h}");
+        // a repeated load adds nothing
+        let twice = projectless(&host, &req(&[h, h], false)).unwrap();
+        assert_eq!(twice.instructions, once.instructions, "{h}");
+        assert_eq!(twice.menu, once.menu, "{h}");
+        // the menu stays whole
+        assert_eq!(menu_ids(&once), HANDLES);
+    }
+
+    // the bootstrap named on its own arrives once
+    let b = projectless(&host, &req(&["rdy:bootstrap"], false)).unwrap();
+    assert_eq!(builtin_ids(&b), boot);
+
+    // full: every row once, in menu order, with or without explicit loads
+    let all: Vec<String> = RULESETS
+        .iter()
+        .flat_map(|s| s.rows.iter().map(|r| r.id.to_string()))
+        .collect();
+    assert_eq!(all.len(), 14);
+    for load in [vec![], vec!["rdy:bootstrap", "rdy:write"], HANDLES.to_vec()] {
+        let r = projectless(&host, &req(&load, true)).unwrap();
+        assert_eq!(builtin_ids(&r), all, "{load:?}");
+        assert_eq!(r.instructions.len(), 14);
+    }
+
+    // full plus a mixed layer load: built-ins once, the named stored ruleset whole
+    let (pj, _, p_opt, _, p_opt_ids) =
+        rules_project("Project reason", "Project must.", "Project may.", None);
+    let (m, _, m_opt, _, m_opt_ids) =
+        rules_project("Person reason", "Person must.", "Person may.", None);
+    let meta_dir = closed(m);
+    let host = at(meta_dir.path(), true);
+    let mixed = [
+        format!("project:{p_opt}"),
+        format!("person:{m_opt}"),
+        "rdy:write".into(),
+    ];
+    let load = req(&mixed.iter().map(String::as_str).collect::<Vec<_>>(), true);
+    let st = pj.r.read();
+    let r = instructions::deliver_with(
+        Some((&st, pj.dir.path())),
+        &load,
+        &caller(),
+        Some(&host),
+        &BOUNDS,
+    )
+    .unwrap();
+    assert_eq!(builtin_ids(&r), all);
+    let ids: Vec<&str> = r.instructions.iter().map(|i| i.id.as_str()).collect();
+    assert!(ids.contains(&p_opt_ids[0].as_str()) && ids.contains(&m_opt_ids[0].as_str()));
+    assert_eq!(r.instructions.len(), 14 + 2 + 2);
+    assert_eq!(r.menu.len(), 12 + 4);
+}
+
+#[test]
+fn agi2_full_leaves_other_optional_rules_unloaded() {
+    let (pj, p_req, p_opt, p_req_ids, p_opt_ids) =
+        rules_project("Project reason", "Project must.", "Project may.", None);
+    let (m, m_req, m_opt, m_req_ids, m_opt_ids) =
+        rules_project("Person reason", "Person must.", "Person may.", None);
+    let meta_dir = closed(m);
+    let host = at(meta_dir.path(), true);
+    let st = pj.r.read();
+    let call = |load: &LoadRequest| {
+        instructions::deliver_with(
+            Some((&st, pj.dir.path())),
+            load,
+            &caller(),
+            Some(&host),
+            &BOUNDS,
+        )
+        .unwrap()
+    };
+
+    let full = call(&req(&[], true));
+    let stored: Vec<(String, String)> = full
+        .instructions
+        .iter()
+        .filter(|i| i.layer != Layer::Rdy)
+        .map(|i| (i.id.clone(), i.layer.to_string()))
+        .collect();
+    // the required rules arrive, the optional ones stay on the menu
+    assert_eq!(
+        stored,
+        vec![
+            (p_req_ids[0].clone(), "project".to_string()),
+            (m_req_ids[0].clone(), "person".to_string()),
+        ]
+    );
+    let menu = menu_ids(&full);
+    for h in [p(&p_req), p(&p_opt), q(&m_req), q(&m_opt)] {
+        assert!(menu.contains(&h), "{h}");
+    }
+    assert_eq!(builtin_ids(&full).len(), 14);
+
+    // a named optional rule arrives with full, and only that one
+    let named = call(&req(&[&q(&m_opt)], true));
+    let ids: Vec<&str> = named.instructions.iter().map(|i| i.id.as_str()).collect();
+    assert!(ids.contains(&m_opt_ids[0].as_str()));
+    assert!(!ids.contains(&p_opt_ids[0].as_str()));
+    assert_eq!(builtin_ids(&named).len(), 14);
+
+    // without full, the built-in optional rulesets stay unloaded
+    let plain = call(&req(&[], false));
+    assert_eq!(builtin_ids(&plain), catalogue_ids(&["bootstrap"]));
+}
+
+#[test]
+fn agi2_layers_keep_order_and_the_approval_lock() {
+    let (pj, _, _, p_ids, _) = rules_project("Project reason", "Use tabs.", "Unused.", Some(true));
+    let (m, _, _, m_ids, _) = rules_project("Person reason", "Use spaces.", "Unused.", Some(false));
+    let meta_dir = closed(m);
+    let host = at(meta_dir.path(), true);
+    let st = pj.r.read();
+    let reply = instructions::deliver_with(
+        Some((&st, pj.dir.path())),
+        &req(&[], false),
+        &caller(),
+        Some(&host),
+        &BOUNDS,
+    )
+    .unwrap();
+
+    // rdy first, then project, then person; the disagreeing rules both stay
+    let order: Vec<(String, String)> = reply
+        .instructions
+        .iter()
+        .map(|i| (i.id.clone(), i.layer.to_string()))
+        .collect();
+    let mut want: Vec<(String, String)> = catalogue_ids(&["bootstrap"])
+        .into_iter()
+        .map(|id| (id, "rdy".to_string()))
+        .collect();
+    want.push((p_ids[0].clone(), "project".into()));
+    want.push((m_ids[0].clone(), "person".into()));
+    assert_eq!(order, want);
+    assert_eq!(
+        reply
+            .menu
+            .iter()
+            .map(|m| m.layer.to_string())
+            .collect::<Vec<_>>()[..13]
+            .iter()
+            .filter(|l| *l == "rdy")
+            .count(),
+        12
+    );
+    let layers: Vec<String> = reply.menu.iter().map(|m| m.layer.to_string()).collect();
+    assert!(layers[..12].iter().all(|l| l == "rdy"));
+    assert_eq!(layers[12..], ["project", "project", "person", "person"]);
+
+    // the approval paragraph is the one locked row, and its lock has force
+    let locked: Vec<&InstructionRow> = reply
+        .instructions
+        .iter()
+        .filter(|i| i.layer == Layer::Rdy && i.locked)
+        .collect();
+    assert_eq!(locked.len(), 1);
+    assert_eq!(locked[0].id, "rdy:bootstrap:approval");
+    assert!(Layer::Rdy.locks_have_force());
+    // the project's own lock is shown and has no force; the person's rule is not removed
+    let proj = reply
+        .instructions
+        .iter()
+        .find(|i| i.id == p_ids[0])
+        .unwrap();
+    assert!(proj.locked && !proj.layer.locks_have_force());
+    assert_eq!(proj.text, "Use tabs.");
+    let pers = reply
+        .instructions
+        .iter()
+        .find(|i| i.id == m_ids[0])
+        .unwrap();
+    assert_eq!(pers.text, "Use spaces.");
+
+    // a host cannot hand the engine a stored source as the rdy layer
+    let e = instructions::collect(&st, Layer::Rdy, &req(&[], false)).unwrap_err();
+    assert_eq!(e.code, "E_INTERNAL", "{e}");
+    // two rdy sources are a host error
+    let b = instructions::builtin(&req(&[], false)).unwrap();
+    let e = instructions::merge(vec![b.clone(), b], &req(&[], false)).unwrap_err();
+    assert_eq!(e.code, "E_INTERNAL", "{e}");
+}
+
+#[test]
+fn agi2_handles_reasons_and_limits_fail_closed() {
+    let home = tempfile::tempdir().unwrap();
+    let host = at(&home.path().join("meta"), false);
+
+    // malformed handles are bad input, before any delivery
+    for bad in [
+        "rdy:",
+        "rdy:Write",
+        "rdy:-write",
+        "rdy:write-",
+        "rdy:a--b",
+        "rdy:write:body",
+        "rdy: write",
+        "rdy:wr ite",
+        "rdy:wrïte",
+        &format!("rdy:{}", "a".repeat(65)),
+        "write",
+        "team:x",
+    ] {
+        let e = LoadRequest::parse(&strings(&[bad])).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            ("E_BAD_INPUT", BAD_LOAD, BAD_LOAD_FIX),
+            "{bad}"
+        );
+    }
+    // a valid unknown name is not found, and a bare name never resolves
+    for unknown in [
+        "rdy:nope",
+        "rdy:bootstrap2",
+        &format!("rdy:{}", "a".repeat(64)),
+    ] {
+        assert_eq!(
+            refusal(projectless(&host, &req(&[unknown], false))),
+            (
+                "E_NOT_FOUND".into(),
+                format!("ruleset {unknown} was not found"),
+                NOT_FOUND_FIX.into()
+            ),
+            "{unknown}"
+        );
+    }
+    // a bad handle beside full is still refused
+    assert!(LoadRequest::parse(&strings(&["rdy:Write"])).is_err());
+    assert_eq!(
+        refusal(projectless(&host, &req(&["rdy:write", "rdy:nope"], true))).0,
+        "E_NOT_FOUND"
+    );
+    // a stored doc id is no built-in name
+    let (_pj, p_req, _, _, _) = rules_project("Project reason", "Must.", "May.", None);
+    assert!(LoadRequest::parse(&strings(&[&format!("rdy:{p_req}")])).is_err());
+
+    // a stale reason in a stored rule still refuses the whole call
+    let mut bad = source("Stale reasons");
+    let d = bad.decision.clone();
+    let (base, _) = ruleset(
+        &mut bad.r,
+        "w",
+        "baseline",
+        "Baseline",
+        Some(true),
+        None,
+        &[rule(&["act:write"], "Keep.")],
+        &d,
+    );
+    land(&mut bad.r, "w").unwrap();
+    let mut broken = raw(
+        "ai-BRKN0",
+        "instruction",
+        Some(&base),
+        "zz",
+        &[],
+        "No reason.",
+    );
+    broken.fields.insert(
+        "applies_to".into(),
+        rdy_model::FieldValue::List(vec![rdy_model::FieldValue::Str("all".into())]),
+    );
+    raw_commit(&mut bad.r, "raw", vec![broken]);
+    land_with_a_tie(&mut bad.r, "raw");
+    let st_bad = bad.r.read();
+    let e = instructions::deliver_with(
+        Some((&st_bad, bad.dir.path())),
+        &req(&[], true),
+        &caller(),
+        Some(&host),
+        &BOUNDS,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_VALIDATION",
+            "project source: instruction ai-BRKN0 requires a decided_by decision",
+            REASON_FIX
+        )
+    );
+
+    // reduced reply bounds refuse, exactly at the size of the reply, with no partial rows
+    for load in [req(&[], false), req(&[], true)] {
+        let ok = projectless(&host, &load).unwrap();
+        let n = instructions::json_len(&ok);
+        let tight = Bounds {
+            reply_bytes: n,
+            ..BOUNDS
+        };
+        let r = instructions::deliver_with(None, &load, &caller(), Some(&host), &tight).unwrap();
+        assert_eq!(r, ok);
+        for less in [n - 1, 100, 0] {
+            let small = Bounds {
+                reply_bytes: less,
+                ..BOUNDS
+            };
+            let e = instructions::deliver_with(None, &load, &caller(), Some(&host), &small)
+                .unwrap_err();
+            assert_eq!(e.code, "E_LIMIT", "{less}");
+            assert_eq!(e.fix, LIMIT_FIX);
+            assert!(
+                e.message.starts_with("instructions exceed "),
+                "{}",
+                e.message
+            );
+        }
+    }
+    // the built-in part alone is bounded too
+    let tiny = Bounds {
+        reply_bytes: 10,
+        ..BOUNDS
+    };
+    let e = instructions::builtin_with(&req(&[], false), &tiny).unwrap_err();
+    assert_eq!(e.code, "E_LIMIT");
+}
+
+#[test]
+fn agi2_meta_and_projectless_hints_follow_connection_state() {
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("absent");
+    let setup = |m: &Path| {
+        format!(
+            "Run rdy setup to create your own rules project at {}. Tell the person when setup finishes.",
+            m.display()
+        )
+    };
+
+    // missing meta: the projectless hint adds the reconnect line, a project's does not
+    let host = at(&missing, false);
+    let r = projectless(&host, &req(&[], false)).unwrap();
+    assert_eq!(
+        r.hint,
+        Some(format!(
+            "{} Reconnect this MCP server after setup.",
+            setup(&missing)
+        ))
+    );
+    let (pj, _, _, _, _) = rules_project("Project reason", "Must.", "May.", None);
+    let st = pj.r.read();
+    let in_project = |host: &Host| {
+        instructions::deliver_with(
+            Some((&st, pj.dir.path())),
+            &req(&[], false),
+            &caller(),
+            Some(host),
+            &BOUNDS,
+        )
+    };
+    let r = in_project(&host).unwrap();
+    assert_eq!(r.hint, Some(setup(&missing)));
+    assert_eq!(builtin_ids(&r), catalogue_ids(&["bootstrap"]));
+
+    // a file where the meta project belongs is no project: the same missing hint
+    let file = home.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    let r = projectless(&at(&file, false), &req(&[], false)).unwrap();
+    assert_eq!(
+        r.hint,
+        Some(format!(
+            "{} Reconnect this MCP server after setup.",
+            setup(&file)
+        ))
+    );
+
+    // an existing meta project: a projectless connection is told to reconnect, a project's
+    // session has no hint, and the person rules arrive
+    let (m, m_req, _, m_req_ids, _) = rules_project("Person reason", "Mine.", "Maybe mine.", None);
+    let meta_dir = closed(m);
+    let host = at(meta_dir.path(), true);
+    let r = projectless(&host, &req(&[], false)).unwrap();
+    assert_eq!(
+        r.hint.as_deref(),
+        Some(
+            "Your own rules project is ready. Reconnect this MCP server to use it. For other work, run rdy init in a folder and reconnect."
+        )
+    );
+    assert_eq!(r.hint.as_deref(), Some(META_READY_HINT));
+    assert!(r.menu.iter().any(|m| m.id == q(&m_req)));
+    assert!(r.instructions.iter().any(|i| i.id == m_req_ids[0]));
+    let r = in_project(&host).unwrap();
+    assert_eq!(r.hint, None);
+
+    // a session on the meta project itself
+    let (s, s_req, _, s_ids, _) = rules_project("Own reason", "Own.", "Own maybe.", None);
+    let own = s.dir.path().to_path_buf();
+    let st_own = s.r.read();
+    let on_meta = Host {
+        path: PersonPath::Override(own.clone()),
+        reads: false,
+    };
+    let r = instructions::deliver_with(
+        Some((&st_own, &own)),
+        &req(&[], false),
+        &caller(),
+        Some(&on_meta),
+        &BOUNDS,
+    )
+    .unwrap();
+    assert_eq!(
+        r.hint.as_deref(),
+        Some(
+            "This session is on your own rules project. Use it for your rules. For other work, run rdy init in a folder and reconnect."
+        )
+    );
+    assert_eq!(r.hint.as_deref(), Some(META_SESSION_HINT));
+    assert!(
+        r.menu
+            .iter()
+            .any(|m| m.id == q(&s_req) && m.layer == Layer::Person)
+    );
+    assert!(
+        r.instructions
+            .iter()
+            .any(|i| i.id == s_ids[0] && i.layer == Layer::Person)
+    );
+    s.r.close().unwrap_or(());
+
+    // no home and no override: the old message, built-ins unchanged
+    let nohome = Host {
+        path: PersonPath::Unavailable,
+        reads: false,
+    };
+    let r = projectless(&nohome, &req(&[], false)).unwrap();
+    assert_eq!(r.hint.as_deref(), Some(NO_HOME_MESSAGE));
+    assert_eq!(builtin_ids(&r), catalogue_ids(&["bootstrap"]));
+    let r = in_project(&nohome).unwrap();
+    assert_eq!(r.hint.as_deref(), Some(NO_HOME_MESSAGE));
+
+    // a meta path that looks like a project but is broken stays a visible failure
+    let broken = home.path().join("broken");
+    std::fs::create_dir(&broken).unwrap();
+    std::fs::write(broken.join(".rdy.yaml"), "not: a project: at all\n").unwrap();
+    let bad = at(&broken, true);
+    assert!(projectless(&bad, &req(&[], false)).is_err());
 }
