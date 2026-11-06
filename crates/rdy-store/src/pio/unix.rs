@@ -686,6 +686,10 @@ fn blocks_to_bytes(blocks: u64) -> io::Result<u64> {
 
 /// Unix only: the tests read modes, owners, error numbers and inodes, make symbolic links, sockets
 /// and shell scripts, and run children under a umask.
+/// Makes the console program `cmd` start without a console window. Unix has no console windows,
+/// so this changes nothing.
+pub fn no_console_window(_cmd: &mut std::process::Command) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,7 +1096,3 @@ mod tests {
         for_each_entry::<io::Error>(&empty, |_| panic!("no entry")).unwrap();
     }
 }
-
-/// Makes the console program `cmd` start without a console window. Unix has no console windows,
-/// so this changes nothing.
-pub fn no_console_window(_cmd: &mut std::process::Command) {}
