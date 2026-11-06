@@ -539,23 +539,27 @@ fn kfu2_damaged_file_recovers_without_touching_store() {
 }
 
 #[test]
-fn kfu2_private_paths_and_replaced_projects_are_safe() {
-    let t = today();
-    // a missing run directory is made private; the files are private
+fn kfu2_a_missing_run_directory_is_made_private_and_the_files_are_private() {
     let (_tmp, rdy) = project();
     let r = rig(&rdy);
     r.rec.record(ALICE, None, "write", Case::Wrong);
     settle(&r);
     let run = rdy.join("run");
-    assert!(pio::is_private_dir(&fs::metadata(&run).unwrap()));
-    assert!(pio::is_private_file(
-        &fs::metadata(count_file(&rdy)).unwrap()
-    ));
-    assert!(pio::is_private_file(
-        &fs::metadata(run.join(LOCK_NAME)).unwrap()
-    ));
-    drop(r);
+    for handle in [
+        pio::open_dir(&run).unwrap(),
+        File::open(count_file(&rdy)).unwrap(),
+        File::open(run.join(LOCK_NAME)).unwrap(),
+    ] {
+        let privacy = pio::privacy(&handle).unwrap();
+        assert!(privacy.mine && privacy.private, "{privacy:?}");
+    }
+}
 
+/// Unix only: this test sets permission modes and makes symbolic links.
+#[cfg(unix)]
+#[test]
+fn kfu2_private_paths_and_replaced_projects_are_safe() {
+    let t = today();
     // a run directory that is a link is never followed
     let (tmp, rdy) = project();
     let elsewhere = tmp.path().join("elsewhere");
