@@ -4,6 +4,7 @@
 use crate::daemon::{human_command, short_tempdir};
 use crate::fixtures::{land, write, writer};
 use crate::mcp::McpClient;
+use crate::platform::ProcessGroup;
 use rdy_engine::instructions_config::{
     PathEnv, PersonPath, PersonSource, Platform, resolve_person,
 };
@@ -111,7 +112,7 @@ const PERSON_VARS: [&str; 6] = [
 
 /// The person variables of a world, as data. With no `home`, only the config place remains. The
 /// drive form exists only where the home has a drive, which is `platform`'s text rule.
-fn person_env(platform: Platform, home: Option<&Path>, cfg: &Path) -> PathEnv {
+pub(crate) fn person_env(platform: Platform, home: Option<&Path>, cfg: &Path) -> PathEnv {
     let drive = home.and_then(|h| {
         let text = h.to_str()?;
         let is_drive = platform == Platform::Windows
@@ -131,6 +132,19 @@ fn person_env(platform: Platform, home: Option<&Path>, cfg: &Path) -> PathEnv {
     }
 }
 
+/// Each person variable with its value in `vars`, in [`PERSON_VARS`] order; `None` where the
+/// variable is not set.
+pub(crate) fn person_pairs(vars: &PathEnv) -> [(&'static str, Option<std::ffi::OsString>); 6] {
+    [
+        ("HOME", vars.home.clone()),
+        ("USERPROFILE", vars.user_profile.clone()),
+        ("HOMEDRIVE", vars.home_drive.clone()),
+        ("HOMEPATH", vars.home_path.clone()),
+        ("APPDATA", vars.app_data.clone()),
+        ("XDG_CONFIG_HOME", vars.xdg_config_home.clone()),
+    ]
+}
+
 /// A person's isolated world: every home and config variable is temporary or removed, the user
 /// config names the human `human:qa`, and every project made here, and the meta project a process
 /// may have made, has its daemon stopped at drop.
@@ -142,6 +156,9 @@ pub struct World {
     projects: Mutex<Vec<PathBuf>>,
     /// The project directories [`World::project`] made: removed only after their daemons stop.
     dirs: Mutex<Vec<tempfile::TempDir>>,
+    /// Every command the world runs, and every daemon those commands start: on Windows one Job
+    /// Object, which ends them when the world drops; on Unix each command leads a process group.
+    group: ProcessGroup,
 }
 
 /// A project directory of a [`World`], which removes it once its daemon stopped.
@@ -177,6 +194,7 @@ impl World {
             no_home: !home,
             projects: Mutex::new(vec![]),
             dirs: Mutex::new(vec![]),
+            group: ProcessGroup::new().expect("the world's process group"),
         };
         w.config("");
         w
@@ -216,15 +234,7 @@ impl World {
 
     /// The environment of every process of this world. [`World::removed_env`] names the rest.
     pub fn env(&self) -> Vec<(String, String)> {
-        let vars = self.person_vars();
-        let pairs = [
-            ("HOME", vars.home),
-            ("USERPROFILE", vars.user_profile),
-            ("HOMEDRIVE", vars.home_drive),
-            ("HOMEPATH", vars.home_path),
-            ("APPDATA", vars.app_data),
-            ("XDG_CONFIG_HOME", vars.xdg_config_home),
-        ];
+        let pairs = person_pairs(&self.person_vars());
         pairs
             .into_iter()
             .filter_map(|(k, v)| Some((k.to_string(), v?.to_string_lossy().into_owned())))
@@ -297,18 +307,32 @@ impl World {
         Dir(path)
     }
 
-    /// The command `rdy --project <dir> <args>` as the human of this world.
-    pub fn command(&self, dir: &Path, args: &[&str]) -> Command {
-        let mut cmd = human_command(dir, &self.env(), args);
+    /// Gives `cmd` this world's person, over anything it holds already: the person variables
+    /// are the world's or removed, `USERNAME` is the fixture's and `SSH_AUTH_SOCK` is removed.
+    pub fn isolate<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        cmd.envs(self.env());
         for name in self.removed_env() {
             cmd.env_remove(name);
         }
+        crate::fixtures::isolate_account(cmd)
+    }
+
+    /// The command `rdy --project <dir> <args>` as the human of this world.
+    pub fn command(&self, dir: &Path, args: &[&str]) -> Command {
+        let mut cmd = human_command(dir, &self.env(), args);
+        self.isolate(&mut cmd);
         cmd
+    }
+
+    /// Runs `cmd` in this world's process group, with its output captured. A daemon the command
+    /// starts stays in the group after the command ends, and ends with the world.
+    pub fn run(&self, cmd: &mut Command) -> std::io::Result<Output> {
+        self.group.output(cmd)
     }
 
     /// `rdy --project <dir> <args>` as the human of this world.
     pub fn rdy(&self, dir: &Path, args: &[&str]) -> Output {
-        self.command(dir, args).output().expect("run rdy")
+        self.run(&mut self.command(dir, args)).expect("run rdy")
     }
 
     /// The JSON of `rdy --project <dir> --json <args>`: stdout on success, else stderr.
@@ -326,21 +350,20 @@ impl World {
 
     /// `rdy mcp --project <dir>` in this world: the proxy to the project's daemon.
     pub fn mcp(&self, dir: &Path) -> McpClient {
-        if !self.no_home {
-            return McpClient::start_proxy_at(dir, &self.env());
-        }
-        let mut cmd = crate::fixtures::rdy_command();
-        cmd.args(["mcp", "--project"])
-            .arg(dir)
-            .env_remove("RDY_ACTOR")
-            .env_remove("RDY_RUN")
-            .env_remove("RDY_NO_DAEMON")
-            .envs(self.env())
-            .stderr(Stdio::piped());
-        for name in self.removed_env() {
-            cmd.env_remove(name);
-        }
-        McpClient::launch(cmd)
+        let mut cmd = if self.no_home {
+            let mut cmd = crate::fixtures::rdy_command();
+            cmd.args(["mcp", "--project"])
+                .arg(dir)
+                .env_remove("RDY_ACTOR")
+                .env_remove("RDY_RUN")
+                .env_remove("RDY_NO_DAEMON")
+                .stderr(Stdio::piped());
+            cmd
+        } else {
+            McpClient::proxy_command(dir, &self.env())
+        };
+        self.isolate(&mut cmd);
+        McpClient::launch_in(cmd, self.no_home, &self.group)
     }
 
     /// The pid of the daemon serving `dir`, while one runs.
@@ -357,7 +380,7 @@ impl World {
     /// Stops the daemon of `dir` (`rdy serve --stop`).
     pub fn stop(&self, dir: &Path) {
         // never a panic: a drop may run while a test unwinds
-        if let Err(e) = self.command(dir, &["serve", "--stop"]).output() {
+        if let Err(e) = self.run(&mut self.command(dir, &["serve", "--stop"])) {
             eprintln!("rdy serve --stop did not run in {}: {e}", dir.display());
         }
     }
@@ -510,5 +533,90 @@ mod tests {
             paths.len(),
             "a path is stopped once: {paths:?}"
         );
+    }
+
+    /// The person variables a command would see, as the engine reads them: what the command
+    /// sets, and nothing for a variable it removes. (A variable it leaves alone comes from the
+    /// machine; the test below proves there is none.)
+    fn env_as_read(cmd: &Command) -> PathEnv {
+        let get = |name: &str| {
+            let set = cmd
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+                .unwrap_or_else(|| panic!("{name} is inherited"));
+            set.1.map(std::ffi::OsString::from)
+        };
+        PathEnv {
+            xdg_config_home: get("XDG_CONFIG_HOME"),
+            home: get("HOME"),
+            user_profile: get("USERPROFILE"),
+            home_drive: get("HOMEDRIVE"),
+            home_path: get("HOMEPATH"),
+            app_data: get("APPDATA"),
+            ..PathEnv::default()
+        }
+    }
+
+    /// Canary values for a person's home sit outside the fixture, in the command before the
+    /// world isolates it. The instructions the engine finds are the fixture person project's,
+    /// and no canary reaches a place the engine reads.
+    #[test]
+    fn wx25a_ain_reads_only_the_fixture_person_project() {
+        let canary = short_tempdir();
+        let canary_home = canary.path().join("home");
+        let canary_cfg = canary.path().join("cfg");
+        for world in [World::new(), World::without_home()] {
+            let mut cmd = Command::new("x");
+            for name in PERSON_VARS {
+                cmd.env(name, &canary_home);
+            }
+            cmd.env("XDG_CONFIG_HOME", &canary_cfg)
+                .env("USERNAME", "canary-user")
+                .env("SSH_AUTH_SOCK", canary.path().join("agent"));
+            world.isolate(&mut cmd);
+
+            // no value of the command names the canary
+            for (name, value) in cmd.get_envs() {
+                let text = value.map(|v| v.to_string_lossy().into_owned());
+                assert!(
+                    text.is_none_or(
+                        |t| !Path::new(&t).starts_with(canary.path()) && !t.contains("canary")
+                    ),
+                    "{name:?} carries a canary"
+                );
+            }
+
+            // the engine, given those values, finds the fixture's person project or none
+            let env = env_as_read(&cmd);
+            let (platform, fixture) = world.path_env();
+            assert_eq!(
+                resolve_person(Platform::HOST, &env).unwrap().path,
+                resolve_person(platform, &fixture).unwrap().path
+            );
+            match resolve_person(Platform::HOST, &env).unwrap().path {
+                PersonPath::Default(p) => {
+                    assert!(!world.no_home);
+                    assert_eq!(p, world.default_meta());
+                    assert!(p.starts_with(world.home.path()));
+                }
+                PersonPath::Unavailable => assert!(world.no_home),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        // an instruction the person configures resolves to the fixture's own project
+        let w = World::new();
+        let mine = short_tempdir();
+        w.person(mine.path());
+        let mut cmd = Command::new("x");
+        cmd.env("HOME", &canary_home);
+        w.isolate(&mut cmd);
+        let env = env_as_read(&cmd);
+        assert!(
+            user_config_path(Platform::HOST, &env)
+                .unwrap()
+                .starts_with(w.config_dir())
+        );
+        assert!(!canary.path().join("cfg").exists() && !canary_home.exists());
     }
 }

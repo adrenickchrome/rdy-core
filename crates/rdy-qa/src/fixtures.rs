@@ -48,13 +48,7 @@ fn human_env_of(actor: &str, dir: tempfile::TempDir) -> (tempfile::TempDir, Vec<
     // ain: an empty home of its own, so no process reads or starts the real meta project
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
-    let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
-    let env = vec![
-        ("XDG_CONFIG_HOME".to_string(), text(dir.path())),
-        ("HOME".to_string(), text(&home)),
-        ("USERPROFILE".to_string(), text(&home)),
-        ("APPDATA".to_string(), text(&home.join("AppData"))),
-    ];
+    let env = person_env_pairs(&home, dir.path());
     (dir, env)
 }
 
@@ -287,19 +281,28 @@ pub fn cases(fast: u32) -> u32 {
     if deep() { fast * 10 } else { fast }
 }
 
+/// The file name of the `rdy` binary on this platform: `rdy`, or `rdy.exe` on Windows.
+pub fn rdy_exe_name() -> String {
+    format!("rdy{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The `rdy` binary beside the executable `exe` of a build profile.
+fn rdy_bin_in(exe: &std::path::Path) -> PathBuf {
+    let dir = exe.parent().expect("the binary's directory");
+    if dir.file_name().is_some_and(|n| n == "deps") {
+        dir.parent().expect("target dir").join(rdy_exe_name())
+    } else {
+        dir.join(rdy_exe_name())
+    }
+}
+
 /// The `rdy` binary: `$RDY_BIN`, else the `rdy` of the profile this binary was built in: a test
 /// runs from `target/<profile>/deps/`, a qa binary (`qa-perf`) from `target/<profile>/`.
 pub fn rdy_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RDY_BIN") {
         return PathBuf::from(p);
     }
-    let exe = std::env::current_exe().expect("current exe");
-    let dir = exe.parent().expect("the binary's directory");
-    let bin = if dir.file_name().is_some_and(|n| n == "deps") {
-        dir.parent().expect("target dir").join("rdy")
-    } else {
-        dir.join("rdy")
-    };
+    let bin = rdy_bin_in(&std::env::current_exe().expect("current exe"));
     assert!(
         bin.exists(),
         "{} not found: run `cargo build --release -p rdy-cli` first (cargo qa does this) or set RDY_BIN",
@@ -322,14 +325,62 @@ pub fn empty_home() -> &'static std::path::Path {
     .path()
 }
 
-/// `Command::new(rdy_bin())` with `HOME`, `USERPROFILE` and `APPDATA` in the [`empty_home`]:
-/// the way every test starts `rdy`. A later `env` or `envs` of the caller wins.
+/// The account name every child of the harness sees (`USERNAME`), whoever runs the tests.
+pub const FIXTURE_USERNAME: &str = "rdyqa";
+
+/// The person variables for a child whose home is `home` and whose config place is `cfg`: the
+/// ones that are set, as pairs (`HOME`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`,
+/// `XDG_CONFIG_HOME`), then the fixture account name. Where the host has no drive form of a
+/// path, the drive variables are absent here and removed by [`isolate_person`].
+pub fn person_env_pairs(home: &std::path::Path, cfg: &std::path::Path) -> Vec<(String, String)> {
+    let vars = crate::instructions::person_env(
+        rdy_engine::instructions_config::Platform::HOST,
+        Some(home),
+        cfg,
+    );
+    let mut pairs: Vec<(String, String)> = crate::instructions::person_pairs(&vars)
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.to_string(), v?.to_string_lossy().into_owned())))
+        .collect();
+    pairs.push(("USERNAME".to_string(), FIXTURE_USERNAME.to_string()));
+    pairs
+}
+
+/// Gives `cmd` an isolated person: every variable that places a home or config is set below
+/// `home` and `cfg` or removed, `USERNAME` is [`FIXTURE_USERNAME`], and `SSH_AUTH_SOCK` is
+/// removed. A test that needs an agent sets `SSH_AUTH_SOCK` itself, after this call. A child's
+/// descendants inherit all of it.
+pub fn isolate_person<'a>(
+    cmd: &'a mut Command,
+    home: &std::path::Path,
+    cfg: &std::path::Path,
+) -> &'a mut Command {
+    let vars = crate::instructions::person_env(
+        rdy_engine::instructions_config::Platform::HOST,
+        Some(home),
+        cfg,
+    );
+    for (name, value) in crate::instructions::person_pairs(&vars) {
+        match value {
+            Some(v) => cmd.env(name, v),
+            None => cmd.env_remove(name),
+        };
+    }
+    isolate_account(cmd)
+}
+
+/// The account part of [`isolate_person`]: the fixed `USERNAME`, and no agent socket.
+pub fn isolate_account(cmd: &mut Command) -> &mut Command {
+    cmd.env("USERNAME", FIXTURE_USERNAME)
+        .env_remove("SSH_AUTH_SOCK")
+}
+
+/// `Command::new(rdy_bin())` with the person in the [`empty_home`] ([`isolate_person`]): the way
+/// every test starts `rdy`. A later `env` or `envs` of the caller wins.
 pub fn rdy_command() -> Command {
     let home = empty_home();
     let mut cmd = Command::new(rdy_bin());
-    cmd.env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("APPDATA", home.join("AppData"));
+    isolate_person(&mut cmd, home, &home.join(".config"));
     cmd
 }
 
@@ -424,6 +475,58 @@ mod tname_tests {
         );
     }
 
+    /// The census reads this process's own tables: a listener it holds is listed, and it is
+    /// gone once closed. Where the host reads native process data (Linux, Windows) it starts
+    /// no process to do so.
+    #[test]
+    fn wx25a_listener_census_uses_native_process_data() {
+        if cfg!(any(target_os = "linux", windows)) {
+            assert!(
+                ["proc", "iphlpapi"].contains(&crate::platform::LISTENER_CENSUS),
+                "{}",
+                crate::platform::LISTENER_CENSUS
+            );
+        } else {
+            // a developer host without kernel tables a test can read
+            assert_eq!(crate::platform::LISTENER_CENSUS, "lsof");
+        }
+        let before = crate::platform::tcp_listen_ports();
+        let v4 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = v4.local_addr().expect("addr").port();
+        let v6 = std::net::TcpListener::bind("[::1]:0").ok();
+        let port6 = v6.as_ref().map(|l| l.local_addr().expect("addr").port());
+        let during = crate::platform::tcp_listen_ports();
+        assert!(during.contains(&port), "{port} not in {during:?}");
+        if let Some(p) = port6 {
+            assert!(during.contains(&p), "{p} not in {during:?}");
+        }
+        assert!(
+            !before.contains(&port),
+            "{port} was listed before it was bound"
+        );
+        // a connection is not a listener
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let client_port = client.local_addr().expect("addr").port();
+        assert!(!crate::platform::tcp_listen_ports().contains(&client_port));
+        drop((v4, v6, client));
+        let after = crate::platform::tcp_listen_ports();
+        assert!(!after.contains(&port), "{port} still in {after:?}");
+    }
+
+    #[test]
+    fn wx25a_executable_name_carries_the_platform_suffix() {
+        assert_eq!(
+            super::rdy_exe_name(),
+            if cfg!(windows) { "rdy.exe" } else { "rdy" }
+        );
+        // the sibling of the test binary's directory, by that name
+        let name = super::rdy_exe_name();
+        assert!(name.starts_with("rdy"));
+        assert!(super::rdy_bin_in(std::path::Path::new("t/deps/x")).ends_with(format!("t/{name}")));
+        assert!(
+            super::rdy_bin_in(std::path::Path::new("t/qa-perf")).ends_with(format!("t/{name}"))
+        );
+    }
     #[test]
     fn tname1_a_module_path_drops_only_the_crate() {
         assert_eq!(

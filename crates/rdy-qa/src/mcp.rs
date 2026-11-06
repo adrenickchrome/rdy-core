@@ -289,8 +289,11 @@ pub struct McpClient {
     bound: Option<Arc<Bound>>,
     /// A bounded session's per-operation hang guard.
     budget: Duration,
-    /// The server's PID, which also leads its process group in a bounded session.
+    /// The server's PID, which the tests check for a reaped server.
+    #[cfg_attr(not(test), allow(dead_code))]
     pid: u32,
+    /// A bounded session's process group (its server leads it); `None` for the others.
+    group: Option<platform::ProcessGroup>,
     /// A bounded session that was stopped: its group killed, its child reaped, its workers
     /// joined.
     stopped: bool,
@@ -300,8 +303,8 @@ pub struct McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        if self.bound.is_some() && !self.stopped {
-            let _ = platform::kill_process_group(self.pid);
+        if let (Some(group), false) = (&self.group, self.stopped) {
+            let _ = group.kill();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -611,18 +614,17 @@ impl McpClient {
     /// `APPDATA` all point there, so a tool that reads the person layer (`<home>/.rdy/meta`) or
     /// the user config never reads the real ones.
     pub fn start_isolated(project: &Path, home: &Path) -> McpClient {
-        let home = home.to_str().expect("a UTF-8 home");
-        let config = Path::new(home).join(".config");
-        let config = config.to_str().expect("a UTF-8 config dir");
-        McpClient::start_with_env(
-            project,
-            &[
-                ("HOME", home),
-                ("USERPROFILE", home),
-                ("XDG_CONFIG_HOME", config),
-                ("APPDATA", config),
-            ],
-        )
+        McpClient::launch_with(McpClient::isolated_command(project, home), false)
+    }
+
+    /// The command of [`McpClient::start_isolated`].
+    pub(crate) fn isolated_command(project: &Path, home: &Path) -> Command {
+        let mut cmd = crate::fixtures::rdy_command();
+        crate::fixtures::isolate_person(&mut cmd, home, &home.join(".config"));
+        cmd.args(["mcp", "--no-daemon", "--project"])
+            .arg(project)
+            .stderr(Stdio::null());
+        cmd
     }
 
     /// `start_with_env` with the child's stderr kept, for a check of everything the server
@@ -653,7 +655,15 @@ impl McpClient {
         McpClient::launch_with(McpClient::proxy_command(dir, env), false)
     }
 
-    fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
+    /// `cmd` as the server in `group`, which owns it and everything it starts: `keep` is as for
+    /// [`McpClient::launch`] (true) or `start_proxy_at` (false).
+    pub fn launch_in(cmd: Command, keep: bool, group: &platform::ProcessGroup) -> McpClient {
+        let mut c = McpClient::spawn_session(cmd, keep, None, Some(group)).expect("spawn rdy mcp");
+        McpClient::initialize(&mut c);
+        c
+    }
+
+    pub(crate) fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
         let mut cmd = crate::fixtures::rdy_command();
         cmd.args(["mcp", "--project"])
             .arg(dir)
@@ -673,12 +683,16 @@ impl McpClient {
     }
 
     fn launch_with(cmd: Command, keep: bool) -> McpClient {
-        let mut c = McpClient::spawn_session(cmd, keep, None).expect("spawn rdy mcp");
+        let mut c = McpClient::spawn_session(cmd, keep, None, None).expect("spawn rdy mcp");
+        McpClient::initialize(&mut c);
+        c
+    }
+
+    fn initialize(c: &mut McpClient) {
         let id = c.next_id();
         c.send(&McpClient::initialize_request(id));
         c.init = c.recv(id, DEADLINE);
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-        c
     }
 
     /// The `initialize` request with `id`.
@@ -694,15 +708,25 @@ impl McpClient {
         mut cmd: Command,
         keep: bool,
         bound: Option<Arc<Bound>>,
+        shared: Option<&platform::ProcessGroup>,
     ) -> std::io::Result<McpClient> {
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+        // a bounded session owns its server's group; a shared group owns it for a world
+        let group = bound
+            .is_some()
+            .then(platform::ProcessGroup::new)
+            .transpose()?;
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = match group.as_ref().or(shared) {
+            Some(g) => g.spawn(&mut cmd)?,
+            None => cmd.spawn()?,
+        };
         // the command holds no pipe end of the child's, but it is not needed any more
         drop(cmd);
         let pid = child.id();
         // a worker that cannot start: the server is stopped and reaped, and the error returned
         let abandon = |child: &mut Child, e: std::io::Error| {
-            if bound.is_some() {
-                let _ = platform::kill_process_group(pid);
+            if let Some(group) = &group {
+                let _ = group.kill();
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -777,6 +801,7 @@ impl McpClient {
             bound,
             budget: DEADLINE,
             pid,
+            group,
             stopped: false,
             eliciting: None,
         })
@@ -823,14 +848,13 @@ impl McpClient {
         max_output: usize,
         revision: Option<Revision>,
     ) -> Result<McpClient, (McpFailure, Option<Box<McpClient>>)> {
-        platform::own_process_group(&mut command);
         command.stderr(Stdio::piped());
         let bound = Arc::new(Bound {
             max: max_output,
             count: AtomicUsize::new(0),
             over: AtomicBool::new(false),
         });
-        let mut c = McpClient::spawn_session(command, true, Some(bound))
+        let mut c = McpClient::spawn_session(command, true, Some(bound), None)
             .map_err(|_| (McpFailure::Io, None))?;
         let initialize = match &revision {
             None => Some((PROTOCOL_VERSION.to_string(), json!({}))),
@@ -1119,7 +1143,7 @@ impl McpClient {
         }
         self.stopped = true;
         self.close_stdin();
-        let mut clean = platform::kill_process_group(self.pid).is_ok();
+        let mut clean = self.group.as_ref().is_none_or(|g| g.kill().is_ok());
         let code = match self.child.wait() {
             Ok(status) => status.code(),
             Err(_) => {

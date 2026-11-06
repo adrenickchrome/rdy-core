@@ -17,6 +17,7 @@
 //!   in the bounded runner.
 
 use rdy_daemon::sys::{Liveness, process_liveness};
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
@@ -28,9 +29,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_MORE_FILES, ERROR_OPERATION_ABORTED,
-    GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING, ERROR_NO_MORE_FILES,
+    ERROR_OPERATION_ABORTED, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
+use windows_sys::Win32::NetworkManagement::IpHelper::GetExtendedTcpTable;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile,
@@ -213,6 +215,105 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// The processes a test owns, to end together: one [`Job`] that holds every member and all they
+/// start. A member that starts a daemon leaves the daemon in the job, so it outlives the member
+/// and ends with the group. Dropping the group closes the job and ends them all. No start asks to
+/// break away.
+#[derive(Debug)]
+pub struct ProcessGroup {
+    job: Job,
+}
+
+impl ProcessGroup {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self { job: Job::new()? })
+    }
+
+    /// Starts `command` suspended, puts it in the job and only then lets it run (as
+    /// [`spawn_in_job`] does). This sets the command's creation flags. A refused start leaves no
+    /// process behind.
+    pub fn spawn(&self, command: &mut Command) -> io::Result<Child> {
+        command.creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn()?;
+        let ready = self.job.assign(&child).and_then(|()| resume(child.id()));
+        match ready {
+            Ok(()) => Ok(child),
+            Err(failure) => {
+                let ended = child.kill();
+                let cleanup = ended.and_then(|()| child.wait().map(drop));
+                Err(cleanup.err().unwrap_or(failure))
+            }
+        }
+    }
+
+    /// `Command::output` for a member: stdin null, stdout and stderr captured.
+    pub fn output(&self, command: &mut Command) -> io::Result<Output> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        self.spawn(command)?.wait_with_output()
+    }
+
+    /// Ends every process in the job. A job with nothing left is already stopped, which is
+    /// success.
+    pub fn kill(&self) -> io::Result<()> {
+        self.job.terminate()
+    }
+}
+
+/// Where [`tcp_listen_ports`] reads: the TCP listener tables of `iphlpapi`, with their owning
+/// process ids. It starts no process.
+pub const LISTENER_CENSUS: &str = "iphlpapi";
+
+/// The TCP ports that a listening socket of this process is bound to, on any address, from the
+/// extended TCP tables of both address families. Panics if the tables cannot be read.
+#[allow(unsafe_code)]
+pub fn tcp_listen_ports() -> BTreeSet<u16> {
+    // the address families, and the table class that lists listeners with their owner
+    const AF_INET: u32 = 2;
+    const AF_INET6: u32 = 23;
+    const TCP_TABLE_OWNER_PID_LISTENER: i32 = 3;
+    // the row sizes of MIB_TCPROW_OWNER_PID and MIB_TCP6ROW_OWNER_PID, and where each holds the
+    // local port and the owner
+    const ROWS: [(u32, usize, usize, usize); 2] = [(AF_INET, 24, 8, 20), (AF_INET6, 56, 20, 52)];
+    let me = std::process::id();
+    let mut ports = BTreeSet::new();
+    for (family, row, port_at, pid_at) in ROWS {
+        let mut buf: Vec<u8> = vec![0; 4096];
+        loop {
+            let mut size = buf.len() as u32;
+            // SAFETY: the pointer and size describe `buf`, which outlives the call; the size is
+            // updated to what the table needs.
+            let asked = unsafe {
+                GetExtendedTcpTable(
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    &raw mut size,
+                    0,
+                    family,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                )
+            };
+            match asked {
+                0 => break,
+                ERROR_INSUFFICIENT_BUFFER => buf.resize(size as usize, 0),
+                e => panic!("GetExtendedTcpTable for family {family} failed with {e}"),
+            }
+        }
+        let word =
+            |at: usize| u32::from_ne_bytes(buf[at..at + 4].try_into().expect("a four byte field"));
+        for i in 0..word(0) as usize {
+            let at = 4 + i * row;
+            if word(at + pid_at) == me {
+                // the port is in network order, in the low half of its field
+                ports.insert(u16::from_be((word(at + port_at) & 0xffff) as u16));
+            }
+        }
+    }
+    ports
 }
 
 /// A running child and the job that holds it. Dropping this ends the child and all it started.

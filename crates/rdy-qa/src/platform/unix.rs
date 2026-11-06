@@ -6,7 +6,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -56,6 +56,73 @@ pub fn kill_hard(pid: u32) {
 pub fn own_process_group(cmd: &mut Command) {
     cmd.process_group(0);
 }
+
+/// The processes a test owns, to end together. Here each member leads a process group of its own
+/// (a daemon's `setsid` leaves that group, so a daemon is ended by its own stop, as before); on
+/// Windows the group is one Job Object, which also holds every descendant. Dropping it ends
+/// nothing on Unix and everything on Windows: a test that needs a process to outlive its owner
+/// does not hold it here.
+#[derive(Debug, Default)]
+pub struct ProcessGroup {
+    leaders: Mutex<Vec<u32>>,
+}
+
+impl ProcessGroup {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self::default())
+    }
+
+    /// Starts `cmd` as a member of this group, in a process group of its own.
+    pub fn spawn(&self, cmd: &mut Command) -> io::Result<Child> {
+        own_process_group(cmd);
+        let child = cmd.spawn()?;
+        self.leaders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(child.id());
+        Ok(child)
+    }
+
+    /// `Command::output` for a member: stdin null, stdout and stderr captured. Its group is
+    /// forgotten once it is reaped, so no stale id is ever signalled.
+    pub fn output(&self, cmd: &mut Command) -> io::Result<Output> {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = self.spawn(cmd)?;
+        let pid = child.id();
+        let out = child.wait_with_output();
+        self.leaders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|p| *p != pid);
+        out
+    }
+
+    /// Ends every member that still runs. A group with nothing left is already stopped, which
+    /// is success. The first failure is returned after every group was tried.
+    pub fn kill(&self) -> io::Result<()> {
+        let leaders = self
+            .leaders
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut first = Ok(());
+        for pid in leaders {
+            if let Err(e) = kill_process_group(pid) {
+                first = first.and(Err(e));
+            }
+        }
+        first
+    }
+}
+
+/// Where [`tcp_listen_ports`] reads: `proc` (the kernel's tables), or `lsof` where the host has
+/// no tables a test can read (macOS, a developer host only).
+#[cfg(target_os = "linux")]
+pub const LISTENER_CENSUS: &str = "proc";
+#[cfg(not(target_os = "linux"))]
+pub const LISTENER_CENSUS: &str = "lsof";
 
 /// Opens `path` for append, creating it with mode 0o600.
 pub fn open_private_log(path: &Path) -> io::Result<File> {
@@ -1836,5 +1903,38 @@ mod tests {
         // hard links: one file, two names
         hard_link(&dir.join("after"), &dir.join("again")).expect("link");
         assert_eq!(link_count(&dir.join("after")).expect("count"), 2);
+    }
+
+    #[test]
+    fn wx25a_a_process_group_ends_what_it_started() {
+        let group = ProcessGroup::new().expect("group");
+        // output: captured, and the member is reaped
+        let out = group
+            .output(&mut shell_script("echo hi; echo err >&2"))
+            .expect("output");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+        assert!(group.leaders.lock().unwrap().is_empty());
+        // a member that does not end by itself, and a child it starts in its group
+        let mut cmd = shell_script("sleep 300 & echo $!; wait");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = group.spawn(&mut cmd).expect("spawn");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().expect("stdout")),
+            &mut line,
+        )
+        .expect("the grandchild's pid");
+        let grandchild: u32 = line.trim().parse().expect("a pid");
+        assert!(process_running(grandchild));
+        group.kill().expect("kill");
+        child.wait().expect("reap");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !process_exited(grandchild) {
+            assert!(Instant::now() < deadline, "the grandchild still runs");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // a group with nothing left is stopped already
+        group.kill().expect("kill again");
     }
 }
