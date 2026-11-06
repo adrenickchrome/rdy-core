@@ -1,5 +1,10 @@
 //! The Unix side of `sys`: every item, each body the code it replaces.
 
+use super::DirState;
+use crate::layout::{NotPrivateDir, RUN_DIR, SHORT_SOCKET_ROOT, SOCKET_FILE, short_dir_error};
+use crate::socket::MAX_SOCKET_PATH;
+use rdy_model::Hash;
+use rdy_store::fileid::FileId;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -188,12 +193,182 @@ pub fn make_private_path(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
+/// What stands at `path`, from `lstat`.
+pub fn dir_state(path: &Path) -> io::Result<DirState> {
+    let m = fs::symlink_metadata(path)?;
+    Ok(if !m.is_dir() {
+        DirState::NotDir
+    } else if is_private_dir(&m) {
+        DirState::Private
+    } else {
+        DirState::NotPrivate
+    })
+}
+
+/// Whether the open run file `f` may be believed. Here its name was opened without following a
+/// link, and that is all that is asked of it.
+pub fn run_file_is_private(_f: &fs::File) -> io::Result<bool> {
+    Ok(true)
+}
+
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
 pub fn no_hard_links(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(n) if n == libc::EPERM || n == libc::ENOTSUP || n == libc::EOPNOTSUPP
     )
+}
+
+// 4b. The project's endpoint and its run files
+
+/// The longest `daemon.sock`: the socket, its newline, and `u64:u64` with its newline.
+pub const MAX_ENDPOINT_RECORD: usize = MAX_SOCKET_PATH + 1 + 2 * 20 + 2;
+/// The longest `daemon.pid`.
+pub const MAX_PID_RECORD: usize = 64;
+
+/// The socket of the canonical project root `root` (D-YMWEM), and whether it is the short one:
+/// `<root>/.rdy/run/rdy.sock` when that is at most `MAX_SOCKET_PATH` bytes, else
+/// `/tmp/rdy-<uid>/<hash of the root>.sock`.
+pub fn project_endpoint(root: &Path) -> (PathBuf, bool) {
+    let long = root.join(".rdy").join(RUN_DIR).join(SOCKET_FILE);
+    if long.as_os_str().len() <= MAX_SOCKET_PATH {
+        return (long, false);
+    }
+    let hash = Hash::of(path_bytes(root)).short();
+    (short_dir(own_uid()).join(format!("{hash}.sock")), true)
+}
+
+/// Nothing to resolve here: `RunDir` falls back to the absolute path, as it says.
+pub fn check_project_root(_root: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// When the socket of `root` is the short one, makes sure its directory is private to this user
+/// (`ensure_short_dir`).
+pub fn prepare_endpoint_place(root: &Path) -> io::Result<()> {
+    match project_endpoint(root) {
+        (path, true) => match path.parent() {
+            Some(dir) => ensure_short_dir(dir),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// `/tmp/rdy-<uid>`: the directory of the short sockets of user `uid`.
+pub(crate) fn short_dir(uid: u32) -> PathBuf {
+    Path::new(SHORT_SOCKET_ROOT).join(format!("rdy-{uid}"))
+}
+
+/// `ensure_short_dir_as` for this process's user.
+pub(crate) fn ensure_short_dir(dir: &Path) -> io::Result<()> {
+    ensure_short_dir_as(dir, own_uid())
+}
+
+/// Makes `dir` a directory private to user `uid` (D-YMWEM): creates it with mode 0o700 when it
+/// is missing; tightens a directory of `uid` with another mode to 0o700; refuses anything else
+/// (a symlink, a file, a directory of another user) with [`NotPrivateDir`], and leaves it as it
+/// is. It never follows a symlink. A failed `mkdir`, `lstat` or `chmod` is a
+/// [`ShortDirError`](crate::layout::ShortDirError) that names `dir`.
+pub(crate) fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
+    let failed = |e| short_dir_error(dir, e);
+    let m = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match create_private_dir(dir) {
+                Ok(()) => {}
+                // another process made it first: check what it made
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(failed(e)),
+            }
+            fs::symlink_metadata(dir).map_err(failed)?
+        }
+        Err(e) => return Err(failed(e)),
+    };
+    if !m.is_dir() || owner(&m) != uid {
+        return Err(io::Error::other(NotPrivateDir(dir.to_path_buf())));
+    }
+    // the umask may have narrowed a new directory's mode, and an old one may be open to others
+    if !is_private_dir(&m) {
+        make_private_dir(dir).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// `e`, naming the socket `path`.
+fn named(path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+}
+
+/// Removes what a dead daemon left at the socket's name, before a bind. The caller holds the
+/// store lock.
+pub fn clear_endpoint(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(named(path, e)),
+    }
+}
+
+/// `bind`, with an error that names the socket.
+pub fn bind_endpoint(path: &Path) -> io::Result<Listener> {
+    bind(path).map_err(|e| named(path, e))
+}
+
+/// Makes the socket a bind just made private: mode 0o600.
+pub fn seal_endpoint(path: &Path) -> io::Result<()> {
+    make_private_path(path).map_err(|e| named(path, e))
+}
+
+/// Removes the socket of a bind that will serve nothing.
+pub fn remove_endpoint(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+/// The socket a `daemon.sock` line names: an absolute path of at most `MAX_SOCKET_PATH` bytes.
+fn endpoint_from_line(line: &[u8]) -> Option<PathBuf> {
+    let well_formed =
+        line.first() == Some(&b'/') && line.len() <= MAX_SOCKET_PATH && !line.contains(&0);
+    well_formed.then(|| path_from_bytes(line))
+}
+
+/// `daemon.sock` as written: the socket, then the identity of the project's `.rdy`
+/// (`{dev}:{ino}`), each ended by a newline. `None` for anything else.
+pub fn parse_endpoint_record(bytes: &[u8]) -> Option<(PathBuf, FileId)> {
+    let (socket, rest) = bytes.split_at(bytes.iter().position(|&b| b == b'\n')?);
+    let project = std::str::from_utf8(rest.strip_prefix(b"\n")?.strip_suffix(b"\n")?).ok()?;
+    let project = project.parse::<FileId>().ok()?;
+    Some((endpoint_from_line(socket)?, project))
+}
+
+/// What `daemon.pid` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PidRecord {
+    pid: u32,
+}
+
+impl PidRecord {
+    /// The process the record names.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+/// This process's `daemon.pid`: `<pid>\n`.
+pub fn own_pid_record() -> io::Result<Vec<u8>> {
+    Ok(format!("{}\n", std::process::id()).into_bytes())
+}
+
+/// `daemon.pid` as written: decimal digits only, surrounding whitespace trimmed. `None` for
+/// anything else.
+pub fn parse_pid_record(bytes: &[u8]) -> Option<PidRecord> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(PidRecord {
+        pid: text.parse().ok()?,
+    })
 }
 
 // 5. Process lifecycle

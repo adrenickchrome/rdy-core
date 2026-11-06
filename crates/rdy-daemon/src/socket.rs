@@ -1,8 +1,10 @@
-//! The daemon's socket: binding it privately, the pid file, and the peer's uid.
+//! The daemon's endpoint: binding it privately, the pid file, and on Unix the peer's uid. The
+//! endpoint is a socket on Unix and a named pipe on Windows, and `sys` holds what differs.
 
 use crate::layout::{ProjectId, RunDir};
 use crate::lock::open_no_follow;
 use crate::sys;
+use rdy_store::{fsutil, pio};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -15,8 +17,11 @@ pub const MAX_SOCKET_PATH: usize = 103;
 /// Refuses a socket path `bind` could not take: over `MAX_SOCKET_PATH` bytes, `bind` fails with
 /// `ENAMETOOLONG`. The error names the path, its length and the limit. `run.socket()` is short
 /// whenever `.rdy/run/rdy.sock` would be too long, so this is the last guard only: a client
-/// checks it before it spawns a daemon that would only die at its bind.
+/// checks it before it spawns a daemon that would only die at its bind. On Windows a pipe's name
+/// comes from the canonical project path, so a path that cannot be resolved is refused here:
+/// `could not resolve the canonical project path {path}: {error}`.
 pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
+    sys::check_project_root(run.given_root())?;
     let path = run.socket();
     let len = path.as_os_str().len();
     if len > MAX_SOCKET_PATH {
@@ -33,11 +38,11 @@ pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
     Ok(())
 }
 
-/// Binds the project's socket (mode 0o600) in a private run dir, writes the pid file, and
-/// records the socket's path and the project's identity in `daemon.sock`
-/// (`RunDir::socket_record`). Returns the listener, the path it bound and the identity of the
-/// project's `.rdy` at bind time (`RunDir::project_id`). A failure of the bind itself names the
-/// socket's path.
+/// Binds the project's endpoint (a socket of mode 0o600, or a pipe private to this account) in a
+/// private run dir, writes the pid file, and records the endpoint and the project's identity in
+/// `daemon.sock` (`RunDir::socket_record`). Returns the listener, the endpoint it bound and the
+/// identity of the project's `.rdy` at bind time (`RunDir::project_id`). A failure of the bind
+/// itself names the endpoint. No file ever stands at a pipe's name.
 ///
 /// Call only while holding the store lock (§3.1); a client never calls this.
 pub async fn bind(run: &RunDir) -> io::Result<(sys::Listener, PathBuf, ProjectId)> {
@@ -45,28 +50,22 @@ pub async fn bind(run: &RunDir) -> io::Result<(sys::Listener, PathBuf, ProjectId
     check_socket_path(run)?;
     let project = run.project_id()?;
     let path = run.socket();
-    let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(named(e)),
-    }
-    let listener = sys::bind(&path).map_err(named)?;
+    sys::clear_endpoint(&path)?;
+    let listener = sys::bind_endpoint(&path)?;
     let mut pid_written = false;
-    let done = sys::make_private_path(&path)
-        .map_err(named)
+    let done = sys::seal_endpoint(&path)
         .and_then(|()| write_pid_file(run))
         .and_then(|()| {
             pid_written = true;
-            let mut record = sys::path_bytes(&path).to_vec();
+            let mut record = path.as_os_str().as_encoded_bytes().to_vec();
             record.push(b'\n');
             record.extend_from_slice(format!("{project}\n").as_bytes());
             write_run_file(&run.socket_record(), &record)
         });
     if let Err(e) = done {
-        // the socket we just bound, and its pid file; no daemon will serve them
+        // the endpoint we just bound, and its pid file; no daemon will serve them
         drop(listener);
-        let _ = fs::remove_file(&path);
+        let _ = sys::remove_endpoint(&path);
         if pid_written {
             let _ = fs::remove_file(run.pid_file());
         }
@@ -75,16 +74,13 @@ pub async fn bind(run: &RunDir) -> io::Result<(sys::Listener, PathBuf, ProjectId
     Ok((listener, path, project))
 }
 
-/// `<pid>\n`, mode 0o600, written atomically (`write_run_file`).
+/// `sys::own_pid_record`, private, written durably (`write_run_file`).
 fn write_pid_file(run: &RunDir) -> io::Result<()> {
-    write_run_file(
-        &run.pid_file(),
-        format!("{}\n", std::process::id()).as_bytes(),
-    )
+    write_run_file(&run.pid_file(), &sys::own_pid_record()?)
 }
 
-/// Writes `bytes` to the run-dir file `target` (mode 0o600): to `<target>.tmp`, never through a
-/// symlink, then renamed into place.
+/// Makes `bytes` the durable content of the run-dir file `target`, private to this account: to
+/// `<target>.tmp`, never through a link, flushed, then renamed into place and the run dir flushed.
 fn write_run_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = target.with_file_name(format!(
         "{}.tmp",
@@ -103,21 +99,19 @@ fn write_run_file(target: &Path, bytes: &[u8]) -> io::Result<()> {
     // a leftover tmp file keeps its old mode through open; set it exactly
     sys::make_private_file(&f)?;
     f.write_all(bytes)?;
+    f.sync_all()?;
     drop(f);
-    fs::rename(&tmp, target)
+    pio::rename_durable(&tmp, target)?;
+    fsutil::sync_dir(target.parent().unwrap_or(Path::new(".")))
 }
 
-/// The effective uid of the process at the other end of `stream` (`sys::peer_uid`).
-pub fn peer_uid(stream: &sys::Stream) -> io::Result<u32> {
-    sys::peer_uid(stream)
-}
-
-/// This process's effective uid (`sys::own_uid`).
-pub fn own_uid() -> u32 {
-    sys::own_uid()
-}
+/// The effective uid of the process at the other end of a stream, and this process's: a uid is a
+/// Unix thing (`sys::Account` is the portable form).
+#[cfg(unix)]
+pub use crate::sys::{own_uid, peer_uid};
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::bind;
     use crate::layout::RunDir;

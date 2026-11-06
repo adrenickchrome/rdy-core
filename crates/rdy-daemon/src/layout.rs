@@ -1,14 +1,14 @@
-//! Where the daemon's files live: `<project>/.rdy/run/`. The socket is `.rdy/run/rdy.sock` when
-//! that path fits `sun_path`, else `/tmp/rdy-<uid>/<hash>.sock` in a directory private to the
-//! user (D-YMWEM). The daemon records the socket it bound in `.rdy/run/daemon.sock`.
+//! Where the daemon's files live: `<project>/.rdy/run/`. On Unix the endpoint is the socket
+//! `.rdy/run/rdy.sock` when that path fits `sun_path`, else `/tmp/rdy-<uid>/<hash>.sock` in a
+//! directory private to the user (D-YMWEM). On Windows it is the named pipe
+//! `\\.\pipe\rdy-<hash>`, which is no file (D-FPKPS). The daemon records the endpoint it bound in
+//! `.rdy/run/daemon.sock`.
 
 use crate::lock::open_no_follow;
-use crate::socket::{MAX_SOCKET_PATH, own_uid};
-use crate::sys;
-use rdy_model::Hash;
+use crate::sys::{self, DirState, records::read_capped};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,10 +47,11 @@ impl RunDir {
         std::path::absolute(&self.0).map(RunDir)
     }
 
-    /// The project's socket (D-YMWEM). The project root is canonical (`fs::canonicalize`, else
-    /// `std::path::absolute`), so every spelling of one project gives one socket. It is
-    /// `<root>/.rdy/run/rdy.sock` when that is at most `MAX_SOCKET_PATH` bytes, else
-    /// `/tmp/rdy-<uid>/<hash of the root>.sock`.
+    /// The project's endpoint. The project root is canonical (`fs::canonicalize`, else
+    /// `std::path::absolute`), so every spelling of one project gives one endpoint. On Unix
+    /// (D-YMWEM) it is `<root>/.rdy/run/rdy.sock` when that is at most `MAX_SOCKET_PATH` bytes,
+    /// else `/tmp/rdy-<uid>/<hash of the root>.sock`. On Windows (D-FPKPS) it is
+    /// `\\.\pipe\rdy-<hash>`, whatever the root's length.
     pub fn socket(&self) -> PathBuf {
         self.socket_place().0
     }
@@ -63,15 +64,9 @@ impl RunDir {
         }
     }
 
-    /// The socket, and whether it is the short one.
+    /// The endpoint, and whether it is the short socket.
     fn socket_place(&self) -> (PathBuf, bool) {
-        let root = self.canonical_root();
-        let long = root.join(".rdy").join(RUN_DIR).join(SOCKET_FILE);
-        if long.as_os_str().len() <= MAX_SOCKET_PATH {
-            return (long, false);
-        }
-        let hash = Hash::of(sys::path_bytes(&root)).short();
-        (short_dir(own_uid()).join(format!("{hash}.sock")), true)
+        sys::project_endpoint(&self.canonical_root())
     }
 
     /// The project's identity: `lstat` of its `.rdy` (the run dir's parent), never followed.
@@ -90,31 +85,37 @@ impl RunDir {
         self.canonical_root()
     }
 
-    /// The project root (the run dir's grandparent), canonical: `fs::canonicalize`, else
-    /// `std::path::absolute` (a root that does not exist), else as given.
-    fn canonical_root(&self) -> PathBuf {
-        let root = match self.0.parent().and_then(Path::parent) {
+    /// The project root (the run dir's grandparent), as this run dir was given it.
+    pub(crate) fn given_root(&self) -> &Path {
+        match self.0.parent().and_then(Path::parent) {
             Some(r) if !r.as_os_str().is_empty() => r,
             _ => Path::new("."),
-        };
+        }
+    }
+
+    /// The project root, canonical: `fs::canonicalize`, else `std::path::absolute` (a root that
+    /// does not exist), else as given.
+    fn canonical_root(&self) -> PathBuf {
+        let root = self.given_root();
         fs::canonicalize(root)
             .or_else(|_| std::path::absolute(root))
             .unwrap_or_else(|_| root.to_path_buf())
     }
 
-    /// `.rdy/run/daemon.sock`: the socket the running daemon bound, then the identity of the
-    /// project's `.rdy` at its bind (`{dev}:{ino}`), one line each. Every spelling of a project
+    /// `.rdy/run/daemon.sock`: the endpoint the running daemon bound, then the identity of the
+    /// project's `.rdy` at its bind (`{dev}:{ino}`, or `w:{volume}:{id}`), one line each. Every spelling of a project
     /// reaches this one run dir, so a client of any spelling finds the daemon there, also when
     /// its own spelling would compute another socket (a macOS firmlink, a bind mount).
     pub fn socket_record(&self) -> PathBuf {
         self.0.join(SOCKET_RECORD_FILE)
     }
 
-    /// The socket `daemon.sock` names, when the record names this project: an absolute socket
-    /// path of at most `MAX_SOCKET_PATH` bytes, then the identity of this project's `.rdy`
-    /// (`project_id`), each ended by a newline. `None` when the record is missing, a symlink,
-    /// unreadable or anything else, and when it names another `.rdy`: a copy or a restore of a
-    /// project carries the original's record, which is stale here.
+    /// The endpoint `daemon.sock` names, when the record names this project: the endpoint
+    /// (`sys::parse_endpoint_record`), then the identity of this project's `.rdy` (`project_id`),
+    /// each ended by a newline. `None` when the record is missing, a link, unreadable or anything
+    /// else, and when it names another `.rdy`: a copy or a restore of a project carries the
+    /// original's record, which is stale here. A record is only ever a place to try: it never
+    /// proves which process to stop.
     pub fn recorded_socket(&self) -> Option<PathBuf> {
         let (socket, project) = self.read_record()?;
         (project == self.project_id().ok()?).then_some(socket)
@@ -128,25 +129,22 @@ impl RunDir {
             .is_some_and(|(s, p)| s == socket && p == project)
     }
 
-    /// `daemon.sock` as written: the socket (absolute, at most `MAX_SOCKET_PATH` bytes) and the
-    /// identity, each ended by a newline; `None` when missing, a symlink, unreadable or anything
-    /// else.
+    /// `daemon.sock` as written (`sys::parse_endpoint_record`), of at most
+    /// `sys::MAX_ENDPOINT_RECORD` bytes; `None` when missing, a link, unreadable, not private to
+    /// this account where that can be told (`sys::run_file_is_private`), or anything else.
     fn read_record(&self) -> Option<(PathBuf, ProjectId)> {
-        let f = open_no_follow(OpenOptions::new().read(true), &self.socket_record()).ok()?;
-        // the socket, its newline, and `u64:u64` with its newline
-        let most = MAX_SOCKET_PATH as u64 + 1 + 2 * 20 + 2;
-        let mut buf = Vec::with_capacity(most as usize);
-        f.take(most + 1).read_to_end(&mut buf).ok()?;
-        if buf.len() as u64 > most {
-            return None;
-        }
-        let (socket, rest) = buf.split_at(buf.iter().position(|&b| b == b'\n')?);
-        let project = std::str::from_utf8(rest.strip_prefix(b"\n")?.strip_suffix(b"\n")?).ok()?;
-        let well_formed = socket.first() == Some(&b'/')
-            && socket.len() <= MAX_SOCKET_PATH
-            && !socket.contains(&0);
-        let project = project.parse::<ProjectId>().ok()?;
-        well_formed.then(|| (sys::path_from_bytes(socket), project))
+        let bytes = read_run_file(&self.socket_record(), sys::MAX_ENDPOINT_RECORD)?;
+        sys::parse_endpoint_record(&bytes)
+    }
+
+    /// `daemon.pid` as written (`sys::parse_pid_record`), of at most `sys::MAX_PID_RECORD` bytes;
+    /// `None` when missing, a link, unreadable, not private to this account where that can be told
+    /// (`sys::run_file_is_private`), or anything else. On Windows it holds the process's creation
+    /// time too. It says what the daemon wrote, and proves nothing alone: a stop needs the
+    /// system's word for the process as well.
+    pub fn pid_record(&self) -> Option<sys::PidRecord> {
+        let bytes = read_run_file(&self.pid_file(), sys::MAX_PID_RECORD)?;
+        sys::parse_pid_record(&bytes)
     }
 
     pub fn start_lock(&self) -> PathBuf {
@@ -161,20 +159,17 @@ impl RunDir {
         self.0.join(LOG_FILE)
     }
 
-    /// Creates `.rdy/run` (and `.rdy` if missing) with mode 0o700 on `run`; tightens an existing
-    /// `run` directory to 0o700; refuses anything else (a file, a symlink) in its place. Then
-    /// writes the run dir's `.gitignore` (`*`) when it is missing, so git ignores the socket, pid,
+    /// Creates `.rdy/run` (and `.rdy` if missing), private to this account; tightens an existing
+    /// `run` directory of this account; refuses anything else (a file, a link, on Windows any
+    /// reparse point or a directory of another account) in its place. Then writes the run dir's `.gitignore` (`*`) when it is missing, so git ignores the socket, pid,
     /// lock and log; whatever already stands at that name, a link included, is left untouched.
     /// When the socket is the short one, makes sure its directory is private to this user
-    /// (`ensure_short_dir`); a refusal is a [`NotPrivateDir`] error, and a directory that cannot
+    /// (`sys::prepare_endpoint_place`); a refusal is a [`NotPrivateDir`] error, and a directory that cannot
     /// be created or checked is a [`ShortDirError`].
     pub fn ensure(&self) -> io::Result<()> {
         self.ensure_dir()?;
         self.ignore_self()?;
-        match self.short_socket().as_deref().and_then(Path::parent) {
-            Some(dir) => ensure_short_dir(dir),
-            None => Ok(()),
-        }
+        sys::prepare_endpoint_place(&self.canonical_root())
     }
 
     fn ignore_self(&self) -> io::Result<()> {
@@ -236,40 +231,47 @@ impl RunDir {
     }
 
     fn ensure_dir(&self) -> io::Result<()> {
-        let path = &self.0;
-        match fs::symlink_metadata(path) {
-            Ok(m) if m.is_dir() => {
-                if !sys::is_private_dir(&m) {
-                    sys::make_private_dir(path)?;
-                }
-                Ok(())
-            }
-            Ok(_) => Err(not_a_dir(path)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                match sys::create_private_dir(path) {
-                    Ok(()) => {}
-                    // another process made it first: check what it made
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                        if !fs::symlink_metadata(path)?.is_dir() {
-                            return Err(not_a_dir(path));
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-                // the umask may have narrowed the mode; set it exactly
-                sys::make_private_dir(path)
-            }
-            Err(e) => Err(e),
-        }
+        ensure_run_dir(&self.0)
     }
 }
 
-/// `/tmp/rdy-<uid>`: the directory of the short sockets of user `uid`.
-fn short_dir(uid: u32) -> PathBuf {
-    Path::new(SHORT_SOCKET_ROOT).join(format!("rdy-{uid}"))
+/// Makes `path` a run directory: `RunDir::ensure`'s first step.
+#[doc(hidden)]
+pub fn ensure_run_dir(path: &Path) -> io::Result<()> {
+    match sys::dir_state(path) {
+        Ok(DirState::Private) => Ok(()),
+        Ok(DirState::NotPrivate) => sys::make_private_dir(path),
+        Ok(DirState::NotDir) => Err(not_a_dir(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match sys::create_private_dir(path) {
+                Ok(()) => {}
+                // another process made it first: check what it made
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if sys::dir_state(path)? == DirState::NotDir {
+                        return Err(not_a_dir(path));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+            // the umask may have narrowed the mode; set it exactly
+            sys::make_private_dir(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The bytes of the run file `path`, of at most `most`; `None` when it is missing, a link,
+/// unreadable, longer, or not to be believed (`sys::run_file_is_private`). Nothing past the bound
+/// is read.
+fn read_run_file(path: &Path, most: usize) -> Option<Vec<u8>> {
+    let f = open_no_follow(OpenOptions::new().read(true), path).ok()?;
+    if !sys::run_file_is_private(&f).ok()? {
+        return None;
+    }
+    read_capped(f, most).ok()?
 }
 
 /// A short socket directory that rdy refuses to use: not a real directory (a symlink, a file),
@@ -315,7 +317,7 @@ impl std::error::Error for ShortDirError {
 }
 
 /// `e` as a [`ShortDirError`] for `dir`, of `e`'s kind.
-fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
+pub(crate) fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
     io::Error::new(
         e.kind(),
         ShortDirError {
@@ -323,41 +325,6 @@ fn short_dir_error(dir: &Path, e: io::Error) -> io::Error {
             error: e,
         },
     )
-}
-
-/// `ensure_short_dir_as` for this process's user.
-pub(crate) fn ensure_short_dir(dir: &Path) -> io::Result<()> {
-    ensure_short_dir_as(dir, own_uid())
-}
-
-/// Makes `dir` a directory private to user `uid` (D-YMWEM): creates it with mode 0o700 when it
-/// is missing; tightens a directory of `uid` with another mode to 0o700; refuses anything else
-/// (a symlink, a file, a directory of another user) with [`NotPrivateDir`], and leaves it as it
-/// is. It never follows a symlink. A failed `mkdir`, `lstat` or `chmod` is a [`ShortDirError`]
-/// that names `dir`.
-fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
-    let failed = |e| short_dir_error(dir, e);
-    let m = match fs::symlink_metadata(dir) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            match sys::create_private_dir(dir) {
-                Ok(()) => {}
-                // another process made it first: check what it made
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(failed(e)),
-            }
-            fs::symlink_metadata(dir).map_err(failed)?
-        }
-        Err(e) => return Err(failed(e)),
-    };
-    if !m.is_dir() || sys::owner(&m) != uid {
-        return Err(io::Error::other(NotPrivateDir(dir.to_path_buf())));
-    }
-    // the umask may have narrowed a new directory's mode, and an old one may be open to others
-    if !sys::is_private_dir(&m) {
-        sys::make_private_dir(dir).map_err(failed)?;
-    }
-    Ok(())
 }
 
 /// Removes a temp file when dropped, so every exit path cleans it up.
@@ -379,8 +346,11 @@ fn no_hard_links(e: &io::Error) -> bool {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
+    use crate::socket::MAX_SOCKET_PATH;
+    use crate::sys::{ensure_short_dir, ensure_short_dir_as, short_dir};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     fn names_in(dir: &Path) -> Vec<String> {

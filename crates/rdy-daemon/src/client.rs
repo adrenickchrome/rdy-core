@@ -738,17 +738,9 @@ fn peer_pid(socket: &Path) -> Option<u32> {
     })
 }
 
-/// The pid `.rdy/run/daemon.pid` holds: decimal digits only, surrounding whitespace trimmed.
-/// `None` when it is missing, a link, too long or anything else.
+/// The pid `.rdy/run/daemon.pid` holds (`RunDir::pid_record`).
 fn read_pid_file(run: &RunDir) -> Option<u32> {
-    let f = open_no_follow(fs::OpenOptions::new().read(true), &run.pid_file()).ok()?;
-    let mut buf = Vec::new();
-    f.take(64).read_to_end(&mut buf).ok()?;
-    let text = std::str::from_utf8(&buf).ok()?.trim();
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok()
+    run.pid_record().map(|r| r.pid())
 }
 
 /// Starts a daemon for a run dir and returns at once, with a way to tell whether it has exited.
@@ -1220,7 +1212,7 @@ mod tests {
         let ro = d.path().join("read-only");
         fs::DirBuilder::new().mode(0o500).create(&ro).unwrap();
         let dir = ro.join("rdy-501");
-        let e = ensure_error(&run, crate::layout::ensure_short_dir(&dir).unwrap_err());
+        let e = ensure_error(&run, crate::sys::ensure_short_dir(&dir).unwrap_err());
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(e.code, E_DAEMON_START);
         assert_eq!(

@@ -22,7 +22,7 @@ use super::Stream;
 use rdy_store::pio::{self, Sid};
 use serde::{Serialize, Serializer};
 use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, FILETIME, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
@@ -98,6 +98,22 @@ impl<P> PeerProcess<P> {
     pub fn handle(&self) -> &P {
         &self.handle
     }
+}
+
+/// The creation time of the process `process` is open on, as a `FILETIME` in one number: 100 ns
+/// units since 1601.
+#[allow(unsafe_code)]
+pub(super) fn creation_time(process: RawHandle) -> io::Result<u64> {
+    let mut times = [FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    }; 4];
+    let [created, exited, kernel, user] = &mut times;
+    // SAFETY: the caller keeps `process` open for the call, and all four times are writable.
+    if unsafe { GetProcessTimes(process, created, exited, kernel, user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
 }
 
 /// Test hook: the system calls of one peer check, in the order [`read_peer`] makes them.
@@ -247,16 +263,7 @@ impl ProcessQuery for PipeQuery<'_> {
     }
 
     fn created(&self, process: &OwnedHandle) -> io::Result<u64> {
-        let mut times = [FILETIME {
-            dwLowDateTime: 0,
-            dwHighDateTime: 0,
-        }; 4];
-        let [created, exited, kernel, user] = &mut times;
-        // SAFETY: `process` is open for the call, and all four times are writable.
-        if unsafe { GetProcessTimes(process.as_raw_handle(), created, exited, kernel, user) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+        creation_time(process.as_raw_handle())
     }
 
     fn account(&self, process: &OwnedHandle) -> io::Result<Account> {

@@ -87,10 +87,35 @@ fn sess1_session_info_serializes_for_the_sessions_op() {
 
 #[test]
 fn sess1_run_dir_names_are_fixed() {
-    let r = RunDir::of_project(std::path::Path::new("/proj"));
-    assert_eq!(r.path(), std::path::Path::new("/proj/.rdy/run"));
+    // a root that does not exist, so its canonical form is the path as written
+    #[cfg(not(windows))]
+    let (root, run) = ("/proj", "/proj/.rdy/run");
+    #[cfg(windows)]
+    let (root, run) = (
+        r"C:\rdy-no-such-project",
+        r"C:\rdy-no-such-project\.rdy\run",
+    );
+    let (root, run) = (std::path::Path::new(root), PathBuf::from(run));
+    let r = RunDir::of_project(root);
+    assert_eq!(r.path(), run);
+    assert_eq!(r.start_lock(), run.join("start.lock"));
+    assert_eq!(r.pid_file(), run.join("daemon.pid"));
+    assert_eq!(r.log_file(), run.join("daemon.log"));
+    assert_eq!(r.socket_record(), run.join("daemon.sock"));
+    #[cfg(not(windows))]
     assert_eq!(r.socket(), PathBuf::from("/proj/.rdy/run/rdy.sock"));
-    assert_eq!(r.start_lock(), PathBuf::from("/proj/.rdy/run/start.lock"));
-    assert_eq!(r.pid_file(), PathBuf::from("/proj/.rdy/run/daemon.pid"));
-    assert_eq!(r.log_file(), PathBuf::from("/proj/.rdy/run/daemon.log"));
+    // the endpoint is a pipe here, no file of the run dir: the hash of the root's UTF-16LE units
+    #[cfg(windows)]
+    {
+        let units: Vec<u8> = root
+            .to_str()
+            .unwrap()
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            r.socket(),
+            PathBuf::from(format!(r"\\.\pipe\rdy-{}", blake3::hash(&units).to_hex()))
+        );
+    }
 }

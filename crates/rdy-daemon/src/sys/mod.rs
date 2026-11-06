@@ -13,7 +13,13 @@
 //! calls (`open_no_follow`, `own_uid`, `owner`, `private_file`, `make_private_file`,
 //! `create_private_dir`, `make_private_dir`, `is_private_dir`) live in the store's seam,
 //! `rdy_store::pio`, so engine code can use them too; this seam re-exports them under the same
-//! names. `make_private_path` stays here.
+//! names. `make_private_path` stays here;
+//! - the project's endpoint and run state: which endpoint a canonical project root has
+//!   (`project_endpoint`), its lifecycle (`clear_endpoint`, `bind_endpoint`, `seal_endpoint`,
+//!   `remove_endpoint`; a pipe is no file, so these do nothing to the file system on Windows), the
+//!   exact grammars of `daemon.sock` and `daemon.pid` (`parse_endpoint_record`, `parse_pid_record`,
+//!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`)
+//!   and whether a run file may be believed (`run_file_is_private`);
 //! - process lifecycle: a new session on spawn, exit codes, liveness, `SIGTERM` and `setsid`;
 //! - what a stop's wait knows of an old daemon ([`Liveness`], `process_liveness`,
 //!   `endpoint_liveness`). The contract for every platform: only a proved end is `Gone`. Access
@@ -31,6 +37,7 @@
 //!   on Unix, `SO_EXCLUSIVEADDRUSE` on Windows (built and tested on its own by the isolated probe
 //!   in `probes/site-socket`).
 
+pub mod records;
 mod site_socket;
 #[cfg(unix)]
 mod unix;
@@ -65,6 +72,17 @@ pub enum Liveness {
     Live,
     /// The system's answer proves neither. A wait counts this as still live.
     Ambiguous,
+}
+
+/// What stands at a run directory's path (`dir_state`), never followed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirState {
+    /// A directory that is private to this account.
+    Private,
+    /// A directory that is not: `make_private_dir` narrows it, or refuses one of another account.
+    NotPrivate,
+    /// Something else.
+    NotDir,
 }
 
 /// The variables the pinned diagram crate reads at run time. Each one changes its drawing.
