@@ -772,10 +772,10 @@ async fn wx21b_copied_restored_and_deleted_projects_are_isolated() {
         connect(&copy_run, &hello_for(copy.path())).await,
         Attempt::NoDaemon(_)
     ));
-    // restored: the project's `.rdy` is removed and made again, so it has a new identity; the
-    // old record no longer names it
+    // restored: the project's `.rdy` is made again, so it has a new identity; the old record no
+    // longer names it. The old one is renamed, not removed, so its identity cannot be reused.
     let before = copy_run.project_id().unwrap();
-    std::fs::remove_dir_all(copy.path().join(".rdy")).unwrap();
+    std::fs::rename(copy.path().join(".rdy"), copy.path().join(".rdy-before")).unwrap();
     let restored = RunDir::of_project(copy.path());
     restored.ensure().unwrap();
     write_record(&restored, &d.run.socket(), &before);
