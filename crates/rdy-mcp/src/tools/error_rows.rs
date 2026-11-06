@@ -517,14 +517,14 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "take the landed side of a conflict (rdy view resolve <view> <id> --landed; rdy_view {op: \"resolve\", block, landed: true}), or write a new decision that supersedes or revokes it. For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.",
     ),
     (
-        E_HELD_BY_READER,
-        "the project store is still open in this process through a read state of an earlier open",
-        HELD_BY_READER_FIX,
-    ),
-    (
         W_KUNGFU,
         "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
         "Call rdy_instructions and load the ruleset named by the warning.",
+    ),
+    (
+        E_HELD_BY_READER,
+        "the project store is still open in this process through a read state of an earlier open",
+        HELD_BY_READER_FIX,
     ),
     (
         E_PUBLICATION_REFERENCE,
