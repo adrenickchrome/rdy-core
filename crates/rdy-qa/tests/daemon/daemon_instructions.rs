@@ -382,13 +382,14 @@ fn agi3_full_crosses_ctl_without_duplicating_person_reads() {
         row(&pa.rules[0][0], "project"),
         row(&ma.rules[0][0], "person"),
     ];
-    // the private form returns the person rows alone, whatever else the call carries
+    // the private form, sent to meta's daemon, returns its own rows as the person layer and
+    // nothing else, whatever else the call carries
     for args in [
         json!({"part": true}),
         json!({"part": true, "full": true}),
         json!({"part": true, "full": true, "load": ["rdy:write"]}),
     ] {
-        let v = ctl_instructions(&w, pd.path(), "agent:p", "p1", args);
+        let v = ctl_instructions(&w, md.path(), "agent:p", "p1", args);
         let part = &v["contribution"];
         assert_eq!(part["layer"], "person", "{v}");
         assert_eq!(rows(part), [row(&ma.rules[0][0], "person")], "{v}");
