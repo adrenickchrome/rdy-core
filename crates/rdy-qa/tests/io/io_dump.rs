@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! dl5: `rdy dump` writes the published log's sealed batches and the closed project files as one
 //! stream (D-69AY3, D-D2NPN; F5 of D-FR0C4). Atomic at the target: a complete file at `out`, or
 //! nothing.
@@ -369,7 +367,7 @@ fn dl5_a_dump_through_a_symlink_into_rdy_is_refused() {
     let (dir, r) = qa_project();
     let tmp = tempfile::tempdir().unwrap();
     let link = tmp.path().join("packs");
-    std::os::unix::fs::symlink(dir.path().join(".rdy/packs"), &link).unwrap();
+    rdy_qa::platform::symlink(&dir.path().join(".rdy/packs"), &link).unwrap();
     let out = link.join("backup.yaml");
     let e = r.read().dump(&out).unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT);

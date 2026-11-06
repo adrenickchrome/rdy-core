@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! dl6: rdy load rebuilds a project from a dump, byte for byte, then builds the index and runs
 //! fsck; a refused or failed load leaves the target as it was.
 use rdy_engine::{Rdy, load::load};
@@ -9,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Every path under `dir` with its bytes (None for a directory).
-fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(crate) fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut out = BTreeMap::new();
     if !dir.exists() {
         return out;
@@ -41,7 +39,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The every-kind project, a dump of it, and a scratch directory.
-fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+pub(crate) fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     let src = every_kind::project();
     let scratch = tempfile::tempdir().unwrap();
     let file = scratch.path().join("p.rdydump");
@@ -51,7 +49,7 @@ fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     (src, scratch, file)
 }
 
-fn segs(p: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(crate) fn segs(p: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     tree(&p.join(".rdy/store/segments"))
 }
 
@@ -405,7 +403,7 @@ fn dl6_a_missing_dump_is_refused_and_the_target_untouched() {
 /// Loads `file` into `to` while another thread opens the project as soon as `.rdy/store`
 /// appears, and holds it until the load returns. Returns the load's result and what the racer's
 /// opens returned: an error code, or `ok`.
-fn race(
+pub(crate) fn race(
     file: &Path,
     to: &Path,
 ) -> (
@@ -478,7 +476,7 @@ fn dl6_a_racing_open_does_not_break_a_load() {
 }
 
 /// A dump of the every-kind project with a view ref that names no view op: fsck refuses it.
-fn fsck_failing_dump(scratch: &Path) -> PathBuf {
+pub(crate) fn fsck_failing_dump(scratch: &Path) -> PathBuf {
     let src = every_kind::project();
     {
         let mut r = Rdy::open(src.path()).unwrap();
@@ -494,8 +492,9 @@ fn fsck_failing_dump(scratch: &Path) -> PathBuf {
     file
 }
 
-#[test]
-fn dl6_a_failed_check_undoes_while_locked() {
+/// Four loads of an fsck-failing dump into a target that holds a file, each raced by an opener:
+/// the opener never gets the store the load then removes, and the target ends as it began.
+pub(crate) fn failed_check_undoes_while_locked() {
     let scratch = tempfile::tempdir().unwrap();
     let file = fsck_failing_dump(scratch.path());
     let mut raced = false;
@@ -521,6 +520,11 @@ fn dl6_a_failed_check_undoes_while_locked() {
         assert_eq!(tree(&to), before, "round {round}");
     }
     assert!(raced, "the racer never tried an open while the load ran");
+}
+
+#[test]
+fn dl6_a_failed_check_undoes_while_locked() {
+    failed_check_undoes_while_locked();
 }
 
 /// `tree(dir)` without the paths under `skip` (relative to `dir`): a live daemon's run files and
@@ -667,7 +671,7 @@ fn dl6_a_file_that_is_not_a_dump_is_refused() {
 fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
     let (src, scratch, file) = dumped();
     let link = scratch.path().join("link");
-    std::os::unix::fs::symlink(src.path().join(".rdy"), &link).unwrap();
+    rdy_qa::platform::symlink(&src.path().join(".rdy"), &link).unwrap();
     let before = tree(src.path());
     for to in [
         src.path().join(".rdy"),
