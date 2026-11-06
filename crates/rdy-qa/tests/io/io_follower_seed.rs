@@ -8,8 +8,10 @@ use rdy_qa::every_kind;
 use rdy_store::dump_chain::ChainEnd;
 use rdy_store::format::{FeatureClass, StoreFeature, StoreFeatures, inject_test_feature};
 use rdy_store::fsutil::{PrivateWriteStage, with_private_write_probe_for_tests};
+use rdy_store::kinds;
+#[cfg(unix)]
+use rdy_store::pio;
 use rdy_store::upgrade::UpgradeStep;
-use rdy_store::{kinds, pio};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -324,12 +326,13 @@ fn mh6_seed_failure_leaves_no_unmarked_store() {
         });
     }
     // the store's creation: a target this user cannot write into (root can)
-    if pio::own_uid() != 0 {
+    if !runs_as_root() {
         let target = d.path().join("shut");
         std::fs::create_dir(&target).unwrap();
-        pio::set_mode(&target, 0o500).unwrap();
-        let e = follower::seed(&file, &target);
-        pio::set_mode(&target, 0o700).unwrap();
+        let e = {
+            let _shut = rdy_qa::platform::ReadOnlyDir::new(&target).unwrap();
+            follower::seed(&file, &target)
+        };
         assert_eq!(e.unwrap_err().code, "E_IO");
         assert!(tree(&target).is_empty());
     }
@@ -356,4 +359,16 @@ fn mh6_seed_failure_leaves_no_unmarked_store() {
     let mark = rdy_store::follower::read_mark(&target.join(".rdy/store")).unwrap();
     assert!(mark.is_some(), "a placed store has its mark");
     assert!(!target.join(".rdy/store.loading").exists());
+}
+
+/// Root ignores directory modes; Windows has no such account for an ordinary test run.
+fn runs_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        pio::own_uid() == 0
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
