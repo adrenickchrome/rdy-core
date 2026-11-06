@@ -2,6 +2,7 @@
 mod common;
 use common::*;
 use rdy_daemon::*;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[cfg(unix)]
