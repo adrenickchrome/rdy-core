@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The build handshake (D-CCC6E): the hello and `ready` carry the build, a daemon alone with
 //! another build exits to be replaced, and a busy one serves and exits at its last close.
 mod common;
@@ -11,7 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// A build that is not this binary's: a fixed synthetic id, never the live one.
 const OTHER: &str = "0123456789abcdef";
@@ -204,10 +201,10 @@ async fn mh5_hello_and_ready_add_build_and_ignore_unknown_fields() {
         let dir = short_tempdir();
         std::fs::create_dir_all(dir.path().join(".rdy/run")).unwrap();
         let run = RunDir::of_project(dir.path());
-        let l = tokio::net::UnixListener::bind(run.socket()).unwrap();
+        let mut l = rdy_daemon::sys::bind(&run.socket()).unwrap();
         let answer = bad.to_string();
         tokio::spawn(async move {
-            let (s, _) = l.accept().await.unwrap();
+            let s = l.accept().await.unwrap();
             let mut s = BufReader::new(s);
             let mut line = String::new();
             s.read_line(&mut line).await.unwrap();
@@ -367,7 +364,7 @@ async fn mh5_prehello_clients_and_concurrent_closes_are_counted() {
     // a client held before its hello counts as a connection
     let d = daemon("1", true, |_| {}).await;
     let cwd = d.dir.path().to_path_buf();
-    let silent = UnixStream::connect(d.run.socket()).await.unwrap();
+    let silent = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
     connections_reach(&d.handle, 1).await;
     let other = ready(&d.run, &typed("1", OTHER, &cwd)).await;
     let stopped = d.handle.stopped();

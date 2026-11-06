@@ -1,23 +1,24 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets, file modes, owners and symlinks. FW-XP1 Phase 4 ports it.
 //! The run dir, the socket and the peer check (sock1).
 mod common;
 use common::*;
 use rdy_daemon::*;
-use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::UnixStream;
 
+#[cfg(unix)]
 fn mode(p: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
 }
 
 #[tokio::test]
 async fn sock1_bind_makes_a_private_run_dir_socket_and_pid_file() {
     let d = daemon("1", true, |_| {}).await;
-    assert_eq!(mode(d.run.path()), 0o700);
-    assert_eq!(mode(&d.run.socket()), 0o600);
-    assert_eq!(mode(&d.run.pid_file()), 0o600);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(d.run.path()), 0o700);
+        assert_eq!(mode(&d.run.socket()), 0o600);
+        assert_eq!(mode(&d.run.pid_file()), 0o600);
+    }
     let pid: u32 = std::fs::read_to_string(d.run.pid_file())
         .unwrap()
         .trim()
@@ -33,10 +34,12 @@ async fn sock1_bind_makes_a_private_run_dir_socket_and_pid_file() {
     assert!(!d.run.pid_file().exists(), "stop removes the pid file");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sock1_an_existing_run_dir_is_tightened_and_a_file_is_refused() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(run.path()).unwrap();
     std::fs::set_permissions(run.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     run.ensure().unwrap();
@@ -54,10 +57,11 @@ async fn sock1_a_stale_socket_file_is_replaced_by_bind() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
-    drop(std::os::unix::net::UnixListener::bind(run.socket()).unwrap()); // dead listener, file stays
+    drop(rdy_daemon::sys::bind(&run.socket()).unwrap()); // dead listener, a socket file stays
+    #[cfg(unix)]
     assert!(run.socket().exists());
     assert!(
-        std::os::unix::net::UnixStream::connect(run.socket()).is_err(),
+        rdy_daemon::sys::connect(&run.socket()).await.is_err(),
         "stale: refused"
     );
     let d = daemon_at(dir).await;
@@ -88,6 +92,7 @@ async fn daemon_at(dir: tempfile::TempDir) -> TestDaemon {
 /// df3 (D-YMWEM): a project path whose `.rdy/run/rdy.sock` is over `sun_path` binds the short
 /// socket in the user's private `/tmp/rdy-<uid>` instead of failing; the pid file stays in
 /// `.rdy/run/`.
+#[cfg(unix)]
 #[tokio::test]
 async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
     let dir = short_tempdir();
@@ -111,12 +116,13 @@ async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
     std::fs::remove_file(&sock).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sock1_a_peer_of_another_uid_is_closed_without_a_byte() {
     let log = rdy_daemon::daemon::capture_log_for_tests(&["refused a connection from uid"]);
     let me = socket::own_uid();
     let d = daemon("1", true, |c| c.expected_account = Some(me + 1)).await;
-    let s = UnixStream::connect(d.run.socket()).await.unwrap();
+    let s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
     let mut r = BufReader::new(s);
     let mut out = String::new();
     let n = tokio::time::timeout(std::time::Duration::from_secs(3), r.read_line(&mut out))
@@ -129,6 +135,7 @@ async fn sock1_a_peer_of_another_uid_is_closed_without_a_byte() {
     assert_eq!(log.lines(), [format!("refused a connection from uid {me}")]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sock1_peer_uid_of_a_same_user_connection_is_our_uid() {
     let d = daemon("1", true, |_| {}).await;
@@ -147,11 +154,16 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
     run.ensure().unwrap();
     let victim = dir.path().join("victim");
     std::fs::write(&victim, "keep\n").unwrap();
-    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-    std::os::unix::fs::symlink(&victim, run.path().join(format!("{PID_FILE}.tmp"))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    symlink_file(&victim, &run.path().join(format!("{PID_FILE}.tmp")));
     let e = socket::bind(&run).await.unwrap_err();
     assert!(e.to_string().contains("symbolic link"), "{e}");
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+    #[cfg(unix)]
     assert_eq!(mode(&victim), 0o644);
     assert!(
         !run.pid_file().exists(),
@@ -166,6 +178,7 @@ async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched()
 /// df3 fix round 1 (ruling 2): after its bind the daemon records the socket it bound in
 /// `.rdy/run/daemon.sock`, next to `daemon.pid`, and removes the record on a clean exit. Fix
 /// round 2 (ruling task-3-round1): the record's second line is the `.rdy` identity.
+#[cfg(unix)]
 #[tokio::test]
 async fn df3_the_daemon_records_its_socket_and_removes_the_record_on_exit() {
     let d = daemon("1", true, |_| {}).await;
@@ -191,6 +204,7 @@ async fn df3_the_daemon_records_its_socket_and_removes_the_record_on_exit() {
 
 /// df3 fix round 1 (ruling 1): a socket that cannot be bound names its path, so a foreground
 /// `rdy serve` says where it failed.
+#[cfg(unix)]
 #[tokio::test]
 async fn df3_a_socket_that_cannot_be_bound_names_its_path() {
     let dir = short_tempdir();

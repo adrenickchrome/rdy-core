@@ -166,3 +166,30 @@ pub async fn ctl(r: &mut BufReader<Conn>, id: u64, op: &str, args: Value) -> Val
     r.read_line(&mut out).await.unwrap();
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out:?}"))
 }
+
+/// Makes a symbolic link to a file at `link`. Windows needs the symbolic-link privilege, which the
+/// ordinary test account holds.
+#[cfg(unix)]
+pub fn symlink_file(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+pub fn symlink_file(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_file(target, link).unwrap();
+}
+
+/// An endpoint name that once had a listener and has none now. On Unix the socket file stays; a
+/// pipe leaves no trace, so on Windows it is a pipe name that nothing ever bound.
+#[cfg(unix)]
+pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
+    let dead = dir.join("dead.sock");
+    drop(rdy_daemon::sys::bind(&dead).unwrap());
+    dead
+}
+
+#[cfg(windows)]
+pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
+    let tag = dir.file_name().unwrap().to_string_lossy().into_owned();
+    std::path::PathBuf::from(format!(r"\\.\pipe\rdy-dead-{tag}"))
+}
