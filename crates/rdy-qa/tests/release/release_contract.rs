@@ -43,6 +43,7 @@ use rdy_store::{codec, dump, kinds, sync_stream};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -5347,16 +5348,45 @@ impl PersonHost for NoStoreHost {
     }
 }
 
-/// The rows and menu that the committed guide bundle says a full reply holds.
-fn bundle_reply(bundle: &Value) -> (Value, Value) {
+/// The rows and menu that the committed guide bundle and tool table say a full reply holds. The
+/// final row of a ruleset that owns tools carries its value's line (D-Y18E1); the value hashes the
+/// bundle's source rows. Computed here and not by the code under test.
+fn bundle_reply(bundle: &Value, table: &Value) -> (Value, Value) {
     let (mut rows, mut menu) = (vec![], vec![]);
     for set in bundle["rulesets"].as_array().expect("rulesets") {
         let handle = format!("rdy:{}", set["name"].as_str().expect("a name"));
+        let tools: Vec<&str> = table
+            .as_array()
+            .expect("the table's rows")
+            .iter()
+            .filter(|row| row["ruleset"] == handle.as_str())
+            .map(|row| row["tool"].as_str().expect("a tool"))
+            .collect();
+        let source_rows = set["rows"].as_array().expect("rows");
+        let source: String = source_rows
+            .iter()
+            .map(|row| row["text"].as_str().expect("a text"))
+            .collect();
+        let digest: String = Sha256::digest(source.as_bytes())
+            .iter()
+            .take(4)
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let mut bytes = 0usize;
-        for row in set["rows"].as_array().expect("rows") {
-            bytes += row["text"].as_str().expect("a text").len();
+        for (index, row) in source_rows.iter().enumerate() {
+            let mut text = row["text"].as_str().expect("a text").to_string();
+            if !tools.is_empty() && index + 1 == source_rows.len() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
+                    "On every call to a tool in this ruleset, pass kungfu: \"kf-{digest}\". Tools: {}.\n",
+                    tools.join(", ")
+                ));
+            }
+            bytes += text.len();
             rows.push(json!({
-                "id": row["id"], "ruleset": handle, "text": row["text"], "layer": "rdy",
+                "id": row["id"], "ruleset": handle, "text": text, "layer": "rdy",
                 "locked": row["locked"], "reason": [],
             }));
         }
@@ -5376,8 +5406,18 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
     let bundle_path = workspace_root().join("release/agent-guide.json");
     let bundle: Value =
         serde_json::from_slice(&std::fs::read(&bundle_path).expect("the bundle")).expect("JSON");
-    let (rows, menu) = bundle_reply(&bundle);
+    let table_path = workspace_root().join("crates/rdy-engine/kungfu-tools.json");
+    let table: Value =
+        serde_json::from_slice(&std::fs::read(&table_path).expect("the table")).expect("JSON");
+    let (rows, menu) = bundle_reply(&bundle, &table);
     assert_eq!(rows.as_array().unwrap().len(), 14);
+    let lines = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["text"].as_str().unwrap().contains("pass kungfu: \"kf-"))
+        .count();
+    assert_eq!(lines, 9, "one line for each ruleset that owns tools");
     assert_eq!(menu.as_array().unwrap().len(), 12);
     let required: Vec<&Value> = rows
         .as_array()
@@ -5480,6 +5520,8 @@ fn agi6_release_surface_exposes_full_and_builtin_rows() {
         .arg(&bundle_path)
         .arg("--sidecar")
         .arg(workspace_root().join("release/agent-guide.sha256"))
+        .arg("--table")
+        .arg(&table_path)
         .output()
         .expect("run the checker");
     assert!(

@@ -36,6 +36,8 @@ time.workspace = true
 # Every log record is compiled out: ureq-proto writes raw request bytes, Authorization included,
 # at trace level.
 log = { workspace = true, features = ["max_level_off", "release_max_level_off"] }
+# The kungfu values: the digest of a ruleset's source rows (D-Y18E1).
+sha2.workspace = true
 # A stream render's one anonymous scratch file (`render_source`): unlinked at creation, so it
 # needs no cleanup and leaves no name behind.
 tempfile.workspace = true

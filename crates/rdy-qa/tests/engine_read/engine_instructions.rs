@@ -20,6 +20,7 @@ use rdy_model::redaction::RedactTarget;
 use rdy_qa::fixtures::*;
 use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fixture};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const NOT_FOUND_FIX: &str = "call rdy_instructions and load an id from its menu";
@@ -1485,9 +1486,26 @@ fn agi2_fresh_delivery_has_bootstrap_menu_and_setup_hint() {
     assert_eq!(boot.name, "bootstrap");
     assert_eq!(boot.rows.len(), 3);
     assert_eq!(reply.instructions.len(), 3);
-    for (got, want) in reply.instructions.iter().zip(boot.rows) {
+    // D-Y18E1: the final row carries the bootstrap's value, on a line after its source bytes; the
+    // value hashes the source rows, so the line is outside it
+    let source: String = boot.rows.iter().map(|r| r.text).collect();
+    let digest: String = Sha256::digest(source.as_bytes())
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let line = format!(
+        "On every call to a tool in this ruleset, pass kungfu: \"kf-{digest}\". Tools: rdy_brief, rdy_context, rdy_overview, rdy_pending, rdy_query, rdy_read, rdy_schema, rdy_search, rdy_site, rdy_suspects, rdy_tensions.\n"
+    );
+    assert!(boot.rows[2].text.ends_with('\n'));
+    let delivered = [
+        boot.rows[0].text.to_string(),
+        boot.rows[1].text.to_string(),
+        format!("{}{line}", boot.rows[2].text),
+    ];
+    for ((got, want), text) in reply.instructions.iter().zip(boot.rows).zip(&delivered) {
         assert_eq!(got.id, want.id);
-        assert_eq!(got.text, want.text);
+        assert_eq!(&got.text, text);
         assert_eq!(got.locked, want.locked);
         assert_eq!(got.ruleset, "rdy:bootstrap");
         assert_eq!(got.layer, Layer::Rdy);
@@ -1522,8 +1540,16 @@ fn agi2_fresh_delivery_has_bootstrap_menu_and_setup_hint() {
         assert_eq!(m.layer, Layer::Rdy);
         assert_eq!(m.required, set.name == "bootstrap");
         assert!(m.hints.is_empty());
-        let bytes: usize = set.rows.iter().map(|r| r.text.len()).sum();
-        assert_eq!(m.tokens, estimate_tokens(bytes as u64));
+        // a menu size counts what the ruleset would deliver, its value's line included
+        let source: u64 = set.rows.iter().map(|r| r.text.len() as u64).sum();
+        let added = match (rdy_engine::kungfu::owner(set.name), set.rows.last()) {
+            (Some(owner), Some(last)) => owner.added_bytes(last.text),
+            _ => 0,
+        };
+        if set.name == "bootstrap" {
+            assert_eq!(added, line.len() as u64);
+        }
+        assert_eq!(m.tokens, estimate_tokens(source + added));
         assert!(m.tokens > 0);
     }
 
