@@ -91,13 +91,12 @@ fn table_value() -> Vec<Value> {
 /// The refusal of `rows` as a table.
 fn refusal(rows: &[Value]) -> String {
     build::validate(&serde_json::to_vec(rows).unwrap())
-        .err()
-        .expect("a refusal")
+        .expect_err("a refusal")
         .to_string()
 }
 
 fn refusal_of_bytes(bytes: &[u8]) -> String {
-    build::validate(bytes).err().expect("a refusal").to_string()
+    build::validate(bytes).expect_err("a refusal").to_string()
 }
 
 const INVALID: &str = "kungfu catalogue: invalid table";
@@ -277,13 +276,12 @@ fn kfu1_table_is_closed_and_all_rows_warn() {
         apply(&mut rows);
         rows
     };
-    let without =
-        |ruleset: &'static str| edited(&move |rows| rows.retain(|r| r["ruleset"] != ruleset));
 
     // a missing owner, for each owner
     for (name, _) in OWNERS {
-        let handle: &'static str = Box::leak(format!("rdy:{name}").into_boxed_str());
-        assert_eq!(refusal(&without(handle)), INVALID, "{name}");
+        let handle = format!("rdy:{name}");
+        let bad = edited(&|rows| rows.retain(|r| r["ruleset"] != handle.as_str()));
+        assert_eq!(refusal(&bad), INVALID, "{name}");
     }
     // exactly the two exemptions
     let lost = edited(&|rows| rows.retain(|r| r["tool"] != "rdy_session"));
@@ -422,6 +420,10 @@ fn kfu1_table_is_closed_and_all_rows_warn() {
             }),
         ),
         (
+            "row is an array",
+            edited(&|rows| rows.push(json!(["rdy_zz", "rdy:write", "warn"]))),
+        ),
+        (
             "row not an object",
             edited(&|rows| rows.push(json!("rdy_write"))),
         ),
@@ -490,8 +492,7 @@ fn kfu1_table_is_closed_and_all_rows_warn() {
     let empty = tempfile::tempdir().unwrap();
     assert_eq!(
         build::load(empty.path())
-            .err()
-            .expect("a refusal")
+            .expect_err("a refusal")
             .to_string(),
         INVALID
     );
@@ -500,10 +501,7 @@ fn kfu1_table_is_closed_and_all_rows_warn() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, " ".repeat(build::TABLE_MAX + 1)).unwrap();
     assert_eq!(
-        build::load(big.path())
-            .err()
-            .expect("a refusal")
-            .to_string(),
+        build::load(big.path()).expect_err("a refusal").to_string(),
         "kungfu catalogue: table exceeds 32768 bytes"
     );
     std::fs::write(&path, &pretty).unwrap();

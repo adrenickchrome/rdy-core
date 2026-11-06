@@ -7,7 +7,7 @@
 //! the digest. The table's layout is closed; `scripts/release/guide.py` checks the same rules.
 
 use serde::Deserialize;
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,18 +150,48 @@ fn over_bytes() -> Refusal {
     Refusal(format!("table exceeds {TABLE_MAX} bytes"))
 }
 
-/// One row as written. Every key is required: a null ruleset is an exemption, a missing one is not.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One row as written. A JSON object with each key exactly once: a null ruleset is an exemption, a
+/// missing one is malformed, and an array is not a row.
 struct RawRow {
     tool: String,
-    #[serde(deserialize_with = "nullable")]
     ruleset: Option<String>,
     response: String,
 }
 
-fn nullable<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(d)
+impl<'de> Deserialize<'de> for RawRow {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RawRow, D::Error> {
+        d.deserialize_map(RowVisitor)
+    }
+}
+
+struct RowVisitor;
+
+impl<'de> Visitor<'de> for RowVisitor {
+    type Value = RawRow;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a table row")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawRow, A::Error> {
+        let (mut tool, mut ruleset, mut response) = (None, None, None);
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "tool" if tool.is_none() => tool = Some(map.next_value()?),
+                "ruleset" if ruleset.is_none() => ruleset = Some(map.next_value()?),
+                "response" if response.is_none() => response = Some(map.next_value()?),
+                _ => return Err(de::Error::custom("an unknown or repeated key")),
+            }
+        }
+        match (tool, ruleset, response) {
+            (Some(tool), Some(ruleset), Some(response)) => Ok(RawRow {
+                tool,
+                ruleset,
+                response,
+            }),
+            _ => Err(de::Error::custom("a missing key")),
+        }
+    }
 }
 
 /// The top-level array. The row bound stops the parse before any further row is kept.

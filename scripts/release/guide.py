@@ -683,24 +683,25 @@ def kungfu_line(value, tools):
 def expected_reply(value, table):
     """The rows and menu a binary built from bundle `value` and tool `table` delivers with --full and
     no other rule. Each value hashes source rows only; the line is added to a copy of the final row."""
-    seen = {}
+    values = {}
     for ruleset in value['rulesets']:
         if ruleset['name'] in table:
             named = kungfu_value(row['text'] for row in ruleset['rows'])
-            if named in seen:
-                raise CatalogueError('value collision rdy:%s rdy:%s' % (seen[named], ruleset['name']))
-            seen[named] = ruleset['name']
+            for owner, other in values.items():
+                if other == named:
+                    raise CatalogueError('value collision rdy:%s rdy:%s' % (owner, ruleset['name']))
+            values[ruleset['name']] = named
     rows = []
     menu = []
     for ruleset in value['rulesets']:
-        handle = 'rdy:' + ruleset['name']
+        name = ruleset['name']
+        handle = 'rdy:' + name
         size = 0
         final = len(ruleset['rows']) - 1
         for index, row in enumerate(ruleset['rows']):
             text = row['text']
-            if ruleset['name'] in table and index == final:
-                line = kungfu_line(kungfu_value(r['text'] for r in ruleset['rows']), table[ruleset['name']])
-                text += ('' if text.endswith('\n') else '\n') + line
+            if name in table and index == final:
+                text += ('' if text.endswith('\n') else '\n') + kungfu_line(values[name], table[name])
             rows.append({'id': row['id'], 'ruleset': handle, 'text': text, 'layer': 'rdy',
                          'locked': row['locked'], 'reason': []})
             size += len(text.encode('utf-8'))

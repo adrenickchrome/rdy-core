@@ -44,8 +44,9 @@ tempfile.workspace = true
 
 [features]
 # Test hooks that lower the redaction report's bounds for a test thread
-# (`redaction::override_limits_for_tests`). Never enabled by a normal build: only this crate's
-# own tests turn it on, through the dev-dependency below.
+# (`redaction::override_limits_for_tests`) and count the kungfu derivations
+# (`kungfu::derivations_for_tests`). Never enabled by a normal build: only this crate's own tests
+# turn it on, through the dev-dependency below.
 test-support = []
 
 [build-dependencies]
