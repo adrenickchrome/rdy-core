@@ -199,7 +199,8 @@ fn wx28a_failed_sync_or_rename_keeps_acknowledged_data() {
 #[test]
 fn wx28a_a_read_only_store_fails_and_keeps_acknowledged_data() {
     type Op = fn(&mut Rdy, &str) -> Result<(), RdyError>;
-    let cases: [(&str, fn(&Path) -> PathBuf, Op); 2] = [
+    type Directory = fn(&Path) -> PathBuf;
+    let cases: [(&str, Directory, Op); 2] = [
         (
             "a roll in read-only segments",
             |p| store_dir(p).join("segments"),
