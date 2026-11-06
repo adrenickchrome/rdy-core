@@ -162,6 +162,34 @@ impl<'a> RuleMutation<'a> {
             RuleMutation::Remove(r) => format!("Retire rule {}: {}", r.id, r.why),
         }
     }
+
+    /// The card title of the decision this request records: the rule's first words, to the title
+    /// limit, or the retired rule's id.
+    fn title(self) -> String {
+        match self {
+            RuleMutation::Add(r) => rule_title(&r.text),
+            RuleMutation::Edit(r) => rule_title(&r.text),
+            RuleMutation::Remove(r) => format!("Retire rule {}", r.id),
+        }
+    }
+}
+
+/// `Rule: ` and the first words of `text`, in at most [`crate::card_words::TITLE_MAX`] characters.
+/// A cut falls between words when it can.
+fn rule_title(text: &str) -> String {
+    const HEAD: &str = "Rule: ";
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let room = crate::card_words::TITLE_MAX - HEAD.chars().count();
+    if words.chars().count() <= room {
+        return format!("{HEAD}{words}");
+    }
+    let cut: String = words.chars().take(room).collect();
+    let whole_word = words.chars().nth(room).is_some_and(char::is_whitespace);
+    let kept = match cut.rfind(char::is_whitespace) {
+        Some(i) if !whole_word => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{HEAD}{}", kept.trim_end())
 }
 
 /// What the statement of an edit that keeps the words `text` holds before and after its ruleset.
@@ -646,6 +674,7 @@ fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>, statement: String) -> 
     }
     DecisionInput {
         statement,
+        title: Some(m.title()),
         why: Some(m.why().to_string()),
         authority_basis: Some("direct_ruling".into()),
         attested_by: Some(format!(
@@ -657,6 +686,28 @@ fn rule_decision(c: &RuleCaller<'_>, m: RuleMutation<'_>, statement: String) -> 
         fields,
         ..Default::default()
     }
+}
+
+/// Whether decisions in canon already say `statement`, and none of them is live. A retired
+/// decision still counts in the duplicate check (D-3AT5X), so a rule said again after its
+/// removal needs another statement. A live decision with these words still meets the tension.
+fn said_before_and_retired(
+    st: &ReadState,
+    canon: &Materialized,
+    statement: &str,
+) -> Result<bool, RdyError> {
+    let g = st.graph(&Scope::Canon)?;
+    let mut any = false;
+    for b in canon.iter() {
+        if b.block_type != decision::DECISION || b.field_str("statement") != Some(statement) {
+            continue;
+        }
+        if matches!(g.status(&b.id), Some(rdy_graph::DerivedStatus::Live)) {
+            return Ok(false);
+        }
+        any = true;
+    }
+    Ok(any)
 }
 
 impl Rdy {
@@ -706,6 +757,24 @@ impl Rdy {
                 return Err(changes_nothing());
             }
             statement = kept_words_statement(&r.text, selectors, &doc, &r.why);
+        }
+        if statement == m.statement() && !matches!(m, RuleMutation::Remove(_)) {
+            let here = current
+                .as_ref()
+                .and_then(|cur| canon.doc_of(&cur.rule.id))
+                .map(|b| b.id.to_string());
+            let doc = match &target {
+                Some(Target::Existing(id)) => id.to_string(),
+                Some(Target::NewDefault { path, .. }) => (*path).to_string(),
+                None => here.unwrap_or_default(),
+            };
+            let now = current.as_ref().map(|cur| selector_list(&cur.rule));
+            let all = vec![ALL.to_string()];
+            let selectors = m.applies_to().or(now.as_deref()).unwrap_or(all.as_slice());
+            if said_before_and_retired(&st, &canon, &statement)? {
+                statement =
+                    kept_words_statement(m.text().unwrap_or_default(), selectors, &doc, m.why());
+            }
         }
         if let Some(cur) = &current {
             let others = dependents(&st, &cur.reason.id, &cur.rule.id, view)?;

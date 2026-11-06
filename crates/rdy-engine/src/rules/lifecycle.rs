@@ -215,12 +215,26 @@ fn is_gate_change(c: &Change) -> bool {
         && c.ops.iter().all(|o| matches!(o, Op::Update { .. }))
 }
 
+/// Whether `written` is the long form of the statement of request `m`, which a rule said again
+/// after its removal takes. Its doc was read from canon at the write, so only its form is read.
+fn said_again_fits(m: RuleMutation<'_>, written: &str) -> bool {
+    let (Some(text), why) = (m.text(), m.why()) else {
+        return false;
+    };
+    let tail = format!("; because: {why})");
+    written
+        .strip_prefix(&format!("Rule: {text} (applies to: "))
+        .and_then(|rest| rest.strip_suffix(tail.as_str()))
+        .and_then(|rest| rest.rsplit_once("; ruleset: "))
+        .is_some_and(|(_, doc)| doc.is_empty() || !doc.contains(' '))
+}
+
 /// Whether `written` is the statement request `m` writes in `content`. An edit that keeps the
 /// words reads that from the version its update replaces, and its selectors from its update. Its
 /// doc was read from canon at the write and a later move can change it, so only its form is read.
 fn statement_fits(st: &ReadState, content: &Change, m: RuleMutation<'_>, written: &str) -> bool {
     let RuleMutation::Edit(r) = m else {
-        return written == m.statement();
+        return written == m.statement() || said_again_fits(m, written);
     };
     let update = content.ops.iter().find_map(|o| match o {
         Op::Update { block, base } => Some((block, base)),
@@ -233,7 +247,7 @@ fn statement_fits(st: &ReadState, content: &Change, m: RuleMutation<'_>, written
         return false;
     };
     if old.body != r.text {
-        return written == m.statement();
+        return written == m.statement() || said_again_fits(m, written);
     }
     let (head, tail) = kept_words_parts(&r.text, &selector_list(rule), &r.why);
     written

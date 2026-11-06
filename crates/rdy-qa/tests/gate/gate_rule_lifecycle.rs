@@ -1427,3 +1427,90 @@ fn rtc2_generated_ops_are_bounded_before_any_write() {
     assert_eq!(e.fix, "use at most 1024 ops for \"ops\"");
     assert_eq!(state_of(d.path(), &r), before);
 }
+
+#[test]
+fn rtc8_a_rule_landing_has_no_card_words_warning() {
+    let (_dir, mut r) = project();
+    let long = "Write every changelog entry in the past tense and name the person who asked for the change in it.";
+    let first = prepare(&mut r, add("Run the tests.")).unwrap();
+    let wide = prepare(&mut r, add(long)).unwrap();
+    for (what, p) in [("short add", &first), ("long add", &wide)] {
+        assert!(
+            !p.warnings.iter().any(|w| w.code == "W_CARD_WORDS"),
+            "{what}: {:?}",
+            p.warnings
+        );
+    }
+    // the card title is the rule's first words, to the title limit
+    let d = block(&r, &Scope::View(first.view.clone()), &first.decision);
+    assert_eq!(text_field(&d, "title"), "Rule: Run the tests.");
+    let d = block(&r, &Scope::View(wide.view.clone()), &wide.decision);
+    let title = text_field(&d, "title");
+    assert!(title.chars().count() <= 80, "{title}");
+    assert!(
+        title.starts_with("Rule: Write every changelog entry"),
+        "{title}"
+    );
+    assert!(
+        long.starts_with(title.strip_prefix("Rule: ").unwrap()),
+        "{title}"
+    );
+    let id = first.rule.id.clone();
+    land_prepared(&mut r, &first);
+
+    // an edit and a remove carry a title too
+    let edited = prepare(&mut r, edit(&id, "Run all the tests.")).unwrap();
+    assert!(
+        !edited.warnings.iter().any(|w| w.code == "W_CARD_WORDS"),
+        "{:?}",
+        edited.warnings
+    );
+    let d = block(&r, &Scope::View(edited.view.clone()), &edited.decision);
+    assert_eq!(text_field(&d, "title"), "Rule: Run all the tests.");
+    land_prepared(&mut r, &edited);
+    let gone = prepare(&mut r, remove(&id)).unwrap();
+    assert!(
+        !gone.warnings.iter().any(|w| w.code == "W_CARD_WORDS"),
+        "{:?}",
+        gone.warnings
+    );
+    let d = block(&r, &Scope::View(gone.view.clone()), &gone.decision);
+    assert_eq!(text_field(&d, "title"), format!("Retire rule {id}"));
+}
+
+#[test]
+fn rtc8_a_removed_rule_said_again_lands() {
+    const WORDS: &str = "Keep to the point.";
+    let (_dir, mut r) = project();
+    let first = added(&mut r, WORDS);
+    let id = first.rule.id.clone();
+    let gone = prepare(&mut r, remove(&id)).unwrap();
+    land_prepared(&mut r, &gone);
+
+    // the same words under a new session_ref: the rule is retired, so this lands
+    let mut again = add(WORDS);
+    again["session_ref"] = json!("chat-2");
+    let p = prepare(&mut r, again.clone()).unwrap_or_else(|e| panic!("{e}"));
+    let d = block(&r, &Scope::View(p.view.clone()), &p.decision);
+    let home = p.rule.ruleset.clone();
+    assert_eq!(
+        text_field(&d, "statement"),
+        format!("Rule: {WORDS} (applies to: all; ruleset: {home}; because: They asked.)")
+    );
+    land_prepared(&mut r, &p);
+    let rule = block(&r, &Scope::Canon, &p.rule.id);
+    assert_eq!(rule.body, WORDS);
+    assert_eq!(delivered(&r).0, std::slice::from_ref(&p.rule.id));
+
+    // saying it once more while the rule is live still meets the tension
+    let mut live = add(WORDS);
+    live["session_ref"] = json!("chat-3");
+    let q = prepare(&mut r, live).unwrap();
+    let PreparedState::Proposed { reference, version } = &q.state else {
+        panic!("{:?} is not proposed", q.state);
+    };
+    accept_deferrals(&mut r, &approver(), version, reference);
+    confirm_exceptions(&mut r, &approver(), reference);
+    let e = r.land(&approver(), version).unwrap_err();
+    assert_eq!(e.code, "E_PROPOSAL_NOT_READY", "{e}");
+}
