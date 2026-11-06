@@ -400,6 +400,10 @@ fn normalized(v: &Value, roots: &[String], masks: &[regex::Regex]) -> Value {
                     let Value::String(k) = normalized(&json!(k), roots, masks) else {
                         unreachable!()
                     };
+                    // a file's size on disk follows the file system's blocks
+                    if k.contains("bytes") && x.is_number() {
+                        return (k, json!("<bytes>"));
+                    }
                     (k, normalized(x, roots, masks))
                 })
                 .collect();
