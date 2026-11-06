@@ -33,7 +33,8 @@ fn decode(v: &Value) -> Reply {
 }
 
 /// `tools/call` of `tool` with `args` and the request metadata `meta`.
-fn call_meta(c: &mut McpClient, tool: &str, args: Value, meta: Value) -> Reply {
+fn call_meta(c: &mut McpClient, tool: &str, mut args: Value, meta: Value) -> Reply {
+    rdy_qa::mcp::supply_kungfu(tool, &mut args);
     let id = c.next_id();
     let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
         "params": {"name": tool, "arguments": args, "_meta": meta}});

@@ -549,7 +549,9 @@ fn hsa8_a_paused_hub_call_does_not_block_other_sessions() {
     let id = a.next_id();
     a.send_raw(
         &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": "rdy_auth", "arguments": {"op": "sign_out", "install": o}}})
+            "params": {"name": "rdy_auth", "arguments": {
+                "op": "sign_out", "install": o,
+                "kungfu": rdy_qa::mcp::fixture_value("rdy_auth")}}})
         .to_string(),
     );
     gate.arrived

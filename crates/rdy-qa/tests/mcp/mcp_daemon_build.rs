@@ -98,7 +98,8 @@ impl Conn {
     }
 
     /// `(isError, the reply's body)` of a tool call.
-    async fn call(&mut self, tool: &str, args: Value, meta: Value) -> (bool, Value) {
+    async fn call(&mut self, tool: &str, mut args: Value, meta: Value) -> (bool, Value) {
+        rdy_qa::mcp::supply_kungfu(tool, &mut args);
         let v = self
             .request(
                 "tools/call",

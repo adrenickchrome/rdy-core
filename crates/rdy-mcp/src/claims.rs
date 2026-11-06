@@ -103,8 +103,35 @@ pub struct Settings {
     /// ain4: a complete `rdy_instructions` reply went out for this actor and run, so its
     /// overview and briefings carry no reminder. In memory only; `rdy_session` keeps it.
     pub instructions_read: bool,
+    /// The owning rulesets a complete instructions reply delivered ([`crate::kungfu::bit_of`]).
+    /// In memory only; every save keeps it.
+    pub kungfu_received: u16,
+    /// The owning rulesets whose `W_KUNGFU` went out since a correct value or a reload.
+    /// In memory only; every save keeps it.
+    pub kungfu_warned: u16,
     /// The last call that used them.
     pub touched: Instant,
+}
+
+impl Settings {
+    /// Settings that hold kungfu state and nothing else. A new functional entry may take their
+    /// place when the registry is full: they exist for the advisory alone.
+    fn kungfu_only(&self) -> bool {
+        self.view.is_none()
+            && self.role.is_none()
+            && !self.dedupe
+            && !self.daemon_build_warned
+            && !self.instructions_read
+    }
+}
+
+/// What the kungfu check reads for one actor and run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KungfuMarks {
+    pub received: u16,
+    pub warned: u16,
+    /// A complete instructions reply went out: the reminder is not due.
+    pub read: bool,
 }
 
 /// A monotonic clock: the registry reads the time through it, so a test can set the time.
@@ -167,10 +194,11 @@ impl Registry {
         }
     }
 
-    /// `E_LIMIT` when `key` has no settings and the registry is full.
+    /// `E_LIMIT` when `key` has no settings and the registry is full of functional entries. A
+    /// kungfu-only entry gives way first.
     pub fn check_room(&self, key: &Key) -> Result<(), RdyError> {
-        let (entries, _) = self.live();
-        room(&entries, key)
+        let (mut entries, _) = self.live();
+        room(&mut entries, key)
     }
 
     /// Saves `view` and `role` for `key`. The dedupe setting is `dedupe`, else the one saved, else
@@ -183,12 +211,14 @@ impl Registry {
         dedupe: Option<bool>,
     ) -> Result<(), RdyError> {
         let (mut entries, now) = self.live();
-        room(&entries, key)?;
+        room(&mut entries, key)?;
         let dedupe = dedupe
             .or_else(|| entries.get(key).map(|s| s.dedupe))
             .unwrap_or(false);
         let daemon_build_warned = entries.get(key).is_some_and(|s| s.daemon_build_warned);
         let instructions_read = entries.get(key).is_some_and(|s| s.instructions_read);
+        let kungfu_received = entries.get(key).map_or(0, |s| s.kungfu_received);
+        let kungfu_warned = entries.get(key).map_or(0, |s| s.kungfu_warned);
         entries.insert(
             key.clone(),
             Settings {
@@ -197,15 +227,17 @@ impl Registry {
                 dedupe,
                 daemon_build_warned,
                 instructions_read,
+                kungfu_received,
+                kungfu_warned,
                 touched: now,
             },
         );
         Ok(())
     }
 
-    /// Saves the dedupe setting of `key`. Settings that do not exist yet start with the writer
-    /// role and `view()`, the session's default view. `E_LIMIT` when `key` is new and the
-    /// registry is full.
+    /// Saves the dedupe setting of `key`. Settings that do not exist yet, or hold kungfu state
+    /// alone, start with the writer role and `view()`, the session's default view; the kungfu sets
+    /// stay. `E_LIMIT` when `key` is new and the registry is full of functional entries.
     pub fn save_dedupe(
         &self,
         key: &Key,
@@ -214,11 +246,15 @@ impl Registry {
     ) -> Result<(), RdyError> {
         let (mut entries, now) = self.live();
         if let Some(s) = entries.get_mut(key) {
+            if s.kungfu_only() {
+                s.view = Some(view());
+                s.role = Some(Role::Writer);
+            }
             s.dedupe = dedupe;
             s.touched = now;
             return Ok(());
         }
-        room(&entries, key)?;
+        room(&mut entries, key)?;
         entries.insert(
             key.clone(),
             Settings {
@@ -227,6 +263,8 @@ impl Registry {
                 dedupe,
                 daemon_build_warned: false,
                 instructions_read: false,
+                kungfu_received: 0,
+                kungfu_warned: 0,
                 touched: now,
             },
         );
@@ -243,7 +281,7 @@ impl Registry {
             s.touched = now;
             return !std::mem::replace(&mut s.daemon_build_warned, true);
         }
-        if entries.len() < MAX_SETTINGS {
+        if room(&mut entries, key).is_ok() {
             entries.insert(
                 key.clone(),
                 Settings {
@@ -252,6 +290,8 @@ impl Registry {
                     dedupe: false,
                     daemon_build_warned: true,
                     instructions_read: false,
+                    kungfu_received: 0,
+                    kungfu_warned: 0,
                     touched: now,
                 },
             );
@@ -274,7 +314,7 @@ impl Registry {
             s.instructions_read = true;
             return;
         }
-        if entries.len() < MAX_SETTINGS {
+        if room(&mut entries, key).is_ok() {
             entries.insert(
                 key.clone(),
                 Settings {
@@ -283,15 +323,90 @@ impl Registry {
                     dedupe: false,
                     daemon_build_warned: false,
                     instructions_read: true,
+                    kungfu_received: 0,
+                    kungfu_warned: 0,
                     touched: now,
                 },
             );
         }
     }
+
+    /// The entries as they stand, with no purge: the kungfu check runs after the call's claim, which
+    /// purged them and refreshed this key's, so it adds no scan of the registry.
+    fn entries(&self) -> MutexGuard<'_, BTreeMap<Key, Settings>> {
+        self.entries.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// What the kungfu check reads for `key`.
+    pub fn kungfu_marks(&self, key: &Key) -> KungfuMarks {
+        self.entries()
+            .get(key)
+            .map_or_else(Default::default, |s| KungfuMarks {
+                received: s.kungfu_received,
+                warned: s.kungfu_warned,
+                read: s.instructions_read,
+            })
+    }
+
+    /// Clears `bit` from `key`'s warned set: a correct value rearms that owner. It makes no entry.
+    pub fn clear_kungfu_warned(&self, key: &Key, bit: u16) {
+        if let Some(s) = self.entries().get_mut(key) {
+            s.kungfu_warned &= !bit;
+        }
+    }
+
+    /// Marks `bit`'s warning as sent for `key`: whether this reply is the one to carry it. Another
+    /// connection of the same actor and run may have carried it first. With no room for a new
+    /// entry the mark is skipped and the reply carries the warning: a later reply may repeat it,
+    /// and no call is refused. A new mark takes no other entry's place.
+    pub fn mark_kungfu_warned(&self, key: &Key, bit: u16) -> bool {
+        let now = (self.clock)();
+        let mut entries = self.entries();
+        if let Some(s) = entries.get_mut(key) {
+            let fresh = s.kungfu_warned & bit == 0;
+            s.kungfu_warned |= bit;
+            return fresh;
+        }
+        if entries.len() < MAX_SETTINGS {
+            entries.insert(
+                key.clone(),
+                Settings {
+                    view: None,
+                    role: None,
+                    dedupe: false,
+                    daemon_build_warned: false,
+                    instructions_read: false,
+                    kungfu_received: 0,
+                    kungfu_warned: bit,
+                    touched: now,
+                },
+            );
+        }
+        true
+    }
+
+    /// Adds `bits` to `key`'s received set and clears them from its warned set. An actor and run
+    /// with no entry have no room for one: the bits are skipped.
+    pub fn mark_kungfu_received(&self, key: &Key, bits: u16) {
+        if let Some(s) = self.entries().get_mut(key) {
+            s.kungfu_received |= bits;
+            s.kungfu_warned &= !bits;
+        }
+    }
 }
 
-fn room(entries: &BTreeMap<Key, Settings>, key: &Key) -> Result<(), RdyError> {
+/// Room for `key`: it has an entry, or the registry has a free slot, or the first kungfu-only entry
+/// in map order gives way. Else the registry's own refusal.
+fn room(entries: &mut BTreeMap<Key, Settings>, key: &Key) -> Result<(), RdyError> {
     if entries.contains_key(key) || entries.len() < MAX_SETTINGS {
+        return Ok(());
+    }
+    let reclaim = entries
+        .iter()
+        .find(|(k, s)| *k != key && s.kungfu_only())
+        .map(|(k, _)| k.clone());
+    if let Some(k) = reclaim {
+        entries.remove(&k);
         return Ok(());
     }
     Err(RdyError::new(
@@ -593,7 +708,7 @@ pub fn deliver_build_warning(
 }
 
 /// Appends to `v`'s `warnings` array, or starts one. A reply that is not an object stays as it is.
-fn append_warning(v: &mut Value, warning: Value) {
+pub(crate) fn append_warning(v: &mut Value, warning: Value) {
     let Some(obj) = v.as_object_mut() else {
         return;
     };

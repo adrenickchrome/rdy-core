@@ -7,7 +7,7 @@
 //! engine writer. Both flows keep the card waiting in the hub's registry, consume it once, and
 //! reach the writer only with a validated choice, through the engine's presented answer.
 
-use super::{CALL, result};
+use super::CALL;
 use crate::claims;
 use crate::elicitation::{self, ANSWER_KEY, Bound, EXPIRY, Route, Terminal};
 use crate::params::{Parameters, parse_params};
@@ -84,7 +84,8 @@ impl RdyServer {
             Ok(Step::Done(v)) => Ok(v),
             Err(e) => Err(e),
         };
-        result(self.warned(out).await).into()
+        let out = self.warned(out).await;
+        self.reply(out).into()
     }
 
     /// `out`, the final result of an elicited answer, with the build warning it is owed.
@@ -263,10 +264,15 @@ impl RdyServer {
         f: impl FnOnce(&mut McpState) -> Result<T, RdyError> + Send + 'static,
     ) -> Result<T, RdyError> {
         let claim = CALL.try_with(|c| c.claim.clone()).ok().flatten();
+        let check = CALL.try_with(|c| c.kungfu.clone()).ok();
         let slot = Arc::new(Mutex::new(None));
         let put = Arc::clone(&slot);
         self.blocking(TOOL, false, move |st| {
             claims::call(st, claim.as_ref(), TOOL, |st| {
+                // the first claimed step of a request counts it; a later step finds it counted
+                if let Some(check) = &check {
+                    crate::kungfu::evaluate(st, check);
+                }
                 let value = f(st)?;
                 *put.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
                 Ok(Value::Null)

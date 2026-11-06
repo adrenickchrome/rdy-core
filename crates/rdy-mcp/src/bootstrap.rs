@@ -52,6 +52,8 @@ impl ProjectlessServer {
     /// A server for a connection started in `dir`, outside any project, that reads the person
     /// layer through `host`. `hub` holds its claims registry.
     pub fn new(dir: &Path, host: Arc<dyn PersonHost>, hub: Arc<NotifyHub>) -> ProjectlessServer {
+        // the kungfu values are ready before the first call
+        rdy_engine::kungfu::owners();
         // the project server's own listing of the two tools: the same names, descriptions and
         // closed input schemas
         let tools: Vec<Tool> = RdyServer::session_router()
@@ -140,7 +142,7 @@ fn instructions(
         run: key.1.clone(),
     };
     let out = tools::instructions_reply(None, Some(st.host.as_ref()), &caller, p.load, p.full)?;
-    st.hub.claims().mark_instructions_read(&key);
+    crate::kungfu::note_delivered(st.hub.claims(), &key, &out);
     Ok(out)
 }
 

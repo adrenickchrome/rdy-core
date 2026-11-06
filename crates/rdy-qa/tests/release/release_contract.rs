@@ -2978,7 +2978,9 @@ fn elicitation_probes(seen: &mut Seen) {
     mcp_probe(seen, &mut c, "rdy_answer", "rdy_answer elicit mixed", mixed);
     let mut raw = |extra: Value| {
         let id = c.next_id();
-        let mut params = json!({"name": "rdy_answer", "arguments": ask, "_meta": {
+        let mut args = ask.clone();
+        rdy_qa::mcp::supply_kungfu("rdy_answer", &mut args);
+        let mut params = json!({"name": "rdy_answer", "arguments": args, "_meta": {
             "rdy/actor": "agent:elc", "rdy/run": "elc",
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},

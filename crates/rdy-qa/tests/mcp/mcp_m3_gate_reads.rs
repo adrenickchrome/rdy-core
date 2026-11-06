@@ -86,7 +86,8 @@ impl Client {
         serde_json::from_str(&line).unwrap()
     }
 
-    async fn start(&mut self, name: &str, args: Value) -> u64 {
+    async fn start(&mut self, name: &str, mut args: Value) -> u64 {
+        rdy_qa::mcp::supply_kungfu(name, &mut args);
         let id = self.next;
         self.next += 1;
         let meta = json!({"rdy/actor": "agent:relay", "rdy/run": "r1"});

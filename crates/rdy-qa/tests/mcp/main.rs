@@ -38,6 +38,7 @@ mod mcp_instruction_startup;
 mod mcp_instructions;
 mod mcp_intake;
 mod mcp_intents;
+mod mcp_kungfu;
 mod mcp_landing_tree;
 mod mcp_log;
 mod mcp_log_assessment;
