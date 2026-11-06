@@ -240,6 +240,23 @@ pub async fn socket_gone(run: &RunDir) -> bool {
     }
 }
 
+/// A successor daemon's listener on the project's endpoint. On Unix the stopping daemon has
+/// unlinked its socket, so the bind is immediate. On Windows the name is held until the old
+/// daemon's listener drops, so this waits up to 3 s for that; call it after any run-file
+/// assertions, because waiting lets the old `run` go on to its cleanup.
+pub async fn bind_successor(run: &RunDir) -> rdy_daemon::sys::Listener {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match rdy_daemon::sys::bind(&run.socket()) {
+            Ok(l) => return l,
+            Err(_) if cfg!(windows) && std::time::Instant::now() < end => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("the successor could not bind: {e}"),
+        }
+    }
+}
+
 /// Whether `daemon.pid` is gone; on Windows it waits up to 3 s, as `socket_gone` does.
 pub async fn pid_file_gone(run: &RunDir) -> bool {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(3);

@@ -192,22 +192,55 @@ async fn life1_a_stop_closes_a_connection_still_in_its_hello() {
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 }
 
+/// `stop` removes the run files before it returns, and `run` is a task of this single-threaded
+/// test runtime, so nothing here yields until the successor's files are in place: `run` reaches
+/// its cleanup only at the `await` after them. That order does not depend on how long the
+/// endpoint takes to go, which on Windows is until the old listener drops.
 #[tokio::test]
 async fn life1_a_handle_stop_leaves_a_successors_run_files_alone() {
     let d = daemon("1", true, |_| {}).await;
     d.handle.stop();
-    assert!(socket_gone(&d.run).await && pid_file_gone(&d.run).await);
-    // a successor binds the same paths before the old `run` gets to its cleanup
-    let successor = rdy_daemon::sys::bind(&d.run.socket()).unwrap();
+    // synchronous: no await between `stop` and the successor's files
+    assert!(!d.run.pid_file().exists(), "stop removed the pid file");
     std::fs::write(d.run.pid_file(), "424242\n").unwrap();
+    // a Unix successor binds the unlinked socket path now; a Windows pipe name is held until the
+    // old listener drops, so there the endpoint is checked on its own below
+    #[cfg(unix)]
+    let successor = {
+        assert!(!d.run.socket().exists(), "stop unlinked the socket");
+        rdy_daemon::sys::bind(&d.run.socket()).unwrap()
+    };
     assert!(matches!(
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(socket_live(&d.run).await, "the successor's socket is kept");
     assert_eq!(
         std::fs::read_to_string(d.run.pid_file()).unwrap(),
-        "424242\n"
+        "424242\n",
+        "the old daemon's cleanup keeps the successor's pid file"
+    );
+    #[cfg(unix)]
+    {
+        assert!(socket_live(&d.run).await, "the successor's socket is kept");
+        drop(successor);
+    }
+}
+
+/// The endpoint of a stopped daemon goes with it (on Windows, with its listener), and a successor
+/// can then take the name.
+#[tokio::test]
+async fn life1_a_stopped_daemons_endpoint_is_gone_and_can_be_taken() {
+    let d = daemon("1", true, |_| {}).await;
+    d.handle.stop();
+    assert!(matches!(
+        d.task.await.unwrap().unwrap(),
+        ExitReason::Stopped
+    ));
+    assert!(socket_gone(&d.run).await && pid_file_gone(&d.run).await);
+    let successor = bind_successor(&d.run).await;
+    assert!(
+        socket_live(&d.run).await,
+        "the successor's endpoint answers"
     );
     drop(successor);
 }
@@ -261,9 +294,10 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
         (false, false),
         "the run files are gone by the time the client reads exiting"
     );
-    // the client's successor binds the same paths at once
-    let successor = rdy_daemon::sys::bind(&d.run.socket()).unwrap();
+    // the client's successor writes its pid file at once, then binds the endpoint (on Windows
+    // that waits for the old listener, so the pid file goes first)
     std::fs::write(d.run.pid_file(), "424242\n").unwrap();
+    let successor = bind_successor(&d.run).await;
     assert!(matches!(
         d.task.await.unwrap().unwrap(),
         ExitReason::VersionReplaced
