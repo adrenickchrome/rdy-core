@@ -97,6 +97,19 @@ fn rig(rdy: &Path) -> Rig {
 }
 
 /// Waits until nothing is pending, nudging the worker past a retry wait after a failure.
+/// Waits for `want`. A worker reports a cycle after it clears its state, so a `settle` can return
+/// with the last `Flushed` or `Loaded` report still to come: those two are skipped, and anything
+/// else is the test's failure.
+fn wait_for(rx: &mpsc::Receiver<Cycle>, want: Cycle) {
+    loop {
+        match rx.recv_timeout(WAIT).expect("a worker cycle") {
+            cy if cy == want => return,
+            Cycle::Flushed | Cycle::Loaded => {}
+            cy => panic!("waiting for {want:?}, saw {cy:?}"),
+        }
+    }
+}
+
 fn settle(rig: &Rig) -> Vec<Cycle> {
     let mut seen = Vec::new();
     while !rig.rec.settled() {
@@ -369,8 +382,7 @@ fn kfu2_concurrent_writers_merge_without_lost_updates() {
     let lock = File::open(rdy.join("run").join(LOCK_NAME)).expect("lock file");
     lock.lock().expect("lock");
     rigs[0].rec.record(AGENT, None, "read", Case::Lost);
-    let seen = rigs[0].rx.recv_timeout(WAIT).expect("cycle");
-    assert_eq!(seen, Cycle::Contended);
+    wait_for(&rigs[0].rx, Cycle::Contended);
     lock.unlock().expect("unlock");
     rigs[0].rec.nudge();
     settle(&rigs[0]);
@@ -396,7 +408,7 @@ fn kfu2_contention_and_io_failure_never_reach_the_caller() {
             "a miss is accepted"
         );
     }
-    assert_eq!(rig.rx.recv_timeout(WAIT).expect("cycle"), Cycle::Contended);
+    wait_for(&rig.rx, Cycle::Contended);
     assert!(!rig.rec.settled());
     assert_eq!(
         rig.rec.summary().total,
@@ -551,7 +563,7 @@ fn kfu2_private_paths_and_replaced_projects_are_safe() {
     pio::symlink(&elsewhere, rdy.join("run")).expect("link");
     let r = rig(&rdy);
     assert!(r.rec.record(ALICE, None, "write", Case::Wrong));
-    assert_eq!(r.rx.recv_timeout(WAIT).expect("cycle"), Cycle::Failed);
+    wait_for(&r.rx, Cycle::Failed);
     assert_eq!(
         fs::read_dir(&elsewhere).unwrap().count(),
         0,
@@ -587,7 +599,7 @@ fn kfu2_private_paths_and_replaced_projects_are_safe() {
     pio::set_mode(&run, 0o755).unwrap();
     let r = rig(&rdy);
     r.rec.record(ALICE, None, "write", Case::Wrong);
-    assert_eq!(r.rx.recv_timeout(WAIT).expect("cycle"), Cycle::Failed);
+    wait_for(&r.rx, Cycle::Failed);
     assert!(!count_file(&rdy).exists());
     pio::set_mode(&run, 0o700).unwrap();
     r.rec.nudge();
@@ -605,7 +617,7 @@ fn kfu2_private_paths_and_replaced_projects_are_safe() {
     pio::set_mode(&run.join(LOCK_NAME), 0o666).unwrap();
     let r = rig(&rdy);
     r.rec.record(ALICE, None, "write", Case::Wrong);
-    assert_eq!(r.rx.recv_timeout(WAIT).expect("cycle"), Cycle::Failed);
+    wait_for(&r.rx, Cycle::Failed);
     assert!(!count_file(&rdy).exists());
 }
 
@@ -681,7 +693,7 @@ fn kfu2_uncertain_replace_does_not_double_count() {
         };
         r.rec.record(ALICE, None, "write", Case::NotLoaded);
         r.rec.record(BOB, None, "read", Case::Wrong);
-        assert_eq!(r.rx.recv_timeout(WAIT).unwrap(), Cycle::Uncertain);
+        wait_for(&r.rx, Cycle::Uncertain);
         let between = if landed { 3 } else { 2 };
         assert_eq!(
             disk_rows(&rdy, t)[&key(t, ALICE, None, "write")].not_loaded,
