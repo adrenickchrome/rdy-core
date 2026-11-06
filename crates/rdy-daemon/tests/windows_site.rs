@@ -7,7 +7,7 @@ use rdy_daemon::site::guard::{Guard, Refusal};
 use rdy_daemon::site::http::parse_head;
 use rdy_daemon::site::{LanOverride, SiteServer};
 use rdy_model::Hash;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use tokio::net::TcpSocket;
 

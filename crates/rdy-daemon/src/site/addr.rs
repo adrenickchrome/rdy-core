@@ -155,7 +155,7 @@ mod tests {
     fn recipe(root_bytes: &[u8], key: &str) -> Vec<u16> {
         let mut input = b"rdy-site-profile-v1\0".to_vec();
         input.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
-        input.extend_from_slice(&root_bytes);
+        input.extend_from_slice(root_bytes);
         input.extend_from_slice(&(key.len() as u64).to_le_bytes());
         input.extend_from_slice(key.as_bytes());
         let h = Hash::of(&input).0;
