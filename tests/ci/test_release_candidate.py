@@ -446,12 +446,17 @@ class agi6_Candidate(Fixture):
     """`build` end to end, over a real Git commit and real executables: only cargo and the tools it
     would have built are stand-ins."""
 
-    def source_commit(self, bundle, sidecar=None):
+    def source_commit(self, bundle, sidecar=None, table=True):
         repo = self.tmp / 'repo'
         repo.mkdir()
         git(repo, 'init', '-q')
         (repo / 'release').mkdir()
         (repo / 'release/notes.md').write_text('# rdy\n')
+        if table:
+            tool_table = repo / 'crates/rdy-engine/kungfu-tools.json'
+            tool_table.parent.mkdir(parents=True)
+            tool_table.write_bytes(guide_tests.TABLE.read_bytes())
+            git(repo, 'add', 'crates')
         if bundle is not None:
             (repo / 'release/agent-guide.json').write_bytes(bundle)
             digest = sha(bundle).encode() + b'\n'
@@ -553,6 +558,30 @@ class agi6_Candidate(Fixture):
         bin_dir, gate, _ = self.toolchain(reply, reply)
         self.refused(repo, commit, bin_dir, gate,
                      'embedded guide: missing release/agent-guide.json; ' + guide_tests.FIX)
+
+    def test_kfu1_a_commit_with_no_table_issues_no_receipt(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw, table=False)
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.refused(repo, commit, bin_dir, gate, 'kungfu catalogue: invalid table')
+
+    def test_kfu1_the_table_comes_from_the_commit(self):
+        # The candidate reads the table of S, not the one beside the script.
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw, table=False)
+        moved = json.loads(guide_tests.TABLE.read_text())
+        for row in moved:
+            if row['tool'] == 'rdy_write':
+                row['ruleset'] = 'rdy:read'
+        tool_table = repo / 'crates/rdy-engine/kungfu-tools.json'
+        tool_table.parent.mkdir(parents=True)
+        tool_table.write_text(json.dumps(moved))
+        git(repo, 'add', 'crates')
+        commit = commit_version(repo, V, 'moved a tool')
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.refused(repo, commit, bin_dir, gate, guide_tests.Agi6Binary.DIFFERS[:-1])
 
 
 class FakeSigner:

@@ -1877,3 +1877,203 @@ fn ui10_answer_params_add_elicit_and_keep_their_shapes() {
         .is_ok()
     );
 }
+
+// ---- kfu3: the undeclared `kungfu` argument (FW-MH.kungfu, D-Y18E1) ----
+
+use rdy_mcp::params::{Kungfu, parse_params_strict, take_kungfu};
+
+fn obj(v: Value) -> serde_json::Map<String, Value> {
+    v.as_object().expect("an object").clone()
+}
+
+/// The tools a project server lists, with their input schemas and descriptions.
+fn listed_tools() -> Vec<Value> {
+    use rdy_engine::Rdy;
+    use rdy_engine::engine::Local;
+    use rdy_mcp::notify::NotifyHub;
+    use rdy_mcp::server::{RdyServer, serve};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(std::sync::Arc::new(Local::new(rdy)), None, NotifyHub::new());
+        let (client, end) = tokio::io::duplex(1 << 20);
+        let (sr, sw) = tokio::io::split(end);
+        tokio::spawn(serve(server, sr, sw));
+        let (r, mut w) = tokio::io::split(client);
+        let mut r = BufReader::new(r);
+        let lines = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "kfu3", "version": "0"}}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        ];
+        for l in lines {
+            w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
+        }
+        loop {
+            let mut line = String::new();
+            assert!(
+                r.read_line(&mut line).await.unwrap() > 0,
+                "the server closed"
+            );
+            let v: Value = serde_json::from_str(&line).unwrap();
+            if v["id"] == json!(2) {
+                assert!(v["result"]["nextCursor"].is_null(), "one page of tools");
+                return v["result"]["tools"].as_array().expect("tools").clone();
+            }
+        }
+    })
+}
+
+#[test]
+fn kfu3_top_level_value_is_removed_before_validation() {
+    let huge = "k".repeat(1 << 20);
+    let values = [
+        json!("kf-00000000"),
+        json!("kf-wrong"),
+        json!(huge),
+        Value::Null,
+        json!(7),
+        json!(true),
+        json!(["kf-00000000"]),
+        json!({"kungfu": "kf-00000000"}),
+    ];
+    for v in values {
+        // the extractor on its own
+        let mut args = obj(json!({"profile": "x", "kungfu": v.clone()}));
+        let class = take_kungfu(&mut args, Some("kf-00000000"));
+        assert!(!args.contains_key("kungfu"));
+        assert_eq!(args.len(), 1, "no other key moves");
+        assert_eq!(
+            class,
+            if v == json!("kf-00000000") {
+                Kungfu::Correct
+            } else {
+                Kungfu::Wrong
+            },
+            "{v}"
+        );
+        // the direct parser
+        let p = parse_params::<SiteParams>("rdy_site", obj(json!({"profile": "x", "kungfu": v})));
+        assert!(p.is_ok(), "{:?}", p.err());
+    }
+    let mut none = obj(json!({"profile": "x"}));
+    assert_eq!(take_kungfu(&mut none, Some("kf-00000000")), Kungfu::Missing);
+    let mut exempt = obj(json!({"kungfu": "kf-00000000"}));
+    assert_eq!(take_kungfu(&mut exempt, None), Kungfu::Wrong);
+    // a required parameter still counts, and the argument does not stand in for it
+    let (code, message, _) = refusal::<DecideParams>("rdy_decide", json!({"kungfu": "kf-x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(message.contains("\"statement\" is required"), "{message}");
+    // a wrong value of an ordinary parameter keeps its error with the argument present
+    assert_eq!(
+        refusal::<ProposeParams>("rdy_propose", json!({"title": ["a"], "kungfu": 1})),
+        refusal::<ProposeParams>("rdy_propose", json!({"title": ["a"]})),
+    );
+}
+
+#[test]
+fn kfu3_other_unknown_keys_keep_their_errors() {
+    // the same refusal with and without the argument
+    for args in [
+        json!({"scopes": "x"}),
+        json!({"profiel": "x"}),
+        json!({"profile": "x", "only": "yes"}),
+    ] {
+        let mut with = args.clone();
+        with["kungfu"] = json!("kf-00000000");
+        assert_eq!(
+            refusal::<SiteParams>("rdy_site", with),
+            refusal::<SiteParams>("rdy_site", args)
+        );
+    }
+    let (_, message, fix) = refusal::<SiteParams>("rdy_site", json!({"profiel": "x"}));
+    assert_eq!(message, "rdy_site: unknown parameter \"profiel\"");
+    assert!(
+        fix.starts_with("did you mean \"profile\"? the parameters here are "),
+        "{fix}"
+    );
+    // a key that only looks like the argument is an ordinary unknown key
+    let (_, message, fix) = refusal::<SiteParams>("rdy_site", json!({"kungfoo": 1}));
+    assert_eq!(message, "rdy_site: unknown parameter \"kungfoo\"");
+    assert!(!fix.contains("kungfu"), "{fix}");
+    let (_, message, _) = refusal::<SiteParams>("rdy_site", json!({"Kungfu": 1}));
+    assert_eq!(message, "rdy_site: unknown parameter \"Kungfu\"");
+    // a parameterless tool keeps its sentence
+    let (_, _, fix) = refusal::<TagsParams>("rdy_tags", json!({"kungfu": "x", "extra": 1}));
+    assert_eq!(fix, "remove \"extra\"; rdy_tags takes no parameters");
+    // a nested key named like the argument is judged by the nested validator
+    let (code, message, fix) = refusal::<SupersedeParams>(
+        "rdy_supersede",
+        json!({"old": "D-AAAAA", "decision": {"parent": "s-1", "statement": "x", "kungfu": "kf-00000000"}}),
+    );
+    assert_eq!(code, "E_BAD_INPUT");
+    assert_eq!(
+        message,
+        "rdy_supersede: unknown parameter \"decision.kungfu\""
+    );
+    assert!(fix.starts_with("remove \"decision.kungfu\""), "{fix}");
+}
+
+#[test]
+fn kfu3_schemas_and_parameter_lists_do_not_disclose_it() {
+    let tools = listed_tools();
+    assert_eq!(tools.len(), 59, "the registered tools");
+    for t in &tools {
+        let name = t["name"].as_str().unwrap();
+        let schema = &t["inputSchema"];
+        assert!(
+            !schema.to_string().contains("kungfu"),
+            "{name} schema mentions the argument"
+        );
+        assert!(
+            !t["description"].as_str().unwrap_or("").contains("kungfu"),
+            "{name} description mentions the argument"
+        );
+        assert!(
+            schema["properties"].get("kungfu").is_none()
+                && schema["additionalProperties"] != json!(true),
+            "{name}"
+        );
+    }
+    // the unknown-key fixes list the declared parameters only
+    let (_, _, fix) = refusal::<SiteParams>("rdy_site", json!({"zzz": 1}));
+    assert!(!fix.contains("kungfu"), "{fix}");
+    let (_, _, fix) = refusal::<DecideParams>("rdy_decide", json!({"zzz": 1, "statement": "x"}));
+    assert!(!fix.contains("kungfu"), "{fix}");
+    let (_, _, fix) = refusal::<IdParams>("rdy_impact", json!({"id": "x", "zzz": 1}));
+    assert!(!fix.contains("kungfu"), "{fix}");
+}
+
+#[test]
+fn kfu3_internal_metadata_keeps_strict_validation() {
+    // the strict parser removes nothing
+    let e = parse_params_strict::<SiteParams>("rdy_site", obj(json!({"kungfu": "x"})))
+        .expect_err("a refusal");
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert_eq!(e.message, "rdy_site: unknown parameter \"kungfu\"");
+    // `_meta` has no shortcut for it
+    for key in ["rdy/kungfu", "rdy/Kungfu"] {
+        let meta = obj(json!({key: "kf-00000000"}));
+        let e = rdy_mcp::claims::parse(Some(&meta)).expect_err("a refusal");
+        assert_eq!(e.code, "E_BAD_INPUT", "{key}");
+        assert!(e.message.contains(key), "{}", e.message);
+    }
+    // a wrong type of a real claim key still refuses
+    let meta = obj(json!({"rdy/actor": 1, "rdy/run": "r"}));
+    assert_eq!(
+        rdy_mcp::claims::parse(Some(&meta))
+            .expect_err("a refusal")
+            .code,
+        "E_BAD_INPUT"
+    );
+    // and a plain `kungfu` in `_meta` is outside the namespace, as any other foreign key is
+    let meta = obj(json!({"kungfu": "x"}));
+    assert!(rdy_mcp::claims::parse(Some(&meta)).unwrap().is_none());
+}

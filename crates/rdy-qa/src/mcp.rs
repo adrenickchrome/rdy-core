@@ -306,6 +306,26 @@ pub struct McpClient {
     stopped: bool,
     /// An eliciting session's state; `None` for every other session, which records nothing.
     eliciting: Option<Eliciting>,
+    /// Sends every call's arguments unchanged ([`McpClient::raw`]). Otherwise a call with no
+    /// `kungfu` key carries this source's value for its tool ([`supply_kungfu`]).
+    raw: bool,
+}
+
+/// The kungfu value this source gives `tool`: `None` for an exempt or unknown tool. Test clients
+/// use it to stay clean; a production client never infers a value.
+pub fn fixture_value(tool: &str) -> Option<&'static str> {
+    let name = rdy_engine::kungfu::policy(tool)?
+        .ruleset?
+        .strip_prefix("rdy:")?;
+    rdy_engine::kungfu::owner(name).map(|o| o.value.as_str())
+}
+
+/// Adds [`fixture_value`] to `args` when `tool` has one and `args` is an object with no `kungfu`
+/// key. An explicit value stays, null included. It loads no instructions.
+pub fn supply_kungfu(tool: &str, args: &mut Value) {
+    if let (Some(value), Some(map)) = (fixture_value(tool), args.as_object_mut()) {
+        map.entry("kungfu").or_insert_with(|| json!(value));
+    }
 }
 
 impl Drop for McpClient {
@@ -847,6 +867,7 @@ impl McpClient {
             group,
             stopped: false,
             eliciting: None,
+            raw: false,
         })
     }
 
@@ -907,6 +928,9 @@ impl McpClient {
             }) => Some((version.clone(), capabilities.clone())),
             Some(Revision::Inline { .. }) => None,
         };
+        // a plain bounded session may run a packaged binary of another build: its calls stay as
+        // the caller wrote them
+        c.raw = revision.is_none();
         c.eliciting = revision.map(|revision| Eliciting {
             revision,
             exchange: Vec::new(),
@@ -962,6 +986,7 @@ impl McpClient {
     /// The `tools/call` request `id` of `tool` with `args`, with `extra` beside them in its
     /// params and, in an inline session, the client context in its `_meta`.
     fn call_request(&self, id: u64, tool: &str, args: Value, extra: Option<&Value>) -> Value {
+        let args = self.prepared(tool, args);
         let mut params = json!({"name": tool, "arguments": args});
         if let Some(Eliciting {
             revision:
@@ -984,6 +1009,21 @@ impl McpClient {
             }
         }
         json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+    }
+
+    /// This session with every call's arguments sent unchanged. No test value is added, so a call
+    /// meets the server's check as a real client's call does.
+    pub fn raw(mut self) -> McpClient {
+        self.raw = true;
+        self
+    }
+
+    /// `args` as a call of `tool` sends them.
+    fn prepared(&self, tool: &str, mut args: Value) -> Value {
+        if !self.raw {
+            supply_kungfu(tool, &mut args);
+        }
+        args
     }
 
     /// The next call's id, counted; an eliciting session refuses a call past its cap.
@@ -1544,6 +1584,7 @@ impl McpClient {
         let id = self.next_id();
         let t = Instant::now();
         self.calls += 1;
+        let args = self.prepared(tool, args);
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": args}}));
         let v = self.recv(id, budget);
         self.latencies.push((tool.to_string(), t.elapsed()));

@@ -15,6 +15,9 @@ pub const E_NO_SESSION: &str = "E_NO_SESSION";
 /// A daemon of the same version and another build serves this client (D-CCC6E).
 pub const W_DAEMON_BUILD: &str = "W_DAEMON_BUILD";
 
+/// A call lacks the current value from its tool's ruleset (D-Y18E1). The call still runs.
+pub const W_KUNGFU: &str = "W_KUNGFU";
+
 /// The most ops one `rdy_write` may carry.
 pub const MAX_OPS_PER_WRITE: usize = 5_000;
 
@@ -87,6 +90,9 @@ pub struct McpState {
     pub build_warning: Option<DaemonBuildWarning>,
     /// The warning this call's reply carries, once taken: its size is reserved in the reply.
     pub build_warning_due: Option<Value>,
+    /// The project's local count of kungfu misses (D-Y18E1). `RdyServer::new` sets it; a session
+    /// with no recorder counts nothing and works the same.
+    pub kungfu_counts: Option<rdy_engine::kungfu_counts::Recorder>,
 }
 
 /// What W_DAEMON_BUILD names; the daemon gives it to the session it serves.
@@ -134,6 +140,7 @@ impl McpState {
             claim: None,
             build_warning: None,
             build_warning_due: None,
+            kungfu_counts: None,
         }
     }
 

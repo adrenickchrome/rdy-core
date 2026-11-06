@@ -1,6 +1,6 @@
 //! ERROR_ROWS: the error code table that rdy_schema reports.
 
-use super::common::W_DAEMON_BUILD;
+use super::common::{W_DAEMON_BUILD, W_KUNGFU};
 use rdy_engine::*;
 
 /// `rdy_schema`'s error rows: `(code, when, fix)`.
@@ -485,6 +485,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         W_AS_BUILT_OVERRIDE,
         "a content block's own planned or since, or planned: true on its nearest section or doc, differs from the planned or since status its decided_by and implements decisions derive",
         "follow the warning's own fix",
+    ),
+    (
+        W_KUNGFU,
+        "A call lacks the current value from its tool's ruleset. The call still runs. The warning asks the agent to reload its instructions.",
+        "Call rdy_instructions and load the ruleset named by the warning.",
     ),
     (
         E_PLAN_ITEM,

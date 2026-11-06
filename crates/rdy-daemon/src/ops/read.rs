@@ -166,6 +166,16 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     if !carried.is_empty() {
         v["redaction_warnings"] = to_json(&carried);
     }
+    // D-Y18E1: the local kungfu miss counts, one line and the retained rows; nothing when zero
+    {
+        use rdy_engine::kungfu_counts as kc;
+        let rows = kc::status_rows(&cx.engine.root().join(".rdy"));
+        let today = kc::Day::today();
+        if let Some(line) = kc::summary_line(&kc::summarize(&rows, today)) {
+            v["kungfu"] = Value::String(line);
+            v["kungfu_counts"] = Value::Array(kc::rows_json(&rows, today));
+        }
+    }
     // the byte report: one serialized census, so no write lands inside it (D-4YRQ4)
     if a.log_bytes {
         let bytes = cx.engine.read_serialized(Box::new(|r| {

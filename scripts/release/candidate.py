@@ -33,6 +33,7 @@ REPOSITORY = 'adrenickchrome/rdy-core'
 # The release target set at this base. A new platform needs its card and a qualified adapter.
 TARGETS = ('aarch64-apple-darwin', 'x86_64-unknown-linux-gnu')
 GUIDE_TOOL = Path(__file__).resolve().parent / 'guide.py'
+KUNGFU_TABLE = 'crates/rdy-engine/kungfu-tools.json'
 # The packaged checker's six checks, in order (`CHECK_NAMES` in rdy-qa's release_install.rs).
 CHECK_NAMES = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
 
@@ -454,7 +455,7 @@ def inspect_archive(path, version, target, extra=()):
 
 def check_packaged_guide(path, version, target, source, work, env):
     """Runs the `rdy` of the inspected archive `path` and compares its built-in rows and menu with
-    the guide bundle of the source archive. Refuses with the checker's own line."""
+    the guide bundle and tool table of the source archive. Refuses with the checker's own line."""
     folder = Path(work) / 'guide-check'
     folder.mkdir(mode=0o700)
     binary = folder / 'rdy'
@@ -469,7 +470,8 @@ def check_packaged_guide(path, version, target, source, work, env):
         raise bad
     release = Path(source) / 'release'
     status, _, said = run_bounded([sys.executable, '-I', '-B', GUIDE_TOOL, 'check-binary', '--binary', binary,
-                                   '--bundle', release / 'agent-guide.json', '--sidecar', release / 'agent-guide.sha256'],
+                                   '--bundle', release / 'agent-guide.json', '--sidecar', release / 'agent-guide.sha256',
+                                   '--table', Path(source) / KUNGFU_TABLE],
                                   env=env)
     shutil.rmtree(str(folder), ignore_errors=True)
     if status != 0:

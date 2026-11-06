@@ -83,6 +83,10 @@ pub(crate) fn status(env: &Env, as_json: bool) -> Result<(Value, String), ErrorR
     let mut v = call(env, "status", args)?;
     let mut t = status_text(&v);
     wc::status::attach(env, &mut v, &mut t)?;
+    // D-Y18E1: the kungfu summary line, once, before the setup hint and the reminder
+    if let Some(k) = v["kungfu"].as_str() {
+        t.push_str(&format!("\n{k}"));
+    }
     // agi4: the missing-meta prompt, before the reminder
     if let Some(h) = crate::setup_cmd::status_prompt(&env.project) {
         v["setup_hint"] = json!(h);

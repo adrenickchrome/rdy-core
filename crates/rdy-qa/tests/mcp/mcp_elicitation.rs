@@ -137,6 +137,8 @@ struct Client {
     next: u64,
     inline: Option<Value>,
     claim: Value,
+    /// Adds this source's kungfu value when a call has none. [`Client::raw`] turns it off.
+    supply: bool,
 }
 
 impl Client {
@@ -148,7 +150,14 @@ impl Client {
             next: 1,
             inline,
             claim: json!({"rdy/actor": "agent:relay", "rdy/run": "r1"}),
+            supply: true,
         }
+    }
+
+    /// This client with every call's arguments sent unchanged.
+    fn raw(mut self) -> Client {
+        self.supply = false;
+        self
     }
 
     /// A 2026-07-28 client: no `initialize`, its context in every request.
@@ -206,7 +215,10 @@ impl Client {
     }
 
     /// Sends one `rdy_answer` call with `extra` beside its arguments. Its request id.
-    async fn start(&mut self, args: Value, extra: Value) -> u64 {
+    async fn start(&mut self, mut args: Value, extra: Value) -> u64 {
+        if self.supply {
+            rdy_qa::mcp::supply_kungfu("rdy_answer", &mut args);
+        }
         let id = self.next;
         self.next += 1;
         let mut params = json!({"name": "rdy_answer", "arguments": args, "_meta": self.meta()});
@@ -244,7 +256,8 @@ impl Client {
     }
 
     /// Any other tool's value.
-    async fn tool(&mut self, name: &str, args: Value) -> Value {
+    async fn tool(&mut self, name: &str, mut args: Value) -> Value {
+        rdy_qa::mcp::supply_kungfu(name, &mut args);
         let id = self.next;
         self.next += 1;
         let params = json!({"name": name, "arguments": args, "_meta": self.meta()});
@@ -1542,7 +1555,8 @@ fn reaffirm() -> (World, String) {
 // -- an imported proposal over the real transport
 
 /// The project's stdio proxy, as a client that states its 2026-07-28 context in each request.
-fn inline_line(id: u64, args: Value, extra: Value) -> String {
+fn inline_line(id: u64, mut args: Value, extra: Value) -> String {
+    rdy_qa::mcp::supply_kungfu("rdy_answer", &mut args);
     let mut params = json!({"name": "rdy_answer", "arguments": args, "_meta": {
         "rdy/actor": "agent:a1", "rdy/run": "a1",
         "io.modelcontextprotocol/protocolVersion": V_NEW,
@@ -2066,4 +2080,166 @@ async fn ui10_contract_and_goldens_are_additive() {
     assert!(rdy_mcp::tools::SIGNING_DOC.ends_with(
         "A UI approval is unsigned; sign it later with rdy_sign or rdy sign. With signing.sign: always, the UI refuses and names rdy approve. An elicited approval signs with the person's key (signing.key) through the caller's SSH agent, with no relay."
     ));
+}
+
+// -- kfu4: the kungfu argument on an elicited answer
+
+/// The `(not_loaded, lost, wrong)` of `rdy:approvals` for the relay, as the server's recorder has
+/// them: this process shares that recorder, so nothing waits for the disk.
+fn approval_misses(w: &World) -> (u64, u64, u64) {
+    let rec = rdy_engine::kungfu_counts::Recorder::for_project(&w.dir.path().join(".rdy"))
+        .expect("the project's recorder");
+    let mut t = (0, 0, 0);
+    for (k, c) in rec.rows() {
+        if k.ruleset == "approvals" {
+            t.0 += c.not_loaded;
+            t.1 += c.lost;
+            t.2 += c.wrong;
+        }
+    }
+    t
+}
+
+fn with_value(args: &Value, value: Option<Value>) -> Value {
+    let mut a = args.clone();
+    if let Some(v) = value {
+        a["kungfu"] = v;
+    }
+    a
+}
+
+/// The approvals warning for a miss of this `message`.
+fn approvals_warning(message: &str) -> Value {
+    json!({"code": "W_KUNGFU", "message": message,
+        "fix": "Call rdy_instructions {load: [\"rdy:approvals\"]} and re-read it before you go on.",
+        "ruleset": "rdy:approvals"})
+}
+
+const KF_NOT_LOADED: &str = "This call has no kungfu value: you have not loaded this ruleset.";
+const KF_WRONG: &str =
+    "This call's kungfu value is not current: your instructions may be out of date.";
+
+#[tokio::test]
+async fn kfu4_elicitation_strips_value_on_initial_and_continued_calls() {
+    let stale = json!("kf-00000000");
+    let right = rdy_qa::mcp::fixture_value("rdy_answer").unwrap();
+
+    // the inline family: the form carries nothing; the continuation's own value decides
+    let (w, item) = approval();
+    let mut c = Client::inline(&w, 1, form_caps()).raw();
+    let args = ask(&item);
+    // a value does not reach the raw input check, and an option beside it still does
+    let mut mixed = with_value(&args, Some(stale.clone()));
+    mixed["option"] = json!("later");
+    let r = c.answer(mixed, json!({})).await;
+    refused_with(&r, MIXED);
+    assert_eq!(
+        done(&r).unwrap_err()["warnings"],
+        json!([approvals_warning(KF_WRONG)]),
+        "a refusal carries it"
+    );
+    assert_eq!(approval_misses(&w), (0, 0, 1));
+    // the mark is sent: the next reset comes from a correct call
+    let first = c
+        .answer(with_value(&args, Some(json!(right))), json!({}))
+        .await;
+    assert_eq!(first["resultType"], "input_required", "{first}");
+    assert!(first.get("warnings").is_none(), "{first}");
+    assert_eq!(
+        approval_misses(&w),
+        (0, 0, 1),
+        "a correct value counts nothing"
+    );
+
+    // missing on the ask: counted, no warning in the form, and no mark
+    let first = c.answer(args.clone(), json!({})).await;
+    assert_eq!(first["resultType"], "input_required", "{first}");
+    assert!(!first.to_string().contains("W_KUNGFU"), "{first}");
+    assert_eq!(approval_misses(&w), (1, 0, 1));
+    let handle = first["requestState"].as_str().unwrap().to_string();
+    // the value changes on the continuation: the bound input stays the same, and it counts once
+    let last = c
+        .answer(
+            with_value(&args, Some(stale.clone())),
+            retry(&handle, json!({"action": "decline"})),
+        )
+        .await;
+    let v = done(&last).unwrap();
+    assert_eq!(v["warnings"], json!([approvals_warning(KF_WRONG)]), "{v}");
+    assert_eq!(approval_misses(&w), (1, 0, 2));
+    let plain = without_warning_of(&v);
+
+    // a correct continuation clears the condition, after a missing ask: the terminal reply is the
+    // plain one
+    let first = c.answer(args.clone(), json!({})).await;
+    assert_eq!(first["resultType"], "input_required", "{first}");
+    assert_eq!(approval_misses(&w), (2, 0, 2));
+    let handle = first["requestState"].as_str().unwrap().to_string();
+    let last = c
+        .answer(
+            with_value(&args, Some(json!(right))),
+            retry(&handle, json!({"action": "decline"})),
+        )
+        .await;
+    let v = done(&last).unwrap();
+    assert_eq!(v, plain, "{v}");
+    assert_eq!(approval_misses(&w), (2, 0, 2));
+
+    // a bad handle on a continuation is the tool's refusal, with the warning due
+    let last = c
+        .answer(
+            args.clone(),
+            retry("no-such-handle", json!({"action": "decline"})),
+        )
+        .await;
+    refused_with(&last, GONE);
+    assert_eq!(
+        done(&last).unwrap_err()["warnings"],
+        json!([approvals_warning(KF_NOT_LOADED)])
+    );
+    assert_eq!(approval_misses(&w), (3, 0, 2));
+
+    // the in-call family: one request, however many internal steps; the reply carries the warning
+    let (w, item) = approval();
+    let mut c = Client::legacy(&w, 1, V_NOV, form_caps()).await.raw();
+    let args = ask(&item);
+    let (id, req) = c.asked(with_value(&args, Some(json!(null)))).await;
+    assert!(!req.to_string().contains("kf-"), "{req}");
+    assert_eq!(approval_misses(&w), (0, 0, 1));
+    let r = c.respond(id, &req, json!({"action": "cancel"})).await;
+    let v = done(&r).unwrap();
+    assert_eq!(v["warnings"], json!([approvals_warning(KF_WRONG)]), "{v}");
+    assert_eq!(
+        approval_misses(&w),
+        (0, 0, 1),
+        "exactly one count for the request"
+    );
+
+    // accepted through the writer: a missing value is one count too, and the mark holds
+    let item = w.card(&item.r#ref);
+    let (id, req) = c.asked(ask(&item)).await;
+    let r = c.respond(id, &req, choice("approve")).await;
+    let v = done(&r).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        v.get("warnings")
+            .is_none_or(|x| !x.to_string().contains("W_KUNGFU")),
+        "{v}"
+    );
+    assert_eq!(
+        approval_misses(&w),
+        (1, 0, 1),
+        "exactly one count for the request"
+    );
+}
+
+/// `v` with its `warnings` removed when they hold only the advisory.
+fn without_warning_of(v: &Value) -> Value {
+    let mut out = v.clone();
+    if let Some(all) = out.get_mut("warnings").and_then(Value::as_array_mut) {
+        all.retain(|w| w["code"] != "W_KUNGFU");
+        if all.is_empty() {
+            out.as_object_mut().unwrap().remove("warnings");
+        }
+    }
+    out
 }

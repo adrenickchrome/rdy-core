@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'scripts/release/guide.py'
+TABLE = ROOT / 'crates/rdy-engine/kungfu-tools.json'
 
 
 def load():
@@ -31,6 +32,22 @@ APPROVAL = "Never approve, tag or answer on your own judgment. Relay the person'
 NAMES = ('bootstrap', 'write', 'after-write', 'approvals', 'as-built', 'read', 'publish', 'review',
          'diagrams', 'parallel', 'project-ops', 'troubleshoot')
 KNOWN = ('index.md', 'agents/index.md', FOLDER + 'index.md', FOLDER + 'about.md')
+# The rulesets that own tools, written out here so that no expectation comes from the table.
+OWNER_TOOLS = {
+    'bootstrap': ('rdy_brief', 'rdy_context', 'rdy_overview', 'rdy_pending', 'rdy_query', 'rdy_read', 'rdy_schema',
+                  'rdy_search', 'rdy_site', 'rdy_suspects', 'rdy_tensions'),
+    'write': ('rdy_accept', 'rdy_asset', 'rdy_decide', 'rdy_intent', 'rdy_revoke', 'rdy_supersede', 'rdy_write'),
+    'after-write': ('rdy_plan', 'rdy_propose', 'rdy_resolve'),
+    'approvals': ('rdy_answer', 'rdy_dispute', 'rdy_land', 'rdy_policy', 'rdy_tag'),
+    'read': ('rdy_coverage', 'rdy_diff', 'rdy_impact', 'rdy_inbox', 'rdy_log', 'rdy_tags', 'rdy_trace'),
+    'publish': ('rdy_auth', 'rdy_export', 'rdy_key_bind', 'rdy_key_retire', 'rdy_key_revoke', 'rdy_key_show',
+                'rdy_publication_check', 'rdy_publish', 'rdy_remote', 'rdy_render'),
+    'review': ('rdy_review', 'rdy_review_next', 'rdy_review_submit'),
+    'parallel': ('rdy_alternatives', 'rdy_view'),
+    'project-ops': ('rdy_clone', 'rdy_compact', 'rdy_dump', 'rdy_import', 'rdy_load', 'rdy_redact', 'rdy_sign',
+                    'rdy_stream_check', 'rdy_upgrade'),
+}
+LINE_START = 'On every call to a tool in this ruleset, pass kungfu: "'
 
 
 def sha(data):
@@ -480,15 +497,25 @@ class Agi1Bundle(unittest.TestCase):
         GUIDE.check(w.out, w.sidecar, w.receipt, w.export, w.projection)
 
 
+def kungfu_line(name, texts):
+    """The line an owner's final row carries, computed here and not by the code under test."""
+    value = 'kf-' + sha(''.join(texts).encode())[:8]
+    return '%s%s". Tools: %s.\n' % (LINE_START, value, ', '.join(OWNER_TOOLS[name]))
+
+
 def reply_of(value):
     """The reply a binary built from bundle `value` gives in an empty home: every field from the
     bundle, computed here and not by the code under test."""
     rows, menu = [], []
     for ruleset in value['rulesets']:
         handle = 'rdy:' + ruleset['name']
-        rows.extend({'id': row['id'], 'ruleset': handle, 'text': row['text'], 'layer': 'rdy',
-                     'locked': row['locked'], 'reason': []} for row in ruleset['rows'])
-        size = sum(len(row['text'].encode()) for row in ruleset['rows'])
+        texts = [row['text'] for row in ruleset['rows']]
+        if ruleset['name'] in OWNER_TOOLS:
+            line = kungfu_line(ruleset['name'], texts)
+            texts[-1] += ('' if texts[-1].endswith('\n') else '\n') + line
+        rows.extend({'id': row['id'], 'ruleset': handle, 'text': text, 'layer': 'rdy',
+                     'locked': row['locked'], 'reason': []} for row, text in zip(ruleset['rows'], texts))
+        size = sum(len(text.encode()) for text in texts)
         menu.append({'id': handle, 'name': ruleset['title'], 'when': ruleset['when'], 'layer': 'rdy',
                      'required': ruleset['required'], 'tokens': (size + 3) // 4, 'hints': []})
     return {'instructions': rows, 'menu': menu, 'hint': 'Run rdy setup to create your own rules project.'}
@@ -526,7 +553,7 @@ def valid_bundle(version=V, landing=L):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode() + b'\n'
 
 
-class Agi6Binary(unittest.TestCase):
+class BinaryCase(unittest.TestCase):
     DIFFERS = 'embedded guide: packaged binary differs from release/agent-guide.json; ' + FIX + '\n'
 
     def setUp(self):
@@ -536,6 +563,7 @@ class Agi6Binary(unittest.TestCase):
         self.sidecar = self.dir / 'agent-guide.sha256'
         self.put_bundle(valid_bundle())
         self.binary = self.dir / 'rdy'
+        self.table = TABLE
 
     def put_bundle(self, raw):
         self.bundle.write_bytes(raw)
@@ -544,7 +572,8 @@ class Agi6Binary(unittest.TestCase):
 
     def run_check(self, env=None):
         return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), 'check-binary', '--binary', str(self.binary),
-                               '--bundle', str(self.bundle), '--sidecar', str(self.sidecar)],
+                               '--bundle', str(self.bundle), '--sidecar', str(self.sidecar),
+                               '--table', str(self.table)],
                               capture_output=True, text=True, env=env)
 
     def differs(self, reply, before=''):
@@ -552,6 +581,8 @@ class Agi6Binary(unittest.TestCase):
         out = self.run_check()
         self.assertEqual((out.returncode, out.stderr, out.stdout), (1, self.DIFFERS, ''))
 
+
+class Agi6Binary(BinaryCase):
     def test_agi6_packaged_binary_matches_frozen_export(self):
         good = reply_of(self.value)
         write_executable(self.binary, binary_source(good))
@@ -563,7 +594,7 @@ class Agi6Binary(unittest.TestCase):
         self.assertEqual(self.run_check().returncode, 0)
         # A relative path names the binary from the caller's folder, not the empty one it runs in.
         out = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), 'check-binary', '--binary', self.binary.name,
-                              '--bundle', self.bundle.name, '--sidecar', self.sidecar.name],
+                              '--bundle', self.bundle.name, '--sidecar', self.sidecar.name, '--table', str(TABLE)],
                              capture_output=True, text=True, cwd=self.dir)
         self.assertEqual((out.returncode, out.stderr), (0, ''), out.stderr)
 
@@ -678,8 +709,242 @@ class Agi6Binary(unittest.TestCase):
     def test_agi6_check_binary_stops_a_hung_binary(self):
         write_executable(self.binary, binary_source(reply_of(self.value), 'import time\ntime.sleep(600)\n'))
         with self.assertRaises(GUIDE.GuideError) as caught:
-            GUIDE.check_binary(self.binary, self.bundle, self.sidecar, deadline=0.1)
+            GUIDE.check_binary(self.binary, self.bundle, self.sidecar, TABLE, deadline=0.1)
         self.assertEqual(str(caught.exception), self.DIFFERS[:-1])
+
+
+class Kfu1Binary(BinaryCase):
+    """The comparison holds whole rows: no suffix is stripped and no trailing text is accepted."""
+
+    def good(self):
+        return reply_of(self.value)
+
+    def changed(self, apply):
+        reply = self.good()
+        apply(reply)
+        return reply
+
+    def passes(self, reply=None):
+        write_executable(self.binary, binary_source(self.good() if reply is None else reply))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (0, ''), out.stderr)
+        self.assertEqual(out.stdout, sha(self.bundle.read_bytes()) + '\n')
+
+    def line_of(self, name):
+        for ruleset in self.value['rulesets']:
+            if ruleset['name'] == name:
+                return kungfu_line(name, [row['text'] for row in ruleset['rows']])
+        raise AssertionError(name)
+
+    def test_kfu1_binary_comparison_checks_generated_lines(self):
+        self.passes()
+        good = self.good()
+        self.assertEqual(sum(row['text'].count(LINE_START) for row in good['instructions']), 9)
+        # Indexes in the fourteen rows: the bootstrap is 0-2, then one row for each other ruleset.
+        before, approval, after, write, as_built = 0, 1, 2, 3, 6
+        boot_line, write_line = self.line_of('bootstrap'), self.line_of('write')
+        rows = lambda r: r['instructions']  # noqa: E731
+        menu = lambda r: r['menu']  # noqa: E731
+
+        def edit(index, old, new):
+            def apply(reply):
+                text = rows(reply)[index]['text']
+                self.assertIn(old, text)
+                rows(reply)[index]['text'] = text.replace(old, new)
+            return apply
+
+        def strip_every_line(reply):
+            for row in rows(reply):
+                row['text'] = row['text'].split(LINE_START)[0]
+
+        value = boot_line.split('"')[1]
+        other_value = write_line.split('"')[1]
+        boot_tools = boot_line.split('Tools: ')[1]
+        write_tools = write_line.split('Tools: ')[1]
+        for label, apply in (
+                ('missing from the bootstrap', edit(after, boot_line, '')),
+                ('missing from an owner', edit(write, write_line, '')),
+                ('missing from every owner', strip_every_line),
+                ('changed value', edit(after, value, 'kf-00000000')),
+                ('value of another owner', edit(after, value, other_value)),
+                ('value in capitals', edit(after, value, value.upper())),
+                ('value with two more digits', edit(after, value + '"', value + '00"')),
+                ('changed wording', edit(after, 'On every call', 'On each call')),
+                ('backticks round the tools', edit(after, 'rdy_brief,', '`rdy_brief`,')),
+                ('no final LF', edit(after, boot_line, boot_line[:-1])),
+                ('CRLF ending', edit(after, boot_line, boot_line[:-1] + '\r\n')),
+                ('a blank line before it', edit(after, boot_line, '\n' + boot_line)),
+                ('trailing text', edit(after, boot_line, boot_line + 'x')),
+                ('trailing space', edit(after, boot_line, boot_line + ' ')),
+                ('duplicated on one row', edit(after, boot_line, boot_line + boot_line)),
+                ('duplicated on an owner', edit(write, write_line, write_line + write_line)),
+                ('on the first bootstrap row too', lambda r: rows(r)[before].update(text=rows(r)[before]['text'] + boot_line)),
+                ('on the first bootstrap row instead',
+                 lambda r: (rows(r)[before].update(text=rows(r)[before]['text'] + boot_line),
+                            edit(after, boot_line, '')(r))),
+                ('on the locked row', lambda r: rows(r)[approval].update(text=rows(r)[approval]['text'] + '\n' + boot_line)),
+                ('on a ruleset with no tools', lambda r: rows(r)[as_built].update(text=rows(r)[as_built]['text'] + write_line)),
+                ('a tool lost', edit(after, 'rdy_brief, ', '')),
+                ('a tool added', edit(after, 'rdy_brief, ', 'rdy_brief, rdy_write, ')),
+                ('tools out of order', edit(after, 'rdy_brief, rdy_context', 'rdy_context, rdy_brief')),
+                ('tools of another owner', edit(after, boot_tools, write_tools)),
+                ('source tokens', lambda r: menu(r)[0].update(tokens=(sum(
+                    len(row['text'].encode()) for row in self.value['rulesets'][0]['rows']) + 3) // 4)),
+                ('source tokens on an owner', lambda r: menu(r)[1].update(tokens=(len(
+                    self.value['rulesets'][1]['rows'][0]['text'].encode()) + 3) // 4)),
+                ('one token more', lambda r: menu(r)[0].update(tokens=menu(r)[0]['tokens'] + 1)),
+                ('one token less', lambda r: menu(r)[1].update(tokens=menu(r)[1]['tokens'] - 1)),
+                ('tokens added to a ruleset with no tools', lambda r: menu(r)[4].update(tokens=menu(r)[4]['tokens'] + 1))):
+            with self.subTest(label):
+                self.differs(self.changed(apply))
+
+        # A row with no final LF gets one LF before the line, and CRLF source bytes stay as they are.
+        raw = json.loads(valid_bundle())
+        raw['rulesets'][1]['rows'][0]['text'] = 'No final line feed'
+        raw['rulesets'][2]['rows'][0]['text'] = 'A CRLF line\r\n'
+        raw['rulesets'][0]['rows'][2]['text'] = '\n\nCafé with no final line feed'
+        self.put_bundle(json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode() + b'\n')
+        self.passes()
+        delivered = self.good()['instructions']
+        self.assertTrue(delivered[3]['text'].startswith('No final line feed\n' + LINE_START))
+        self.assertTrue(delivered[4]['text'].startswith('A CRLF line\r\n' + LINE_START))
+        self.assertTrue(delivered[2]['text'].startswith('\n\nCafé with no final line feed\n' + LINE_START))
+        self.differs(self.changed(lambda r: rows(r)[3].update(
+            text=rows(r)[3]['text'].replace('feed\n', 'feed', 1))))
+
+        # The table decides the tools: the same binary is wrong for another table.
+        self.put_bundle(valid_bundle())
+        moved = json.loads(TABLE.read_text())
+        for row in moved:
+            if row['tool'] == 'rdy_write':
+                row['ruleset'] = 'rdy:read'
+        self.table = self.dir / 'moved.json'
+        self.table.write_text(json.dumps(moved))
+        self.differs(self.good())
+
+    def test_kfu1_binary_comparison_preserves_source_digest_checks(self):
+        marker = self.dir / 'ran'
+        write_executable(self.binary, binary_source(self.good(), 'open(%r, "w").close()\n' % str(marker)))
+        raw = self.bundle.read_bytes()
+        digest_refusal = ('embedded guide: release/agent-guide.json does not match release/agent-guide.sha256; '
+                          + FIX + '\n')
+
+        # Damage to the bundle or its digest refuses before the table is read or the binary runs.
+        self.bundle.write_bytes(raw.replace(b'A body', b'B body', 1))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, digest_refusal))
+        self.put_bundle(raw)
+        self.sidecar.write_bytes(b'0' * 64 + b'\n')
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, digest_refusal))
+        self.sidecar.unlink()
+        self.assertIn('missing release/agent-guide.sha256', self.run_check().stderr)
+        self.put_bundle(raw)
+        self.table = self.dir / 'absent.json'
+        self.bundle.write_bytes(raw.replace(b'A body', b'B body', 1))
+        self.assertEqual(self.run_check().stderr, digest_refusal, 'the digest comes first')
+        self.put_bundle(raw)
+
+        # A missing or unusable table refuses before the binary runs.
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr, out.stdout), (1, 'kungfu catalogue: invalid table\n', ''))
+        # So do equal values, and the diagnostic prints none.
+        self.table = TABLE
+        same = json.loads(raw)
+        same['rulesets'][5]['rows'][0]['text'] = same['rulesets'][1]['rows'][0]['text']
+        self.put_bundle(json.dumps(same, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode() + b'\n')
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, 'kungfu catalogue: value collision rdy:write rdy:read\n'))
+        self.assertNotIn('kf-', out.stderr)
+        self.assertFalse(marker.exists(), 'a bad input runs no binary')
+
+        # Source bytes get no line: not in the bundle, not in its digest, not in the parsed value.
+        self.put_bundle(raw)
+        write_executable(self.binary, binary_source(self.good()))
+        self.assertEqual(self.run_check().returncode, 0)
+        self.assertEqual(self.bundle.read_bytes(), raw)
+        self.assertEqual(self.sidecar.read_bytes(), sha(raw).encode() + b'\n')
+        self.assertNotIn(LINE_START.encode(), raw)
+        before = json.loads(raw)
+        rows, menu = GUIDE.expected_reply(before, GUIDE.read_table(TABLE))
+        self.assertEqual(before, json.loads(raw), 'deriving the reply changes no source row')
+        self.assertEqual(rows, self.good()['instructions'])
+        self.assertEqual(menu, self.good()['menu'])
+        # The value hashes the source rows, split or not, and never a delivered line.
+        boot = before['rulesets'][0]['rows']
+        joined = ''.join(row['text'] for row in boot)
+        self.assertEqual(GUIDE.kungfu_value([row['text'] for row in boot]), 'kf-' + sha(joined.encode())[:8])
+        self.assertEqual(GUIDE.kungfu_value([joined]), GUIDE.kungfu_value([row['text'] for row in boot]))
+        self.assertEqual(GUIDE.kungfu_value(['abc']), 'kf-ba7816bf')
+        self.assertEqual(GUIDE.kungfu_value(['a\r\nb\r\n']), 'kf-58055bdc')
+        self.assertEqual(GUIDE.kungfu_value(['a\nb']), 'kf-7e18f737')
+        # The checked-in export carries no line either.
+        self.assertNotIn(LINE_START.encode(), (ROOT / 'release/agent-guide.json').read_bytes())
+
+    def test_kfu1_checker_reads_the_table_by_the_builds_rules(self):
+        good = json.loads(TABLE.read_text())
+        self.assertEqual(len(good), 59)
+        table = GUIDE.read_table(TABLE)
+        self.assertEqual({name: tuple(tools) for name, tools in table.items()}, OWNER_TOOLS)
+        path = self.dir / 'table.json'
+
+        def edited(apply):
+            rows = json.loads(json.dumps(good))
+            apply(rows)
+            return json.dumps(rows).encode()
+
+        def dropped(handle):
+            return lambda rows: rows.__setitem__(slice(None), [r for r in rows if r['ruleset'] != handle])
+
+        def duplicate(rows):
+            rows.insert(1, dict(rows[1]))
+
+        invalid = 'invalid table'
+        padded = TABLE.read_bytes() + b' ' * (GUIDE.TABLE_MAX - TABLE.stat().st_size)
+        many = json.loads(json.dumps(good)) + [
+            {'tool': 'rdy_z%03d' % i, 'ruleset': 'rdy:write', 'response': 'warn'} for i in range(198)]
+        for label, data, reason in (
+                ('not JSON', b'not json', invalid),
+                ('not an array', b'{"rows":[]}', invalid),
+                ('not UTF-8', b'["\xff"]', invalid),
+                ('duplicate key', b'[{"tool":"a","tool":"b","ruleset":null,"response":"warn"}]', invalid),
+                ('deep', b'[' * GUIDE.TABLE_MAX, invalid),
+                ('too many bytes', padded + b' ', 'table exceeds 32768 bytes'),
+                ('too many rows', json.dumps(many).encode(), 'table exceeds 256 rows'),
+                ('missing owner', edited(dropped('rdy:read')), invalid),
+                ('missing exemption', edited(lambda r: r.__setitem__(
+                    slice(None), [x for x in r if x['tool'] != 'rdy_session'])), invalid),
+                ('another exemption', edited(lambda r: [x.update(ruleset=None) for x in r if x['tool'] == 'rdy_write']),
+                 invalid),
+                ('duplicate tool', edited(duplicate), 'duplicate tool rdy_alternatives'),
+                ('out of order', edited(lambda r: r.insert(0, r.pop(1))), invalid),
+                ('unknown ruleset', edited(lambda r: r[0].update(ruleset='rdy:nothing')), 'unknown ruleset rdy:nothing'),
+                ('non-owning ruleset', edited(lambda r: r[0].update(ruleset='rdy:as-built')), 'unknown ruleset rdy:as-built'),
+                ('refusal row', edited(lambda r: r[0].update(response='refuse')), 'non-warn response rdy_accept'),
+                ('other response', edited(lambda r: r[0].update(response='block')), invalid),
+                ('response type', edited(lambda r: r[0].update(response=True)), invalid),
+                ('unknown key', edited(lambda r: r[0].update(reason='x')), invalid),
+                ('missing key', edited(lambda r: r[0].pop('ruleset')), invalid),
+                ('tool type', edited(lambda r: r[0].update(tool=1)), invalid),
+                ('long tool', edited(lambda r: r.insert(0, {'tool': 'a' * 97, 'ruleset': 'rdy:write', 'response': 'warn'})),
+                 invalid),
+                ('row type', edited(lambda r: r.append('rdy_write')), invalid)):
+            with self.subTest(label):
+                path.write_bytes(data)
+                with self.assertRaises(GUIDE.CatalogueError) as caught:
+                    GUIDE.read_table(path)
+                self.assertEqual(str(caught.exception), 'kungfu catalogue: ' + reason)
+        path.write_bytes(padded)
+        self.assertEqual(len(GUIDE.read_table(path)), 9)
+        missing = self.dir / 'absent.json'
+        with self.assertRaises(GUIDE.CatalogueError) as caught:
+            GUIDE.read_table(missing)
+        self.assertEqual(str(caught.exception), 'kungfu catalogue: invalid table')
+        # The command needs the table: leaving it out is an invalid invocation.
+        out = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), 'check-binary', '--binary', str(self.binary),
+                              '--bundle', str(self.bundle), '--sidecar', str(self.sidecar)],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2, out.stderr)
 
 
 if __name__ == '__main__':
