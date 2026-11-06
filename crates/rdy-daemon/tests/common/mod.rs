@@ -1,18 +1,31 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets and path bytes. FW-XP1 Phase 4 ports it.
+//! The shared daemon fixture. It reaches the endpoint only through the `sys` seam, so one harness
+//! serves a Unix socket and a Windows named pipe.
 #![allow(dead_code)]
 use rdy_daemon::*;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
+/// The stream of the daemon's endpoint: a Unix socket or a named pipe.
+pub type Conn = rdy_daemon::sys::Stream;
+
+/// A new project directory. On Unix it is under /tmp, so `.rdy/run/rdy.sock` fits `sun_path`.
+#[cfg(unix)]
 pub fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rdyd")
         .tempdir_in("/tmp")
         .expect("tempdir in /tmp")
+}
+
+/// A new project directory. The endpoint is a named pipe, so the path length does not matter.
+#[cfg(windows)]
+pub fn short_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("rdyd")
+        .tempdir()
+        .expect("tempdir")
 }
 
 /// Echoes `args`; records ended sessions.
@@ -54,6 +67,17 @@ pub struct TestDaemon {
     pub readiness: Readiness,
     pub echo: Arc<Echo>,
     pub task: tokio::task::JoinHandle<std::io::Result<ExitReason>>,
+}
+
+impl TestDaemon {
+    /// Stops the daemon, waits for it to end and removes its directory. The removal fails while
+    /// any handle in the directory is open, which is the check that nothing leaked.
+    pub async fn finish(self) -> ExitReason {
+        self.handle.stop();
+        let reason = self.task.await.expect("daemon task").expect("daemon run");
+        self.dir.close().expect("the fixture directory closes");
+        reason
+    }
 }
 
 /// A bound daemon of `version` with the echo handler, not yet ready unless `ready`.
@@ -100,18 +124,34 @@ pub fn hello_built(version: &str, build: &str, cwd: &Path) -> String {
         + "\n"
 }
 
+/// The endpoint's name as a record holds it: a Unix path's bytes, or a pipe name (always UTF-8).
+#[cfg(unix)]
+fn endpoint_bytes(endpoint: &Path) -> Vec<u8> {
+    rdy_daemon::sys::path_bytes(endpoint).to_vec()
+}
+
+#[cfg(windows)]
+fn endpoint_bytes(endpoint: &Path) -> Vec<u8> {
+    endpoint
+        .to_str()
+        .expect("a pipe name is UTF-8")
+        .as_bytes()
+        .to_vec()
+}
+
 /// Writes `run`'s socket record as a daemon does: the socket, then the `.rdy` identity.
 pub fn write_record(run: &RunDir, socket: &Path, project: &ProjectId) {
-    use std::os::unix::ffi::OsStrExt;
-    let mut bytes = socket.as_os_str().as_bytes().to_vec();
+    let mut bytes = endpoint_bytes(socket);
     bytes.push(b'\n');
     bytes.extend_from_slice(format!("{project}\n").as_bytes());
     std::fs::write(run.socket_record(), bytes).unwrap();
 }
 
 /// Connects, sends `line` as the hello, and returns the reader and the first reply line.
-pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<UnixStream>, String) {
-    let mut s = UnixStream::connect(run.socket()).await.expect("connect");
+pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<Conn>, String) {
+    let mut s = rdy_daemon::sys::connect(&run.socket())
+        .await
+        .expect("connect");
     s.write_all(line.as_bytes()).await.unwrap();
     let mut r = BufReader::new(s);
     let mut out = String::new();
@@ -119,7 +159,7 @@ pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<UnixStream>, S
     (r, out)
 }
 
-pub async fn ctl(r: &mut BufReader<UnixStream>, id: u64, op: &str, args: Value) -> Value {
+pub async fn ctl(r: &mut BufReader<Conn>, id: u64, op: &str, args: Value) -> Value {
     let line = json!({"id": id, "op": op, "args": args}).to_string() + "\n";
     r.get_mut().write_all(line.as_bytes()).await.unwrap();
     let mut out = String::new();
