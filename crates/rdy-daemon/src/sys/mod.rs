@@ -52,6 +52,27 @@ pub use windows::*;
 #[cfg(not(any(unix, windows)))]
 compile_error!("rdy_daemon::sys has no implementation for this platform (FW-XP1 D-1RXEA)");
 
+/// The bytes of the canonical path `p` that a port hash takes (the site's ports, D-YMWEM and
+/// D-DK03K). On Unix they are the path's own bytes, so the ports are as they were. On Windows
+/// they are the path's UTF-16LE code units, as the pipe name's hash takes them, so no native
+/// separator is converted and no unpaired surrogate is lost.
+#[cfg(unix)]
+pub fn path_hash_bytes(p: &std::path::Path) -> std::borrow::Cow<'_, [u8]> {
+    std::borrow::Cow::Borrowed(path_bytes(p))
+}
+
+/// See the Unix form: the path's UTF-16LE code units.
+#[cfg(windows)]
+pub fn path_hash_bytes(p: &std::path::Path) -> std::borrow::Cow<'_, [u8]> {
+    use std::os::windows::ffi::OsStrExt;
+    std::borrow::Cow::Owned(
+        p.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    )
+}
+
 /// The read half of a `Stream`.
 pub type ReadHalf = tokio::io::ReadHalf<Stream>;
 /// The write half of a `Stream`.

@@ -17,7 +17,7 @@ const SPAN: u16 = 16384;
 /// (D-YMWEM), so every spelling of one project gives one port, as it gives one socket.
 pub fn derived_port(root: &Path) -> u16 {
     let canonical = RunDir::of_project(root).root();
-    let h = Hash::of(crate::sys::path_bytes(&canonical)).0;
+    let h = Hash::of(&crate::sys::path_hash_bytes(&canonical)).0;
     PORT_LOW + u16::from_le_bytes([h[0], h[1]]) % SPAN
 }
 
@@ -38,12 +38,12 @@ pub fn candidates(setting: Option<u16>, root: &Path) -> Vec<u16> {
 /// pins the source listener only: it has no say here.
 pub fn profile_candidates(root: &Path, canonical_key: &str) -> Vec<u16> {
     let canonical = RunDir::of_project(root).root();
-    let root_bytes = crate::sys::path_bytes(&canonical);
+    let root_bytes = crate::sys::path_hash_bytes(&canonical);
     let mut input =
         Vec::with_capacity(PROFILE_DOMAIN.len() + 16 + root_bytes.len() + canonical_key.len());
     input.extend_from_slice(PROFILE_DOMAIN);
     input.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
-    input.extend_from_slice(root_bytes);
+    input.extend_from_slice(&root_bytes);
     input.extend_from_slice(&(canonical_key.len() as u64).to_le_bytes());
     input.extend_from_slice(canonical_key.as_bytes());
     let h = Hash::of(&input).0;
@@ -155,7 +155,7 @@ mod tests {
     fn recipe(root_bytes: &[u8], key: &str) -> Vec<u16> {
         let mut input = b"rdy-site-profile-v1\0".to_vec();
         input.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
-        input.extend_from_slice(root_bytes);
+        input.extend_from_slice(&root_bytes);
         input.extend_from_slice(&(key.len() as u64).to_le_bytes());
         input.extend_from_slice(key.as_bytes());
         let h = Hash::of(&input).0;
@@ -173,7 +173,7 @@ mod tests {
         // a second spelling of the same directory, with no OS-specific call
         let link = real.join(".");
         let canonical = RunDir::of_project(&real).root();
-        let bytes = crate::sys::path_bytes(&canonical).to_vec();
+        let bytes = crate::sys::path_hash_bytes(&canonical).into_owned();
         for key in ["docs", "a.b-c_d", "implicit:org", "x"] {
             let want = recipe(&bytes, key);
             assert_eq!(want.len(), 16);
