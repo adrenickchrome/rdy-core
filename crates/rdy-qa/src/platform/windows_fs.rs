@@ -123,20 +123,32 @@ pub(super) fn own_sid() -> io::Result<String> {
     Ok(rdy_store::pio::current_account()?.to_string())
 }
 
-/// Sets the access of `path` to what `mode` says for its owner, in Windows terms. A mode with no
-/// owner bit (`0o000`) is an empty protected DACL: no account may open the file, and the owner
-/// can still change the DACL. Any other mode gives this account full control. A directory's
-/// entry is inherited.
-pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-    if mode & 0o700 == 0 {
-        return set_dacl(path, "D:P");
-    }
-    let flags = if path.is_dir() { "OICI" } else { "" };
-    set_dacl(path, &format!("D:P(A;{flags};FA;;;{})", own_sid()?))
-}
-
 /// FILE_GENERIC_READ and FILE_GENERIC_EXECUTE: list, read and traverse, nothing that writes.
 const READ_AND_LIST: &str = "0x1200a9";
+
+/// The protected DACL that `mode` gives its owner, in Windows terms. No owner bit (`0o000`) is an
+/// empty DACL: no account may open the file, and the owner can still change the DACL. An owner
+/// bit without the write bit (`0o400`, `0o500`, `0o555`) is read and list only, so nothing can be
+/// written or created there, and the owner can still change the DACL. A write bit gives full
+/// control. A directory's entry is inherited.
+fn mode_sddl(mode: u32, is_dir: bool, sid: &str) -> String {
+    let flags = if is_dir { "OICI" } else { "" };
+    if mode & 0o700 == 0 {
+        "D:P".to_string()
+    } else if mode & 0o200 == 0 {
+        format!("D:P(A;{flags};{READ_AND_LIST};;;{sid})")
+    } else {
+        format!("D:P(A;{flags};FA;;;{sid})")
+    }
+}
+
+/// Sets the access of `path` to what `mode` says for its owner. See `mode_sddl`.
+pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    if mode & 0o700 == 0 {
+        return set_dacl(path, &mode_sddl(mode, false, ""));
+    }
+    set_dacl(path, &mode_sddl(mode, path.is_dir(), &own_sid()?))
+}
 
 /// A directory that a standard account cannot write in while this value lives. No entry gives
 /// a write right; the owner can still change the DACL, and does when the value is dropped. Only the directory's own DACL changes, never what it holds.
@@ -511,5 +523,33 @@ mod tests {
         // a device name makes no entry
         let _ = fs::write(dir.join(device_name()), b"x");
         assert!(entry_names(dir).expect("list").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod set_mode_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_owner_modes_give_no_write_right() {
+        for mode in [0o400, 0o500, 0o555] {
+            let sddl = mode_sddl(mode, true, "S-1-5-X");
+            assert!(!sddl.contains(";FA;"), "{mode:o}: {sddl}");
+            assert!(sddl.contains(READ_AND_LIST), "{mode:o}: {sddl}");
+        }
+        assert!(mode_sddl(0o700, true, "S").contains(";FA;"));
+        assert!(mode_sddl(0o600, false, "S").contains(";FA;"));
+        assert_eq!(mode_sddl(0o000, true, "S"), "D:P");
+    }
+
+    #[test]
+    fn a_read_only_mode_refuses_a_write_unless_elevated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_mode(dir.path(), 0o500).expect("chmod");
+        let wrote = std::fs::write(dir.path().join("x"), b"x").is_ok();
+        set_mode(dir.path(), 0o700).expect("restore");
+        if !super::super::windows_accounts::is_elevated().unwrap_or(false) {
+            assert!(!wrote, "0o500 must refuse a write");
+        }
     }
 }
