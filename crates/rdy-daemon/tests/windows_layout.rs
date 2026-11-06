@@ -680,8 +680,12 @@ fn wx15_run_directory_reparse_or_acl_violation_is_refused() {
         // this account's run directory that is open to others is narrowed, as on Unix
         let root = d.path().join("open");
         let run = project(&root);
-        fs::create_dir(run.path()).unwrap();
+        pio::create_private_dir(run.path()).unwrap();
         widen(run.path());
+        assert_eq!(
+            rdy_daemon::sys::dir_state(run.path()).unwrap(),
+            rdy_daemon::sys::DirState::NotPrivate
+        );
         run.ensure().unwrap();
         only_me(run.path(), ObjectKind::Dir);
     }
