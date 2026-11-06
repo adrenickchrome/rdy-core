@@ -199,7 +199,7 @@ fn wx15_aliases_reach_one_pipe() {
         aliases.push(canonical.clone());
         // a junction to it
         let through = parent.join("through");
-        junction(&root, &through);
+        junction(Path::new(&plain), &through);
         aliases.push(through);
         // a drive letter for it
         let subst = Subst::of(&canonical);
