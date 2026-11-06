@@ -234,6 +234,9 @@ mod tests {
                 "user.email=qa",
                 "-c",
                 "commit.gpgsign=false",
+                // Git for Windows refuses a path with a control character in an index entry
+                "-c",
+                "core.protectNTFS=false",
                 "-c",
                 &format!(
                     "core.hooksPath={}",

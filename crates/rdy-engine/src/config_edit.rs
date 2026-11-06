@@ -282,8 +282,8 @@ fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, Rdy
     if !m.is_dir() || !privacy.mine || !privacy.private {
         return Err(not_private());
     }
-    dir.sync_all().map_err(|_| save_failed())?;
-    parent.sync_all().map_err(|_| save_failed())?;
+    pio::sync_open_dir(&dir, &parent_path.join(part)).map_err(|_| save_failed())?;
+    pio::sync_open_dir(parent, parent_path).map_err(|_| save_failed())?;
     fsutil::record(parent_path);
     Ok(dir)
 }

@@ -209,7 +209,12 @@ fn ain2_config_typos_warn_and_keep_the_default() {
         "true",
     ] {
         let (d, env) = user_file(&format!("instructions:\n  person: {value}\n"));
-        let file = d.path().join("rdy/config.yaml").display().to_string();
+        let file = d
+            .path()
+            .join("rdy")
+            .join("config.yaml")
+            .display()
+            .to_string();
         let got = resolve_person(Platform::Unix, &env).unwrap();
         assert_eq!(got.path, default, "{value}");
         assert!(got.origin.is_none(), "{value}");

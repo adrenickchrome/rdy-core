@@ -193,24 +193,20 @@ mod host {
         let owner = pio::security_of(&f).unwrap().owner.unwrap().to_string();
         drop(f);
         let sticky = mode & 0o1000 != 0;
-        let mut args = vec!["/inheritance:r".to_string()];
         let classes = [
-            (&owner, (mode >> 6) & 7, false),
-            (&POWER_USERS.to_string(), (mode >> 3) & 7, false),
-            (&EVERYONE.to_string(), mode & 7, sticky),
-        ]
-        .map(|(sid, bits, sticky)| (sid.clone(), bits, sticky));
-        args.push("/grant:r".to_string());
-        for (sid, bits, sticky) in &classes {
-            if *bits != 0 {
-                args.push(format!("*{sid}:{}", rights(*bits, *sticky)));
-            }
+            (owner.as_str(), (mode >> 6) & 7, false),
+            (POWER_USERS, (mode >> 3) & 7, false),
+            (EVERYONE, mode & 7, sticky),
+        ];
+        icacls(path, &["/inheritance:r".to_string()]);
+        // `/grant:r` keeps an ACE with other inheritance flags, so each goes first
+        for (sid, _, _) in classes {
+            icacls(path, &["/remove:g".to_string(), format!("*{sid}")]);
         }
-        icacls(path, &args);
-        // a class with no bits holds no ACE, whatever stood before
-        for (sid, bits, _) in &classes {
-            if *bits == 0 {
-                icacls(path, &["/remove".to_string(), format!("*{sid}")]);
+        for (sid, bits, sticky) in classes {
+            if bits != 0 {
+                let grant = format!("*{sid}:{}", rights(bits, sticky));
+                icacls(path, &["/grant".to_string(), grant]);
             }
         }
     }

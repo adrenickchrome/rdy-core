@@ -447,60 +447,79 @@ fn hsa2_a_replaced_directory_is_refused_and_never_redirected() {
     a.replace(b"a bytes").unwrap();
     let mut b = open(home, "b/credentials.yaml", true).unwrap();
     b.replace(b"b bytes").unwrap();
-    // a is renamed aside and replaced by a link to b
-    fs::rename(home.join("a"), home.join("a-aside")).unwrap();
-    link(home.join("b"), home.join("a")).unwrap();
-    assert_privacy(a.replace(b"redirected"), "a directory replaced by a link");
-    assert_eq!(
-        fs::read(home.join("b/credentials.yaml")).unwrap(),
-        b"b bytes"
-    );
-    assert_eq!(
-        fs::read(home.join("a-aside/credentials.yaml")).unwrap(),
-        b"a bytes"
-    );
-    // b's lock and replacement still work
-    b.replace(b"b again").unwrap();
-    assert_eq!(
-        fs::read(home.join("b/credentials.yaml")).unwrap(),
-        b"b again"
-    );
-    // a real directory put in its place is refused too
-    fs::remove_file(home.join("a")).unwrap();
-    mkdir(home.join("a")).unwrap();
-    assert_privacy(a.replace(b"new dir"), "a directory replaced by another");
-    assert!(names(&home.join("a")).is_empty());
-    drop(a);
-    // a swap during the write cannot redirect it: the bytes land in the directory opened at
-    // open, the other config is untouched, and the changed path is an error
-    fs::remove_dir(home.join("a")).unwrap();
-    fs::rename(home.join("a-aside"), home.join("a")).unwrap();
-    let mut a = open(home, "a/credentials.yaml", true).unwrap();
-    let swap_home = home.to_path_buf();
-    let e = with_private_write_probe_for_tests(
-        move |stage, _: &Path| {
-            if stage == PrivateWriteStage::Written {
-                fs::rename(swap_home.join("a"), swap_home.join("a-aside"))?;
-                link(swap_home.join("b"), swap_home.join("a"))?;
-            }
-            Ok(())
-        },
-        || a.replace(b"during the swap"),
-    );
-    assert_privacy(e, "a directory swapped during the write");
-    assert_eq!(
-        fs::read(home.join("b/credentials.yaml")).unwrap(),
-        b"b again"
-    );
-    assert_eq!(
-        fs::read(home.join("a-aside/credentials.yaml")).unwrap(),
-        b"during the swap",
-        "the bytes went to the directory opened at open"
-    );
-    assert_eq!(
-        names(&home.join("b")),
-        ["credentials.yaml", "credentials.yaml.lock"]
-    );
+    #[cfg(unix)]
+    {
+        // a is renamed aside and replaced by a link to b
+        fs::rename(home.join("a"), home.join("a-aside")).unwrap();
+        link(home.join("b"), home.join("a")).unwrap();
+        assert_privacy(a.replace(b"redirected"), "a directory replaced by a link");
+        assert_eq!(
+            fs::read(home.join("b/credentials.yaml")).unwrap(),
+            b"b bytes"
+        );
+        assert_eq!(
+            fs::read(home.join("a-aside/credentials.yaml")).unwrap(),
+            b"a bytes"
+        );
+        // b's lock and replacement still work
+        b.replace(b"b again").unwrap();
+        assert_eq!(
+            fs::read(home.join("b/credentials.yaml")).unwrap(),
+            b"b again"
+        );
+        // a real directory put in its place is refused too
+        fs::remove_file(home.join("a")).unwrap();
+        mkdir(home.join("a")).unwrap();
+        assert_privacy(a.replace(b"new dir"), "a directory replaced by another");
+        assert!(names(&home.join("a")).is_empty());
+        drop(a);
+        // a swap during the write cannot redirect it: the bytes land in the directory opened at
+        // open, the other config is untouched, and the changed path is an error
+        fs::remove_dir(home.join("a")).unwrap();
+        fs::rename(home.join("a-aside"), home.join("a")).unwrap();
+        let mut a = open(home, "a/credentials.yaml", true).unwrap();
+        let swap_home = home.to_path_buf();
+        let e = with_private_write_probe_for_tests(
+            move |stage, _: &Path| {
+                if stage == PrivateWriteStage::Written {
+                    fs::rename(swap_home.join("a"), swap_home.join("a-aside"))?;
+                    link(swap_home.join("b"), swap_home.join("a"))?;
+                }
+                Ok(())
+            },
+            || a.replace(b"during the swap"),
+        );
+        assert_privacy(e, "a directory swapped during the write");
+        assert_eq!(
+            fs::read(home.join("b/credentials.yaml")).unwrap(),
+            b"b again"
+        );
+        assert_eq!(
+            fs::read(home.join("a-aside/credentials.yaml")).unwrap(),
+            b"during the swap",
+            "the bytes went to the directory opened at open"
+        );
+        assert_eq!(
+            names(&home.join("b")),
+            ["credentials.yaml", "credentials.yaml.lock"]
+        );
+    }
+    // Windows refuses to move a directory while a handle under it is open: no path can change
+    // under an open config, and the replacement stays where it was opened
+    #[cfg(windows)]
+    {
+        fs::rename(home.join("a"), home.join("a-aside")).unwrap_err();
+        a.replace(b"a again").unwrap();
+        assert_eq!(
+            fs::read(home.join("a/credentials.yaml")).unwrap(),
+            b"a again"
+        );
+        assert_eq!(
+            fs::read(home.join("b/credentials.yaml")).unwrap(),
+            b"b bytes"
+        );
+        drop(a);
+    }
     drop(b);
     // a target link planted after open is refused, not replaced
     let mut c = open(home, "b/credentials.yaml", true).unwrap();
