@@ -293,7 +293,7 @@ impl Home {
         }
         text.push_str(&format!(
             "    \"{origin}\":\n      ca_file: {}\n",
-            pem.display()
+            rdy_qa::fixtures::yaml_path(&pem)
         ));
         std::fs::write(self.config(), text).unwrap();
     }

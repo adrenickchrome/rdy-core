@@ -11,6 +11,7 @@ mod cli_checks;
 mod cli_clone;
 mod cli_config;
 mod cli_config_file;
+mod cli_config_native;
 mod cli_coverage;
 mod cli_daemon;
 mod cli_daemon_build;

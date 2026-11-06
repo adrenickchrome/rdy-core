@@ -6,6 +6,12 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// `path` as one YAML single-quoted scalar: a native path (a Windows drive, backslashes, a space
+/// or a quote in a directory name) reads back as the same path.
+pub fn yaml_path(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
 pub fn writer() -> Session {
     Session::human("human:qa".into(), Role::Writer).unwrap()
 }

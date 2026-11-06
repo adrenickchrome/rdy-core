@@ -123,6 +123,18 @@ pub(super) fn own_sid() -> io::Result<String> {
     Ok(rdy_store::pio::current_account()?.to_string())
 }
 
+/// Sets the access of `path` to what `mode` says for its owner, in Windows terms. A mode with no
+/// owner bit (`0o000`) is an empty protected DACL: no account may open the file, and the owner
+/// can still change the DACL. Any other mode gives this account full control. A directory's
+/// entry is inherited.
+pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    if mode & 0o700 == 0 {
+        return set_dacl(path, "D:P");
+    }
+    let flags = if path.is_dir() { "OICI" } else { "" };
+    set_dacl(path, &format!("D:P(A;{flags};FA;;;{})", own_sid()?))
+}
+
 /// FILE_GENERIC_READ and FILE_GENERIC_EXECUTE: list, read and traverse, nothing that writes.
 const READ_AND_LIST: &str = "0x1200a9";
 
