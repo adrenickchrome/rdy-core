@@ -43,6 +43,7 @@
 {"tool": "rdy_review_next", "ruleset": "rdy:review", "response": "warn"},
 {"tool": "rdy_review_submit", "ruleset": "rdy:review", "response": "warn"},
 {"tool": "rdy_revoke", "ruleset": "rdy:write", "response": "warn"},
+{"tool": "rdy_rule", "ruleset": "rdy:write", "response": "warn"},
 {"tool": "rdy_schema", "ruleset": "rdy:bootstrap", "response": "warn"},
 {"tool": "rdy_search", "ruleset": "rdy:bootstrap", "response": "warn"},
 {"tool": "rdy_session", "ruleset": null, "response": "warn"},

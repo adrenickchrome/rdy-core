@@ -2922,8 +2922,231 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"load": ["project:d-ZZZZZ"]}),
     );
     drop(ins);
+    rule_probes(seen);
     elicitation_probes(seen);
     let _ = (doc, a);
+}
+
+/// Lands in the closed store `r` a doc with the authority policy `fields` and the decision that
+/// adopts it.
+fn land_rule_policy(r: &mut rdy_engine::Rdy, fields: Value) {
+    use rdy_engine::WriteRequest;
+    use rdy_model::Justification;
+    use rdy_qa::fixtures::{land, parse_test_ops, write, writer};
+    let w = write(
+        r,
+        "pol",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "decision", "id": "$dec", "parent": "$d", "fields": {"statement": "Adopt the policy", "status": "proposed", "needs_content": false}}
+        ]),
+    )
+    .expect("write the rules");
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: "pol".into(),
+            ops: parse_test_ops(json!([
+                {"op": "create", "type": "authority_policy", "id": "$p", "parent": w.created["$d"], "fields": fields}
+            ]))
+            .expect("the policy ops"),
+            justification: Some(Justification::Implements(vec![
+                BlockId::parse(&w.created["$dec"]).expect("a decision id"),
+            ])),
+            message: String::new(),
+        },
+    )
+    .expect("write the policy");
+    land(r, "pol").expect("land the policy");
+}
+
+/// rtc5: `rdy_rule`, both input forms. A project rule lands, is edited and is removed, and a
+/// repeat of a rule is held back with its issues; under the card policy the call stops at a card
+/// and the answer form lands it; a person's rule goes to the meta project of a world of its own,
+/// so no probe reads a real meta override.
+fn rule_probes(seen: &mut Seen) {
+    use rdy_qa::instructions::World;
+    let session = json!({"actor": "agent:rl", "run": "rl", "role": "writer"});
+    let words = |extra: Value| {
+        let mut v = json!({
+            "why": "The person asked for it.",
+            "evidence": "Please keep this rule.",
+            "question": "Shall I save this rule?",
+            "session_ref": "chat-9"
+        });
+        for (k, x) in extra.as_object().expect("an object") {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let (dir, r) = project();
+    drop(r);
+    let mut c = isolated_mcp(dir.path());
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", session.clone());
+    let added = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        words(json!({"scope": "project", "op": "add", "text": "Say what you changed."})),
+    ));
+    let id = added["rule"]["id"].clone();
+    assert!(id.is_string(), "the rule landed: {added}");
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule edit",
+        words(json!({"scope": "project", "op": "edit", "id": id,
+            "text": "Say what you changed and why.", "session_ref": "chat-10"})),
+    );
+    // a repeat of the same words is held back with its issues: no card exists for it
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        words(
+            json!({"scope": "project", "op": "add", "text": "Say what you changed and why.",
+            "session_ref": "chat-11"}),
+        ),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule remove",
+        words(json!({"scope": "project", "op": "remove", "id": id, "session_ref": "chat-12"})),
+    );
+    // the refusals: a missing key, an unknown rule and an answer to no card
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        json!({"scope": "project", "op": "add"}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule remove",
+        words(
+            json!({"scope": "project", "op": "remove", "id": "ai-00000", "session_ref": "chat-13"}),
+        ),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule answer",
+        json!({"scope": "project", "answer": {"ref": "P-ZZZZZ@1", "option": "approve",
+            "card_hash": "0".repeat(64), "evidence": "Yes."}}),
+    );
+    drop(c);
+    // a reader writes nothing
+    let mut rdr = isolated_mcp(dir.path());
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:rlr", "run": "rlr", "role": "reader"}),
+    );
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_rule",
+        "rdy_rule add",
+        words(json!({"scope": "project", "op": "add", "text": "A reader's rule."})),
+    );
+    drop(rdr);
+
+    // the card policy: the call stops at the card, and the answer form lands it
+    let (cdir, mut r) = project();
+    land_rule_policy(
+        &mut r,
+        json!({"key": "authority-policy", "agent_may_accept": [], "roles": {}, "require": [],
+            "owners": [], "rules_from_chat": "card"}),
+    );
+    drop(r);
+    let mut c = isolated_mcp(cdir.path());
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", session);
+    let card = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule card",
+        words(json!({"scope": "project", "op": "add", "text": "Keep one idea per change."})),
+    ));
+    assert_eq!(card["state"], "card", "{card}");
+    // the person's answers, relayed: an approval lands the rule
+    fn answer(
+        seen: &mut Seen,
+        c: &mut rdy_qa::mcp::McpClient,
+        item: &Value,
+        option: &str,
+        hash: &Value,
+    ) -> Value {
+        ok_of(&mcp_probe(
+            seen,
+            c,
+            "rdy_rule",
+            "rdy_rule answer",
+            json!({"scope": "project", "answer": {"ref": item, "option": option,
+                "card_hash": hash, "evidence": "Yes, keep it.",
+                "question": "Shall I land this rule?"}}),
+        ))
+    }
+    let landed = answer(seen, &mut c, &card["ref"], "approve", &card["card_hash"]);
+    let id = landed["rule"]["id"].clone();
+    assert!(id.is_string(), "the approval landed the rule: {landed}");
+    // an edit stops at the card, with the confirm card that rests beside it
+    let edit = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule card",
+        words(json!({"scope": "project", "op": "edit", "id": id,
+            "text": "Keep one idea in each change.", "session_ref": "chat-14"})),
+    ));
+    assert_eq!(edit["state"], "card", "{edit}");
+    let confirm = edit["cards"][0].clone();
+    assert!(confirm["card_hash"].is_string(), "a confirm card: {edit}");
+    let answered = answer(
+        seen,
+        &mut c,
+        &confirm["ref"],
+        "confirm",
+        &confirm["card_hash"],
+    );
+    assert_eq!(answered["state"], "answered", "{answered}");
+    let next = answered["remaining_cards"][0].clone();
+    let landed = answer(seen, &mut c, &next["ref"], "approve", &next["card_hash"]);
+    assert_eq!(landed["rule"]["text"], "Keep one idea in each change.");
+    drop(c);
+
+    // a person's rule, in a world with a meta project of its own
+    let w = World::new();
+    let meta = w.project();
+    w.person(meta.path());
+    let src = w.project();
+    let mut c = w.mcp(src.path());
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:rlp", "run": "rlp", "role": "writer"}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add person",
+        words(json!({"scope": "person", "op": "add", "text": "Answer in British English."})),
+    );
+    drop(c);
 }
 
 /// ui10: the elicit input, its unavailable refusal, and the protocol envelopes and outcomes of a
@@ -5164,6 +5387,22 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_revoke/ok/on_change/resolved",
     "mcp/rdy_revoke/ok/on_change/tensions",
     "mcp/rdy_revoke/ok/suggestions",
+    "mcp/rdy_rule add person/ok/landing/consequences",
+    "mcp/rdy_rule add person/ok/landing/signatures",
+    "mcp/rdy_rule add/ok/landing?/consequences",
+    "mcp/rdy_rule add/ok/landing?/signatures",
+    "mcp/rdy_rule add/refused/issues",
+    "mcp/rdy_rule answer/ok/landing?/consequences",
+    "mcp/rdy_rule answer/ok/landing?/signatures",
+    "mcp/rdy_rule answer/ok/landing?/warnings",
+    "mcp/rdy_rule answer/ok/remaining_cards?[]/card/members",
+    "mcp/rdy_rule answer/refused/issues",
+    "mcp/rdy_rule card/ok/cards[]/card/members",
+    "mcp/rdy_rule edit/ok/landing/consequences",
+    "mcp/rdy_rule edit/ok/landing/signatures",
+    "mcp/rdy_rule remove/ok/landing/consequences",
+    "mcp/rdy_rule remove/ok/landing/signatures",
+    "mcp/rdy_rule remove/refused/issues",
     "mcp/rdy_schema/ok/checks?/agent[]/stages",
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_schema/ok/fields?/planned/values",
@@ -5392,14 +5631,16 @@ fn ok14_probe_shapes_merge_every_array_element() {
 fn mh7_new_surfaces_preserve_the_release_contract() {
     let fixture = read_fixture();
     let mcp = &fixture["mcp"];
-    // 57 tools before; one more (and ain4's rdy_instructions), and the earlier ones stay
+    // 57 tools before; one more (and ain4's rdy_instructions and rtc5's rdy_rule), and the earlier ones stay
     let names: Vec<&str> = mcp["tool_names"]
         .as_array()
         .unwrap()
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 59);
+    // rtc5 adds `rdy_rule`
+    assert_eq!(names.len(), 60);
+    assert!(names.contains(&"rdy_rule"));
     assert!(names.contains(&"rdy_compact"));
     for kept in [
         "rdy_upgrade",

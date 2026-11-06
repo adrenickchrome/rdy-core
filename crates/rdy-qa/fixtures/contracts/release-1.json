@@ -17894,6 +17894,446 @@
           "warnings_repeated": "number"
         }
       },
+      "rdy_rule add": {
+        "ok": {
+          "decision": "string",
+          "issues?": [
+            {
+              "block": "null",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ],
+          "landing?": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          },
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "ref?": "string",
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string",
+          "state?": "string",
+          "view?": "string",
+          "warnings?": [
+            {
+              "block": "null|string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ]
+        },
+        "refusal_codes": [
+          "E_BAD_INPUT",
+          "E_PERMISSION"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_rule add person": {
+        "ok": {
+          "decision": "string",
+          "landing": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          },
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string"
+        }
+      },
+      "rdy_rule answer": {
+        "ok": {
+          "answer?": {
+            "act": "string",
+            "answer": "string",
+            "assurance": "string",
+            "label": "string",
+            "landing": "null",
+            "next": "string",
+            "option": "string",
+            "ref": "string",
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            }
+          },
+          "decision": "string",
+          "landing?": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": []
+          },
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "proposal_ref?": "string",
+          "ref?": "string",
+          "remaining_cards?": [
+            {
+              "card": {
+                "age": "string",
+                "batch": "null",
+                "blocking": "bool",
+                "card": "string",
+                "card_hash": "string",
+                "exception": "null",
+                "facts": [
+                  {
+                    "name": "string",
+                    "value": "string"
+                  }
+                ],
+                "kind": "string",
+                "members": [],
+                "options": [
+                  {
+                    "consequences": [
+                      "string"
+                    ],
+                    "id": "string",
+                    "label": "string",
+                    "reason?": "string",
+                    "recommended?": "bool"
+                  }
+                ],
+                "raised_at": "string",
+                "raised_by": "string",
+                "ref": "string",
+                "summary": "string",
+                "summary_by": "string",
+                "title": "string",
+                "why": "string"
+              },
+              "card_hash": "string",
+              "ref": "string"
+            }
+          ],
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string",
+          "state?": "string",
+          "view?": "string"
+        },
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_rule card": {
+        "ok": {
+          "card": {
+            "age": "string",
+            "batch": "null",
+            "blocking": "bool",
+            "card": "string",
+            "card_hash": "string",
+            "exception": "null",
+            "facts": [
+              {
+                "name": "string",
+                "value": "string"
+              }
+            ],
+            "kind": "string",
+            "members": [
+              "string"
+            ],
+            "options": [
+              {
+                "consequences": [
+                  "string"
+                ],
+                "id": "string",
+                "label": "string",
+                "reason?": "string",
+                "recommended?": "bool"
+              }
+            ],
+            "raised_at": "string",
+            "raised_by": "string",
+            "ref": "string",
+            "summary": "string",
+            "summary_by": "string",
+            "title": "string",
+            "why": "string"
+          },
+          "card_hash": "string",
+          "cards": [
+            {
+              "card": {
+                "age": "string",
+                "batch": "string",
+                "blocking": "bool",
+                "card": "string",
+                "card_hash": "string",
+                "exception": "string",
+                "facts": [
+                  {
+                    "name": "string",
+                    "value": "string"
+                  }
+                ],
+                "kind": "string",
+                "members": [],
+                "options": [
+                  {
+                    "consequences": [
+                      "string"
+                    ],
+                    "id": "string",
+                    "label": "string",
+                    "reason?": "string",
+                    "recommended?": "bool"
+                  }
+                ],
+                "raised_at": "string",
+                "raised_by": "string",
+                "ref": "string",
+                "summary": "null",
+                "summary_by": "null",
+                "title": "string",
+                "why": "string"
+              },
+              "card_hash": "string",
+              "ref": "string"
+            }
+          ],
+          "decision": "string",
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "proposal_ref": "string",
+          "ref": "string",
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string",
+          "state": "string",
+          "view": "string",
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ]
+        }
+      },
+      "rdy_rule edit": {
+        "ok": {
+          "decision": "string",
+          "landing": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          },
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string"
+        }
+      },
+      "rdy_rule remove": {
+        "ok": {
+          "decision": "string",
+          "landing": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "relayed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          },
+          "project": {
+            "name": "string",
+            "repo_id": "string"
+          },
+          "rule": {
+            "id": "string",
+            "retired": "bool",
+            "ruleset": "string",
+            "text": "string"
+          },
+          "scope": "string"
+        },
+        "refusal_codes": [
+          "E_NOT_FOUND"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
       "rdy_schema": {
         "ok": {
           "alternatives?": "string",
@@ -19160,6 +19600,7 @@
       "rdy_review_next",
       "rdy_review_submit",
       "rdy_revoke",
+      "rdy_rule",
       "rdy_schema",
       "rdy_search",
       "rdy_session",
@@ -21825,6 +22266,124 @@
           "required": [
             "reason",
             "target"
+          ],
+          "type": "object"
+        }
+      },
+      "rdy_rule": {
+        "input_schema": {
+          "$defs": {
+            "RuleAnswerArgs": {
+              "additionalProperties": false,
+              "description": "The answer to a card of this tool.",
+              "properties": {
+                "card_hash": {
+                  "description": "The card_hash of the card the person saw: 64 lowercase hexadecimal characters.",
+                  "maxLength": 64,
+                  "minLength": 64,
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "evidence": {
+                  "description": "The person's own words, at most 2000 characters.",
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                "option": {
+                  "description": "An option id of that card, at most 144 bytes.",
+                  "maxLength": 144,
+                  "type": "string"
+                },
+                "question": {
+                  "description": "The question you asked the person, at most 2000 characters.",
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                "ref": {
+                  "description": "The item the card named: its ref, at most 128 bytes.",
+                  "maxLength": 128,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "card_hash",
+                "evidence",
+                "option",
+                "ref"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "$ref": "#/$defs/RuleAnswerArgs",
+              "description": "The person's answer to a card this tool returned. Pass it alone with scope."
+            },
+            "applies_to": {
+              "description": "When the rule applies, 1 to 1024 selectors of at most 256 bytes each (add and edit). Default for add: all.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1024,
+              "minItems": 1,
+              "type": "array"
+            },
+            "evidence": {
+              "description": "The person's own words that ask for this change, at most 2000 characters. Required for add, edit and remove.",
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "id": {
+              "description": "The id of the instruction to change (edit and remove), at most 96 bytes.",
+              "maxLength": 96,
+              "type": "string"
+            },
+            "op": {
+              "description": "The change: add, edit or remove. Leave it out only to answer a card.",
+              "enum": [
+                "add",
+                "edit",
+                "remove"
+              ],
+              "type": "string"
+            },
+            "question": {
+              "description": "The question you asked the person, at most 2000 characters.",
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "ruleset": {
+              "description": "The ruleset that holds the rule: a doc id or path in the selected scope, or its person: or project: handle (add and edit). Default: the scope's default ruleset.",
+              "maxLength": 1024,
+              "type": "string"
+            },
+            "scope": {
+              "description": "Where the rule lives: person (the person's meta project) or project (this project). No default.",
+              "enum": [
+                "person",
+                "project"
+              ],
+              "type": "string"
+            },
+            "session_ref": {
+              "description": "A short id for the conversation, at most 256 characters. A repeat of the same request in the same session reads the same receipt; use a new one for a new request.",
+              "maxLength": 256,
+              "type": "string"
+            },
+            "text": {
+              "description": "The rule in full, at most 65536 bytes (add and edit). It is stored as given.",
+              "type": "string"
+            },
+            "why": {
+              "description": "Why, in one line of at most 2000 characters. It is stored as the reason of the rule's decision.",
+              "maxLength": 2000,
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
           ],
           "type": "object"
         }
