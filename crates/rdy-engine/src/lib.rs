@@ -99,6 +99,7 @@ pub mod render_inputs;
 pub mod render_source;
 pub mod repo;
 pub mod rule_types;
+pub mod rules;
 pub mod search;
 pub mod section;
 pub mod semantic;
