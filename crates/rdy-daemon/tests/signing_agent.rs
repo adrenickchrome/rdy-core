@@ -1,66 +1,46 @@
-#![cfg(unix)]
-// Unix only: a fake SSH agent listens on a Unix socket. FW-XP1 Phase 4 ports it.
-//! The caller's SSH agent over its socket (sig3): bounded, complete packets, and one agent per
-//! caller. No test reads or sets `SSH_AUTH_SOCK`: each agent is injected by its socket path.
+//! The caller's SSH agent over its native endpoint (sig3): bounded, complete packets, and one agent
+//! per caller. No test reads or sets `SSH_AUTH_SOCK`: each agent is injected by its endpoint path.
+//! The fake agent is a raw endpoint (`common::agent`): a socket on Unix, a named pipe on Windows.
 
+mod common;
+
+use common::agent::{Act, Fake, Script, Seen, no_endpoint, start};
 use rdy_daemon::signing_agent::CallerAgent;
 use rdy_engine::signing_crypto::{SigningAgent, resolve_key, sign_sshsig};
 use rdy_engine::{E_NO_AGENT, RdyError};
-use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Duration;
+use tokio::sync::Notify;
 
-/// What the fake agent writes for one request (the request's message type and body): the raw
-/// reply bytes, length prefix included, so a test can send a malformed frame.
-type Script = Arc<dyn Fn(u8, &[u8]) -> Vec<u8> + Send + Sync>;
+/// A hung test fails here. It asserts no timing: every wait below ends on an event.
+const HANG_LIMIT: Duration = Duration::from_secs(120);
 
-/// A fake agent on its own socket: it answers each connection's one request with `script`,
-/// reports each request on the returned channel, then closes the connection.
-struct Fake {
-    path: PathBuf,
+/// A fake agent and the requests it saw, whole, length prefix included.
+struct Agent {
+    path: std::path::PathBuf,
     requests: Receiver<Vec<u8>>,
-    _dir: tempfile::TempDir,
+    _fake: Fake,
 }
 
-fn fake(script: Script) -> Fake {
+fn fake(script: Script) -> Agent {
     let (tx, rx) = channel();
     fake_on(script, tx, rx)
 }
 
 /// [`fake`] reporting on `tx`, whose receiver `rx` the returned value holds.
-fn fake_on(script: Script, tx: Sender<Vec<u8>>, rx: Receiver<Vec<u8>>) -> Fake {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    thread::spawn(move || serve(listener, script, tx));
-    Fake {
-        path,
+fn fake_on(script: Script, tx: Sender<Vec<u8>>, rx: Receiver<Vec<u8>>) -> Agent {
+    let tx = std::sync::Mutex::new(tx);
+    let fake = start(Act::Reply(script), move |seen| {
+        if let Seen::Request(whole) = seen {
+            let _ = tx.lock().unwrap().send(whole);
+        }
+    });
+    Agent {
+        path: fake.path.clone(),
         requests: rx,
-        _dir: dir,
-    }
-}
-
-fn serve(listener: UnixListener, script: Script, tx: Sender<Vec<u8>>) {
-    for conn in listener.incoming() {
-        let Ok(mut conn) = conn else { return };
-        let mut len = [0u8; 4];
-        if conn.read_exact(&mut len).is_err() {
-            continue;
-        }
-        let mut req = vec![0u8; u32::from_be_bytes(len) as usize];
-        if conn.read_exact(&mut req).is_err() {
-            continue;
-        }
-        let mut whole = len.to_vec();
-        whole.extend(&req);
-        if tx.send(whole).is_err() {
-            return;
-        }
-        let reply = script(req[0], &req[1..]);
-        let _ = conn.write_all(&reply);
+        _fake: fake,
     }
 }
 
@@ -146,13 +126,19 @@ fn sig3_agent_packets_are_bounded_and_complete() {
     let ids = agent.identities().unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0].public_key, key, "the comment is dropped");
-    assert_eq!(f.requests.recv().unwrap(), vec![0, 0, 0, 1, 11]);
+    assert_eq!(
+        f.requests.recv_timeout(HANG_LIMIT).expect("the test hung"),
+        vec![0, 0, 0, 1, 11]
+    );
     assert_eq!(agent.sign(&key, b"payload").unwrap(), ed_signature());
     let mut sign_req = vec![13u8];
     sign_req.extend(string(&key));
     sign_req.extend(string(b"payload"));
     sign_req.extend([0, 0, 0, 0]);
-    assert_eq!(f.requests.recv().unwrap(), frame(&sign_req));
+    assert_eq!(
+        f.requests.recv_timeout(HANG_LIMIT).expect("the test hung"),
+        frame(&sign_req)
+    );
 
     // Refusals: types 5, 30 and 102 are the shared `request refused`, for either request.
     for ty in [5u8, 30, 102] {
@@ -196,8 +182,8 @@ fn sig3_agent_packets_are_bounded_and_complete() {
     assert_cause(ids, "connection failed", "no reply");
     assert_cause(sig, "connection failed", "no reply");
     // No agent at that path at all.
-    let dir = tempfile::tempdir().unwrap();
-    let gone = CallerAgent::with_socket(dir.path().join("none.sock"));
+    let none = no_endpoint();
+    let gone = CallerAgent::with_socket(&none.path);
     assert_cause(gone.identities(), "connection failed", "no socket");
     assert_cause(
         gone.sign(&ed_key(1), b"p"),
@@ -420,7 +406,7 @@ fn sig3_cancel_closes_the_agent_stream() {
         })
     };
     // The request reached the agent: the call is now waiting for its reply.
-    let first = f.requests.recv().unwrap();
+    let first = f.requests.recv_timeout(HANG_LIMIT).expect("the test hung");
     assert!(
         !first.is_empty(),
         "the call ended before the agent saw a request: {:?}",
@@ -442,4 +428,64 @@ fn sig3_cancel_closes_the_agent_stream() {
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The agent's side of a connection, seen by a test: its requests and its closes, in order.
+fn watched(act: Act) -> (Fake, Receiver<Seen>) {
+    let (tx, rx) = channel();
+    let tx = std::sync::Mutex::new(tx);
+    let fake = start(act, move |seen| {
+        let _ = tx.lock().unwrap().send(seen);
+    });
+    (fake, rx)
+}
+
+fn next(seen: &Receiver<Seen>) -> Seen {
+    seen.recv_timeout(HANG_LIMIT).expect("the test hung")
+}
+
+#[test]
+fn wx21d_agent_disconnect_and_cancel_reap_workers() {
+    // The agent goes while a call waits on its read: the worker ends as a lost connection, and
+    // the call's connection is closed by then.
+    let release = Arc::new(Notify::new());
+    let (f, seen) = watched(Act::Hold {
+        release: Arc::clone(&release),
+    });
+    let agent = Arc::new(CallerAgent::with_socket(&f.path));
+    let worker = {
+        let agent = Arc::clone(&agent);
+        thread::spawn(move || agent.identities().map(|v| v.len()))
+    };
+    assert_eq!(next(&seen), Seen::Request(vec![0, 0, 0, 1, 11]));
+    release.notify_one();
+    assert_cause(
+        worker.join().unwrap(),
+        "connection failed",
+        "the agent left",
+    );
+
+    // A cancel ends the waiting call and closes its connection, round after round: each round
+    // would leave a worker behind and a connection open.
+    let (f, seen) = watched(Act::Hold {
+        release: Arc::new(Notify::new()),
+    });
+    let agent = Arc::new(CallerAgent::with_socket(&f.path));
+    for round in 1..=20 {
+        let worker = {
+            let agent = Arc::clone(&agent);
+            thread::spawn(move || agent.sign(&[1, 2, 3], b"payload").map(|v| v.len()))
+        };
+        assert!(
+            matches!(next(&seen), Seen::Request(r) if r[4] == 13),
+            "{round}"
+        );
+        agent.cancel();
+        assert_cause(
+            worker.join().unwrap(),
+            "request cancelled",
+            &format!("round {round}"),
+        );
+        assert_eq!(next(&seen), Seen::Closed, "{round}");
+    }
 }

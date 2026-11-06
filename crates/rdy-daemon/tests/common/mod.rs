@@ -1,6 +1,7 @@
 //! The shared daemon fixture. It reaches the endpoint only through the `sys` seam, so one harness
 //! serves a Unix socket and a Windows named pipe.
 #![allow(dead_code)]
+pub mod agent;
 use rdy_daemon::*;
 use serde_json::{Value, json};
 use std::path::Path;
