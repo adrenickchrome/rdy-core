@@ -2,8 +2,10 @@
 # Inactive until activation: the job runs only when the repository variable RDY_WEB_DISPATCH_ENABLED is 'true',
 # set after the founder approves the separate rdy-web dispatcher App and its key (RDY_WEB_DISPATCH_APP_ID,
 # RDY_WEB_DISPATCH_APP_PRIVATE_KEY). Until then every published release skips it.
-# Releases are published with a person's token, so `release: published` fires; a release published with
-# GITHUB_TOKEN would not trigger this workflow.
+# Releases are published by the release publisher App's token (release.yml, job promote), so `release: published`
+# fires; a release published with GITHUB_TOKEN would not trigger this workflow. This workflow never uses the
+# publisher App: the web dispatch has its own App. A failed notification is retried by re-running this run for
+# that release id, never by publishing again.
 # No checkout, build, signing, upload or release change. The website verifies the release itself.
 name: Notify website of published core release
 on:

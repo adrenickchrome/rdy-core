@@ -1,0 +1,5 @@
+# CodeQL scans all product code, including #[cfg(test)] modules under crates/*/src.
+# It skips only the integration test folders, where test panics re-flag rust/cleartext-logging.
+name: rdy CodeQL configuration
+paths-ignore:
+  - crates/*/tests/**

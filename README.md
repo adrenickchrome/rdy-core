@@ -359,6 +359,22 @@ Fingerprint: SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc.
 
 Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.41.0). Use the key only when both match.
 
+### Release keys
+
+Each version has exactly one release key. A signature by any other key is refused.
+
+| Versions | Key type | Fingerprint | State |
+| --- | --- | --- | --- |
+| v0.17.0 to v0.41.0 | `sk-ssh-ed25519@openssh.com` | `SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc` | historical key, retired for new releases |
+
+No other version has a release key. The machine release key is pending: no version after v0.41.0 has a release key yet.
+
+The allowed-signers line for v0.17.0 to v0.41.0:
+
+```text
+rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==
+```
+
 ### Install
 
 On macOS arm64, for an archive downloaded with curl:

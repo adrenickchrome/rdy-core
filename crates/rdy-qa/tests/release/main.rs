@@ -3,5 +3,6 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod release_contract;
 mod release_install;
+mod release_keys;
 mod release_notices;
 mod release_package;
