@@ -371,23 +371,32 @@ fn wx28b_chain_load_and_reindex_keep_every_released_fixture() {
         // the loaded state passes fsck, and a reindex reproduces it
         let mut ra = open(&a, f.holder);
         ra.fsck().unwrap_or_else(|e| panic!("{}: {e}", f.name));
-        let before = derived(&ra).unwrap();
-        ra.reindex().unwrap_or_else(|e| panic!("{}: {e}", f.name));
-        let after = derived(&ra).unwrap();
-        let v = compare(&before, &after);
-        assert!(
-            v.is_empty(),
-            "{}: a reindex changed the state: {v:#?}",
-            f.name
-        );
-        ra.close().unwrap();
-        // and the reopened project agrees with a second, independent load
-        let ra = open(&a, f.holder);
-        let rb = open(&b, f.holder);
-        let v = compare(&derived(&ra).unwrap(), &derived(&rb).unwrap());
-        assert!(v.is_empty(), "{}: two loads differ: {v:#?}", f.name);
-        ra.close().unwrap();
-        rb.close().unwrap();
+        if f.holder {
+            // a holder answers derived reads only for a tag or a landing, so it is reindexed
+            // and checked again after a reopen
+            ra.reindex().unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            ra.close().unwrap();
+            let rb = open(&a, true);
+            rb.fsck().unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            rb.close().unwrap();
+        } else {
+            let before = derived(&ra).unwrap();
+            ra.reindex().unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            let v = compare(&before, &derived(&ra).unwrap());
+            assert!(
+                v.is_empty(),
+                "{}: a reindex changed the state: {v:#?}",
+                f.name
+            );
+            ra.close().unwrap();
+            // and the reopened project agrees with a second, independent load
+            let ra = open(&a, false);
+            let rb = open(&b, false);
+            let v = compare(&derived(&ra).unwrap(), &derived(&rb).unwrap());
+            assert!(v.is_empty(), "{}: two loads differ: {v:#?}", f.name);
+            ra.close().unwrap();
+            rb.close().unwrap();
+        }
         assert_eq!(
             code_of(load_fixture(f, &a)),
             "E_ALREADY_EXISTS",
