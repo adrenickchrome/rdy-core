@@ -65,6 +65,7 @@ pub mod instructions_config;
 pub mod intent;
 mod io;
 mod keys;
+pub mod kungfu_counts;
 pub mod landing_order;
 pub mod lexicon;
 mod lint;
