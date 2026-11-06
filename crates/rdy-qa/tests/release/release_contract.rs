@@ -5501,8 +5501,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/rule add card/stdout/cards",
     "cli/rule add person/stdout/landing/consequences",
     "cli/rule add person/stdout/landing/signatures",
+    "cli/rule add person/stdout/landing/warnings",
     "cli/rule add/stdout/landing?/consequences",
     "cli/rule add/stdout/landing?/signatures",
+    "cli/rule add/stdout/landing?/warnings",
     "cli/rule answer/stdout/landing?/consequences",
     "cli/rule answer/stdout/landing?/signatures",
     "cli/rule answer/stdout/landing?/warnings",
@@ -5511,8 +5513,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/rule edit card/stdout/cards[]/card/members",
     "cli/rule edit/stdout/landing/consequences",
     "cli/rule edit/stdout/landing/signatures",
+    "cli/rule edit/stdout/landing/warnings",
     "cli/rule remove/stdout/landing/consequences",
     "cli/rule remove/stdout/landing/signatures",
+    "cli/rule remove/stdout/landing/warnings",
     "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
@@ -5616,8 +5620,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_revoke/ok/suggestions",
     "mcp/rdy_rule add person/ok/landing/consequences",
     "mcp/rdy_rule add person/ok/landing/signatures",
+    "mcp/rdy_rule add person/ok/landing/warnings",
     "mcp/rdy_rule add/ok/landing?/consequences",
     "mcp/rdy_rule add/ok/landing?/signatures",
+    "mcp/rdy_rule add/ok/landing?/warnings",
     "mcp/rdy_rule add/refused/issues",
     "mcp/rdy_rule answer/ok/landing?/consequences",
     "mcp/rdy_rule answer/ok/landing?/signatures",
@@ -5627,8 +5633,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_rule card/ok/cards[]/card/members",
     "mcp/rdy_rule edit/ok/landing/consequences",
     "mcp/rdy_rule edit/ok/landing/signatures",
+    "mcp/rdy_rule edit/ok/landing/warnings",
     "mcp/rdy_rule remove/ok/landing/consequences",
     "mcp/rdy_rule remove/ok/landing/signatures",
+    "mcp/rdy_rule remove/ok/landing/warnings",
     "mcp/rdy_rule remove/refused/issues",
     "mcp/rdy_schema/ok/checks?/agent[]/stages",
     "mcp/rdy_schema/ok/children?",
@@ -6540,7 +6548,8 @@ fn rtc7_release_contract_covers_every_rule_stop() {
         "an attached card"
     );
     assert!(card["cards"][0]["card"]["options"][0]["id"].is_string());
-    assert!(card["warnings"].is_array());
+    // a rule card carries no card-words warning, so its reply has no warnings member
+    assert!(card.get("warnings").is_none(), "{card}");
 
     // the answer: a landing or the remaining cards, and its answer record
     let answered = &results["rdy_rule answer"]["ok"];
