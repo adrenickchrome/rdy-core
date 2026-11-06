@@ -518,6 +518,15 @@ class agi6_Candidate(Fixture):
     def test_agi6_candidate_checks_guide_before_receipt(self):
         raw = guide_tests.valid_bundle(V)
         reply = guide_tests.reply_of(json.loads(raw))
+        # What counts is the packaged binary, not the build's own copy or the source files.
+        locked = json.loads(json.dumps(reply))
+        locked['instructions'][1]['locked'] = False
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, log = self.toolchain(reply, locked)
+        self.refused(repo, commit, bin_dir, gate, guide_tests.Agi6Binary.DIFFERS[:-1])
+        self.assertEqual(log.read_text(), 'package\n', 'the check follows packaging')
+        for entry in self.tmp.iterdir():
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
         repo, commit = self.source_commit(raw)
         bin_dir, gate, log = self.toolchain(reply, reply)
         receipt = self.build(repo, commit, bin_dir, gate)
@@ -528,18 +537,6 @@ class agi6_Candidate(Fixture):
         self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
         self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
-
-    def test_agi6_failed_comparison_issues_no_receipt(self):
-        raw = guide_tests.valid_bundle(V)
-        reply = guide_tests.reply_of(json.loads(raw))
-        differs = guide_tests.Agi6Binary.DIFFERS[:-1]
-        locked = json.loads(json.dumps(reply))
-        locked['instructions'][1]['locked'] = False
-        # What counts is the packaged binary, not the build's own copy or the source files.
-        repo, commit = self.source_commit(raw)
-        bin_dir, gate, log = self.toolchain(reply, locked)
-        self.refused(repo, commit, bin_dir, gate, differs)
-        self.assertEqual(log.read_text(), 'package\n', 'the check follows packaging')
 
     def test_agi6_the_guide_at_the_commit_must_stand_on_its_own(self):
         raw = guide_tests.valid_bundle(V)
