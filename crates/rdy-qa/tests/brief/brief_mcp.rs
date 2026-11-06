@@ -236,6 +236,10 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
         i.contains("Read and write through rdy's tools, not the working-copy files"),
         "{i}"
     );
+    assert!(
+        !i.contains("Brief before editing") && !i.contains("Finding:") && !i.contains("Why:"),
+        "the long guidance left the server text: {i}"
+    );
     let write = guide_text(&mut c, &["write"]);
     let built = guide_text(&mut c, &["as-built"]);
     let read = guide_text(&mut c, &["read"]);

@@ -116,6 +116,10 @@ fn erow1_the_edit_loop_doc_and_instructions_carry_the_m2c3_lines() {
     ] {
         assert!(EDIT_LOOP_DOC.contains(word), "{word}: {EDIT_LOOP_DOC}");
     }
+    assert!(
+        !rdy_mcp::server::INSTRUCTIONS.contains("a second time in a session"),
+        "the server text no longer holds the rule"
+    );
     let i = crate::mcp_instructions::guide(&["write"]);
     assert!(
         i.contains("a second time in a session") && i.contains("change plan"),

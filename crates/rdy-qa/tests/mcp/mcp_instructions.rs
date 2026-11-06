@@ -180,10 +180,12 @@ pub(crate) fn guide(sets: &[&str]) -> String {
 fn guide_has(set: &str, sentence: &str) {
     let g = guide(&[set]);
     assert!(g.contains(sentence), "rdy:{set} lacks: {sentence}");
-    assert!(
-        !rdy_mcp::server::INSTRUCTIONS.contains(sentence),
-        "the server text still holds: {sentence}"
-    );
+    for text in [sentence.to_string(), sentence.replace('`', "")] {
+        assert!(
+            !rdy_mcp::server::INSTRUCTIONS.contains(&text),
+            "the server text still holds: {text}"
+        );
+    }
 }
 
 fn moved(set: &str, starts: &str) -> &'static str {
@@ -292,7 +294,9 @@ fn cc18_the_instructions_carry_confidence_and_linking() {
     let g = guide(&["write"]);
     let conf = moved("write", "Fact sheets, search hits");
     let link = moved("write", "Link every entity");
-    assert!(conf.contains("carry a confidence level: act on high"));
+    for s in [conf, link] {
+        assert!(!rdy_mcp::server::INSTRUCTIONS.contains(&s.replace('`', "")));
+    }
     let (a, b) = (g.find(conf), g.find(link));
     assert!(a.is_some() && b.is_some(), "{g}");
     assert!(a < b, "the confidence line comes before the linking line");
