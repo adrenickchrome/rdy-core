@@ -83,6 +83,48 @@ pub fn mode_of(path: &Path) -> io::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
 }
 
+/// A directory that no normal user can write in while this value lives (FW-XP1 Phase 4, the
+/// filesystem fixtures). Unix: the mode drops to 0o555, and the old mode returns when the value
+/// is dropped. Root ignores modes, so a test that expects a refused write skips that part for
+/// it. Only the directory itself changes, never what it holds.
+pub struct ReadOnlyDir {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl ReadOnlyDir {
+    /// Makes `path` read-only. The change is read back before this returns, so the test that
+    /// calls it knows the setup took hold.
+    pub fn new(path: &Path) -> io::Result<ReadOnlyDir> {
+        let mode = mode_of(path)?;
+        set_mode(path, 0o555)?;
+        let dir = ReadOnlyDir {
+            path: path.to_path_buf(),
+            mode,
+        };
+        if mode_of(path)? != 0o555 {
+            return Err(io::Error::other("the directory is still writable"));
+        }
+        Ok(dir)
+    }
+}
+
+impl Drop for ReadOnlyDir {
+    fn drop(&mut self) {
+        let _ = set_mode(&self.path, self.mode);
+    }
+}
+
+/// Makes `new` a second name of the file `existing`.
+pub fn hard_link(existing: &Path, new: &Path) -> io::Result<()> {
+    std::fs::hard_link(existing, new)
+}
+
+/// How many names the file `path` has, read from an open handle.
+pub fn link_count(path: &Path) -> io::Result<u64> {
+    rdy_store::fileid::links_of(&File::open(path)?, path)
+}
+
 /// The directory that holds `path` and `path`'s own entry name in it.
 fn entry_of(path: &Path) -> io::Result<(&Path, &std::ffi::OsStr)> {
     match (path.parent(), path.file_name()) {
@@ -1765,5 +1807,34 @@ mod tests {
         assert_eq!(mode_of(&f).expect("read the mode"), 0o4751);
         set_mode(&f, 0o644).expect("set the mode");
         assert_eq!(mode_of(&f).expect("read the mode"), 0o644);
+    }
+
+    #[test]
+    fn wx24_read_only_fixture_refuses_a_normal_user_write() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("ro");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join("before"), b"1").expect("a write works before the fixture");
+        let before = mode_of(&dir).expect("mode");
+        {
+            let _ro = ReadOnlyDir::new(&dir).expect("read-only");
+            assert_eq!(
+                mode_of(&dir).expect("mode"),
+                0o555,
+                "the setup changed access"
+            );
+            if rdy_store::pio::own_uid() != 0 {
+                let err = std::fs::write(dir.join("after"), b"2").expect_err("refused");
+                assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                assert!(!dir.join("after").exists());
+                assert!(std::fs::create_dir(dir.join("sub")).is_err());
+            }
+            assert_eq!(std::fs::read(dir.join("before")).expect("read"), b"1");
+        }
+        assert_eq!(mode_of(&dir).expect("mode"), before, "the old mode returns");
+        std::fs::write(dir.join("after"), b"2").expect("a write works again");
+        // hard links: one file, two names
+        hard_link(&dir.join("after"), &dir.join("again")).expect("link");
+        assert_eq!(link_count(&dir.join("after")).expect("count"), 2);
     }
 }
