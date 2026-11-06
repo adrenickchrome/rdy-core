@@ -131,9 +131,13 @@ fn hello_line(proto: Proto) -> Vec<u8> {
 /// One connection, as the daemon's accept loop serves it after its peer check.
 async fn serve_connection(mut stream: sys::Stream, info: DaemonInfo) {
     let hello = read_hello(&mut stream).await.unwrap();
-    let session = info
-        .sessions
-        .insert(hello.proto, hello.version, hello.build, hello.cwd, 0);
+    let session = info.sessions.insert(
+        hello.proto,
+        hello.version,
+        hello.build,
+        hello.cwd,
+        sys::own_account().unwrap(),
+    );
     let handler: Arc<dyn Handler> = Arc::new(Echo);
     match hello.proto {
         Proto::Ctl => {

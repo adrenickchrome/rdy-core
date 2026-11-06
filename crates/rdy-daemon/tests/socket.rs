@@ -115,7 +115,7 @@ async fn sock1_a_long_project_path_binds_its_short_socket_privately() {
 async fn sock1_a_peer_of_another_uid_is_closed_without_a_byte() {
     let log = rdy_daemon::daemon::capture_log_for_tests(&["refused a connection from uid"]);
     let me = socket::own_uid();
-    let d = daemon("1", true, |c| c.expected_uid = Some(me + 1)).await;
+    let d = daemon("1", true, |c| c.expected_account = Some(me + 1)).await;
     let s = UnixStream::connect(d.run.socket()).await.unwrap();
     let mut r = BufReader::new(s);
     let mut out = String::new();

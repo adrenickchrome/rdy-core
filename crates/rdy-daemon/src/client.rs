@@ -476,27 +476,34 @@ pub enum Attempt {
 
 /// Connects to the project's daemon (the socket recorded in `daemon.sock`, else the run dir's
 /// socket), sends `hello` and reads the first reply (within `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
-/// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
+/// path that is a symlink, and a peer that is not of our own account (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
-    connect_expecting_uid(run, hello, sys::own_uid()).await
+    match sys::own_account() {
+        Ok(account) => connect_expecting_account(run, hello, account).await,
+        Err(e) => Attempt::NoDaemon(e),
+    }
 }
 
-/// Test hook: `connect`, taking the peer to be ours only when it runs as `uid`.
+/// Test hook: `connect`, taking the peer to be ours only when it runs as `account`.
 #[doc(hidden)]
-pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Attempt {
-    match exchange_hello(run, hello, uid).await {
+pub async fn connect_expecting_account(
+    run: &RunDir,
+    hello: &Hello,
+    account: sys::Account,
+) -> Attempt {
+    match exchange_hello(run, hello, account).await {
         Ok(found) => attempt(run, found.stream, found.reply),
         Err(e) => Attempt::NoDaemon(e),
     }
 }
 
 /// What one hello exchange found: the connection, the daemon's first reply, the socket path the
-/// connection went to, and the pid of the process at its other end, when the system gives it.
+/// connection went to, and the process at its other end, as the system gives it.
 struct Found {
     stream: sys::Stream,
     reply: HelloReply,
     socket: PathBuf,
-    pid: Option<u32>,
+    process: sys::PeerProcess,
 }
 
 /// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
@@ -507,19 +514,19 @@ struct Found {
 /// daemon that answers but serves another project refuses the hello, and that refusal is the
 /// reply: it is never retried elsewhere (`connect_or_start` tries once more only when that
 /// daemon says it is stopping).
-async fn exchange_hello(run: &RunDir, hello: &Hello, uid: u32) -> io::Result<Found> {
+async fn exchange_hello(run: &RunDir, hello: &Hello, account: sys::Account) -> io::Result<Found> {
     let own = run.socket();
     if let Some(recorded) = run.recorded_socket()
         && recorded != own
-        && let Ok(found) = exchange_hello_at(&recorded, hello, uid).await
+        && let Ok(found) = exchange_hello_at(&recorded, hello, account).await
     {
         return Ok(found);
     }
-    exchange_hello_at(&own, hello, uid).await
+    exchange_hello_at(&own, hello, account).await
 }
 
 /// `exchange_hello` on the socket `path`.
-async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<Found> {
+async fn exchange_hello_at(path: &Path, hello: &Hello, account: sys::Account) -> io::Result<Found> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::other(format!(
@@ -528,15 +535,9 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
         )));
     }
     let mut stream = sys::connect(path).await?;
-    // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
-    let peer = sys::peer_uid(&stream)?;
-    if peer != uid {
-        return Err(io::Error::other(format!(
-            "the socket's peer is uid {peer}, not ours"
-        )));
-    }
-    // read before the hello, from the connection that gets the reply
-    let pid = sys::peer_pid(&stream);
+    // the mirror of the daemon's peer check: only a daemon of our own account hears the hello.
+    // The process is read here, before the hello, from the connection that gets the reply.
+    let process = sys::check_daemon(&stream, path, account)?;
     let mut line = serde_json::to_vec(hello).map_err(io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line).await?;
@@ -552,7 +553,7 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
             stream,
             reply,
             socket: path.to_path_buf(),
-            pid,
+            process,
         }),
     }
 }
@@ -606,14 +607,17 @@ const UNTIED_FIX: &str = "close the daemon's other sessions, then run rdy serve 
 /// Then the client signals the daemon's process (`terminate`, `SIGTERM`, which `rdy serve` takes
 /// as a stop), only when all of these hold: the socket record names this project's `.rdy`
 /// (D-R7N9J); the refusal came on that recorded socket; the peer of that connection runs as our
-/// uid (the peer check of the exchange) and the system gives its pid `p > 1`; and
+/// account (the peer check of the exchange) and the system gives its pid `p > 1`; and
 /// `.rdy/run/daemon.pid` holds exactly `p`. Otherwise nothing is signalled.
 pub async fn request_stop(
     run: &RunDir,
     hello: &Hello,
     start_timeout: Duration,
 ) -> Result<Option<StopRequest>, ErrorReply> {
-    let Ok(found) = exchange_hello(run, hello, sys::own_uid()).await else {
+    let Ok(account) = sys::own_account() else {
+        return Ok(None);
+    };
+    let Ok(found) = exchange_hello(run, hello, account).await else {
         return Ok(None);
     };
     if let HelloReply::Refused { error } = &found.reply
@@ -666,7 +670,7 @@ fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
         return Err(untied());
     }
     // 3. the peer's pid, from the connection itself; never init or a process group
-    let pid = found.pid.filter(|&p| p > 1).ok_or_else(untied)?;
+    let pid = found.process.pid().filter(|&p| p > 1).ok_or_else(untied)?;
     // 4. the pid file, opened without following a link, names the same process
     if read_pid_file(run) != Some(pid) {
         return Err(untied());
@@ -687,7 +691,7 @@ fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
 
 /// The pid of a live daemon of the project at `project`, by the ties `request_stop` checks
 /// before it signals (D-R7N9J): the socket record names this project's `.rdy`; a connection to
-/// that recorded socket (never a link) has a peer of our uid whose pid the system gives,
+/// that recorded socket (never a link) has a peer of our account whose pid the system gives,
 /// `p > 1`; and `.rdy/run/daemon.pid`, opened without following a link, holds exactly `p`.
 /// `None` when any tie fails. It sends nothing: the daemon reads an end of file where a hello
 /// would be, and closes the connection.
@@ -709,8 +713,8 @@ pub fn live_daemon(project: &Path) -> Option<u32> {
 }
 
 /// The pid of the process at the other end of a connection to `socket`, read as
-/// `exchange_hello_at` reads it: the peer's uid with `sys::peer_uid` (it must be ours), then
-/// the pid with `sys::peer_pid`, `p > 1`. The connection runs on a thread of its own with a
+/// `exchange_hello_at` reads it: `sys::check_daemon` with our own account, then the pid, `p > 1`.
+/// The connection runs on a thread of its own with a
 /// current-thread runtime: `live_daemon`'s caller may have no runtime (`rdy load`), or may be in
 /// one (`rdy_load` on a blocking thread), where `block_on` would panic.
 fn peer_pid(socket: &Path) -> Option<u32> {
@@ -722,10 +726,10 @@ fn peer_pid(socket: &Path) -> Option<u32> {
                 .ok()?;
             rt.block_on(async {
                 let stream = sys::connect(socket).await.ok()?;
-                if sys::peer_uid(&stream).ok()? != sys::own_uid() {
-                    return None;
-                }
-                sys::peer_pid(&stream).filter(|&p| p > 1)
+                sys::check_daemon(&stream, socket, sys::own_account().ok()?)
+                    .ok()?
+                    .pid()
+                    .filter(|&p| p > 1)
             })
         })
         .join()
@@ -1073,7 +1077,11 @@ impl Start<'_> {
         // waiting cannot help. Neither can waiting on a daemon that has exited.
         let mut attempt_no = 0u32;
         loop {
-            let reached = match exchange_hello(run, &hello, sys::own_uid()).await {
+            let found = match sys::own_account() {
+                Ok(account) => exchange_hello(run, &hello, account).await,
+                Err(e) => Err(e),
+            };
+            let reached = match found {
                 Ok(Found {
                     reply: HelloReply::Exiting { version: theirs },
                     ..

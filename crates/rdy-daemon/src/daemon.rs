@@ -127,9 +127,9 @@ pub struct DaemonConfig {
     pub build: String,
     /// `None` never idles out (a foreground `rdy serve`).
     pub idle_timeout: Option<Duration>,
-    /// Test hook: the peer uid to accept instead of our own.
+    /// Test hook: the peer account to accept instead of our own.
     #[doc(hidden)]
-    pub expected_uid: Option<u32>,
+    pub expected_account: Option<sys::Account>,
 }
 
 impl DaemonConfig {
@@ -139,7 +139,7 @@ impl DaemonConfig {
             version,
             build: crate::BUILD.to_string(),
             idle_timeout: None,
-            expected_uid: None,
+            expected_account: None,
         }
     }
 }
@@ -446,7 +446,10 @@ impl Daemon {
         let ctx = Arc::new(Conn {
             version: self.config.version.clone(),
             build: self.config.build.clone(),
-            expected_uid: self.config.expected_uid.unwrap_or_else(sys::own_uid),
+            expected_account: match self.config.expected_account {
+                Some(account) => account,
+                None => sys::own_account()?,
+            },
             handler: Arc::clone(&self.handler),
             info: self.info.clone(),
             readiness: self.readiness.clone(),
@@ -649,7 +652,7 @@ fn remove_if_present(path: &Path) {
 struct Conn {
     version: String,
     build: String,
-    expected_uid: u32,
+    expected_account: sys::Account,
     handler: Arc<dyn Handler>,
     info: DaemonInfo,
     readiness: Readiness,
@@ -857,17 +860,13 @@ impl Conn {
 
     async fn serve(self: Arc<Self>, mut stream: sys::Stream, mut end: ConnEnd) {
         // (a) the peer check
-        let peer_uid = match sys::peer_uid(&stream) {
-            Ok(uid) => uid,
-            Err(e) => {
-                log(&format!("could not read a connection's peer uid: {e}"));
+        let peer = match sys::check_client(&stream, self.expected_account) {
+            Ok(process) => process.account(),
+            Err(refusal) => {
+                log(&refusal);
                 return;
             }
         };
-        if peer_uid != self.expected_uid {
-            log(&format!("refused a connection from uid {peer_uid}"));
-            return;
-        }
         // (b) the hello; a stop closes a connection still in it
         let mut stop = self.info.stop.subscribe();
         if *stop.borrow_and_update() {
@@ -964,7 +963,7 @@ impl Conn {
             hello.version.clone(),
             hello.build.clone(),
             hello.cwd.clone(),
-            peer_uid,
+            peer,
         );
         end.session = Some(session.clone());
         // the host's start of the session (a pack reload) before `ready`; a stop closes the

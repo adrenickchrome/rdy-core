@@ -271,7 +271,7 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
         version: opts.version.clone(),
         build: crate::BUILD.to_string(),
         idle_timeout: opts.idle_timeout,
-        expected_uid: None,
+        expected_account: None,
     };
     let handler = ServeHandler::new(Arc::clone(&shared), opts.human_actor.clone());
     let mut daemon = Daemon::new(config, Arc::new(handler));

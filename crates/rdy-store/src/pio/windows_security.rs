@@ -28,7 +28,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -503,22 +503,29 @@ fn judge(sec: &Security, kind: ObjectKind, reparse: bool, me: &Sid) -> Privacy {
 }
 
 /// This process's account: the user SID of its token, read once.
+#[allow(unsafe_code)]
 pub fn current_account() -> io::Result<Sid> {
     static ACCOUNT: OnceLock<Sid> = OnceLock::new();
     if let Some(sid) = ACCOUNT.get() {
         return Ok(*sid);
     }
-    let sid = token_user()?;
+    // SAFETY: the process pseudo handle needs no closing and is valid for the call.
+    let sid = token_user(unsafe { GetCurrentProcess() })?;
     Ok(*ACCOUNT.get_or_init(|| sid))
 }
 
-/// The user SID of this process's token, read into a fixed buffer that holds a `TOKEN_USER`
-/// and the largest SID. The SID's place in the buffer is checked before it is read.
+/// The account of the process `process`: the user SID of its token.
+pub fn account_of_process(process: BorrowedHandle<'_>) -> io::Result<Sid> {
+    token_user(process.as_raw_handle())
+}
+
+/// The user SID of the token of the process `process`, read into a fixed buffer that holds a
+/// `TOKEN_USER` and the largest SID. The SID's place in the buffer is checked before it is read.
 #[allow(unsafe_code)]
-fn token_user() -> io::Result<Sid> {
+fn token_user(process: HANDLE) -> io::Result<Sid> {
     let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: the process pseudo handle needs no closing; `token` is a writable handle slot.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    // SAFETY: the caller keeps `process` open for the call; `token` is a writable handle slot.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the call succeeded, so `token` is a new handle that nothing else owns.

@@ -103,7 +103,7 @@ mod tests {
             version: "1".into(),
             build: crate::BUILD.into(),
             cwd: "/".into(),
-            peer_uid: 0,
+            peer: crate::sys::own_account().unwrap().into(),
             connected_at_ms: 0,
         };
         let h = EchoLine;

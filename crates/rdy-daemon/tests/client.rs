@@ -389,7 +389,7 @@ async fn start1_a_socket_whose_peer_is_another_uid_is_no_daemon_and_hears_no_hel
     let l = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
     let me = socket::own_uid();
     let t0 = std::time::Instant::now();
-    match client::connect_expecting_uid(&run, &hello_for(dir.path()), me + 1).await {
+    match client::connect_expecting_account(&run, &hello_for(dir.path()), me + 1).await {
         Attempt::NoDaemon(e) => {
             assert_eq!(
                 e.to_string(),

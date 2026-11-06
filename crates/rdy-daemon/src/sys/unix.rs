@@ -102,6 +102,73 @@ pub fn peer_pid(stream: &Stream) -> Option<u32> {
 /// This process's effective uid (moved to `rdy_store::pio`, re-exported here).
 pub use rdy_store::pio::own_uid;
 
+/// An account, as this platform names one: an effective uid.
+pub type Account = u32;
+
+/// This process's account.
+pub fn own_account() -> io::Result<Account> {
+    Ok(own_uid())
+}
+
+/// A session's peer account, under its field on this platform (D-FARN9).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionPeer {
+    peer_uid: Account,
+}
+
+impl From<Account> for SessionPeer {
+    fn from(peer_uid: Account) -> SessionPeer {
+        SessionPeer { peer_uid }
+    }
+}
+
+/// The process at the other end of a stream, as the system gives it.
+#[derive(Debug)]
+pub struct PeerProcess {
+    account: Account,
+    pid: Option<u32>,
+}
+
+impl PeerProcess {
+    /// Its account.
+    pub fn account(&self) -> Account {
+        self.account
+    }
+
+    /// Its pid, `None` when the system does not say.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+}
+
+/// The daemon's check of a new connection, before it reads a byte: the peer runs as `expected`.
+/// The error is the daemon's log line; the daemon then closes the connection without a reply.
+pub fn check_client(stream: &Stream, expected: Account) -> Result<PeerProcess, String> {
+    let account =
+        peer_uid(stream).map_err(|e| format!("could not read a connection's peer uid: {e}"))?;
+    if account != expected {
+        return Err(format!("refused a connection from uid {account}"));
+    }
+    Ok(PeerProcess {
+        account,
+        pid: peer_pid(stream),
+    })
+}
+
+/// A client's check of a new connection, before it sends its hello: the peer runs as `expected`.
+pub fn check_daemon(stream: &Stream, _path: &Path, expected: Account) -> io::Result<PeerProcess> {
+    let account = peer_uid(stream)?;
+    if account != expected {
+        return Err(io::Error::other(format!(
+            "the socket's peer is uid {account}, not ours"
+        )));
+    }
+    Ok(PeerProcess {
+        account,
+        pid: peer_pid(stream),
+    })
+}
+
 // 3. No-follow opens
 
 /// Opening with `O_NOFOLLOW` (moved to `rdy_store::pio`, re-exported here): a run-dir file that

@@ -2,7 +2,10 @@
 //! - transport: the local endpoint's listener and stream, and paths as bytes. A named pipe on
 //!   Windows and a socket elsewhere; `Listener::accept` gives a connected `Stream`, and `split`
 //!   gives its halves, the same types on every platform;
-//! - peer identity: the uid and pid at the other end of a stream, and this process's uid;
+//! - peer identity: this process's [`Account`] (a uid on Unix, a full SID on Windows), and each
+//!   side's check of the account at the other end of a stream before any hello byte moves
+//!   (`check_client`, `check_daemon`), which also give that peer's process (`PeerProcess`);
+//! - a session's peer account (D-FARN9, `SessionPeer`): each platform shows only its own field;
 //! - no-follow opens: a run-dir file that is a symbolic link is refused;
 //! - private files and directories: modes 0o600 and 0o700, the owner, and hard-link support;
 //!
