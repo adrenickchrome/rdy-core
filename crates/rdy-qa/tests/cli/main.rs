@@ -57,6 +57,7 @@ mod cli_render_stream;
 mod cli_render_stream_unix;
 mod cli_repo_id;
 mod cli_rule_config;
+mod cli_rules;
 mod cli_search;
 mod cli_search_filters;
 mod cli_semantic;

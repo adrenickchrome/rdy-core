@@ -1374,6 +1374,516 @@
             ]
           }
         },
+        "rule add": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "decision": "string",
+            "issues?": [
+              {
+                "block": "null",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ],
+            "landing?": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "signatures": [],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "fix": "string",
+                  "message": "string",
+                  "severity": "string"
+                }
+              ]
+            },
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "ref?": "string",
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string",
+            "state?": "string",
+            "view?": "string",
+            "warnings?": [
+              {
+                "block": "null|string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          }
+        },
+        "rule add card": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "card": {
+              "age": "string",
+              "batch": "null",
+              "blocking": "bool",
+              "card": "string",
+              "card_hash": "string",
+              "exception": "null",
+              "facts": [
+                {
+                  "name": "string",
+                  "value": "string"
+                }
+              ],
+              "kind": "string",
+              "members": [
+                "string"
+              ],
+              "options": [
+                {
+                  "consequences": [
+                    "string"
+                  ],
+                  "id": "string",
+                  "label": "string",
+                  "reason?": "string",
+                  "recommended?": "bool"
+                }
+              ],
+              "raised_at": "string",
+              "raised_by": "string",
+              "ref": "string",
+              "summary": "string",
+              "summary_by": "string",
+              "title": "string",
+              "why": "string"
+            },
+            "card_hash": "string",
+            "cards": [],
+            "decision": "string",
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "proposal_ref": "string",
+            "ref": "string",
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string",
+            "state": "string",
+            "view": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          }
+        },
+        "rule add person": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "decision": "string",
+            "landing": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "signatures": [],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "fix": "string",
+                  "message": "string",
+                  "severity": "string"
+                }
+              ]
+            },
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string"
+          }
+        },
+        "rule answer": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "answer?": {
+              "act": "string",
+              "answer": "string",
+              "assurance": "string",
+              "label": "string",
+              "landing": "null",
+              "next": "string",
+              "option": "string",
+              "ref": "string",
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              }
+            },
+            "decision": "string",
+            "landing?": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "signatures": [],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": []
+            },
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "proposal_ref?": "string",
+            "ref?": "string",
+            "remaining_cards?": [
+              {
+                "card": {
+                  "age": "string",
+                  "batch": "null",
+                  "blocking": "bool",
+                  "card": "string",
+                  "card_hash": "string",
+                  "exception": "null",
+                  "facts": [
+                    {
+                      "name": "string",
+                      "value": "string"
+                    }
+                  ],
+                  "kind": "string",
+                  "members": [],
+                  "options": [
+                    {
+                      "consequences": [
+                        "string"
+                      ],
+                      "id": "string",
+                      "label": "string",
+                      "reason?": "string",
+                      "recommended?": "bool"
+                    }
+                  ],
+                  "raised_at": "string",
+                  "raised_by": "string",
+                  "ref": "string",
+                  "summary": "string",
+                  "summary_by": "string",
+                  "title": "string",
+                  "why": "string"
+                },
+                "card_hash": "string",
+                "ref": "string"
+              }
+            ],
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string",
+            "state?": "string",
+            "view?": "string"
+          }
+        },
+        "rule edit": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "decision": "string",
+            "landing": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "signatures": [],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "fix": "string",
+                  "message": "string",
+                  "severity": "string"
+                }
+              ]
+            },
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string"
+          }
+        },
+        "rule edit card": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "card": {
+              "age": "string",
+              "batch": "null",
+              "blocking": "bool",
+              "card": "string",
+              "card_hash": "string",
+              "exception": "null",
+              "facts": [
+                {
+                  "name": "string",
+                  "value": "string"
+                }
+              ],
+              "kind": "string",
+              "members": [],
+              "options": [
+                {
+                  "consequences": [
+                    "string"
+                  ],
+                  "id": "string",
+                  "label": "string",
+                  "reason?": "string",
+                  "recommended?": "bool"
+                }
+              ],
+              "raised_at": "string",
+              "raised_by": "string",
+              "ref": "string",
+              "summary": "string",
+              "summary_by": "string",
+              "title": "string",
+              "why": "string"
+            },
+            "card_hash": "string",
+            "cards": [
+              {
+                "card": {
+                  "age": "string",
+                  "batch": "string",
+                  "blocking": "bool",
+                  "card": "string",
+                  "card_hash": "string",
+                  "exception": "string",
+                  "facts": [
+                    {
+                      "name": "string",
+                      "value": "string"
+                    }
+                  ],
+                  "kind": "string",
+                  "members": [],
+                  "options": [
+                    {
+                      "consequences": [
+                        "string"
+                      ],
+                      "id": "string",
+                      "label": "string",
+                      "reason?": "string",
+                      "recommended?": "bool"
+                    }
+                  ],
+                  "raised_at": "string",
+                  "raised_by": "string",
+                  "ref": "string",
+                  "summary": "null",
+                  "summary_by": "null",
+                  "title": "string",
+                  "why": "string"
+                },
+                "card_hash": "string",
+                "ref": "string"
+              }
+            ],
+            "decision": "string",
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "proposal_ref": "string",
+            "ref": "string",
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string",
+            "state": "string",
+            "view": "string",
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          }
+        },
+        "rule remove": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "decision": "string",
+            "landing": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "relayed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "signatures": [],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "fix": "string",
+                  "message": "string",
+                  "severity": "string"
+                }
+              ]
+            },
+            "project": {
+              "name": "string",
+              "repo_id": "string"
+            },
+            "rule": {
+              "id": "string",
+              "retired": "bool",
+              "ruleset": "string",
+              "text": "string"
+            },
+            "scope": "string"
+          }
+        },
         "search": {
           "exits": [
             0
@@ -8286,6 +8796,696 @@
                 }
               ],
               "name": "list",
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Rule",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "rule",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "choices": [
+                    "person",
+                    "project"
+                  ],
+                  "id": "scope",
+                  "long": "scope",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SCOPE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "text",
+                  "long": "text",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "ruleset",
+                  "long": "ruleset",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "applies_to",
+                  "long": "applies-to",
+                  "num_args": "1..",
+                  "value_names": [
+                    "SELECTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "why",
+                  "long": "why",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "AddArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "applies_to",
+                    "ruleset",
+                    "text"
+                  ],
+                  "id": "Content",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref",
+                    "why"
+                  ],
+                  "id": "Words",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "add",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "id",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "ID"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "choices": [
+                    "person",
+                    "project"
+                  ],
+                  "id": "scope",
+                  "long": "scope",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SCOPE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "text",
+                  "long": "text",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "ruleset",
+                  "long": "ruleset",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "applies_to",
+                  "long": "applies-to",
+                  "num_args": "1..",
+                  "value_names": [
+                    "SELECTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "why",
+                  "long": "why",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "EditArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "applies_to",
+                    "ruleset",
+                    "text"
+                  ],
+                  "id": "Content",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref",
+                    "why"
+                  ],
+                  "id": "Words",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "edit",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "id",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "ID"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "choices": [
+                    "person",
+                    "project"
+                  ],
+                  "id": "scope",
+                  "long": "scope",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SCOPE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "why",
+                  "long": "why",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "RemoveArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref",
+                    "why"
+                  ],
+                  "id": "Words",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "remove",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "ref",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "option",
+                  "index": 2,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "OPTION"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "choices": [
+                    "person",
+                    "project"
+                  ],
+                  "id": "scope",
+                  "long": "scope",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SCOPE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "card",
+                  "long": "card",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "HASH"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "card",
+                    "evidence",
+                    "option",
+                    "question",
+                    "ref",
+                    "relayed_by",
+                    "scope"
+                  ],
+                  "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "answer",
               "subcommands": []
             }
           ]

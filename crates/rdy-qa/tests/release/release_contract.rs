@@ -2166,6 +2166,7 @@ fn cli_runtime() -> Value {
     setup_env.push(("HOME".to_string(), setup_text.clone()));
     setup_env.push(("USERPROFILE".to_string(), setup_text));
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
+    cli_rule_probes(&mut seen);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2180,6 +2181,217 @@ fn cli_runtime() -> Value {
         "probes": seen.into_value(),
         "not_probed_commands": not_captured,
     })
+}
+
+/// rtc6: `rdy rule`, all four forms, as an agent relaying a person. A project rule lands, is edited
+/// and is removed; a repeat of a rule is held back with its issues; refusals; under the card policy
+/// the commands stop at the card and the answer form lands the rule; a person's rule goes to the
+/// meta project of a world of its own, so no probe reads a real meta override.
+fn cli_rule_probes(seen: &mut Seen) {
+    use rdy_qa::instructions::World;
+    let w = World::new();
+    let meta = w.project();
+    w.person(meta.path());
+    let env = w.env();
+    let who = ("agent:rlc", "rlc");
+    let words = |session: &'static str| {
+        vec![
+            "--why",
+            "The person asked for it.",
+            "--evidence",
+            "Please keep this rule.",
+            "--relayed-by",
+            "agent:rlc",
+            "--question",
+            "Shall I save this rule?",
+            "--session",
+            session,
+        ]
+    };
+    let run = |seen: &mut Seen, dir: &Path, label: &str, head: &[&str], session: &'static str| {
+        let mut args = head.to_vec();
+        args.extend(words(session));
+        agent_cli_probe(seen, dir, &env, who, label, &args)
+    };
+    let dir = w.project();
+    let added = run(
+        seen,
+        dir.path(),
+        "rule add",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed.",
+        ],
+        "chat-9",
+    );
+    let id = added["rule"]["id"]
+        .as_str()
+        .expect("the rule landed")
+        .to_string();
+    run(
+        seen,
+        dir.path(),
+        "rule edit",
+        &[
+            "rule",
+            "edit",
+            &id,
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed and why.",
+        ],
+        "chat-10",
+    );
+    // a repeat of the same words is held back with its issues: no card exists for it
+    run(
+        seen,
+        dir.path(),
+        "rule add",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed and why.",
+        ],
+        "chat-11",
+    );
+    run(
+        seen,
+        dir.path(),
+        "rule remove",
+        &["rule", "remove", &id, "--scope", "project"],
+        "chat-12",
+    );
+    // the refusals: an unknown rule and an answer to no card
+    run(
+        seen,
+        dir.path(),
+        "rule remove",
+        &["rule", "remove", "ai-00000", "--scope", "project"],
+        "chat-13",
+    );
+    agent_cli_probe(
+        seen,
+        dir.path(),
+        &env,
+        who,
+        "rule answer",
+        &[
+            "rule",
+            "answer",
+            "P-23456@1",
+            "approve",
+            "--scope",
+            "project",
+            "--card",
+            &"0".repeat(64),
+            "--evidence",
+            "Yes.",
+            "--relayed-by",
+            "agent:rlc",
+        ],
+    );
+    // a person's rule, in the world's own meta project
+    run(
+        seen,
+        dir.path(),
+        "rule add person",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "person",
+            "--text",
+            "Answer in British English.",
+        ],
+        "chat-14",
+    );
+
+    // the card policy: the commands stop at the card, and the answer form lands the rule
+    let cdir = w.project();
+    {
+        let mut r = rdy_engine::Rdy::open(cdir.path()).expect("open the card project");
+        land_rule_policy(
+            &mut r,
+            json!({"key": "authority-policy", "agent_may_accept": [], "roles": {}, "require": [],
+                "owners": [], "rules_from_chat": "card"}),
+        );
+    }
+    let card = run(
+        seen,
+        cdir.path(),
+        "rule add card",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Keep one idea per change.",
+        ],
+        "chat-15",
+    );
+    assert_eq!(card["state"], "card", "{card}");
+    let answer = |seen: &mut Seen, item: &Value, option: &str, hash: &Value| {
+        agent_cli_probe(
+            seen,
+            cdir.path(),
+            &env,
+            who,
+            "rule answer",
+            &[
+                "rule",
+                "answer",
+                item.as_str().expect("a ref"),
+                option,
+                "--scope",
+                "project",
+                "--card",
+                hash.as_str().expect("a hash"),
+                "--evidence",
+                "Yes, keep it.",
+                "--relayed-by",
+                "agent:rlc",
+                "--question",
+                "Shall I land this rule?",
+            ],
+        )
+    };
+    let landed = answer(seen, &card["ref"], "approve", &card["card_hash"]);
+    let id = landed["rule"]["id"]
+        .as_str()
+        .expect("the approval landed")
+        .to_string();
+    // an edit stops at the card, with the confirm card that rests beside it
+    let edit = run(
+        seen,
+        cdir.path(),
+        "rule edit card",
+        &[
+            "rule",
+            "edit",
+            &id,
+            "--scope",
+            "project",
+            "--text",
+            "Keep one idea in each change.",
+        ],
+        "chat-16",
+    );
+    assert_eq!(edit["state"], "card", "{edit}");
+    let confirm = edit["cards"][0].clone();
+    let answered = answer(seen, &confirm["ref"], "confirm", &confirm["card_hash"]);
+    assert_eq!(answered["state"], "answered", "{answered}");
+    let next = answered["remaining_cards"][0].clone();
+    let landed = answer(seen, &next["ref"], "approve", &next["card_hash"]);
+    assert_eq!(landed["rule"]["text"], "Keep one idea in each change.");
 }
 
 /// The id of the advised semantic tension in a `tensions` reply.
@@ -4675,11 +4887,11 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
         .collect();
     // the earlier commands, in order, and the new one
     // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`;
-    // ain5 added `instructions` and `setup`: their pin is `ok14_cli_contract_from_clap_is_complete`)
+    // ain5 added `instructions` and `setup`, and rtc6 added `rule`: their pin is `ok14_cli_contract_from_clap_is_complete`)
     let earlier: Vec<&str> = top
         .iter()
         .copied()
-        .filter(|n| !["review", "compact", "instructions", "setup"].contains(n))
+        .filter(|n| !["review", "compact", "instructions", "setup", "rule"].contains(n))
         .collect();
     assert_eq!(earlier, COMMANDS_BEFORE_CK9);
     let review = tree["subcommands"]
@@ -5286,6 +5498,21 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/review request/stdout/requests[]/case/code",
     "cli/review run/stdout/case/code",
     "cli/review run/stdout/requests[]/case/code",
+    "cli/rule add card/stdout/cards",
+    "cli/rule add person/stdout/landing/consequences",
+    "cli/rule add person/stdout/landing/signatures",
+    "cli/rule add/stdout/landing?/consequences",
+    "cli/rule add/stdout/landing?/signatures",
+    "cli/rule answer/stdout/landing?/consequences",
+    "cli/rule answer/stdout/landing?/signatures",
+    "cli/rule answer/stdout/landing?/warnings",
+    "cli/rule answer/stdout/remaining_cards?[]/card/members",
+    "cli/rule edit card/stdout/card/members",
+    "cli/rule edit card/stdout/cards[]/card/members",
+    "cli/rule edit/stdout/landing/consequences",
+    "cli/rule edit/stdout/landing/signatures",
+    "cli/rule remove/stdout/landing/consequences",
+    "cli/rule remove/stdout/landing/signatures",
     "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
@@ -5690,8 +5917,8 @@ fn mh7_new_surfaces_preserve_the_release_contract() {
         .collect();
     assert_eq!(
         top.len(),
-        COMMANDS_BEFORE_CK9.len() + 4,
-        "review, compact, and ain5's instructions and setup"
+        COMMANDS_BEFORE_CK9.len() + 5,
+        "review, compact, ain5's instructions and setup, and rtc6's rule"
     );
     for kept in COMMANDS_BEFORE_CK9 {
         assert!(top.contains(&kept), "{kept}");
