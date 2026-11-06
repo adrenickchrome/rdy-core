@@ -561,6 +561,11 @@ class Agi6Binary(unittest.TestCase):
         # Rows and menu arrive in JSON object order the binary chose: only the values count.
         write_executable(self.binary, binary_source(dict(reversed(list(good.items())))))
         self.assertEqual(self.run_check().returncode, 0)
+        # A relative path names the binary from the caller's folder, not the empty one it runs in.
+        out = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), 'check-binary', '--binary', self.binary.name,
+                              '--bundle', self.bundle.name, '--sidecar', self.sidecar.name],
+                             capture_output=True, text=True, cwd=self.dir)
+        self.assertEqual((out.returncode, out.stderr), (0, ''), out.stderr)
 
         def changed(apply):
             reply = json.loads(json.dumps(good))
@@ -578,6 +583,8 @@ class Agi6Binary(unittest.TestCase):
                 ('row layer', lambda r: rows(r)[3].update(layer='project')),
                 ('lock lost', lambda r: rows(r)[1].update(locked=False)),
                 ('lock added', lambda r: rows(r)[3].update(locked=True)),
+                ('lock is a number', lambda r: rows(r)[1].update(locked=1)),
+                ('tokens are a float', lambda r: menu(r)[1].update(tokens=float(menu(r)[1]['tokens']))),
                 ('reason added', lambda r: rows(r)[3].update(reason=[{'id': 'D-AAAAA', 'statement': 'x'}])),
                 ('row key added', lambda r: rows(r)[3].update(extra=1)),
                 ('row key lost', lambda r: rows(r)[3].pop('reason')),

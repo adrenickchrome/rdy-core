@@ -525,6 +525,7 @@ class agi6_Candidate(Fixture):
         self.assertEqual(log.read_text(), 'package\n')
         name = CANDIDATE.archive_name(V, LINUX)
         self.assertEqual(receipt['commit'], commit)
+        self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
         self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
 

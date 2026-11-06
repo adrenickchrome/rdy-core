@@ -3,7 +3,8 @@
 
 The candidate is the unsigned bytes of one release: one native archive per release target and a
 SHA256SUMS manifest over exactly those archives. It is built from `git archive S` in a new
-workspace, packaged with the existing native tool, and inspected for host paths. Every upload is
+workspace, packaged with the existing native tool, inspected for host paths, and run once to compare
+its built-in rows with the guide bundle at the commit. Every upload is
 addressed by run, run attempt, artifact id, artifact digest and target, and is downloaded and
 rehashed before assembly. Nothing here signs, holds a key or writes to GitHub.
 
@@ -31,6 +32,7 @@ import zipfile
 REPOSITORY = 'adrenickchrome/rdy-core'
 # The release target set at this base. A new platform needs its card and a qualified adapter.
 TARGETS = ('aarch64-apple-darwin', 'x86_64-unknown-linux-gnu')
+GUIDE_TOOL = Path(__file__).resolve().parent / 'guide.py'
 # The packaged checker's six checks, in order (`CHECK_NAMES` in rdy-qa's release_install.rs).
 CHECK_NAMES = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
 
@@ -450,6 +452,31 @@ def inspect_archive(path, version, target, extra=()):
     return 0
 
 
+def check_packaged_guide(path, version, target, source, work, env):
+    """Runs the `rdy` of the inspected archive `path` and compares its built-in rows and menu with
+    the guide bundle of the source archive. Refuses with the checker's own line."""
+    folder = Path(work) / 'guide-check'
+    folder.mkdir(mode=0o700)
+    binary = folder / 'rdy'
+    bad = ControllerError('the ' + target + ' archive is not one packaged release')
+    try:
+        with tarfile.open(str(path), mode='r:gz') as archive:
+            stream = archive.extractfile('rdy-' + version + '-preview-' + target + '/rdy')
+            fd = os.open(str(binary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+            with os.fdopen(fd, 'wb') as handle:
+                shutil.copyfileobj(stream, handle, MIB)
+    except (tarfile.TarError, OSError, EOFError, KeyError, AttributeError):
+        raise bad
+    release = Path(source) / 'release'
+    status, _, said = run_bounded([sys.executable, '-I', '-B', GUIDE_TOOL, 'check-binary', '--binary', binary,
+                                   '--bundle', release / 'agent-guide.json', '--sidecar', release / 'agent-guide.sha256'],
+                                  env=env)
+    shutil.rmtree(str(folder), ignore_errors=True)
+    if status != 0:
+        lines = said.decode('utf-8', 'replace').splitlines()
+        raise ControllerError(lines[0] if lines else 'the guide check of the ' + target + ' binary failed')
+
+
 def build_receipt(version, commit, target, run_id, run_attempt, archive_name, archive_bytes=None,
                   fast_gate=None, sources=(), archive_sha256=None, archive_size=None):
     """The closed build receipt of one target. It keeps S, the commit the archive was built from."""
@@ -545,6 +572,7 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
         raise ControllerError('qa-release-package did not package the ' + target + ' archive')
     packaged = work / 'package' / name
     inspect_archive(packaged, version, target, extra=sorted({home, str(work), cargo_home, rustup_home}))
+    check_packaged_guide(packaged, version, target, source, work, env)
     digest, size = sha256_file(packaged, ARCHIVE_MAX)
     out.mkdir(mode=0o700, parents=True)
     shutil.copyfile(str(packaged), str(out / name))

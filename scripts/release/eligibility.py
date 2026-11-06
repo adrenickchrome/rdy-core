@@ -619,6 +619,16 @@ def _install(facts, record, runs, commit):
     return tuple(install)
 
 
+def _guide_names(bundle):
+    """The edition and design landing a guide bundle names, or None when it names none. The build
+    refuses any other flaw of its shape, and the digests above tie these bytes to that build."""
+    try:
+        value = cand.loads(bundle, limit=SOURCE_FILE_MAX)
+    except (ControllerError, RecursionError):
+        return None
+    return (value.get('edition'), value.get('design_landing')) if isinstance(value, dict) else None
+
+
 def _source(facts, record, version, commit):
     """Cargo and the committed release/ exports at S against E."""
     e = record.value
@@ -634,12 +644,13 @@ def _source(facts, record, version, commit):
     notes = facts.file('release/notes.md', commit, SOURCE_FILE_MAX).data
     if not (_sha(notes) == source.value['notes_sha256'] == e['source']['notes_sha256']):
         raise Refused(MISMATCH, 'release/notes.md does not match its digest')
-    agents = facts.file('release/AGENTS.md', commit, SOURCE_FILE_MAX).data
-    claude = facts.file('release/CLAUDE.md', commit, SOURCE_FILE_MAX).data
-    if agents != claude:
-        raise Refused(MISMATCH, 'release/AGENTS.md and release/CLAUDE.md differ')
-    if not (_sha(agents) == source.value['guide_sha256'] == e['source']['guide_sha256']):
+    bundle = facts.file('release/agent-guide.json', commit, SOURCE_FILE_MAX).data
+    sidecar = facts.file('release/agent-guide.sha256', commit, SOURCE_FILE_MAX).data
+    digest = _sha(bundle)
+    if not (sidecar == digest.encode() + b'\n' and digest == source.value['guide_sha256'] == e['source']['guide_sha256']):
         raise Refused(MISMATCH, 'the release guide does not match its digest')
+    if _guide_names(bundle) != (version, e['design_landing']):
+        raise Refused(MISMATCH, 'the release guide does not name this version and design landing')
 
 
 def _security(facts, record, commit):

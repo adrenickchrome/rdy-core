@@ -4,12 +4,14 @@
 The input is a Markdown export of the guide at one frozen landing, plus the JSON projection of its
 metadata table. Both are explicit files from the writer's export receipt; nothing here reads a
 project. This script wraps the exported bodies in JSON and rewrites no prose: it removes only the
-exporter's front matter and anchors.
+exporter's front matter and anchors. `check-binary` then runs the packaged binary and compares what it
+delivers with the bundle: a comparison of source files alone would not prove what the binary holds.
 
 Subcommands (each failure is one `embedded guide: ...` line on stderr and exit 1; invalid arguments
 exit 2):
   bundle  write release/agent-guide.json, its digest, and the export receipt
   check   check a bundle and its digest; with a receipt, repeat `bundle` and require equal bytes
+  check-binary  check a bundle and its digest, then compare a packaged rdy's rows and menu with it
 """
 import argparse
 import hashlib
@@ -17,8 +19,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 
 FIX = 're-export the guide and its digest from one frozen landing'
 BUNDLE_PATH = 'release/agent-guide.json'
@@ -36,6 +41,9 @@ TITLE_MAX = 256
 WHEN_MAX = 1024
 ROW_ID_MAX = 96
 ROW_TEXT_MAX = 262144
+REPLY_MAX = 16777216  # the reply limit of rdy_instructions
+BINARY_DEADLINE = 60  # seconds for the packaged binary to answer
+BINARY_DIFFERS = 'packaged binary differs from %s' % BUNDLE_PATH
 
 # The rulesets, in delivery order. The bootstrap alone is required. A changed layout needs a plan
 # change here and in crates/rdy-engine/build/guide.rs, never a more permissive parser.
@@ -579,6 +587,81 @@ def check(out, sidecar, receipt, export, projection):
     return digest
 
 
+def expected_reply(value):
+    """The rows and menu a binary built from bundle `value` delivers with --full and no other rule."""
+    rows = []
+    menu = []
+    for ruleset in value['rulesets']:
+        handle = 'rdy:' + ruleset['name']
+        size = 0
+        for row in ruleset['rows']:
+            rows.append({'id': row['id'], 'ruleset': handle, 'text': row['text'], 'layer': 'rdy',
+                         'locked': row['locked'], 'reason': []})
+            size += len(row['text'].encode('utf-8'))
+        # estimate_tokens in crates/rdy-engine/src/instructions.rs: UTF-8 bytes / 4, rounded up.
+        menu.append({'id': handle, 'name': ruleset['title'], 'when': ruleset['when'], 'layer': 'rdy',
+                     'required': ruleset['required'], 'tokens': (size + 3) // 4, 'hints': []})
+    return rows, menu
+
+
+def binary_output(binary, root, deadline):
+    """The packaged binary's stdout for `instructions --full --json`, or None when it fails. It runs
+    in an empty folder with an empty home below `root`, with no variable of the caller's but PATH: no
+    person layer, user config or project can reach the reply."""
+    home = os.path.join(root, 'home')
+    work = os.path.join(root, 'work')
+    os.mkdir(home)
+    os.mkdir(work)
+    env = {'HOME': home, 'USERPROFILE': home, 'XDG_CONFIG_HOME': os.path.join(home, '.config'),
+           'APPDATA': os.path.join(home, 'AppData')}
+    if 'PATH' in os.environ:
+        env['PATH'] = os.environ['PATH']
+    try:
+        child = subprocess.Popen([os.path.abspath(binary), 'instructions', '--full', '--json'], cwd=work, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise GuideError('missing packaged binary') from None
+    except OSError:
+        return None
+    timer = threading.Timer(deadline, child.kill)
+    timer.start()
+    try:
+        data = child.stdout.read(REPLY_MAX + 1)
+        if len(data) > REPLY_MAX:
+            child.kill()
+        status = child.wait()
+    finally:
+        timer.cancel()
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        child.stdout.close()
+    return None if status != 0 or len(data) > REPLY_MAX else data
+
+
+def check_binary(binary, bundle_path, sidecar, deadline=BINARY_DEADLINE):
+    """Checks the bundle, then runs the packaged binary and compares every delivered built-in row and
+    menu field with it, order included. A row of any other source is an extra row: the home is empty."""
+    digest = check(bundle_path, sidecar, None, None, None)
+    rows, menu = expected_reply(strict_json(read_bounded(bundle_path, BUNDLE_MAX, BUNDLE_PATH), BUNDLE_PATH))
+    root = tempfile.mkdtemp(prefix='rdyguide')
+    try:
+        data = binary_output(binary, root, deadline)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    if data is None:
+        raise GuideError(BINARY_DIFFERS)
+    try:
+        reply = strict_json(data, 'reply')
+    except GuideError:
+        raise GuideError(BINARY_DIFFERS) from None
+    # Compared as JSON text, where 1 is not true and 1.0 is not 1.
+    if not isinstance(reply, dict) or (json.dumps([reply.get('instructions'), reply.get('menu')], sort_keys=True)
+                                       != json.dumps([rows, menu], sort_keys=True)):
+        raise GuideError(BINARY_DIFFERS)
+    return digest
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='The public agent guide bundle.')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -597,11 +680,17 @@ def main(argv=None):
     verify.add_argument('--receipt')
     verify.add_argument('--export')
     verify.add_argument('--projection')
+    packaged = commands.add_parser('check-binary')
+    packaged.add_argument('--binary', required=True)
+    packaged.add_argument('--bundle', required=True)
+    packaged.add_argument('--sidecar', required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'bundle':
             digest = bundle(args.export, args.projection, args.landing, args.version, args.profile,
                             args.out, args.sidecar, args.receipt)
+        elif args.command == 'check-binary':
+            digest = check_binary(args.binary, args.bundle, args.sidecar)
         else:
             if args.receipt and not (args.export and args.projection):
                 parser.error('--receipt needs --export and --projection')

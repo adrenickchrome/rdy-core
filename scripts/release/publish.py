@@ -71,7 +71,6 @@ GENUINE_MEMBER = 'genuine-receipt.json'
 FINAL_TAG_ARTIFACT = 'final-tag-evidence-a'
 FINAL_TAG_MEMBER = 'final-tag-evidence.json'
 
-GUIDES = ('AGENTS.md', 'CLAUDE.md')
 MANIFEST = 'SHA256SUMS'
 SIGNATURE = 'SHA256SUMS.sig'
 SIGNATURE_MAX = ctl.SIGNATURE_MAX
@@ -480,8 +479,6 @@ def wanted_assets(facts, release, signature=None):
     wants[MANIFEST] = Want(release.manifest_sha256, len(manifest))
     wants[SIGNATURE] = Want(None, None) if signature is None else Want(_sha(signature), len(signature))
     files = {MANIFEST: manifest}
-    for name in GUIDES:
-        files[name] = facts.contents('release/' + name, release.commit, elig.SOURCE_FILE_MAX).data
     if release.first_machine_tag == 'v' + release.version:
         stem = 'transition-' + release.first_machine_tag + '.json'
         files[stem] = facts.contents('release-keys/' + stem, release.policy_commit, sign.KEY_FILE_MAX).data
