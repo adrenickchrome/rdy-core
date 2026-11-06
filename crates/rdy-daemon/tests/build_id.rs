@@ -229,3 +229,47 @@ fn mh2_build_emits_complete_rerun_inputs() {
     put(other.path(), "crates/x/deep/more/f.txt", b"f");
     assert_eq!(out.id, source_build_id(other.path()).unwrap());
 }
+
+#[test]
+fn agi1_guide_change_moves_the_build_id() {
+    let d = tempfile::tempdir().unwrap();
+    tiny(d.path());
+    let without = source_build_id(d.path()).unwrap();
+    put(d.path(), "release/agent-guide.json", b"guide");
+    put(d.path(), "release/agent-guide.sha256", b"digest");
+    let base = source_build_id(d.path()).unwrap();
+    assert_ne!(base, without);
+    assert_eq!(
+        base,
+        reference(&[
+            ("Cargo.lock", b"b"),
+            ("Cargo.toml", b"a"),
+            ("crates/x/src/lib.rs", b"c"),
+            ("release/agent-guide.json", b"guide"),
+            ("release/agent-guide.sha256", b"digest"),
+        ])
+    );
+    for rel in ["release/agent-guide.json", "release/agent-guide.sha256"] {
+        let old = fs::read(d.path().join(rel)).unwrap();
+        put(d.path(), rel, b"changed");
+        assert_ne!(source_build_id(d.path()).unwrap(), base, "{rel}");
+        put(d.path(), rel, &old);
+        assert_eq!(source_build_id(d.path()).unwrap(), base, "{rel}");
+    }
+    let rerun = source_build_inputs(d.path(), &LIMITS, &mut |_, _| {})
+        .unwrap()
+        .rerun;
+    for rel in ["release/agent-guide.json", "release/agent-guide.sha256"] {
+        assert!(rerun.contains(&d.path().join(rel)), "{rel}");
+    }
+    // Only the two guide files of that folder count: the rest of a release changes no binary.
+    put(d.path(), "release/notes.md", b"notes");
+    assert_eq!(source_build_id(d.path()).unwrap(), base);
+    // Anything but a file in their place refuses, as for every other input.
+    fs::remove_file(d.path().join("release/agent-guide.sha256")).unwrap();
+    fs::create_dir(d.path().join("release/agent-guide.sha256")).unwrap();
+    assert_eq!(
+        reason(source_build_id(d.path())),
+        "input is not a regular file: release/agent-guide.sha256"
+    );
+}
