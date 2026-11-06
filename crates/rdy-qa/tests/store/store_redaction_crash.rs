@@ -469,7 +469,7 @@ fn files_with_secret(dir: &Path) -> Vec<PathBuf> {
     while let Some(p) = files.pop() {
         if p.is_dir() {
             files.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
-        } else if holds_secret(&std::fs::read(&p).unwrap()) {
+        } else if holds_secret(&rdy_qa::platform::read_live_file(&p).unwrap()) {
             found.push(p);
         }
     }
@@ -739,7 +739,24 @@ fn rdb7_a_late_eraser_leaves_a_name_it_no_longer_owns() {
     s.seal_redaction_batch_for_tests(items).unwrap();
     s.close().unwrap();
     assert!(erase.exists(), "kept while the reader lives");
-    let s = Store::open(&l.prep).unwrap();
+    // Windows: the reader's database still locks the kept file against every other handle, so the
+    // reopen cannot zero it and is refused, naming it. The name is taken away here, as the
+    // reopen takes it elsewhere; the file itself stays the reader's until it drops.
+    let s = if cfg!(windows) {
+        let e = Store::open(&l.prep)
+            .err()
+            .expect("refused while the reader lives");
+        assert!(
+            e.to_string().contains(
+                "index.redb.erase is a replaced index file kept for zeroing, and it could not be zeroed and removed"
+            ),
+            "{e}"
+        );
+        std::fs::remove_file(&erase).unwrap();
+        None
+    } else {
+        Some(Store::open(&l.prep).unwrap())
+    };
     assert!(
         !erase.exists(),
         "the reopen zeroed and removed the kept name"

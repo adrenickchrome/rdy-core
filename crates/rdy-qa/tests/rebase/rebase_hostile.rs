@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it reads the signal that ended a child. FW-XP1 Phase 4 ports it.
 //! vhost1: hostile view names and large sizes for views and rebase.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
@@ -228,6 +226,165 @@ fn vhost1_a_5000_change_include_and_a_50_view_landing_stay_correct() {
     check(&r, &Scope::Canon).unwrap();
 }
 
+/// View names that mean something to a file system or a shell, and names at and past the limit.
+fn native_names() -> Vec<(&'static str, String)> {
+    vec![
+        ("a device", "NUL".into()),
+        ("a device with a type", "CON.txt".into()),
+        ("a port", "COM1".into()),
+        ("a printer", "LPT1".into()),
+        ("a stream", "a:b".into()),
+        ("a stream's data", "a::$DATA".into()),
+        ("a trailing dot", "a.".into()),
+        ("a trailing space", "a ".into()),
+        ("back slashes up", "..\\..\\x".into()),
+        ("a drive", "C:\\x".into()),
+        ("a verbatim path", "\\\\?\\C:\\x".into()),
+        ("a pipe", "\\\\.\\pipe\\x".into()),
+        ("forward slashes up", "a/../b".into()),
+        ("wildcards", "a*b?c".into()),
+        ("reserved characters", "a<b>c|d\"e".into()),
+        ("a control character", "a\u{1}b".into()),
+        ("a character past 16 bits", "\u{1D4B3}".into()),
+        ("a combining mark", "e\u{301}".into()),
+        ("a byte order mark", "\u{FEFF}x".into()),
+        ("a direction override", "\u{202E}x".into()),
+        ("at the limit", "n".repeat(MAX_VIEW_NAME_CHARS)),
+        ("one past the limit", "n".repeat(MAX_VIEW_NAME_CHARS + 1)),
+        ("one mebibyte", "n".repeat(1 << 20)),
+    ]
+}
+
+/// A hostile name in a view, in a store's folder or in a project's path is an error or an
+/// ordinary name. It never panics, never makes a file of its own, and an error's text is bounded.
+#[test]
+fn wx28a_hostile_names_remain_bounded() {
+    for (label, name) in native_names() {
+        for op in ["write", "create"] {
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("p");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut r = Rdy::init(&dir, "rdy-standard").unwrap();
+            let (_doc, section, _c) = seed_doc(&mut r, "seed");
+            land(&mut r, "seed").unwrap();
+            let a = as_agent("agent:a", "r1");
+            let before = walk(base.path(), &dir.join(".rdy"));
+            let store_before = walk(&dir.join(".rdy"), &dir.join(".rdy").join("run"));
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match op {
+                "write" => write_as(&mut r, &a, &name, claim(&section, "y")).map(|_| ()),
+                _ => r.view_create(&a, &name, None, false).map(|_| ()),
+            }))
+            .unwrap_or_else(|_| panic!("{label}: {op} panicked"));
+            assert_eq!(
+                before,
+                walk(base.path(), &dir.join(".rdy")),
+                "{label}: {op} wrote a file outside .rdy"
+            );
+            assert_eq!(
+                store_before,
+                walk(&dir.join(".rdy"), &dir.join(".rdy").join("run")),
+                "{label}: {op} made a file of the name"
+            );
+            let over = name.chars().count() > MAX_VIEW_NAME_CHARS;
+            match got {
+                Err(e) => {
+                    assert!(
+                        e.message.len() < 400,
+                        "{label}: {op}: an error of {} bytes",
+                        e.message.len()
+                    );
+                    if over {
+                        assert_eq!(e.code, E_LIMIT, "{label}: {op}");
+                    } else {
+                        assert!(
+                            e.code == E_RESERVED_VIEW || e.code == E_BAD_INPUT,
+                            "{label}: {op} failed with {}",
+                            e.code
+                        );
+                    }
+                }
+                Ok(()) => {
+                    assert!(!over, "{label}: {op} accepted a name past the limit");
+                    assert!(r.read().view_head(&name).is_some(), "{label}: {op}");
+                    r.fsck().unwrap_or_else(|e| panic!("{label}: {op}: {e}"));
+                    drop(r);
+                    // the name comes back as it went in, from the log and from a dump
+                    let r = Rdy::open(&dir).unwrap();
+                    assert!(r.read().view_head(&name).is_some(), "{label}: {op}: reopen");
+                    let dump = base.path().join("d.dump");
+                    r.read().dump(&dump).unwrap();
+                    r.close().unwrap();
+                    let loaded = base.path().join("loaded");
+                    std::fs::create_dir(&loaded).unwrap();
+                    rdy_engine::load::load(&dump, &loaded)
+                        .unwrap_or_else(|e| panic!("{label}: {op}: {e}"));
+                    let l = Rdy::open(&loaded).unwrap();
+                    assert!(l.read().view_head(&name).is_some(), "{label}: {op}: load");
+                }
+            }
+        }
+    }
+
+    // entries a store did not make, in the folder it scans: the open reads past them or refuses,
+    // and it never removes or changes one
+    let not_unicode = rdy_qa::platform::not_unicode("seg-000001.log");
+    let planted = [
+        std::ffi::OsString::from("seg-x.log"),
+        std::ffi::OsString::from("seg-000000.log.bak"),
+        not_unicode.clone(),
+    ];
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("p");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut r = Rdy::init(&dir, "rdy-standard").unwrap();
+    let (_doc, _section, c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    r.close().unwrap();
+    let segments = dir.join(".rdy").join("store").join("segments");
+    let mut made = vec![];
+    for name in &planted {
+        // a file system that keeps Unicode names only refuses this one, so it has no such entry
+        if std::fs::write(segments.join(name), b"not a segment").is_ok() {
+            made.push(name.clone());
+        }
+    }
+    assert!(made.len() >= 2, "{made:?}");
+    let opened = std::panic::catch_unwind(|| Rdy::open(&dir).map(|r| r.close()))
+        .unwrap_or_else(|_| panic!("a planted name panicked the open"));
+    if let Ok(closed) = opened {
+        closed.unwrap();
+        let r = Rdy::open(&dir).unwrap();
+        assert!(version_of(&r, &Scope::Canon, &c).len() > 8);
+    }
+    for name in &made {
+        assert_eq!(
+            std::fs::read(segments.join(name)).unwrap(),
+            b"not a segment",
+            "{name:?}"
+        );
+    }
+
+    // a project path that is not Unicode, or longer than a classic path: an error or a project
+    for project in [
+        base.path().join(rdy_qa::platform::not_unicode("project")),
+        (0..40).fold(base.path().to_path_buf(), |p, i| {
+            p.join(format!("a-long-folder-name-{i:02}"))
+        }),
+    ] {
+        if std::fs::create_dir_all(&project).is_err() {
+            continue;
+        }
+        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Rdy::init(&project, "rdy-standard").map(|r| r.close())
+        }))
+        .unwrap_or_else(|_| panic!("{}: the init panicked", project.display()));
+        if let Ok(closed) = got {
+            closed.unwrap();
+            Rdy::open(&project).unwrap().fsck().unwrap();
+        }
+    }
+}
+
 // A kill at every crash point of a landing that rebases views, and of an include into a new
 // view, runs in a child process that aborts at the armed point; the parent reopens the store.
 const NAME: &str = "vhost1_a_kill_at_any_point_of_a_landing_with_rebases_is_all_or_nothing";
@@ -296,9 +453,8 @@ fn reached(point: CrashPoint) -> bool {
 /// operation's path, or exiting `FINISHED` where it is not. Any other end (a panic, an exit 0
 /// from a filter that matched nothing) is the child failing before it acted.
 fn ended_as_expected(point: CrashPoint, status: &std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt;
     if reached(point) {
-        status.signal().is_some()
+        rdy_store::pio::ended(status) == rdy_store::pio::Ended::Aborted
     } else {
         status.code() == Some(FINISHED)
     }

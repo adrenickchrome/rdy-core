@@ -428,7 +428,7 @@ fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
     let p = tempfile::tempdir().unwrap();
     let proj = p.path().join("new/project");
     drop(Rdy::init(&proj, "rdy-standard").unwrap());
-    let store = proj.join(".rdy/store");
+    let store = proj.join(".rdy").join("store");
     assert_eq!(
         std::fs::read_to_string(store.join("FEATURES")).unwrap(),
         current_text()
@@ -445,7 +445,7 @@ fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
 #[test]
 fn fmt3_init_over_a_non_store_directory_is_refused() {
     let p = tempfile::tempdir().unwrap();
-    let store = p.path().join(".rdy/store");
+    let store = p.path().join(".rdy").join("store");
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(store.join("index.redb"), b"not ours").unwrap();
     let e = Rdy::init(p.path(), "rdy-standard").err().expect("refused");

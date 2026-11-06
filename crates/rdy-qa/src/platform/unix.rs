@@ -188,6 +188,11 @@ impl Drop for ReadOnlyDir {
     }
 }
 
+/// The bytes of a file that a live store may hold, as a kill of its process would leave them.
+pub fn read_live_file(path: &Path) -> io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
 /// Makes `new` a second name of the file `existing`.
 pub fn hard_link(existing: &Path, new: &Path) -> io::Result<()> {
     std::fs::hard_link(existing, new)

@@ -164,7 +164,7 @@ fn store_torn_tail_at_sampled_offsets_recovers() {
         let mut s = Store::create(&dir).unwrap();
         let first = s.put_blob(b"acknowledged").unwrap();
         let before = segment_len(&dir);
-        let pre_index = std::fs::read(dir.join("index.redb")).unwrap();
+        let pre_index = rdy_qa::platform::read_live_file(&dir.join("index.redb")).unwrap();
         let last = s.put_blob(&vec![9u8; 4096]).unwrap();
         (first, (last, before), pre_index)
     };

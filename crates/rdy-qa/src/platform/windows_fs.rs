@@ -19,9 +19,9 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -35,6 +35,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY, UnmapViewOfFile,
+};
 use windows_sys::Win32::System::SystemServices::{
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
 };
@@ -148,6 +151,37 @@ impl Drop for ReadOnlyDir {
             let _ = set_dacl(&self.path, &format!("D:P(A;OICI;FA;;;{sid})"));
         }
     }
+}
+
+/// The bytes of a file that a live store may hold, as a kill of its process would leave them. A
+/// live index file holds a byte-range lock that refuses every read of another handle, and a
+/// mapped view is the one way past it that needs no help from the holder.
+#[allow(unsafe_code)]
+pub fn read_live_file(path: &Path) -> io::Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let len = usize::try_from(file.metadata()?.len())
+        .map_err(|_| io::Error::other("the file does not fit in memory"))?;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the handle is open for reading, and no name or security attributes are given.
+    let map =
+        unsafe { CreateFileMappingW(file.as_raw_handle(), null(), PAGE_READONLY, 0, 0, null()) };
+    if map.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `map` is a read-only mapping of the whole file, and the handle is closed once below.
+    let map = unsafe { OwnedHandle::from_raw_handle(map) };
+    // SAFETY: the same mapping. A length of 0 maps the whole file, which holds `len` bytes or more.
+    let view = unsafe { MapViewOfFile(map.as_raw_handle(), FILE_MAP_READ, 0, 0, 0) };
+    if view.Value.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the view is readable for `len` bytes, and it stays mapped until the call below.
+    let bytes = unsafe { std::slice::from_raw_parts(view.Value.cast::<u8>(), len) }.to_vec();
+    // SAFETY: `view` came from MapViewOfFile above and is unmapped once.
+    unsafe { UnmapViewOfFile(view) };
+    Ok(bytes)
 }
 
 /// What a link in the file system is, by its reparse tag.
