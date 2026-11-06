@@ -144,6 +144,17 @@ pub fn dir_alias(target: &Path, link: &Path) -> io::Result<()> {
     symlink(target, link)
 }
 
+/// Removes the link `link` that [`dir_alias`] or [`symlink`] made to a directory, as an entry; its
+/// target is never entered.
+pub fn remove_dir_link(link: &Path) -> io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+/// Makes `new` a link with the target of the link `link`, as written there.
+pub fn copy_link(link: &Path, new: &Path) -> io::Result<()> {
+    symlink(&std::fs::read_link(link)?, new)
+}
+
 /// Sets the permission bits of `path` to `mode` (for example `0o555` for a read-only directory).
 pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;

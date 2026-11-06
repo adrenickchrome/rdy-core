@@ -4,7 +4,7 @@ use rdy_engine::*;
 use rdy_qa::daemon::Served;
 use rdy_qa::wc::*;
 
-fn add_figure(s: &Served, section: &str, blob: &str, extra: &str) {
+pub(crate) fn add_figure(s: &Served, section: &str, blob: &str, extra: &str) {
     let mut text = read(s, "guides/intro.yaml");
     text.push_str(&format!("- type: figure\n  parent: {section}\n  fields:\n    blob: {blob}\n    alt: A chart\n{extra}"));
     std::fs::write(at(s, "guides/intro.yaml"), text).unwrap();
@@ -75,7 +75,6 @@ fn wcfg1_a_missing_outside_or_untyped_image_is_e_wc_invalid() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn msw11_blobs_are_never_written_through_a_linked_blobs_dir() {
     let (s, seed) = seeded();
@@ -86,7 +85,7 @@ fn msw11_blobs_are_never_written_through_a_linked_blobs_dir() {
     ok(&s, &["commit", "-m", "a figure"]);
     std::fs::remove_dir_all(at(&s, "_blobs")).unwrap();
     let outside = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(outside.path(), at(&s, "_blobs")).unwrap();
+    rdy_qa::platform::symlink(outside.path(), &at(&s, "_blobs")).unwrap();
     let _ = json(&s, &["checkout", "--force"]);
     assert_eq!(
         std::fs::read_dir(outside.path()).unwrap().count(),
@@ -114,7 +113,6 @@ fn msw11_a_torn_blob_file_is_repaired_by_checkout() {
     assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG chart");
 }
 
-#[cfg(unix)]
 /// Commits one figure and returns the blob's working-copy path and its temp-file name.
 fn msw11_committed_blob(s: &Served, section: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     std::fs::create_dir_all(at(s, "guides/img")).unwrap();
@@ -132,7 +130,6 @@ fn msw11_committed_blob(s: &Served, section: &str) -> (std::path::PathBuf, std::
     )
 }
 
-#[cfg(unix)]
 #[test]
 fn msw11_checkout_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let (s, seed) = seeded();
@@ -142,14 +139,13 @@ fn msw11_checkout_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let victim = outside.path().join("victim.txt");
     std::fs::write(&victim, b"keep me").unwrap();
     std::fs::remove_file(&blob).unwrap();
-    std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+    rdy_qa::platform::symlink(&victim, &tmp).unwrap();
     ok(&s, &["checkout", "--force"]);
     assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
     assert!(std::fs::symlink_metadata(&blob).unwrap().is_file());
     assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
 }
 
-#[cfg(unix)]
 #[test]
 fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let (s, seed) = seeded();
@@ -159,7 +155,7 @@ fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
     let victim = outside.path().join("victim2.txt");
     std::fs::write(&victim, b"keep me").unwrap();
     std::fs::remove_file(&blob).unwrap();
-    std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+    rdy_qa::platform::symlink(&victim, &tmp).unwrap();
     // a second figure with the same bytes uploads to the same blob name
     std::fs::write(at(&s, "guides/img/again.png"), b"\x89PNG chart").unwrap();
     add_figure(&s, &seed.section, "img/again.png", "");

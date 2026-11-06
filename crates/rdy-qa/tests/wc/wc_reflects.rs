@@ -38,22 +38,22 @@ fn stored(s: &Served, change: &str) -> Option<Justification> {
     j
 }
 
-/// `rdy --project <dir> --json edit <args>` as the human, with `EDITOR=editor` (a command line
-/// with no quoting: the edit runs `$EDITOR "$1"`).
-fn edit_cli(s: &Served, editor: &str, args: &[&str]) -> (bool, Value) {
-    let out = rdy_qa::fixtures::rdy_command()
-        .arg("--project")
+/// `rdy --project <dir> --json edit <args>` as the human, with the editor `script` run by the
+/// native editor fixture.
+fn edit_cli(s: &Served, script: &str, args: &[&str]) -> (bool, Value) {
+    use crate::wc_editor::child_fixture::{edit_output, set_editor};
+    let mut cmd = rdy_qa::fixtures::rdy_command();
+    cmd.arg("--project")
         .arg(s.dir.path())
         .arg("--json")
         .arg("edit")
         .args(args)
-        .env("EDITOR", editor)
         .env_remove("RDY_ACTOR")
         .env_remove("RDY_RUN")
         .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap();
+        .envs(s.env_pairs());
+    set_editor(&mut cmd, script);
+    let out = edit_output(&mut cmd).unwrap();
     let text = if out.status.success() {
         &out.stdout
     } else {
@@ -159,13 +159,13 @@ fn rf8_mcp_cli_and_recovered_commit_record_one_justification() {
     // edit: the same flags, conflicting with --reason
     let (okk, _) = edit_cli(
         &s,
-        "true",
+        "",
         &[seed.note.as_str(), "--reflects", "SRC-ONE", "--reason", "x"],
     );
     assert!(!okk);
     let (okk, v) = edit_cli(
         &s,
-        "perl -pi -es/code/release/",
+        "replace with code\twith release\n",
         &[seed.note.as_str(), "--reflects", "SRC-ONE"],
     );
     assert!(okk, "{v}");

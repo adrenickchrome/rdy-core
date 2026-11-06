@@ -121,8 +121,10 @@ fn wcck1_a_dotdot_path_out_of_the_checkout_is_checked_where_it_is() {
         .to_str()
         .unwrap()
         .to_string();
-    let root = s.dir.path().canonicalize().unwrap();
-    let via_root = format!("{}/../{name}", root.display());
+    // `..` is a rule of the plain path form: a verbatim path (Windows' `\\?\`) reads it as a name
+    let root = s.dir.path().canonicalize().unwrap().display().to_string();
+    let root = root.strip_prefix(r"\\?\").unwrap_or(&root);
+    let via_root = format!("{root}/../{name}");
     let (okk, v) = check(&s, &[&via_root]);
     assert!(
         v.as_array().is_some_and(|a| a
@@ -132,7 +134,7 @@ fn wcck1_a_dotdot_path_out_of_the_checkout_is_checked_where_it_is() {
     );
     assert!(!okk, "its bad file fails the check: {v}");
     // a `..` that stays inside the tree is still the working copy
-    let inside = format!("{}/guides/../notes.yaml", root.display());
+    let inside = format!("{root}/guides/../notes.yaml");
     let (okk, v) = check(&s, &[&inside]);
     assert!(okk, "{v}");
 }

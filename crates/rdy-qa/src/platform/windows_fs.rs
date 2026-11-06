@@ -23,6 +23,10 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, LocalFree};
+use windows_sys::Win32::Networking::WinSock::{
+    AF_UNIX, INVALID_SOCKET, SOCK_STREAM, SOCKADDR_UN, WSADATA, WSAGetLastError, WSAStartup, bind,
+    closesocket, socket,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -327,6 +331,74 @@ pub fn junction(target: &Path, link: &Path) -> io::Result<()> {
 /// Removes the junction or directory symlink `link` as an entry; its target is never entered.
 pub fn remove_dir_link(link: &Path) -> io::Result<()> {
     std::fs::remove_dir(link)
+}
+
+/// Makes `path` a directory entry that is a reparse point and no link: a bound `AF_UNIX` socket.
+/// Its tag names no other object, so the system reports a plain file, and any open of it is
+/// refused (`ERROR_CANT_ACCESS_FILE`, 1920). It is the nearest thing here to a Unix FIFO: an entry
+/// that holds no data. `path` is a plain path of at most 107 bytes.
+#[allow(unsafe_code)]
+pub fn socket_entry(path: &Path) -> io::Result<()> {
+    let wsa_error = || {
+        io::Error::from_raw_os_error(
+            // SAFETY: this call takes nothing and reads this thread's last socket error.
+            unsafe { WSAGetLastError() },
+        )
+    };
+    // SAFETY: an all-zero record is valid for both; each field below is plain data.
+    let (mut wsa, mut address): (WSADATA, SOCKADDR_UN) = unsafe { std::mem::zeroed() };
+    let bytes = path.to_str().map(str::as_bytes).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "a socket path is not Unicode")
+    })?;
+    if bytes.len() >= address.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a socket path of {} bytes is too long", bytes.len()),
+        ));
+    }
+    address.sun_family = AF_UNIX;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as i8;
+    }
+    // SAFETY: `wsa` is a writable record. A repeated start is counted and needs no matching call
+    // here: the process ends with the test.
+    let started = unsafe { WSAStartup(0x0202, &mut wsa) };
+    if started != 0 {
+        return Err(io::Error::from_raw_os_error(started));
+    }
+    // SAFETY: the arguments are plain values.
+    let handle = unsafe { socket(i32::from(AF_UNIX), SOCK_STREAM, 0) };
+    if handle == INVALID_SOCKET {
+        return Err(wsa_error());
+    }
+    // SAFETY: `address` is a valid record of the size given, alive for the call.
+    let bound = unsafe {
+        bind(
+            handle,
+            (&raw const address).cast(),
+            std::mem::size_of::<SOCKADDR_UN>() as i32,
+        )
+    };
+    let result = if bound == 0 { Ok(()) } else { Err(wsa_error()) };
+    // SAFETY: `handle` came from the call above and is closed once. The entry stays.
+    unsafe { closesocket(handle) };
+    result
+}
+
+/// Makes `new` a link with the target of the link `link`, as written there. Whether it is a
+/// directory link comes from the entry itself: following it can be refused (error 448), and the
+/// target may not exist.
+pub fn copy_link(link: &Path, new: &Path) -> io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+    let target = std::fs::read_link(link)?;
+    if std::fs::symlink_metadata(link)?
+        .file_type()
+        .is_symlink_dir()
+    {
+        std::os::windows::fs::symlink_dir(target, new)
+    } else {
+        std::os::windows::fs::symlink_file(target, new)
+    }
 }
 
 /// Makes `new` a second name of the file `existing`.
