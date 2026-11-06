@@ -1,10 +1,9 @@
-#![cfg(unix)]
-// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! cli2: every command is a client of the daemon; direct mode keeps the in-process path; serve
 //! starts, detaches and stops; the human comes from the user config and agents stay in their views.
 use rdy_daemon::E_DAEMON_START;
 use rdy_engine::{E_LOCKED, E_PERMISSION, E_VIEW_OWNER, Rdy};
 use rdy_qa::daemon::Served;
+#[cfg(unix)]
 use rdy_qa::fixtures::rdy_bin;
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -208,12 +207,14 @@ fn cli2_serve_foreground_detach_and_stop() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("already running"));
     let out = s.rdy(&["serve", "--stop"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "stopped");
-    assert!(!s.run_dir().socket().exists());
+    rdy_qa::daemon::wait_endpoint_gone(&s.run_dir());
     assert!(s.daemon_pid().is_none());
     let r = Rdy::open(s.dir.path()).unwrap();
     assert!(!r.open_report().unclean_shutdown);
 }
 
+// Unix editor script: Task 26b ports it to the native child fixture.
+#[cfg(unix)]
 #[test]
 fn cli2_edit_goes_through_the_daemon() {
     let s = Served::new();
@@ -234,8 +235,7 @@ fn cli2_edit_goes_through_the_daemon() {
         "#!/bin/sh\nsed -i.bak 's/title: Before/title: After/' \"$1\"\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    rdy_qa::platform::set_mode(&script, 0o755).unwrap();
     let out = rdy_qa::fixtures::rdy_command()
         .args(["--project"])
         .arg(s.dir.path())
@@ -280,6 +280,7 @@ fn cli2_check_inside_a_project_reads_canon_through_the_daemon() {
 }
 
 /// The id of the doc a `new doc` reply created.
+#[cfg(unix)]
 fn created_doc(v: &Value) -> String {
     v["created"]
         .as_object()
@@ -291,15 +292,16 @@ fn created_doc(v: &Value) -> String {
 }
 
 /// Writes an executable editor script into the project.
+#[cfg(unix)]
 fn editor_script(s: &Served, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = s.dir.path().join("ed.sh");
     std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    rdy_qa::platform::set_mode(&script, 0o755).unwrap();
     script
 }
 
 /// `rdy --project <dir> --json edit <id>` with `EDITOR=script`, as the human.
+#[cfg(unix)]
 fn edit_with(s: &Served, script: &std::path::Path, id: &str) -> std::process::Output {
     rdy_qa::fixtures::rdy_command()
         .args(["--project"])
@@ -338,6 +340,8 @@ fn cli2_a_relative_project_starts_the_daemon() {
     }
 }
 
+// Unix editor script: Task 26b ports it to the native child fixture.
+#[cfg(unix)]
 #[test]
 fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
     edit_survives_stop_with_notice(None);
@@ -345,6 +349,8 @@ fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
 
 /// A waiting notice on stderr (the stop writes one after its grace on a loaded machine) must not
 /// change what the stop prints on stdout. The notice is injected, so no grace has to run out.
+// Unix editor script: Task 26b ports it to the native child fixture.
+#[cfg(unix)]
 #[test]
 fn plc8_stop_waiting_notice_does_not_change_stdout() {
     edit_survives_stop_with_notice(Some(
@@ -352,6 +358,7 @@ fn plc8_stop_waiting_notice_does_not_change_stdout() {
     ));
 }
 
+#[cfg(unix)]
 fn edit_survives_stop_with_notice(notice: Option<&str>) {
     let s = Served::new();
     // made directly, so the edit below is the command that spawns the daemon (and so its parent)
@@ -415,6 +422,8 @@ fn edit_survives_stop_with_notice(notice: Option<&str>) {
     assert_eq!(v["fields"]["title"], "After");
 }
 
+// Unix editor script: Task 26b ports it to the native child fixture.
+#[cfg(unix)]
 #[test]
 fn cli2_a_failed_edit_keeps_the_edited_file_and_names_it() {
     let s = Served::new();
@@ -438,50 +447,4 @@ fn cli2_a_failed_edit_keeps_the_edited_file_and_names_it() {
     let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
     assert!(ok, "{v}");
     assert_eq!(v["fields"]["title"], "Before");
-}
-
-/// Final review fix round 1 (minor 12): SIGINT (Ctrl-C) and SIGTERM stop a foreground
-/// `rdy serve` the way `rdy serve --stop` does: the run files go, the store closes cleanly and
-/// the process exits 0.
-#[test]
-fn cli2_sigint_and_sigterm_stop_a_foreground_serve_cleanly() {
-    for sig in ["-INT", "-TERM"] {
-        let s = Served::new();
-        let mut child = s.spawn(&["serve"]);
-        let t = Instant::now();
-        while s.daemon_pid() != Some(child.id()) {
-            assert!(
-                t.elapsed() < Duration::from_secs(30),
-                "{sig}: the foreground daemon did not write its pid"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let status = std::process::Command::new("kill")
-            .args([sig, &child.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let t = Instant::now();
-        let exit = loop {
-            if let Some(st) = child.try_wait().unwrap() {
-                break st;
-            }
-            if t.elapsed() > Duration::from_secs(30) {
-                let _ = child.kill();
-                panic!("{sig}: rdy serve did not exit within 30 s");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            exit.success(),
-            "{sig}: {exit:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(!s.run_dir().socket().exists(), "{sig}");
-        assert!(!s.run_dir().pid_file().exists(), "{sig}");
-        let r = Rdy::open(s.dir.path()).unwrap();
-        assert!(!r.open_report().unclean_shutdown, "{sig}");
-        drop(r);
-    }
 }

@@ -369,11 +369,8 @@ impl World {
     /// The pid of the daemon serving `dir`, while one runs.
     pub fn daemon_pid(&self, dir: &Path) -> Option<u32> {
         let run = rdy_daemon::RunDir::of_project(dir);
-        let pid: u32 = std::fs::read_to_string(run.pid_file())
-            .ok()?
-            .trim()
-            .parse()
-            .ok()?;
+        let bytes = std::fs::read(run.pid_file()).ok()?;
+        let pid = rdy_daemon::sys::parse_pid_record(&bytes)?.pid();
         crate::platform::process_running(pid).then_some(pid)
     }
 

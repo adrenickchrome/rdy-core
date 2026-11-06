@@ -222,6 +222,15 @@ impl Decoder {
     }
 }
 
+/// `result`, with a peer that has gone counted as done. A flush or a shutdown has nothing left to
+/// wait for then. The peer may have answered before it left, and its answer is still there to read.
+fn peer_gone_is_done(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 /// One connection to or from the daemon: either end of a pipe instance.
 #[derive(Debug)]
 pub struct Stream {
@@ -272,6 +281,21 @@ impl Stream {
             self.unsent = &self.unsent[n..];
         }
         Poll::Ready(Ok(()))
+    }
+
+    /// Queues the end mark behind every byte written, once, and waits until the pipe has taken
+    /// them.
+    fn poll_end_mark(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.write_ended {
+            ready!(self.poll_unsent(cx))?;
+            let n = ready!(self.end.poll_write(cx, END_MARK))?;
+            if n == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+            self.unsent = &END_MARK[n..];
+            self.write_ended = true;
+        }
+        self.poll_taken(cx)
     }
 
     /// Ends when the pipe has taken every byte written so far. Tokio's pipe write copies the bytes
@@ -338,24 +362,19 @@ impl AsyncWrite for Stream {
         me.end.poll_write(cx, &buf[..run])
     }
 
+    /// A socket's flush does nothing, so a caller reads the reply or the end of the stream next, on
+    /// every platform.
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_taken(cx)
+        let taken = ready!(self.get_mut().poll_taken(cx));
+        Poll::Ready(peer_gone_is_done(taken))
     }
 
     /// Queues the end mark behind every byte written, and waits until the pipe has taken them. The
     /// peer's reads end after those bytes; this stream goes on reading what the peer sends.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let me = self.get_mut();
-        if !me.write_ended {
-            ready!(me.poll_unsent(cx))?;
-            let n = ready!(me.end.poll_write(cx, END_MARK))?;
-            if n == 0 {
-                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-            }
-            me.unsent = &END_MARK[n..];
-            me.write_ended = true;
-        }
-        me.poll_taken(cx)
+        let shut = ready!(me.poll_end_mark(cx));
+        Poll::Ready(peer_gone_is_done(shut))
     }
 }
 
@@ -409,6 +428,28 @@ mod tests {
         // from closing it.
         let file = ManuallyDrop::new(unsafe { File::from_raw_handle(handle) });
         pio::security_of(&file).unwrap()
+    }
+
+    /// A client writes a request and is held up before its flush. In that time the daemon answers
+    /// and exits. The flush must not hide the reply: on a socket a flush does nothing, and a
+    /// reply is read before the end of the stream.
+    #[tokio::test]
+    async fn wx25b_a_flush_after_the_peer_answered_and_left_hides_no_reply() {
+        let mut listener = bind(&name()).unwrap();
+        let (mut client, mut server) = pair(&mut listener).await;
+        client.write_all(b"request\n").await.unwrap();
+        let mut request = [0u8; 8];
+        server.read_exact(&mut request).await.unwrap();
+        server.write_all(b"reply\n").await.unwrap();
+        server.flush().await.unwrap();
+        drop(server);
+        // the handle closes with the drop, and the close has no await to wait on
+        tokio::task::yield_now().await;
+        client.flush().await.expect("a flush is no read");
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        assert_eq!(reply, "reply\n");
+        client.shutdown().await.expect("a shutdown is no read");
     }
 
     #[tokio::test]

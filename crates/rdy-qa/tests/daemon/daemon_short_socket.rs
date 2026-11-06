@@ -1,17 +1,16 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets, owners and symlinks. FW-XP1 Phase 4 ports it.
-//! df3 (F12, D-YMWEM): a project whose `.rdy/run/rdy.sock` is longer than `sun_path` allows
-//! gets a short socket, `/tmp/rdy-<uid>/<hash>.sock`, in a directory only the user can read.
-//! Every other run file stays in `.rdy/run/`.
-use rdy_daemon::socket::own_uid;
-use rdy_daemon::{Attempt, Hello, MAX_SOCKET_PATH, PROTO_VERSION, Proto, RunDir, connect};
+//! df3 (D-YMWEM): a project keeps its own daemon however its directory reaches it: a stale record,
+//! a copy, a restore and a deleted project. The socket path's own rules are Unix only
+//! (`daemon_short_socket_unix`).
+use rdy_daemon::{Attempt, Hello, PROTO_VERSION, Proto, RunDir, connect};
 use rdy_engine::Rdy;
-use rdy_qa::daemon::{Served, human_command, short_tempdir};
+use rdy_qa::daemon::{
+    dead_endpoint, endpoint_live, human_command, short_tempdir, wait_endpoint_gone,
+};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 /// The demo's case: a sandbox or CI workspace path, nested, one component more.
-fn long_project(base: &Path) -> PathBuf {
+pub(crate) fn long_project(base: &Path) -> PathBuf {
     let project = base
         .join("a-long-directory-name-like-a-sandbox-or-ci-workspace")
         .join("nested")
@@ -19,18 +18,21 @@ fn long_project(base: &Path) -> PathBuf {
         .join("checkout-01");
     std::fs::create_dir_all(&project).unwrap();
     drop(Rdy::init(&project, "rdy-standard").unwrap());
-    let canonical = std::fs::canonicalize(&project).unwrap();
-    let long = canonical.join(".rdy/run/rdy.sock");
-    assert!(
-        long.as_os_str().len() > MAX_SOCKET_PATH,
-        "the case needs a socket path over the limit: {}",
-        long.display()
-    );
+    #[cfg(unix)]
+    {
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        let long = canonical.join(".rdy/run/rdy.sock");
+        assert!(
+            long.as_os_str().len() > rdy_daemon::MAX_SOCKET_PATH,
+            "the case needs a socket path over the limit: {}",
+            long.display()
+        );
+    }
     project
 }
 
 /// Runs `rdy serve --stop` for `project` when dropped, so a failed assertion leaves no daemon.
-struct StopOnDrop<'a>(&'a Path);
+pub(crate) struct StopOnDrop<'a>(pub(crate) &'a Path);
 
 impl Drop for StopOnDrop<'_> {
     fn drop(&mut self) {
@@ -38,7 +40,7 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
-fn ok(out: &Output) {
+pub(crate) fn ok(out: &Output) {
     assert!(
         out.status.success(),
         "stdout: {}\nstderr: {}",
@@ -48,7 +50,7 @@ fn ok(out: &Output) {
 }
 
 /// The pid the project's daemon reports to `ping`.
-fn ping_pid(project: &Path) -> u64 {
+pub(crate) fn ping_pid(project: &Path) -> u64 {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let hello = Hello {
@@ -73,124 +75,6 @@ fn ping_pid(project: &Path) -> u64 {
     })
 }
 
-#[test]
-fn df3_long_socket_path() {
-    let base = short_tempdir();
-    let project = long_project(base.path());
-    let _stop = StopOnDrop(&project);
-    let out = human_command(&project, &[], &["--json", "status"])
-        .output()
-        .unwrap();
-    ok(&out);
-    let run = RunDir::of_project(&project);
-    let sock = run.socket();
-    assert!(
-        sock.to_string_lossy().starts_with("/tmp/rdy-")
-            && sock.as_os_str().len() <= MAX_SOCKET_PATH,
-        "{}",
-        sock.display()
-    );
-    assert_eq!(run.short_socket().as_ref(), Some(&sock));
-    assert!(sock.exists(), "the daemon listens on {}", sock.display());
-    assert!(project.join(".rdy/run/daemon.log").exists());
-    assert_eq!(
-        std::fs::read_to_string(project.join(".rdy/run/.gitignore")).unwrap(),
-        "*\n"
-    );
-    assert!(!project.join(".rdy/run/rdy.sock").exists());
-    ok(&human_command(&project, &[], &["serve", "--stop"])
-        .output()
-        .unwrap());
-    assert!(!sock.exists(), "the stopped daemon left {}", sock.display());
-}
-
-/// Guard: a project whose `.rdy/run/rdy.sock` fits keeps it there, spelled with the canonical
-/// root.
-#[test]
-fn df3_a_short_project_keeps_its_socket_in_rdy_run() {
-    let s = Served::new();
-    let canonical = std::fs::canonicalize(s.dir.path()).unwrap();
-    assert_eq!(s.run_dir().socket(), canonical.join(".rdy/run/rdy.sock"));
-    assert_eq!(s.run_dir().short_socket(), None);
-}
-
-/// Review Focus 2: `/tmp/x`, `/private/tmp/x` and a relative `--project` reach one socket and
-/// one daemon.
-#[test]
-fn df3_every_spelling_of_a_long_project_path_reaches_one_socket() {
-    let base = short_tempdir();
-    let project = long_project(base.path());
-    let _stop = StopOnDrop(&project);
-    let sock = RunDir::of_project(&project).socket();
-    assert_eq!(
-        sock.parent().unwrap(),
-        Path::new(&format!("/tmp/rdy-{}", own_uid()))
-    );
-    let canonical = std::fs::canonicalize(&project).unwrap();
-    assert_eq!(RunDir::of_project(&canonical).socket(), sock);
-    let tmp_is_a_link = std::fs::symlink_metadata("/tmp").is_ok_and(|m| m.file_type().is_symlink());
-    let private = Path::new("/private").join(project.strip_prefix("/").unwrap());
-    if tmp_is_a_link {
-        assert_eq!(RunDir::of_project(&private).socket(), sock);
-    }
-
-    // the absolute spelling starts the daemon
-    ok(&human_command(&project, &[], &["--json", "status"])
-        .output()
-        .unwrap());
-    let pid = ping_pid(&project);
-
-    // a relative --project from the project's parent's parent reaches it
-    let grand = project.parent().unwrap().parent().unwrap();
-    let relative = project.strip_prefix(grand).unwrap();
-    let out = rdy_qa::fixtures::rdy_command()
-        .current_dir(grand)
-        .arg("--project")
-        .arg(relative)
-        .args(["--json", "status"])
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .output()
-        .unwrap();
-    ok(&out);
-    assert_eq!(
-        ping_pid(&project),
-        pid,
-        "a relative --project started another daemon"
-    );
-
-    // the /private spelling reaches it too
-    if tmp_is_a_link {
-        ok(&human_command(&private, &[], &["--json", "status"])
-            .output()
-            .unwrap());
-        assert_eq!(
-            ping_pid(&private),
-            pid,
-            "the /private spelling started another daemon"
-        );
-    }
-    ok(&human_command(&project, &[], &["serve", "--stop"])
-        .output()
-        .unwrap());
-    assert!(!sock.exists());
-}
-
-/// The `/System/Volumes/Data` spelling of `canonical` (a macOS firmlink that `fs::canonicalize`
-/// leaves as it is), when it names the same directory under another string.
-fn firmlink_spelling(canonical: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let data = Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/").ok()?);
-    let (a, b) = (
-        std::fs::metadata(canonical).ok()?,
-        std::fs::metadata(&data).ok()?,
-    );
-    let same = (a.dev(), a.ino()) == (b.dev(), b.ino());
-    let unmerged = std::fs::canonicalize(&data).ok()? != canonical;
-    (same && unmerged).then_some(data)
-}
-
 /// How many daemons started for `project`: the "opening store" lines of its daemon.log.
 fn starts(project: &Path) -> usize {
     std::fs::read_to_string(project.join(".rdy/run/daemon.log"))
@@ -201,7 +85,7 @@ fn starts(project: &Path) -> usize {
 
 /// Starts the daemon through `first`, then checks that `status` through `second` reaches the same
 /// daemon (same pid) with no second spawn, and stops it.
-fn one_daemon_through(project: &Path, first: &Path, second: &Path) {
+pub(crate) fn one_daemon_through(project: &Path, first: &Path, second: &Path) {
     let before = starts(project);
     ok(&human_command(first, &[], &["--json", "status"])
         .output()
@@ -226,44 +110,6 @@ fn one_daemon_through(project: &Path, first: &Path, second: &Path) {
     assert!(!record.exists(), "a clean exit removes the record");
 }
 
-/// Fix round 1 (ruling 2): every spelling of one project reaches one daemon, also a spelling
-/// that `fs::canonicalize` does not merge (the macOS `/System/Volumes/Data` firmlink), because
-/// the daemon records where it bound and clients connect there.
-#[test]
-fn df3_two_spellings_of_one_project_reach_one_daemon() {
-    // a symlink: canonicalize merges it
-    let base = short_tempdir();
-    let project = long_project(base.path());
-    let _stop = StopOnDrop(&project);
-    let link = base.path().join("link");
-    std::os::unix::fs::symlink(&project, &link).unwrap();
-    one_daemon_through(&project, &link, &project);
-
-    // the firmlink spelling of a long project: both spellings get a short socket, keyed by
-    // different strings
-    let canonical = std::fs::canonicalize(&project).unwrap();
-    if let Some(data) = firmlink_spelling(&canonical) {
-        one_daemon_through(&project, &data, &canonical);
-    }
-
-    // at the length limit: the canonical spelling fits .rdy/run/rdy.sock, the firmlink one does
-    // not
-    let base = short_tempdir();
-    let canonical_base = std::fs::canonicalize(base.path()).unwrap();
-    let pad = MAX_SOCKET_PATH - canonical_base.as_os_str().len() - 1 - "/.rdy/run/rdy.sock".len();
-    let edge = canonical_base.join("p".repeat(pad));
-    std::fs::create_dir(&edge).unwrap();
-    drop(Rdy::init(&edge, "rdy-standard").unwrap());
-    assert_eq!(
-        edge.join(".rdy/run/rdy.sock").as_os_str().len(),
-        MAX_SOCKET_PATH
-    );
-    let _stop_edge = StopOnDrop(&edge);
-    if let Some(data) = firmlink_spelling(&edge) {
-        one_daemon_through(&edge, &data, &edge);
-    }
-}
-
 /// Fix round 1 (ruling 2): a record that names a socket nobody answers on is stale: the client
 /// computes its own socket, starts a daemon, and that daemon rewrites the record.
 #[test]
@@ -275,10 +121,13 @@ fn df3_a_stale_socket_record_is_recomputed_and_rewritten() {
     let _stop = StopOnDrop(&project);
     let run = RunDir::of_project(&project);
     run.ensure().unwrap();
-    let dead = base.path().join("dead.sock");
-    drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+    let dead = dead_endpoint(base.path());
     let id = run.project_id().unwrap();
-    std::fs::write(run.socket_record(), format!("{}\n{id}\n", dead.display())).unwrap();
+    rdy_store::fsutil::write_private_durable(
+        &run.socket_record(),
+        format!("{}\n{id}\n", dead.display()).as_bytes(),
+    )
+    .unwrap();
     ok(&human_command(&project, &[], &["--json", "status"])
         .output()
         .unwrap());
@@ -293,6 +142,39 @@ fn df3_a_stale_socket_record_is_recomputed_and_rewritten() {
         .output()
         .unwrap());
     assert!(!run.socket_record().exists());
+}
+
+/// A person's copy of a project: `cp -R` on Unix, where it may complain about the socket file. On
+/// Windows, what the running daemon holds stays behind, and the run files stay private to the
+/// account, as a copy made by that account can.
+#[cfg(unix)]
+fn copy_project(from: &Path, to: &Path) -> bool {
+    std::process::Command::new("cp")
+        .arg("-R")
+        .arg(from)
+        .arg(to)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+#[cfg(windows)]
+pub(crate) fn copy_project(from: &Path, to: &Path) -> bool {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if e.file_type().unwrap().is_dir() {
+            copy_project(&src, &dst);
+        } else if let Ok(bytes) = std::fs::read(&src) {
+            if from.ends_with(".rdy/run") {
+                rdy_store::fsutil::write_private_durable(&dst, &bytes).unwrap();
+            } else {
+                std::fs::write(&dst, bytes).unwrap();
+            }
+        }
+    }
+    true
 }
 
 /// Whether `rdy ls --scope work` in `project` lists the folder `path` (`--no-daemon` with
@@ -330,12 +212,7 @@ fn df3_a_copied_project_never_talks_to_the_originals_daemon() {
     for n in 1..=10 {
         let copy = base.path().join(format!("c{n}"));
         // cp may complain about the socket file; the record must reach the copy
-        let _ = std::process::Command::new("cp")
-            .arg("-R")
-            .arg(&original)
-            .arg(&copy)
-            .output()
-            .unwrap();
+        let _ = copy_project(&original, &copy);
         assert!(
             copy.join(".rdy/run/daemon.sock").exists(),
             "the copy carries the original's record"
@@ -369,14 +246,14 @@ fn df3_a_copied_project_never_talks_to_the_originals_daemon() {
 }
 
 /// Ends process `pid` when dropped, so a failed assertion leaves no orphan daemon.
+#[cfg(unix)]
 struct KillOnDrop(u32);
 
+#[cfg(unix)]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if rdy_daemon::process_alive(self.0) {
-            let _ = std::process::Command::new("kill")
-                .arg(self.0.to_string())
-                .output();
+            rdy_qa::platform::kill_hard(self.0);
         }
     }
 }
@@ -385,7 +262,10 @@ impl Drop for KillOnDrop {
 /// one in `/tmp/rdy-<uid>`) is moved away, copied back with `cp -R` and the old copy removed,
 /// while its daemon lives. That daemon's `.rdy` is gone, so the restored project's `status`
 /// makes it refuse (stopping) and exit; the client retries once and starts the restored
-/// project's own daemon within its start poll. The old process exits.
+/// project's own daemon within its start poll. The old process exits. Unix only: Windows refuses to
+/// move or delete a directory while a process holds a file in it without sharing its delete, as a
+/// real daemon holds its log; `wx25b_a_restored_project_replaces_its_old_daemon` is its counterpart.
+#[cfg(unix)]
 #[test]
 fn df3_a_restored_project_replaces_its_old_daemon() {
     let base = short_tempdir();
@@ -398,13 +278,7 @@ fn df3_a_restored_project_replaces_its_old_daemon() {
     let _kill = KillOnDrop(old);
     let away = base.path().join("away");
     std::fs::rename(&project, &away).unwrap();
-    let copied = std::process::Command::new("cp")
-        .arg("-R")
-        .arg(&away)
-        .arg(&project)
-        .output()
-        .unwrap();
-    assert!(copied.status.success(), "{copied:?}");
+    assert!(copy_project(&away, &project), "cp -R failed");
     std::fs::remove_dir_all(&away).unwrap();
     ok(&human_command(&project, &[], &["--json", "status"])
         .output()
@@ -441,14 +315,13 @@ fn df3_a_daemon_exits_when_its_project_is_deleted() {
     })
     .unwrap();
     let sock = run.handle().socket();
+    #[cfg(unix)]
     assert!(sock.starts_with("/tmp"), "{}", sock.display());
-    assert!(sock.exists());
+    let endpoint = RunDir::of_project(&project);
+    assert_eq!(endpoint.socket(), sock);
+    assert!(endpoint_live(&endpoint));
     std::fs::remove_dir_all(&project).unwrap();
     run.handle().tick();
     assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
-    assert!(
-        !sock.exists(),
-        "the gone project's daemon left {}",
-        sock.display()
-    );
+    wait_endpoint_gone(&endpoint);
 }

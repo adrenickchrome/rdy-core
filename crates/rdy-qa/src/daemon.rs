@@ -110,6 +110,19 @@ pub fn child_daemon_entry() {
         .build()
         .expect("child runtime");
     let code = rt.block_on(async move {
+        // SIGTERM ends this process on Unix. On Windows a stop of another version sets the
+        // project's event, so the child holds it. A predecessor may hold the name for a moment,
+        // and only the stop tests need it: their child has no predecessor.
+        #[cfg(windows)]
+        match rdy_daemon::sys::StopSignals::install(&run.root()) {
+            Ok(mut signals) => {
+                tokio::spawn(async move {
+                    signals.recv().await;
+                    std::process::exit(0);
+                });
+            }
+            Err(e) => eprintln!("race1 child: no stop event: {e}"),
+        }
         let mut config = DaemonConfig::new(run, version);
         config.idle_timeout = Some(idle);
         let mut d = Daemon::new(config, Arc::new(EchoHandler::default()));
@@ -487,6 +500,109 @@ pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Com
     cmd
 }
 
+/// What `f` gives from a runtime of its own on a thread of its own, so a test may ask from inside
+/// a runtime or outside one.
+fn on_own_runtime<T: Send>(f: impl std::future::Future<Output = T> + Send) -> T {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime")
+                    .block_on(f)
+            })
+            .join()
+            .expect("the endpoint probe")
+    })
+}
+
+/// Whether the project's endpoint stands: its socket file on Unix, an instance of its pipe on
+/// Windows. A pipe is no file, so on Windows this asks by connecting (`sys::endpoint_liveness`).
+pub fn endpoint_live(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        on_own_runtime(rdy_daemon::sys::endpoint_liveness(&run.socket()))
+            == rdy_daemon::sys::Liveness::Live
+    }
+}
+
+/// Whether the project's endpoint is proved gone: no socket file on Unix, no pipe of that name on
+/// Windows. A pipe's name lasts until its last instance closes, so an open connection keeps it.
+pub fn endpoint_gone(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        !run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        on_own_runtime(rdy_daemon::sys::endpoint_liveness(&run.socket()))
+            == rdy_daemon::sys::Liveness::Gone
+    }
+}
+
+/// How long a test waits for a daemon's endpoint or process to end: a hang guard, never a measure.
+const STOP_WAIT: Duration = Duration::from_secs(30);
+
+/// Waits until the project's endpoint is proved gone ([`endpoint_gone`]), or panics past
+/// [`STOP_WAIT`]. A missing run file proves nothing here: only the endpoint answers.
+pub fn wait_endpoint_gone(run: &RunDir) {
+    let t0 = std::time::Instant::now();
+    while !endpoint_gone(run) {
+        assert!(
+            t0.elapsed() < STOP_WAIT,
+            "the daemon's endpoint {} still stands",
+            run.socket().display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Waits until the project's endpoint stands ([`endpoint_live`]), or panics past [`STOP_WAIT`].
+pub fn wait_endpoint_live(run: &RunDir) {
+    let t0 = std::time::Instant::now();
+    while !endpoint_live(run) {
+        assert!(
+            t0.elapsed() < STOP_WAIT,
+            "the daemon never bound {}",
+            run.socket().display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// An endpoint nothing answers on: a socket file nothing listens on (Unix), the name of a pipe
+/// nothing ever served (Windows).
+pub fn dead_endpoint(dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let dead = dir.join("dead.sock");
+        on_own_runtime(async { drop(rdy_daemon::sys::bind(&dead).expect("bind the dead socket")) });
+        dead
+    }
+    #[cfg(windows)]
+    {
+        rdy_daemon::sys::project_endpoint(&dir.join("never-served")).0
+    }
+}
+
+/// Replaces the `.rdy` of the project at `dir` with a fresh directory, as a restore from a copy
+/// does. While a daemon has the store open the system refuses to move the directory on Windows, so
+/// there the old one is deleted.
+pub fn replace_rdy_dir(dir: &Path) {
+    let rdy = dir.join(".rdy");
+    if cfg!(windows) {
+        std::fs::remove_dir_all(&rdy).expect("delete the old .rdy");
+    } else {
+        std::fs::rename(&rdy, dir.join(".rdy-old")).expect("move the old .rdy");
+    }
+    std::fs::create_dir(&rdy).expect("a fresh .rdy");
+}
+
 /// How long `Served::kill9` waits for the killed daemon to exit.
 const KILL_WAIT: Duration = Duration::from_secs(30);
 
@@ -632,11 +748,8 @@ impl Served {
     }
 
     fn pid_file(&self) -> Option<u32> {
-        std::fs::read_to_string(self.run_dir().pid_file())
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        let bytes = std::fs::read(self.run_dir().pid_file()).ok()?;
+        rdy_daemon::sys::parse_pid_record(&bytes).map(|record| record.pid())
     }
 
     /// SIGKILLs the daemon named by the pid file, then waits until that process is gone

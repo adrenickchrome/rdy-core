@@ -490,11 +490,7 @@ fn sg6_the_kill_wait_ends_when_a_successor_already_answers() {
     let (ok, v) = s.json(&["--json", "status"]);
     assert!(ok, "{v}");
     let first = s.daemon_pid().expect("a daemon");
-    let status = std::process::Command::new("kill")
-        .args(["-9", &first.to_string()])
-        .status()
-        .expect("run kill");
-    assert!(status.success());
+    rdy_qa::platform::kill_hard(first);
     // the next client starts a successor before the wait begins
     let (ok, v) = s.json(&["--json", "status"]);
     assert!(ok, "{v}");

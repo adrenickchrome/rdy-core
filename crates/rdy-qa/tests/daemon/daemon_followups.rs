@@ -159,7 +159,11 @@ fn dfu1_a_store_held_while_a_daemon_pid_is_live_is_not_refused() {
     // live process (this one), so the held lock may be a daemon's: spawn, let its open retry
     let run = s.run_dir();
     run.ensure().unwrap();
-    std::fs::write(run.pid_file(), format!("{}\n", std::process::id())).unwrap();
+    rdy_store::fsutil::write_private_durable(
+        &run.pid_file(),
+        &rdy_daemon::sys::own_pid_record().unwrap(),
+    )
+    .unwrap();
     let holder = Rdy::open(s.dir.path()).unwrap();
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(HELD_GRACE * 3);
@@ -182,9 +186,12 @@ fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
         spawn_child_daemon(&rdy_qa::test_name!("dfu1_child"), &run, "0.2.0", &[]);
     let rt = Hosted::rt();
     rt.block_on(async {
-        let old = connect_or_start(&run, client_opts(&run, "0.1.0", dir.path(), spawn_old))
-            .await
-            .unwrap();
+        let old = connect_or_start(
+            &run,
+            client_opts(&run, "0.1.0", dir.path(), spawn_old.clone()),
+        )
+        .await
+        .unwrap();
         // the old daemon is idle once it has dropped `old`'s connection: it ends the session
         // (`ConnEnd`) before it closes the stream, so EOF here means it has no session left
         let mut stream = old.into_stream();
@@ -198,9 +205,12 @@ fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
         // the old daemon is replaced (it answers `exiting` and drops its socket) but its store
         // lock is still held for longer than HELD_GRACE
         let holder = hold_store_lock(dir.path(), HELD_GRACE * 3);
-        let mut new = connect_or_start(&run, client_opts(&run, "0.2.0", dir.path(), spawn_new))
-            .await
-            .unwrap_or_else(|e| panic!("a draining predecessor is not a --no-daemon holder: {e}"));
+        let mut new = connect_or_start(
+            &run,
+            client_opts(&run, "0.2.0", dir.path(), spawn_new.clone()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a draining predecessor is not a --no-daemon holder: {e}"));
         assert_eq!(new.version(), "0.2.0");
         assert_eq!(count_new.load(std::sync::atomic::Ordering::SeqCst), 1);
         new.ctl("stop", json!({})).await.unwrap();
@@ -301,8 +311,10 @@ fn msw15_a_relative_project_under_a_long_path_starts_its_daemon() {
         String::from_utf8_lossy(&stop.stderr)
     );
     let run = RunDir::of_project(&project);
-    assert!(run.short_socket().is_some(), "{}", run.socket().display());
+    if cfg!(unix) {
+        assert!(run.short_socket().is_some(), "{}", run.socket().display());
+    }
     assert!(project.join(".rdy/run/daemon.log").exists());
     assert!(!project.join(".rdy/run/rdy.sock").exists());
-    assert!(!run.socket().exists(), "the stopped daemon left its socket");
+    rdy_qa::daemon::wait_endpoint_gone(&run);
 }

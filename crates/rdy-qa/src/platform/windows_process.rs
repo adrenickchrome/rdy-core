@@ -23,6 +23,7 @@ use std::fs::File;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -57,6 +58,21 @@ use windows_sys::Win32::System::Threading::{
 };
 
 pub use rdy_store::pio::{ProgramInDir, StartPin, program_in_dir, start_in_dir};
+
+/// A directory for a project's temporary home: the system's temp directory. A pipe name does not
+/// depend on a path's length, so this needs no short root.
+pub fn short_tmp_root() -> &'static Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(std::env::temp_dir)
+}
+
+/// Opens the log at `path` to append, private to this account, as the product opens its own.
+pub fn open_private_log(path: &Path) -> io::Result<std::fs::File> {
+    rdy_store::pio::open_no_follow(
+        rdy_store::pio::private_file(std::fs::OpenOptions::new().append(true).create(true)),
+        path,
+    )
+}
 
 /// The exit code of a process this module ended: 128 plus SIGKILL's number, as a shell shows it.
 pub const KILLED_EXIT_CODE: u32 = 137;

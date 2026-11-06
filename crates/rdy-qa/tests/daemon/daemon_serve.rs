@@ -5,7 +5,7 @@ use rdy_daemon::{
     connect, start,
 };
 use rdy_engine::{E_BAD_INPUT, E_PERMISSION, E_VIEW_OWNER, Rdy};
-use rdy_qa::daemon::{Hosted, short_tempdir};
+use rdy_qa::daemon::{Hosted, endpoint_live, short_tempdir, wait_endpoint_gone};
 use serde_json::json;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or 
 fn serve1_start_binds_after_the_store_is_open_and_a_second_start_is_already_running() {
     let mut h = Hosted::new();
     let run = RunDir::of_project(h.dir.path());
-    assert!(run.socket().exists());
+    assert!(endpoint_live(&run));
     assert!(run.pid_file().exists());
     let e = start(ServeOptions {
         project: h.dir.path().into(),
@@ -31,11 +31,11 @@ fn serve1_start_binds_after_the_store_is_open_and_a_second_start_is_already_runn
     .unwrap();
     assert!(matches!(e, ServeError::AlreadyRunning(_)), "{e}");
     assert!(
-        run.socket().exists(),
+        endpoint_live(&run),
         "the loser never touched the winner's socket"
     );
     assert_eq!(h.stop(), ExitReason::Stopped);
-    assert!(!run.socket().exists());
+    wait_endpoint_gone(&run);
     let r = Rdy::open(h.dir.path()).unwrap();
     assert!(!r.open_report().unclean_shutdown, "stop closed the store");
 }
@@ -182,7 +182,7 @@ fn serve1_mcp_runs_over_the_socket_and_a_session_end_frees_its_slot() {
     rt.block_on(async {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let stream = h.mcp_stream().await;
-        let (r, mut w) = stream.into_split();
+        let (r, mut w) = rdy_daemon::sys::split(stream);
         let mut r = BufReader::new(r);
         let mut line = String::new();
         let line_of = |v: serde_json::Value| format!("{v}\n");
@@ -358,15 +358,7 @@ fn serve1_a_successor_started_as_soon_as_a_stopped_daemons_socket_is_gone_comes_
         let mut c = h.client(None, None).await;
         c.ctl("stop", json!({})).await.unwrap();
     });
-    let socket = RunDir::of_project(h.dir.path()).socket();
-    let t = std::time::Instant::now();
-    while socket.exists() {
-        assert!(
-            t.elapsed() < Duration::from_secs(30),
-            "the socket was not removed"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    wait_endpoint_gone(&RunDir::of_project(h.dir.path()));
     let new = start_successor(h.dir.path(), "t");
     assert_ready(&rt, h.dir.path(), "t");
     assert_eq!(old.join().unwrap().unwrap(), ExitReason::Stopped);
@@ -445,7 +437,7 @@ fn hd4_an_oversized_line_on_the_mcp_socket_is_refused_and_the_session_lives() {
     let rt = Hosted::rt();
     rt.block_on(async {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let (r, mut w) = h.mcp_stream().await.into_split();
+        let (r, mut w) = rdy_daemon::sys::split(h.mcp_stream().await);
         let mut r = BufReader::new(r);
         let mut line = String::new();
         let send = |v: serde_json::Value| format!("{v}\n");

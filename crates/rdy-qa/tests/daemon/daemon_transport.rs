@@ -1,14 +1,12 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The daemon area, transport part (race1): real client processes and threads against a daemon
 //! in a child process, auto-start races, a stale socket, hostile hellos and lines.
+use crate::daemon_children::child_fixture::fixture_command;
 use rdy_daemon::*;
 use rdy_qa::daemon::*;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// The re-exec child. Not a test of anything: it returns at once in a normal run.
 #[test]
@@ -67,7 +65,7 @@ fn race1_eight_clients_against_a_cold_project_start_one_daemon_and_all_reach_it(
         assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1);
         c.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -75,7 +73,8 @@ fn race1_eight_clients_against_a_stale_socket_start_one_daemon() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
-    drop(std::os::unix::net::UnixListener::bind(run.socket()).unwrap());
+    // a socket file nothing listens on (Unix); a pipe's name goes with its listener (Windows)
+    rt().block_on(async { drop(sys::bind(&run.socket()).unwrap()) });
     let (spawn, count) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
     rt().block_on(async {
         let mut tasks = vec![];
@@ -97,7 +96,7 @@ fn race1_eight_clients_against_a_stale_socket_start_one_daemon() {
         c.ctl("stop", json!({})).await.unwrap();
     });
     assert_eq!(count.load(Ordering::SeqCst), 1);
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -113,9 +112,14 @@ fn race1_a_killed_daemon_is_replaced_on_the_next_client() {
             .as_u64()
             .unwrap()
     });
-    kill9(pid1);
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(run.socket().exists(), "kill -9 leaves the socket file");
+    rdy_qa::platform::kill_hard(pid1 as u32);
+    if cfg!(unix) {
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(endpoint_live(&run), "kill -9 leaves the socket file");
+    } else {
+        // a killed process's pipe instances close with it
+        wait_endpoint_gone(&run);
+    }
     let pid2 = rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
             .await
@@ -128,18 +132,7 @@ fn race1_a_killed_daemon_is_replaced_on_the_next_client() {
     });
     assert_ne!(pid1, pid2);
     assert_eq!(count.load(Ordering::SeqCst), 2);
-    wait_gone(&run);
-}
-
-/// SIGKILL through the shell: rdy-qa has no libc dependency.
-fn kill9(pid: u64) {
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -152,13 +145,24 @@ fn race1_a_detached_daemon_idles_out_and_the_next_client_starts_a_new_one() {
         "1",
         &[("RDY_DAEMON_IDLE_MS", "500")],
     );
-    rt().block_on(async {
+    let pid = rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
             .await
             .unwrap();
-        c.ctl("echo", json!({})).await.unwrap();
+        c.ctl("ping", json!({})).await.unwrap()["pid"]
+            .as_u64()
+            .unwrap() as u32
     });
-    wait_gone(&run);
+    // the process, then the endpoint: a look at a pipe connects, which would reset its idle time
+    let t0 = std::time::Instant::now();
+    while !exited(pid) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "the daemon did not idle out"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    wait_endpoint_gone(&run);
     rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
             .await
@@ -166,7 +170,7 @@ fn race1_a_detached_daemon_idles_out_and_the_next_client_starts_a_new_one() {
         c.ctl("stop", json!({})).await.unwrap();
     });
     assert_eq!(count.load(Ordering::SeqCst), 2);
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -203,7 +207,7 @@ fn race1_version_mismatch_idle_daemon_is_replaced_busy_one_refuses() {
         assert_eq!(count_new.load(Ordering::SeqCst), 1);
         new.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -211,18 +215,19 @@ fn race1_hostile_hellos_and_lines_never_take_the_daemon_down() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     let (spawn, _) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
+    let cwd = serde_json::to_string(dir.path()).unwrap();
     rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone())).await.unwrap();
         let junk: Vec<Vec<u8>> = vec![
             b"\n".to_vec(),
             b"\xff\xfe\x00garbage\n".to_vec(),
             vec![b'{'; 5000],
-            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"ctl\",\"cwd\":\"{}\"}}\n{{\"id\":1,\"op\":\"echo\",\"args\":{}}}\n", dir.path().display(), "[".repeat(100_000)).into_bytes(),
-            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"ctl\",\"cwd\":\"{}\"}}\n{}", dir.path().display(), "x".repeat(17 * 1024 * 1024)).into_bytes(),
-            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"mcp\",\"cwd\":\"{}\"}}\n{{\"jsonrpc\":\"2.0\"}}\n", dir.path().display()).into_bytes(),
+            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"ctl\",\"cwd\":{cwd}}}\n{{\"id\":1,\"op\":\"echo\",\"args\":{}}}\n", "[".repeat(100_000)).into_bytes(),
+            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"ctl\",\"cwd\":{cwd}}}\n{}", "x".repeat(17 * 1024 * 1024)).into_bytes(),
+            format!("{{\"rdy\":1,\"version\":\"1\",\"proto\":\"mcp\",\"cwd\":{cwd}}}\n{{\"jsonrpc\":\"2.0\"}}\n").into_bytes(),
         ];
         for bytes in junk {
-            let mut s = UnixStream::connect(run.socket()).await.unwrap();
+            let mut s = sys::connect(&run.socket()).await.unwrap();
             let _ = s.write_all(&bytes).await;
             let mut r = BufReader::new(s);
             let mut out = String::new();
@@ -244,7 +249,7 @@ fn race1_hostile_hellos_and_lines_never_take_the_daemon_down() {
         }
         c.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -285,7 +290,7 @@ fn race1_two_hundred_pipelined_requests_from_four_clients_all_answer_in_order() 
             .unwrap();
         c.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -300,25 +305,31 @@ fn race1_children_spawned_by_other_threads_during_the_start_lock_handoff_do_not_
         &[("RDY_DAEMON_PROGRESS_MS", "200")],
     );
     let stop = Arc::new(AtomicBool::new(false));
-    // two threads spawn short-lived children nonstop while eight clients race on start.lock
+    // two threads start children nonstop while eight clients race on start.lock. Each child lives
+    // until sixteen newer ones stand, so one that kept the lock would still hold it at the check.
     let churn: Vec<_> = (0..2)
         .map(|_| {
             let stop = stop.clone();
             std::thread::spawn(move || {
-                let mut kids = vec![];
+                let mut kids = std::collections::VecDeque::new();
                 while !stop.load(Ordering::SeqCst) {
-                    kids.push(
-                        std::process::Command::new("sleep")
-                            .arg("0.3")
+                    kids.push_back(
+                        fixture_command("hang")
                             .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .spawn()
                             .unwrap(),
                     );
+                    if kids.len() > 16 {
+                        let mut old: std::process::Child = kids.pop_front().unwrap();
+                        let _ = old.kill();
+                        let _ = old.wait();
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 for mut k in kids {
+                    let _ = k.kill();
                     let _ = k.wait();
                 }
             })
@@ -357,19 +368,7 @@ fn race1_children_spawned_by_other_threads_during_the_start_lock_handoff_do_not_
             .unwrap();
         c.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
-}
-
-/// Waits until the daemon's socket is gone (it unlinks it on exit).
-fn wait_gone(run: &RunDir) {
-    let t0 = std::time::Instant::now();
-    while run.socket().exists() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(30),
-            "daemon did not exit"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_endpoint_gone(&run);
 }
 
 #[test]
@@ -401,14 +400,7 @@ fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
         &[("RDY_DAEMON_READY_FILE", gate.to_str().unwrap())],
     );
     let _child = spawn.spawn(&run).unwrap();
-    let t = std::time::Instant::now();
-    while !run.socket().exists() {
-        assert!(
-            t.elapsed() < Duration::from_secs(30),
-            "the child never bound"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_endpoint_live(&run);
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
@@ -430,5 +422,5 @@ fn vw5_a_ctl_connect_waits_while_the_daemon_is_starting() {
         assert_eq!(c.version(), "1");
         c.ctl("stop", json!({})).await.unwrap();
     });
-    wait_gone(&run);
+    wait_endpoint_gone(&run);
 }

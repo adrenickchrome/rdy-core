@@ -14,6 +14,7 @@ mod cli_config_file;
 mod cli_coverage;
 mod cli_daemon;
 mod cli_daemon_build;
+mod cli_daemon_unix;
 mod cli_diff;
 mod cli_dispute;
 mod cli_dump;
