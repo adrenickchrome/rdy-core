@@ -31,6 +31,9 @@
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`), a Unix
 //!   socket (`bind_socket`) and a child process under another umask (`under_umask`), so the
 //!   store's and the engine's tests need no Unix-only call of their own;
+//! - child windows: `no_console_window` makes a console program that rdy starts run without a
+//!   console window of its own (Windows `CREATE_NO_WINDOW`; nothing on Unix), so a detached
+//!   daemon never flashes a window when it runs git;
 //! - on every platform, for tests that kill or abort a child: how the child ended (`ended`); and
 //!   for tests of text that is not Unicode: such text (`not_unicode`).
 //!

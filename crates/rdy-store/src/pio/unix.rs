@@ -1092,3 +1092,7 @@ mod tests {
         for_each_entry::<io::Error>(&empty, |_| panic!("no entry")).unwrap();
     }
 }
+
+/// Makes the console program `cmd` start without a console window. Unix has no console windows,
+/// so this changes nothing.
+pub fn no_console_window(_cmd: &mut std::process::Command) {}

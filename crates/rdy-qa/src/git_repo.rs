@@ -1,9 +1,42 @@
 //! A throwaway git repository for the code-index tests (cidx1, cbrief1, prov1, cmcp1, ccli1,
-//! cperf1): fixed dates, no hooks, no signing, whatever the machine's git config says.
+//! cperf1): fixed dates, no hooks, no signing, whatever the machine's git config says. Git runs
+//! with an argument vector (never a shell line), native absolute paths and an empty private folder
+//! as its hooks path, so the fixture is the same on every host.
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// An empty private folder for `core.hooksPath`, made once per process: no host path such as
+/// `/dev/null` is needed, and no hook of the machine or of the repository runs. Absolute and in
+/// the host's own form.
+pub fn git_hooks_dir() -> &'static Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let d = tempfile::tempdir().expect("empty hooks dir");
+        rdy_store::pio::make_private_dir(d.path()).expect("make the hooks dir private");
+        d
+    })
+    .path()
+}
+
+/// Git is a real prerequisite of these fixtures: a host without `git` on its path stops here, with
+/// the way to fix it, rather than failing in the middle of a test with a spawn error.
+pub fn require_git() {
+    static CHECKED: OnceLock<Result<String, String>> = OnceLock::new();
+    let r = CHECKED.get_or_init(|| match Command::new("git").arg("--version").output() {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        Ok(o) => Err(format!("git --version failed: {}", o.status)),
+        Err(e) => Err(e.to_string()),
+    });
+    if let Err(e) = r {
+        panic!(
+            "the QA git fixtures need git on the path (git.exe on Windows): {e}; install Git and \
+             put it on the PATH"
+        );
+    }
+}
 
 pub struct GitRepo {
     dir: PathBuf,
@@ -70,6 +103,7 @@ fn name_of(dir: &Path) -> String {
 impl GitRepo {
     /// A new repository on branch `main` in a fresh temporary directory.
     pub fn new() -> GitRepo {
+        require_git();
         let tmp = tempfile::tempdir().expect("tempdir");
         let g = GitRepo {
             dir: tmp.path().to_path_buf(),
@@ -143,6 +177,7 @@ impl GitRepo {
 
     /// A new repository on branch `main` at `dir` (created if missing); removed with its parent.
     pub fn at(dir: &Path) -> GitRepo {
+        require_git();
         std::fs::create_dir_all(dir).expect("mkdir");
         let g = GitRepo {
             dir: dir.to_path_buf(),
@@ -174,8 +209,8 @@ impl GitRepo {
                 "-c",
                 "commit.gpgsign=false",
                 "-c",
-                "core.hooksPath=/dev/null",
             ])
+            .arg(format!("core.hooksPath={}", git_hooks_dir().display()))
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")

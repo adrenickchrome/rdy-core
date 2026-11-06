@@ -83,3 +83,24 @@ fn qapack1_pathological_globs_in_a_pack_are_bounded() {
     let e = set.resolve("q").unwrap_err();
     assert!(e.to_string().contains("at most 256 bytes"), "{e}");
 }
+
+/// A glob matches the logical form of a path: slash-separated on every host. A path built from
+/// native pieces and turned into its logical form matches as a typed one does.
+#[test]
+fn wx27_globs_use_logical_paths_on_windows() {
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(
+        "name: lg\nversion: \"1\"\nextends: rdy-standard\nareas:\n  src: { paths: ['src/**/*.rs'] }\n  docs: { paths: ['docs/*.md'] }\n",
+    )
+    .unwrap();
+    let p = set.resolve("lg").unwrap();
+    let native: std::path::PathBuf = ["src", "deep", "a.rs"].iter().collect();
+    let logical = rdy_engine::logical_of(&native).expect("a relative path has a logical form");
+    assert_eq!(logical, "src/deep/a.rs");
+    assert_eq!(p.areas_for_path(&logical), vec!["src"]);
+    let doc: std::path::PathBuf = ["docs", "x.md"].iter().collect();
+    let logical = rdy_engine::logical_of(&doc).unwrap();
+    assert_eq!(p.areas_for_path(&logical), vec!["docs"]);
+    // the host separator is not a separator of the grammar when it is a backslash
+    assert!(p.areas_for_path("docs\\x.md").is_empty());
+}

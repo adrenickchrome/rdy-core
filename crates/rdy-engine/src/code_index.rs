@@ -118,6 +118,8 @@ pub fn git_command(root: &Path) -> Command {
     }
     c.env("GIT_NO_LAZY_FETCH", "1");
     c.stdin(Stdio::null());
+    // a detached daemon has no console: without this a Windows git child opens a window
+    rdy_store::pio::no_console_window(&mut c);
     c
 }
 
