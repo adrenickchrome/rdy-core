@@ -182,7 +182,7 @@ pub(super) enum Found {
     Landed { content: Box<Change>, landing: Hash },
 }
 
-fn changed(view: &str) -> RdyError {
+pub(super) fn changed(view: &str) -> RdyError {
     RdyError::new(
         E_STALE_BASE,
         format!("rule view {view} changed outside this request"),

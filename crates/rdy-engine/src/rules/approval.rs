@@ -300,14 +300,11 @@ impl Rdy {
             drop(st);
             return self.rule_cards_stop(person, &pref);
         }
-        let first = p.changes.first().ok_or_else(|| {
-            RdyError::new(
-                E_INTERNAL,
-                format!("{} has no change", a.reference),
-                "report this as a bug in rdy",
-            )
-        })?;
-        let content = st.reader().change(first)?;
+        // the exact proposal of the checked request: its receipt and its change set, again
+        let content = lifecycle::stored_rule(&st, &a.view)?
+            .filter(|rule| p.view == a.view && p.changes.first() == Some(&rule.first))
+            .ok_or_else(|| lifecycle::changed(&a.view))?
+            .content;
         check_dependents(&st, a.scope, &a.view, &content)?;
         // the person refused this version on its card: their words on the same request do not
         // bring it back
@@ -649,9 +646,14 @@ fn finish_landing(
             fix: format!("close the view with rdy view close {view}"),
         }),
     };
-    let added: Vec<Value> = extra
+    add_warnings(landing, &extra);
+    add_warnings(landing, trouble.as_slice());
+}
+
+/// Adds `issues` after the warnings `landing` holds.
+fn add_warnings(landing: &mut Value, issues: &[Issue]) {
+    let added: Vec<Value> = issues
         .iter()
-        .chain(trouble.iter())
         .filter_map(|i| serde_json::to_value(i).ok())
         .collect();
     if added.is_empty() {
@@ -730,8 +732,9 @@ fn run_mutation(
     };
     let reference = match state {
         PreparedState::Landed { landing } => {
+            // the repeat already finished the cleanup, and its warnings say how that went
             let mut v = stored_landing(engine, &landing)?;
-            finish_landing(engine, call, &view, &mut v, warnings);
+            add_warnings(&mut v, &warnings);
             return Ok(reply(Outcome::Landed { landing: v }));
         }
         PreparedState::Proposed { reference, .. } => reference,
