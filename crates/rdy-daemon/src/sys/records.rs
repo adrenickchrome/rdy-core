@@ -5,10 +5,12 @@
 use rdy_model::Hash;
 use rdy_store::fileid::FileId;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What every project's pipe name starts with: the local pipe namespace, then rdy's prefix.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\rdy-";
+/// What every project's stop event starts with: this session's namespace, then rdy's prefix.
+pub const STOP_EVENT_PREFIX: &str = r"Local\rdy-stop-";
 /// The most of `daemon.sock` that is read on Windows.
 pub const MAX_PIPE_RECORD: usize = 256;
 /// The most of `daemon.pid` that is read on Windows.
@@ -26,6 +28,20 @@ pub fn hash_of_units(units: impl Iterator<Item = u16>) -> Hash {
 /// The pipe of a project whose canonical path has the hash `hash`.
 pub fn pipe_name(hash: &Hash) -> PathBuf {
     PathBuf::from(format!("{PIPE_PREFIX}{hash}"))
+}
+
+/// The stop event of a project whose canonical path has the hash `hash`: the hash of its pipe.
+pub fn stop_event_name(hash: &Hash) -> String {
+    format!("{STOP_EVENT_PREFIX}{hash}")
+}
+
+/// The stop event of the daemon that listens on `pipe`. `None` for anything but a whole rdy pipe
+/// name ([`pipe_from_line`]).
+pub fn stop_event_of_pipe(pipe: &Path) -> Option<String> {
+    let line = pipe.to_str()?;
+    pipe_from_line(line.as_bytes())?;
+    let hash = line.strip_prefix(PIPE_PREFIX)?;
+    Some(format!("{STOP_EVENT_PREFIX}{hash}"))
 }
 
 /// The pipe that a `daemon.sock` line names: exactly the local namespace, rdy's prefix and 64

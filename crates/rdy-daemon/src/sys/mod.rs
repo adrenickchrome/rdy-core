@@ -20,13 +20,18 @@
 //!   exact grammars of `daemon.sock` and `daemon.pid` (`parse_endpoint_record`, `parse_pid_record`,
 //!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`)
 //!   and whether a run file may be believed (`run_file_is_private`);
-//! - process lifecycle: a new session on spawn, exit codes, liveness, `SIGTERM` and `setsid`;
+//! - process lifecycle: a new session on spawn, exit codes, liveness and leaving the caller's
+//!   session (`detach`). `SIGTERM` by pid is Unix only: Windows never ends a process by its pid;
 //! - what a stop's wait knows of an old daemon ([`Liveness`], `process_liveness`,
 //!   `endpoint_liveness`). The contract for every platform: only a proved end is `Gone`. Access
 //!   denied and an answering endpoint are `Live`, anything else unclear is `Ambiguous`, and a
 //!   caller waits on both. A named pipe is no filesystem object, so its probe connects, never
 //!   looks for a name;
-//! - stop signals: `SIGINT` and `SIGTERM` in a tokio runtime;
+//! - stop signals, installed for one project's canonical root: `SIGINT` and `SIGTERM` in a tokio
+//!   runtime on Unix, and the project's private named event, Ctrl-C and Ctrl-Break on Windows;
+//! - the stop of a daemon of another version (`stop_refused_daemon`, under the proofs of
+//!   [`stop_proof`]): a signal on Unix, and on Windows the event, then after a grace period a
+//!   forced end through a handle held since the peer check;
 //! - the caller's SSH agent: `AgentStream`, `AgentCancel`, `agent_connect`, `agent_handle` and
 //!   `agent_close`. A socket on Unix, and on Windows only the local named pipe the caller names.
 //!   Nothing else is looked for, and a cancel or close ends a call that waits;
@@ -39,6 +44,7 @@
 
 pub mod records;
 mod site_socket;
+pub mod stop_proof;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]

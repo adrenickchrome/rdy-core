@@ -505,7 +505,8 @@ pub fn own_sid() -> i32 {
 
 // 6. Stop signals
 
-/// SIGINT and SIGTERM, registered in the current tokio runtime.
+/// SIGINT and SIGTERM, registered in the current tokio runtime. They are the process's, so the
+/// project plays no part.
 pub struct StopSignals {
     int: tokio::signal::unix::Signal,
     term: tokio::signal::unix::Signal,
@@ -513,7 +514,7 @@ pub struct StopSignals {
 
 impl StopSignals {
     /// Registers the handlers in the current tokio runtime; call it inside one.
-    pub fn install() -> io::Result<StopSignals> {
+    pub fn install(_root: &Path) -> io::Result<StopSignals> {
         use tokio::signal::unix::{SignalKind, signal};
         Ok(StopSignals {
             int: signal(SignalKind::interrupt())?,
@@ -527,6 +528,39 @@ impl StopSignals {
             _ = self.int.recv() => "SIGINT",
             _ = self.term.recv() => "SIGTERM",
         }
+    }
+}
+
+/// Stops a daemon of another version that refused a connection to `endpoint`, whose peer check
+/// gave `process`: `SIGTERM`, when the record and the pid file tie that process to this project
+/// ([`proved`](super::stop_proof::proved)), and never more than that. A Unix pid file has no
+/// creation time, so a narrow `kill(2)` race remains, as with any pid-based signal: the daemon
+/// could exit after the pid file is read and its pid be reused before the signal. A process that
+/// has gone by then is no failure. Nothing here waits, so `_grace` plays no part.
+pub async fn stop_refused_daemon(
+    run: crate::layout::RunDir,
+    endpoint: std::path::PathBuf,
+    process: PeerProcess,
+    _grace: std::time::Duration,
+) -> super::stop_proof::StopOutcome {
+    use super::stop_proof::{Refusal, StopOutcome, proved};
+    let refusal = Refusal {
+        endpoint,
+        pid: process.pid(),
+        created: 0,
+    };
+    let pid_file = run.pid_record().map(|r| (r.pid(), 0));
+    let Some(pid) = proved(
+        &refusal,
+        run.recorded_socket().as_deref(),
+        pid_file,
+        Some(0),
+    ) else {
+        return StopOutcome::Untied;
+    };
+    match terminate(pid) {
+        Ok(_) => StopOutcome::Signalled { pid },
+        Err(error) => StopOutcome::SignalFailed { pid, error },
     }
 }
 
@@ -1450,6 +1484,6 @@ mod tests {
     fn ps6_stop_signals_install_in_a_runtime() {
         let rt = rt();
         let _g = rt.enter();
-        StopSignals::install().unwrap();
+        StopSignals::install(Path::new("/")).unwrap();
     }
 }

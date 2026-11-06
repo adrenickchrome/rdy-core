@@ -37,11 +37,11 @@ use windows_sys::Win32::System::Threading::{
 const AGENT_CONNECT_RETRY_MS: u32 = 20;
 
 /// A manual-reset event: once set, it stays set.
-struct Event(OwnedHandle);
+pub(super) struct Event(OwnedHandle);
 
 impl Event {
     #[allow(unsafe_code)]
-    fn new() -> io::Result<Event> {
+    pub(super) fn new() -> io::Result<Event> {
         // SAFETY: null attributes and a null name are allowed. The call reads nothing else.
         let event = unsafe { CreateEventW(null(), TRUE, FALSE, null()) };
         if event.is_null() {
@@ -51,12 +51,12 @@ impl Event {
         Ok(Event(unsafe { OwnedHandle::from_raw_handle(event) }))
     }
 
-    fn raw(&self) -> HANDLE {
+    pub(super) fn raw(&self) -> HANDLE {
         self.0.as_raw_handle()
     }
 
     #[allow(unsafe_code)]
-    fn set(&self) {
+    pub(super) fn set(&self) {
         // SAFETY: the handle is open for as long as `self`.
         unsafe { SetEvent(self.raw()) };
     }
@@ -333,6 +333,7 @@ fn count() -> &'static tokio::sync::watch::Sender<u64> {
 
 /// Ctrl-C and Ctrl-Break are this process's to handle while a guard lives. Any other event goes
 /// to the next handler. The system runs this on a thread of its own.
+#[allow(unsafe_code)]
 unsafe extern "system" fn on_console_event(event: u32) -> i32 {
     if event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT {
         return FALSE;

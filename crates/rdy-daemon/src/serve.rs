@@ -458,7 +458,7 @@ fn open_store(project: &Path, start: Option<&StartGuard>) -> Result<Rdy, RdyErro
 /// durable) and leaves the next open to catch up. The handlers are installed before the store
 /// opens, so no signal finds the store open without them.
 pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
-    let signals = StopSignals::install();
+    let signals = StopSignals::install(&opts.project);
     let run = start(opts)?;
     if let Some(s) = signals {
         s.stop_on_signal(run.handle());
@@ -488,7 +488,7 @@ pub fn serve_with_profile(
     key: &str,
     on_ready: impl FnOnce(ProfileSiteReady) -> Result<(), RdyError>,
 ) -> Result<ExitReason, ServeError> {
-    let signals = StopSignals::install();
+    let signals = StopSignals::install(&opts.project);
     let root = RunDir::of_project(&opts.project).root();
     let run = start_checked(opts, Some(key))?;
     if let Some(s) = signals {
@@ -542,15 +542,16 @@ struct StopSignals {
 
 impl StopSignals {
     /// `None` (logged) if the handlers cannot be installed: the daemon then runs without them,
-    /// and `rdy serve --stop` still stops it cleanly.
-    fn install() -> Option<StopSignals> {
+    /// and `rdy serve --stop` still stops it cleanly. `project` names what they stop.
+    fn install(project: &Path) -> Option<StopSignals> {
+        let root = RunDir::of_project(project).root();
         let installed = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .and_then(|rt| {
                 let signals = {
                     let _g = rt.enter();
-                    sys::StopSignals::install()?
+                    sys::StopSignals::install(&root)?
                 };
                 Ok(StopSignals { rt, signals })
             });

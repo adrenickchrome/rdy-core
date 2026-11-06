@@ -1,6 +1,7 @@
 //! The client side: connecting with a hello, `ctl` requests, and connect-or-start under
 //! `start.lock`.
 
+use crate::daemon::STOP_GRACE;
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION, valid_build};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
@@ -10,6 +11,7 @@ use crate::signing_transport::{CallerLink, CallerSigner, InterruptSource, read_r
 use crate::socket::MAX_SOCKET_PATH;
 use crate::spawn::{Launch, Launched, LaunchedChild, Spawned};
 use crate::sys;
+use crate::sys::stop_proof::StopOutcome;
 use rdy_store::start_lock::{ReservationState, StartGuard};
 use serde_json::{Value, json};
 use std::fs;
@@ -604,11 +606,14 @@ const UNTIED_FIX: &str = "close the daemon's other sessions, then run rdy serve 
 ///
 /// A daemon of another version with other clients refuses every hello (`E_DAEMON_VERSION`,
 /// D-ABRC8), so the stop cannot go over its socket, and daemons already released cannot change.
-/// Then the client signals the daemon's process (`terminate`, `SIGTERM`, which `rdy serve` takes
-/// as a stop), only when all of these hold: the socket record names this project's `.rdy`
-/// (D-R7N9J); the refusal came on that recorded socket; the peer of that connection runs as our
-/// account (the peer check of the exchange) and the system gives its pid `p > 1`; and
-/// `.rdy/run/daemon.pid` holds exactly `p`. Otherwise nothing is signalled.
+/// Then the client signals the daemon's process (`sys::stop_refused_daemon`: `SIGTERM`, which
+/// `rdy serve` takes as a stop, or on Windows the project's stop event), only when all of these
+/// hold: the socket record names this project's `.rdy` (D-R7N9J); the refusal came on that recorded
+/// socket; the peer of that connection runs as our account (the peer check of the exchange) and
+/// the system gives its pid `p > 1`; and `.rdy/run/daemon.pid` holds exactly `p`, with `p`'s
+/// creation time on Windows. Otherwise nothing is signalled. On Windows, a daemon that does not
+/// heed the event within `STOP_GRACE` is ended under the same proofs, read again
+/// (`sys::stop_proof`). So this call can take that long.
 pub async fn request_stop(
     run: &RunDir,
     hello: &Hello,
@@ -623,11 +628,7 @@ pub async fn request_stop(
     if let HelloReply::Refused { error } = &found.reply
         && error.code == E_DAEMON_VERSION
     {
-        // `signal_stop` checks the four ties just before it signals. A narrow `kill(2)` race
-        // remains, as with any pid-based signal: the daemon could exit after the pid file is
-        // read and its pid be reused before the signal. Holding `found.stream` open does not
-        // prevent this, because the daemon closes its end after the refusal.
-        return signal_stop(run, &found).map(Some);
+        return signal_stop(run, found).await.map(Some);
     }
     let client = match attempt(run, found.stream, found.reply) {
         Attempt::NoDaemon(_) => return Ok(None),
@@ -660,31 +661,49 @@ pub async fn request_stop(
     }))
 }
 
-/// The fallback of `request_stop`: signals the process of the daemon that refused `found`'s
-/// hello, when the record, the connection and the pid file all tie it to this project.
-fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
-    let untied = || ErrorReply::new(E_DAEMON_VERSION, UNTIED_MESSAGE, UNTIED_FIX);
-    // 1. the record names this project's `.rdy`; 2. the refusal came on its socket
-    let recorded = run.recorded_socket().ok_or_else(untied)?;
-    if found.socket != recorded {
-        return Err(untied());
-    }
-    // 3. the peer's pid, from the connection itself; never init or a process group
-    let pid = found.process.pid().filter(|&p| p > 1).ok_or_else(untied)?;
-    // 4. the pid file, opened without following a link, names the same process
-    if read_pid_file(run) != Some(pid) {
-        return Err(untied());
-    }
-    match crate::spawn::terminate(pid) {
-        Ok(_) => Ok(StopRequest {
-            pid: Some(pid),
-            socket: recorded,
-            signalled: true,
-        }),
-        Err(e) => Err(ErrorReply::new(
+/// The fallback of `request_stop`: stops the process of the daemon that refused `found`'s hello.
+/// The connection plays no further part: the daemon closes its end after the refusal.
+async fn signal_stop(run: &RunDir, found: Found) -> Result<StopRequest, ErrorReply> {
+    let Found {
+        socket, process, ..
+    } = found;
+    let outcome = sys::stop_refused_daemon(run.clone(), socket.clone(), process, STOP_GRACE).await;
+    stop_reply(socket, outcome)
+}
+
+/// What `request_stop` answers for `outcome`. A failure to prove identity is always the untied
+/// refusal, and only a failure of the call itself names the process.
+fn stop_reply(socket: PathBuf, outcome: StopOutcome) -> Result<StopRequest, ErrorReply> {
+    let failed = |message: String, pid: u32| {
+        ErrorReply::new(
             E_DAEMON_VERSION,
-            format!("could not send the stop signal to the daemon's process {pid}: {e}"),
+            message,
             format!("end process {pid}, then run rdy serve --stop again"),
+        )
+    };
+    let request = |pid: u32, signalled: bool| StopRequest {
+        pid: Some(pid),
+        socket: socket.clone(),
+        signalled,
+    };
+    match outcome {
+        StopOutcome::Untied => Err(ErrorReply::new(
+            E_DAEMON_VERSION,
+            UNTIED_MESSAGE,
+            UNTIED_FIX,
+        )),
+        StopOutcome::Exited { pid } => Ok(request(pid, false)),
+        StopOutcome::Signalled { pid }
+        | StopOutcome::Stopped { pid }
+        | StopOutcome::Draining { pid }
+        | StopOutcome::Terminated { pid } => Ok(request(pid, true)),
+        StopOutcome::SignalFailed { pid, error } => Err(failed(
+            format!("could not send the stop signal to the daemon's process {pid}: {error}"),
+            pid,
+        )),
+        StopOutcome::TerminateFailed { pid, error } => Err(failed(
+            format!("could not terminate the daemon's process {pid}: {error}"),
+            pid,
         )),
     }
 }
@@ -1183,6 +1202,62 @@ impl Handoff<'_> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Every answer a stop of another version can give, by its exact words.
+    #[test]
+    fn wx16_every_stop_reply_is_pinned() {
+        let socket = || PathBuf::from("the-endpoint");
+        let denied = || io::Error::other("the system's words");
+        let refused = |outcome| {
+            let e = stop_reply(socket(), outcome).unwrap_err();
+            assert_eq!(e.code, E_DAEMON_VERSION);
+            (e.message, e.fix)
+        };
+        assert_eq!(
+            refused(StopOutcome::Untied),
+            (
+                "the running daemon is another rdy version and has other clients, and rdy cannot tie its process to this project".to_string(),
+                "close the daemon's other sessions, then run rdy serve --stop again".to_string(),
+            )
+        );
+        let end_it = "end process 7, then run rdy serve --stop again".to_string();
+        assert_eq!(
+            refused(StopOutcome::SignalFailed {
+                pid: 7,
+                error: denied()
+            }),
+            (
+                "could not send the stop signal to the daemon's process 7: the system's words"
+                    .to_string(),
+                end_it.clone(),
+            )
+        );
+        assert_eq!(
+            refused(StopOutcome::TerminateFailed {
+                pid: 7,
+                error: denied()
+            }),
+            (
+                "could not terminate the daemon's process 7: the system's words".to_string(),
+                end_it,
+            )
+        );
+
+        let sent = |outcome| {
+            let r = stop_reply(socket(), outcome).unwrap();
+            assert_eq!(r.socket, socket());
+            (r.pid, r.signalled)
+        };
+        assert_eq!(sent(StopOutcome::Exited { pid: 7 }), (Some(7), false));
+        for outcome in [
+            StopOutcome::Signalled { pid: 7 },
+            StopOutcome::Stopped { pid: 7 },
+            StopOutcome::Draining { pid: 7 },
+            StopOutcome::Terminated { pid: 7 },
+        ] {
+            assert_eq!(sent(outcome), (Some(7), true));
+        }
+    }
 
     #[test]
     fn df3_a_refused_short_socket_dir_is_e_daemon_start_with_its_own_fix() {

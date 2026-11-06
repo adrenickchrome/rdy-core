@@ -19,21 +19,20 @@
 //! [`check_daemon`] in a client.
 
 use super::Stream;
+use super::process::{open_process, wait_exit};
 use rdy_store::pio::{self, Sid};
 use serde::{Serialize, Serializer};
 use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, FILETIME, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, FILETIME, HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
     GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, PeekNamedPipe,
 };
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 
 /// An account, as this platform names one: a SID.
@@ -247,19 +246,7 @@ impl ProcessQuery for PipeQuery<'_> {
     }
 
     fn open(&self, pid: u32) -> io::Result<OwnedHandle> {
-        // SAFETY: the call takes no pointer.
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                0,
-                pid,
-            )
-        };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: the call succeeded, so `handle` is a new handle that nothing else owns.
-        Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+        open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
     }
 
     fn created(&self, process: &OwnedHandle) -> io::Result<u64> {
@@ -271,13 +258,7 @@ impl ProcessQuery for PipeQuery<'_> {
     }
 
     fn has_exited(&self, process: &OwnedHandle) -> io::Result<bool> {
-        // SAFETY: `process` is open for the call, with `SYNCHRONIZE`. No wait: 0 ms.
-        match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
-            WAIT_OBJECT_0 => Ok(true),
-            WAIT_TIMEOUT => Ok(false),
-            WAIT_FAILED => Err(io::Error::last_os_error()),
-            other => Err(io::Error::from_raw_os_error(other as i32)),
-        }
+        wait_exit(process.as_raw_handle(), 0)
     }
 
     fn connected(&self) -> io::Result<bool> {

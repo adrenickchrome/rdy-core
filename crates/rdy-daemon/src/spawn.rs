@@ -195,32 +195,36 @@ pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
     })
 }
 
-/// Whether a process `pid` exists (`kill(pid, 0)`; a process of another user counts).
+/// Whether a process `pid` exists (a process of another account counts).
 pub fn process_alive(pid: u32) -> bool {
     sys::alive(pid)
 }
 
 /// Sends `SIGTERM` to `pid`, which `rdy serve` takes as `rdy serve --stop`. `Ok(true)` when it
 /// was sent, `Ok(false)` when the process is gone (`ESRCH`). A `pid` of 1 or less is refused:
-/// never init, and never a process group (`kill(0, ..)` and negative pids).
+/// never init, and never a process group (`kill(0, ..)` and negative pids). Unix only: no process
+/// is ended by its pid alone on Windows (`sys::stop_refused_daemon`).
+#[cfg(unix)]
 pub fn terminate(pid: u32) -> io::Result<bool> {
     sys::terminate(pid)
 }
 
-/// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process
-/// group (a child of `serve_command` already leads its own session), and is `Ok`. Called by
-/// `rdy serve --detach` after its argument parsing and before it opens the store.
+/// Leaves the caller's session (`setsid`) or console. A caller that has left already (a child of
+/// `serve_command`) is `Ok`. Called by `rdy serve --detach` after its argument parsing and before
+/// it opens the store.
 pub fn detach() -> io::Result<()> {
     sys::detach()
 }
 
 /// The caller's process group id (`getpgid(0)`), for the tests.
+#[cfg(unix)]
 #[doc(hidden)]
 pub fn own_pgid() -> i32 {
     sys::own_pgid()
 }
 
 /// The caller's session id (`getsid(0)`), for the tests.
+#[cfg(unix)]
 #[doc(hidden)]
 pub fn own_sid() -> i32 {
     sys::own_sid()
