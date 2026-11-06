@@ -1806,3 +1806,78 @@ fn ain6_public_words_match_the_approved_description() {
     }
     assert!(readme.contains("rdy computes. Agents write. People decide."));
 }
+
+/// agi6 (D-GEKKY, D-NB9NE): the guide ships in the binary, so no step downloads it. The quick path
+/// still comes first: install, a first project, and only then the optional verification.
+#[test]
+fn agi6_readme_uses_setup_and_no_guide_download() {
+    let readme = read("README.md");
+    let tried = readme
+        .split_once("## Try it: your first project\n")
+        .expect("the first-project section")
+        .1
+        .split_once("\n## ")
+        .expect("the next section")
+        .0;
+    let steps: Vec<&str> = tried
+        .lines()
+        .filter(|l| {
+            l.split_once(". **")
+                .is_some_and(|(n, _)| n.parse::<u32>().is_ok())
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "1. **Make a project.**",
+            "2. **Connect your agent.** For Claude Code:",
+            "3. **Prepare your agent.**",
+            "4. **Ask your agent for something real.** For example:",
+            "5. **Review and approve it yourself.**",
+            "6. **Read the result.**",
+        ]
+    );
+    let step = tried
+        .split_once("3. **Prepare your agent.**\n")
+        .unwrap()
+        .1
+        .split_once("4. **Ask your agent")
+        .unwrap()
+        .0;
+    assert!(step.contains("```sh\n   rdy setup\n   ```\n"), "{step}");
+    for said in [
+        "`rdy_instructions`",
+        "The guide ships inside rdy, so you download nothing.",
+        "[docs site](https://getrdy.dev)",
+        "The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.",
+    ] {
+        assert!(step.contains(said), "{said}: {step}");
+    }
+    // no line of the README downloads a guide, and no step points at one
+    for line in readme.lines() {
+        let names_a_guide_file = line.contains("AGENTS.md") || line.contains("CLAUDE.md");
+        assert!(
+            !(names_a_guide_file && (line.contains("ownload") || line.contains("release page"))),
+            "{line}"
+        );
+        assert!(!line.contains("agent-guide.json"), "{line}");
+    }
+    assert!(!readme.contains("The guide in step 3"));
+    assert!(!tried.contains("releases/tag"), "{tried}");
+    // quick use first; verification stays optional and last
+    let at = |what: &str| {
+        readme
+            .find(what)
+            .unwrap_or_else(|| panic!("the README lacks {what}"))
+    };
+    let order = [
+        at("## Install\n"),
+        at("curl -fsSL https://getrdy.dev/install.sh | sh"),
+        at("## Try it: your first project\n"),
+        at("rdy setup\n"),
+        at("## Quick start\n"),
+        at("<summary><b>Verify the download (optional)</b></summary>"),
+        at("You do not need this to use rdy."),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+}

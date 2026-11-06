@@ -480,5 +480,200 @@ class Agi1Bundle(unittest.TestCase):
         GUIDE.check(w.out, w.sidecar, w.receipt, w.export, w.projection)
 
 
+def reply_of(value):
+    """The reply a binary built from bundle `value` gives in an empty home: every field from the
+    bundle, computed here and not by the code under test."""
+    rows, menu = [], []
+    for ruleset in value['rulesets']:
+        handle = 'rdy:' + ruleset['name']
+        rows.extend({'id': row['id'], 'ruleset': handle, 'text': row['text'], 'layer': 'rdy',
+                     'locked': row['locked'], 'reason': []} for row in ruleset['rows'])
+        size = sum(len(row['text'].encode()) for row in ruleset['rows'])
+        menu.append({'id': handle, 'name': ruleset['title'], 'when': ruleset['when'], 'layer': 'rdy',
+                     'required': ruleset['required'], 'tokens': (size + 3) // 4, 'hints': []})
+    return {'instructions': rows, 'menu': menu, 'hint': 'Run rdy setup to create your own rules project.'}
+
+
+def binary_source(reply, before=''):
+    """A real executable that answers `instructions --full --json`, as the packaged rdy does."""
+    return ('#!/usr/bin/env python3\n'
+            'import sys\n'
+            + before +
+            'if sys.argv[1:] != ["instructions", "--full", "--json"]:\n'
+            '    sys.exit(64)\n'
+            'sys.stdout.write(%r)\n' % (reply if isinstance(reply, str) else json.dumps(reply),))
+
+
+def write_executable(path, source):
+    path.write_text(source)
+    path.chmod(0o755)
+    return path
+
+
+def valid_bundle(version=V, landing=L):
+    """Canonical bundle bytes with the closed layout and no export behind them."""
+    sets = []
+    for name in NAMES:
+        if name == 'bootstrap':
+            rows = [{'id': 'rdy:bootstrap:before', 'text': '# Start with rdy\n\n', 'locked': False},
+                    {'id': 'rdy:bootstrap:approval', 'text': APPROVAL, 'locked': True},
+                    {'id': 'rdy:bootstrap:after', 'text': '\n\nCafé is five bytes.\n', 'locked': False}]
+        else:
+            rows = [{'id': 'rdy:%s:body' % name, 'text': '# %s\n\nA body of %s.\n' % (name.title(), name), 'locked': False}]
+        sets.append({'name': name, 'title': 'Start with rdy' if name == 'bootstrap' else name.title(),
+                     'when': 'when ' + name, 'required': name == 'bootstrap', 'rows': rows})
+    value = {'schema': 1, 'edition': version, 'design_landing': landing, 'rulesets': sets}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+
+
+class Agi6Binary(unittest.TestCase):
+    DIFFERS = 'embedded guide: packaged binary differs from release/agent-guide.json; ' + FIX + '\n'
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix='rdyguide'))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.bundle = self.dir / 'agent-guide.json'
+        self.sidecar = self.dir / 'agent-guide.sha256'
+        self.put_bundle(valid_bundle())
+        self.binary = self.dir / 'rdy'
+
+    def put_bundle(self, raw):
+        self.bundle.write_bytes(raw)
+        self.sidecar.write_bytes(sha(raw).encode() + b'\n')
+        self.value = json.loads(raw)
+
+    def run_check(self, env=None):
+        return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), 'check-binary', '--binary', str(self.binary),
+                               '--bundle', str(self.bundle), '--sidecar', str(self.sidecar)],
+                              capture_output=True, text=True, env=env)
+
+    def differs(self, reply, before=''):
+        write_executable(self.binary, binary_source(reply, before))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr, out.stdout), (1, self.DIFFERS, ''))
+
+    def test_agi6_packaged_binary_matches_frozen_export(self):
+        good = reply_of(self.value)
+        write_executable(self.binary, binary_source(good))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (0, ''), out.stderr)
+        self.assertEqual(out.stdout, sha(self.bundle.read_bytes()) + '\n')
+        # Rows and menu arrive in JSON object order the binary chose: only the values count.
+        write_executable(self.binary, binary_source(dict(reversed(list(good.items())))))
+        self.assertEqual(self.run_check().returncode, 0)
+
+        def changed(apply):
+            reply = json.loads(json.dumps(good))
+            apply(reply)
+            return reply
+
+        rows = lambda r: r['instructions']  # noqa: E731
+        menu = lambda r: r['menu']  # noqa: E731
+        for label, apply in (
+                ('body text', lambda r: rows(r)[3].update(text=rows(r)[3]['text'] + 'x')),
+                ('body byte, same token count', lambda r: rows(r)[3].update(text=rows(r)[3]['text'].replace('A body', 'B body'))),
+                ('bootstrap slice', lambda r: rows(r)[2].update(text=rows(r)[2]['text'].replace('\n\n', '\n', 1))),
+                ('row id', lambda r: rows(r)[3].update(id='rdy:write:other')),
+                ('row ruleset', lambda r: rows(r)[3].update(ruleset='rdy:after-write')),
+                ('row layer', lambda r: rows(r)[3].update(layer='project')),
+                ('lock lost', lambda r: rows(r)[1].update(locked=False)),
+                ('lock added', lambda r: rows(r)[3].update(locked=True)),
+                ('reason added', lambda r: rows(r)[3].update(reason=[{'id': 'D-AAAAA', 'statement': 'x'}])),
+                ('row key added', lambda r: rows(r)[3].update(extra=1)),
+                ('row key lost', lambda r: rows(r)[3].pop('reason')),
+                ('missing row', lambda r: rows(r).pop(5)),
+                ('extra row', lambda r: rows(r).append(dict(rows(r)[5], id='rdy:more:body'))),
+                ('stored row in an empty home', lambda r: rows(r).append(dict(rows(r)[5], id='p-AAAAA', layer='person'))),
+                ('row order', lambda r: rows(r).insert(3, rows(r).pop(4))),
+                ('no rows', lambda r: r.update(instructions=[])),
+                ('rows are not a list', lambda r: r.update(instructions={})),
+                ('menu title', lambda r: menu(r)[1].update(name='Other')),
+                ('menu when', lambda r: menu(r)[1].update(when='never')),
+                ('menu required', lambda r: menu(r)[1].update(required=True)),
+                ('menu required lost', lambda r: menu(r)[0].update(required=False)),
+                ('menu tokens', lambda r: menu(r)[1].update(tokens=menu(r)[1]['tokens'] + 1)),
+                ('menu hints', lambda r: menu(r)[1].update(hints=['x'])),
+                ('menu layer', lambda r: menu(r)[1].update(layer='project')),
+                ('menu id', lambda r: menu(r)[1].update(id='rdy:other')),
+                ('missing menu entry', lambda r: menu(r).pop(1)),
+                ('extra menu entry', lambda r: menu(r).append(dict(menu(r)[1], id='rdy:more'))),
+                ('menu order', lambda r: menu(r).insert(1, menu(r).pop(2))),
+                ('no menu', lambda r: r.pop('menu'))):
+            with self.subTest(label):
+                self.differs(changed(apply))
+
+        # A binary that fails, says nothing usable or writes without end is not the guide either.
+        for label, reply, before in (
+                ('exits nonzero', good, 'sys.exit(3)\n'),
+                ('not JSON', 'not json', ''),
+                ('duplicate key', '{"instructions":[],"instructions":[],"menu":[]}', ''),
+                ('trailing text', json.dumps(good) + 'x', ''),
+                ('nested too deep', '[' * 100, ''),
+                ('not an object', '[]', ''),
+                ('no such form', good, 'sys.argv[1:] = []\n'),
+                ('endless output', good, 'sys.stdout.write("x" * 17000000)\nsys.stdout.flush()\n')):
+            with self.subTest(label):
+                self.differs(reply, before)
+
+    def test_agi6_check_binary_refuses_a_bad_bundle_before_it_runs_anything(self):
+        marker = self.dir / 'ran'
+        write_executable(self.binary, binary_source(reply_of(self.value),
+                                                    'open(%r, "w").close()\n' % str(marker)))
+        raw = self.bundle.read_bytes()
+        self.bundle.write_bytes(raw.replace(b'A body', b'B body', 1))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, 'embedded guide: release/agent-guide.json does not match '
+                                                           'release/agent-guide.sha256; ' + FIX + '\n'))
+        self.put_bundle(raw)
+        self.sidecar.write_bytes(b'0' * 64 + b'\n')
+        self.assertEqual(self.run_check().returncode, 1)
+        self.put_bundle(raw.replace(b'"locked":true', b'"locked":false'))
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, 'embedded guide: invalid rulesets[0].rows[1].locked: '
+                                                           'invalid approval lock; ' + FIX + '\n'))
+        self.sidecar.unlink()
+        self.assertIn('missing release/agent-guide.sha256', self.run_check().stderr)
+        self.assertFalse(marker.exists(), 'a bad bundle runs no binary')
+        self.put_bundle(raw)
+        self.binary.unlink()
+        out = self.run_check()
+        self.assertEqual((out.returncode, out.stderr), (1, 'embedded guide: missing packaged binary; ' + FIX + '\n'))
+
+    def test_agi6_check_binary_runs_in_a_home_of_its_own(self):
+        seen = self.dir / 'seen.json'
+        probe = ('import json, os\n'
+                 'home = os.environ.get("HOME", "")\n'
+                 'open(os.path.join(home, "left-behind"), "w").close()\n'
+                 'json.dump({"env": dict(os.environ), "cwd": os.getcwd(), "cwd_files": os.listdir("."),\n'
+                 '           "home_files": os.listdir(home)}, open(%r, "w"))\n' % str(seen))
+        write_executable(self.binary, binary_source(reply_of(self.value), probe))
+        parent = dict(os.environ, HOME=str(self.dir), USERPROFILE=str(self.dir), XDG_CONFIG_HOME=str(self.dir),
+                      APPDATA=str(self.dir), HOMEDRIVE='Z:', HOMEPATH='\\real', RDY_ACTOR='human:real',
+                      RDY_RUN='real', RDY_NO_DAEMON='1')
+        out = self.run_check(env=parent)
+        self.assertEqual((out.returncode, out.stderr), (0, ''), out.stderr)
+        got = json.loads(seen.read_text())
+        env = got['env']
+        home = Path(env['HOME'])
+        self.assertEqual(env['USERPROFILE'], env['HOME'])
+        for name in ('XDG_CONFIG_HOME', 'APPDATA'):
+            self.assertTrue(Path(env[name]).is_relative_to(home), name)
+        self.assertNotIn(str(self.dir), env['HOME'])
+        self.assertIn('left-behind', got['home_files'])
+        self.assertNotIn(self.bundle.name, got['home_files'], 'a home of its own')
+        self.assertEqual(got['cwd_files'], [], 'no project in the working directory')
+        self.assertEqual(Path(got['cwd']).parent.resolve(), home.parent.resolve(), 'a folder beside the home')
+        self.assertEqual([k for k in env if k.startswith('RDY_')], [])
+        self.assertNotIn('HOMEDRIVE', env)
+        self.assertNotIn('HOMEPATH', env)
+        self.assertFalse(home.parent.exists(), 'the home is removed afterward')
+
+    def test_agi6_check_binary_stops_a_hung_binary(self):
+        write_executable(self.binary, binary_source(reply_of(self.value), 'import time\ntime.sleep(600)\n'))
+        with self.assertRaises(GUIDE.GuideError) as caught:
+            GUIDE.check_binary(self.binary, self.bundle, self.sidecar, deadline=0.1)
+        self.assertEqual(str(caught.exception), self.DIFFERS[:-1])
+
+
 if __name__ == '__main__':
     unittest.main()

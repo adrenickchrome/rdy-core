@@ -26,6 +26,8 @@ def load(name):
 
 
 CANDIDATE = load('candidate')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_release_guide as guide_tests  # noqa: E402
 REHEARSE = load('rehearse')
 ControllerError = CANDIDATE.ControllerError
 WORKFLOW = (ROOT / '.github/workflows/release-candidate.yml').read_text()
@@ -438,6 +440,121 @@ class rsig4_Candidate(Fixture):
             with self.assertRaises(ControllerError) as caught:
                 CANDIDATE.inspect_archive(path, V, LINUX, extra=[])
             self.assertEqual(str(caught.exception), 'the x86_64-unknown-linux-gnu archive is not one packaged release')
+
+
+class agi6_Candidate(Fixture):
+    """`build` end to end, over a real Git commit and real executables: only cargo and the tools it
+    would have built are stand-ins."""
+
+    def source_commit(self, bundle, sidecar=None):
+        repo = self.tmp / 'repo'
+        repo.mkdir()
+        git(repo, 'init', '-q')
+        (repo / 'release').mkdir()
+        (repo / 'release/notes.md').write_text('# rdy\n')
+        if bundle is not None:
+            (repo / 'release/agent-guide.json').write_bytes(bundle)
+            digest = sha(bundle).encode() + b'\n'
+            (repo / 'release/agent-guide.sha256').write_bytes(digest if sidecar is None else sidecar)
+        git(repo, 'add', 'release')
+        return repo, commit_version(repo, V, 'source')
+
+    def toolchain(self, built, packaged):
+        """A cargo that `builds` rdy (reply `built`) and tools that package rdy (reply `packaged`)."""
+        tools = self.tmp / 'tools'
+        tools.mkdir()
+        version = ('if sys.argv[1:] == ["--version"]:\n'
+                   '    print("rdy ' + V + ' (preview)")\n'
+                   '    sys.exit(0)\n')
+        guide_tests.write_executable(tools / 'built-rdy', guide_tests.binary_source(built, version))
+        guide_tests.write_executable(tools / 'packaged-rdy', guide_tests.binary_source(packaged, version))
+        log = self.tmp / 'steps.log'
+        guide_tests.write_executable(tools / 'qa-release-sources', (
+            '#!/usr/bin/env python3\n'
+            'import os, sys\n'
+            'out = sys.argv[sys.argv.index("--out") + 1]\n'
+            'os.mkdir(out)\n'
+            'open(os.path.join(out, "imbl-7.0.2.crate"), "wb").write(b"crate")\n'))
+        guide_tests.write_executable(tools / 'qa-release-package', (
+            '#!/usr/bin/env python3\n'
+            'import os, sys, tarfile\n'
+            'value = lambda name: sys.argv[sys.argv.index(name) + 1]\n'
+            'out, version, target = value("--out"), value("--version"), value("--target")\n'
+            'os.mkdir(out)\n'
+            'stem = "rdy-" + version + "-preview-" + target\n'
+            'path = os.path.join(out, stem + ".tar.gz")\n'
+            'with tarfile.open(path, "w:gz") as archive:\n'
+            '    archive.add(%r, arcname=stem + "/rdy")\n'
+            'open(%r, "a").write("package\\n")\n'
+            'print(path)\n' % (str(tools / 'packaged-rdy'), str(log))))
+        bin_dir = self.tmp / 'bin'
+        bin_dir.mkdir()
+        guide_tests.write_executable(bin_dir / 'cargo', (
+            '#!/usr/bin/env python3\n'
+            'import os, shutil, sys\n'
+            'if sys.argv[1] == "build":\n'
+            '    release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")\n'
+            '    os.makedirs(release)\n'
+            '    shutil.copy(%r, os.path.join(release, "rdy"))\n'
+            '    for tool in ("qa-release-sources", "qa-release-package"):\n'
+            '        shutil.copy(os.path.join(%r, tool), release)\n' % (str(tools / 'built-rdy'), str(tools))))
+        gate = self.tmp / 'fast-gate.json'
+        gate.write_bytes(plain_json(FAST_GATE))
+        return bin_dir, gate, log
+
+    def build(self, repo, commit, bin_dir, gate):
+        home = self.tmp / 'build-home'
+        home.mkdir(exist_ok=True)
+        env = dict(os.environ, HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                   CARGO_HOME=str(home / 'cargo'), RUSTUP_HOME=str(home / 'rustup'))
+        return CANDIDATE.build(repo, commit, V, LINUX, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT, env=env)
+
+    def refused(self, repo, commit, bin_dir, gate, text):
+        with self.assertRaises(ControllerError) as caught:
+            self.build(repo, commit, bin_dir, gate)
+        self.assertEqual(str(caught.exception), text)
+        self.assertFalse((self.tmp / 'out').exists(), 'a failed comparison leaves no archive and no receipt')
+
+    def test_agi6_candidate_checks_guide_before_receipt(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, log = self.toolchain(reply, reply)
+        receipt = self.build(repo, commit, bin_dir, gate)
+        # The guide of S passed, then the receipt names S and the checked archive by its digest.
+        self.assertEqual(log.read_text(), 'package\n')
+        name = CANDIDATE.archive_name(V, LINUX)
+        self.assertEqual(receipt['commit'], commit)
+        self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))
+        self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + LINUX + '.json']))
+
+    def test_agi6_failed_comparison_issues_no_receipt(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        differs = guide_tests.Agi6Binary.DIFFERS[:-1]
+        locked = json.loads(json.dumps(reply))
+        locked['instructions'][1]['locked'] = False
+        # What counts is the packaged binary, not the build's own copy or the source files.
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, log = self.toolchain(reply, locked)
+        self.refused(repo, commit, bin_dir, gate, differs)
+        self.assertEqual(log.read_text(), 'package\n', 'the check follows packaging')
+
+    def test_agi6_the_guide_at_the_commit_must_stand_on_its_own(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw, b'0' * 64 + b'\n')
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.refused(repo, commit, bin_dir, gate, 'embedded guide: release/agent-guide.json does not match '
+                     'release/agent-guide.sha256; ' + guide_tests.FIX)
+
+    def test_agi6_a_commit_with_no_guide_issues_no_receipt(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(None)
+        bin_dir, gate, _ = self.toolchain(reply, reply)
+        self.refused(repo, commit, bin_dir, gate,
+                     'embedded guide: missing release/agent-guide.json; ' + guide_tests.FIX)
 
 
 class FakeSigner:
