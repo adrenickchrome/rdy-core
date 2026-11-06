@@ -1888,3 +1888,12 @@ mod tests {
         assert!(e.to_string().ends_with(" exceeds 32767 UTF-16 code units"));
     }
 }
+
+/// Makes the console program `cmd` start without a console window (`CREATE_NO_WINDOW`). A
+/// detached daemon has no console, so Windows gives each console child a new window unless this
+/// flag is set. Other creation flags of `cmd` are kept.
+pub fn no_console_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
