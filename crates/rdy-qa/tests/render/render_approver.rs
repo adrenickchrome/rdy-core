@@ -766,11 +766,7 @@ fn ui7_ui_rendering_leaves_site_outputs_identical() {
 fn ui7_forms_and_details_need_no_script() {
     let (_d, r) = tiny();
     let st = r.read();
-    let init = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/init.js"
-    ))
-    .unwrap();
+    let init = std::fs::read_to_string(rdy_qa::site::theme_js("init.js")).unwrap();
     let mut approve = item(ItemKind::Approve, "p-ABCDE@1", "Approve me");
     approve.options.push(option("more", "More time", &[], None));
     seal(&mut approve);

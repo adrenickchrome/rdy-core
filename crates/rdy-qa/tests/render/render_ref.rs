@@ -56,11 +56,7 @@ fn ref1_every_block_carries_a_ref_in_the_grammar_and_headings_get_the_button() {
     assert_eq!(h.matches("contextmenu").count(), 0);
     let js = std::fs::read_to_string(out.path().join("assets/app.js")).unwrap();
     // the theme toggle's arrow keys do call it (a keyboard event); the copy script never does
-    let copy = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/copy.js"
-    ))
-    .unwrap();
+    let copy = std::fs::read_to_string(rdy_qa::site::theme_js("copy.js")).unwrap();
     assert!(
         !js.contains("contextmenu") && !copy.contains("preventDefault"),
         "never override the context menu"

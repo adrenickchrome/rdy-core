@@ -478,10 +478,7 @@ console.log(JSON.stringify(h.out));
 /// Runs `scenario` (the body of a function over `h`, see [`HARNESS`]) against the sidebars of
 /// `pages` with `sidebar.js`, and returns what it filled into `h.out`.
 fn run(pages: Value, scenario: &str) -> Value {
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/sidebar.js"
-    );
+    let js = &rdy_qa::site::theme_js("sidebar.js");
     let spec = json!({"pages": pages, "scenario": scenario}).to_string();
     let mut child = std::process::Command::new("node")
         .args(["-e", HARNESS, "--", js])

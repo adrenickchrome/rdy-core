@@ -241,10 +241,7 @@ fn sr7_show_diff_reveals_the_inline_diffs_and_remembers() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/review.js"
-    );
+    let js = &rdy_qa::site::theme_js("review.js");
     let o = std::process::Command::new("node")
         .args(["-e", DIFF_HARNESS, "--", js])
         .output()
@@ -325,10 +322,7 @@ fn sr7_every_theme_group_works() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/theme.js"
-    );
+    let js = &rdy_qa::site::theme_js("theme.js");
     let o = std::process::Command::new("node")
         .args(["-e", THEME_HARNESS, "--", js])
         .output()
@@ -837,10 +831,7 @@ fn sr14_show_diff_depends_on_show_changes() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/review.js"
-    );
+    let js = &rdy_qa::site::theme_js("review.js");
     let o = std::process::Command::new("node")
         .args(["-e", DEPENDS_HARNESS, "--", js])
         .output()

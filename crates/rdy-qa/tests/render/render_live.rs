@@ -465,10 +465,7 @@ fn rdx14_the_live_script_reopens_a_refused_stream() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/live.js"
-    );
+    let js = &rdy_qa::site::theme_js("live.js");
     let o = std::process::Command::new("node")
         .args(["-e", &format!("{LIVE_DOM}{LIVE_CASES}"), "--", js])
         .output()

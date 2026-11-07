@@ -285,7 +285,7 @@ fn site15_the_site_name_is_the_projects_name_not_rdy() {
 fn site16_no_underscore_directory_and_no_id_or_hash_page_in_any_url() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
-        let rel = p.strip_prefix(out.path()).unwrap().to_string_lossy();
+        let rel = slash_rel(out.path(), &p);
         assert!(!rel.split('/').any(|s| s.starts_with('_')), "{rel}");
         for h in attrs(&read(&p), "href") {
             assert!(!h.split('/').any(|s| s.starts_with('_')), "{rel}: {h}");
@@ -505,4 +505,21 @@ fn people1_no_page_of_the_golden_site_has_an_agents_zone_or_panel() {
             p.display()
         );
     }
+}
+
+#[test]
+fn wx30b_browser_fixtures_keep_native_roots_out_of_urls() {
+    // A native root can carry `\\` and a drive letter. The site-relative name of a page is
+    // slash-separated and holds neither, and a theme script path has no `..` hop.
+    let root = std::path::Path::new(if cfg!(windows) { "C:\\site" } else { "/site" });
+    let page = root.join("a").join("_b").join("p.html");
+    assert_eq!(slash_rel(root, &page), "a/_b/p.html");
+    let (_d, _r, _ids, out) = canon();
+    for p in golden::pages(out.path()) {
+        let rel = slash_rel(out.path(), &p);
+        assert!(!rel.contains('\\') && !rel.contains(':'), "{rel}");
+    }
+    let js = theme_js("menu.js");
+    assert!(js.ends_with("menu.js") && !js.contains(".."), "{js}");
+    assert!(std::path::Path::new(&js).is_file(), "{js}");
 }

@@ -247,10 +247,7 @@ fn rv1_show_changes_hides_and_shows_the_markers_and_remembers_for_the_session() 
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/review.js"
-    );
+    let js = &rdy_qa::site::theme_js("review.js");
     let o = std::process::Command::new("node")
         .args(["-e", TOGGLE_HARNESS, "--", js])
         .output()

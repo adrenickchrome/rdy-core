@@ -870,10 +870,7 @@ fn spv5_script_fetches_the_pills_context_and_keeps_focus() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/menu.js"
-    );
+    let js = &rdy_qa::site::theme_js("menu.js");
     let dom = crate::render_menu::MENU_DOM;
     let o = std::process::Command::new("node")
         .args(["-e", &format!("{dom}{PROFILE_CASES}"), "--", js])

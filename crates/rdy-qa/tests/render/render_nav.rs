@@ -301,10 +301,7 @@ fn nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at() {
             {"tag": "span", "id": "", "cls": "id-anchor"}, {"tag": name, "id": hid, "cls": cls}]}));
     }
     let spec = serde_json::json!({"links": links, "blocks": blocks}).to_string();
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/toc.js"
-    );
+    let js = &rdy_qa::site::theme_js("toc.js");
     let mut child = std::process::Command::new("node")
         .args(["-e", SPY_HARNESS, "--", js])
         .stdin(std::process::Stdio::piped())
