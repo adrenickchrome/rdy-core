@@ -136,6 +136,11 @@ fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
         };
         let mut c = match connect(&RunDir::of_project(s.dir.path()), &hello).await {
             Attempt::Ready(c) => c,
+            Attempt::Exiting => panic!(
+                "the daemon is of another build than this test: the rdy binary was built from \
+                 other sources (rebuild it with cargo build -p rdy-cli, in the profile this \
+                 test runs in)"
+            ),
             other => panic!("no daemon: {other:?}"),
         };
         c.ctl("session", json!({"actor": null, "run": null}))
