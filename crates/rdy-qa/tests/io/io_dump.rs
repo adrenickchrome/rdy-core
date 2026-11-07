@@ -369,9 +369,14 @@ fn dl5_a_dump_through_a_symlink_into_rdy_is_refused() {
     let link = tmp.path().join("packs");
     rdy_qa::platform::symlink(&dir.path().join(".rdy/packs"), &link).unwrap();
     let out = link.join("backup.yaml");
+    // an account that may not follow the link gets a refusal of another wording (the directory
+    // does not resolve); the point stays: no dump, nothing written into .rdy
+    let refused = rdy_qa::platform::follow_refused(&out);
     let e = r.read().dump(&out).unwrap_err();
-    assert_eq!(e.code, E_BAD_INPUT);
-    assert_eq!(e.fix, "dump to a path outside .rdy");
+    if !refused {
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(e.fix, "dump to a path outside .rdy");
+    }
     assert!(!dir.path().join(".rdy/packs/backup.yaml").exists());
 }
 

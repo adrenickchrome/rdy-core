@@ -682,15 +682,19 @@ fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
         link.clone(),
     ] {
         let e = load(&file, &to).unwrap_err();
-        assert_eq!(e.code, "E_BAD_INPUT", "{to:?}: {e}");
-        assert_eq!(
-            e.message,
-            format!("{} is inside a project's .rdy directory", to.display())
-        );
-        assert_eq!(
-            e.fix,
-            "load into a new directory outside any .rdy, for example a sibling of the project"
-        );
+        // an account that may not follow the link is refused in another wording; nothing is
+        // written either way
+        if !rdy_qa::platform::follow_refused(&to) {
+            assert_eq!(e.code, "E_BAD_INPUT", "{to:?}: {e}");
+            assert_eq!(
+                e.message,
+                format!("{} is inside a project's .rdy directory", to.display())
+            );
+            assert_eq!(
+                e.fix,
+                "load into a new directory outside any .rdy, for example a sibling of the project"
+            );
+        }
         assert_eq!(tree(src.path()), before, "{to:?}");
     }
 }

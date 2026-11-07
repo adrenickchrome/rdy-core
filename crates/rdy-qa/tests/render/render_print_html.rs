@@ -460,12 +460,16 @@ fn names_in(dir: &std::path::Path) -> Vec<String> {
 fn assert_inside_rdy(p: &Print, out: &std::path::Path, watched: &[&std::path::Path]) {
     let before: Vec<Vec<String>> = watched.iter().map(|d| names_in(d)).collect();
     let e = print::single::write_single_html(p, out).expect_err("inside .rdy");
-    assert_eq!(e.code, E_BAD_INPUT, "{}", e.message);
-    assert_eq!(
-        e.message,
-        format!("{} is inside the project .rdy directory", out.display())
-    );
-    assert_eq!(e.fix, "export to a path outside .rdy");
+    // an account that may not follow a link on the way is refused in another wording; nothing is
+    // written either way
+    if !rdy_qa::platform::follow_refused(out) {
+        assert_eq!(e.code, E_BAD_INPUT, "{}", e.message);
+        assert_eq!(
+            e.message,
+            format!("{} is inside the project .rdy directory", out.display())
+        );
+        assert_eq!(e.fix, "export to a path outside .rdy");
+    }
     assert!(
         std::fs::symlink_metadata(out).is_err(),
         "no destination file"
@@ -543,6 +547,38 @@ fn ec7_a_symlinked_project_rdy_directory_is_refused_by_either_path() {
     std::fs::create_dir_all(&packs).unwrap();
     let alias = storage.path().join("alias");
     rdy_qa::platform::symlink(&state, &alias).unwrap();
+    if rdy_qa::platform::follow_refused(&rdy) {
+        // an account that may not follow the project's link cannot resolve the store at all, so
+        // every out, by any path, is refused with the system's own error (448) and nothing is
+        // written
+        let before = names_in(&state);
+        for out in [
+            rdy.join("export.html"),
+            state.join("export.html"),
+            packs.join("export.yaml"),
+            alias.join("export.html"),
+            storage.path().join("export.html"),
+        ] {
+            let e = print::single::write_single_html(&p, &out).expect_err("no resolved store");
+            // the link on the way does not resolve ("does not exist"), or the store behind the
+            // project's link is refused by the system itself (448): no other error passes
+            let unresolved = e.code == E_BAD_INPUT && e.message.ends_with(" does not exist");
+            let denied = e.code == "E_IO" && e.message.contains("(os error 448)");
+            assert!(
+                denied || (unresolved && rdy_qa::platform::follow_refused(&out)),
+                "{}: {} {}",
+                out.display(),
+                e.code,
+                e.message
+            );
+            assert!(
+                std::fs::symlink_metadata(&out).is_err(),
+                "no destination file"
+            );
+            assert_eq!(names_in(&state), before, "no partial file is left");
+        }
+        return;
+    }
     // through the project's symlink, through the physical path, through another alias of it
     assert_inside_rdy(&p, &rdy.join("export.html"), &[&state]);
     assert_inside_rdy(

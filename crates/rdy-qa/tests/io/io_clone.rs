@@ -655,6 +655,18 @@ fn ec5_a_clone_into_a_symlinked_source_dot_rdy_is_refused_and_both_are_untouched
     // a second link to the source's .rdy, not named .rdy
     let link = scratch.path().join("link");
     rdy_qa::platform::symlink(&src.path().join(".rdy"), &link).unwrap();
+    if rdy_qa::platform::follow_refused(&src.path().join(".rdy")) {
+        // an account that may not follow the link cannot open the project through it: that is
+        // the refusal, and the store behind the link stays as it was
+        let before = tree(&physical);
+        assert!(
+            Rdy::open(src.path()).is_err(),
+            "no open through a refused link"
+        );
+        assert_eq!(tree(&physical), before, "the store is untouched");
+        eprintln!("ec5: the clone path through the link was not exercised (error 448)");
+        return;
+    }
     let a = Rdy::open(src.path()).unwrap();
     let file = scratch.path().join("p.rdydump");
     a.read().dump(&file).unwrap();

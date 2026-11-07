@@ -144,6 +144,13 @@ pub fn dir_alias(target: &Path, link: &Path) -> io::Result<()> {
     symlink(target, link)
 }
 
+/// Whether the system refuses this account to follow a link on the way to `path`. It never does
+/// here: a link a user made is followed.
+pub fn follow_refused(path: &Path) -> bool {
+    let _ = path;
+    false
+}
+
 /// Removes the link `link` that [`dir_alias`] or [`symlink`] made to a directory, as an entry; its
 /// target is never entered.
 pub fn remove_dir_link(link: &Path) -> io::Result<()> {
@@ -1322,6 +1329,17 @@ mod tests {
         let mode = f.metadata().expect("metadata").permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         open_private_log(&path).expect("open the log again (append)");
+    }
+
+    #[test]
+    fn wx33b_a_link_a_user_made_is_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+        let link = dir.path().join("link");
+        symlink(&real, &link).expect("symlink");
+        assert!(!follow_refused(&link));
+        assert!(!follow_refused(&link.join("new")));
     }
 
     #[test]

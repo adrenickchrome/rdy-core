@@ -266,6 +266,25 @@ pub fn dir_alias(target: &Path, link: &Path) -> io::Result<()> {
     junction(target, link)
 }
 
+/// Whether the system refuses this account to follow a link on the way to `path`: the first
+/// existing entry from `path` upward fails with error 448 (`ERROR_UNTRUSTED_MOUNT_POINT`). A
+/// logon whose process policy refuses links that a standard user made does this for a
+/// symbolic link and a junction alike. Any other failure is a fault of the test, so it panics.
+pub fn follow_refused(path: &Path) -> bool {
+    for entry in path.ancestors() {
+        match std::fs::metadata(entry) {
+            Ok(_) => return false,
+            Err(e) if e.raw_os_error() == Some(448) => return true,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => panic!(
+                "{}: neither followed nor refused with 448: {e}",
+                entry.display()
+            ),
+        }
+    }
+    false
+}
+
 /// Makes `link` a junction to the existing directory `target`. A new empty directory takes the
 /// reparse data, and it is removed again if that fails. No privilege is needed.
 #[allow(unsafe_code)]

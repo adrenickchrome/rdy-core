@@ -166,6 +166,22 @@ fn wx26a_a_directory_alias_names_the_same_directory_without_a_privilege_gate() {
     std::fs::write(real.join("f"), b"same").expect("write");
     let alias = dir.path().join("alias");
     platform::dir_alias(&real, &alias).expect("an alias needs no privilege");
-    assert_eq!(std::fs::read(alias.join("f")).expect("read"), b"same");
     assert_ne!(alias, real);
+    if platform::follow_refused(&alias) {
+        // a logon whose process policy refuses links a standard user made: following the alias
+        // fails with 448 and nothing else. The alias still names the directory, read as an entry.
+        let named = std::fs::read_link(&alias).expect("the alias names its target");
+        let plain = |p: &Path| {
+            let text = p.to_string_lossy().to_lowercase();
+            text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+        };
+        assert_eq!(plain(&named), plain(&std::fs::canonicalize(&real).unwrap()));
+        assert_eq!(
+            std::fs::read(alias.join("f")).unwrap_err().raw_os_error(),
+            Some(448)
+        );
+        eprintln!("wx26a: the link path was not exercised (error 448)");
+        return;
+    }
+    assert_eq!(std::fs::read(alias.join("f")).expect("read"), b"same");
 }

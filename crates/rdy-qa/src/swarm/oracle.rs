@@ -809,6 +809,15 @@ mod tests {
                 "{name} names the same target"
             );
         }
+        if crate::platform::follow_refused(&to.join("alias")) {
+            // a logon whose process policy refuses links a standard user made: following one
+            // fails with 448 and nothing else, so the content check cannot run
+            let refused = |p: PathBuf| std::fs::read(p).unwrap_err().raw_os_error();
+            assert_eq!(refused(to.join("file-link")), Some(448));
+            assert_eq!(refused(to.join("alias/inner/f.txt")), Some(448));
+            eprintln!("wx31b: the link path was not exercised (error 448)");
+            return;
+        }
         assert_eq!(std::fs::read(to.join("file-link")).unwrap(), b"two");
         assert_eq!(std::fs::read(to.join("alias/inner/f.txt")).unwrap(), b"one");
         // the alias is not a second tree: a write through the copy's alias lands in the source

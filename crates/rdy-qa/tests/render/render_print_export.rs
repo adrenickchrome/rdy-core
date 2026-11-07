@@ -39,13 +39,17 @@ fn assert_refused_inside(r: &Rdy, out: &Path, store: &Path) {
         let before = paths(store);
         let e = print::export(&r.read(), &Scope::Canon, out, format, None)
             .expect_err("an out inside the project .rdy directory");
-        assert_eq!(e.code, E_BAD_INPUT, "{format:?}: {}", e.message);
-        assert_eq!(
-            e.message,
-            format!("{} is inside the project .rdy directory", out.display()),
-            "{format:?}"
-        );
-        assert_eq!(e.fix, "export to a path outside .rdy", "{format:?}");
+        // an account that may not follow a link on the way is refused in another wording;
+        // nothing is written either way
+        if !rdy_qa::platform::follow_refused(out) {
+            assert_eq!(e.code, E_BAD_INPUT, "{format:?}: {}", e.message);
+            assert_eq!(
+                e.message,
+                format!("{} is inside the project .rdy directory", out.display()),
+                "{format:?}"
+            );
+            assert_eq!(e.fix, "export to a path outside .rdy", "{format:?}");
+        }
         assert!(
             std::fs::symlink_metadata(out).is_err(),
             "{format:?}: no out"
@@ -66,6 +70,17 @@ fn ec11_every_format_refuses_a_symlinked_project_store_by_either_path() {
     let rdy = d.path().join(".rdy");
     std::fs::rename(&rdy, &physical).unwrap();
     rdy_qa::platform::symlink(&physical, &rdy).unwrap();
+    if rdy_qa::platform::follow_refused(&rdy) {
+        // an account that may not follow the link cannot open the project through it: that is
+        // the refusal, and the store behind the link stays as it was
+        let before = paths(&physical);
+        assert!(
+            Rdy::open(d.path()).is_err(),
+            "no open through a refused link"
+        );
+        assert_eq!(paths(&physical), before, "the store is untouched");
+        return;
+    }
     let r = Rdy::open(d.path()).expect("the store opens through the symlink");
     let segments = physical.join("store").join("segments");
     assert!(segments.is_dir(), "guard: the store's segments directory");
