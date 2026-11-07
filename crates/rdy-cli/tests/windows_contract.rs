@@ -191,10 +191,16 @@ fn wx22_stdio_tools_and_cli_share_windows_results() {
     let doc = made["created"]["$d"].as_str().unwrap().to_string();
 
     // the same query through both surfaces: one daemon, one answer
-    let by_tool = m.tool(
+    let mut by_tool = m.tool(
         "rdy_query",
         json!({"filter": "type = claim", "scope": "run-22"}),
     );
+    // this raw client sends no kungfu value, so the tool's reply alone warns (D-Y18E1)
+    if let Some(w) = by_tool.as_object_mut().unwrap().remove("warnings") {
+        for one in w.as_array().unwrap() {
+            assert_eq!(one["code"], "W_KUNGFU", "{one}");
+        }
+    }
     let by_cli = s.cli(&["--json", "q", "type = claim", "--scope", "run-22"]);
     assert_eq!(by_tool, by_cli);
     let shown = by_cli.to_string();
