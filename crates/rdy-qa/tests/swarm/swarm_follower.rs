@@ -243,10 +243,18 @@ fn wx31b_compact_and_follower_witnesses_run_on_windows() {
         .pre_removal
         .as_ref()
         .expect("the real compact kept the log it took before its removal");
-    assert!(
-        !segments(before).is_empty(),
-        "the pre-removal copy holds log segments"
-    );
+    // the copy is the store's segments directory itself
+    let logs = std::fs::read_dir(before)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|x| x == "log")
+        })
+        .count();
+    assert!(logs > 0, "the pre-removal copy holds log segments");
     let (_keep, frozen) = copy_of(&o.frozen);
     let d = tempfile::tempdir().unwrap();
     let full = d.path().join("frozen.rdydump");
