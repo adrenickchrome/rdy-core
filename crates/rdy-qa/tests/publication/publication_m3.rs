@@ -69,7 +69,7 @@ fn fingerprint(dir: &Path) -> BTreeMap<String, u64> {
                 .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
             if path.is_dir() {
                 walk(root, &path, out);
             } else if rel.starts_with(".rdy/") && !rel.starts_with(".rdy/store/segments/") {
@@ -919,4 +919,47 @@ fn mg6_root_supporting_blocks_follow_the_built_selection_rule() {
         .call("rdy_publication_check", json!({"profile": "orgp"}))
         .ok();
     assert_eq!(canon["selection"]["blocks"], sc.selected.len());
+}
+
+/// The selected words reach the org outputs and the excluded canaries reach none, by name or by
+/// byte, and the Markdown and site text keep LF on every platform. The audit reads the files by
+/// slash paths whatever the host separator is.
+#[test]
+fn wx30c_publication_canaries_stay_excluded() {
+    let (s, sc) = served();
+    let mut c = session(&s, "p", "writer", None);
+    let out = scratch();
+    let org = drive(&mut c, "orgp", "canon", out.path());
+    assert!(org.refused.is_empty(), "{:?}", org.refused);
+    drop(c);
+    s.stop();
+    for (name, files) in &org.outputs {
+        for path in files.keys() {
+            assert!(!path.contains('\\'), "{name}: {path} is not a slash path");
+        }
+        for word in ["XPROSECANARY", "XDOCCANARY", "OUTDECCANARY", "OUTQCANARY"] {
+            assert!(
+                holding(files, word.as_bytes()).is_empty(),
+                "{name} holds {word}"
+            );
+        }
+        assert!(
+            holding(files, &sc.excluded_png).is_empty(),
+            "{name} holds the excluded figure"
+        );
+        for (path, bytes) in files {
+            if path.ends_with(".md") || path.ends_with(".html") || path.ends_with(".yml") {
+                assert!(!bytes.contains(&b'\r'), "{name}/{path} holds a CR");
+            }
+        }
+    }
+    assert!(
+        org.outputs["site"].values().any(|b| b == &sc.selected_png),
+        "the selected figure is published"
+    );
+    let org_print = print_text(s.dir.path(), "canon", "orgp");
+    assert_eq!(
+        audit(&org, &sc, Stage::Source, Some(&org_print)),
+        Vec::<String>::new()
+    );
 }

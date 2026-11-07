@@ -780,7 +780,6 @@ fn ec6_an_occupied_staging_path_is_refused_and_never_deleted() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
     let (_d, r, _ids) = project();
@@ -788,19 +787,19 @@ fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("md");
     std::fs::write(dir.path().join("neighbour"), b"mine").unwrap();
-    rdy_qa::platform::set_mode(dir.path(), 0o555).unwrap();
-    let writable = std::fs::File::create(dir.path().join("probe")).is_ok();
-    let result = write_markdown(&p, &out, Layout::Plain);
-    rdy_qa::platform::set_mode(dir.path(), 0o755).unwrap();
-    if writable {
-        // a user the mode does not bind (root): nothing to test; RDY_QA_REQUIRE_ALL=1 fails it
+    // a mode on Unix, an ACL on Windows; the guard restores the directory when it drops
+    let Some(guard) = rdy_qa::wc::read_only_dir(dir.path()) else {
+        // a user the access does not bind (root, an elevated token): nothing to test;
+        // RDY_QA_REQUIRE_ALL=1 fails it
         rdy_qa::skip::skip(
             "ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone",
             rdy_qa::skip::Why::Prerequisite,
-            "a read-only directory takes writes here (running as root?)",
+            rdy_qa::wc::READ_ONLY_REASON,
         );
         return;
-    }
+    };
+    let result = write_markdown(&p, &out, Layout::Plain);
+    drop(guard);
     let e = result.expect_err("the staging directory cannot be created");
     assert_eq!(e.code, rdy_engine::E_IO);
     let mut names: Vec<_> = std::fs::read_dir(dir.path())
@@ -809,6 +808,24 @@ fn ec6_a_staging_path_that_cannot_be_created_leaves_the_directory_alone() {
         .collect();
     names.sort();
     assert_eq!(names, ["neighbour"]);
+}
+
+/// Every Markdown file the export writes keeps LF: no carriage return anywhere, and each file ends
+/// in one line feed, on every platform.
+#[test]
+fn wx30c_print_and_export_bytes_keep_lf() {
+    let (_d, r, _ids) = project();
+    for layout in [Layout::Plain, Layout::Mkdocs] {
+        let (_dir, out, _p) = exported(&r, &Scope::Canon, layout);
+        let files = tree(&out);
+        assert!(!files.is_empty());
+        for (name, bytes) in &files {
+            assert!(!bytes.contains(&b'\r'), "{name} holds a carriage return");
+            if name.ends_with(".md") {
+                assert!(bytes.ends_with(b"\n"), "{name} does not end in LF");
+            }
+        }
+    }
 }
 
 /// The file of the doc "Deep *doc*" in a hand-built print.

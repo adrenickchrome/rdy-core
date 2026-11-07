@@ -188,7 +188,12 @@ fn entries(dir: &Path) -> Vec<String> {
             if p.is_dir() {
                 stack.push(p.clone());
             }
-            out.push(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+            out.push(
+                p.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
         }
     }
     out.sort();

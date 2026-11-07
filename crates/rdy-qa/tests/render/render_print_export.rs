@@ -20,7 +20,12 @@ fn paths(dir: &Path) -> Vec<String> {
             if e.file_type().unwrap().is_dir() {
                 stack.push(p.clone());
             }
-            out.push(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+            out.push(
+                p.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
         }
     }
     out.sort();
