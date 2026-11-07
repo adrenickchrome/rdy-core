@@ -1418,6 +1418,42 @@ mod tests {
         }
     }
 
+    /// A box with `core.autocrlf=true` turned README.md, LICENSE-MIT and deny.toml into CRLF, and
+    /// 11 tests that read them by bytes failed. The first rule of `.gitattributes` pins every file
+    /// of the repository, so a new root file needs no rule of its own; the later rules only narrow
+    /// it (`-text` for what is never converted).
+    #[test]
+    fn wx33h_gitattributes_pin_every_file_to_lf_first() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
+        let first = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'));
+        assert_eq!(first, Some("* text=auto eol=lf"));
+    }
+
+    /// The text files at the repository's root hold no CR in this checkout, whatever its settings.
+    #[test]
+    fn wx33h_root_text_files_are_lf_in_this_checkout() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut seen = Vec::new();
+        for e in std::fs::read_dir(&root).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let text_file = name.starts_with("LICENSE")
+                || [".md", ".toml", ".lock"].iter().any(|x| name.ends_with(x));
+            if e.path().is_file() && text_file {
+                let bytes = std::fs::read(e.path()).unwrap();
+                assert!(!bytes.contains(&b'\r'), "{name} holds a CR");
+                seen.push(name);
+            }
+        }
+        for name in ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "deny.toml"] {
+            assert!(seen.iter().any(|s| s == name), "{name} in {seen:?}");
+        }
+    }
+
     #[test]
     fn ps11_the_real_tree_has_no_unix_code_outside_the_seams() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

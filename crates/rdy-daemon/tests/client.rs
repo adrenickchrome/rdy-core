@@ -360,24 +360,24 @@ async fn start1_an_exiting_reply_from_the_daemon_we_spawned_is_e_daemon_start_at
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     let n = Arc::new(AtomicUsize::new(0));
-    let t0 = std::time::Instant::now();
-    let e = connect_or_start(
-        &run,
-        opts(
-            "0.2.0",
-            dir.path(),
-            in_process_spawn("0.1.0", n.clone(), Duration::ZERO),
-        ),
-    )
-    .await
-    .unwrap_err();
+    let mut o = opts(
+        "0.2.0",
+        dir.path(),
+        in_process_spawn("0.1.0", n.clone(), Duration::ZERO),
+    );
+    // A start timeout no run waits out, and a guard far under it and far over any slow host: only
+    // a refusal that does not wait for the timeout gets here.
+    o.start_timeout = Duration::from_secs(3600);
+    let e = tokio::time::timeout(Duration::from_secs(300), connect_or_start(&run, o))
+        .await
+        .expect("the refusal comes without waiting out the start timeout")
+        .unwrap_err();
     assert_eq!(e.code, E_DAEMON_START);
     assert!(
         e.message
             .starts_with("the daemon we started is rdy 0.1.0, this client is rdy 0.2.0"),
         "{e}"
     );
-    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     assert_eq!(n.load(Ordering::SeqCst), 1, "spawned once, not again");
 }
 

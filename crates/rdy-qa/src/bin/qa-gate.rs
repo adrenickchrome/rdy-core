@@ -253,10 +253,7 @@ fn main() {
 
         let (ok, out) = step(
             "workspace tests",
-            with_require_all(
-                cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
-                &args,
-            ),
+            with_require_all(cargo(&report::WORKSPACE_TEST_ARGS), &args),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));

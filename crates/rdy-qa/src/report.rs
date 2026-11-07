@@ -245,6 +245,16 @@ pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> 
     s
 }
 
+/// The workspace-tests gate step's cargo arguments. Every binary runs: without `--no-fail-fast`
+/// cargo stops at the first failing binary, and the ones after it neither run nor count.
+pub const WORKSPACE_TEST_ARGS: [&str; 5] = [
+    "test",
+    "--workspace",
+    "--exclude",
+    "rdy-qa",
+    "--no-fail-fast",
+];
+
 /// The detail of the workspace-tests gate step: the counts, then (when tests failed) the failing
 /// names with their panic excerpts, then (when the step failed) the last 20 lines of `output`,
 /// then a note when no test ran.
@@ -1628,6 +1638,43 @@ mod tests {
         assert!(p.ends_with(&format!("\n{TRUNCATED}")) && !p.contains("SECOND"));
         assert_eq!(p.matches("panicked at").count(), 1);
         assert_eq!(counts(&run), want_counts);
+    }
+
+    #[test]
+    fn wx33h_the_workspace_step_runs_every_binary_and_counts_them() {
+        // cargo stops at the first failing test binary without this flag, and the binaries after
+        // it neither run nor count: Windows' `read_only` failures hid behind `client`'s
+        assert_eq!(
+            WORKSPACE_TEST_ARGS,
+            [
+                "test",
+                "--workspace",
+                "--exclude",
+                "rdy-qa",
+                "--no-fail-fast"
+            ]
+        );
+        assert!(
+            include_str!("bin/qa-gate.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
+            "the gate runs these arguments"
+        );
+        let out = "\
+     Running tests/a.rs (target/debug/deps/a-1)
+test a1 ... FAILED
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.1s
+error: test failed, to rerun pass `-p x --test a`
+     Running tests/b.rs (target/debug/deps/b-1)
+test b1 ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s
+error: test failed, to rerun pass `-p x --test b`
+error: 2 targets failed:
+    `-p x --test a`
+    `-p x --test b`
+";
+        let run = parse_cargo_test(out);
+        assert_eq!((run.passed, run.failed, run.ignored), (5, 2, 1));
+        assert!(run.failures.iter().any(|f| f == "a1"), "{:?}", run.failures);
+        assert!(run.failures.iter().any(|f| f == "b1"), "{:?}", run.failures);
     }
 
     #[test]

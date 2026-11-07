@@ -1,3 +1,7 @@
+# Every file of the repository is LF on every checkout, whatever core.autocrlf says: tests read
+# README.md, LICENSE-* and deny.toml by bytes. Git leaves a file it sees as binary alone. The rules
+# below only narrow this one. wx33h_gitattributes_pin_every_file_to_lf_first keeps it first.
+* text=auto eol=lf
 # The daemon's source build id (D-CCC6E) hashes the bytes of Cargo.toml, Cargo.lock and every
 # file under crates/. A checkout with core.autocrlf=true must give the bytes the commit holds,
 # so the text kinds below are always LF. The lines after this block win for the released

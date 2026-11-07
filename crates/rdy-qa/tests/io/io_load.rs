@@ -563,8 +563,12 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
     let p = host.dir.path().to_path_buf();
     let store = p.join(".rdy/store");
     let aside = p.join("store-aside");
+    // an open connection keeps the daemon serving: it runs no idle project check
+    let held = rdy_qa::daemon::HeldConnection::open(&p, "t");
     // the in-place move with the daemon still up: the daemon serves the store set aside
     let moved = rdy_qa::daemon::move_aside_under_daemon(&store, &aside);
+    // the tick the daemon runs by itself every 500 ms, now, so that no timing decides this test
+    host.run.as_ref().unwrap().handle().tick();
     let skip = [".rdy/run", "store-aside"];
     let before = tree_but(&p, &skip);
     let e = load(&file, &p).unwrap_err();
@@ -599,8 +603,40 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
     if moved {
         std::fs::rename(&aside, &store).unwrap();
     }
+    drop(held);
     host.stop();
     std::fs::rename(&store, &aside).unwrap();
+    let s = load(&file, &p).unwrap();
+    assert_eq!(s.files_kept, [".rdy.yaml"]);
+}
+
+/// With no connection open, a daemon whose store moved leaves by its own project check (D-6JZ5V):
+/// it removes its run files, stops and writes nothing more to the store. The load that follows
+/// passes no live daemon, so it goes ahead. This is the state that made
+/// `dl6_a_live_daemon_on_the_target_refuses_the_load` fail under load when that test held no
+/// connection: the check's 500 ms tick came while the load read its dump.
+#[test]
+fn wx33h_a_daemon_gone_by_its_own_project_check_does_not_refuse_the_load() {
+    rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
+    let dir = rdy_qa::daemon::short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    let r = Rdy::open(dir.path()).unwrap();
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    let mut host = rdy_qa::daemon::Hosted::start_in(dir);
+    let p = host.dir.path().to_path_buf();
+    let store = p.join(".rdy/store");
+    let aside = p.join("store-aside");
+    if !rdy_qa::daemon::move_aside_under_daemon(&store, &aside) {
+        // Windows: the store cannot move under its daemon, so this state cannot stand
+        return;
+    }
+    let run = host.run.take().unwrap();
+    run.handle().tick();
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+    assert_eq!(rdy_daemon::live_daemon(&p), None, "its run files are gone");
     let s = load(&file, &p).unwrap();
     assert_eq!(s.files_kept, [".rdy.yaml"]);
 }

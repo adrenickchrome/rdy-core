@@ -53,6 +53,37 @@ pub fn move_aside_under_daemon(store: &Path, aside: &Path) -> bool {
     }
 }
 
+/// A `ctl` connection to the daemon of the project at `dir`, open until this drops. A daemon runs
+/// its project check at each hello and, with no connection open, on its idle tick (every 500 ms).
+/// So a test that moves the store under a daemon holds one from before the move: else the daemon
+/// sees the move at some tick, removes its run files and stops, and the test no longer has the
+/// daemon it asks about.
+pub struct HeldConnection {
+    _client: Client,
+    _rt: tokio::runtime::Runtime,
+}
+
+impl HeldConnection {
+    /// Connects past `ready`, with a hello of `version` and this build.
+    pub fn open(dir: &Path, version: &str) -> HeldConnection {
+        let run = RunDir::of_project(dir);
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: version.into(),
+            build: rdy_daemon::BUILD.to_string(),
+            proto: Proto::Ctl,
+            cwd: dir.into(),
+            project: run.project_id().expect("the project's .rdy"),
+        };
+        let rt = Hosted::rt();
+        let client = rt.block_on(connect_ready(&run, &hello));
+        HeldConnection {
+            _client: client,
+            _rt: rt,
+        }
+    }
+}
+
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
 pub fn short_tempdir() -> tempfile::TempDir {

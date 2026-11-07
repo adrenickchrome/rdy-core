@@ -395,14 +395,21 @@ fn pre3_preview_note_matches_readme_and_archive() {
 fn pre3_cli_prints_the_guide_and_refuses_bad_arguments() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = ssh_key_line();
+    // The guide for a POSIX target is text that a person runs elsewhere, so it takes POSIX paths
+    // on every host. A Windows tempdir is not one, and this path stands nowhere on Windows.
+    let base = if cfg!(windows) {
+        "/rdy-pre3-no-such-dir".to_string()
+    } else {
+        dir.path().display().to_string()
+    };
     let input = InstallInput {
-        download: dir.path().join("no download"),
+        download: format!("{base}/no download").into(),
         signer_line: key,
         version: "0.14.0".into(),
         commit: COMMIT.into(),
         target: TARGETS[1].into(),
-        unpack: dir.path().join("no unpack"),
-        prefix: dir.path().join("no parent").join("rdy-0.14.0"),
+        unpack: format!("{base}/no unpack").into(),
+        prefix: format!("{base}/no parent/rdy-0.14.0").into(),
         browser: false,
     };
 

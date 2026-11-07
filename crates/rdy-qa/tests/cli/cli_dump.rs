@@ -225,6 +225,8 @@ fn dl7_rdy_load_refuses_a_target_whose_daemon_still_runs() {
     let dir = s.dir.path();
     let store = dir.join(".rdy/store");
     let aside = scratch.path().join("store-aside");
+    // an open connection keeps the daemon serving: it runs no idle project check
+    let held = rdy_qa::daemon::HeldConnection::open(dir, env!("CARGO_PKG_VERSION"));
     let moved = rdy_qa::daemon::move_aside_under_daemon(&store, &aside);
     let (ok, e) = s.json(&["--json", "load", file_arg, dir.to_str().unwrap()]);
     assert!(!ok, "{e}");
@@ -256,6 +258,7 @@ fn dl7_rdy_load_refuses_a_target_whose_daemon_still_runs() {
         );
     }
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
+    drop(held);
     s.stop();
     assert!(s.daemon_pid().is_none(), "the daemon stopped");
     std::fs::rename(&store, &aside).unwrap();
