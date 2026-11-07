@@ -372,7 +372,16 @@ fn wx11_autocrlf_checkout_keeps_the_source_build_id() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let listed = git(
         &root,
-        &["ls-files", "-z", "--", "Cargo.toml", "Cargo.lock", "crates"],
+        &[
+            "ls-files",
+            "-z",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            "release/agent-guide.json",
+            "release/agent-guide.sha256",
+            "crates",
+        ],
     );
     if !listed.status.success() || !root.join(".gitattributes").is_file() {
         return; // not a git checkout (a packaged source tree)
@@ -404,6 +413,7 @@ fn wx11_autocrlf_checkout_keeps_the_source_build_id() {
     );
     assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
     std::fs::remove_dir_all(copy.join("crates")).unwrap();
+    std::fs::remove_dir_all(copy.join("release")).unwrap();
     std::fs::remove_file(copy.join("Cargo.toml")).unwrap();
     std::fs::remove_file(copy.join("Cargo.lock")).unwrap();
     let out = git(

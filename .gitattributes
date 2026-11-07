@@ -1,7 +1,9 @@
 # The daemon's source build id (D-CCC6E) hashes the bytes of Cargo.toml, Cargo.lock and every
 # file under crates/. A checkout with core.autocrlf=true must give the bytes the commit holds,
 # so the text kinds below are always LF. The lines after this block win for the released
-# fixtures, which stay -text.
+# fixtures, which stay -text. A file of a kind with no rule below is never converted either, so a
+# new kind cannot move the id.
+crates/** -text
 /Cargo.toml text eol=lf
 /Cargo.lock text eol=lf
 crates/**/*.rs text eol=lf
@@ -18,6 +20,7 @@ crates/**/*.py text eol=lf
 crates/**/*.svg text eol=lf
 crates/**/*.mmd text eol=lf
 crates/**/*.log text eol=lf
+crates/**/*.sha256 text eol=lf
 crates/**/FORMAT text eol=lf
 crates/**/FEATURES text eol=lf
 crates/**/.gitignore text eol=lf

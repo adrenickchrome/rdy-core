@@ -195,8 +195,15 @@ fn wx22_stdio_tools_and_cli_share_windows_results() {
         "rdy_query",
         json!({"filter": "type = claim", "scope": "run-22"}),
     );
-    // this raw client sends no kungfu value, so the tool's reply alone warns (D-Y18E1)
-    if let Some(w) = by_tool.as_object_mut().unwrap().remove("warnings") {
+    // this raw client sends no kungfu value and has not read its instructions, so the tool's
+    // reply alone carries the advisory (D-Y18E1): the reminder while it is due, then the warning.
+    // The advisory is no part of the result, and the CLI's `q` is not an op that carries the
+    // reminder (`ops::REMINDER_OPS`).
+    let advised = by_tool.as_object_mut().unwrap();
+    if let Some(reminder) = advised.remove("reminder") {
+        assert_eq!(reminder, rdy_engine::instructions::REMINDER);
+    }
+    if let Some(w) = advised.remove("warnings") {
         for one in w.as_array().unwrap() {
             assert_eq!(one["code"], "W_KUNGFU", "{one}");
         }
