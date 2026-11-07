@@ -8369,6 +8369,18 @@ mod tests {
         assert_eq!(c.matches(" / ").count(), 2, "{c}");
     }
 
+    /// wx33g: on Windows the class names the system, the processor and the file system, so the
+    /// report header never reads `unknown` there.
+    #[test]
+    fn wx33g_the_machine_class_is_read_on_windows() {
+        let c = machine_class();
+        if cfg!(windows) {
+            assert!(!c.contains("unknown"), "{c}");
+            assert!(c.starts_with("Microsoft Windows"), "{c}");
+        }
+        assert_eq!(c.matches(" / ").count(), 2, "{c}");
+    }
+
     #[test]
     fn the_write_target_is_stated_per_hardware_class() {
         let t = spec_target("write_single").unwrap();
