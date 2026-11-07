@@ -89,6 +89,33 @@ pub fn tar_program() -> PathBuf {
     system_file("tar.exe")
 }
 
+/// The PowerShell program: the system's Windows PowerShell 5.1.
+pub fn powershell_program() -> PathBuf {
+    system_file(r"WindowsPowerShell\v1.0\powershell.exe")
+}
+
+/// The directories the installed check puts on PATH after the version's `bin` directory: the
+/// system directories, and the directory of the `git.exe` that this process's PATH finds first
+/// (the daemon runs `git`).
+pub fn smoke_path_dirs() -> Vec<PathBuf> {
+    let root =
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()));
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|dir| dir.is_absolute() && dir.join("git.exe").is_file())
+                .take(1)
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.extend([
+        root.join("System32"),
+        root.clone(),
+        root.join(r"System32\WindowsPowerShell\v1.0"),
+    ]);
+    dirs
+}
+
 /// Opens the directory `path` for the `*_at` calls; links in `path` are followed.
 pub fn open_dir(path: &Path) -> io::Result<File> {
     rdy_store::pio::open_dir(path)

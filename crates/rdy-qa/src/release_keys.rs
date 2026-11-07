@@ -1363,6 +1363,7 @@ fn render_statement(record: &Record, kind: Kind) -> Result<String, TrustError> {
             cwd: dir.clone(),
             stdin: None,
             stdout: Some(dir.join(&signers)),
+            ps: None,
         },
         GuideCommand {
             program: "ssh-keygen".into(),
@@ -1383,6 +1384,7 @@ fn render_statement(record: &Record, kind: Kind) -> Result<String, TrustError> {
             cwd: dir.clone(),
             stdin: Some(dir.join(&record.name)),
             stdout: None,
+            ps: None,
         },
     ];
     let block = release_install::render_commands(&commands).map_err(|_| refuse())?;

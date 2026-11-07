@@ -820,6 +820,19 @@ pub fn tar_program() -> PathBuf {
     PathBuf::from("tar")
 }
 
+/// The PowerShell program: PowerShell 7 on Unix. Only the guide of the Windows target uses it,
+/// and no Unix machine installs that target.
+pub fn powershell_program() -> PathBuf {
+    PathBuf::from("pwsh")
+}
+
+/// The directories the installed check puts on PATH after the version's `bin` directory.
+pub fn smoke_path_dirs() -> Vec<PathBuf> {
+    ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        .map(PathBuf::from)
+        .to_vec()
+}
+
 /// The largest `uname -srm` output the OS probe accepts, its LF included.
 const UNAME_MAX: usize = 4096;
 
