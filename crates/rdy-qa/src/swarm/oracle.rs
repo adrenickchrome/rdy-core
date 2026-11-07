@@ -17,8 +17,7 @@ use std::time::Duration;
 /// A command's hang guard, not a speed check.
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 
-/// Copies the tree `from` to `to` (which must not exist): directories, files and symbolic
-/// links. A socket or another special file is left out: it means nothing without its process.
+/// Copies the tree `from` to `to` (which must not exist): directories, files and links. A socket or another special file is left out: it means nothing without its process.
 pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -28,7 +27,11 @@ pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_tree(&src, &dst)?;
         } else if kind.is_file() {
-            std::fs::copy(&src, &dst)?;
+            // a live store holds a byte-range lock on some platforms that refuses a plain copy;
+            // the seam reads the bytes the way a kill would leave them
+            if std::fs::copy(&src, &dst).is_err() {
+                std::fs::write(&dst, crate::platform::read_live_file(&src)?)?;
+            }
         } else if kind.is_symlink() {
             crate::platform::copy_link(&src, &dst)?;
         }

@@ -438,10 +438,15 @@ mod tests {
         let dead = child.id();
         child.wait().expect("wait for true");
         let live = std::process::id();
+        // another live process (the first process of a Unix system is not one everywhere)
+        let mut other = platform::fixture_command("hang")
+            .spawn()
+            .expect("spawn a hang");
+        let other_pid = other.id();
         let names = [
             format!("{PARENT_PREFIX}{dead}"),
             format!("{PARENT_PREFIX}{live}"),
-            format!("{PARENT_PREFIX}1"),
+            format!("{PARENT_PREFIX}{other_pid}"),
             format!("{PARENT_PREFIX}x"),
             "rdyd-other".to_string(),
         ];
@@ -453,6 +458,8 @@ mod tests {
         for n in &names[1..] {
             assert!(root.path().join(n).exists(), "{n} was kept");
         }
+        other.kill().expect("end the hang");
+        other.wait().expect("reap the hang");
         assert!(run_parent().ends_with(format!("{PARENT_PREFIX}{live}")));
         assert!(run_parent().is_dir());
     }
