@@ -375,9 +375,13 @@ fn served(
 ) {
     let i = info();
     let (client, server) = tokio::io::duplex(1 << 20);
-    let session = i
-        .sessions
-        .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
+    let session = i.sessions.insert(
+        Proto::Ctl,
+        "t".into(),
+        BUILD.into(),
+        "/".into(),
+        sys::own_account().unwrap(),
+    );
     let (r, w) = tokio::io::split(server);
     (
         BufReader::new(client),

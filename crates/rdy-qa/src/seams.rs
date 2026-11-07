@@ -1,8 +1,11 @@
-//! Unix-only code lives only in the seam modules (FW-XP1 D-1RXEA).
+//! Unix-only and Windows-only code lives only in the seam modules (FW-XP1 D-1RXEA).
 //!
 //! The gate's "unix seams" step and `ps11_the_real_tree_has_no_unix_code_outside_the_seams`
 //! scan every `.rs` file under `crates/*/src`, `crates/*/tests` and `crates/*/benches`, and
-//! every `crates/*/build.rs`, for the tokens in [`TOKENS`].
+//! every `crates/*/build.rs`, for the tokens in [`TOKENS`] (Unix) and [`WINDOWS_TOKENS`]
+//! (Windows). A file that holds a Windows token must be on an exact list: [`WINDOWS_SEAM_FILES`],
+//! [`WINDOWS_TEST_FILES`] or, for the tests of one product file, [`WINDOWS_UNIT_TEST_USES`]. No
+//! directory is a seam by its name. Task 32 added the Windows half.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +43,7 @@ pub const SEAM_FILES: &[&str] = &[
     "crates/rdy-qa/src/platform/agent_wire.rs",
     "crates/rdy-qa/src/platform/child_fixture.rs",
     "crates/rdy-qa/src/platform/child_fixture_tests.rs",
+    "crates/rdy-qa/src/platform/exclusions.rs",
     "crates/rdy-qa/src/platform/unix.rs",
     "crates/rdy-qa/src/platform/windows.rs",
     "crates/rdy-qa/src/platform/windows_accounts.rs",
@@ -81,6 +85,118 @@ pub const UNIT_TEST_USES: &[(&str, usize, &str)] = &[
     ("crates/rdy-daemon/src/socket.rs", 1, "the socket's mode"),
 ];
 
+/// The Windows-only tokens (closed list). A line whose trimmed text starts with `//` is skipped.
+pub const WINDOWS_TOKENS: &[&str] = &[
+    "std::os::windows",
+    "windows_sys",
+    "windows::Win32",
+    "winapi::",
+    "tokio::net::windows",
+    "tokio::signal::windows",
+    "extern \"system\"",
+    "#[link(",
+];
+
+/// The files where a Windows-only token is allowed: the Windows side of each seam, and the seam
+/// files that hold a Windows branch beside a Unix one. An exact list, never a directory.
+pub const WINDOWS_SEAM_FILES: &[&str] = &[
+    "crates/rdy-store/src/pio.rs",
+    "crates/rdy-store/src/pio/windows.rs",
+    "crates/rdy-store/src/pio/windows_dir.rs",
+    "crates/rdy-store/src/pio/windows_durable.rs",
+    "crates/rdy-store/src/pio/windows_io.rs",
+    "crates/rdy-store/src/pio/windows_security.rs",
+    "crates/rdy-store/src/fileid/windows.rs",
+    "crates/rdy-daemon/src/sys/mod.rs",
+    "crates/rdy-daemon/src/sys/site_socket.rs",
+    "crates/rdy-daemon/src/sys/windows.rs",
+    "crates/rdy-daemon/src/sys/windows/agent.rs",
+    "crates/rdy-daemon/src/sys/windows/identity.rs",
+    "crates/rdy-daemon/src/sys/windows/pipe.rs",
+    "crates/rdy-daemon/src/sys/windows/process.rs",
+    "crates/rdy-daemon/src/sys/windows/run_state.rs",
+    "crates/rdy-daemon/src/sys/windows/stop.rs",
+    "crates/rdy-qa/src/platform.rs",
+    "crates/rdy-qa/src/platform/child_fixture.rs",
+    "crates/rdy-qa/src/platform/windows.rs",
+    "crates/rdy-qa/src/platform/windows_accounts.rs",
+    "crates/rdy-qa/src/platform/windows_agent.rs",
+    "crates/rdy-qa/src/platform/windows_fs.rs",
+    "crates/rdy-qa/src/platform/windows_process.rs",
+    "crates/rdy-qa/src/platform/windows_release.rs",
+    "crates/rdy-qa/src/seams.rs",
+];
+
+/// Test and bench files that use Windows-only APIs, each with why. They run on Windows only or
+/// reach a Windows API from a branch that Windows alone compiles. A new file is not allowed until
+/// it is listed here.
+pub const WINDOWS_TEST_FILES: &[(&str, &str)] = &[
+    (
+        "crates/rdy-daemon/tests/common/agent.rs",
+        "the fake agent's named pipe",
+    ),
+    (
+        "crates/rdy-daemon/tests/windows_identity.rs",
+        "error numbers of a broken pipe",
+    ),
+    (
+        "crates/rdy-daemon/tests/windows_layout.rs",
+        "short names, wide strings and links of the run directory",
+    ),
+    (
+        "crates/rdy-daemon/tests/windows_signing.rs",
+        "the signing agent's named pipe",
+    ),
+    (
+        "crates/rdy-daemon/tests/windows_stop.rs",
+        "tokens, handles and the stop event of a real process",
+    ),
+    (
+        "crates/rdy-engine/tests/modes/mod.rs",
+        "links and an exclusive open on Windows",
+    ),
+    (
+        "crates/rdy-qa/tests/release/release_install.rs",
+        "an unpaired surrogate in a token",
+    ),
+    (
+        "crates/rdy-qa/tests/wc/wc_windows.rs",
+        "the file type of a reparse point",
+    ),
+    (
+        "crates/rdy-store/tests/follower_guard.rs",
+        "links and an exclusive open on Windows",
+    ),
+    (
+        "crates/rdy-store/tests/read_only.rs",
+        "a file link in a store directory",
+    ),
+    (
+        "crates/rdy-store/tests/store.rs",
+        "an exclusive open on Windows",
+    ),
+    (
+        "crates/rdy-store/tests/transition.rs",
+        "an exclusive open on Windows",
+    ),
+    (
+        "crates/rdy-store/tests/upgrade.rs",
+        "links made with the Windows call",
+    ),
+    (
+        "crates/rdy-store/tests/windows_durability.rs",
+        "an exclusive open on Windows",
+    ),
+];
+
+/// Product files whose `#[cfg(test)]` module uses Windows-only APIs: the path, the exact number of
+/// lines with a token, all after the file's first `#[cfg(test)]` line, and why.
+pub const WINDOWS_UNIT_TEST_USES: &[(&str, usize, &str)] = &[(
+    "crates/rdy-store/src/fsutil.rs",
+    1,
+    "a file link at the temp name",
+)];
+
 /// Line 1 of a test or bench file that may use Unix-only APIs.
 pub const GATE_LINE: &str = "#![cfg(unix)]";
 
@@ -89,7 +205,7 @@ pub const REASON_PREFIX: &str = "// Unix only: ";
 
 /// Every problem under `root` (the workspace), in path then line order; empty when clean.
 pub fn seam_problems(root: &Path) -> Vec<String> {
-    problems_with(root, SEAM_FILES, UNIT_TEST_USES)
+    all_problems(root, SEAM_FILES, UNIT_TEST_USES, &WindowsRules::REAL)
 }
 
 /// The line of a problem with the whole file: after every real line.
@@ -98,8 +214,46 @@ const FILE: usize = usize::MAX;
 /// A problem before sorting: (path, line, message).
 type Problem = (String, usize, String);
 
-/// [`seam_problems`] with the seam files and the unit-test allowlist given.
+/// The Windows half of the scan: the lists of [`WINDOWS_SEAM_FILES`], [`WINDOWS_TEST_FILES`] and
+/// [`WINDOWS_UNIT_TEST_USES`].
+struct WindowsRules<'a> {
+    seams: &'a [&'a str],
+    tests: &'a [(&'a str, &'a str)],
+    unit_uses: &'a [(&'a str, usize, &'a str)],
+}
+
+impl WindowsRules<'static> {
+    const REAL: WindowsRules<'static> = WindowsRules {
+        seams: WINDOWS_SEAM_FILES,
+        tests: WINDOWS_TEST_FILES,
+        unit_uses: WINDOWS_UNIT_TEST_USES,
+    };
+}
+
+#[cfg(test)]
+impl WindowsRules<'_> {
+    /// No file may use a Windows-only API, and none is listed.
+    const NONE: WindowsRules<'static> = WindowsRules {
+        seams: &[],
+        tests: &[],
+        unit_uses: &[],
+    };
+}
+
+/// The Unix half of the scan with the seam files and the unit-test allowlist given, and no
+/// Windows rule listed.
+#[cfg(test)]
 fn problems_with(root: &Path, seams: &[&str], unit_uses: &[(&str, usize, &str)]) -> Vec<String> {
+    all_problems(root, seams, unit_uses, &WindowsRules::NONE)
+}
+
+/// Every problem of both halves, sorted.
+fn all_problems(
+    root: &Path,
+    seams: &[&str],
+    unit_uses: &[(&str, usize, &str)],
+    windows: &WindowsRules<'_>,
+) -> Vec<String> {
     // (path, line, message); a file's own problems have line FILE and sort after its lines.
     let (files, mut found) = rust_files(root);
     // The paths the scan could not read; a file at or under one of them is not "gone".
@@ -173,18 +327,137 @@ fn problems_with(root: &Path, seams: &[&str], unit_uses: &[(&str, usize, &str)])
     }
     // An allowlisted file that is gone has no lines in its tests.
     for (path, want, _) in unit_uses {
-        let blocked = unscanned.iter().any(|u| {
-            path == u
-                || path
-                    .strip_prefix(u.as_str())
-                    .is_some_and(|r| r.starts_with('/'))
-        });
+        let blocked = is_unscanned(&unscanned, path);
         if !blocked && !files.iter().any(|(p, _)| p == path) {
             found.push((path.to_string(), FILE, count_message(path, 0, *want)));
         }
     }
+    found.extend(windows_problems(&files, &unscanned, root, windows));
     found.sort();
     found.into_iter().map(|(_, _, m)| m).collect()
+}
+
+/// Whether `path` is, or is under, one of the paths the scan could not read.
+fn is_unscanned(unscanned: &[String], path: &str) -> bool {
+    unscanned.iter().any(|u| {
+        path == u
+            || path
+                .strip_prefix(u.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+    })
+}
+
+/// The problems of the Windows half. A file with a [`WINDOWS_TOKENS`] line must be a listed seam,
+/// a listed test or bench file, or a listed product file whose tests alone use it. A list entry
+/// that is gone, or that no longer uses a Windows token, is a problem too, so a list never
+/// outlives its need.
+fn windows_problems(
+    files: &[(String, String)],
+    unscanned: &[String],
+    root: &Path,
+    rules: &WindowsRules<'_>,
+) -> Vec<Problem> {
+    let mut found: Vec<Problem> = Vec::new();
+    let text_of = |path: &str| files.iter().find(|(p, _)| p == path).map(|(_, t)| t);
+    for seam in rules.seams {
+        if !root.join(seam).is_file() {
+            found.push((
+                seam.to_string(),
+                FILE,
+                format!(
+                    "{seam}: is a Windows seam file in crates/rdy-qa/src/seams.rs, but it does not \
+                     exist"
+                ),
+            ));
+        }
+    }
+    for (path, text) in files {
+        if rules.seams.contains(&path.as_str()) {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let uses = token_lines_of(&lines, WINDOWS_TOKENS);
+        if let Some(&(_, want, _)) = rules.unit_uses.iter().find(|(p, _, _)| *p == path) {
+            let tests_from = lines.iter().position(|l| l.trim() == "#[cfg(test)]");
+            let mut in_tests = 0;
+            for &(line, token) in &uses {
+                if tests_from.is_some_and(|t| line > t + 1) {
+                    in_tests += 1;
+                } else {
+                    found.push((
+                        path.clone(),
+                        line,
+                        format!(
+                            "{path}:{line}: {token} is Windows-only and outside the file's \
+                             #[cfg(test)] module; only its tests may use it"
+                        ),
+                    ));
+                }
+            }
+            if in_tests != want {
+                found.push((
+                    path.clone(),
+                    FILE,
+                    format!(
+                        "{path}: has {in_tests} Windows-only lines in its tests; \
+                         WINDOWS_UNIT_TEST_USES in crates/rdy-qa/src/seams.rs says {want}"
+                    ),
+                ));
+            }
+            continue;
+        }
+        if is_test_or_bench(path) && rules.tests.iter().any(|(p, _)| *p == path) {
+            continue;
+        }
+        for (line, token) in uses {
+            found.push((
+                path.clone(),
+                line,
+                format!(
+                    "{path}:{line}: {token} is Windows-only; move it into a seam (rdy_store::pio, \
+                     rdy_store::fileid, rdy_daemon::sys, rdy_qa::platform), or list the test file \
+                     in WINDOWS_TEST_FILES in crates/rdy-qa/src/seams.rs with its reason (FW-XP1)"
+                ),
+            ));
+        }
+    }
+    for (path, _) in rules.tests {
+        if !is_test_or_bench(path) {
+            found.push((
+                path.to_string(),
+                FILE,
+                format!("{path}: is in WINDOWS_TEST_FILES but is not under tests/ or benches/"),
+            ));
+        } else if let Some(text) = text_of(path) {
+            let lines: Vec<&str> = text.lines().collect();
+            if token_lines_of(&lines, WINDOWS_TOKENS).is_empty() {
+                found.push((
+                    path.to_string(),
+                    FILE,
+                    format!("{path}: is in WINDOWS_TEST_FILES but uses no Windows-only API"),
+                ));
+            }
+        } else if !is_unscanned(unscanned, path) {
+            found.push((
+                path.to_string(),
+                FILE,
+                format!("{path}: is in WINDOWS_TEST_FILES, but it does not exist"),
+            ));
+        }
+    }
+    for (path, want, _) in rules.unit_uses {
+        if !is_unscanned(unscanned, path) && text_of(path).is_none() {
+            found.push((
+                path.to_string(),
+                FILE,
+                format!(
+                    "{path}: has 0 Windows-only lines in its tests; WINDOWS_UNIT_TEST_USES in \
+                     crates/rdy-qa/src/seams.rs says {want}"
+                ),
+            ));
+        }
+    }
+    found
 }
 
 fn count_message(path: &str, n: usize, m: usize) -> String {
@@ -197,12 +470,17 @@ fn count_message(path: &str, n: usize, m: usize) -> String {
 /// The 1-based number and the first token of each line that holds a token, skipping comment
 /// lines.
 fn token_lines(lines: &[&str]) -> Vec<(usize, &'static str)> {
+    token_lines_of(lines, TOKENS)
+}
+
+/// [`token_lines`] for any closed list of tokens.
+fn token_lines_of(lines: &[&str], tokens: &'static [&'static str]) -> Vec<(usize, &'static str)> {
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if line.trim_start().starts_with("//") {
             continue;
         }
-        let first = TOKENS
+        let first = tokens
             .iter()
             .filter_map(|t| line.find(t).map(|at| (at, *t)))
             .min();
@@ -335,7 +613,7 @@ impl Scan<'_> {
 /// a link that resolves to nothing, or a directory cycle): an absent `src`, `tests`, `benches`
 /// or `build.rs` (nothing there, not even a link) is no problem, but every other failure is, so
 /// the scan never passes without reading every file it names.
-fn rust_files(root: &Path) -> (Vec<(String, String)>, Vec<Problem>) {
+pub(crate) fn rust_files(root: &Path) -> (Vec<(String, String)>, Vec<Problem>) {
     let mut scan = Scan {
         root,
         files: Vec::new(),
@@ -781,6 +1059,362 @@ mod tests {
         assert_eq!(registered, on_disk);
         for child in ["unix.rs", "windows.rs", "windows_process.rs"] {
             assert!(on_disk.contains(&format!("{DIR}{child}")), "{child}");
+        }
+    }
+
+    /// The problems of a temp tree under the Windows lists given and no Unix list.
+    fn windows_only(
+        files: &[(&str, &str)],
+        seams: &[&str],
+        tests: &[(&str, &str)],
+        unit_uses: &[(&str, usize, &str)],
+    ) -> Vec<String> {
+        let rules = WindowsRules {
+            seams,
+            tests,
+            unit_uses,
+        };
+        all_problems(tree(files).path(), &[], &[], &rules)
+    }
+
+    fn windows_move_it(path: &str, line: usize, token: &str) -> String {
+        format!(
+            "{path}:{line}: {token} is Windows-only; move it into a seam (rdy_store::pio, \
+             rdy_store::fileid, rdy_daemon::sys, rdy_qa::platform), or list the test file in \
+             WINDOWS_TEST_FILES in crates/rdy-qa/src/seams.rs with its reason (FW-XP1)"
+        )
+    }
+
+    #[test]
+    fn wx32_windows_apis_outside_seams_are_named() {
+        // product code, a build script and a directory that is only named sys
+        let got = windows_only(
+            &[
+                (
+                    "crates/rdy-engine/src/lib.rs",
+                    "pub mod a;\nuse std::os::windows::fs::OpenOptionsExt;\nfn f() {}\n",
+                ),
+                (
+                    "crates/rdy-engine/src/sys/mod.rs",
+                    "use windows_sys::Win32::Foundation::CloseHandle;\n",
+                ),
+                (
+                    "crates/rdy-cli/build.rs",
+                    "fn main() {\n    let _ = winapi::um::fileapi::CreateFileW;\n}\n",
+                ),
+                (
+                    "crates/rdy-daemon/src/lib.rs",
+                    "extern \"system\" fn cb() {}\n#[link(name = \"kernel32\")]\nextern {}\n",
+                ),
+                (
+                    "crates/rdy-daemon/src/net.rs",
+                    "use tokio::net::windows::named_pipe::ServerOptions;\nuse tokio::signal::windows::ctrl_c;\n",
+                ),
+                (
+                    "crates/rdy-engine/src/win32.rs",
+                    "use windows::Win32::Foundation::HANDLE;\n",
+                ),
+            ],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            got,
+            vec![
+                windows_move_it("crates/rdy-cli/build.rs", 2, "winapi::"),
+                windows_move_it("crates/rdy-daemon/src/lib.rs", 1, "extern \"system\""),
+                windows_move_it("crates/rdy-daemon/src/lib.rs", 2, "#[link("),
+                windows_move_it("crates/rdy-daemon/src/net.rs", 1, "tokio::net::windows"),
+                windows_move_it("crates/rdy-daemon/src/net.rs", 2, "tokio::signal::windows"),
+                windows_move_it("crates/rdy-engine/src/lib.rs", 2, "std::os::windows"),
+                windows_move_it("crates/rdy-engine/src/sys/mod.rs", 1, "windows_sys"),
+                windows_move_it("crates/rdy-engine/src/win32.rs", 1, "windows::Win32"),
+            ]
+        );
+        // an exact seam file may use any of them; its sibling in the same directory may not
+        let files = [
+            (
+                "crates/rdy-daemon/src/sys/windows/pipe.rs",
+                "use windows_sys::Win32::Foundation::CloseHandle;\n",
+            ),
+            (
+                "crates/rdy-daemon/src/sys/windows/other.rs",
+                "use windows_sys::Win32::Foundation::CloseHandle;\n",
+            ),
+        ];
+        assert_eq!(
+            windows_only(
+                &files,
+                &["crates/rdy-daemon/src/sys/windows/pipe.rs"],
+                &[],
+                &[]
+            ),
+            vec![windows_move_it(
+                "crates/rdy-daemon/src/sys/windows/other.rs",
+                1,
+                "windows_sys"
+            )]
+        );
+    }
+
+    #[test]
+    fn wx32_windows_guard_skips_comments_urls_and_logical_slashes() {
+        let got = windows_only(
+            &[(
+                "crates/rdy-engine/src/lib.rs",
+                "// std::os::windows is not used here\n    /// windows_sys in a doc comment\n\
+                 //! winapi::um in a module doc\nfn f() { let _ = \"https://example.test/a/b\"; \
+                 let _ = \"docs/a.md\"; let _ = \"C:/x\"; }\n",
+            )],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(got, Vec::<String>::new());
+    }
+
+    #[test]
+    fn wx32_windows_test_files_and_unit_uses_are_exact() {
+        const CLEAN: (&str, &str) = ("crates/rdy-engine/src/lib.rs", "fn f() {}\n");
+        let used = "use std::os::windows::fs::symlink_file;\n";
+        // a listed test file is clean; an unlisted one is named; a stale entry is named
+        let got = windows_only(
+            &[
+                ("crates/rdy-store/tests/a.rs", used),
+                ("crates/rdy-store/tests/b.rs", used),
+                ("crates/rdy-store/tests/c.rs", "fn f() {}\n"),
+            ],
+            &[],
+            &[
+                ("crates/rdy-store/tests/a.rs", "links"),
+                ("crates/rdy-store/tests/c.rs", "nothing"),
+                ("crates/rdy-store/tests/gone.rs", "gone"),
+                ("crates/rdy-store/src/lib.rs", "wrong place"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            got,
+            vec![
+                "crates/rdy-store/src/lib.rs: is in WINDOWS_TEST_FILES but is not under tests/ or \
+                 benches/"
+                    .to_string(),
+                windows_move_it("crates/rdy-store/tests/b.rs", 1, "std::os::windows"),
+                "crates/rdy-store/tests/c.rs: is in WINDOWS_TEST_FILES but uses no Windows-only API"
+                    .to_string(),
+                "crates/rdy-store/tests/gone.rs: is in WINDOWS_TEST_FILES, but it does not exist"
+                    .to_string(),
+            ]
+        );
+        // a product file may use a Windows API in its tests, exactly as often as listed
+        let file = "crates/rdy-store/src/fsutil.rs";
+        let text = "fn f() {}\n#[cfg(test)]\nmod tests {\n    use std::os::windows::fs::symlink_file;\n}\n";
+        assert_eq!(
+            windows_only(&[(file, text)], &[], &[], &[(file, 1, "a link")]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            windows_only(&[(file, text)], &[], &[], &[(file, 2, "a link")]),
+            vec![format!(
+                "{file}: has 1 Windows-only lines in its tests; WINDOWS_UNIT_TEST_USES in \
+                 crates/rdy-qa/src/seams.rs says 2"
+            )]
+        );
+        // a use before the test module is product code
+        let early = "use std::os::windows::fs::symlink_file;\n#[cfg(test)]\nmod tests {}\n";
+        assert_eq!(
+            windows_only(&[(file, early)], &[], &[], &[(file, 0, "none")]),
+            vec![format!(
+                "{file}:1: std::os::windows is Windows-only and outside the file's #[cfg(test)] \
+                 module; only its tests may use it"
+            )]
+        );
+        // a listed file that is gone
+        assert_eq!(
+            windows_only(&[CLEAN], &[], &[], &[(file, 1, "a link")]),
+            vec![format!(
+                "{file}: has 0 Windows-only lines in its tests; WINDOWS_UNIT_TEST_USES in \
+                 crates/rdy-qa/src/seams.rs says 1"
+            )]
+        );
+        // a missing Windows seam file
+        assert_eq!(
+            windows_only(&[CLEAN], &["crates/rdy-store/src/pio/windows.rs"], &[], &[]),
+            vec![
+                "crates/rdy-store/src/pio/windows.rs: is a Windows seam file in \
+                 crates/rdy-qa/src/seams.rs, but it does not exist"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// Problems with the compile errors and the gate reasons that a Windows build meets.
+    fn phase_four_problems(files: &[(String, String)]) -> Vec<String> {
+        const CFG: &str = "#[cfg(not(any(unix, windows)))]";
+        let mut out = Vec::new();
+        for (path, text) in files {
+            if path == "crates/rdy-qa/src/seams.rs" {
+                continue;
+            }
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if !t.starts_with("compile_error!(") {
+                    continue;
+                }
+                let before = lines[..i]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && !l.starts_with("//"));
+                if before != Some(CFG) {
+                    out.push(format!(
+                        "{path}:{}: a compile_error! that a Windows build can reach; gate it with \
+                         {CFG}",
+                        i + 1
+                    ));
+                }
+                if t.contains("Phase 4") || t.contains(" yet") {
+                    out.push(format!(
+                        "{path}:{}: a compile_error! that still says the port is not done",
+                        i + 1
+                    ));
+                }
+            }
+            if is_test_or_bench(path) && lines.first() == Some(&GATE_LINE) {
+                let reason = lines.get(1).copied().unwrap_or("");
+                if reason.contains("Phase 4") || reason.contains("ports it") {
+                    out.push(format!(
+                        "{path}:2: a Unix gate that waits for a port; name the mechanism and the \
+                         Windows counterpart instead"
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn wx32_no_phase_four_compile_error_remains() {
+        // synthetic: the old form, a reachable one, and a gate that waits for the port
+        let bad = vec![
+            (
+                "crates/rdy-qa/src/platform.rs".to_string(),
+                "// Stays until every export exists.\n#[cfg(not(unix))]\ncompile_error!(\"no implementation yet (FW-XP1 Phase 4)\");\n".to_string(),
+            ),
+            (
+                "crates/rdy-store/src/pio.rs".to_string(),
+                "#[cfg(not(any(unix, windows)))]\ncompile_error!(\"no implementation yet\");\n".to_string(),
+            ),
+            (
+                "crates/rdy-cli/tests/cli.rs".to_string(),
+                "#![cfg(unix)]\n// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.\n".to_string(),
+            ),
+        ];
+        assert_eq!(
+            phase_four_problems(&bad),
+            vec![
+                "crates/rdy-cli/tests/cli.rs:2: a Unix gate that waits for a port; name the \
+                 mechanism and the Windows counterpart instead"
+                    .to_string(),
+                "crates/rdy-qa/src/platform.rs:3: a compile_error! that a Windows build can reach; \
+                 gate it with #[cfg(not(any(unix, windows)))]"
+                    .to_string(),
+                "crates/rdy-qa/src/platform.rs:3: a compile_error! that still says the port is not \
+                 done"
+                    .to_string(),
+                "crates/rdy-store/src/pio.rs:2: a compile_error! that still says the port is not \
+                 done"
+                    .to_string(),
+            ]
+        );
+        // the real tree
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (files, scan) = rust_files(&root);
+        assert_eq!(scan, Vec::<Problem>::new());
+        assert_eq!(phase_four_problems(&files), Vec::<String>::new());
+        // and the three crates that cannot build for another platform still say so
+        for path in [
+            "crates/rdy-store/src/pio.rs",
+            "crates/rdy-store/src/fileid.rs",
+            "crates/rdy-daemon/src/sys/mod.rs",
+            "crates/rdy-qa/src/platform.rs",
+        ] {
+            let text = &files.iter().find(|(p, _)| p == path).expect(path).1;
+            assert!(text.contains("\ncompile_error!("), "{path}");
+        }
+    }
+
+    #[test]
+    fn wx32_every_audit_row_has_a_disposition() {
+        // every list row has a reason and appears once
+        for (name, rows) in [
+            (
+                "UNIT_TEST_USES",
+                UNIT_TEST_USES
+                    .iter()
+                    .map(|r| (r.0, r.2))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "WINDOWS_UNIT_TEST_USES",
+                WINDOWS_UNIT_TEST_USES.iter().map(|r| (r.0, r.2)).collect(),
+            ),
+            ("WINDOWS_TEST_FILES", WINDOWS_TEST_FILES.to_vec()),
+        ] {
+            for (path, reason) in &rows {
+                assert!(!reason.trim().is_empty(), "{name}: {path} has no reason");
+            }
+            let mut paths: Vec<&str> = rows.iter().map(|r| r.0).collect();
+            paths.sort_unstable();
+            let before = paths.len();
+            paths.dedup();
+            assert_eq!(paths.len(), before, "{name} lists a file twice");
+        }
+        for list in [SEAM_FILES, WINDOWS_SEAM_FILES] {
+            let mut sorted = list.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), list.len(), "a seam file is listed twice");
+        }
+        // The counts that the moving tasks explained, against the plan's ledger: fsutil.rs 1,
+        // wc/files.rs 3, layout.rs 9, client.rs 1, site/addr.rs 1 and socket.rs 1. No task changed
+        // one; a change needs its own explanation.
+        let counts: Vec<(&str, usize)> = UNIT_TEST_USES.iter().map(|r| (r.0, r.1)).collect();
+        assert_eq!(
+            counts,
+            vec![
+                ("crates/rdy-store/src/fsutil.rs", 1),
+                ("crates/rdy-engine/src/wc/files.rs", 3),
+                ("crates/rdy-daemon/src/layout.rs", 9),
+                ("crates/rdy-daemon/src/client.rs", 1),
+                ("crates/rdy-daemon/src/site/addr.rs", 1),
+                ("crates/rdy-daemon/src/socket.rs", 1),
+            ]
+        );
+        // Every file of the real tree with a Unix or a Windows token has a disposition, and no
+        // list row is stale: the whole scan comes back clean.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert_eq!(seam_problems(&root), Vec::<String>::new());
+        // A seam of one family is not a seam of the other by accident: the Unix-only seam files
+        // hold no Windows token outside the Windows seam list, and the reverse.
+        let (files, _) = rust_files(&root);
+        for (path, text) in &files {
+            let lines: Vec<&str> = text.lines().collect();
+            if !token_lines_of(&lines, WINDOWS_TOKENS).is_empty() {
+                let ok = WINDOWS_SEAM_FILES.contains(&path.as_str())
+                    || WINDOWS_TEST_FILES.iter().any(|r| r.0 == path)
+                    || WINDOWS_UNIT_TEST_USES.iter().any(|r| r.0 == path);
+                assert!(ok, "{path}: a Windows token with no disposition");
+            }
+            if !token_lines(&lines).is_empty() {
+                let ok = SEAM_FILES.contains(&path.as_str())
+                    || UNIT_TEST_USES.iter().any(|r| r.0 == path)
+                    || (is_test_or_bench(path) && lines.first() == Some(&GATE_LINE));
+                assert!(ok, "{path}: a Unix token with no disposition");
+            }
         }
     }
 

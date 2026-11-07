@@ -10,7 +10,6 @@ use super::identity::creation_time;
 use super::pipe::{Listener, bind};
 use rdy_model::Hash;
 use rdy_store::fileid::FileId;
-use rdy_store::layout::STORE_DIR;
 use rdy_store::pio;
 pub use rdy_store::pio::{
     create_private_dir, make_private_dir, make_private_file, open_no_follow, private_file,
@@ -40,18 +39,6 @@ pub fn project_hash(root: &Path) -> Hash {
 /// The pipe of the canonical project root `root`. It is never the short socket.
 pub fn project_endpoint(root: &Path) -> (PathBuf, bool) {
     (records::pipe_name(&project_hash(root)), false)
-}
-
-/// What the project check watches beside `.rdy`, with its identity now: the store's directory and
-/// its lock file, each if it stands. A delete on Windows can stop part way or leave directories
-/// behind, so `.rdy` may stand with no store in it, and a daemon would run on with nothing to
-/// serve. The daemon holds the store's lock, and only its own end changes these two.
-pub fn project_parts(rdy_dir: &Path) -> Vec<(PathBuf, FileId)> {
-    let store = rdy_dir.join(STORE_DIR);
-    [store.join("lock"), store]
-        .into_iter()
-        .filter_map(|path| FileId::lstat(&path).ok().map(|id| (path, id)))
-        .collect()
 }
 
 /// Refuses a project whose canonical path cannot be read: its pipe's name would depend on the

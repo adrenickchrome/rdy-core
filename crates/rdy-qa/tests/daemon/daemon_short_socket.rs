@@ -333,6 +333,29 @@ fn wx25c_deleting_a_project_stops_its_daemon() {
     wait_endpoint_gone(&endpoint);
 }
 
+/// D-6JZ5V: on every platform the project check stops a daemon whose store or its lock file is
+/// gone, though `.rdy` stands. The check is the existing one (`check_project` is what the idle tick
+/// calls), with no timer of its own.
+#[test]
+fn wx25c_a_store_gone_under_a_standing_rdy_dir_stops_the_daemon() {
+    let dir = short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let run = rdy_daemon::start(rdy_daemon::ServeOptions {
+        project: dir.path().to_path_buf(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        detach: false,
+        idle_timeout: None,
+        human_actor: None,
+        site_lan_override: None,
+    })
+    .unwrap();
+    assert!(!run.handle().check_project(), "its store stands");
+    std::fs::remove_dir_all(dir.path().join(".rdy").join("store")).unwrap();
+    assert!(dir.path().join(".rdy").is_dir());
+    assert!(run.handle().check_project());
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+}
+
 /// Final ruling (c): a daemon whose project is deleted exits on its next idle tick (driven
 /// through the test hook, no sleep) and removes the short socket it bound.
 #[test]

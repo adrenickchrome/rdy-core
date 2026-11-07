@@ -621,7 +621,7 @@ fn wx25b_a_pipe_nobody_serves_is_no_daemon() {
 /// A project whose `.rdy` still stands has lost its store under a real daemon, as a delete that
 /// stopped part way leaves it. `.rdy` is the one the daemon bound, and the daemon still ends.
 #[test]
-fn wx25c_a_store_gone_under_a_standing_rdy_dir_stops_the_daemon() {
+fn wx25c_a_store_gone_under_a_standing_rdy_dir_stops_a_spawned_daemon() {
     let base = short_tempdir();
     let project = long_project(base.path());
     let _stop = StopOnDrop(&project);

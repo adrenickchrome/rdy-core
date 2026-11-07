@@ -213,3 +213,17 @@ fn rtc5_schema_and_parser_share_both_closed_forms() {
     assert_eq!(code, "E_BAD_INPUT");
     assert!(message.contains("\"text\" is not allowed"), "{message}");
 }
+
+/// D-ZSRBN: a rule the person already stated is saved on their words; the tool asks first only for
+/// an inferred rule or an unsure scope, and shows wording that goes beyond their words.
+#[test]
+fn wx32_the_tool_doc_saves_a_stated_rule_and_asks_only_for_an_inferred_one() {
+    assert!(RULE_DOC.contains("Save a rule the person already stated, on their words"));
+    assert!(
+        RULE_DOC.contains(
+            "Ask first only for a rule you inferred or when you are unsure of the scope."
+        )
+    );
+    assert!(RULE_DOC.contains("Show the wording first when it goes beyond their words."));
+    assert!(!RULE_DOC.contains("ask the person first"));
+}

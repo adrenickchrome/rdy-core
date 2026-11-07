@@ -165,25 +165,3 @@ fn df3_two_spellings_of_one_project_reach_one_daemon() {
         one_daemon_through(&edge, &data, &edge);
     }
 }
-
-/// On Unix the project check looks at `.rdy` alone (D-A6ZZA): a delete there never stops part way
-/// over a held file, so the store has no check of its own.
-#[test]
-fn wx25c_a_unix_daemon_checks_its_rdy_dir_alone() {
-    let dir = short_tempdir();
-    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    let run = rdy_daemon::start(rdy_daemon::ServeOptions {
-        project: dir.path().to_path_buf(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        detach: false,
-        idle_timeout: None,
-        human_actor: None,
-        site_lan_override: None,
-    })
-    .unwrap();
-    std::fs::remove_dir_all(dir.path().join(".rdy").join("store")).unwrap();
-    assert!(!run.handle().check_project());
-    std::fs::remove_dir_all(dir.path().join(".rdy")).unwrap();
-    assert!(run.handle().check_project());
-    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
-}

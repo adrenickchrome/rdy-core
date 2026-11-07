@@ -25,8 +25,6 @@
 //! - process lifecycle: a new session on spawn, where a started daemon runs (`daemon_start_dir`),
 //!   exit codes, liveness and leaving the caller's session (`detach`). `SIGTERM` by pid is Unix
 //!   only: Windows never ends a process by its pid;
-//! - what the project check watches beside `.rdy` (`project_parts`): nothing on Unix, and the store
-//!   on Windows;
 //! - what a stop's wait knows of an old daemon ([`Liveness`], `process_liveness`,
 //!   `endpoint_liveness`). The contract for every platform: only a proved end is `Gone`. Access
 //!   denied and an answering endpoint are `Live`, anything else unclear is `Ambiguous`, and a

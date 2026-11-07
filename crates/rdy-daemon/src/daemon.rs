@@ -9,6 +9,7 @@ use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
 use crate::sys;
 use rdy_store::fileid::FileId;
+use rdy_store::layout::STORE_DIR;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -198,8 +199,8 @@ pub enum ExitReason {
     /// A client of the same version and another build arrived with no other connection, or the
     /// last connection closed after one came.
     BuildReplaced,
-    /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy), or on
-    /// Windows its store is (`sys::project_parts`): the daemon serves nothing there and exits
+    /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy), or its
+    /// store is (`project_parts`): the daemon serves nothing there and exits
     /// without writing to its store.
     ProjectGone,
 }
@@ -337,7 +338,7 @@ impl DaemonHandle {
     }
 
     /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` or another of its
-    /// parts (`sys::project_parts`) is gone or replaced, removes this daemon's run files that still
+    /// parts (`project_parts`) is gone or replaced, removes this daemon's run files that still
     /// name it and stops the daemon with `ProjectGone`. True when the project is gone. False before
     /// the bind.
     pub fn check_project(&self) -> bool {
@@ -430,7 +431,7 @@ impl Daemon {
         let _ = self
             .check
             .parts
-            .set(sys::project_parts(&self.check.root.join(".rdy")));
+            .set(project_parts(&self.check.root.join(".rdy")));
         self.listener = Some(listener);
         Ok(())
     }
@@ -672,12 +673,25 @@ struct Conn {
 
 /// The project check (final ruling, D-A6ZZA), shared by every socket connection, the idle tick
 /// and every `DaemonHandle` (the site runs it at each accepted HTTP connection, ls6).
+/// What the project check watches beside `.rdy`, with its identity now: the store's directory and
+/// its lock file, each if it stands. On every platform a delete can stop part way or leave
+/// directories behind (D-6JZ5V), so `.rdy` may stand with no store in it, and a daemon would run
+/// on with nothing to serve. The daemon holds the store's lock, and only its own end changes these
+/// two. It is read once, at the bind; the check adds no timer.
+fn project_parts(rdy_dir: &Path) -> Vec<(PathBuf, FileId)> {
+    let store = rdy_dir.join(STORE_DIR);
+    [store.join("lock"), store]
+        .into_iter()
+        .filter_map(|path| FileId::lstat(&path).ok().map(|id| (path, id)))
+        .collect()
+}
+
 struct ProjectCheck {
     /// The canonical project root.
     root: PathBuf,
     /// The identity of the project's `.rdy` at the bind; unset before it.
     project: OnceLock<ProjectId>,
-    /// What else stands for the project, with its identity at the bind (`sys::project_parts`).
+    /// What else stands for the project, with its identity at the bind (`project_parts`).
     parts: OnceLock<Vec<(PathBuf, FileId)>>,
     reason: Arc<OnceLock<ExitReason>>,
     run: RunDir,

@@ -519,7 +519,10 @@ mod tests {
     /// A pipe that denies every account, this one included: an empty DACL, and no owner given.
     #[allow(unsafe_code)]
     fn pipe_denying_everyone(name: &Path) -> NamedPipeServer {
+        // SAFETY: `ACL` and `SECURITY_DESCRIPTOR` are plain C structs of integers and pointers, for
+        // which all-zero bytes are a valid value; the calls below fill them in.
         let mut acl: ACL = unsafe { std::mem::zeroed() };
+        // SAFETY: as for `acl`.
         let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
         // SAFETY: `acl` and `descriptor` are live, writable and of the sizes given. The descriptor
         // points at `acl`, and both outlive the create call that reads them.

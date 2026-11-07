@@ -10,6 +10,9 @@ pub use child_fixture::*;
 #[cfg(test)]
 mod child_fixture_tests;
 
+// the tests that leave Windows, with their Unix mechanism and Windows counterpart (Task 32)
+pub mod exclusions;
+
 // the test SSH agent's protocol is the same on every platform, only its endpoint differs
 mod agent_wire;
 
@@ -38,7 +41,6 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-// Stays until every export the harness calls exists on Windows. Until then the Windows children
-// build only in an isolated probe.
-#[cfg(not(unix))]
-compile_error!("rdy_qa::platform has no implementation for this platform yet (FW-XP1 Phase 4)");
+// A platform with neither child module has no harness.
+#[cfg(not(any(unix, windows)))]
+compile_error!("rdy_qa::platform has no implementation for this platform (FW-XP1 D-1RXEA)");
