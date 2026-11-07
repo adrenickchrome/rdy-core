@@ -639,6 +639,14 @@ impl Served {
         Served { dir, cfg, env }
     }
 
+    /// Every later command and chat session of the human has `socket` as its SSH agent.
+    pub fn set_caller_agent(&mut self, socket: &Path) {
+        self.env.push((
+            "SSH_AUTH_SOCK".to_string(),
+            socket.to_str().expect("an agent socket's path").to_string(),
+        ));
+    }
+
     /// The user config the served commands read (`$XDG_CONFIG_HOME/rdy/config.yaml`).
     pub fn user_config(&self) -> PathBuf {
         self.cfg.path().join("rdy/config.yaml")

@@ -5,20 +5,25 @@
 //! daemon proxy, the simulated person's form on the local approval page, and the person's own
 //! `rdy answer` and `rdy approve`. The stored effects are read back through `rdy log` and
 //! compared after the generated ids and times, and the route's own evidence fields, are set
-//! aside. Local, elicited, relayed and policy provenance keep their real differences.
+//! aside. Local, elicited, relayed and policy provenance keep their real differences. The wx31a
+//! pins run the same routes with the caller's SSH agent on its native endpoint.
 use rdy_engine::pending::queue::PENDING_ITEMS_MAX;
 use rdy_engine::pending::{CARD_MAX_TOKENS, Pending, PendingQuery};
 use rdy_engine::{DecisionInput, ProposalInfo, Rdy, WriteRequest};
 use rdy_model::assessment::PolicyVerdict;
-use rdy_model::{BlockId, Justification};
+use rdy_model::signature::{Signature, StatementSource, parse_statement};
+use rdy_model::{BlockId, Hash, Justification, LandingRecord, RepoId};
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::{approver, land, parse_test_ops, write, writer};
 use rdy_qa::http::{self, UiForm};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY, answer_open_items};
 use rdy_qa::mcp::{McpClient, McpFailure, PersonAct, Reply, Revision};
+use rdy_qa::platform::SocketAgent;
+use rdy_qa::signing::{QaAgent, TestKey, sign_record};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------- the routes
 
@@ -2952,4 +2957,217 @@ fn mg5_a_write_naming_the_removed_block_refuses_only_the_removal_card() {
     }
     // the other version stays answerable and lands
     p.land_via(Route::Relayed, &other.r#ref);
+}
+
+// ---------------------------------------------------------------- the caller's agent (wx31a)
+
+/// The signing section of `.rdy/local.yaml`: both test keys by fingerprint, and the `sign` mode.
+fn signing_section(sign: &str) -> String {
+    format!(
+        "signing:\n  key: {:?}\n  agent_key: {:?}\n  sign: {sign}\n  allowed_signers: null\n",
+        QaAgent::fingerprint(TestKey::Person),
+        QaAgent::fingerprint(TestKey::Agent),
+    )
+}
+
+/// A project whose person answers through the fake agent `agent`, under the `sign` mode.
+fn signed_project(agent: &SocketAgent, sign: &str) -> (Project, ProposalInfo) {
+    let (mut p, (_, [v1, _])) = Project::new(ready);
+    p.s.set_caller_agent(agent.socket_path());
+    local_config(&p, &signing_section(sign));
+    (p, v1)
+}
+
+/// The stored landing of a log row, the signatures it has, and the project's repo id.
+fn stored_signatures(p: &Project, row: &Value) -> (Hash, LandingRecord, Vec<Signature>, RepoId) {
+    let landing: Hash = row["landing"].as_str().expect("a landing").parse().unwrap();
+    p.seed(|r| {
+        let read = r.read();
+        let reader = read.reader();
+        let signatures = reader
+            .signatures_of(&landing)
+            .unwrap()
+            .iter()
+            .map(|h| reader.signature(h).unwrap())
+            .collect();
+        let record = reader.landing(&landing).unwrap();
+        (landing, record, signatures, read.repo_id().unwrap())
+    })
+}
+
+/// The kind each signature's statement names, sorted.
+fn kinds_of(signatures: &[Signature]) -> Vec<String> {
+    let mut kinds: Vec<String> = signatures
+        .iter()
+        .map(|g| {
+            parse_statement(&g.statement)
+                .expect("a stored statement parses")
+                .kind()
+                .as_str()
+                .to_string()
+        })
+        .collect();
+    kinds.sort();
+    kinds
+}
+
+/// The signatures a route stores for the person's approval, by kind: a relay signs its own act
+/// too, and the local UI asks no agent.
+fn expected_kinds(route: Route) -> Vec<String> {
+    let kinds: &[&str] = match route {
+        Route::Relayed => &["approval", "relay"],
+        Route::Ui => &[],
+        Route::Elicited | Route::CliAnswer | Route::CliApprove => &["approval"],
+    };
+    kinds.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn wx31a_caller_agent_signatures_match_the_existing_statements() {
+    let agent = SocketAgent::start(Arc::new(QaAgent::new())).unwrap();
+    for route in [
+        Route::Relayed,
+        Route::Elicited,
+        Route::CliAnswer,
+        Route::CliApprove,
+    ] {
+        let (p, v1) = signed_project(&agent, "always");
+        let asked = agent.requests();
+        let row = p.land_via(route, &v1.r#ref);
+        assert!(
+            agent.requests() > asked,
+            "{route:?}: the signature went through the caller's agent"
+        );
+        let (landing, record, stored, repo) = stored_signatures(&p, &row);
+        assert_eq!(kinds_of(&stored), expected_kinds(route), "{route:?}");
+        for got in &stored {
+            // the same act, signed in memory by the wrapper the frozen vectors pin: the bytes
+            // that crossed the agent's endpoint are these bytes
+            let parsed = parse_statement(&got.statement).unwrap();
+            let (source, key) = match parsed.kind().as_str() {
+                "approval" => (StatementSource::Approval(&record), TestKey::Person),
+                "relay" => (StatementSource::RelayApproval(&record), TestKey::Agent),
+                other => panic!("{route:?}: a {other} signature"),
+            };
+            let want = sign_record(landing, source, repo, got.signed_by.clone(), key);
+            assert_eq!(
+                String::from_utf8_lossy(&got.statement),
+                String::from_utf8_lossy(&want.statement),
+                "{route:?}"
+            );
+            assert_eq!(
+                got, &want,
+                "{route:?}: the record, signature bytes included"
+            );
+        }
+        // the person's log verifies them, with no agent
+        let verified = p.cli_ok(&["log", "--verify", "--limit", "1"]);
+        let checks = rows_of(&verified)[0]["signatures"].clone();
+        assert_eq!(
+            checks.as_array().map(Vec::len),
+            Some(stored.len()),
+            "{route:?}: {checks:#}"
+        );
+        for check in checks.as_array().unwrap() {
+            assert_eq!(
+                (&check["signed"], &check["statement"], &check["code"]),
+                (&json!("valid"), &json!("match"), &Value::Null),
+                "{route:?}: {check:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wx31a_all_approval_routes_keep_their_provenance() {
+    let agent = SocketAgent::start(Arc::new(QaAgent::new())).unwrap();
+    // a reachable agent changes no route's provenance, and only signs where the route signs
+    let mut commons = Vec::new();
+    for route in ROUTES {
+        let (p, v1) = signed_project(&agent, "auto");
+        let queue = p.mcp_queue();
+        let item = queue["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["ref"] == v1.r#ref.as_str())
+            .unwrap_or_else(|| panic!("{route:?}: {queue:#}"));
+        assert_eq!(
+            item["summary"], TEST_SUMMARY,
+            "{route:?}: the card's summary"
+        );
+        let shown = p.shown(route, &v1.r#ref).expect("shown");
+        let asked = agent.requests();
+        p.answer(route, &shown, "approve").done();
+        if route == Route::Ui {
+            assert_eq!(agent.requests(), asked, "the local UI asks no agent");
+        } else {
+            assert!(agent.requests() > asked, "{route:?} asks the agent");
+        }
+        let row = p.log()[0].clone();
+        assert_eq!(
+            provenance(&row),
+            expected_provenance(route, &v1.r#ref, &shown.card_hash),
+            "{route:?}: {row:#}"
+        );
+        commons.push((route, common(&row)));
+        let (.., stored, _) = stored_signatures(&p, &row);
+        assert_eq!(kinds_of(&stored), expected_kinds(route), "{route:?}");
+    }
+    for (route, c) in &commons[1..] {
+        assert_eq!(
+            c, &commons[0].1,
+            "{route:?} stores what {:?} does",
+            commons[0].0
+        );
+    }
+
+    // signing always: with no agent every route refuses with its own words and lands nothing
+    for route in ROUTES {
+        let (p, (_, [v1, _])) = Project::new(ready);
+        local_config(&p, &signing_section("always"));
+        let before = p.log();
+        let shown = p.shown(route, &v1.r#ref).expect("shown");
+        let (code, reply) = p.answer(route, &shown, "approve").refused();
+        assert_eq!(code, "E_NO_AGENT", "{route:?}: {reply:#}");
+        match route {
+            Route::Ui => {
+                let page = reply["page"].as_str().unwrap();
+                for text in [
+                    "the SSH agent could not sign: the local UI has no agent socket".to_string(),
+                    format!(
+                        "run rdy approve {} in a terminal to sign this approval",
+                        v1.r#ref
+                    ),
+                ] {
+                    assert!(
+                        page.contains(&rdy_render::escape(&text).to_string()),
+                        "{text}: {page}"
+                    );
+                }
+                assert_eq!(reply["status"], 403);
+            }
+            _ => assert_eq!(
+                (&reply["message"], &reply["fix"]),
+                (
+                    &json!("the SSH agent could not sign: SSH_AUTH_SOCK is not set"),
+                    &json!("check SSH_AUTH_SOCK and the configured key, then try again"),
+                ),
+                "{route:?}: {reply:#}"
+            ),
+        }
+        assert_eq!(p.log(), before, "{route:?}: nothing written");
+    }
+
+    // signing always with a reachable agent: the local UI still refuses, and asks no agent
+    let (p, v1) = signed_project(&agent, "always");
+    let before = p.log();
+    let asked = agent.requests();
+    let (code, reply) = p
+        .show_and_answer(Route::Ui, &v1.r#ref, "approve")
+        .1
+        .refused();
+    assert_eq!(code, "E_NO_AGENT", "{reply:#}");
+    assert_eq!(agent.requests(), asked, "the local UI asks no agent");
+    assert_eq!(p.log(), before, "nothing written");
 }

@@ -364,6 +364,20 @@ mod tests {
         }
     }
 
+    /// The first installed Python 3, by the names it has on each platform: `python3`, then
+    /// `python` and `py`. Windows can have a `python3` that only points at a store: it prints an
+    /// error and exits non-zero, so it is no Python.
+    fn python_program() -> Option<&'static str> {
+        ["python3", "python", "py"].into_iter().find(|program| {
+            let version = std::process::Command::new(program)
+                .arg("--version")
+                .output();
+            version.is_ok_and(|out| {
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Python 3")
+            })
+        })
+    }
+
     /// Task 10 fix round 3: a missing python3 is a counted skip, never a silent pass.
     #[test]
     fn sig10_a_missing_python_is_reported_not_passed_silently() {
@@ -395,7 +409,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/signing/sk_vector_sim.py"
         );
-        let Some(out) = run_simulator("python3", path) else {
+        let Some(out) = python_program().and_then(|program| run_simulator(program, path)) else {
             crate::skip::skip(
                 "signing::tests::sig10_the_sk_vector_comes_from_the_standalone_simulator",
                 crate::skip::Why::Prerequisite,

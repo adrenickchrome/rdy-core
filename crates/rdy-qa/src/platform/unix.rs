@@ -1096,9 +1096,6 @@ pub struct SocketAgent {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The largest request packet the test agent reads.
-const SOCKET_AGENT_PACKET_MAX: usize = 262_144;
-
 impl SocketAgent {
     /// Binds a new socket in a fresh directory under [`short_tmp_root`] and serves `signer`.
     pub fn start(signer: Arc<dyn rdy_engine::signing_crypto::SigningAgent>) -> io::Result<Self> {
@@ -1160,22 +1157,6 @@ impl Drop for SocketAgent {
     }
 }
 
-/// Appends an SSH `string`: a big-endian length, then the bytes.
-fn agent_string(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
-    out.extend(bytes);
-}
-
-/// Reads one SSH `string` at `*at` in `body`, every length checked against what remains.
-fn agent_take<'a>(body: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
-    let len_end = at.checked_add(4)?;
-    let len = u32::from_be_bytes(body.get(*at..len_end)?.try_into().ok()?);
-    let end = len_end.checked_add(usize::try_from(len).ok()?)?;
-    let out = body.get(len_end..end)?;
-    *at = end;
-    Some(out)
-}
-
 /// Reads one request on `conn` and builds its reply packet; `None` when no request was read.
 fn agent_reply(
     conn: &mut std::os::unix::net::UnixStream,
@@ -1183,57 +1164,10 @@ fn agent_reply(
 ) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut len = [0u8; 4];
-    if conn.read_exact(&mut len).is_err() {
-        return None;
-    }
-    let Ok(len) = usize::try_from(u32::from_be_bytes(len)) else {
-        return None;
-    };
-    if len == 0 || len > SOCKET_AGENT_PACKET_MAX {
-        return None;
-    }
-    let mut body = vec![0u8; len];
-    if conn.read_exact(&mut body).is_err() {
-        return None;
-    }
-    let failure = vec![5u8];
-    let reply = match body[0] {
-        11 => match signer.identities() {
-            Ok(ids) => {
-                let mut out = vec![12u8];
-                out.extend(u32::try_from(ids.len()).unwrap_or(u32::MAX).to_be_bytes());
-                for id in ids {
-                    agent_string(&mut out, &id.public_key);
-                    agent_string(&mut out, b"");
-                }
-                out
-            }
-            Err(_) => failure,
-        },
-        13 => {
-            let mut at = 1;
-            let key = agent_take(&body, &mut at);
-            let data = agent_take(&body, &mut at);
-            match (key, data) {
-                (Some(key), Some(data)) => match signer.sign(key, data) {
-                    Ok(sig) => {
-                        let mut out = vec![14u8];
-                        agent_string(&mut out, &sig);
-                        out
-                    }
-                    Err(_) => failure,
-                },
-                _ => failure,
-            }
-        }
-        _ => failure,
-    };
-    let mut packet = u32::try_from(reply.len())
-        .unwrap_or(u32::MAX)
-        .to_be_bytes()
-        .to_vec();
-    packet.extend(reply);
-    Some(packet)
+    conn.read_exact(&mut len).ok()?;
+    let mut body = vec![0u8; super::agent_wire::request_len(len)?];
+    conn.read_exact(&mut body).ok()?;
+    Some(super::agent_wire::reply_packet(&body, signer))
 }
 
 /// Test helpers that the release module's tests share: named pipes for readiness, and hang

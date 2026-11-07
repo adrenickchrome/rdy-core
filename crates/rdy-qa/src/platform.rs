@@ -10,6 +10,9 @@ pub use child_fixture::*;
 #[cfg(test)]
 mod child_fixture_tests;
 
+// the test SSH agent's protocol is the same on every platform, only its endpoint differs
+mod agent_wire;
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

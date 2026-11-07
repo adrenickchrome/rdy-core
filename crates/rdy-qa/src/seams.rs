@@ -42,6 +42,7 @@ pub const SEAM_FILES: &[&str] = &[
     "crates/rdy-qa/src/platform/unix.rs",
     "crates/rdy-qa/src/platform/windows.rs",
     "crates/rdy-qa/src/platform/windows_accounts.rs",
+    "crates/rdy-qa/src/platform/windows_agent.rs",
     "crates/rdy-qa/src/platform/windows_fs.rs",
     "crates/rdy-qa/src/platform/windows_process.rs",
     "crates/rdy-qa/src/seams.rs",
