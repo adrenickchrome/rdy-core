@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 65);
+    assert_eq!(OPS.len(), 66);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -119,6 +119,12 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
     assert!(
         err.fix.contains("status") && err.fix.contains("approve"),
         "{err}"
+    );
+    assert!(
+        err.fix
+            .split(", ")
+            .any(|o| o.trim_start_matches("one of: ") == "rule"),
+        "rtc4: the unknown-op fix names rule: {err}"
     );
 }
 

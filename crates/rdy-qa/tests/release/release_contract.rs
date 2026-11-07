@@ -2166,6 +2166,7 @@ fn cli_runtime() -> Value {
     setup_env.push(("HOME".to_string(), setup_text.clone()));
     setup_env.push(("USERPROFILE".to_string(), setup_text));
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
+    cli_rule_probes(&mut seen);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2180,6 +2181,217 @@ fn cli_runtime() -> Value {
         "probes": seen.into_value(),
         "not_probed_commands": not_captured,
     })
+}
+
+/// rtc6: `rdy rule`, all four forms, as an agent relaying a person. A project rule lands, is edited
+/// and is removed; a repeat of a rule is held back with its issues; refusals; under the card policy
+/// the commands stop at the card and the answer form lands the rule; a person's rule goes to the
+/// meta project of a world of its own, so no probe reads a real meta override.
+fn cli_rule_probes(seen: &mut Seen) {
+    use rdy_qa::instructions::World;
+    let w = World::new();
+    let meta = w.project();
+    w.person(meta.path());
+    let env = w.env();
+    let who = ("agent:rlc", "rlc");
+    let words = |session: &'static str| {
+        vec![
+            "--why",
+            "The person asked for it.",
+            "--evidence",
+            "Please keep this rule.",
+            "--relayed-by",
+            "agent:rlc",
+            "--question",
+            "Shall I save this rule?",
+            "--session",
+            session,
+        ]
+    };
+    let run = |seen: &mut Seen, dir: &Path, label: &str, head: &[&str], session: &'static str| {
+        let mut args = head.to_vec();
+        args.extend(words(session));
+        agent_cli_probe(seen, dir, &env, who, label, &args)
+    };
+    let dir = w.project();
+    let added = run(
+        seen,
+        dir.path(),
+        "rule add",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed.",
+        ],
+        "chat-9",
+    );
+    let id = added["rule"]["id"]
+        .as_str()
+        .expect("the rule landed")
+        .to_string();
+    run(
+        seen,
+        dir.path(),
+        "rule edit",
+        &[
+            "rule",
+            "edit",
+            &id,
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed and why.",
+        ],
+        "chat-10",
+    );
+    // a repeat of the same words is held back with its issues: no card exists for it
+    run(
+        seen,
+        dir.path(),
+        "rule add",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Say what you changed and why.",
+        ],
+        "chat-11",
+    );
+    run(
+        seen,
+        dir.path(),
+        "rule remove",
+        &["rule", "remove", &id, "--scope", "project"],
+        "chat-12",
+    );
+    // the refusals: an unknown rule and an answer to no card
+    run(
+        seen,
+        dir.path(),
+        "rule remove",
+        &["rule", "remove", "ai-00000", "--scope", "project"],
+        "chat-13",
+    );
+    agent_cli_probe(
+        seen,
+        dir.path(),
+        &env,
+        who,
+        "rule answer",
+        &[
+            "rule",
+            "answer",
+            "P-23456@1",
+            "approve",
+            "--scope",
+            "project",
+            "--card",
+            &"0".repeat(64),
+            "--evidence",
+            "Yes.",
+            "--relayed-by",
+            "agent:rlc",
+        ],
+    );
+    // a person's rule, in the world's own meta project
+    run(
+        seen,
+        dir.path(),
+        "rule add person",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "person",
+            "--text",
+            "Answer in British English.",
+        ],
+        "chat-14",
+    );
+
+    // the card policy: the commands stop at the card, and the answer form lands the rule
+    let cdir = w.project();
+    {
+        let mut r = rdy_engine::Rdy::open(cdir.path()).expect("open the card project");
+        land_rule_policy(
+            &mut r,
+            json!({"key": "authority-policy", "agent_may_accept": [], "roles": {}, "require": [],
+                "owners": [], "rules_from_chat": "card"}),
+        );
+    }
+    let card = run(
+        seen,
+        cdir.path(),
+        "rule add card",
+        &[
+            "rule",
+            "add",
+            "--scope",
+            "project",
+            "--text",
+            "Keep one idea per change.",
+        ],
+        "chat-15",
+    );
+    assert_eq!(card["state"], "card", "{card}");
+    let answer = |seen: &mut Seen, item: &Value, option: &str, hash: &Value| {
+        agent_cli_probe(
+            seen,
+            cdir.path(),
+            &env,
+            who,
+            "rule answer",
+            &[
+                "rule",
+                "answer",
+                item.as_str().expect("a ref"),
+                option,
+                "--scope",
+                "project",
+                "--card",
+                hash.as_str().expect("a hash"),
+                "--evidence",
+                "Yes, keep it.",
+                "--relayed-by",
+                "agent:rlc",
+                "--question",
+                "Shall I land this rule?",
+            ],
+        )
+    };
+    let landed = answer(seen, &card["ref"], "approve", &card["card_hash"]);
+    let id = landed["rule"]["id"]
+        .as_str()
+        .expect("the approval landed")
+        .to_string();
+    // an edit stops at the card, with the confirm card that rests beside it
+    let edit = run(
+        seen,
+        cdir.path(),
+        "rule edit card",
+        &[
+            "rule",
+            "edit",
+            &id,
+            "--scope",
+            "project",
+            "--text",
+            "Keep one idea in each change.",
+        ],
+        "chat-16",
+    );
+    assert_eq!(edit["state"], "card", "{edit}");
+    let confirm = edit["cards"][0].clone();
+    let answered = answer(seen, &confirm["ref"], "confirm", &confirm["card_hash"]);
+    assert_eq!(answered["state"], "answered", "{answered}");
+    let next = answered["remaining_cards"][0].clone();
+    let landed = answer(seen, &next["ref"], "approve", &next["card_hash"]);
+    assert_eq!(landed["rule"]["text"], "Keep one idea in each change.");
 }
 
 /// The id of the advised semantic tension in a `tensions` reply.
@@ -2922,8 +3134,231 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"load": ["project:d-ZZZZZ"]}),
     );
     drop(ins);
+    rule_probes(seen);
     elicitation_probes(seen);
     let _ = (doc, a);
+}
+
+/// Lands in the closed store `r` a doc with the authority policy `fields` and the decision that
+/// adopts it.
+fn land_rule_policy(r: &mut rdy_engine::Rdy, fields: Value) {
+    use rdy_engine::WriteRequest;
+    use rdy_model::Justification;
+    use rdy_qa::fixtures::{land, parse_test_ops, write, writer};
+    let w = write(
+        r,
+        "pol",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "decision", "id": "$dec", "parent": "$d", "fields": {"statement": "Adopt the policy", "status": "proposed", "needs_content": false}}
+        ]),
+    )
+    .expect("write the rules");
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: "pol".into(),
+            ops: parse_test_ops(json!([
+                {"op": "create", "type": "authority_policy", "id": "$p", "parent": w.created["$d"], "fields": fields}
+            ]))
+            .expect("the policy ops"),
+            justification: Some(Justification::Implements(vec![
+                BlockId::parse(&w.created["$dec"]).expect("a decision id"),
+            ])),
+            message: String::new(),
+        },
+    )
+    .expect("write the policy");
+    land(r, "pol").expect("land the policy");
+}
+
+/// rtc5: `rdy_rule`, both input forms. A project rule lands, is edited and is removed, and a
+/// repeat of a rule is held back with its issues; under the card policy the call stops at a card
+/// and the answer form lands it; a person's rule goes to the meta project of a world of its own,
+/// so no probe reads a real meta override.
+fn rule_probes(seen: &mut Seen) {
+    use rdy_qa::instructions::World;
+    let session = json!({"actor": "agent:rl", "run": "rl", "role": "writer"});
+    let words = |extra: Value| {
+        let mut v = json!({
+            "why": "The person asked for it.",
+            "evidence": "Please keep this rule.",
+            "question": "Shall I save this rule?",
+            "session_ref": "chat-9"
+        });
+        for (k, x) in extra.as_object().expect("an object") {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let (dir, r) = project();
+    drop(r);
+    let mut c = isolated_mcp(dir.path());
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", session.clone());
+    let added = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        words(json!({"scope": "project", "op": "add", "text": "Say what you changed."})),
+    ));
+    let id = added["rule"]["id"].clone();
+    assert!(id.is_string(), "the rule landed: {added}");
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule edit",
+        words(json!({"scope": "project", "op": "edit", "id": id,
+            "text": "Say what you changed and why.", "session_ref": "chat-10"})),
+    );
+    // a repeat of the same words is held back with its issues: no card exists for it
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        words(
+            json!({"scope": "project", "op": "add", "text": "Say what you changed and why.",
+            "session_ref": "chat-11"}),
+        ),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule remove",
+        words(json!({"scope": "project", "op": "remove", "id": id, "session_ref": "chat-12"})),
+    );
+    // the refusals: a missing key, an unknown rule and an answer to no card
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add",
+        json!({"scope": "project", "op": "add"}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule remove",
+        words(
+            json!({"scope": "project", "op": "remove", "id": "ai-00000", "session_ref": "chat-13"}),
+        ),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule answer",
+        json!({"scope": "project", "answer": {"ref": "P-ZZZZZ@1", "option": "approve",
+            "card_hash": "0".repeat(64), "evidence": "Yes."}}),
+    );
+    drop(c);
+    // a reader writes nothing
+    let mut rdr = isolated_mcp(dir.path());
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:rlr", "run": "rlr", "role": "reader"}),
+    );
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_rule",
+        "rdy_rule add",
+        words(json!({"scope": "project", "op": "add", "text": "A reader's rule."})),
+    );
+    drop(rdr);
+
+    // the card policy: the call stops at the card, and the answer form lands it
+    let (cdir, mut r) = project();
+    land_rule_policy(
+        &mut r,
+        json!({"key": "authority-policy", "agent_may_accept": [], "roles": {}, "require": [],
+            "owners": [], "rules_from_chat": "card"}),
+    );
+    drop(r);
+    let mut c = isolated_mcp(cdir.path());
+    mcp_probe(seen, &mut c, "rdy_session", "rdy_session", session);
+    let card = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule card",
+        words(json!({"scope": "project", "op": "add", "text": "Keep one idea per change."})),
+    ));
+    assert_eq!(card["state"], "card", "{card}");
+    // the person's answers, relayed: an approval lands the rule
+    fn answer(
+        seen: &mut Seen,
+        c: &mut rdy_qa::mcp::McpClient,
+        item: &Value,
+        option: &str,
+        hash: &Value,
+    ) -> Value {
+        ok_of(&mcp_probe(
+            seen,
+            c,
+            "rdy_rule",
+            "rdy_rule answer",
+            json!({"scope": "project", "answer": {"ref": item, "option": option,
+                "card_hash": hash, "evidence": "Yes, keep it.",
+                "question": "Shall I land this rule?"}}),
+        ))
+    }
+    let landed = answer(seen, &mut c, &card["ref"], "approve", &card["card_hash"]);
+    let id = landed["rule"]["id"].clone();
+    assert!(id.is_string(), "the approval landed the rule: {landed}");
+    // an edit stops at the card, with the confirm card that rests beside it
+    let edit = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule card",
+        words(json!({"scope": "project", "op": "edit", "id": id,
+            "text": "Keep one idea in each change.", "session_ref": "chat-14"})),
+    ));
+    assert_eq!(edit["state"], "card", "{edit}");
+    let confirm = edit["cards"][0].clone();
+    assert!(confirm["card_hash"].is_string(), "a confirm card: {edit}");
+    let answered = answer(
+        seen,
+        &mut c,
+        &confirm["ref"],
+        "confirm",
+        &confirm["card_hash"],
+    );
+    assert_eq!(answered["state"], "answered", "{answered}");
+    let next = answered["remaining_cards"][0].clone();
+    let landed = answer(seen, &mut c, &next["ref"], "approve", &next["card_hash"]);
+    assert_eq!(landed["rule"]["text"], "Keep one idea in each change.");
+    drop(c);
+
+    // a person's rule, in a world with a meta project of its own
+    let w = World::new();
+    let meta = w.project();
+    w.person(meta.path());
+    let src = w.project();
+    let mut c = w.mcp(src.path());
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:rlp", "run": "rlp", "role": "writer"}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_rule",
+        "rdy_rule add person",
+        words(json!({"scope": "person", "op": "add", "text": "Answer in British English."})),
+    );
+    drop(c);
 }
 
 /// ui10: the elicit input, its unavailable refusal, and the protocol envelopes and outcomes of a
@@ -3526,6 +3961,40 @@ fn packs_row() -> Value {
             .to_string()
     };
     let pack_keys: Vec<String> = pack_json.as_object().unwrap().keys().cloned().collect();
+    // rtc1 (D-ZSRBN): the policy field `rules_from_chat`: absent reads land, both values, and the
+    // two refusals of a value outside the field
+    let policy_probe = |value: Option<rdy_model::FieldValue>| -> Value {
+        let mut block = rdy_model::Block {
+            id: BlockId::parse("ap-APQ01").expect("a policy id"),
+            block_type: rdy_schema::policy::POLICY_TYPE.to_string(),
+            parent: Some(BlockId::parse("d-D0C11").expect("a doc id")),
+            order: "V".to_string(),
+            fields: rdy_schema::policy::template_fields(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            read_identity: None,
+        };
+        if let Some(v) = value {
+            block.fields.insert("rules_from_chat".to_string(), v);
+        }
+        let mut doc = block.clone();
+        doc.id = BlockId::parse("d-D0C11").expect("a doc id");
+        doc.block_type = "doc".to_string();
+        doc.parent = None;
+        doc.fields = [("name", "plan"), ("title", "Plan"), ("doc_type", "page")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), rdy_model::FieldValue::Str(v.to_string())))
+            .collect();
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &block, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        let read = rdy_schema::policy::policy_fields(&std_pack, &block)
+            .map(|f| f.rules_from_chat.as_str());
+        json!({"issues": issues, "reads": read})
+    };
+    let text = |s: &str| Some(rdy_model::FieldValue::Str(s.to_string()));
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -3559,6 +4028,11 @@ fn packs_row() -> Value {
             "duplicate_pack_name": duplicate,
             "coverage_level_too_low": level_refusal(0),
             "coverage_level_too_high": level_refusal(100_001),
+            "policy_rules_from_chat_default": policy_probe(None),
+            "policy_rules_from_chat_land": policy_probe(text("land")),
+            "policy_rules_from_chat_card": policy_probe(text("card")),
+            "policy_rules_from_chat_bad_value": policy_probe(text("later")),
+            "policy_rules_from_chat_bad_kind": policy_probe(Some(rdy_model::FieldValue::Int(3))),
         },
     })
 }
@@ -4413,11 +4887,11 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
         .collect();
     // the earlier commands, in order, and the new one
     // (mh7 added `compact` after them: its own pin is `mh7_new_surfaces_preserve_the_release_contract`;
-    // ain5 added `instructions` and `setup`: their pin is `ok14_cli_contract_from_clap_is_complete`)
+    // ain5 added `instructions` and `setup`, and rtc6 added `rule`: their pin is `ok14_cli_contract_from_clap_is_complete`)
     let earlier: Vec<&str> = top
         .iter()
         .copied()
-        .filter(|n| !["review", "compact", "instructions", "setup"].contains(n))
+        .filter(|n| !["review", "compact", "instructions", "setup", "rule"].contains(n))
         .collect();
     assert_eq!(earlier, COMMANDS_BEFORE_CK9);
     let review = tree["subcommands"]
@@ -5024,6 +5498,25 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/review request/stdout/requests[]/case/code",
     "cli/review run/stdout/case/code",
     "cli/review run/stdout/requests[]/case/code",
+    "cli/rule add card/stdout/cards",
+    "cli/rule add person/stdout/landing/consequences",
+    "cli/rule add person/stdout/landing/signatures",
+    "cli/rule add person/stdout/landing/warnings",
+    "cli/rule add/stdout/landing?/consequences",
+    "cli/rule add/stdout/landing?/signatures",
+    "cli/rule add/stdout/landing?/warnings",
+    "cli/rule answer/stdout/landing?/consequences",
+    "cli/rule answer/stdout/landing?/signatures",
+    "cli/rule answer/stdout/landing?/warnings",
+    "cli/rule answer/stdout/remaining_cards?[]/card/members",
+    "cli/rule edit card/stdout/card/members",
+    "cli/rule edit card/stdout/cards[]/card/members",
+    "cli/rule edit/stdout/landing/consequences",
+    "cli/rule edit/stdout/landing/signatures",
+    "cli/rule edit/stdout/landing/warnings",
+    "cli/rule remove/stdout/landing/consequences",
+    "cli/rule remove/stdout/landing/signatures",
+    "cli/rule remove/stdout/landing/warnings",
     "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
@@ -5125,6 +5618,26 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_revoke/ok/on_change/resolved",
     "mcp/rdy_revoke/ok/on_change/tensions",
     "mcp/rdy_revoke/ok/suggestions",
+    "mcp/rdy_rule add person/ok/landing/consequences",
+    "mcp/rdy_rule add person/ok/landing/signatures",
+    "mcp/rdy_rule add person/ok/landing/warnings",
+    "mcp/rdy_rule add/ok/landing?/consequences",
+    "mcp/rdy_rule add/ok/landing?/signatures",
+    "mcp/rdy_rule add/ok/landing?/warnings",
+    "mcp/rdy_rule add/refused/issues",
+    "mcp/rdy_rule answer/ok/landing?/consequences",
+    "mcp/rdy_rule answer/ok/landing?/signatures",
+    "mcp/rdy_rule answer/ok/landing?/warnings",
+    "mcp/rdy_rule answer/ok/remaining_cards?[]/card/members",
+    "mcp/rdy_rule answer/refused/issues",
+    "mcp/rdy_rule card/ok/cards[]/card/members",
+    "mcp/rdy_rule edit/ok/landing/consequences",
+    "mcp/rdy_rule edit/ok/landing/signatures",
+    "mcp/rdy_rule edit/ok/landing/warnings",
+    "mcp/rdy_rule remove/ok/landing/consequences",
+    "mcp/rdy_rule remove/ok/landing/signatures",
+    "mcp/rdy_rule remove/ok/landing/warnings",
+    "mcp/rdy_rule remove/refused/issues",
     "mcp/rdy_schema/ok/checks?/agent[]/stages",
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_schema/ok/fields?/planned/values",
@@ -5353,14 +5866,16 @@ fn ok14_probe_shapes_merge_every_array_element() {
 fn mh7_new_surfaces_preserve_the_release_contract() {
     let fixture = read_fixture();
     let mcp = &fixture["mcp"];
-    // 57 tools before; one more (and ain4's rdy_instructions), and the earlier ones stay
+    // 57 tools before; one more (and ain4's rdy_instructions and rtc5's rdy_rule), and the earlier ones stay
     let names: Vec<&str> = mcp["tool_names"]
         .as_array()
         .unwrap()
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 59);
+    // rtc5 adds `rdy_rule`
+    assert_eq!(names.len(), 60);
+    assert!(names.contains(&"rdy_rule"));
     assert!(names.contains(&"rdy_compact"));
     for kept in [
         "rdy_upgrade",
@@ -5410,8 +5925,8 @@ fn mh7_new_surfaces_preserve_the_release_contract() {
         .collect();
     assert_eq!(
         top.len(),
-        COMMANDS_BEFORE_CK9.len() + 4,
-        "review, compact, and ain5's instructions and setup"
+        COMMANDS_BEFORE_CK9.len() + 5,
+        "review, compact, ain5's instructions and setup, and rtc6's rule"
     );
     for kept in COMMANDS_BEFORE_CK9 {
         assert!(top.contains(&kept), "{kept}");
@@ -5923,3 +6438,652 @@ const PINNED_SECTIONS: [(&str, &str); 6] = [
         "2d4c1e7028375201fa9569f76ebeef713997a72dde29d93487b3cb203affd78f",
     ),
 ];
+
+/// The SHA-256 of `v`'s compact encoding. Objects have sorted keys, so the bytes are the same on
+/// every run.
+fn digest_of(v: &Value) -> String {
+    Sha256::digest(serde_json::to_vec(v).expect("encode"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// rtc7 (D-ZSRBN): the release contract holds every stop of `rdy_rule`. A guard: Tasks 1, 5 and 6
+/// captured the rows, and this pins them together. The input has two closed forms and one tool
+/// list; the policy field has two values; the command line has four commands with every flag;
+/// and the success, the card, the not-ready stop and the refusals each hold a populated reply, so
+/// no stop is pinned by an empty array alone.
+#[test]
+fn rtc7_release_contract_covers_every_rule_stop() {
+    let fixture = read_fixture();
+    let mcp = &fixture["mcp"];
+
+    // the tool list and the input: eleven keys, one closed object, `scope` alone required
+    let names = mcp["tool_names"].as_array().expect("names");
+    assert_eq!(names.len(), 60);
+    assert_eq!(names.iter().filter(|n| *n == "rdy_rule").count(), 1);
+    let schema = &mcp["tools"]["rdy_rule"]["input_schema"];
+    assert_eq!(schema["additionalProperties"], json!(false));
+    assert_eq!(schema["required"], json!(["scope"]));
+    assert_eq!(
+        shape_keys(&schema["properties"]),
+        [
+            "answer",
+            "applies_to",
+            "evidence",
+            "id",
+            "op",
+            "question",
+            "ruleset",
+            "scope",
+            "session_ref",
+            "text",
+            "why"
+        ]
+    );
+    let answer = &schema["$defs"]["RuleAnswerArgs"];
+    assert_eq!(answer["additionalProperties"], json!(false));
+    assert_eq!(
+        answer["required"],
+        json!(["card_hash", "evidence", "option", "ref"])
+    );
+    assert_eq!(
+        shape_keys(&answer["properties"]),
+        ["card_hash", "evidence", "option", "question", "ref"]
+    );
+    assert_eq!(answer["properties"]["card_hash"]["minLength"], json!(64));
+    assert_eq!(answer["properties"]["card_hash"]["maxLength"], json!(64));
+
+    // success: add, edit and remove carry the rule, the decision and a landing
+    let results = &mcp["result_fields"];
+    for label in [
+        "rdy_rule add",
+        "rdy_rule add person",
+        "rdy_rule edit",
+        "rdy_rule remove",
+    ] {
+        let ok = &results[label]["ok"];
+        assert_eq!(
+            shape_keys(&ok["rule"]),
+            ["id", "retired", "ruleset", "text"],
+            "{label}"
+        );
+        assert_eq!(shape_keys(&ok["project"]), ["name", "repo_id"], "{label}");
+        for key in ["decision", "scope"] {
+            assert!(ok[key].is_string(), "{label} lacks {key}");
+        }
+        let landing = if ok["landing"].is_object() {
+            &ok["landing"]
+        } else {
+            &ok["landing?"]
+        };
+        assert!(landing["landing"].is_string(), "{label}: {ok}");
+        assert_eq!(landing["relayed_by"]["actor"], "string", "{label}");
+    }
+
+    // the not-ready stop: a ref and issues that hold a row, with the fields of a row
+    let stop = &results["rdy_rule add"]["ok"];
+    assert!(stop["ref?"].is_string(), "{stop}");
+    assert!(stop["view?"].is_string(), "{stop}");
+    assert!(stop["state?"].is_string(), "{stop}");
+    assert_eq!(
+        shape_keys(&stop["issues?"][0]),
+        ["block", "code", "fix", "message", "severity"],
+        "a populated issue row"
+    );
+
+    // the card stop: the card, its hash, and the attached cards in a row of their own
+    let card = &results["rdy_rule card"]["ok"];
+    for key in ["card_hash", "proposal_ref", "ref", "state", "view"] {
+        assert!(card[key].is_string(), "{key} in {card}");
+    }
+    assert!(card["card"]["card_hash"].is_string());
+    assert!(
+        card["card"]["options"][0]["id"].is_string(),
+        "a card with options"
+    );
+    assert_eq!(
+        shape_keys(&card["cards"][0]),
+        ["card", "card_hash", "ref"],
+        "an attached card"
+    );
+    assert!(card["cards"][0]["card"]["options"][0]["id"].is_string());
+    // a rule card carries no card-words warning, so its reply has no warnings member
+    assert!(card.get("warnings").is_none(), "{card}");
+
+    // the answer: a landing or the remaining cards, and its answer record
+    let answered = &results["rdy_rule answer"]["ok"];
+    assert_eq!(
+        shape_keys(&answered["answer?"]),
+        [
+            "act",
+            "answer",
+            "assurance",
+            "label",
+            "landing",
+            "next",
+            "option",
+            "ref",
+            "relayed_by"
+        ]
+    );
+    assert_eq!(
+        shape_keys(&answered["remaining_cards?"][0]),
+        ["card", "card_hash", "ref"]
+    );
+    assert!(answered["landing?"]["landing"].is_string());
+
+    // the refusals: each probed tool names its codes, and the envelope has its four members
+    for (label, code) in [
+        ("rdy_rule add", "E_BAD_INPUT"),
+        ("rdy_rule add", "E_PERMISSION"),
+        ("rdy_rule answer", "E_BAD_INPUT"),
+        ("rdy_rule remove", "E_NOT_FOUND"),
+    ] {
+        let codes = results[label]["refusal_codes"].as_array().expect("codes");
+        assert!(codes.iter().any(|c| c == code), "{label}: {code}");
+        assert_eq!(
+            shape_keys(&results[label]["refused"]),
+            ["code", "fix", "issues", "message"],
+            "{label}"
+        );
+    }
+
+    // the policy: an optional enum field with the two values, and a probe for each reading
+    let policy = &fixture["schema_packs"]["rdy_standard"]["block_types"]["authority_policy"]["fields"]
+        ["rules_from_chat"];
+    assert_eq!(
+        policy,
+        &json!({"kind": "enum", "required": false, "values": ["land", "card"]})
+    );
+    let validation = &fixture["schema_packs"]["validation"];
+    for probe in [
+        "policy_rules_from_chat_default",
+        "policy_rules_from_chat_land",
+        "policy_rules_from_chat_card",
+        "policy_rules_from_chat_bad_kind",
+        "policy_rules_from_chat_bad_value",
+    ] {
+        assert!(!validation[probe].is_null(), "{probe}");
+    }
+
+    // the command line: four commands, in this order, with every flag and positional
+    let tree = &fixture["cli"]["tree"]["subcommands"];
+    let rule = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "rule")
+        .expect("the rule command");
+    assert_eq!(rule["subcommand_required"], json!(true));
+    let commands: Vec<&str> = rule["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(commands, ["add", "edit", "remove", "answer"]);
+    let words = ["why", "evidence", "relayed_by", "question", "session_ref"];
+    let content = ["scope", "text", "ruleset", "applies_to"];
+    let flags = |name: &str| -> Vec<String> {
+        let c = rule["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        let mut got = own_args(c);
+        got.sort();
+        got
+    };
+    let sorted = |mut v: Vec<&str>| -> Vec<String> {
+        v.sort();
+        v.into_iter().map(String::from).collect()
+    };
+    assert_eq!(flags("add"), sorted([&content[..], &words[..]].concat()));
+    assert_eq!(
+        flags("edit"),
+        sorted([&["id"][..], &content[..], &words[..]].concat())
+    );
+    assert_eq!(
+        flags("remove"),
+        sorted(vec![
+            "id",
+            "scope",
+            "why",
+            "evidence",
+            "relayed_by",
+            "question",
+            "session_ref"
+        ])
+    );
+    assert_eq!(
+        flags("answer"),
+        sorted(vec![
+            "ref",
+            "option",
+            "scope",
+            "card",
+            "evidence",
+            "relayed_by",
+            "question"
+        ])
+    );
+    // the commands that need an agent's words require them, and the rest are optional
+    for command in rule["subcommands"].as_array().unwrap() {
+        for arg in command["args"].as_array().unwrap() {
+            let id = arg["id"].as_str().unwrap();
+            if matches!(id, "evidence" | "relayed_by" | "scope") {
+                assert_eq!(arg["required"], json!(true), "{} {id}", command["name"]);
+            }
+            if matches!(id, "question" | "session_ref" | "ruleset" | "applies_to") {
+                assert_ne!(arg["required"], json!(true), "{} {id}", command["name"]);
+            }
+        }
+    }
+
+    // the command line's replies, run by the release binary: each stop has a populated probe
+    let probes = &fixture["cli"]["runtime"]["probes"];
+    for label in [
+        "rule add",
+        "rule add card",
+        "rule add person",
+        "rule edit",
+        "rule edit card",
+        "rule remove",
+        "rule answer",
+    ] {
+        assert!(probes[label]["stdout"].is_object(), "{label}");
+    }
+    assert_eq!(probes["rule answer"]["exits"], json!([0, 1]));
+    assert_eq!(probes["rule remove"]["exits"], json!([0, 1]));
+    assert!(
+        probes["rule answer"]["stderr"]["code"].is_string(),
+        "an answer that refuses names its code"
+    );
+    assert_eq!(
+        shape_keys(&probes["rule add"]["stdout"]["issues?"][0]),
+        ["block", "code", "fix", "message", "severity"]
+    );
+    assert!(probes["rule add card"]["stdout"]["card"]["options"][0]["id"].is_string());
+    assert!(
+        probes["rule edit card"]["stdout"]["cards"][0]["card"]["options"][0]["id"].is_string(),
+        "the edit's confirm card"
+    );
+    assert!(probes["rule answer"]["stdout"]["remaining_cards?"][0]["ref"].is_string());
+
+    // the probes run again give the same shapes
+    let live = rows();
+    assert_eq!(
+        live["mcp"]["result_fields"],
+        fixture["mcp"]["result_fields"]
+    );
+    assert_eq!(
+        live["cli"]["runtime"]["probes"],
+        fixture["cli"]["runtime"]["probes"]
+    );
+}
+
+/// rtc7 (D-ZSRBN): a guard. The packaged tools keep the card hash for every ordinary text answer.
+/// `rdy_answer` refuses a relayed answer that names no card, with the same words in text and card
+/// kinds, and lands nothing; the card's own hash answers it. Only `rdy_rule`'s own cards take a
+/// text relay.
+#[test]
+fn rtc7_release_surface_keeps_other_answer_hashes() {
+    use rdy_qa::fixtures::write;
+    let (dir, mut r) = project();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$d",
+                "fields": {"name": "plain", "title": "Plain", "doc_type": "page"}}]),
+    )
+    .expect("write the doc");
+    let p = r
+        .propose(
+            &rdy_qa::fixtures::writer(),
+            "work",
+            "Add a doc",
+            Some(rdy_qa::intake::TEST_SUMMARY),
+        )
+        .expect("propose it");
+    drop(r);
+    let mut c = isolated_mcp(dir.path());
+    assert!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:rtc7", "run": "rtc7", "role": "writer"})
+        )
+        .is_ok()
+    );
+    let queue = c.call("rdy_pending", json!({})).ok();
+    let item = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["ref"] == p.r#ref.as_str()))
+        .cloned()
+        .unwrap_or_else(|| panic!("the proposal is pending: {queue}"));
+    let landings_before = c.call("rdy_log", json!({})).ok();
+    for kind in [json!(null), json!("card"), json!("text")] {
+        let mut args = json!({"ref": item["ref"], "option": item["options"][0]["id"],
+            "evidence": "Yes, that is fine.", "question": "Shall I approve it?"});
+        if !kind.is_null() {
+            args["kind"] = kind.clone();
+        }
+        match c.call("rdy_answer", args) {
+            rdy_qa::mcp::Reply::ToolError(e) => {
+                assert_eq!(e["code"], "E_BAD_INPUT", "{kind}: {e}");
+                assert_eq!(
+                    e["message"], "a relayed answer names the card the person was shown",
+                    "{kind}"
+                );
+            }
+            other => panic!("{kind}: a text answer with no card hash was not refused: {other:?}"),
+        }
+    }
+    // the rule tool's answer form needs the hash by its schema, before any call reaches a store
+    match c.call(
+        "rdy_rule",
+        json!({"scope": "project", "answer": {"ref": item["ref"], "option": "approve",
+            "evidence": "Yes."}}),
+    ) {
+        rdy_qa::mcp::Reply::ToolError(e) => assert_eq!(e["code"], "E_BAD_INPUT", "{e}"),
+        rdy_qa::mcp::Reply::RpcError(_) => {}
+        other => panic!("an answer with no card hash was not refused: {other:?}"),
+    }
+    assert_eq!(
+        c.call("rdy_log", json!({})).ok(),
+        landings_before,
+        "nothing landed"
+    );
+    // an ordinary proposal is no rule proposal: the rule tool will not answer it
+    match c.call(
+        "rdy_rule",
+        json!({"scope": "project", "answer": {"ref": item["ref"], "option": "approve",
+            "card_hash": item["card_hash"], "evidence": "Yes."}}),
+    ) {
+        rdy_qa::mcp::Reply::ToolError(e) => assert_eq!(e["code"], "E_BAD_INPUT", "{e}"),
+        other => panic!("another flow's proposal was routed: {other:?}"),
+    }
+    // the card's own hash answers it
+    let done = c.call(
+        "rdy_answer",
+        json!({"ref": item["ref"], "option": item["options"][0]["id"],
+            "card_hash": item["card_hash"], "evidence": "Yes, that is fine.",
+            "question": "Shall I approve it?"}),
+    );
+    assert!(done.is_ok(), "{done:?}");
+}
+
+/// rtc7 (D-GEKKY, D-Y18E1): the guide keeps its source apart from the lines that the build
+/// generates. The committed bundle is a development source: its edition ends in `-dev`, so no
+/// release of this version can name it, and no source row holds a generated line. The delivered
+/// write ruleset ends with the source plus one exact suffix, whose tool list holds `rdy_rule`
+/// beside the other write tools and no other ruleset's tool.
+#[test]
+fn rtc7_release_guide_keeps_source_and_generated_suffix_separate() {
+    let bundle: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("release/agent-guide.json")).expect("the bundle"),
+    )
+    .expect("JSON");
+    let table: Value = serde_json::from_slice(
+        &std::fs::read(workspace_root().join("crates/rdy-engine/kungfu-tools.json"))
+            .expect("the table"),
+    )
+    .expect("JSON");
+    let sidecar = std::fs::read_to_string(workspace_root().join("release/agent-guide.sha256"))
+        .expect("the sidecar");
+
+    // development source: the edition says so and cannot equal the package version, which is
+    // the check that production eligibility makes against the release it ships
+    let edition = bundle["edition"].as_str().expect("an edition");
+    assert!(edition.ends_with("-dev"), "{edition}");
+    assert_ne!(edition, env!("CARGO_PKG_VERSION"));
+    assert!(
+        edition
+            .trim_end_matches("-dev")
+            .split('.')
+            .all(|n| n.parse::<u64>().is_ok()),
+        "{edition}"
+    );
+    // the source holds no generated line and no digest of its own
+    let mut sources = vec![];
+    for set in bundle["rulesets"].as_array().expect("rulesets") {
+        sources.extend(set["rows"].as_array().expect("rows").iter().cloned());
+    }
+    for row in &sources {
+        let text = row["text"].as_str().expect("a text");
+        assert!(
+            !text.contains("pass kungfu:") && !text.contains("kf-") && !text.contains("Tools: "),
+            "{}",
+            row["id"]
+        );
+    }
+    let digest: String =
+        Sha256::digest(std::fs::read(workspace_root().join("release/agent-guide.json")).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+    assert_eq!(
+        sidecar,
+        format!("{digest}\n"),
+        "the sidecar names these bytes"
+    );
+
+    // the write ruleset's tools, from the table, in order
+    let write_tools: Vec<&str> = table
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|row| row["ruleset"] == "rdy:write")
+        .map(|row| row["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        write_tools,
+        [
+            "rdy_accept",
+            "rdy_asset",
+            "rdy_decide",
+            "rdy_intent",
+            "rdy_revoke",
+            "rdy_rule",
+            "rdy_supersede",
+            "rdy_write"
+        ]
+    );
+    // no other ruleset lists the rule tool
+    assert_eq!(
+        table
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["tool"] == "rdy_rule")
+            .count(),
+        1
+    );
+
+    // delivered: the packaged binary's write row is the source and the exact suffix
+    let world = rdy_qa::instructions::World::new();
+    let dir = world.project();
+    let (ok, full) = world.json(dir.path(), &["instructions", "--full"]);
+    assert!(ok, "{full}");
+    let rows = full["instructions"].as_array().expect("rows");
+    let delivered = rows
+        .iter()
+        .find(|r| r["id"] == "rdy:write:body")
+        .expect("the write row");
+    let source = sources
+        .iter()
+        .find(|r| r["id"] == "rdy:write:body")
+        .expect("the write source");
+    let raw = source["text"].as_str().unwrap();
+    let text = delivered["text"].as_str().unwrap();
+    let kf: String = Sha256::digest(
+        bundle["rulesets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "write")
+            .unwrap()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect::<String>()
+            .as_bytes(),
+    )
+    .iter()
+    .take(4)
+    .map(|b| format!("{b:02x}"))
+    .collect();
+    let suffix = format!(
+        "On every call to a tool in this ruleset, pass kungfu: \"kf-{kf}\". Tools: rdy_accept, rdy_asset, rdy_decide, rdy_intent, rdy_revoke, rdy_rule, rdy_supersede, rdy_write.\n"
+    );
+    let joiner = if raw.ends_with('\n') { "" } else { "\n" };
+    assert_eq!(text, format!("{raw}{joiner}{suffix}"));
+    // the generated line is in no other row, and the rule tool is named in one suffix alone
+    let named = rows
+        .iter()
+        .filter(|r| r["text"].as_str().unwrap().contains("rdy_rule, "))
+        .count();
+    assert_eq!(named, 1, "one generated list names rdy_rule");
+
+    // the checker accepts the committed bundle and its sidecar
+    let python = std::process::Command::new("python3")
+        .arg("--version")
+        .output();
+    if !python.is_ok_and(|o| o.status.success()) {
+        skip::skip(
+            &rdy_qa::test_name!("rtc7_release_guide_keeps_source_and_generated_suffix_separate"),
+            Why::Prerequisite,
+            "python3 is not on PATH",
+        );
+        return;
+    }
+    let checked = std::process::Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(workspace_root().join("scripts/release/guide.py"))
+        .arg("check")
+        .arg("--bundle")
+        .arg(workspace_root().join("release/agent-guide.json"))
+        .arg("--sidecar")
+        .arg(workspace_root().join("release/agent-guide.sha256"))
+        .output()
+        .expect("run the checker");
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&checked.stdout).trim(), digest);
+}
+
+/// rtc7 (D-ZSRBN): the contract moves for the rules and for nothing else of this plan. A guard:
+/// the sections that hold the store's encodings, the dump promise, the stream and the signing
+/// contracts keep their bytes, and so does every tool, command and probe except the rule's own.
+/// The digests are of the baseline before the rules, taken from the contract at the plan's base
+/// (the kungfu change moved only `W_KUNGFU` and `mcp.kungfu_counts`, and those are left out of the
+/// error rows and the schema reply).
+#[test]
+fn rtc7_contract_diff_is_limited_to_rules() {
+    let fixture = read_fixture();
+    // the frozen sections
+    for (name, want) in PINNED_SECTIONS {
+        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
+    }
+    for (name, want) in [
+        (
+            "working_copy",
+            "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
+        ),
+        (
+            "config",
+            "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
+        ),
+    ] {
+        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
+    }
+    // the tools: every tool but the rule's, the names but its own, the results but its own
+    // (and `rdy_schema`, which only the kungfu change moved)
+    let mcp = fixture["mcp"].as_object().expect("mcp");
+    let without = |v: &Value, keep: &dyn Fn(&str) -> bool| -> Value {
+        Value::Object(
+            v.as_object()
+                .expect("an object")
+                .iter()
+                .filter(|(k, _)| keep(k))
+                .map(|(k, x)| (k.clone(), x.clone()))
+                .collect::<Map<String, Value>>(),
+        )
+    };
+    assert_eq!(
+        digest_of(&without(&mcp["tools"], &|k| k != "rdy_rule")),
+        "63407687adbe2695ceeaef2447414197f3a1a5ff1a170dc8c6cb9e2a1c4d5fa9"
+    );
+    let names: Vec<&Value> = mcp["tool_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| *n != "rdy_rule")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(names)),
+        "4d8cdbccd36dafb6e37c9bb020e103aa7c3d288d183ae0bcd53afccb59ffdf46"
+    );
+    assert_eq!(
+        digest_of(&without(&mcp["result_fields"], &|k| {
+            !k.starts_with("rdy_rule") && k != "rdy_schema"
+        })),
+        "854e7292a55cd4ab9ed0bda185267e218ce9aecb77e2c27223592cd974a2b565"
+    );
+    for key in [
+        "carried_value_refusals",
+        "ops_not_probed",
+        "refusal_envelope",
+        "result_fields_not_captured",
+    ] {
+        assert!(mcp.contains_key(key), "{key}");
+    }
+    // the error codes: no code but the kungfu one is new, and no row is
+    let errors = &fixture["errors_warnings"];
+    let codes: Map<String, Value> = errors["codes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| *k != "W_KUNGFU")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(
+        digest_of(&Value::Object(codes)),
+        "f614f31ede7a20703bfe3acf7a2e2605f4713a94a2c2f98e50a5d82a355b716e"
+    );
+    let rows: Vec<&Value> = errors["error_rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r[0] != "W_KUNGFU")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(rows)),
+        "2a6eb32dd02c3ff7bbad7fd1832939658b99c819b18a0018ef1022ccacf12ff4"
+    );
+    // the command line: every command but `rule`, every probe but the rule's, and the rest
+    let cli = &fixture["cli"];
+    let others: Vec<&Value> = cli["tree"]["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] != "rule")
+        .collect();
+    assert_eq!(
+        digest_of(&json!(others)),
+        "91020aeffb2e3b0d48b86c76abba05c5348f95be31f69f3ce699abee373668e6"
+    );
+    assert_eq!(
+        digest_of(&without(&cli["runtime"]["probes"], &|k| !k.starts_with("rule "))),
+        "31041518cd31060f84815d85a99fa6193f25b0d807d8d53fd0a1651c842a9c85"
+    );
+    assert_eq!(
+        digest_of(&without(&cli["runtime"], &|k| k != "probes")),
+        "8d518aab09e1206edfb24fd47a7dca339e54af78df76cf6d029e5626435f59be"
+    );
+}

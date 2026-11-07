@@ -39,6 +39,7 @@ mod redact_cmd;
 mod remote_cmd;
 mod render_stream_cmd;
 mod review_cmd;
+mod rule_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod setup_cmd;
@@ -163,6 +164,11 @@ enum Cmd {
     Review {
         #[command(subcommand)]
         cmd: review_cmd::ReviewCmd,
+    },
+    /// Add, edit or remove a rule from the person's words, or answer a card that one of them returned. The rule goes to your own rules (the meta project) or to this project. An agent only relays the person's words (--relayed-by with --evidence). The CLI has no Later. The chat path is rdy_rule.
+    Rule {
+        #[command(subcommand)]
+        cmd: rule_cmd::RuleCmd,
     },
     /// Print what waits for the person: the cards of the "needs you" queue, then the versions that are not ready. The chat path is rdy_pending.
     Pending(intake_cmd::PendingArgs),
@@ -326,6 +332,7 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         Cmd::Resolve(a) => tension_cmd::resolve(env, a),
         Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
         Cmd::Review { cmd } => review_cmd::review(env, cmd),
+        Cmd::Rule { cmd } => rule_cmd::rule(env, cmd, projectless),
         Cmd::Pending(a) => intake_cmd::pending(env, a),
         Cmd::Answer(a) => intake_cmd::answer(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),
@@ -454,6 +461,11 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+        }
+        // a rule outside every project goes to the meta project; a project rule there has no project
+        Cmd::Rule { .. } if cli.project.is_none() && instructions_cmd::discover(&cwd).is_none() => {
+            projectless = true;
+            project
         }
         _ => project,
     };

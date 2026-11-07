@@ -111,6 +111,22 @@ impl Check {
 /// the same request does nothing. A correct value clears the owner's mark and delivers nothing.
 /// A miss counts, always; a failed count changes nothing.
 pub(crate) fn evaluate(st: &McpState, check: &Check) {
+    let Some(session) = st.session.as_ref() else {
+        return;
+    };
+    let key = (session.actor.clone(), session.run.clone());
+    evaluate_for(st.hub.claims(), &key, || st.kungfu_counts.clone(), check);
+}
+
+/// [`evaluate`] for a caller that has no state: the claims registry, the call's `key`, and the
+/// recorder of the project that owns the count, made only when a miss needs it. A server with no
+/// project passes the meta project's recorder; making it opens no store.
+pub(crate) fn evaluate_for(
+    claims: &Registry,
+    key: &Key,
+    recorder: impl FnOnce() -> Option<rdy_engine::kungfu_counts::Recorder>,
+    check: &Check,
+) {
     let Some((owner, bit)) = check.owned else {
         return;
     };
@@ -118,16 +134,11 @@ pub(crate) fn evaluate(st: &McpState, check: &Check) {
     if std::mem::replace(&mut latch.evaluated, true) {
         return;
     }
-    let Some(session) = st.session.as_ref() else {
-        return;
-    };
-    let key = (session.actor.clone(), session.run.clone());
-    let claims = st.hub.claims();
-    let marks = claims.kungfu_marks(&key);
+    let marks = claims.kungfu_marks(key);
     let case = match check.value {
         Kungfu::Correct => {
             if marks.warned & bit != 0 {
-                claims.clear_kungfu_warned(&key, bit);
+                claims.clear_kungfu_warned(key, bit);
             }
             return;
         }
@@ -135,7 +146,7 @@ pub(crate) fn evaluate(st: &McpState, check: &Check) {
         Kungfu::Missing if marks.received & bit != 0 => Case::Lost,
         Kungfu::Missing => Case::NotLoaded,
     };
-    if let Some(recorder) = &st.kungfu_counts {
+    if let Some(recorder) = recorder() {
         recorder.record(&key.0, key.1.as_deref(), owner.name, case);
     }
     latch.advice = if owner.name == BOOTSTRAP && !marks.read {
@@ -144,7 +155,7 @@ pub(crate) fn evaluate(st: &McpState, check: &Check) {
         None
     } else {
         Some(Advice::Warn {
-            key,
+            key: key.clone(),
             owner,
             bit,
             case,

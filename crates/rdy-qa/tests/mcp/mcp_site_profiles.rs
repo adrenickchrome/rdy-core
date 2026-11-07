@@ -34,8 +34,8 @@ const CHECK_SCOPE_HELP: &str =
     "canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n.";
 /// The number of tools the server lists, which the profile task left as it found it: 47. cp11
 /// adds `rdy_plan`, and the count is 48. rf12 adds `rdy_trace`, and the count is 49. ok11 adds
-/// `rdy_upgrade`, and the count is 50. ap5 adds `rdy_dispute`, and the count is 51. ap9 adds `rdy_policy`, and the count is 52. ap11 adds `rdy_land`, and the count is 53. dq7 adds `rdy_diff` and `rdy_query`, and the count is 55. ck8 adds rdy_review, and the count is 56. ui6 adds rdy_import, and the count is 57. mh7 adds rdy_compact, and the count is 58. ain4 adds rdy_instructions, and the count is 59.
-const TOOL_COUNT: usize = 59;
+/// `rdy_upgrade`, and the count is 50. ap5 adds `rdy_dispute`, and the count is 51. ap9 adds `rdy_policy`, and the count is 52. ap11 adds `rdy_land`, and the count is 53. dq7 adds `rdy_diff` and `rdy_query`, and the count is 55. ck8 adds rdy_review, and the count is 56. ui6 adds rdy_import, and the count is 57. mh7 adds rdy_compact, and the count is 58. ain4 adds rdy_instructions, and the count is 59. rtc5 adds rdy_rule, and the count is 60.
+const TOOL_COUNT: usize = 60;
 
 /// A running project: the host, the proxy environment and what the pins need.
 struct World {

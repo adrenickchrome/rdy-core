@@ -358,7 +358,7 @@ fn in_process() -> InProcess {
     }
 }
 
-// ------------------------------------------------------------------- the 59-tool matrix
+// ------------------------------------------------------------------- the 60-tool matrix
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
@@ -700,6 +700,13 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
 
     x.step("rdy_view", json!({"op": "create", "name": "fork-a"}));
     x.step("rdy_alternatives", json!({"op": "list"}));
+    // rtc5: a rule to remove that does not exist, so the call changes nothing and is the same
+    // refusal whatever its value
+    x.step(
+        "rdy_rule",
+        json!({"scope": "project", "op": "remove", "id": "ai-00000", "why": "No longer wanted.",
+            "evidence": "Drop it.", "session_ref": "chat-1"}),
+    );
 
     x.step("rdy_dump", json!({"out": s("dump.rdy")}));
     x.step("rdy_stream_check", json!({"file": s("dump.rdy")}));
@@ -753,6 +760,7 @@ const REFUSED: &[(&str, &str)] = &[
     ("rdy_key_retire", "E_BAD_INPUT"),
     ("rdy_key_revoke", "E_BAD_INPUT"),
     ("rdy_review_submit", "E_BAD_INPUT"),
+    ("rdy_rule", "E_NOT_FOUND"),
     ("rdy_stream_check", "E_BAD_RECORD"),
     ("rdy_sign", "E_PERMISSION"),
 ];
@@ -823,7 +831,7 @@ fn kfu4_each_tool_keeps_its_action_for_all_values() {
 
     // the matrix accounts for every router name
     let names: BTreeSet<String> = kungfu::TOOLS.iter().map(|p| p.tool.to_string()).collect();
-    assert_eq!(names.len(), 59);
+    assert_eq!(names.len(), 60);
     assert_eq!(correct.called, names);
 
     same_steps(&correct, &absent, "absent");

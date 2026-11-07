@@ -275,6 +275,15 @@ impl Eligible {
             .transpose()
     }
 
+    /// The items of the batch `batch`, in queue order, each card whole: its approve item, then
+    /// what stands beside it. Empty when the batch has no approve item in the queue.
+    pub(crate) fn batch_items(&self, batch: &str) -> Result<Vec<Item>, RdyError> {
+        self.items()
+            .filter(|i| i.r#ref == batch || i.batch.as_deref() == Some(batch))
+            .map(|i| finish(i.clone(), CARD_MAX_TOKENS))
+            .collect()
+    }
+
     fn items(&self) -> impl Iterator<Item = &Item> {
         self.groups.iter().flat_map(|g| &g.items)
     }
@@ -2994,6 +3003,16 @@ fn exception_kinds(
         kinds.push((ExceptionKind::BlockingTension, blocking.join(", ")));
     }
     kinds
+}
+
+/// Whether the `confirm` item `i` holds one exception, that its decision goes against a decision
+/// exactly as `detail` says: no other kind and no other cause beside it.
+pub(crate) fn only_against(i: &Item, detail: &str) -> bool {
+    let names = ExceptionKind::ALL.map(fact_name);
+    let mut kinds = i.facts.iter().filter(|f| names.contains(&f.name.as_ref()));
+    i.exception == Some(ExceptionKind::Against)
+        && kinds.next().is_some_and(|f| f.value == detail)
+        && kinds.next().is_none()
 }
 
 /// The fact that names an exception kind on its `confirm` card.

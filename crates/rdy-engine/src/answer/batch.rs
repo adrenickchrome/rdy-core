@@ -23,6 +23,9 @@
 //! `Store::put_answer`, and its publish is `Delta::Seq` (O14). Canon never changes but by a
 //! landing.
 //!
+//! A rule's own confirmation ([`super::RuleContext::Text`]) records the person's words and no
+//! card: no option, no label, no options and no hash, with evidence `text`.
+//!
 //! # The exception check (F2)
 //!
 //! An approval is refused with `E_EXCEPTION_OPEN` while an exception of the version has no
@@ -39,7 +42,7 @@
 //! removal digest, so an approval binds each request and the hash of its complete report. A batch
 //! of recommended answers never reaches it (`Rdy::answer_all_recommended` refuses the whole call).
 use super::presented::Presentation;
-use super::{AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer};
+use super::{AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer, RuleContext};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;
 use crate::pending::{ExceptionKind, Item, ItemKind};
@@ -56,7 +59,8 @@ pub(crate) fn act(
     b: Bound,
     note: Option<String>,
 ) -> Result<AnswerStep, RdyError> {
-    let (who, relay, kind) = (&by.who, by.relay.clone(), by.kind);
+    let who = &by.who;
+    let (relay, kind) = (by.relay.clone(), by.kind);
     let mut person = who.provenance();
     let act = match (b.item.kind, b.option.id.as_str()) {
         (_, "later") => {
@@ -92,7 +96,7 @@ pub(crate) fn act(
             ));
         }
     };
-    record(r, person, relay, kind, b, note, act).map(|i| AnswerStep::Done(Box::new(i)))
+    record(r, by, person, b, note, act).map(|i| AnswerStep::Done(Box::new(i)))
 }
 
 /// The chat session of a Later with no relay: the run of the session that elicited it (O9). A
@@ -175,13 +179,15 @@ fn approve(
 /// Writes the `ANSWER` of `act` by `person` in a batch of its own and publishes it.
 fn record(
     r: &mut Rdy,
+    by: &Answerer,
     person: Provenance,
-    relay: Option<Relay>,
-    kind: Option<EvidenceKind>,
     b: Bound,
     note: Option<String>,
     act: AnswerAct,
 ) -> Result<AnswerInfo, RdyError> {
+    let (relay, kind) = (by.relay.clone(), by.kind);
+    // the person's words alone: no card was shown, so nothing claims one
+    let shown = !by.rule.as_ref().is_some_and(RuleContext::no_card);
     // D-AAQ9Z: a deferral answer binds the card's complete hash, local or relayed, so the
     // landing can check it names the card the version has now
     let card_hash = match b.item.kind {
@@ -197,10 +203,10 @@ fn record(
     let a = Answer {
         item: b.item.r#ref.clone(),
         act,
-        option: Some(b.option.id.clone()),
-        label: Some(b.option.label.clone()),
-        options: labels(&b.item),
-        card_hash,
+        option: shown.then(|| b.option.id.clone()),
+        label: shown.then(|| b.option.label.clone()),
+        options: if shown { labels(&b.item) } else { vec![] },
+        card_hash: card_hash.filter(|_| shown),
         targets: vec![],
         person,
         relayed_by: relay.as_ref().map(|r| r.by.clone()),

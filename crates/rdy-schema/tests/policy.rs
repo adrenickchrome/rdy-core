@@ -4,7 +4,7 @@
 use rdy_model::{Block, BlockId, FieldValue};
 use rdy_schema::policy::{
     self, DecisionsRule, JustificationKind, Lifecycle, OwnerEntry, PolicyFields, Require, Rule,
-    When,
+    RulesFromChat, When,
 };
 use rdy_schema::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -153,6 +153,7 @@ fn ap1_every_pack_holds_the_policy_type() {
                 ("owners", (FieldKind::List, false)),
                 ("require", (FieldKind::List, false)),
                 ("roles", (FieldKind::Map, false)),
+                ("rules_from_chat", (FieldKind::Enum, false)),
             ])
         );
         // a doc lists it once, after the publication profile
@@ -480,6 +481,7 @@ fn ap1_a_top_level_field_of_the_wrong_kind_is_reported_once() {
             roles: BTreeMap::new(),
             require: vec![],
             owners: vec![],
+            rules_from_chat: RulesFromChat::Land,
         }
     );
 }
@@ -899,6 +901,7 @@ fn ap1_policy_fields_reads_a_valid_block_and_none_for_an_invalid_one() {
                 owners: vec!["human:nick".into()],
             },
         ],
+        rules_from_chat: RulesFromChat::Land,
     };
     assert_eq!(policy::policy_fields(&pack, &p), Some(want));
 
@@ -933,4 +936,88 @@ fn ap1_policy_fields_reads_a_valid_block_and_none_for_an_invalid_one() {
     let mut other = doc();
     other.fields = policy::template_fields();
     assert_eq!(policy::policy_fields(&pack, &other), None);
+}
+
+#[test]
+fn rtc1_policy_defaults_land_and_parses_card() {
+    let pack = standard();
+    // no policy: the default is land
+    assert_eq!(RulesFromChat::of(None), RulesFromChat::Land);
+    assert_eq!(RulesFromChat::default(), RulesFromChat::Land);
+    // a policy with no field reads land; the template leaves the field out
+    let p = policy_block();
+    assert!(!p.fields.contains_key("rules_from_chat"));
+    assert_eq!(errors(&pack, &p), vec![]);
+    let absent = policy::policy_fields(&pack, &p).expect("valid");
+    assert_eq!(absent.rules_from_chat, RulesFromChat::Land);
+    assert_eq!(RulesFromChat::of(Some(&absent)), RulesFromChat::Land);
+    // both values read as given
+    let mut land = policy_block();
+    set(&mut land, "rules_from_chat", s("land"));
+    assert_eq!(errors(&pack, &land), vec![]);
+    let mut card = policy_block();
+    set(&mut card, "rules_from_chat", s("card"));
+    assert_eq!(errors(&pack, &card), vec![]);
+    let card_fields = policy::policy_fields(&pack, &card).expect("valid");
+    assert_eq!(card_fields.rules_from_chat, RulesFromChat::Card);
+    assert_eq!(RulesFromChat::of(Some(&card_fields)), RulesFromChat::Card);
+    assert_eq!(
+        policy::policy_fields(&pack, &land),
+        Some(PolicyFields {
+            rules_from_chat: RulesFromChat::Land,
+            ..absent.clone()
+        })
+    );
+    // parsed policy equality: only the new field differs between the two
+    assert_eq!(
+        card_fields,
+        PolicyFields {
+            rules_from_chat: RulesFromChat::Card,
+            ..absent
+        }
+    );
+    assert_eq!(RulesFromChat::Land.as_str(), "land");
+    assert_eq!(RulesFromChat::Card.as_str(), "card");
+}
+
+#[test]
+fn rtc1_policy_rejects_typos_kinds_and_bad_values() {
+    let pack = standard();
+    // a wrong kind: generic validation and policy_fields agree
+    for bad in [
+        FieldValue::Int(3),
+        FieldValue::Bool(true),
+        list(&["card"]),
+        FieldValue::Map(BTreeMap::new()),
+    ] {
+        let mut p = policy_block();
+        set(&mut p, "rules_from_chat", bad);
+        let codes: Vec<&str> = errors(&pack, &p).iter().map(|e| e.0).collect();
+        assert_eq!(codes, vec!["E_FIELD_KIND"]);
+        assert_eq!(policy::policy_fields(&pack, &p), None);
+    }
+    // a wrong enum string
+    for bad in ["later", "Card", "", "card "] {
+        let mut p = policy_block();
+        set(&mut p, "rules_from_chat", s(bad));
+        let found = errors(&pack, &p);
+        assert_eq!(found.len(), 1, "{bad:?}: {found:?}");
+        assert_eq!(found[0].0, "E_FIELD_ENUM");
+        assert_eq!(
+            found[0].1,
+            format!("field \"rules_from_chat\" has value {bad:?}")
+        );
+        assert_eq!(policy::policy_fields(&pack, &p), None);
+    }
+    let mut p = policy_block();
+    set(&mut p, "rules_from_chat", s("later"));
+    let issues = validate_block(&pack, &p, Some(&doc()));
+    assert_eq!(issues[0].fix, "use one of: land, card");
+    // a typo of the field is an unknown field and names the real ones
+    let mut p = policy_block();
+    set(&mut p, "rule_from_chat", s("card"));
+    let found = validate_block(&pack, &p, Some(&doc()));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].code, "E_FIELD_UNKNOWN");
+    assert!(found[0].fix.contains("rules_from_chat"), "{}", found[0].fix);
 }

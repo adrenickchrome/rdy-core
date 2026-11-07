@@ -72,6 +72,7 @@ mod mcp_reflects_history;
 mod mcp_repo_id;
 mod mcp_resources;
 mod mcp_reviews;
+mod mcp_rules;
 mod mcp_schema;
 mod mcp_schema_rows;
 mod mcp_search;

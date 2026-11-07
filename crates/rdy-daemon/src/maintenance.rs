@@ -141,7 +141,8 @@ fn apply(
     }
 }
 
-/// `e`, a daemon client's refusal, as an rdy error with the same code, message and fix.
+/// `e`, a daemon client's refusal, as an rdy error with the same code, message and fix, and the
+/// same diagnostic members.
 pub(crate) fn rdy_error(e: ErrorReply) -> RdyError {
     let code = rdy_engine::core_error_code(&e.code)
         .or_else(|| {
@@ -150,7 +151,7 @@ pub(crate) fn rdy_error(e: ErrorReply) -> RdyError {
                 .find(|c| *c == e.code)
         })
         .unwrap_or(E_IO);
-    RdyError::new(code, e.message, e.fix)
+    RdyError::new(code, e.message, e.fix).with_reply_members(&e.extra)
 }
 
 /// The hello this rdy sends to the project's daemon.
