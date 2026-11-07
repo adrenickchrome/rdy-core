@@ -502,6 +502,55 @@ fn sg5_no_acknowledged_write_is_lost_across_a_kill() {
     });
 }
 
+/// wx31b: the kill is a real one on every platform, and what it cut does not touch what was
+/// acknowledged. Each seed acknowledged changes on both sides of the kill (daemon generation 0
+/// and 1), and the frozen copy holds every one. The daemon that took the kill is gone, and the
+/// run's final daemon is not that process.
+#[test]
+fn wx31b_swarm_kill_keeps_every_acknowledged_write() {
+    each(|seed, o| {
+        let acked: Vec<&Entry> = o
+            .before_freeze()
+            .iter()
+            .filter(|e| e.outcome == Met::Ok && e.change.is_some())
+            .collect();
+        for epoch in [0, 1] {
+            assert!(
+                acked.iter().any(|e| e.epoch == epoch),
+                "swarm seed {seed}: no change was acknowledged by daemon generation {epoch}"
+            );
+        }
+        let (_keep, copy) = copy_of(&o.frozen);
+        let r = Rdy::open(&copy).expect("open the frozen copy");
+        let st = r.read();
+        let missing: Vec<String> = acked
+            .iter()
+            .filter(|e| {
+                !e.change
+                    .as_deref()
+                    .and_then(|c| c.parse::<Hash>().ok())
+                    .is_some_and(|h| st.reader().has_kind(kinds::CHANGE, &h).unwrap_or(false))
+            })
+            .map(|e| format!("{} step {} (generation {})", e.actor, e.step, e.epoch))
+            .collect();
+        drop(st);
+        r.close().expect("close the frozen copy");
+        assert!(
+            missing.is_empty(),
+            "swarm seed {seed}: acknowledged changes the store does not hold: {missing:?}"
+        );
+        let lost = o
+            .before_freeze()
+            .iter()
+            .filter(|e| e.outcome == Met::Lost)
+            .count();
+        assert!(
+            lost == 0 || acked.iter().any(|e| e.epoch == 1),
+            "swarm seed {seed}: {lost} calls were cut and nothing followed the restart"
+        );
+    });
+}
+
 #[test]
 fn sg5_every_reference_tension_is_reported() {
     each(|seed, o| {

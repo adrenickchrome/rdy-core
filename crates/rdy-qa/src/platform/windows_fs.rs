@@ -391,6 +391,10 @@ pub fn socket_entry(path: &Path) -> io::Result<()> {
 pub fn copy_link(link: &Path, new: &Path) -> io::Result<()> {
     use std::os::windows::fs::FileTypeExt;
     let target = std::fs::read_link(link)?;
+    // a junction stays a junction: it needs no privilege, a symbolic link does
+    if reparse_kind(link)? == Some(ReparseKind::Junction) {
+        return junction(&target, new);
+    }
     if std::fs::symlink_metadata(link)?
         .file_type()
         .is_symlink_dir()

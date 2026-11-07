@@ -74,6 +74,13 @@ pub fn open_private_log(path: &Path) -> io::Result<std::fs::File> {
     )
 }
 
+/// A command that does nothing and succeeds.
+pub fn no_op_command() -> Command {
+    let mut command = Command::new("cmd");
+    command.args(["/D", "/C", "exit", "0"]);
+    command
+}
+
 /// The exit code of a process this module ended: 128 plus SIGKILL's number, as a shell shows it.
 pub const KILLED_EXIT_CODE: u32 = 137;
 
