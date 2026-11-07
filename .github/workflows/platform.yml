@@ -13,6 +13,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   native:
+    # Windows Server 2025 supplements the Windows 11 gate and does not replace it.
     name: Native fast gate, advisory (${{ matrix.label }})
     strategy:
       fail-fast: false
@@ -20,8 +21,8 @@ jobs:
         include:
           - runner: macos-26
             label: macOS ARM64
-          - runner: ubuntu-26.04-arm
-            label: Linux ARM64
+          - runner: windows-2025
+            label: Windows Server 2025
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     continue-on-error: true
@@ -39,37 +40,46 @@ jobs:
         with:
           node-version: "22"
       - name: Toolchain
+        if: runner.os != 'Windows'
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Not root
+        if: runner.os != 'Windows'
         run: test "$(id -u)" -ne 0
       - name: Locked dependencies
+        if: runner.os != 'Windows'
         run: cargo fetch --locked
       - name: Fast gate (fmt, clippy, tests; no perf)
+        if: runner.os != 'Windows'
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo qa --skip-perf --require-all
       - name: Failing tests
-        if: failure()
+        if: failure() && runner.os != 'Windows'
         run: |
           # print the qa report's failing tests and their panic excerpts, so the log names the cause
           test -f target/qa/report.md || exit 0
           sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
       - name: No tracked file changed
+        if: runner.os != 'Windows'
         run: git diff --exit-code
-  windows-portable:
-    name: Windows Server portable crates, advisory
-    runs-on: windows-2025
-    timeout-minutes: 30
-    continue-on-error: true
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal
-      - name: Check model, schema and graph only
-        # Windows Server is not Windows 11. This does not build the CLI, store or daemon, and it does
-        # not qualify a Windows 11 distribution.
-        run: cargo +1.99.0 check --locked -p rdy-model -p rdy-schema -p rdy-graph
+      - name: Standard account, private checkout, toolchain and fast gate
+        # The runner is elevated. The gate runs under a temporary standard account, so read-only and
+        # ACL tests do not see an administrator token. The script exits with the gate's own status.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/windows_gate.ps1
+      - name: Qa report, failing tests and counts
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/windows_report.ps1 -Report 'C:\rdy-ci\work\target\qa\report.md'
+      - name: No tracked file changed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git -c safe.directory='C:/rdy-ci/work' -C 'C:\rdy-ci\work' diff --exit-code
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Remove the temporary account
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/windows_gate_cleanup.ps1
