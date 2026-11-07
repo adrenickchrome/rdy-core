@@ -1,6 +1,5 @@
 //! `qa-release-sources` and the dependency policy for MPL-2.0 libraries (D-CNNKS).
 use rdy_qa::fixtures::output_within;
-use rdy_qa::platform;
 use rdy_qa::release_notices::{MSG_INVALID_ARGUMENTS, MSG_OUTPUT_EXISTS};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -9,15 +8,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
-const IMBL_SHA: &str = "46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec";
-const CHUNKS_SHA: &str = "2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6";
+pub(crate) const IMBL_SHA: &str =
+    "46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec";
+pub(crate) const CHUNKS_SHA: &str =
+    "2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6";
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// Runs `qa-release-sources` with `args`.
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
+pub(crate) fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qa-release-sources"));
     cmd.args(args);
     output_within(&mut cmd, Duration::from_secs(600)).expect("run qa-release-sources")
@@ -34,16 +35,15 @@ fn refused(out: &Output, code: i32, message: &str, what: &str) {
     assert!(out.stdout.is_empty(), "{what}: no stdout on failure");
 }
 
-/// The sorted names in `dir`, with each file's bytes and mode.
-fn contents(dir: &Path) -> Vec<(String, Vec<u8>, u32)> {
-    let mut v: Vec<(String, Vec<u8>, u32)> = fs::read_dir(dir)
+/// The sorted names in `dir`, with each file's bytes.
+pub(crate) fn contents(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
         .expect("read_dir")
         .map(|e| {
             let p = e.expect("entry").path();
             (
                 p.file_name().expect("name").to_string_lossy().into_owned(),
                 fs::read(&p).expect("read"),
-                platform::mode_of(&p).expect("mode"),
             )
         })
         .collect();
@@ -81,19 +81,15 @@ fn plx7_source_tool_matches_the_locked_assets() {
     );
     assert_eq!(String::from_utf8_lossy(&done.stdout), want);
     let staged = contents(&out);
-    let summary: Vec<(&str, String, u32)> = staged
+    let summary: Vec<(&str, String)> = staged
         .iter()
-        .map(|(n, b, m)| (n.as_str(), format!("{:x}", Sha256::digest(b)), *m))
+        .map(|(n, b)| (n.as_str(), format!("{:x}", Sha256::digest(b))))
         .collect();
     assert_eq!(
         summary,
         [
-            ("imbl-7.0.2.crate", IMBL_SHA.to_string(), 0o644),
-            (
-                "imbl-sized-chunks-0.2.0.crate",
-                CHUNKS_SHA.to_string(),
-                0o644
-            ),
+            ("imbl-7.0.2.crate", IMBL_SHA.to_string()),
+            ("imbl-sized-chunks-0.2.0.crate", CHUNKS_SHA.to_string()),
         ],
         "only the two crate files, each the locked bytes"
     );

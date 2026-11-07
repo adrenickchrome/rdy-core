@@ -7,6 +7,8 @@
 //! Modes (the value of [`MODE_ENV`]):
 //! - `exit:<code>`: exit with `code`.
 //! - `output:<stdout|stderr>:<bytes>`: write that many `x` bytes to the stream and exit 0.
+//! - `split:<stdout bytes>:<stderr bytes>`: write that many `x` bytes to stdout, then that many to
+//!   stderr, and exit 0. A reader that counts both streams together sees the sum.
 //! - `invalid:<stdout|stderr>`: write [`INVALID_BYTES`], which are not UTF-8, and exit 0.
 //! - `hang`: never exit by itself.
 //! - `descendants:<count>`: start `count` hanging copies of this child, write their process IDs to
@@ -90,6 +92,7 @@ pub enum Stream {
 pub enum Mode {
     Exit(i32),
     Output(Stream, usize),
+    Split(usize, usize),
     Invalid(Stream),
     Hang,
     Descendants(usize),
@@ -120,6 +123,7 @@ pub fn parse_mode(text: &str) -> Result<Mode, String> {
             .map(Mode::Exit)
             .map_err(|_| format!("bad exit code `{code}` in fixture mode `{text}`")),
         ["output", which, bytes] => Ok(Mode::Output(stream(which)?, number(bytes)?)),
+        ["split", out, err] => Ok(Mode::Split(number(out)?, number(err)?)),
         ["invalid", which] => Ok(Mode::Invalid(stream(which)?)),
         ["hang"] => Ok(Mode::Hang),
         ["descendants", count] => Ok(Mode::Descendants(number(count)?)),
@@ -585,22 +589,32 @@ fn run_script(steps: &[Step]) -> Result<i32, String> {
     Ok(0)
 }
 
+/// Writes `bytes` `x` bytes to `which`; it stops quietly when the reader closes the stream (the
+/// cap did its work).
+fn write_x(which: Stream, bytes: usize) {
+    let chunk = [b'x'; 8192];
+    let mut left = bytes;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        if write_stream(which, &chunk[..n]).is_err() {
+            return;
+        }
+        left -= n;
+    }
+}
+
 /// Runs `mode` in this process. Returns the exit code the process should end with; a hanging
 /// mode never returns.
 pub fn run_mode(mode: &Mode) -> Result<i32, String> {
     match mode {
         Mode::Exit(code) => Ok(*code),
         Mode::Output(which, bytes) => {
-            let chunk = [b'x'; 8192];
-            let mut left = *bytes;
-            while left > 0 {
-                let n = left.min(chunk.len());
-                if write_stream(*which, &chunk[..n]).is_err() {
-                    // the reader closed the stream: the cap did its work
-                    return Ok(0);
-                }
-                left -= n;
-            }
+            write_x(*which, *bytes);
+            Ok(0)
+        }
+        Mode::Split(out, err) => {
+            write_x(Stream::Stdout, *out);
+            write_x(Stream::Stderr, *err);
             Ok(0)
         }
         Mode::Invalid(which) => {

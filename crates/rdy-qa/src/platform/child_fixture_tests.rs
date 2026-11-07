@@ -30,6 +30,8 @@ fn wx23c_native_child_modes_are_deterministic() {
         parse_mode("output:stderr:12"),
         Ok(Mode::Output(Stream::Stderr, 12))
     );
+    assert_eq!(parse_mode("split:3:4"), Ok(Mode::Split(3, 4)));
+    assert!(parse_mode("split:3").unwrap_err().contains("split"));
     assert!(parse_mode("output:tty:1").unwrap_err().contains("tty"));
     assert!(parse_mode("hold").unwrap_err().contains("hold"));
     assert!(parse_mode("exit:x").unwrap_err().contains("exit code"));

@@ -5,5 +5,6 @@ mod release_contract;
 mod release_install;
 mod release_keys;
 mod release_notices;
+mod release_notices_unix;
 mod release_package;
 mod release_package_unix;

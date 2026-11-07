@@ -12,7 +12,9 @@
 //! and checks their changes part: in place, and naming any store or dump format move since the
 //! previous release with a dump-and-load step only when the store format moves (D-7PQEF, D-MYEW8).
 use crate::platform;
-use crate::release_install::{self, TARGETS, valid_path, valid_target, valid_version};
+use crate::release_install::{
+    self, TARGETS, WINDOWS_TARGET, valid_path, valid_target, valid_version,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -662,6 +664,9 @@ struct Sources<'a> {
     overrides: &'a [Override],
 }
 
+/// The targets whose notices the release attaches: the two Unix targets, then Windows.
+const NOTICE_TARGETS: [&str; 3] = [TARGETS[0], TARGETS[1], WINDOWS_TARGET];
+
 /// The configured `CARGO` executable, else `cargo`.
 fn cargo_command() -> Command {
     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
@@ -786,11 +791,11 @@ fn cache_path(dir: &Path, name: &str, version: &str) -> Option<PathBuf> {
     )
 }
 
-/// The MPL-2.0-only packages of both release targets, each once (by name, version and
+/// The MPL-2.0-only packages of every notice target (both Unix targets and Windows), each once (by name, version and
 /// checksum), sorted, and their crate files.
 fn union_sources(src: &Sources) -> Result<(Vec<MplSource>, Vec<Source>), Refused> {
     let mut all: BTreeMap<(String, String), (MplSource, PathBuf)> = BTreeMap::new();
-    for target in TARGETS {
+    for target in NOTICE_TARGETS {
         let (notices, crates) = inventory(target, src)?;
         for m in notices.mpl {
             let at = || format!("{} {}", m.name, m.version);
@@ -1205,7 +1210,7 @@ fn sources_with(
     Ok(part)
 }
 
-/// Copies the crate file of each MPL-2.0-only package of both release targets from Cargo's
+/// Copies the crate file of each MPL-2.0-only package of every notice target from Cargo's
 /// registry cache into the new directory `out` (0644 each, nothing else), checks each copy's
 /// SHA-256 against `Cargo.lock`, and returns the exact release notes part for `version`. On
 /// failure only this run's own outputs are removed. The error is one of the `MSG_` texts.
@@ -1329,9 +1334,13 @@ fn tool_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::shell_script;
-    use crate::platform::test_support::{fifo, unix_socket};
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
+
+    /// The crates.io packages the Windows release binary links (measured).
+    const WINDOWS_CRATES: usize = 178;
+
+    #[cfg(unix)]
+    mod unix_tests;
     use std::cell::Cell;
     use std::fs;
 
@@ -1653,6 +1662,80 @@ mod tests {
         );
     }
 
+    /// The locked graph of the Windows release target (x86_64-pc-windows-msvc), measured with
+    /// the locked, offline `cargo tree` and `cargo metadata`: the packages it links, which
+    /// Unix-only and build-only packages it leaves out, and the notices that follow.
+    #[test]
+    fn wx35b_windows_notices_match_the_locked_target_graph() {
+        // The notices cover every release target, the Windows one last.
+        assert_eq!(
+            NOTICE_TARGETS,
+            [
+                "aarch64-apple-darwin",
+                "x86_64-unknown-linux-gnu",
+                "x86_64-pc-windows-msvc"
+            ]
+        );
+        assert_eq!(NOTICE_TARGETS[..2], TARGETS);
+        assert_eq!(NOTICE_TARGETS[2], WINDOWS_TARGET);
+        let release = Sources::release();
+        let root = release.root.to_str().expect("utf-8 root").to_string();
+        let (notices, crates) = inventory(WINDOWS_TARGET, &release).expect("inventory");
+        let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            crates.len(),
+            WINDOWS_CRATES,
+            "linked crates.io packages for Windows"
+        );
+        for linked in ["windows-sys", "windows-link", "imbl", "imbl-sized-chunks"] {
+            assert!(names.contains(linked), "Windows links {linked}");
+        }
+        for absent in [
+            // linked only on macOS or on Unix
+            "core-foundation",
+            "security-framework",
+            "openssl-probe",
+            "linux-raw-sys",
+            "rustix",
+            // build-only, proc-macro, QA-only and replaced packages
+            "autocfg",
+            "cc",
+            "version_check",
+            "serde_derive",
+            "thiserror-impl",
+            "rmcp-macros",
+            "syn",
+            "proc-macro2",
+            "quote",
+            "toml",
+            "spdx",
+            "winnow",
+            "proptest",
+            "rusty-fork",
+            "ttf-parser",
+        ] {
+            assert!(!names.contains(absent), "Windows links no {absent}");
+        }
+        assert_eq!(notices.mpl, locked_mpl(), "the same two MPL-2.0 packages");
+        assert_eq!(
+            headings(&notices.bytes).len(),
+            WINDOWS_CRATES,
+            "one entry each"
+        );
+        let text = String::from_utf8(notices.bytes.clone()).expect("utf-8");
+        assert!(text.starts_with(HEADER));
+        for local in [root.as_str(), "registry/src", "/Users/", "/home/", "C:\\"] {
+            assert!(!text.contains(local), "names {local}");
+        }
+        let (again, _) = inventory(WINDOWS_TARGET, &release).expect("inventory");
+        assert_eq!(again, notices, "the same bytes again");
+        assert_eq!(for_target(WINDOWS_TARGET), Ok(notices), "the public call");
+        // The Windows graph adds no MPL-2.0 package, so the union is the same two.
+        let (mpl, sources) = union_sources(&release).expect("all targets");
+        assert_eq!(mpl, locked_mpl());
+        assert_eq!(sources.len(), 2);
+    }
+
     /// The runtime packages the pinned diagram crate adds to the release binary, sorted.
     const DIAGRAM_RUNTIME: [(&str, &str, &str); 6] = [
         ("mmdflux", "2.6.1", "MIT"),
@@ -1844,9 +1927,9 @@ mod tests {
             );
         }
 
-        // Links, sockets, FIFOs and text that is not UTF-8 refuse.
+        // Links and text that is not UTF-8 refuse (sockets and FIFOs: the Unix tests).
         type Spoil = fn(&Path);
-        let spoils: [(&str, Spoil); 5] = [
+        let spoils: [(&str, Spoil); 3] = [
             ("a symlinked file", |d| {
                 fs::write(d.join("real"), b"x\n").expect("write");
                 platform::symlink(&d.join("real"), &d.join("LICENSE-link")).expect("symlink");
@@ -1855,8 +1938,6 @@ mod tests {
                 fs::create_dir(d.join("real")).expect("mkdir");
                 platform::symlink(&d.join("real"), &d.join("LICENSES")).expect("symlink");
             }),
-            ("a FIFO", |d| fifo(&d.join("LICENSE.fifo"))),
-            ("a socket", |d| drop(unix_socket(&d.join("NOTICE.sock")))),
             ("text that is not UTF-8", |d| {
                 fs::write(d.join("COPYING"), b"\xff\xfe").expect("write")
             }),
@@ -2023,35 +2104,53 @@ mod tests {
         assert!(fs::symlink_metadata(&out).is_err(), "no OUT remains");
     }
 
+    /// A stand-in Cargo: the private child fixture in `mode`. The `--` ends libtest's own
+    /// options, so Cargo's arguments that follow are free words and the child ignores them.
+    fn stub_cargo(mode: &str) -> Command {
+        let mut cmd = platform::fixture_command(mode);
+        cmd.arg("--");
+        cmd
+    }
+
+    /// The fixture child's stdout starts with libtest's header; a count that is exact on the
+    /// stream is the mode's bytes plus the header.
+    fn stdout_bytes(total: usize) -> String {
+        format!("output:stdout:{}", total - platform::BANNER.len())
+    }
+
+    /// Cargo's output bounds, with a native child on every platform: N bytes pass, N+1 is the
+    /// size limit, both streams count together, a failure is the graph refusal and bytes that
+    /// are not UTF-8 are the graph refusal at the tree output.
     #[test]
-    fn plx7_notice_bounds_refuse_before_output() {
-        // Cargo's output: N bytes pass, N+1 is the size limit; a failure is the graph refusal.
+    fn wx35b_notice_child_bounds_are_native() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let script = |s: &'static str| move || shell_script(s);
-        let at_cap = script("head -c 16777216 /dev/zero");
-        let over = script("head -c 16777217 /dev/zero");
-        let split = script("head -c 8388608 /dev/zero; head -c 8388609 /dev/zero >&2");
-        let fails = script("exit 101");
-        let not_utf8 = script("case \"$0\" in tree) printf '\\377\\n';; esac");
+        let at_cap = stdout_bytes(CARGO_OUTPUT_MAX);
+        let over = stdout_bytes(CARGO_OUTPUT_MAX + 1);
+        let half = CARGO_OUTPUT_MAX / 2;
+        let split = format!("split:{}:{}", half - platform::BANNER.len(), half + 1);
+        let split_at = format!("split:{}:{}", half - platform::BANNER.len(), half);
+        let run = |mode: &str, command: &str| {
+            let mode = mode.to_string();
+            let make = move || stub_cargo(&mode);
+            run_cargo(&with_cargo(dir.path(), &make), &[command, "--locked"])
+        };
+        assert_eq!(run(&at_cap, "tree").map(|o| o.len()), Ok(CARGO_OUTPUT_MAX));
+        assert_eq!(run(&over, "tree"), Err(refused(Kind::SizeLimit, "tree")));
         assert_eq!(
-            run_cargo(&with_cargo(dir.path(), &at_cap), &["tree"]).map(|o| o.len()),
-            Ok(CARGO_OUTPUT_MAX)
+            run(&split_at, "metadata").map(|o| o.len()),
+            Ok(half),
+            "the two streams together at the cap pass"
         );
         assert_eq!(
-            run_cargo(&with_cargo(dir.path(), &over), &["tree"]),
-            Err(refused(Kind::SizeLimit, "tree"))
-        );
-        assert_eq!(
-            run_cargo(&with_cargo(dir.path(), &split), &["metadata"]),
+            run(&split, "metadata"),
             Err(refused(Kind::SizeLimit, "metadata")),
             "stdout and stderr count together"
         );
-        assert_eq!(
-            run_cargo(&with_cargo(dir.path(), &fails), &["tree"]),
-            Err(refused(Kind::Graph, "tree"))
-        );
+        assert_eq!(run("exit:101", "tree"), Err(refused(Kind::Graph, "tree")));
         // a well-formed (empty) lock, which is read before Cargo runs
         fs::write(dir.path().join("Cargo.lock"), b"version = 4\n").expect("write");
+        let not_utf8 = || stub_cargo("invalid:stdout");
+        let fails = || stub_cargo("exit:101");
         assert_eq!(
             gather(TARGETS[0], &with_cargo(dir.path(), &not_utf8)),
             Err(refused(Kind::Graph, "tree output"))
@@ -2063,6 +2162,11 @@ mod tests {
             ),
             Err(refused(Kind::Arguments, "riscv64gc-unknown-linux-gnu"))
         );
+    }
+
+    #[test]
+    fn plx7_notice_bounds_refuse_before_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
 
         // Metadata: 4096 packages and a 4096-byte manifest path pass; one more of either fails.
         let json = |count: usize, path_len: usize| {
@@ -2286,7 +2390,6 @@ mod tests {
             let copy = out.join(&s.filename);
             assert_eq!(&fs::read(&copy).expect("copy"), b);
             assert_eq!(sha256_hex(b), s.sha256);
-            assert_eq!(platform::mode_of(&copy).expect("mode"), 0o644);
             assert_eq!(
                 &fs::read(&s.cache).expect("cache"),
                 b,
@@ -2308,16 +2411,12 @@ mod tests {
 
         // A missing, linked or substituted nonregular source fails before OUT.
         type Spoil = fn(&Path);
-        let spoils: [(&str, Spoil); 4] = [
+        let spoils: [(&str, Spoil); 3] = [
             ("missing", |p| fs::remove_file(p).expect("rm")),
             ("a symlink", |p| {
                 let real = p.with_extension("real");
                 fs::rename(p, &real).expect("mv");
                 platform::symlink(&real, p).expect("symlink");
-            }),
-            ("a FIFO", |p| {
-                fs::remove_file(p).expect("rm");
-                fifo(p);
             }),
             ("a directory", |p| {
                 fs::remove_file(p).expect("rm");
@@ -2402,104 +2501,6 @@ mod tests {
             fs::read(out.join("alpha-1.0.0.crate")).expect("replacement"),
             b"someone else's\n"
         );
-    }
-
-    /// Set in the child that [`plx7_source_staging_owns_its_outputs_when_descriptors_run_out`]
-    /// re-executes under a 128-descriptor limit.
-    const DESCRIPTOR_CHILD: &str = "RDY_PLX7_DESCRIPTOR_CHILD";
-
-    /// Source staging owns each output from the moment it exists, and its cleanup still has
-    /// the descriptor it needs. The staging runs in a re-executed child under a 128-descriptor
-    /// limit, where filling every free descriptor touches no other test; after the first
-    /// source's first chunk, `during` takes every free descriptor (or all but one).
-    #[test]
-    fn plx7_source_staging_owns_its_outputs_when_descriptors_run_out() {
-        let name =
-            crate::test_name!("plx7_source_staging_owns_its_outputs_when_descriptors_run_out");
-        if std::env::var_os(DESCRIPTOR_CHILD).is_none() {
-            let mut child = shell_script("ulimit -n 128 && exec \"$0\" \"$@\"");
-            child
-                .arg(std::env::current_exe().expect("current exe"))
-                .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
-                .env(DESCRIPTOR_CHILD, "1");
-            let out =
-                crate::fixtures::output_within(&mut child, std::time::Duration::from_secs(600))
-                    .expect("run the child");
-            let text = String::from_utf8_lossy(&out.stdout);
-            assert!(
-                out.status.success() && text.contains("test result: ok. 1 passed"),
-                "the child ran this one test and it passed: {out:?}"
-            );
-            return;
-        }
-        let base = tempfile::tempfile().expect("a handle to copy");
-        let held: std::cell::RefCell<Vec<File>> = std::cell::RefCell::new(Vec::new());
-        // Copies `base` until no descriptor is free, then gives `free` of them back.
-        let exhaust = |free: usize| {
-            let mut held = held.borrow_mut();
-            while held.len() < 4096 {
-                match base.try_clone() {
-                    Ok(f) => held.push(f),
-                    Err(_) => break,
-                }
-            }
-            assert!(held.len() < 4096, "the 128-descriptor limit holds");
-            for _ in 0..free {
-                held.pop();
-            }
-        };
-
-        // No descriptor free: the second output cannot be made. The run fails, and its
-        // cleanup still removes the first copy and OUT.
-        let d = tempfile::tempdir().expect("tempdir");
-        let (sources, bytes) = cached(d.path());
-        let out = d.path().join("out");
-        let filled = Cell::new(false);
-        let during = |name: &str, _: u64| {
-            if name == "alpha-1.0.0.crate" && !filled.replace(true) {
-                exhaust(0);
-            }
-        };
-        let got = stage_sources(&sources, &out, &during);
-        held.borrow_mut().clear();
-        assert!(filled.get(), "the descriptors ran out mid-run");
-        assert_eq!(got, Err(refused(Kind::FileOperation, "beta-2.0.0.crate")));
-        assert!(
-            fs::symlink_metadata(&out).is_err(),
-            "no owned output remains"
-        );
-        for (s, b) in sources.iter().zip(&bytes) {
-            assert_eq!(
-                &fs::read(&s.cache).expect("cache"),
-                b,
-                "the cache is unchanged"
-            );
-        }
-        // A retry with descriptors to spare finds no OUT in its way.
-        stage_sources(&sources, &out, &|_, _| {}).expect("the retry stages");
-        assert_eq!(listed(&out), ["alpha-1.0.0.crate", "beta-2.0.0.crate"]);
-
-        // One descriptor free: the second output takes it and is copied through that one
-        // handle; the run succeeds with both exact copies.
-        let d = tempfile::tempdir().expect("tempdir");
-        let (sources, bytes) = cached(d.path());
-        let out = d.path().join("out");
-        let filled = Cell::new(false);
-        let during = |name: &str, _: u64| {
-            if name == "alpha-1.0.0.crate" && !filled.replace(true) {
-                exhaust(1);
-            }
-        };
-        let got = stage_sources(&sources, &out, &during);
-        held.borrow_mut().clear();
-        assert!(filled.get(), "the descriptors ran out mid-run");
-        assert_eq!(got, Ok(()));
-        assert_eq!(listed(&out), ["alpha-1.0.0.crate", "beta-2.0.0.crate"]);
-        for (s, b) in sources.iter().zip(&bytes) {
-            let copy = out.join(&s.filename);
-            assert_eq!(&fs::read(&copy).expect("copy"), b);
-            assert_eq!(platform::mode_of(&copy).expect("mode"), 0o644);
-        }
     }
 
     /// The tool reads, bounds and parses `Cargo.lock` before Cargo runs: a malformed lock is the
