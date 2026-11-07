@@ -118,7 +118,10 @@ fn kill2_a_daemon_killed_mid_write_loses_no_acknowledged_write_and_never_duplica
 #[test]
 fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
     let s = Served::new();
-    s.json(&["--json", "status"]);
+    // the daemon the next connect expects must be up and of this build: a failed start is named
+    // here, not as a missing daemon below
+    let (ok, st) = s.json(&["--json", "status"]);
+    assert!(ok, "the first status starts the daemon: {st}");
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let hello = Hello {

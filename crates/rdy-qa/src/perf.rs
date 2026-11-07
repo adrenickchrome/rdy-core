@@ -885,6 +885,25 @@ pub fn machine_class() -> String {
                     .map(|v| v.trim().to_string())
             }),
         )
+    } else if cfg!(windows) {
+        (
+            // `Microsoft Windows [Version 10.0.26100.1]` from the command interpreter
+            cmd("cmd", &["/C", "ver"]).map(|v| {
+                v.trim_matches(['[', ']', '\r', '\n', ' '])
+                    .replace("[Version ", "")
+            }),
+            std::env::var("PROCESSOR_IDENTIFIER").ok(),
+            // the file system of the drive that holds the working directory
+            cmd(
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[IO.DriveInfo]::new([IO.Path]::GetPathRoot((Get-Location).Path)).DriveFormat",
+                ],
+            ),
+        )
     } else {
         (
             std::fs::read_to_string("/etc/os-release")

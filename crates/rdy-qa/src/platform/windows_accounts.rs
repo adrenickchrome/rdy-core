@@ -268,11 +268,16 @@ mod tests {
         let other = second_account().expect("the second account is provisioned");
         let me = rdy_store::pio::current_account().expect("own account");
         assert_ne!(other.sid, me);
-        let tmp = tempfile::tempdir().expect("tempdir");
+        // The test makes its own protected parent: a Temp folder that inherits a grant to other
+        // accounts (a fixture root outside a profile) would give the second account the right
+        // before the test shares anything, and the control below could not tell.
+        let root = tempfile::tempdir().expect("tempdir");
+        let tmp = root.path().join("fixture");
+        rdy_store::pio::create_private_dir(&tmp).expect("private parent");
 
         // The control: a directory shared with the account is granted to it. Without this,
         // "no access" below could mean that the check cannot say yes.
-        let shared = tmp.path().join("shared");
+        let shared = tmp.join("shared");
         fs::create_dir(&shared).expect("mkdir");
         let before = granted_access(&other.sid, &shared).expect("check before");
         share_with(&shared, &other.sid).expect("share");
@@ -291,7 +296,7 @@ mod tests {
 
         // The private objects this account makes: the other account has no right at all, and
         // this account can still open them.
-        let private = tmp.path().join("private");
+        let private = tmp.join("private");
         rdy_store::pio::create_private_dir(&private).expect("private dir");
         let file = private.join("state");
         fs::write(&file, b"secret").expect("write");
@@ -308,6 +313,6 @@ mod tests {
         }
 
         // The check reads the real object: a path that is not there is an error.
-        assert!(granted_access(&other.sid, &tmp.path().join("missing")).is_err());
+        assert!(granted_access(&other.sid, &tmp.join("missing")).is_err());
     }
 }

@@ -629,6 +629,16 @@ fn ec5_a_dump_replaced_after_its_header_check_is_never_cloned_from_the_new_bytes
             Err(e) if e.code == "E_DUMP" && e.message == o10 => {
                 assert!(!to.exists(), "attempt {i}: the target is untouched");
             }
+            // Windows renames the new bytes over an existing file without a guarantee that
+            // the name is always there: a clone can meet the gap and find no source. Nothing
+            // was read then, so nothing was ingested, and the target stays untouched.
+            Err(e)
+                if cfg!(windows)
+                    && e.code == "E_BAD_INPUT"
+                    && e.message == format!("{} does not exist", src.display()) =>
+            {
+                assert!(!to.exists(), "attempt {i}: the target is untouched");
+            }
             Err(e) => {
                 outcome = Err(format!("attempt {i}: {e}"));
                 break;

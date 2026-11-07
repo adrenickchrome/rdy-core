@@ -1072,6 +1072,22 @@ fn guide_windows(input: &InstallInput) -> Result<Guide, InstallFailure> {
 }
 
 /// Checks the grammar of every argument (no filesystem access) and builds the guide.
+/// Whether `path` is an absolute POSIX path in the guide's grammar: it starts with `/`, is UTF-8
+/// and at most [`PATH_MAX`] bytes, and has no NUL, CR or LF. The guide for a POSIX target is
+/// text that a person runs elsewhere, so this holds on every host (on a POSIX host it is
+/// [`valid_path`]).
+fn valid_posix_path(path: &Path) -> bool {
+    path.to_str().is_some_and(|p| {
+        p.starts_with('/') && p.len() <= PATH_MAX && !p.contains(['\0', '\r', '\n'])
+    })
+}
+
+/// `base` and `name` joined with `/`, whatever the host's separator is.
+fn posix_join(base: &Path, name: &str) -> PathBuf {
+    let base = base.to_string_lossy();
+    PathBuf::from(format!("{}/{name}", base.trim_end_matches('/')))
+}
+
 fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
     if input.target == WINDOWS_TARGET {
         return guide_windows(input);
@@ -1082,7 +1098,7 @@ fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
         && valid_target(target)
         && valid_commit(&input.commit)
         && valid_signer_line(&input.signer_line)
-        && paths.iter().all(|p| valid_path(p))
+        && paths.iter().all(|p| valid_posix_path(p))
         && input
             .prefix
             .file_name()
@@ -1096,14 +1112,14 @@ fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
     }
     let download = input.download.as_path();
     let stem = archive_stem(v, target);
-    let archive = download.join(archive_name(v, target));
+    let archive = posix_join(download, &archive_name(v, target));
     let (unpack, prefix) = (input.unpack.as_os_str(), input.prefix.as_os_str());
     let mut signers = GuideCommand::new(
         "printf",
         &[r"%s\n".as_ref(), input.signer_line.as_ref()],
         download,
     );
-    signers.stdout = Some(download.join(SIGNERS_FILE));
+    signers.stdout = Some(posix_join(download, SIGNERS_FILE));
     let mut verify = GuideCommand::new(
         "ssh-keygen",
         &[
@@ -1121,7 +1137,7 @@ fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
         .map(OsStr::new),
         download,
     );
-    verify.stdin = Some(download.join(MANIFEST_FILE));
+    verify.stdin = Some(posix_join(download, MANIFEST_FILE));
     let checksums = if target == MAC_TARGET {
         GuideCommand::new(
             "shasum",
@@ -1146,9 +1162,9 @@ fn guide(input: &InstallInput) -> Result<Guide, InstallFailure> {
             download,
         )
     });
-    let bin = input.prefix.join("bin");
-    let installed = bin.join("rdy");
-    let extracted = input.unpack.join(&stem).join("rdy");
+    let bin = posix_join(&input.prefix, "bin");
+    let installed = posix_join(&bin, "rdy");
+    let extracted = posix_join(&posix_join(&input.unpack, &stem), "rdy");
     Ok(Guide {
         verify,
         checksums,
@@ -2422,6 +2438,27 @@ pub fn install_tools_available(target: &str) -> bool {
 mod tests {
     use super::*;
     use crate::platform::run_bounded;
+
+    /// wx33g: the README's POSIX install blocks are text for a person on macOS or Linux, so a
+    /// Windows host renders them with `/` and the same words.
+    #[test]
+    fn wx33g_the_readme_install_section_is_posix_text_on_every_host() {
+        let signer = format!(
+            "{SIGNER_PREFIX}ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA11UHVOCACl0jfu9YJgNXZrmz5aFYaKlAqyiZWHiOOw"
+        );
+        let section = readme_install_section("0.14.0", &signer).expect("install section");
+        assert!(!section.contains("/path/to/download\\"), "{section}");
+        assert!(!section.contains("/path/to/rdy-0.14.0\\"), "{section}");
+        assert!(
+            section.contains("'/path/to/download/SHA256SUMS'"),
+            "{section}"
+        );
+        assert!(
+            section.contains("'/path/to/rdy-0.14.0/bin/rdy'"),
+            "{section}"
+        );
+    }
+
     // The Unix-only fixtures (shell scripts, modes) live in the two whole-file Unix modules.
     #[cfg(unix)]
     use crate::platform::{mode_of, shell_script};

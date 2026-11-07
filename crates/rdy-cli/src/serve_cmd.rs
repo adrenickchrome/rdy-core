@@ -596,8 +596,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let run = RunDir::of_project(d.path());
         std::fs::create_dir_all(run.path()).unwrap();
-        // the daemon bound a socket other than the one this spelling computes
+        // the daemon bound an endpoint other than the one this spelling computes: a socket file
+        // where sockets are files, else a pipe name (which no test can create or remove, so a
+        // flag stands for its being there)
+        #[cfg(not(windows))]
         let bound = d.path().join("bound.sock");
+        #[cfg(windows)]
+        let bound = std::path::PathBuf::from(format!(r"\\.\pipe\rdy-{}", "0".repeat(64)));
         assert_ne!(bound, run.socket());
         let project = run.project_id().unwrap();
         std::fs::write(
@@ -605,17 +610,31 @@ mod tests {
             format!("{}\n{project}\n", bound.display()),
         )
         .unwrap();
+        let up = Cell::new(true);
+        #[cfg(not(windows))]
         std::fs::write(&bound, "").unwrap();
         assert!(!run.socket().exists());
         // read once, before the stop
         let socket = stop_socket(&run);
         assert_eq!(socket, bound);
-        let gone = || exited(None, || socket.exists(), |_| false);
+        let there = || {
+            #[cfg(not(windows))]
+            {
+                socket.exists()
+            }
+            #[cfg(windows)]
+            {
+                up.get()
+            }
+        };
+        let gone = || exited(None, there, |_| false);
         assert!(!gone(), "the recorded socket is still there");
         // the daemon removes its record first, then its socket
         std::fs::remove_file(run.socket_record()).unwrap();
         assert!(!gone(), "the socket outlives the record");
+        #[cfg(not(windows))]
         std::fs::remove_file(&bound).unwrap();
+        up.set(false);
         assert!(gone());
         // with no record, the client's own socket is all there is to go by
         assert_eq!(stop_socket(&run), run.socket());
