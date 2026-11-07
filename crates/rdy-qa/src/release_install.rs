@@ -625,7 +625,7 @@ const SMOKE_CONFIG: &str = "actor: human:release-check\n";
 /// The targets a signed manifest may list, in the manifest's order: sorted by archive name.
 const MANIFEST_TARGETS: [&str; 3] = [TARGETS[0], WINDOWS_TARGET, TARGETS[1]];
 /// The pipe of the Windows OpenSSH agent. rdy needs `SSH_AUTH_SOCK` to name it, even when ssh
-/// finds the agent without it (D-EDS38).
+/// finds the agent without it.
 pub const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 /// The installed report's checks, in order.
 pub const CHECK_NAMES: [&str; 6] = [
@@ -1319,7 +1319,7 @@ pub fn render_powershell(commands: &[GuideCommand]) -> Result<String, String> {
 }
 
 /// The Windows guide's notes for the version prefix `prefix`, as PowerShell comment lines:
-/// PATH, and the agent pipe that rdy needs (D-EDS38).
+/// PATH, and the agent pipe that rdy needs.
 fn windows_notes(prefix: &str) -> Result<String, String> {
     Ok(format!(
         "# Add the version's bin directory to PATH in this session:\n# $env:Path = {} + $env:Path\n# rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:\n# $env:SSH_AUTH_SOCK = {}",
