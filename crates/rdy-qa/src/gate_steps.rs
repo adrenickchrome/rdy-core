@@ -98,6 +98,37 @@ pub fn run_bounded(mut cmd: Command) -> ChildOutput {
     }
 }
 
+/// The name of the gate's executable after it steps aside: `qa-gate.running-<pid>.exe`.
+pub fn aside_name(pid: u32) -> String {
+    format!("qa-gate.running-{pid}.exe")
+}
+
+/// Whether `name` is an executable that an earlier gate moved aside.
+pub fn is_aside_name(name: &str) -> bool {
+    name.strip_prefix("qa-gate.running-")
+        .and_then(|r| r.strip_suffix(".exe"))
+        .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Moves the running gate out of Cargo's way. Windows cannot delete a running executable, and the
+/// test builds relink `target/release/qa-gate.exe`, so they would all fail with "Access is
+/// denied". It can rename one, so the gate renames itself and Cargo writes a new file. The old
+/// files of earlier gates are removed when they are no longer running. Other systems replace a
+/// running file without trouble and need none of this.
+pub fn step_aside() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().expect("an executable has a directory");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if is_aside_name(&e.file_name().to_string_lossy()) {
+                // fails while that gate still runs; it is removed by a later gate
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    std::fs::rename(&exe, dir.join(aside_name(std::process::id())))
+}
+
 /// One test executable that Cargo built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestExe {
@@ -372,5 +403,15 @@ not json at all
             "{e}"
         );
         assert_eq!(discovered(&done(true, 0, ARTIFACTS)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wx33_the_running_gate_steps_aside_by_a_name_it_can_clean_up() {
+        assert_eq!(aside_name(42), "qa-gate.running-42.exe");
+        assert!(is_aside_name(&aside_name(42)));
+        assert!(!is_aside_name("qa-gate.exe"));
+        assert!(!is_aside_name("qa-gate.running-.exe"));
+        assert!(!is_aside_name("qa-gate.running-4x.exe"));
+        assert!(!is_aside_name("qa-perf.running-42.exe"));
     }
 }

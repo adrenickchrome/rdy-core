@@ -191,6 +191,12 @@ fn perf_tier(
 
 fn main() {
     let args = Args::parse();
+    if cfg!(windows)
+        && let Err(e) = rdy_qa::gate_steps::step_aside()
+    {
+        eprintln!("could not move the running gate aside: {e}");
+        std::process::exit(2);
+    }
     let start = Instant::now();
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
