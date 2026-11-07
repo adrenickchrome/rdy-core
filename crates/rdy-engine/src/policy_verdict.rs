@@ -397,6 +397,7 @@ mod tests {
             roles: BTreeMap::new(),
             require: vec![],
             owners: vec![],
+            rules_from_chat: Default::default(),
         }
     }
 

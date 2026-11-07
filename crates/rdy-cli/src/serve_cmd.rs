@@ -85,8 +85,11 @@ fn mcp_projectless(env: &Env) -> Result<(Value, String), ErrorReply> {
     configured_actor(env)?;
     let rt = tokio::runtime::Runtime::new().map_err(|e| io_error(e, "retry"))?;
     let person = Arc::new(crate::instructions_cmd::person_reader(env.no_daemon));
+    // a rule the person's words ask for may need a signature: this process's own agent signs it
+    let agent = rdy_daemon::signing_transport::direct_agent();
     rt.block_on(rdy_mcp::bootstrap::serve_projectless_stdio(
         env.cwd.clone(),
+        agent,
         person,
     ))
     .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "retry rdy mcp"))?;

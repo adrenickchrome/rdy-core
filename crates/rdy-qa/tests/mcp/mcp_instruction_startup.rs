@@ -340,7 +340,8 @@ fn ain5_missing_meta_startup_returns_the_creation_hint() {
 }
 
 /// agi4: a projectless server stays projectless after `rdy setup` made the rules project. Its
-/// instructions call sees the new source and says to reconnect; every other tool still refuses.
+/// instructions call sees the new source and says to reconnect; `rdy_rule` joins the tools, and
+/// every other project tool still refuses.
 /// A new connection from the same place selects the rules project and serves every tool.
 #[test]
 fn agi4_setup_requires_reconnect_for_the_old_projectless_server() {
@@ -378,13 +379,17 @@ fn agi4_setup_requires_reconnect_for_the_old_projectless_server() {
         );
         let s = json_of(&out);
         assert_eq!(s["meta"]["result"], "created", "{s}");
-        // the same connection: the new source is seen, the tools are the same, the hint says to
-        // reconnect
+        // the same connection: the new source is seen, the hint says to reconnect, and the
+        // person's rule tool joins the two (rtc5); every other project tool still needs a
+        // new connection
         let v = old.call("rdy_instructions", json!({})).ok();
         assert_builtins_first(&v);
         assert_eq!(v["hint"], ready, "{v}");
         assert!(authored(&v, "instructions").is_empty(), "{v}");
-        assert_eq!(names(&mut old), ["rdy_instructions", "rdy_session"]);
+        assert_eq!(
+            names(&mut old),
+            ["rdy_instructions", "rdy_rule", "rdy_session"]
+        );
         match old.call("rdy_overview", json!({})) {
             Reply::ToolError(e) => assert_eq!(e["code"], "E_NO_PROJECT", "{e}"),
             other => panic!("expected E_NO_PROJECT, got {other:?}"),

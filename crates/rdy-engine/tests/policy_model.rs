@@ -182,6 +182,7 @@ fn fields(require: Vec<Require>, owners: Vec<OwnerEntry>) -> PolicyFields {
         ]),
         require,
         owners,
+        rules_from_chat: Default::default(),
     }
 }
 

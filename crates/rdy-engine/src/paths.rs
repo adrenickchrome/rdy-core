@@ -218,6 +218,46 @@ impl ReadState {
     }
 }
 
+/// The doc type a new doc takes when none is named: the pack's default, or the new-doc refusal.
+pub(crate) fn default_doc_type(pack: &rdy_schema::Pack) -> Result<String, RdyError> {
+    pack.default_doc_type.clone().ok_or_else(|| {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("pack {} has no default_doc_type", pack.name),
+            format!(
+                "pass --type, one of: {}",
+                pack.doc_types
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    })
+}
+
+/// The ops, as JSON, that create the skeleton sections of a doc of type `doc_type` under the doc
+/// that `parent` names: none when the pack has no `section` type. They read nothing.
+pub(crate) fn skeleton_ops(
+    pack: &rdy_schema::Pack,
+    doc_type: &str,
+    parent: &str,
+) -> Vec<serde_json::Value> {
+    if !pack.block_types.contains_key("section") {
+        return vec![];
+    }
+    let Some(def) = pack.doc_types.get(doc_type) else {
+        return vec![];
+    };
+    def.skeleton
+        .iter()
+        .enumerate()
+        .map(|(k, sec)| {
+            json!({"op": "create", "type": "section", "id": format!("$s{k}"), "parent": parent, "fields": {"title": sec.title}})
+        })
+        .collect()
+}
+
 impl Rdy {
     pub fn new_folder(
         &mut self,
@@ -238,21 +278,7 @@ impl Rdy {
     ) -> Result<WriteResult, RdyError> {
         let dt = match doc_type {
             Some(t) => t.to_string(),
-            None => self.pack.default_doc_type.clone().ok_or_else(|| {
-                RdyError::new(
-                    E_BAD_INPUT,
-                    format!("pack {} has no default_doc_type", self.pack.name),
-                    format!(
-                        "pass --type, one of: {}",
-                        self.pack
-                            .doc_types
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )
-            })?,
+            None => default_doc_type(&self.pack)?,
         };
         self.new_at(s, view, path, Some((dt, title.map(String::from))))
     }
@@ -315,19 +341,7 @@ impl Rdy {
             Some((dt, title)) => {
                 ops.push(json!({"op": "create", "type": tree::DOC, "id": "$doc", "parent": parent_ref,
                     "fields": {"name": last, "title": title.clone().unwrap_or_else(|| last.to_string()), "doc_type": dt}}));
-                if self.pack.block_types.contains_key("section") {
-                    for (k, sec) in self
-                        .pack
-                        .doc_types
-                        .get(dt)
-                        .map(|d| d.skeleton.clone())
-                        .unwrap_or_default()
-                        .iter()
-                        .enumerate()
-                    {
-                        ops.push(json!({"op": "create", "type": "section", "id": format!("$s{k}"), "parent": "$doc", "fields": {"title": sec.title}}));
-                    }
-                }
+                ops.extend(skeleton_ops(&self.pack, dt, "$doc"));
                 "doc"
             }
         };

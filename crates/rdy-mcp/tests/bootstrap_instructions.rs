@@ -248,6 +248,100 @@ async fn ain4_projectless_mcp_can_claim_and_read_empty_instructions() {
             "hint": instructions::META_READY_HINT
         })
     );
+    // rtc5: with the meta project in place, the same listing gains the person's rule tool and
+    // no other
+    assert_eq!(
+        tool_names(&mut c).await,
+        ["rdy_session", "rdy_instructions", "rdy_rule"]
+    );
+}
+
+/// The names the connection lists now, in order.
+async fn tool_names(c: &mut Conn) -> Vec<String> {
+    let listed = c.request("tools/list", json!({})).await;
+    listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools in {listed}"))
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rtc5_projectless_list_gains_rule_after_setup() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let meta = home.path().join(".rdy").join("meta");
+    let mut c = Conn::start(dir.path(), home.path()).await;
+    let two = ["rdy_session", "rdy_instructions"];
+    assert_eq!(tool_names(&mut c).await, two);
+    // before setup a direct call is the missing-meta refusal, and makes nothing
+    let (err, e) = c
+        .call(
+            "rdy_rule",
+            json!({"scope": "person", "answer": {"ref": "P-ABCDE@1", "option": "later",
+                "card_hash": "a".repeat(64), "evidence": "Not yet."}}),
+            Some(claim("agent:p", "p1")),
+        )
+        .await;
+    assert!(err);
+    assert_eq!(
+        (e["code"].as_str(), e["message"].as_str(), e["fix"].as_str()),
+        (
+            Some("E_NO_PROJECT"),
+            Some("the meta project does not exist"),
+            Some("run rdy setup")
+        ),
+        "{e}"
+    );
+    assert!(!meta.exists());
+    // setup happens while the connection stays open: the listing follows it, with the project
+    // server's own entry for the tool
+    std::fs::create_dir_all(&meta).unwrap();
+    drop(Rdy::init(&meta, "rdy-standard").unwrap());
+    let listed = c.request("tools/list", json!({})).await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["rdy_session", "rdy_instructions", "rdy_rule"]
+    );
+    let entry = &tools[2];
+    assert_eq!(entry["description"], rdy_mcp::tools::RULE_DOC);
+    assert_eq!(entry["inputSchema"]["additionalProperties"], false);
+    // the schema the project server lists, less the title and description the listing drops
+    let mut want = serde_json::to_value(schemars::schema_for!(rdy_mcp::tools::RuleParams)).unwrap();
+    let want_object = want.as_object_mut().unwrap();
+    want_object.remove("title");
+    want_object.remove("description");
+    assert_eq!(entry["inputSchema"], want);
+    // other project tools stay unavailable on this connection
+    let (err, e) = c.call("rdy_overview", json!({}), None).await;
+    assert!(err);
+    assert_eq!(e["code"], "E_NO_PROJECT", "{e}");
+    // removing the meta project takes the tool away again; a new one brings it back
+    std::fs::remove_dir_all(&meta).unwrap();
+    assert_eq!(tool_names(&mut c).await, two);
+    std::fs::create_dir_all(&meta).unwrap();
+    drop(Rdy::init(&meta, "rdy-standard").unwrap());
+    assert_eq!(
+        tool_names(&mut c).await,
+        ["rdy_session", "rdy_instructions", "rdy_rule"]
+    );
+    // a call rechecks too: with the meta project gone it is the missing-meta refusal
+    std::fs::remove_dir_all(&meta).unwrap();
+    let (err, e) = c
+        .call(
+            "rdy_rule",
+            json!({"scope": "person", "answer": {"ref": "P-ABCDE@1", "option": "later",
+                "card_hash": "a".repeat(64), "evidence": "Not yet."}}),
+            None,
+        )
+        .await;
+    assert!(err);
+    assert_eq!(e["message"], "the meta project does not exist", "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

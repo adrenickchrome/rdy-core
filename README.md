@@ -92,7 +92,7 @@ To check the signature of the download first, see "Verify the download" at the b
    rdy setup
    ```
 
-   This writes a short `CLAUDE.md` and `AGENTS.md` in the project folder. It also creates your own rules project if you have none. These files tell the agent to call `rdy_instructions` at the start of every task. The guide ships inside rdy, so you download nothing. To read the whole guide yourself, see the [docs site](https://getrdy.dev). The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
+   This writes a short `CLAUDE.md` and `AGENTS.md` in the project folder. It also creates your own rules project if you have none. These files tell the agent to call `rdy_instructions` at the start of every task. The guide ships inside rdy, so you download nothing. To read the whole guide yourself, run rdy instructions --full. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
 4. **Ask your agent for something real.** For example:
 

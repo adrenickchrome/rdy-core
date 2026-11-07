@@ -55,6 +55,9 @@ impl From<rdy_engine::RdyError> for ErrorReply {
         if let Some(b) = e.briefing {
             r.extra.insert("briefing".into(), b);
         }
+        if let Some(w) = e.warnings {
+            r.extra.insert("warnings".into(), Value::Array(*w));
+        }
         r
     }
 }

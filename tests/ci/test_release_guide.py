@@ -36,7 +36,8 @@ KNOWN = ('index.md', 'agents/index.md', FOLDER + 'index.md', FOLDER + 'about.md'
 OWNER_TOOLS = {
     'bootstrap': ('rdy_brief', 'rdy_context', 'rdy_overview', 'rdy_pending', 'rdy_query', 'rdy_read', 'rdy_schema',
                   'rdy_search', 'rdy_site', 'rdy_suspects', 'rdy_tensions'),
-    'write': ('rdy_accept', 'rdy_asset', 'rdy_decide', 'rdy_intent', 'rdy_revoke', 'rdy_supersede', 'rdy_write'),
+    'write': ('rdy_accept', 'rdy_asset', 'rdy_decide', 'rdy_intent', 'rdy_revoke', 'rdy_rule', 'rdy_supersede',
+              'rdy_write'),
     'after-write': ('rdy_plan', 'rdy_propose', 'rdy_resolve'),
     'approvals': ('rdy_answer', 'rdy_dispute', 'rdy_land', 'rdy_policy', 'rdy_tag'),
     'read': ('rdy_coverage', 'rdy_diff', 'rdy_impact', 'rdy_inbox', 'rdy_log', 'rdy_tags', 'rdy_trace'),
@@ -883,7 +884,7 @@ class Kfu1Binary(BinaryCase):
 
     def test_kfu1_checker_reads_the_table_by_the_builds_rules(self):
         good = json.loads(TABLE.read_text())
-        self.assertEqual(len(good), 59)
+        self.assertEqual(len(good), 60)
         table = GUIDE.read_table(TABLE)
         self.assertEqual({name: tuple(tools) for name, tools in table.items()}, OWNER_TOOLS)
         path = self.dir / 'table.json'

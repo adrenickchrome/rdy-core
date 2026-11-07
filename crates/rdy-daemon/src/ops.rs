@@ -36,6 +36,7 @@ mod read;
 mod redaction;
 mod remote;
 mod review;
+mod rule;
 mod search;
 mod signing;
 mod site;
@@ -63,6 +64,7 @@ use read::{block, coverage, impact, log, ls, show, status, suspects, tags, trace
 use redaction::redact;
 use remote::remote;
 use review::review;
+use rule::rule;
 use search::search;
 use signing::{key_bind, key_retire, key_revoke, key_show, sign};
 use site::{EXPORT_SHAPE, export, import, render};
@@ -135,6 +137,7 @@ pub const OPS: &[&str] = &[
     "new_finding",
     "new_source",
     "new_instruction",
+    "rule",
     "keys_assign",
     "edit_block",
     "propose",
@@ -491,6 +494,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{parent, text, applies_to, reason, locked?, view?}",
             )?,
         ),
+        "rule" => rule(cx, &args),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
             cx,

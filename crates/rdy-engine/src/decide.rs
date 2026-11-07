@@ -138,6 +138,89 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
     f
 }
 
+/// The op that creates decision `d` as `$decision`, with `extra` links after its own: the one
+/// construction behind `rdy_decide`, `rdy_supersede`, `rdy_revoke` and `rdy_rule`. It reads nothing.
+pub(crate) fn decision_op(d: &DecisionInput, extra: Vec<(String, LinkInput)>) -> OpInput {
+    let mut links = links_of(d);
+    for (name, l) in extra {
+        links.entry(name).or_default().push(l);
+    }
+    OpInput::Create {
+        block_type: decision::DECISION.into(),
+        id: Some("$decision".into()),
+        // an empty parent is the project root (D-P3YD5)
+        parent: (!d.parent.is_empty()).then(|| d.parent.clone()),
+        after: None,
+        before: None,
+        fields: fields_of(d),
+        body: d.body.clone(),
+        links,
+    }
+}
+
+/// The link kinds a superseding decision takes from the old one.
+const INHERITED: [&str; 4] = [
+    decision::AFFECTS,
+    decision::DEPENDS_ON,
+    decision::CONDITIONAL_ON,
+    decision::REFINES,
+];
+
+/// sup1: what the decision `d` that supersedes `old` keeps of `old`'s scope and premises, kind by
+/// kind, unless `d` gives that kind or lists it in `no_inherit`: the targets by kind, as a reply
+/// shows them, and the links to write. A link to a block absent from `scope` can't be copied.
+#[allow(clippy::type_complexity)]
+pub(crate) fn inherited_links(
+    st: &ReadState,
+    scope: &Scope,
+    old: &rdy_model::Block,
+    d: &DecisionInput,
+) -> Result<(BTreeMap<String, Vec<String>>, Vec<(String, LinkInput)>), RdyError> {
+    let old_id = &old.id;
+    let mut inherited = BTreeMap::new();
+    let mut extra = vec![];
+    for kind in INHERITED {
+        let given = match kind {
+            decision::AFFECTS => &d.affects,
+            decision::DEPENDS_ON => &d.depends_on,
+            decision::CONDITIONAL_ON => &d.conditional_on,
+            _ => &d.refines,
+        };
+        if !given.is_empty() || d.no_inherit.iter().any(|k| k == kind) {
+            continue;
+        }
+        let links = old.links.get(kind).into_iter().flatten();
+        let mut targets = vec![];
+        for l in links {
+            // a link to a block deleted in this view can't be copied: say so before writing
+            if st.materialized(scope)?.get(&l.target).is_none() {
+                return Err(RdyError::new(
+                    E_UNKNOWN_REF,
+                    format!(
+                        "{old_id}'s {kind} link to {} no longer exists, so it can't be inherited",
+                        l.target
+                    ),
+                    format!(
+                        "pass {kind} yourself or drop it (MCP: \"{kind}\": []; engine: no_inherit)"
+                    ),
+                ));
+            }
+            targets.push(l.target.to_string());
+            extra.push((
+                kind.to_string(),
+                LinkInput {
+                    target: l.target.to_string(),
+                    part: l.part.clone(),
+                },
+            ));
+        }
+        if !targets.is_empty() {
+            inherited.insert(kind.to_string(), targets);
+        }
+    }
+    Ok((inherited, extra))
+}
+
 /// Both fixes of a decision home that names no block, or neither a doc nor a folder (D-P3YD5).
 const DECISIONS_HOME_FIX: &str =
     "set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists";
@@ -229,21 +312,7 @@ impl Rdy {
         });
         let brief = d.brief.clone();
         let intent = d.intent.clone();
-        let mut links = links_of(&d);
-        for (name, l) in extra {
-            links.entry(name).or_default().push(l);
-        }
-        let op = OpInput::Create {
-            block_type: decision::DECISION.into(),
-            id: Some("$decision".into()),
-            // an empty parent is the project root (D-P3YD5)
-            parent: (!d.parent.is_empty()).then(|| d.parent.clone()),
-            after: None,
-            before: None,
-            fields: fields_of(&d),
-            body: d.body.clone(),
-            links,
-        };
+        let op = decision_op(&d, extra);
         self.write_with_intent(
             s,
             WriteRequest {
@@ -307,14 +376,7 @@ impl Rdy {
     ) -> Result<WriteResult, RdyError> {
         let old_id = self.require_decision(view, old)?;
         let old_block = self.read().block(&Scope::View(view.into()), &old_id)?;
-        // sup1: the new decision keeps the old one's scope and premises, kind by kind, unless the
-        // caller gives that kind or lists it in no_inherit
-        const INHERITED: [&str; 4] = [
-            decision::AFFECTS,
-            decision::DEPENDS_ON,
-            decision::CONDITIONAL_ON,
-            decision::REFINES,
-        ];
+        // sup1: the new decision keeps the old one's scope and premises (`inherited_links`)
         if let Some(k) = d
             .no_inherit
             .iter()
@@ -327,47 +389,7 @@ impl Rdy {
             ));
         }
         let scope = Scope::View(view.into());
-        let mut inherited = BTreeMap::new();
-        let mut extra = vec![];
-        for kind in INHERITED {
-            let given = match kind {
-                decision::AFFECTS => &d.affects,
-                decision::DEPENDS_ON => &d.depends_on,
-                decision::CONDITIONAL_ON => &d.conditional_on,
-                _ => &d.refines,
-            };
-            if !given.is_empty() || d.no_inherit.iter().any(|k| k == kind) {
-                continue;
-            }
-            let links = old_block.links.get(kind).into_iter().flatten();
-            let mut targets = vec![];
-            for l in links {
-                // a link to a block deleted in this view can't be copied: say so before writing
-                if self.read().materialized(&scope)?.get(&l.target).is_none() {
-                    return Err(RdyError::new(
-                        E_UNKNOWN_REF,
-                        format!(
-                            "{old_id}'s {kind} link to {} no longer exists, so it can't be inherited",
-                            l.target
-                        ),
-                        format!(
-                            "pass {kind} yourself or drop it (MCP: \"{kind}\": []; engine: no_inherit)"
-                        ),
-                    ));
-                }
-                targets.push(l.target.to_string());
-                extra.push((
-                    kind.to_string(),
-                    LinkInput {
-                        target: l.target.to_string(),
-                        part: l.part.clone(),
-                    },
-                ));
-            }
-            if !targets.is_empty() {
-                inherited.insert(kind.to_string(), targets);
-            }
-        }
+        let (inherited, mut extra) = inherited_links(&self.read(), &scope, &old_block, &d)?;
         let msg = format!("supersede {old_id}: {}", d.statement);
         let mut res = self.write_decision(
             s,

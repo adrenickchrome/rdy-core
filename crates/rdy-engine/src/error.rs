@@ -1228,10 +1228,131 @@ pub fn core_error_code(code: &str) -> Option<&'static str> {
     CORE_ERROR_CODES.iter().copied().find(|c| *c == code)
 }
 
+/// The most issue codes [`issue_code`] keeps a spelling of, and the longest it keeps. A daemon of
+/// this rdy sends far fewer: this bounds what a reply can make this process hold.
+const MAX_ISSUE_CODES: usize = 1_024;
+const MAX_ISSUE_CODE_BYTES: usize = 64;
+
+/// A static spelling of an issue code a daemon's reply names. Issue codes are spelled across the
+/// engine and the schema, with no one list to look them up in, so a new one is kept once. A code
+/// outside the code form, or past the bound, reads `E_INTERNAL`.
+fn issue_code(code: &str) -> &'static str {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if let Some(c) = core_error_code(code) {
+        return c;
+    }
+    let form = !code.is_empty()
+        && code.len() <= MAX_ISSUE_CODE_BYTES
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    if !form {
+        return E_INTERNAL;
+    }
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(c) = seen.get(code) {
+        return c;
+    }
+    if seen.len() >= MAX_ISSUE_CODES {
+        return E_INTERNAL;
+    }
+    let kept: &'static str = Box::leak(code.to_string().into_boxed_str());
+    seen.insert(kept);
+    kept
+}
+
+/// One issue of a daemon's reply, as [`Issue`] serializes it.
+fn issue_of_reply(v: &serde_json::Value) -> Issue {
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    Issue {
+        severity: if text("severity") == "warning" {
+            rdy_schema::Severity::Warning
+        } else {
+            rdy_schema::Severity::Error
+        },
+        code: issue_code(text("code")),
+        block: v
+            .get("block")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|b| rdy_model::BlockId::parse(b).ok()),
+        message: text("message").to_string(),
+        fix: text("fix").to_string(),
+    }
+}
+
+impl RdyError {
+    /// This error with the diagnostic members of a daemon's reply, as a refusal carries them over
+    /// its connection: `issues`, `corrected`, `briefing` and `warnings`. It keeps the code, the
+    /// message and the fix.
+    pub fn with_reply_members(
+        mut self,
+        members: &serde_json::Map<String, serde_json::Value>,
+    ) -> RdyError {
+        if let Some(list) = members.get("issues").and_then(serde_json::Value::as_array) {
+            self.issues = list.iter().map(issue_of_reply).collect();
+        }
+        self.corrected = members.get("corrected").cloned();
+        self.briefing = members.get("briefing").cloned();
+        if let Some(list) = members
+            .get("warnings")
+            .and_then(serde_json::Value::as_array)
+        {
+            self.warnings = Some(Box::new(list.clone()));
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn rtc4_reply_members_are_kept_and_their_codes_are_bounded() {
+        let members = serde_json::json!({
+            "issues": [
+                {"severity": "warning", "code": "W_RTC4_KEPT", "block": null, "message": "m", "fix": "f"},
+                {"severity": "error", "code": E_VALIDATION, "block": "not a block", "message": "n", "fix": "g"},
+                {"severity": "error", "code": "not a code", "message": "o", "fix": "h"},
+                {"severity": "error", "code": "W_".repeat(40), "message": "p", "fix": "i"},
+            ],
+            "corrected": {"state": "normal_path"},
+            "briefing": {"ids": ["a"]},
+            "warnings": [{"code": "W_ONE"}],
+        });
+        let e = RdyError::new(E_STALE_BASE, "kept", "kept too")
+            .with_reply_members(members.as_object().unwrap());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (E_STALE_BASE, "kept", "kept too")
+        );
+        let codes: Vec<&str> = e.issues.iter().map(|i| i.code).collect();
+        assert_eq!(codes, ["W_RTC4_KEPT", E_VALIDATION, E_INTERNAL, E_INTERNAL]);
+        assert_eq!(e.issues[0].severity, rdy_schema::Severity::Warning);
+        assert_eq!(e.issues[3].message, "p");
+        assert_eq!(
+            e.corrected,
+            Some(serde_json::json!({"state": "normal_path"}))
+        );
+        assert_eq!(e.briefing, Some(serde_json::json!({"ids": ["a"]})));
+        assert_eq!(
+            e.warnings.as_deref(),
+            Some(&vec![serde_json::json!({"code": "W_ONE"})])
+        );
+        // the same code keeps the same spelling
+        assert!(std::ptr::eq(
+            issue_code("W_RTC4_KEPT"),
+            issue_code("W_RTC4_KEPT")
+        ));
+    }
 
     #[test]
     fn ok5_upgrade_failures_keep_their_rows() {

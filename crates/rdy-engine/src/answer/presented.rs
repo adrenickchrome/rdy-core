@@ -101,6 +101,7 @@ impl Rdy {
                 source,
                 caller: caller.clone(),
             }),
+            rule: None,
         };
         // a re-affirmation card checks its own note: a reason for each option (D-CQMA4)
         let note = if req.reference.starts_with(REAFFIRM_REF_PREFIX) {

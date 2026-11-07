@@ -1857,7 +1857,7 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
     for said in [
         "`rdy_instructions`",
         "The guide ships inside rdy, so you download nothing.",
-        "[docs site](https://getrdy.dev)",
+        "To read the whole guide yourself, run rdy instructions --full.",
         "The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.",
     ] {
         assert!(step.contains(said), "{said}: {step}");

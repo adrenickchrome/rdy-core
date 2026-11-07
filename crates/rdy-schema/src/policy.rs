@@ -1,6 +1,6 @@
 //! The authority policy (D-ZWP7Q): an engine block type, injected into every pack, that says what
 //! an agent may land without a person and who approves the rest. It has no body and sits directly
-//! under a doc, as a publication profile does. Generic validation checks its four top-level
+//! under a doc, as a publication profile does. Generic validation checks its five top-level
 //! fields; this module checks what they hold (the closed forms and bounds below) and reads a
 //! valid block. A project holds one live policy block: its key is fixed, and keys are unique.
 
@@ -54,6 +54,9 @@ const AGENT_MAY_ACCEPT: &str = "agent_may_accept";
 const ROLES: &str = "roles";
 const REQUIRE: &str = "require";
 const OWNERS: &str = "owners";
+/// The optional field that says whether a rule a person states in chat lands at once or waits for
+/// the person's card (FW-MH.rules, D-ZSRBN).
+pub const RULES_FROM_CHAT: &str = "rules_from_chat";
 
 /// The keys of a rule, in the order they are checked.
 const RULE_KEYS: [&str; 10] = [
@@ -167,6 +170,42 @@ pub struct OwnerEntry {
     pub owners: Vec<String>,
 }
 
+/// What the policy says about a rule a person states in chat (D-ZSRBN): `land` relays the
+/// person's words through the normal gate at once; `card` stops at the person's card first. No
+/// policy and no field both read `land`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RulesFromChat {
+    #[default]
+    Land,
+    Card,
+}
+
+impl RulesFromChat {
+    /// The enum values of the field, in the order the field lists them.
+    pub const VALUES: [&'static str; 2] = ["land", "card"];
+
+    /// The stored text of the value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RulesFromChat::Land => "land",
+            RulesFromChat::Card => "card",
+        }
+    }
+
+    /// The value `fields` holds; `land` when there is no valid policy.
+    pub fn of(fields: Option<&PolicyFields>) -> RulesFromChat {
+        fields.map_or(RulesFromChat::Land, |f| f.rules_from_chat)
+    }
+
+    fn parse(text: &str) -> Option<RulesFromChat> {
+        match text {
+            "land" => Some(RulesFromChat::Land),
+            "card" => Some(RulesFromChat::Card),
+            _ => None,
+        }
+    }
+}
+
 /// The fields of a valid policy block, in the author's order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyFields {
@@ -174,6 +213,7 @@ pub struct PolicyFields {
     pub roles: BTreeMap<String, Vec<String>>,
     pub require: Vec<Require>,
     pub owners: Vec<OwnerEntry>,
+    pub rules_from_chat: RulesFromChat,
 }
 
 fn optional(kind: FieldKind) -> FieldDef {
@@ -195,6 +235,17 @@ pub(crate) fn type_def() -> BlockTypeDef {
             (OWNERS.to_string(), optional(FieldKind::List)),
             (REQUIRE.to_string(), optional(FieldKind::List)),
             (ROLES.to_string(), optional(FieldKind::Map)),
+            (
+                RULES_FROM_CHAT.to_string(),
+                FieldDef {
+                    kind: FieldKind::Enum,
+                    required: false,
+                    values: RulesFromChat::VALUES
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect(),
+                },
+            ),
         ]),
         children: vec![],
         body: BodyRule::Forbidden,
@@ -838,6 +889,11 @@ fn read(pack: &Pack, block: &Block, out: &mut Vec<Issue>) -> Option<PolicyFields
         Some(FieldValue::List(items)) => r.owners(items),
         Some(_) => None,
     };
+    // generic validation reports a wrong kind or value of this field; here it reads as None
+    let rules_from_chat = match block.fields.get(RULES_FROM_CHAT) {
+        None => Some(RulesFromChat::Land),
+        Some(v) => v.as_str().and_then(RulesFromChat::parse),
+    };
     if !ok {
         return None;
     }
@@ -846,5 +902,6 @@ fn read(pack: &Pack, block: &Block, out: &mut Vec<Issue>) -> Option<PolicyFields
         roles: roles?,
         require: require?,
         owners: owners?,
+        rules_from_chat: rules_from_chat?,
     })
 }
