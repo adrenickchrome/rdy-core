@@ -1,7 +1,9 @@
 //! The tests that Windows does not compile, one row per file (FW-XP1 D-1RXEA, Windows plan task 32).
 //!
 //! A test leaves Windows in two ways: its file begins with `#![cfg(unix)]` (a whole-file gate),
-//! or the test itself follows `#[cfg(unix)]` (an item gate). Every such test is named here, with
+//! or the test itself follows `#[cfg(unix)]`, above or below `#[test]`, or sits in a `mod` that does
+//! (an item gate). A Unix gate written any other way (`all(unix, ..)`, `target_family`, `cfg_attr`)
+//! is named by [`problems`] as unsupported. Every such test is named here, with
 //! the Unix mechanism that cannot exist on Windows and the tests that hold the same safety
 //! property on Windows. [`problems`] compares this manifest with the tree and fails on any
 //! difference, so a new, renamed or removed exclusion cannot shrink the test population without a
@@ -51,6 +53,45 @@ pub const EXCLUSIONS: &[Exclusion] = &[
             "wx20_editor_receives_one_literal_native_path",
             "wx20_editor_can_reopen_the_closed_temp_file",
         ],
+    },
+    Exclusion {
+        file: "crates/rdy-daemon/src/layout.rs",
+        gate: Gate::Item,
+        tests: &[
+            "msw15_a_failed_gitignore_write_leaves_no_gitignore_and_no_temp_file",
+            "msw15_a_file_system_without_hard_links_has_no_gitignore_and_still_ensures",
+            "msw15_an_existing_gitignore_is_left_untouched_and_no_temp_file_remains",
+            "msw15_a_link_at_the_gitignore_name_is_not_written_through",
+            "df3_a_short_socket_directory_that_is_not_private_is_refused",
+            "df3_a_short_socket_directory_that_cannot_be_prepared_names_it",
+            "df3_a_socket_record_is_read_only_when_it_names_this_project",
+        ],
+        mechanism: "Errno values, symlinks, hard links and modes of the short socket directory and the run directory's .gitignore (the whole tests module is `#[cfg(unix)]`).",
+        counterparts: &[
+            "wx15_run_directory_reparse_or_acl_violation_is_refused",
+            "wx15_pipe_record_is_bounded_and_local",
+        ],
+    },
+    Exclusion {
+        file: "crates/rdy-daemon/src/layout.rs",
+        gate: Gate::Item,
+        tests: &["ps8_project_id_is_the_store_file_id"],
+        mechanism: "The project identity is the Unix device and inode of .rdy (the whole tests module is `#[cfg(unix)]`).",
+        counterparts: &["wx2_full_file_id_round_trips_without_truncation"],
+    },
+    Exclusion {
+        file: "crates/rdy-daemon/src/layout.rs",
+        gate: Gate::Item,
+        tests: &["ps8_the_identity_text_is_unchanged"],
+        mechanism: "The `dev:ino` text of a Unix project identity (the whole tests module is `#[cfg(unix)]`).",
+        counterparts: &["wx14_session_identity_matches_the_settled_schema"],
+    },
+    Exclusion {
+        file: "crates/rdy-daemon/src/socket.rs",
+        gate: Gate::Item,
+        tests: &["ps7_the_socket_record_is_the_path_bytes_then_the_identity"],
+        mechanism: "The socket record holds a Unix socket path and a device and inode identity (the whole tests module is `#[cfg(unix)]`).",
+        counterparts: &["wx15_pipe_record_is_bounded_and_local"],
     },
     Exclusion {
         file: "crates/rdy-daemon/src/client.rs",
@@ -322,15 +363,137 @@ pub fn problems(root: &Path) -> Vec<String> {
     named
 }
 
-/// The tests of `files` that leave Windows, as (file, name, gate), in file then line order.
-fn gated_tests(files: &[(String, String)]) -> Vec<(String, String, Gate)> {
+/// A `mod name { .. }` block: its attribute lines and the lines it spans.
+struct Module {
+    attrs: Vec<String>,
+    first: usize,
+    last: usize,
+}
+
+/// A line that gates on Unix in a way this scanner cannot read (anything but the two exact forms).
+fn unsupported_gate(attr: &str) -> bool {
+    (attr.starts_with("#[cfg(") || attr.starts_with("#[cfg_attr("))
+        && attr.contains("unix")
+        && attr != "#[cfg(unix)]"
+        && attr != "#[cfg(not(unix))]"
+}
+
+/// The line of the `}` that closes the block opened on line `from`, skipping braces in strings,
+/// characters and comments.
+fn block_end(lines: &[&str], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut opened = false;
+    let mut in_block_comment = false;
+    let mut raw_hashes: Option<usize> = None;
+    let mut in_str = false;
+    for (n, line) in lines.iter().enumerate().skip(from) {
+        let c: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < c.len() {
+            if in_block_comment {
+                if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                    in_block_comment = false;
+                    i += 1;
+                }
+            } else if let Some(h) = raw_hashes {
+                if c[i] == '"' && c[i + 1..].iter().take(h).filter(|x| **x == '#').count() == h {
+                    raw_hashes = None;
+                    i += h;
+                }
+            } else if in_str {
+                if c[i] == '\\' {
+                    i += 1;
+                } else if c[i] == '"' {
+                    in_str = false;
+                }
+            } else if c[i] == '/' && c.get(i + 1) == Some(&'/') {
+                break;
+            } else if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                in_block_comment = true;
+                i += 1;
+            } else if c[i] == 'r'
+                && (i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '_'))
+                && {
+                    let h = c[i + 1..].iter().take_while(|x| **x == '#').count();
+                    c.get(i + 1 + h) == Some(&'"')
+                }
+            {
+                let h = c[i + 1..].iter().take_while(|x| **x == '#').count();
+                raw_hashes = Some(h);
+                i += 1 + h;
+            } else if c[i] == '"' {
+                in_str = true;
+            } else if c[i] == '\'' {
+                // a character literal; a lifetime has no closing quote two or three places on
+                if c.get(i + 1) == Some(&'\\') {
+                    i += 3;
+                    while i < c.len() && c[i] != '\'' {
+                        i += 1;
+                    }
+                } else if c.get(i + 2) == Some(&'\'') {
+                    i += 2;
+                }
+            } else if c[i] == '{' {
+                depth += 1;
+                opened = true;
+            } else if c[i] == '}' {
+                depth = depth.saturating_sub(1);
+                if opened && depth == 0 {
+                    return Some(n);
+                }
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Every `mod name { .. }` block of the file.
+fn modules(lines: &[&str]) -> Vec<Module> {
     let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        let t = t.strip_prefix("pub ").unwrap_or(t);
+        if !(t.starts_with("mod ") && t.ends_with('{')) {
+            continue;
+        }
+        if let Some(last) = block_end(lines, i) {
+            out.push(Module {
+                attrs: attributes_above(lines, i).map(str::to_string).collect(),
+                first: i,
+                last,
+            });
+        }
+    }
+    out
+}
+
+/// The attribute lines of the test on line `at`: those above it and those between it and its `fn`.
+fn test_attributes(lines: &[&str], at: usize) -> Vec<String> {
+    let mut attrs: Vec<String> = attributes_above(lines, at).map(str::to_string).collect();
+    for l in &lines[at..] {
+        let t = l.trim();
+        if t.starts_with("#[") {
+            attrs.push(t.to_string());
+        } else if t.starts_with("fn ") || t.starts_with("pub ") || t.starts_with("async ") {
+            break;
+        }
+    }
+    attrs
+}
+
+/// The tests of `files` that leave Windows, as (file, name, gate) in file then line order, and the
+/// tests whose Unix gate this scanner cannot read.
+fn gated_tests(files: &[(String, String)]) -> (Vec<(String, String, Gate)>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut bad = Vec::new();
     for (path, text) in files {
         if is_seam_internal(path) {
             continue;
         }
         let lines: Vec<&str> = text.lines().collect();
         let whole = lines.first() == Some(&GATE_LINE);
+        let mods = modules(&lines);
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
             if !(t.starts_with("#[test") || t.starts_with("#[tokio::test")) {
@@ -339,15 +502,25 @@ fn gated_tests(files: &[(String, String)]) -> Vec<(String, String, Gate)> {
             let Some(name) = fn_name_after(&lines, i) else {
                 continue;
             };
-            let item = attributes_above(&lines, i).any(|a| a == "#[cfg(unix)]");
+            let mut attrs = test_attributes(&lines, i);
+            for m in mods.iter().filter(|m| m.first < i && i <= m.last) {
+                attrs.extend(m.attrs.iter().cloned());
+            }
+            if let Some(a) = attrs.iter().find(|a| unsupported_gate(a)) {
+                bad.push(format!(
+                    "{path}::{name}: an unsupported Unix gate `{a}`; use `#[cfg(unix)]` on the test \
+                     or its module, or `#![cfg(unix)]` on the file"
+                ));
+                continue;
+            }
             if whole {
                 out.push((path.clone(), name, Gate::File));
-            } else if item {
+            } else if attrs.iter().any(|a| a == "#[cfg(unix)]") {
                 out.push((path.clone(), name, Gate::Item));
             }
         }
     }
-    out
+    (out, bad)
 }
 
 /// The product seams' own unit tests test the seam's calls and are not part of the population.
@@ -382,7 +555,8 @@ fn attributes_above<'a>(lines: &'a [&'a str], at: usize) -> impl Iterator<Item =
 /// [`problems`] over scanned `files` and a given manifest.
 fn problems_in(files: &[(String, String)], manifest: &[Exclusion]) -> Vec<String> {
     let mut out = Vec::new();
-    let found = gated_tests(files);
+    let (found, unreadable) = gated_tests(files);
+    out.extend(unreadable);
     let mut listed: Vec<(&str, &str, Gate)> = Vec::new();
     for e in manifest {
         if e.mechanism.trim().is_empty() {
@@ -524,6 +698,52 @@ mod tests {
             problems_in(&f, &[ghost]),
             vec!["crates/rdy-daemon/tests/x_unix.rs: the Windows counterpart not_a_test is not a test in the tree".to_string()]
         );
+    }
+
+    #[test]
+    fn wx32_module_gates_and_attribute_order_are_accounted_for() {
+        // a test inside a `#[cfg(unix)]` module is excluded, whatever its own attributes
+        let module = files(&[(
+            "crates/rdy-daemon/src/m.rs",
+            "fn plain() {}\n#[cfg(test)]\n#[cfg(unix)]\nmod tests {\n    #[test]\n    fn in_mod() { let _ = \"}\"; }\n    #[test]\n    fn in_mod_two() {}\n}\n#[test]\nfn after_mod() {}\n",
+        )]);
+        let got = problems_in(&module, &[]);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got[0].starts_with("crates/rdy-daemon/src/m.rs::in_mod:"),
+            "{got:?}"
+        );
+        assert!(
+            got[1].starts_with("crates/rdy-daemon/src/m.rs::in_mod_two:"),
+            "{got:?}"
+        );
+        // a gate written below `#[test]` counts
+        let below = files(&[(
+            "crates/rdy-daemon/tests/y.rs",
+            "#[test]\n#[cfg(unix)]\nfn low() {}\n",
+        )]);
+        let got = problems_in(&below, &[]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0].starts_with("crates/rdy-daemon/tests/y.rs::low:"),
+            "{got:?}"
+        );
+        // a gate arrangement the scanner cannot read is refused by name
+        for odd in [
+            "#[cfg(all(unix, test))]\n#[test]\nfn odd() {}\n",
+            "#[test]\n#[cfg_attr(unix, ignore)]\nfn odd() {}\n",
+            "#[cfg(any(unix, windows))]\nmod tests {\n#[test]\nfn odd() {}\n}\n",
+        ] {
+            let got = problems_in(&files(&[("crates/rdy-daemon/tests/z.rs", odd)]), &[]);
+            assert_eq!(got.len(), 1, "{odd}: {got:?}");
+            assert!(got[0].contains("unsupported Unix gate"), "{got:?}");
+        }
+        // `not(unix)` and a plain cfg(test) are not Unix gates
+        let fine = files(&[(
+            "crates/rdy-daemon/tests/w.rs",
+            "#[cfg(test)]\nmod t {\n#[cfg(not(unix))]\n#[test]\nfn ok() {}\n}\n",
+        )]);
+        assert_eq!(problems_in(&fine, &[]), Vec::<String>::new());
     }
 
     #[test]
