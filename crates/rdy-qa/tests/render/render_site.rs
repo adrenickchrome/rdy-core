@@ -427,6 +427,8 @@ fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     let locked = site.join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("f"), "x").unwrap();
+    // Windows lets a file's own access delete it: the file gives no delete right either
+    rdy_qa::platform::set_mode(&locked.join("f"), 0o400).unwrap();
     let Some(guard) = ReadOnly::new(
         "ren1_an_old_copy_that_cannot_be_removed_is_a_warning",
         &locked,
@@ -439,6 +441,7 @@ fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     let left = old.join("locked");
     let kept = left.join("f").exists();
     rdy_qa::platform::set_mode(&left, 0o755).ok();
+    rdy_qa::platform::set_mode(&left.join("f"), 0o600).ok();
     assert!(kept, "the old copy is still there");
     assert_eq!(second.warnings.len(), 1, "{:?}", second.warnings);
     assert!(
