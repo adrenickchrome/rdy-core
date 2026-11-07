@@ -21,9 +21,28 @@ pub fn require_all() -> bool {
     std::env::var(REQUIRE_ALL).as_deref() == Ok("1")
 }
 
+/// The start of the reason of a deep-only skip, so the gate counts it apart from a missing
+/// prerequisite.
+pub const DEEP_TAG: &str = "(deep) ";
+
 /// The line a skip of `test` writes.
 pub fn skip_line(test: &str, reason: &str) -> String {
     format!("{SKIP_MARK} {test}: {reason}")
+}
+
+/// The line a skip of `test` writes for `why`: a deep-only skip carries `DEEP_TAG`.
+pub fn skip_line_for(test: &str, why: Why, reason: &str) -> String {
+    match why {
+        Why::Prerequisite => skip_line(test, reason),
+        Why::DeepOnly => skip_line(test, &format!("{DEEP_TAG}{reason}")),
+    }
+}
+
+/// Whether the text after `RDY-QA-SKIP` (`<test>: <reason>`) is a deep-only skip.
+pub fn is_deep(record: &str) -> bool {
+    record
+        .split_once(": ")
+        .is_some_and(|(_, reason)| reason.starts_with(DEEP_TAG))
 }
 
 /// Whether a skip fails its test: a missing prerequisite when every prerequisite is required.
@@ -35,7 +54,11 @@ pub fn fails(why: Why, require_all: bool) -> bool {
 /// the print macros of a passing test and drops them. Panics when the skip fails (`fails`). The
 /// caller returns after it.
 pub fn skip(test: &str, why: Why, reason: &str) {
-    let _ = writeln!(std::io::stderr().lock(), "{}", skip_line(test, reason));
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        skip_line_for(test, why, reason)
+    );
     if fails(why, require_all()) {
         panic!("{test}: {reason}; {REQUIRE_ALL}=1 needs every prerequisite");
     }
@@ -64,6 +87,13 @@ mod tests {
         assert_eq!(
             skip_line("render::a", "node is not installed"),
             "RDY-QA-SKIP render::a: node is not installed"
+        );
+        let deep = skip_line_for("k::a", Why::DeepOnly, "deep gate only");
+        assert_eq!(deep, "RDY-QA-SKIP k::a: (deep) deep gate only");
+        assert!(is_deep(deep.strip_prefix(SKIP_MARK).unwrap().trim()));
+        assert_eq!(
+            skip_line_for("k::a", Why::Prerequisite, "no node"),
+            skip_line("k::a", "no node")
         );
     }
 }

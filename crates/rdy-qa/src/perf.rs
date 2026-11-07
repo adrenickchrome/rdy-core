@@ -11092,6 +11092,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         };
         let md = crate::report::markdown(&report);
         assert!(
