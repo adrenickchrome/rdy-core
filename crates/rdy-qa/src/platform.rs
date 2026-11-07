@@ -13,6 +13,21 @@ mod child_fixture_tests;
 // the test SSH agent's protocol is the same on every platform, only its endpoint differs
 mod agent_wire;
 
+/// The release target of `os`/`arch` (`gnu`: the GNU C library; for Windows, the MinGW
+/// environment): macOS arm64, Linux (GNU) amd64 or Windows (MSVC) amd64. The one place where
+/// the harness names the release targets of a machine, on every platform.
+pub fn release_target_of(os: &str, arch: &str, gnu: bool) -> std::io::Result<&'static str> {
+    match (os, arch, gnu) {
+        ("macos", "aarch64", _) => Ok("aarch64-apple-darwin"),
+        ("linux", "x86_64", true) => Ok("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64", false) => Ok("x86_64-pc-windows-msvc"),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("rdy has no release for {os}/{arch}"),
+        )),
+    }
+}
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

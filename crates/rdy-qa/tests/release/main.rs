@@ -6,3 +6,4 @@ mod release_install;
 mod release_keys;
 mod release_notices;
 mod release_package;
+mod release_package_unix;

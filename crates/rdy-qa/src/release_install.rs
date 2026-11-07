@@ -30,8 +30,11 @@ A project made with a preview moves to Release 1 the same way.
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
 ";
 
-/// The two release targets: macOS arm64 and Linux amd64.
+/// The two Unix release targets: macOS arm64 and Linux amd64. Their archive lines are the whole
+/// signed manifest; the Windows target joins the manifest with its install checker.
 pub const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
+/// The Windows release target: its archive holds `rdy.exe` where the others hold `rdy`.
+pub const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
 /// The MIT license file, at the repository root and in each archive.
 pub const MIT_FILE: &str = "LICENSE-MIT";
 /// The Apache 2.0 license file, at the repository root and in each archive.
@@ -150,7 +153,7 @@ pub(crate) fn repository_root() -> PathBuf {
 
 /// `tar -czf - <stem>`: the archive goes to stdout. AppleDouble files stay out of the archive.
 fn tar_command(stem: &str) -> Command {
-    let mut cmd = Command::new("tar");
+    let mut cmd = Command::new(platform::tar_program());
     cmd.args(["-czf", "-", stem]).env("COPYFILE_DISABLE", "1");
     cmd
 }
@@ -175,9 +178,18 @@ pub fn valid_version(version: &str) -> bool {
         && !minor.starts_with('0')
 }
 
-/// Whether `target` is one of the two [`TARGETS`].
+/// Whether `target` is one of the [`TARGETS`] or the [`WINDOWS_TARGET`].
 pub fn valid_target(target: &str) -> bool {
-    TARGETS.contains(&target)
+    TARGETS.contains(&target) || target == WINDOWS_TARGET
+}
+
+/// The executable's file name in the archive of `target`, chosen by the triple alone.
+fn binary_name(target: &str) -> &'static str {
+    if target == WINDOWS_TARGET {
+        "rdy.exe"
+    } else {
+        "rdy"
+    }
 }
 
 /// Whether `path` is an absolute UTF-8 path of at most [`PATH_MAX`] bytes with no NUL, CR or LF.
@@ -190,7 +202,7 @@ pub fn valid_path(path: &Path) -> bool {
 
 /// Whether `tar --version` runs and succeeds.
 pub fn tar_available() -> bool {
-    let mut cmd = Command::new("tar");
+    let mut cmd = Command::new(platform::tar_program());
     cmd.arg("--version");
     platform::run_bounded(cmd, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
         .is_ok_and(|o| o.status.success())
@@ -347,7 +359,8 @@ impl Work<'_> {
             dir,
             files: Vec::new(),
         });
-        stage.add("rdy", 0o755, |to| copy_from(&inputs.binary, to, BINARY_MAX))?;
+        let exe = binary_name(target);
+        stage.add(exe, 0o755, |to| copy_from(&inputs.binary, to, BINARY_MAX))?;
         stage.add(MIT_FILE, 0o644, |to| {
             copy_from(&inputs.mit, to, LICENSE_MAX)
         })?;
@@ -359,7 +372,7 @@ impl Work<'_> {
             to.write_all(&inputs.notices)
                 .map_err(|_| Failure::FileOperation)
         })?;
-        let preview = probe_version(&stage.dir, version, setup)?;
+        let preview = probe_version(&stage.dir, exe, version, setup)?;
         let stem = if preview {
             format!("rdy-{version}-preview-{target}")
         } else {
@@ -503,12 +516,12 @@ fn copy_from(from: &File, to: &mut File, max: u64) -> Result<(), Failure> {
 const PROBE_BUSY_TRIES: u32 = 50;
 
 /// Runs the staged binary's `--version` (the setup's probe), started in the open stage `stage`
-/// as `./rdy`, and reads whether it is a preview.
-fn probe_version(stage: &File, version: &str, setup: &Setup) -> Result<bool, Failure> {
+/// as `./<exe>` (`rdy`, or `rdy.exe` for Windows), and reads whether it is a preview.
+fn probe_version(stage: &File, exe: &str, version: &str, setup: &Setup) -> Result<bool, Failure> {
     let mut tries = 1;
     loop {
         let program =
-            platform::program_in_dir(stage, "rdy".as_ref()).map_err(|_| Failure::FileOperation)?;
+            platform::program_in_dir(stage, exe.as_ref()).map_err(|_| Failure::FileOperation)?;
         let mut probe = (setup.probe)(program.path());
         let start =
             platform::start_in_dir(&mut probe, stage).map_err(|_| Failure::FileOperation)?;
@@ -1295,7 +1308,7 @@ impl MadeDir {
         let dir = rdy_store::pio::open_dir_at(parent, name).ok()?;
         let meta = dir.metadata().ok()?;
         (meta.is_dir()
-            && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid()
+            && rdy_store::pio::privacy(&dir).ok()?.mine
             && platform::is_empty_dir(&dir).unwrap_or(false))
         .then_some(())?;
         Some(MadeDir {
@@ -1462,10 +1475,8 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     use InstallFailure::Input;
     let dir = platform::open_dir(&input.download).map_err(|_| Input)?;
     let meta = dir.metadata().map_err(|_| Input)?;
-    if !meta.is_dir()
-        || rdy_store::pio::owner(&meta) != rdy_store::pio::own_uid()
-        || rdy_store::pio::is_shared_writable(&meta)
-    {
+    let who = rdy_store::pio::privacy(&dir).map_err(|_| Input)?;
+    if !meta.is_dir() || !who.mine || who.shared_writable {
         return Err(Input);
     }
     if !(absent(&input.unpack) && absent(&input.prefix)) {
@@ -2038,7 +2049,7 @@ mod tests {
 
     /// A probe that prints `text` (a printf format) instead of running the staged copy.
     fn printing(text: &'static str) -> impl Fn(&Path) -> Command {
-        move |_| shell_script(&format!("printf '{text}'"))
+        move |_| platform::print_command(&text.replace("\\n", "\n"))
     }
 
     fn setup<'a>(f: &Fixture, probe: &'a dyn Fn(&Path) -> Command) -> Setup<'a> {
@@ -2062,7 +2073,7 @@ mod tests {
 
     /// `tar` with `args`, which must succeed; its stdout.
     fn tar(args: &[&std::ffi::OsStr]) -> Vec<u8> {
-        let mut cmd = Command::new("tar");
+        let mut cmd = Command::new(platform::tar_program());
         cmd.args(args);
         let out =
             run_bounded(cmd, None, 1 << 20, std::time::Duration::from_secs(600)).expect("run tar");
@@ -2542,22 +2553,18 @@ mod tests {
     #[test]
     fn pre1_package_calls_unopenable_nonregular_inputs_invalid() {
         let probe = printing("rdy 0.14.0\n");
-        // /dev/tty opens only with a controlling terminal; missing or opened, it is not regular
+        // a device is never a regular file (Unix: /dev/tty, which opens only with a controlling
+        // terminal; Windows: the null device); missing or opened, it is refused as invalid input
         let f = Fixture::new();
         let before = f.state();
+        let device = platform::device_input();
         assert_eq!(
-            package_with(
-                Path::new("/dev/tty"),
-                V,
-                TARGET,
-                &f.out(),
-                &setup(&f, &probe)
-            ),
+            package_with(device, V, TARGET, &f.out(), &setup(&f, &probe)),
             Err(Failure::InputFile),
-            "/dev/tty"
+            "{device:?}"
         );
-        assert_eq!(f.state(), before, "/dev/tty: nothing changed");
-        assert!(!f.out().exists(), "/dev/tty: no OUT");
+        assert_eq!(f.state(), before, "{device:?}: nothing changed");
+        assert!(!f.out().exists(), "{device:?}: no OUT");
         // a socket never opens; a FIFO without read access does not open for this user
         let socket: Spoil = |p| {
             fs::remove_file(p).expect("rm");
@@ -3077,6 +3084,192 @@ mod tests {
         assert_eq!(refused, if native.is_some() { 1 } else { 2 });
     }
 
+    /// The Windows packaging branch, driven by the target triple on any host: a stand-in
+    /// probe replaces the staged executable's own run.
+    fn windows_package(f: &Fixture, stdout: &'static str) -> PathBuf {
+        let probe = printing(stdout);
+        package_with(&f.binary, V, WINDOWS_TARGET, &f.out(), &setup(f, &probe))
+            .unwrap_or_else(|e| panic!("package for Windows: {}", e.message()))
+    }
+
+    #[test]
+    fn wx35a_windows_target_packages_rdy_exe() {
+        if !tar_or_skip(&crate::test_name!("wx35a_windows_target_packages_rdy_exe")) {
+            return;
+        }
+        assert_eq!(WINDOWS_TARGET, "x86_64-pc-windows-msvc");
+        assert!(valid_target(WINDOWS_TARGET));
+        for (stdout, preview, stem) in [
+            (
+                "rdy 0.14.0 (preview)\\n",
+                true,
+                "rdy-0.14.0-preview-x86_64-pc-windows-msvc",
+            ),
+            ("rdy 0.14.0\\n", false, "rdy-0.14.0-x86_64-pc-windows-msvc"),
+        ] {
+            let f = Fixture::new();
+            let archive = windows_package(&f, stdout);
+            assert_eq!(archive, f.out().join(format!("{stem}.tar.gz")));
+            let mut want = members(stem, preview);
+            want.retain(|m| m != &format!("{stem}/rdy"));
+            want.push(format!("{stem}/rdy.exe"));
+            want.sort();
+            assert_eq!(
+                listing(&archive),
+                want,
+                "rdy.exe, licenses, notices, marker"
+            );
+            let into = f.dir.path().join("x");
+            extract(&archive, &into);
+            let root = into.join(stem);
+            assert_eq!(fs::read(root.join("rdy.exe")).expect("rdy.exe"), BINARY);
+            assert!(!root.join("rdy").exists(), "no extensionless executable");
+            assert_eq!(fs::read(root.join(NOTICES_FILE)).expect("notices"), NOTICES);
+            assert_eq!(root.join("PREVIEW.txt").exists(), preview);
+        }
+        // the Unix targets keep `rdy`
+        let f = Fixture::new();
+        let probe = printing("rdy 0.14.0\\n");
+        let archive = package_with(&f.binary, V, TARGET, &f.out(), &setup(&f, &probe))
+            .map_err(Failure::message)
+            .expect("package for macOS");
+        assert!(
+            listing(&archive).contains(&"rdy-0.14.0-aarch64-apple-darwin/rdy".to_string()),
+            "{:?}",
+            listing(&archive)
+        );
+    }
+
+    #[test]
+    fn wx35a_archive_bytes_and_manifest_names_are_stable() {
+        // the archive names of all three targets, byte for byte
+        assert_eq!(
+            [TARGETS[0], TARGETS[1], WINDOWS_TARGET].map(|t| archive_name("0.14.0", t)),
+            [
+                "rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz",
+                "rdy-0.14.0-preview-x86_64-unknown-linux-gnu.tar.gz",
+                "rdy-0.14.0-preview-x86_64-pc-windows-msvc.tar.gz",
+            ]
+        );
+        // the two Unix archive lines of the manifest stay; no zip, MSI or installer name exists
+        assert_eq!(
+            TARGETS,
+            ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+        );
+        let line = |t: &str| format!("{}  {}\n", "a".repeat(64), archive_name("0.14.0", t));
+        let manifest = format!("{}{}", line(TARGETS[0]), line(TARGETS[1]));
+        assert_eq!(check_manifest(manifest.as_bytes(), "0.14.0"), Ok(()));
+        let with_windows = format!("{manifest}{}", line(WINDOWS_TARGET));
+        assert!(check_manifest(with_windows.as_bytes(), "0.14.0").is_err());
+        assert!(!archive_name("0.14.0", WINDOWS_TARGET).ends_with(".zip"));
+        if !tar_or_skip(&crate::test_name!(
+            "wx35a_archive_bytes_and_manifest_names_are_stable"
+        )) {
+            return;
+        }
+        // the member bytes are the inputs' bytes and the members are the sorted closed set
+        let f = Fixture::new();
+        let archive = windows_package(&f, "rdy 0.14.0 (preview)\\n");
+        let stem = "rdy-0.14.0-preview-x86_64-pc-windows-msvc";
+        let into = f.dir.path().join("x");
+        extract(&archive, &into);
+        let root = into.join(stem);
+        assert_eq!(names(&root), {
+            let mut v = vec![
+                "LICENSE-APACHE",
+                "LICENSE-MIT",
+                "PREVIEW.txt",
+                "THIRD-PARTY-NOTICES.txt",
+                "rdy.exe",
+            ];
+            v.sort();
+            v.into_iter().map(str::to_string).collect::<Vec<_>>()
+        });
+        assert_eq!(fs::read(root.join("rdy.exe")).expect("exe"), BINARY);
+        assert_eq!(fs::read(root.join(MIT_FILE)).expect("mit"), MIT);
+        assert_eq!(fs::read(root.join(APACHE_FILE)).expect("apache"), APACHE);
+        assert_eq!(
+            fs::read(root.join("PREVIEW.txt")).expect("note"),
+            PREVIEW_NOTE.as_bytes()
+        );
+        assert!(!PREVIEW_NOTE.contains('\r'), "LF note");
+    }
+
+    #[test]
+    fn wx35a_windows_archive_contains_no_host_path() {
+        if !tar_or_skip(&crate::test_name!(
+            "wx35a_windows_archive_contains_no_host_path"
+        )) {
+            return;
+        }
+        let f = Fixture::new();
+        let archive = windows_package(&f, "rdy 0.14.0 (preview)\\n");
+        let verbose = String::from_utf8(tar(&["-tvzf".as_ref(), archive.as_os_str()]))
+            .expect("utf-8 listing");
+        let host = f.dir.path().to_string_lossy().into_owned();
+        assert!(!verbose.contains(&host), "{verbose}");
+        for member in listing(&archive) {
+            assert!(
+                member.starts_with("rdy-0.14.0-preview-x86_64-pc-windows-msvc"),
+                "{member}"
+            );
+            assert!(!member.contains(['\\', ':']), "{member}");
+            assert!(!member.contains(STAGE_DIR), "{member}");
+        }
+        // no file holds the temporary directory either
+        let into = f.dir.path().join("x");
+        extract(&archive, &into);
+        for entry in
+            fs::read_dir(into.join("rdy-0.14.0-preview-x86_64-pc-windows-msvc")).expect("read_dir")
+        {
+            let bytes = fs::read(entry.expect("entry").path()).expect("read");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(&host),
+                "a member names the host directory"
+            );
+        }
+    }
+
+    #[test]
+    fn wx35a_native_windows_never_takes_unsupported_target_branch() {
+        // the shared mapping: Windows on x86-64 with the MSVC environment is a release target
+        assert_eq!(
+            platform::release_target_of("windows", "x86_64", false).expect("Windows amd64"),
+            WINDOWS_TARGET
+        );
+        for (os, arch, gnu) in [
+            ("windows", "x86_64", true),
+            ("windows", "aarch64", false),
+            ("windows", "x86", false),
+        ] {
+            let err = platform::release_target_of(os, arch, gnu).expect_err("no release target");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{os}/{arch}/{gnu}");
+        }
+        // a machine whose target is Windows packages for it, and is not refused as invalid
+        let f = Fixture::new();
+        let native = || Ok(WINDOWS_TARGET);
+        let probe = printing("rdy 0.14.0\\n");
+        let on_windows = Setup {
+            native_target: Some(&native),
+            ..setup(&f, &probe)
+        };
+        if tar_available() {
+            let made = package_with(&f.binary, V, WINDOWS_TARGET, &f.out(), &on_windows);
+            assert!(made.is_ok(), "{made:?}");
+        }
+        // and a Unix target is still another machine's target there
+        let g = Fixture::new();
+        let on_windows = Setup {
+            native_target: Some(&native),
+            ..setup(&g, &probe)
+        };
+        assert_eq!(
+            package_with(&g.binary, V, TARGET, &g.out(), &on_windows),
+            Err(Failure::Arguments)
+        );
+        assert!(!g.out().exists());
+    }
+
     #[test]
     fn pre1_valid_version_and_target_grammar() {
         for good in ["0.1.0", "0.14.0", "0.1234567890.0"] {
@@ -3326,7 +3519,7 @@ esac
         fn retar(&self, target: &str) {
             let src = self.dir.path().join(format!("src-{target}"));
             let _ = fs::remove_file(self.archive(target));
-            let mut cmd = Command::new("tar");
+            let mut cmd = Command::new(platform::tar_program());
             cmd.arg("-czf")
                 .arg(self.archive(target))
                 .arg("-C")

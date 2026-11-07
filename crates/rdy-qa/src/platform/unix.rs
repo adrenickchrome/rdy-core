@@ -793,23 +793,31 @@ fn drain_bounded(
 /// The release target triple of this machine: macOS arm64 or Linux (GNU) amd64. Any other
 /// machine is `Unsupported`.
 pub fn release_target() -> io::Result<&'static str> {
-    release_target_of(
+    super::release_target_of(
         std::env::consts::OS,
         std::env::consts::ARCH,
         cfg!(target_env = "gnu"),
     )
 }
 
-/// The release target of `os`/`arch` (`gnu`: the GNU C library).
-fn release_target_of(os: &str, arch: &str, gnu: bool) -> io::Result<&'static str> {
-    match (os, arch, gnu) {
-        ("macos", "aarch64", _) => Ok("aarch64-apple-darwin"),
-        ("linux", "x86_64", true) => Ok("x86_64-unknown-linux-gnu"),
-        _ => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("rdy has no release for {os}/{arch}"),
-        )),
-    }
+/// An absolute path to a device that is not a regular file and that a package input must refuse:
+/// `/dev/tty` opens only with a controlling terminal, and missing or opened it is not regular.
+#[cfg(test)]
+pub(crate) fn device_input() -> &'static Path {
+    Path::new("/dev/tty")
+}
+
+/// A command that writes exactly `text` to stdout and exits 0: a stand-in version probe.
+#[cfg(test)]
+pub(crate) fn print_command(text: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "printf '%s' \"$0\"", text]);
+    cmd
+}
+
+/// The archive tool: `tar`, found on PATH.
+pub fn tar_program() -> PathBuf {
+    PathBuf::from("tar")
 }
 
 /// The largest `uname -srm` output the OS probe accepts, its LF included.
@@ -1727,6 +1735,7 @@ mod tests {
 
     #[test]
     fn pre1_native_release_facts_stay_in_the_platform_seam() {
+        use crate::platform::release_target_of;
         assert_eq!(
             release_target_of("macos", "aarch64", false).expect("macOS arm64"),
             "aarch64-apple-darwin"
@@ -1739,7 +1748,7 @@ mod tests {
             ("linux", "aarch64", true),
             ("macos", "x86_64", false),
             ("linux", "x86_64", false),
-            ("windows", "x86_64", false),
+            ("windows", "x86_64", true),
         ] {
             let err = release_target_of(os, arch, gnu).expect_err("no release target");
             assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{os}/{arch}");
