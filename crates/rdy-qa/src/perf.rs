@@ -10094,10 +10094,20 @@ mod tests {
             .build()
             .expect("client runtime");
         let (run, hold) = site_daemon_start(&proj, Duration::from_millis(300));
-        drop(rt.block_on(daemon_ready(&proj)));
+        // The client is dropped inside the runtime and the runtime is driven a moment more: on
+        // Windows a named-pipe handle closes when its cancelled I/O completes, and a runtime that
+        // is not polled again never delivers that completion, so the daemon would keep the
+        // connection (and the idle timer would never arm).
+        let connect_and_close = || {
+            rt.block_on(async {
+                drop(daemon_ready(&proj).await);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+        };
+        connect_and_close();
         std::thread::sleep(Duration::from_millis(1500));
         assert!(run.handle().keepers() >= 1, "the hold keeps the daemon up");
-        drop(rt.block_on(daemon_ready(&proj)));
+        connect_and_close();
         drop(hold);
         let started = Instant::now();
         // the idle timer runs again: the daemon exits on its own
