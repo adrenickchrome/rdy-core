@@ -649,7 +649,7 @@ impl Served {
 
     /// The user config the served commands read (`$XDG_CONFIG_HOME/rdy/config.yaml`).
     pub fn user_config(&self) -> PathBuf {
-        self.cfg.path().join("rdy/config.yaml")
+        self.cfg.path().join("rdy").join("config.yaml")
     }
 
     /// The command `rdy --project <dir> <args>` in the project, as the human (`human_command`).
