@@ -69,7 +69,7 @@ fn fingerprint(dir: &Path) -> BTreeMap<String, u64> {
                 .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .to_string();
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if rel == ".rdy/run" || rel.starts_with(".rdy/run/") || rel.contains("index.redb") {
                 continue;
             }

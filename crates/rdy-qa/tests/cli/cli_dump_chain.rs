@@ -472,7 +472,7 @@ fn hc8_paths_use_project_root_for_mcp_and_session_cwd_for_cli() {
         text.contains(" after i1.rdydump, ")
             && text.contains(&format!(
                 ", to {} (",
-                work.canonicalize().unwrap().join("next.rdydump").display()
+                rdy_engine::display_path(&work.canonicalize().unwrap().join("next.rdydump"))
             )),
         "{text:?}"
     );
@@ -494,7 +494,9 @@ fn hc8_paths_use_project_root_for_mcp_and_session_cwd_for_cli() {
         e["message"]
             .as_str()
             .unwrap()
-            .contains(arg(&work.canonicalize().unwrap().join("gone.rdydump"))),
+            .contains(&rdy_engine::display_path(
+                &work.canonicalize().unwrap().join("gone.rdydump")
+            )),
         "{e}"
     );
     // load: the file, each --then and the dir are the caller's too

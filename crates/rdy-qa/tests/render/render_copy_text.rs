@@ -905,6 +905,17 @@ fn dgm9_copy_links_are_absolute_and_frozen() {
     );
 }
 
+/// The `file:` URL of a directory: `file:///C:/dir` for a Windows drive path (no `\\?\` prefix,
+/// forward slashes), `file:///dir` elsewhere.
+fn file_url(dir: &std::path::Path) -> String {
+    let text = rdy_engine::display_path(dir).replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}
+
 /// From a static site opened from disk, Copy works with the page alone: the payload is in the
 /// page, every link leads to a file of the site, and nothing is requested.
 #[test]
@@ -937,7 +948,7 @@ fn dgm9_copy_works_from_file_without_requests() {
     if !node_or_skip("dgm9_copy_works_from_file_without_requests") {
         return;
     }
-    let root = format!("file://{}", out.path().canonicalize().unwrap().display());
+    let root = file_url(&out.path().canonicalize().unwrap());
     let url = format!("{root}/{GUIDE}");
     let v = run(page_spec(&page, &url, COPY_ALL));
     let all = copies(&page, &v);

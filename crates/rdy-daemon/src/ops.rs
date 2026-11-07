@@ -379,11 +379,14 @@ fn to_json<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).expect("a reply serializes")
 }
 
-/// `p` as given when absolute, else under `cwd`.
+/// `p` as given when absolute, else under `cwd`. On Windows a path with a root and no drive
+/// (`/x`) is on `cwd`'s drive; it is spelled with the native separator, never `C:/x`.
 pub(crate) fn resolve_path(cwd: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);
     if path.is_absolute() {
         path.to_path_buf()
+    } else if path.has_root() {
+        cwd.join(path).components().collect()
     } else {
         cwd.join(path)
     }
@@ -667,5 +670,30 @@ fn check_max_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
             format!("ask for at most {MAX_TOKENS_LIMIT} tokens"),
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod wx33f_tests {
+    use super::resolve_path;
+    use std::path::Path;
+
+    #[test]
+    fn wx33f_a_rooted_path_without_a_drive_is_spelled_natively() {
+        // Unix: `/x` is absolute and a relative path goes under the working directory.
+        let cwd = if cfg!(windows) {
+            Path::new(r"C:\work\dir")
+        } else {
+            Path::new("/work/dir")
+        };
+        let root = resolve_path(cwd, "/");
+        let text = root.to_string_lossy();
+        if cfg!(windows) {
+            assert_eq!(text, r"C:\", "the drive root of the working directory");
+            assert_eq!(resolve_path(cwd, "/x/y").to_string_lossy(), r"C:\x\y");
+        } else {
+            assert_eq!(text, "/");
+        }
+        assert_eq!(resolve_path(cwd, "a/b"), cwd.join("a/b"));
     }
 }

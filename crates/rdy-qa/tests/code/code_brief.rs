@@ -186,9 +186,15 @@ fn cbrief1_with_no_code_repo_linked_only_reflects_answer() {
     assert!(cb.code.repos.is_empty());
     assert!(cb.code.implements.is_empty());
     assert_eq!(cb.code.reflects.len(), 1);
+    // an absolute path in the platform's own spelling (`/abs/..` is not absolute on Windows)
+    let abs = if cfg!(windows) {
+        r"C:\abs\src\new.rs"
+    } else {
+        "/abs/src/new.rs"
+    };
     let e = r
         .read()
-        .brief_code(&Scope::Canon, "/abs/src/new.rs", None, None)
+        .brief_code(&Scope::Canon, abs, None, None)
         .unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.fix.contains("code_repos"), "{}", e.fix);

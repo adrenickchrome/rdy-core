@@ -109,12 +109,12 @@ pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
         return Err(config_levels::missing_project(project));
     }
     let mut paths = vec![cfg_path];
-    let local = project.join(config_levels::LOCAL_FILE);
+    let local = config_levels::local_path(project);
     let has_local = local.exists();
     if has_local {
         paths.push(local);
     }
-    paths.extend(pack_files(&project.join(".rdy/packs"))?);
+    paths.extend(pack_files(&project.join(".rdy").join("packs"))?);
     let mut files = Vec::with_capacity(paths.len());
     let mut contents = Vec::with_capacity(paths.len());
     let mut buf = Vec::new();
@@ -220,7 +220,7 @@ pub(crate) fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
 
 pub(crate) fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
     let mut packs = vec![];
-    for f in pack_files(&root.join(".rdy/packs"))? {
+    for f in pack_files(&root.join(".rdy").join("packs"))? {
         let bytes = std::fs::read(&f).map_err(io)?;
         packs.push((f, bytes));
     }

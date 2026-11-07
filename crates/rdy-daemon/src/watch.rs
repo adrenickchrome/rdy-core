@@ -20,7 +20,7 @@
 //! fresh stamp look old, so a same-tick rewrite there can be missed. (git compares with its index
 //! file's own mtime, stamped by the same server; a marker file under `.rdy/run` would do the same
 //! here, at the price of a write per check.)
-use rdy_engine::config_levels::{LOCAL_FILE, PROJECT_FILE};
+use rdy_engine::config_levels::{self, PROJECT_FILE};
 use rdy_engine::{FileStamp, PackFingerprint, pack_fingerprint};
 use rdy_model::Hash;
 use std::path::{Path, PathBuf};
@@ -119,7 +119,7 @@ impl PackWatch {
     /// `*.yaml` (and `*.yml`) of `.rdy/packs/` sorted by path.
     fn listing(&self) -> Vec<(PathBuf, Stat)> {
         let mut paths = vec![self.root.join(PROJECT_FILE)];
-        let local = self.root.join(LOCAL_FILE);
+        let local = config_levels::local_path(&self.root);
         if local.exists() {
             paths.push(local);
         }
@@ -225,7 +225,11 @@ mod tests {
         std::fs::write(d.path().join(PROJECT_FILE), "pack: p\nname: N\n").unwrap();
         assert!(w.changed(), "an edit of .rdy.yaml is a change");
         let w = watch(d.path(), LONG);
-        std::fs::write(d.path().join(LOCAL_FILE), "views:\n  idle_days: 2\n").unwrap();
+        std::fs::write(
+            d.path().join(config_levels::LOCAL_FILE),
+            "views:\n  idle_days: 2\n",
+        )
+        .unwrap();
         assert!(w.changed(), "a new .rdy/local.yaml is a change");
         assert_eq!(PROJECT_FILE, ".rdy.yaml");
     }

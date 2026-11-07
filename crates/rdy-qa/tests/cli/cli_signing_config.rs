@@ -497,7 +497,10 @@ fn sig2_config_does_not_contact_an_agent() {
     );
     // the CLI shows the project's canonical path (macOS temp dirs are symlinks)
     let root = d.path().canonicalize().unwrap();
-    let local = format!("  # {}", root.join(LOCAL_FILE).display());
+    let local = format!(
+        "  # {}",
+        rdy_engine::display_path(&rdy_engine::config_levels::local_path(&root))
+    );
     let line = |k: &str| {
         text.lines()
             .find(|l| l.starts_with(&format!("{k} = ")))

@@ -203,7 +203,11 @@ fn working_copy_files(root: &Path) -> Vec<(String, String)> {
     while let Some(d) = todo.pop() {
         for e in std::fs::read_dir(&d).unwrap().flatten() {
             let p = e.path();
-            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let rel = p
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if rel == ".rdy/store" || rel == ".rdy/run" {
                 continue;
             }

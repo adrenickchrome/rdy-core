@@ -748,7 +748,7 @@ pub(crate) fn holder_files() -> RdyError {
 /// Step 5: writes one project file the target does not have, durably, never over a file.
 fn write_new(project: &Path, path: &str, bytes: &[u8], made: &mut Made) -> Result<(), RdyError> {
     if path.starts_with(&format!("{PACKS_DIR}/")) {
-        made.create_dirs(&project.join(PACKS_DIR))?;
+        made.create_dirs(&project.join(".rdy").join("packs"))?;
     }
     let at = project.join(path);
     let mut f = OpenOptions::new()
@@ -897,7 +897,7 @@ fn fails_fsck(project: &Path, carried: &[String], e: RdyError) -> RdyError {
 /// relative to the project and in full.
 fn target_only(project: &Path, carried: &[String]) -> Vec<(String, PathBuf)> {
     let mut rel = vec![LOCAL_FILE.to_string(), IGNORE_FILE.to_string()];
-    if let Ok(entries) = std::fs::read_dir(project.join(PACKS_DIR)) {
+    if let Ok(entries) = std::fs::read_dir(project.join(".rdy").join("packs")) {
         let mut packs: Vec<String> = entries
             .filter_map(Result::ok)
             .filter_map(|e| e.file_name().to_str().map(|n| format!("{PACKS_DIR}/{n}")))

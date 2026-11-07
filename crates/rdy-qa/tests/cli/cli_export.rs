@@ -277,7 +277,17 @@ fn ec11_rdy_export_refuses_an_out_with_no_file_name_in_every_format() {
         ]);
         assert!(!ok, "{format}: {v}");
         assert_eq!(v["code"], "E_BAD_INPUT", "{format}: {v}");
-        assert_eq!(v["message"], "/ does not name a directory", "{format}");
+        if cfg!(windows) {
+            // `/` is the root of the working directory's drive, spelled natively: `C:\`
+            let m = v["message"].as_str().unwrap();
+            let b = m.as_bytes();
+            assert!(
+                b[0].is_ascii_alphabetic() && &m[1..] == r":\ does not name a directory",
+                "{format}: {m}"
+            );
+        } else {
+            assert_eq!(v["message"], "/ does not name a directory", "{format}");
+        }
         assert_eq!(
             v["fix"], "pass a directory path such as ./docs-md",
             "{format}"

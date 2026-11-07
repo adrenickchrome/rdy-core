@@ -100,6 +100,17 @@ pub fn missing_project(project: &Path) -> RdyError {
 /// The settings of this checkout only, never committed.
 pub const LOCAL_FILE: &str = ".rdy/local.yaml";
 
+/// [`LOCAL_FILE`] as a native relative path: `.rdy\local.yaml` on Windows, never a path that
+/// mixes the two separators when it is joined and shown.
+pub fn local_rel() -> PathBuf {
+    Path::new(".rdy").join("local.yaml")
+}
+
+/// The checkout's local settings file under `project`, spelled natively.
+pub fn local_path(project: &Path) -> PathBuf {
+    project.join(local_rel())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -585,7 +596,7 @@ pub(crate) fn file_name(level: Level, user_file: Option<&Path>) -> String {
 
 fn path_of(project: Option<&Path>, level: Level, user_file: Option<&Path>) -> Option<PathBuf> {
     match level {
-        Level::Local => project.map(|p| p.join(LOCAL_FILE)),
+        Level::Local => project.map(local_path),
         Level::Project => project.map(|p| p.join(PROJECT_FILE)),
         Level::User => user_file.map(Path::to_path_buf),
         Level::Default => None,
@@ -1796,7 +1807,7 @@ pub fn human_actor_for(
     user: Option<&str>,
 ) -> Result<String, RdyError> {
     let local_shown = file_name(Level::Local, user_file);
-    let local = read_file(&project.join(LOCAL_FILE), &local_shown)?;
+    let local = read_file(&local_path(project), &local_shown)?;
     let user_shown = file_name(Level::User, user_file);
     let user_map = match user_file {
         Some(f) => read_file(f, &user_shown)?,
@@ -1818,6 +1829,18 @@ pub fn human_actor_for_env(project: &Path) -> Result<String, RdyError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wx33f_the_local_file_path_never_mixes_separators() {
+        let p = local_path(Path::new("proj"));
+        let text = p.to_string_lossy();
+        assert!(
+            !cfg!(windows) || !text.contains('/'),
+            "a Windows path uses one separator: {text}"
+        );
+        assert_eq!(p, Path::new("proj").join(".rdy").join("local.yaml"));
+        assert_eq!(local_rel(), Path::new(".rdy").join("local.yaml"));
+    }
+
     use super::*;
 
     fn project(config: &str, local: Option<&str>) -> tempfile::TempDir {

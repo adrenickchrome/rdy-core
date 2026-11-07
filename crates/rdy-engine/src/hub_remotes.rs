@@ -276,13 +276,13 @@ impl RemoteService {
         let mut user = LockedConfig::open(&home, &rel, false, MAX_CONFIG_BYTES)?;
         let dest_rel = match level {
             RemoteLevel::User => None,
-            RemoteLevel::Project => Some(PROJECT_FILE),
-            RemoteLevel::Local => Some(LOCAL_FILE),
+            RemoteLevel::Project => Some(PathBuf::from(PROJECT_FILE)),
+            RemoteLevel::Local => Some(config_levels::local_rel()),
         };
         let mut dest = match dest_rel {
             Some(rel) => Some(LockedConfig::open(
                 &self.project,
-                Path::new(rel),
+                &rel,
                 false,
                 MAX_CONFIG_BYTES,
             )?),
