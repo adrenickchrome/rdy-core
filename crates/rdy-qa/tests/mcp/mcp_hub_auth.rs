@@ -582,7 +582,7 @@ fn hsa8_a_paused_hub_call_does_not_block_other_sessions() {
 /// Adds an ordinary key rdy does not know (`actro`) and an unknown hub key (`hub.instalss`) to
 /// the user config under `home`.
 fn mistype(home: &Path) {
-    let file = home.join("rdy/config.yaml");
+    let file = home.join("rdy").join("config.yaml");
     let text = std::fs::read_to_string(&file).unwrap();
     let text = text.replacen("hub:\n", "hub:\n  instalss: {}\n", 1);
     std::fs::write(&file, format!("{text}actro: human:wrong\n")).unwrap();
@@ -615,7 +615,7 @@ fn hsa8_chat_auth_failures_carry_config_warnings() {
         (json!("E_UPSTREAM_CONFIRM_HOST"), json!([]))
     );
     mistype(home.path());
-    let cfg = home.path().join("rdy/config.yaml");
+    let cfg = home.path().join("rdy").join("config.yaml");
     let warnings = rdy_engine::config_levels::config_warnings(p.path(), Some(&cfg));
     let found: Vec<bool> = ["actro", "hub.instalss"]
         .iter()
@@ -684,7 +684,7 @@ fn hsa8_chat_sign_out_is_local_first_whatever_the_settings() {
             })),
         );
         write_creds(home.path(), &file);
-        let cfg = home.path().join("rdy/config.yaml");
+        let cfg = home.path().join("rdy").join("config.yaml");
         let text = std::fs::read_to_string(&cfg).unwrap();
         std::fs::write(&cfg, format!("{text}{broken}")).unwrap();
         // the settings are refused by a call that needs them
