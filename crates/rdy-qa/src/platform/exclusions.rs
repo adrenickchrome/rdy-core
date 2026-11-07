@@ -200,6 +200,13 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         counterparts: &["wx25b_the_stop_event_stops_a_foreground_serve_cleanly"],
     },
     Exclusion {
+        file: "crates/rdy-qa/tests/cli/cli_hub_keys.rs",
+        gate: Gate::Item,
+        tests: &["hsa9_the_containment_check_fails_on_each_output_channel"],
+        mechanism: "The stub MCP server is a POSIX shell script run with sh -c.",
+        counterparts: &["hsa9_signin_remote_bind_retire_revoke_is_one_client_flow"],
+    },
+    Exclusion {
         file: "crates/rdy-qa/tests/code/code_brief.rs",
         gate: Gate::Item,
         tests: &["cbrief1_a_new_file_in_a_new_folder_under_a_symlinked_prefix_is_inside_the_repo"],

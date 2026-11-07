@@ -19,7 +19,9 @@ use rdy_engine::{Rdy, now_ms};
 use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::{land, seed_doc};
 use rdy_qa::mcp::{DEADLINE, McpClient, Reply as McpReply, Transcript, exposed_outputs};
-use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode, shell_script};
+#[cfg(unix)]
+use rdy_qa::platform::shell_script;
+use rdy_qa::platform::{RecordingAgent, SocketAgent, set_mode};
 use rdy_qa::signing::{QaAgent, TestKey};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -1220,8 +1222,9 @@ fn hsa9_all_client_surfaces_hide_credential_and_proof_bytes() {
     assert_eq!(k.hub.finish(), 0);
 }
 
-/// A stub MCP server: it answers `initialize`, reads `notifications/initialized` and one tool
+/// A stub MCP server (a POSIX shell script, so Unix only): it answers `initialize`, reads `notifications/initialized` and one tool
 /// call, runs `emit`, answers the call with a pending bind and waits for its input to close.
+#[cfg(unix)]
 fn stub(emit: &str) -> McpClient {
     let script = format!(
         r#"read l
@@ -1237,6 +1240,9 @@ cat >/dev/null"#
     McpClient::launch(cmd)
 }
 
+// Unix only: the stub MCP server is a POSIX shell script. The containment check itself is
+// portable, and the one-client-flow test of mcp_hub_keys.rs applies it on Windows.
+#[cfg(unix)]
 #[test]
 fn hsa9_the_containment_check_fails_on_each_output_channel() {
     // (where a sentinel goes, what the stub writes, what the project's daemon log holds)
