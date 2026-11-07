@@ -176,6 +176,8 @@ impl Home {
     fn command(&self, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
         let mut cmd = rdy_qa::fixtures::rdy_command();
         cmd.env_clear()
+            // Windows sockets do not start in a process without it; no other platform has it
+            .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
             .envs(self.env())
             .envs(extra.iter().copied())
             .args(args)
