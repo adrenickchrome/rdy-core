@@ -820,8 +820,9 @@ fn wx30c_print_and_export_bytes_keep_lf() {
         let files = tree(&out);
         assert!(!files.is_empty());
         for (name, bytes) in &files {
-            assert!(!bytes.contains(&b'\r'), "{name} holds a carriage return");
-            if name.ends_with(".md") {
+            // copied assets keep every byte, and a PNG signature holds a CR
+            if name.ends_with(".md") || name.ends_with(".yml") {
+                assert!(!bytes.contains(&b'\r'), "{name} holds a carriage return");
                 assert!(bytes.ends_with(b"\n"), "{name} does not end in LF");
             }
         }
