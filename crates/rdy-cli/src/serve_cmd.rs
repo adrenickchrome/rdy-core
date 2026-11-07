@@ -595,7 +595,7 @@ mod tests {
     fn df3_stop_without_a_pid_waits_for_the_recorded_socket() {
         let d = tempfile::tempdir().unwrap();
         let run = RunDir::of_project(d.path());
-        std::fs::create_dir_all(run.path()).unwrap();
+        run.ensure().unwrap();
         // the daemon bound an endpoint other than the one this spelling computes: a socket file
         // where sockets are files, else a pipe name (which no test can create or remove, so a
         // flag stands for its being there)
@@ -605,11 +605,25 @@ mod tests {
         let bound = std::path::PathBuf::from(format!(r"\\.\pipe\rdy-{}", "0".repeat(64)));
         assert_ne!(bound, run.socket());
         let project = run.project_id().unwrap();
-        std::fs::write(
-            run.socket_record(),
-            format!("{}\n{project}\n", bound.display()),
-        )
-        .unwrap();
+        // the record is private to this account, as the daemon writes it: a client reads no other
+        {
+            use rdy_daemon::sys;
+            use std::io::Write;
+            let mut record = sys::open_no_follow(
+                sys::private_file(
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true),
+                ),
+                &run.socket_record(),
+            )
+            .unwrap();
+            sys::make_private_file(&record).unwrap();
+            record
+                .write_all(format!("{}\n{project}\n", bound.display()).as_bytes())
+                .unwrap();
+        }
         let up = Cell::new(true);
         #[cfg(not(windows))]
         std::fs::write(&bound, "").unwrap();
