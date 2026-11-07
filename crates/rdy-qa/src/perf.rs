@@ -5172,7 +5172,7 @@ fn dir_digest(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64, Hash)> {
         if std::fs::symlink_metadata(&p).expect("metadata").is_dir() {
             out.extend(dir_digest(&p));
         } else {
-            let bytes = std::fs::read(&p).expect("read");
+            let bytes = crate::platform::read_live_file(&p).expect("read");
             out.push((p, bytes.len() as u64, Hash::of(&bytes)));
         }
     }

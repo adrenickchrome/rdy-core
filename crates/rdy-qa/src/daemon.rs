@@ -36,6 +36,23 @@ const ENV_READY_FILE: &str = "RDY_DAEMON_READY_FILE";
 /// How long `client`'s `connect_or_start` waits for a daemon.
 const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Moves `store` to `aside` while a daemon serves it. Windows refuses that move with error 5
+/// (access denied) while the daemon holds the store (D-6JZ5V); then nothing moved and this is
+/// false. Any other failure is a test failure.
+pub fn move_aside_under_daemon(store: &Path, aside: &Path) -> bool {
+    match std::fs::rename(store, aside) {
+        Ok(()) => true,
+        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            assert!(
+                store.exists() && !aside.exists(),
+                "a refused move changes nothing"
+            );
+            false
+        }
+        Err(e) => panic!("move {} aside: {e}", store.display()),
+    }
+}
+
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
 pub fn short_tempdir() -> tempfile::TempDir {

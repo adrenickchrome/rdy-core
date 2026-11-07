@@ -142,7 +142,7 @@ fn tree(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
                 stack.push(p);
                 out.insert(rel, None);
             } else {
-                out.insert(rel, Some(std::fs::read(&p).unwrap()));
+                out.insert(rel, Some(rdy_qa::platform::read_live_file(&p).unwrap()));
             }
         }
     }

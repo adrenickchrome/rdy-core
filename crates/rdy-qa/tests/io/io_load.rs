@@ -19,7 +19,7 @@ pub(crate) fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             if e.is_dir() {
                 None
             } else {
-                Some(std::fs::read(&e).unwrap())
+                Some(rdy_qa::platform::read_live_file(&e).unwrap())
             },
         );
     }
@@ -541,7 +541,7 @@ fn tree_but(dir: &Path, skip: &[&str]) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             if e.is_dir() {
                 None
             } else {
-                Some(std::fs::read(&e).unwrap())
+                Some(rdy_qa::platform::read_live_file(&e).unwrap())
             },
         );
     }
@@ -564,29 +564,41 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
     let store = p.join(".rdy/store");
     let aside = p.join("store-aside");
     // the in-place move with the daemon still up: the daemon serves the store set aside
-    std::fs::rename(&store, &aside).unwrap();
+    let moved = rdy_qa::daemon::move_aside_under_daemon(&store, &aside);
     let skip = [".rdy/run", "store-aside"];
     let before = tree_but(&p, &skip);
     let e = load(&file, &p).unwrap_err();
-    assert_eq!(e.code, "E_LOCKED", "{e}");
-    assert_eq!(
-        e.message,
-        format!(
-            "a daemon still runs for {} (pid {})",
-            p.display(),
-            std::process::id()
-        )
-    );
-    assert_eq!(
-        e.fix,
-        format!(
-            "run rdy serve --stop in {}, then load or clone again",
-            p.display()
-        )
-    );
+    if moved {
+        assert_eq!(e.code, "E_LOCKED", "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "a daemon still runs for {} (pid {})",
+                p.display(),
+                std::process::id()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            format!(
+                "run rdy serve --stop in {}, then load or clone again",
+                p.display()
+            )
+        );
+    } else {
+        // Windows: the store cannot move, so the store check refuses, in rdy's words
+        assert_eq!(e.code, "E_ALREADY_EXISTS", "{e}");
+        assert_eq!(e.message, format!("{} already has a store", p.display()));
+        assert_eq!(
+            e.fix,
+            "load into a new directory, or move .rdy/store aside first"
+        );
+    }
     assert_eq!(tree_but(&p, &skip), before, "the target is untouched");
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
-    std::fs::rename(&aside, &store).unwrap();
+    if moved {
+        std::fs::rename(&aside, &store).unwrap();
+    }
     host.stop();
     std::fs::rename(&store, &aside).unwrap();
     let s = load(&file, &p).unwrap();
