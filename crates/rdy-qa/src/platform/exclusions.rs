@@ -2,7 +2,8 @@
 //!
 //! A test leaves Windows in two ways: its file begins with `#![cfg(unix)]` (a whole-file gate),
 //! or the test itself follows `#[cfg(unix)]`, above or below `#[test]`, or sits in a `mod` that does
-//! (an item gate). A Unix gate written any other way (`all(unix, ..)`, `target_family`, `cfg_attr`)
+//! (an item gate; the module may be `pub(crate)` or have its brace on the next line, and any
+//! attribute may span several lines). A Unix gate written any other way (`all(unix, ..)`, `target_family`, `cfg_attr`)
 //! is named by [`problems`] as unsupported. Every such test is named here, with
 //! the Unix mechanism that cannot exist on Windows and the tests that hold the same safety
 //! property on Windows. [`problems`] compares this manifest with the tree and fails on any
@@ -363,11 +364,325 @@ pub fn problems(root: &Path) -> Vec<String> {
     named
 }
 
-/// A `mod name { .. }` block: its attribute lines and the lines it spans.
+/// A file read for scanning: `code` is the text with comments and the insides of string and
+/// character literals blanked (same length, same line breaks), so braces, brackets and keywords
+/// in it are real. `orig` keeps the text for reading an attribute.
+struct Source {
+    orig: Vec<char>,
+    code: Vec<char>,
+}
+
+impl Source {
+    fn new(text: &str) -> Source {
+        let orig: Vec<char> = text.chars().collect();
+        let code = mask(&orig);
+        Source { orig, code }
+    }
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// `src` with comments and the insides of literals replaced by spaces (line breaks kept).
+fn mask(src: &[char]) -> Vec<char> {
+    let n = src.len();
+    let mut out = src.to_vec();
+    let blank = |out: &mut Vec<char>, from: usize, to: usize| {
+        for c in &mut out[from..to] {
+            if *c != '\n' {
+                *c = ' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < n {
+        let next = src.get(i + 1).copied();
+        if src[i] == '/' && next == Some('/') {
+            let mut j = i;
+            while j < n && src[j] != '\n' {
+                j += 1;
+            }
+            blank(&mut out, i, j);
+            i = j;
+        } else if src[i] == '/' && next == Some('*') {
+            let (mut depth, mut j) = (1, i + 2);
+            while j < n && depth > 0 {
+                if src[j] == '/' && src.get(j + 1) == Some(&'*') {
+                    depth += 1;
+                    j += 2;
+                } else if src[j] == '*' && src.get(j + 1) == Some(&'/') {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            blank(&mut out, i, j);
+            i = j;
+        } else if src[i] == 'r'
+            && (i == 0
+                || !is_ident(src[i - 1])
+                || (src[i - 1] == 'b' && (i == 1 || !is_ident(src[i - 2]))))
+            && {
+                let h = src[i + 1..].iter().take_while(|x| **x == '#').count();
+                src.get(i + 1 + h) == Some(&'"')
+            }
+        {
+            let h = src[i + 1..].iter().take_while(|x| **x == '#').count();
+            let start = i + 2 + h;
+            let mut j = start;
+            while j < n
+                && !(src[j] == '"'
+                    && src[j + 1..].iter().take(h).filter(|x| **x == '#').count() == h)
+            {
+                j += 1;
+            }
+            blank(&mut out, start, j.min(n));
+            i = (j + 1 + h).min(n);
+        } else if src[i] == '"' {
+            let mut j = i + 1;
+            while j < n && src[j] != '"' {
+                j += if src[j] == '\\' { 2 } else { 1 };
+            }
+            blank(&mut out, i + 1, j.min(n));
+            i = j + 1;
+        } else if src[i] == '\'' {
+            // a character literal; a lifetime has no closing quote two or three places on
+            if next == Some('\\') {
+                let mut j = i + 3;
+                while j < n && src[j] != '\'' {
+                    j += 1;
+                }
+                blank(&mut out, i + 1, j.min(n));
+                i = j + 1;
+            } else if src.get(i + 2) == Some(&'\'') {
+                blank(&mut out, i + 1, i + 2);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// One attribute group `#[..]` or `#![..]`, whole, however many lines it spans.
+struct Attr {
+    start: usize,
+    end: usize,
+    inner: bool,
+    /// The attribute as written, without white space.
+    text: String,
+}
+
+/// Every attribute of the file, in order.
+fn attributes(src: &Source) -> Vec<Attr> {
+    let c = &src.code;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '#' {
+            let mut j = i + 1;
+            while c.get(j).is_some_and(|x| x.is_whitespace()) {
+                j += 1;
+            }
+            let inner = c.get(j) == Some(&'!');
+            if inner {
+                j += 1;
+                while c.get(j).is_some_and(|x| x.is_whitespace()) {
+                    j += 1;
+                }
+            }
+            if c.get(j) == Some(&'[') {
+                let mut depth = 0usize;
+                let mut k = j;
+                while k < c.len() {
+                    if c[k] == '[' {
+                        depth += 1;
+                    } else if c[k] == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                if k < c.len() {
+                    out.push(Attr {
+                        start: i,
+                        end: k + 1,
+                        inner,
+                        text: src.orig[i..=k]
+                            .iter()
+                            .filter(|x| !x.is_whitespace())
+                            .collect(),
+                    });
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A `mod name { .. }` block: the attributes of its declaration and the span of its braces.
 struct Module {
     attrs: Vec<String>,
-    first: usize,
-    last: usize,
+    open: usize,
+    close: usize,
+}
+
+/// The index of the closer that matches the opener at `open`.
+fn matching(code: &[char], open: usize) -> Option<usize> {
+    let (o, c) = (code[open], if code[open] == '{' { '}' } else { ')' });
+    let mut depth = 0usize;
+    for (k, ch) in code.iter().enumerate().skip(open) {
+        if *ch == o {
+            depth += 1;
+        } else if *ch == c {
+            depth -= 1;
+            if depth == 0 {
+                return Some(k);
+            }
+        }
+    }
+    None
+}
+
+fn skip_space(code: &[char], mut i: usize) -> usize {
+    while code.get(i).is_some_and(|x| x.is_whitespace()) {
+        i += 1;
+    }
+    i
+}
+
+/// The start of a visibility (`pub`, `pub(crate)`, `pub(in a::b)`) that ends just before `at`, or
+/// `at` when there is none.
+fn visibility_start(code: &[char], at: usize) -> usize {
+    let mut k = at;
+    while k > 0 && code[k - 1].is_whitespace() {
+        k -= 1;
+    }
+    if k > 0 && code[k - 1] == ')' {
+        let mut depth = 0usize;
+        let mut m = k;
+        while m > 0 {
+            m -= 1;
+            if code[m] == ')' {
+                depth += 1;
+            } else if code[m] == '(' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        k = m;
+        while k > 0 && code[k - 1].is_whitespace() {
+            k -= 1;
+        }
+    }
+    if k >= 3 && code[k - 3..k] == ['p', 'u', 'b'] && (k == 3 || !is_ident(code[k - 4])) {
+        k - 3
+    } else {
+        at
+    }
+}
+
+/// The outer attributes directly above the item that starts at `head` (nothing but white space and
+/// comments between them), nearest first.
+fn attrs_above<'a>(attrs: &'a [Attr], code: &[char], head: usize) -> Vec<&'a Attr> {
+    let mut out = Vec::new();
+    let mut cursor = head;
+    while let Some(a) = attrs.iter().find(|a| {
+        !a.inner && a.end <= cursor && code[a.end..cursor].iter().all(|c| c.is_whitespace())
+    }) {
+        out.push(a);
+        cursor = a.start;
+    }
+    out
+}
+
+/// Every `mod name { .. }` block of the file, however it is spelt (`pub(crate)`, a brace on the
+/// next line). An out-of-line `mod name;` has no block here.
+fn modules(src: &Source, attrs: &[Attr]) -> Vec<Module> {
+    let c = &src.code;
+    let mut out = Vec::new();
+    for i in 0..c.len().saturating_sub(3) {
+        if c[i..i + 3] != ['m', 'o', 'd']
+            || (i > 0 && is_ident(c[i - 1]))
+            || !c[i + 3].is_whitespace()
+        {
+            continue;
+        }
+        let mut j = skip_space(c, i + 3);
+        let name = j;
+        while c.get(j).is_some_and(|x| is_ident(*x)) {
+            j += 1;
+        }
+        if j == name {
+            continue;
+        }
+        let j = skip_space(c, j);
+        if c.get(j) != Some(&'{') {
+            continue;
+        }
+        if let Some(close) = matching(c, j) {
+            out.push(Module {
+                attrs: attrs_above(attrs, c, visibility_start(c, i))
+                    .into_iter()
+                    .map(|a| a.text.clone())
+                    .collect(),
+                open: j,
+                close,
+            });
+        }
+    }
+    out
+}
+
+/// The name of the `fn` that the item head at `i` declares (after `pub`, `async`, `unsafe`, ..).
+fn fn_name_at(code: &[char], mut i: usize) -> Option<String> {
+    loop {
+        i = skip_space(code, i);
+        if code.get(i) == Some(&'"') {
+            // the ABI of `extern "C"`
+            i += 1;
+            while code.get(i).is_some_and(|x| *x != '"') {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while code.get(i).is_some_and(|x| is_ident(*x)) {
+            i += 1;
+        }
+        let word: String = code[start..i].iter().collect();
+        match word.as_str() {
+            "fn" => {
+                let s = skip_space(code, i);
+                let mut e = s;
+                while code.get(e).is_some_and(|x| is_ident(*x)) {
+                    e += 1;
+                }
+                return (e > s).then(|| code[s..e].iter().collect());
+            }
+            "pub" => {
+                let k = skip_space(code, i);
+                if code.get(k) == Some(&'(') {
+                    i = matching(code, k)? + 1;
+                }
+            }
+            "async" | "unsafe" | "const" | "extern" => {}
+            _ => return None,
+        }
+    }
 }
 
 /// A line that gates on Unix in a way this scanner cannot read (anything but the two exact forms).
@@ -378,112 +693,8 @@ fn unsupported_gate(attr: &str) -> bool {
         && attr != "#[cfg(not(unix))]"
 }
 
-/// The line of the `}` that closes the block opened on line `from`, skipping braces in strings,
-/// characters and comments.
-fn block_end(lines: &[&str], from: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut opened = false;
-    let mut in_block_comment = false;
-    let mut raw_hashes: Option<usize> = None;
-    let mut in_str = false;
-    for (n, line) in lines.iter().enumerate().skip(from) {
-        let c: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i < c.len() {
-            if in_block_comment {
-                if c[i] == '*' && c.get(i + 1) == Some(&'/') {
-                    in_block_comment = false;
-                    i += 1;
-                }
-            } else if let Some(h) = raw_hashes {
-                if c[i] == '"' && c[i + 1..].iter().take(h).filter(|x| **x == '#').count() == h {
-                    raw_hashes = None;
-                    i += h;
-                }
-            } else if in_str {
-                if c[i] == '\\' {
-                    i += 1;
-                } else if c[i] == '"' {
-                    in_str = false;
-                }
-            } else if c[i] == '/' && c.get(i + 1) == Some(&'/') {
-                break;
-            } else if c[i] == '/' && c.get(i + 1) == Some(&'*') {
-                in_block_comment = true;
-                i += 1;
-            } else if c[i] == 'r'
-                && (i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '_'))
-                && {
-                    let h = c[i + 1..].iter().take_while(|x| **x == '#').count();
-                    c.get(i + 1 + h) == Some(&'"')
-                }
-            {
-                let h = c[i + 1..].iter().take_while(|x| **x == '#').count();
-                raw_hashes = Some(h);
-                i += 1 + h;
-            } else if c[i] == '"' {
-                in_str = true;
-            } else if c[i] == '\'' {
-                // a character literal; a lifetime has no closing quote two or three places on
-                if c.get(i + 1) == Some(&'\\') {
-                    i += 3;
-                    while i < c.len() && c[i] != '\'' {
-                        i += 1;
-                    }
-                } else if c.get(i + 2) == Some(&'\'') {
-                    i += 2;
-                }
-            } else if c[i] == '{' {
-                depth += 1;
-                opened = true;
-            } else if c[i] == '}' {
-                depth = depth.saturating_sub(1);
-                if opened && depth == 0 {
-                    return Some(n);
-                }
-            }
-            i += 1;
-        }
-    }
-    None
-}
-
-/// Every `mod name { .. }` block of the file.
-fn modules(lines: &[&str]) -> Vec<Module> {
-    let mut out = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let t = line.trim();
-        let t = t.strip_prefix("pub ").unwrap_or(t);
-        if !(t.starts_with("mod ") && t.ends_with('{')) {
-            continue;
-        }
-        if let Some(last) = block_end(lines, i) {
-            out.push(Module {
-                attrs: attributes_above(lines, i).map(str::to_string).collect(),
-                first: i,
-                last,
-            });
-        }
-    }
-    out
-}
-
-/// The attribute lines of the test on line `at`: those above it and those between it and its `fn`.
-fn test_attributes(lines: &[&str], at: usize) -> Vec<String> {
-    let mut attrs: Vec<String> = attributes_above(lines, at).map(str::to_string).collect();
-    for l in &lines[at..] {
-        let t = l.trim();
-        if t.starts_with("#[") {
-            attrs.push(t.to_string());
-        } else if t.starts_with("fn ") || t.starts_with("pub ") || t.starts_with("async ") {
-            break;
-        }
-    }
-    attrs
-}
-
-/// The tests of `files` that leave Windows, as (file, name, gate) in file then line order, and the
-/// tests whose Unix gate this scanner cannot read.
+/// The tests of `files` that leave Windows, as (file, name, gate) in file then source order, and the
+/// gates this scanner cannot read.
 fn gated_tests(files: &[(String, String)]) -> (Vec<(String, String, Gate)>, Vec<String>) {
     let mut out = Vec::new();
     let mut bad = Vec::new();
@@ -491,22 +702,47 @@ fn gated_tests(files: &[(String, String)]) -> (Vec<(String, String, Gate)>, Vec<
         if is_seam_internal(path) {
             continue;
         }
-        let lines: Vec<&str> = text.lines().collect();
-        let whole = lines.first() == Some(&GATE_LINE);
-        let mods = modules(&lines);
-        for (i, line) in lines.iter().enumerate() {
-            let t = line.trim();
-            if !(t.starts_with("#[test") || t.starts_with("#[tokio::test")) {
+        let src = Source::new(text);
+        let attrs = attributes(&src);
+        let mods = modules(&src, &attrs);
+        let whole = text.lines().next() == Some(GATE_LINE);
+        for a in attrs.iter().filter(|a| a.inner) {
+            let as_outer = a.text.replacen("#!", "#", 1);
+            let first_line = a.start == 0 && whole;
+            if !first_line && (as_outer == "#[cfg(unix)]" || unsupported_gate(&as_outer)) {
+                bad.push(format!(
+                    "{path}: an inner Unix gate `{}` that is not the first line of the file; put \
+                     `{GATE_LINE}` on line one or gate the test with `#[cfg(unix)]`",
+                    a.text
+                ));
+            }
+        }
+        for (k, t) in attrs.iter().enumerate() {
+            if t.inner || !(t.text.starts_with("#[test") || t.text.starts_with("#[tokio::test")) {
                 continue;
             }
-            let Some(name) = fn_name_after(&lines, i) else {
+            // the attributes of the test: above `t`, and those that follow it before the `fn`
+            let mut own: Vec<&Attr> = attrs_above(&attrs, &src.code, t.start);
+            let mut cursor = t.end;
+            while let Some(a) = attrs[k + 1..].iter().find(|a| {
+                !a.inner
+                    && a.start >= cursor
+                    && src.code[cursor..a.start].iter().all(|c| c.is_whitespace())
+            }) {
+                own.push(a);
+                cursor = a.end;
+            }
+            let Some(name) = fn_name_at(&src.code, cursor) else {
                 continue;
             };
-            let mut attrs = test_attributes(&lines, i);
-            for m in mods.iter().filter(|m| m.first < i && i <= m.last) {
-                attrs.extend(m.attrs.iter().cloned());
+            let mut gates: Vec<&str> = own.iter().map(|a| a.text.as_str()).collect();
+            for m in mods
+                .iter()
+                .filter(|m| m.open < t.start && t.start < m.close)
+            {
+                gates.extend(m.attrs.iter().map(String::as_str));
             }
-            if let Some(a) = attrs.iter().find(|a| unsupported_gate(a)) {
+            if let Some(a) = gates.iter().find(|a| unsupported_gate(a)) {
                 bad.push(format!(
                     "{path}::{name}: an unsupported Unix gate `{a}`; use `#[cfg(unix)]` on the test \
                      or its module, or `#![cfg(unix)]` on the file"
@@ -515,7 +751,7 @@ fn gated_tests(files: &[(String, String)]) -> (Vec<(String, String, Gate)>, Vec<
             }
             if whole {
                 out.push((path.clone(), name, Gate::File));
-            } else if attrs.iter().any(|a| a == "#[cfg(unix)]") {
+            } else if gates.contains(&"#[cfg(unix)]") {
                 out.push((path.clone(), name, Gate::Item));
             }
         }
@@ -529,27 +765,6 @@ fn is_seam_internal(path: &str) -> bool {
         || path.starts_with("crates/rdy-store/src/pio")
         || path.starts_with("crates/rdy-store/src/fileid")
         || path.starts_with("crates/rdy-qa/src/platform")
-}
-
-/// The name of the first `fn` at or after line `from`.
-fn fn_name_after(lines: &[&str], from: usize) -> Option<String> {
-    lines[from..].iter().find_map(|l| {
-        let rest = l.trim_start();
-        let rest = rest.strip_prefix("pub ").unwrap_or(rest);
-        let rest = rest.strip_prefix("async ").unwrap_or(rest);
-        let rest = rest.strip_prefix("fn ")?;
-        let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
-        Some(rest[..end].to_string())
-    })
-}
-
-/// The attribute and doc lines directly above line `at`, nearest first.
-fn attributes_above<'a>(lines: &'a [&'a str], at: usize) -> impl Iterator<Item = &'a str> {
-    lines[..at]
-        .iter()
-        .rev()
-        .map(|l| l.trim())
-        .take_while(|l| l.starts_with("#[") || l.starts_with("///") || l.starts_with("//"))
 }
 
 /// [`problems`] over scanned `files` and a given manifest.
@@ -744,6 +959,79 @@ mod tests {
             "#[cfg(test)]\nmod t {\n#[cfg(not(unix))]\n#[test]\nfn ok() {}\n}\n",
         )]);
         assert_eq!(problems_in(&fine, &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn wx32_restricted_visibility_modules_and_multiline_gates_are_accounted_for() {
+        // (source, the tests it must name as excluded)
+        let named: &[(&str, &[&str])] = &[
+            // restricted-visibility modules
+            (
+                "#[cfg(unix)]\npub(crate) mod t {\n    #[test]\n    fn a() {}\n}\n",
+                &["a"],
+            ),
+            (
+                "#[cfg(unix)]\npub(super) mod t {\n    #[test]\n    fn a() {}\n}\n",
+                &["a"],
+            ),
+            (
+                "#[cfg(unix)]\npub ( in crate::x ) mod t {\n    #[test]\n    fn a() {}\n}\n",
+                &["a"],
+            ),
+            // the brace on the next line
+            (
+                "#[cfg(unix)]\nmod t\n{\n    #[test]\n    fn a() {}\n}\n",
+                &["a"],
+            ),
+            // a multiline gate above and below `#[test]`
+            ("#[cfg(\n    unix\n)]\n#[test]\nfn a() {}\n", &["a"]),
+            ("#[test]\n#[cfg(\n    unix,\n)]\nfn a() {}\n", &["a"]),
+            ("#[test]\n#[cfg(\n    unix\n)]\nfn a() {}\n", &["a"]),
+            // a multiline gate on a module
+            (
+                "#[cfg(\n    unix\n)]\npub(crate) mod t {\n    #[test]\n    fn a() {}\n}\n",
+                &["a"],
+            ),
+            // two attributes on one line
+            ("#[cfg(unix)] #[test] fn a() {}\n", &["a"]),
+            // `not(unix)` over several lines is not a gate
+            ("#[cfg(\n    not(unix)\n)]\n#[test]\nfn a() {}\n", &[]),
+            // a gate that sits in a string or a comment is not a gate
+            (
+                "#[test]\nfn a() { let _ = \"#[cfg(unix)]\"; /* #[cfg(unix)] */ }\n#[test]\nfn b() {}\n",
+                &[],
+            ),
+        ];
+        for (i, (src, want)) in named.iter().enumerate() {
+            let got = problems_in(&files(&[("crates/rdy-daemon/tests/q.rs", src)]), &[]);
+            assert_eq!(got.len(), want.len(), "case {i} {src:?}: {got:?}");
+            for (g, w) in got.iter().zip(*want) {
+                assert!(
+                    g.starts_with(&format!("crates/rdy-daemon/tests/q.rs::{w}:")),
+                    "case {i}: {got:?}"
+                );
+            }
+        }
+        // a multiline gate the scanner cannot read is refused by name, on a test or a module
+        for odd in [
+            "#[cfg(all(\n    unix,\n    test\n))]\n#[test]\nfn odd() {}\n",
+            "#[test]\n#[cfg(all(\n    unix,\n    test\n))]\nfn odd() {}\n",
+            "#[cfg(any(\n    unix,\n    windows\n))]\npub(crate) mod t {\n#[test]\nfn odd() {}\n}\n",
+            "#[cfg(target_family = \"unix\")]\npub(crate) mod t {\n#[test]\nfn odd() {}\n}\n",
+        ] {
+            let got = problems_in(&files(&[("crates/rdy-daemon/tests/z.rs", odd)]), &[]);
+            assert_eq!(got.len(), 1, "{odd}: {got:?}");
+            assert!(got[0].contains("unsupported Unix gate"), "{got:?}");
+        }
+        // an inner gate that is not line one is no whole-file gate: named, not skipped
+        let got = problems_in(
+            &files(&[(
+                "crates/rdy-daemon/tests/z.rs",
+                "// lead\n#![cfg(unix)]\n#[test]\nfn odd() {}\n",
+            )]),
+            &[],
+        );
+        assert!(got.iter().any(|g| g.contains("inner Unix gate")), "{got:?}");
     }
 
     #[test]
