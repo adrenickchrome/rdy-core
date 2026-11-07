@@ -205,17 +205,25 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
         } else if let Some(rest) = line.strip_prefix("test ")
             && let Some(name) = rest.strip_suffix(" ... FAILED")
         {
-            run.failures.push(name.to_string());
+            run.failures.push(result_name(name).to_string());
         } else if let Some(rest) = line.strip_prefix("test ")
             && let Some(name) = rest.strip_suffix(" ... ok")
         {
-            run.completed.push(name.to_string());
+            run.completed.push(result_name(name).to_string());
         }
     }
     flush(&mut found, &block, &mut panic);
     found.retain(|name, _| run.failures.contains(name));
     run.panics = found;
     run
+}
+
+/// The test a result line names. A test that runs its own binary as a crashing child leaves
+/// the start of a line, `test <child> ... `, with no result, and the next result is appended to
+/// it (`test <child> ... test <name> ... FAILED`). The name is what follows the last
+/// `... test `.
+fn result_name(name: &str) -> &str {
+    name.rsplit(" ... test ").next().unwrap_or(name)
 }
 
 /// The failing tests of one report area, in the given order, as a Markdown list. A test with
@@ -2186,6 +2194,28 @@ mod tests {
         let run = run_of(&tail);
         assert_eq!((run.passed, run.failed), (3, 1));
         assert_eq!(run.skipped.len(), 1);
+    }
+
+    /// Found by the native run (fix round 2): a test that runs its own binary as a crashing child
+    /// (`io_follower::mh8_*`, `--nocapture --test-threads=1`) leaves the start of a line,
+    /// `test <child> ... `, with no result. The next test's result is then appended to that
+    /// partial line. The report named the child, which passed, as a failing test and lost the
+    /// real name.
+    #[test]
+    fn wx33_a_partial_start_line_never_renames_the_next_result() {
+        let text = "running 3 tests\n\
+                    test m::a ... ok\n\
+                    test io_follower::mh8_child ... test io_load::dl6_real ... FAILED\n\
+                    test io_follower::other ... test io_load::fine ... ok\n\
+                    \nfailures:\n\n---- io_load::dl6_real stdout ----\n\
+                    thread 'io_load::dl6_real' panicked at x.rs:1:1:\nboom\n\n\
+                    failures:\n    io_load::dl6_real\n\n\
+                    test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = run_of(text);
+        assert_eq!(run.failures, ["io_load::dl6_real"]);
+        assert_eq!(run.completed, ["m::a", "io_load::fine"]);
+        assert!(run.panics.contains_key("io_load::dl6_real"));
+        assert_eq!((run.passed, run.failed), (2, 1));
     }
 
     #[test]
