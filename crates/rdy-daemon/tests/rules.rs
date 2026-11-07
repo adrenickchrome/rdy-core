@@ -48,6 +48,8 @@ impl Home {
             home_drive: None,
             home_path: None,
             app_data: Some(self.home.path().join("AppData").into()),
+            // The account name places nothing: this home's config names the human.
+            ..PathEnv::default()
         };
         PersonReader::daemon(env!("CARGO_PKG_VERSION")).with_env(Platform::HOST, env)
     }
