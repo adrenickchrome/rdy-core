@@ -214,6 +214,8 @@ impl PersonHost for Home {
             Platform::HOST,
             &PathEnv {
                 home: Some(self.0.clone().into()),
+                // Windows places the default meta project from the profile, not HOME
+                user_profile: Some(self.0.clone().into()),
                 xdg_config_home: Some(self.0.join("cfg").into()),
                 ..PathEnv::default()
             },

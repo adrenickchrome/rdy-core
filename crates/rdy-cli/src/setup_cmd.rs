@@ -48,6 +48,11 @@ pub(crate) fn choose(explicit: Option<&Path>, cwd: &Path) -> Result<Option<Chose
     }
 }
 
+/// A path as a message shows it: no `\\?\` prefix on a plain Windows drive path.
+fn shown(path: &Path) -> String {
+    rdy_engine::display_path(path)
+}
+
 /// What one target needs.
 enum Plan {
     /// No file: it is created with the stub.
@@ -62,7 +67,7 @@ enum Plan {
 fn io(path: &Path, e: std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
-        format!("{}: {e}", path.display()),
+        format!("{}: {e}", shown(path)),
         "check the file and its directory, then run rdy setup again",
     )
 }
@@ -77,7 +82,7 @@ fn preflight(path: &Path) -> Result<Plan, RdyError> {
     if !meta.file_type().is_file() {
         return Err(RdyError::new(
             E_IO,
-            format!("{} is not a regular instruction file", path.display()),
+            format!("{} is not a regular instruction file", shown(path)),
             NOT_REGULAR_FIX,
         ));
     }
@@ -105,7 +110,7 @@ fn stubs(root: &Path) -> Result<(Vec<Value>, Vec<String>), ErrorReply> {
         let (bytes, perms) = match plan {
             Plan::Keep => {
                 files.push(json!({"path": path.to_string_lossy(), "result": "kept"}));
-                text.push(format!("{} already has the stub", path.display()));
+                text.push(format!("{} already has the stub", shown(path)));
                 continue;
             }
             Plan::Create => (STUB.as_bytes().to_vec(), None),
@@ -116,18 +121,18 @@ fn stubs(root: &Path) -> Result<(Vec<Value>, Vec<String>), ErrorReply> {
         if let Err(e) = wrote {
             let done: Vec<String> = written
                 .iter()
-                .map(|p| format!("; {} was written", p.display()))
+                .map(|p| format!("; {} was written", shown(p)))
                 .collect();
             return Err(RdyError::new(
                 E_IO,
-                format!("{}: {e}{}", path.display(), done.concat()),
+                format!("{}: {e}{}", shown(path), done.concat()),
                 "fix the cause, then run rdy setup again; it leaves a file that has the stub alone",
             )
             .into());
         }
         written.push(path);
         files.push(json!({"path": path.to_string_lossy(), "result": "written"}));
-        text.push(format!("wrote the stub to {}", path.display()));
+        text.push(format!("wrote the stub to {}", shown(path)));
     }
     Ok((files, text))
 }
@@ -202,7 +207,7 @@ fn cannot_create(path: &Path, e: &RdyError) -> Meta {
         Some(path),
         format!(
             "Cannot create your rules project at {}: {}",
-            path.display(),
+            shown(path),
             e.message
         ),
         Some(e.code),
@@ -214,7 +219,7 @@ fn kept(path: &Path) -> Meta {
     Meta::done(
         path,
         "kept",
-        format!("Your rules project already exists at {}.", path.display()),
+        format!("Your rules project already exists at {}.", shown(path)),
     )
 }
 
@@ -223,7 +228,7 @@ fn occupied(path: &Path) -> Meta {
         Some(path),
         format!(
             "Cannot create your rules project at {}: the path is not an rdy project.",
-            path.display()
+            shown(path)
         ),
         Some(E_NO_PROJECT),
         Some(OCCUPIED_FIX.to_string()),
@@ -242,7 +247,7 @@ fn meta_at(path: &Path) -> Meta {
         Err(e) => {
             let e = RdyError::new(
                 E_IO,
-                format!("{}: {e}", path.display()),
+                format!("{}: {e}", shown(path)),
                 "check the path and its directory, then run rdy setup again",
             );
             return cannot_create(path, &e);
@@ -252,7 +257,7 @@ fn meta_at(path: &Path) -> Meta {
         Ok(()) => Meta::done(
             path,
             "created",
-            format!("Created your rules project at {}.", path.display()),
+            format!("Created your rules project at {}.", shown(path)),
         ),
         // a concurrent creator counts as kept only once the project predicate holds
         Err(_) if is_project(path) => kept(path),

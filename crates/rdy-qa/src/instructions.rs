@@ -452,7 +452,13 @@ mod tests {
 
         // A configured path is one YAML string, whatever it holds, and stays where it says.
         let other = short_tempdir();
-        let tricky = other.path().join("a: b #c 'd\"");
+        // A Windows name holds neither `:` nor `"`; the YAML-significant rest stays.
+        let name = if cfg!(windows) {
+            "a, b #c 'd"
+        } else {
+            "a: b #c 'd\""
+        };
+        let tricky = other.path().join(name);
         w.person(&tricky);
         let source = resolve_person(platform, &env).unwrap();
         assert_eq!(source.path, PersonPath::Override(tricky.clone()));
