@@ -1350,7 +1350,10 @@ fn render_statement(record: &Record, kind: Kind) -> Result<String, TrustError> {
         Kind::Revocation => "revocation",
     };
     let namespace = kind.namespace();
-    let dir = PathBuf::from("/path/to/release-keys");
+    // A documentation placeholder, not a host path: the page is the same on every host, so the
+    // joins use '/' and never the host separator.
+    const DOC_DIR: &str = "/path/to/release-keys";
+    let dir = PathBuf::from(DOC_DIR);
     let signers = format!("root-{what}-allowed-signers");
     let commands = [
         GuideCommand {
@@ -1362,7 +1365,7 @@ fn render_statement(record: &Record, kind: Kind) -> Result<String, TrustError> {
             ],
             cwd: dir.clone(),
             stdin: None,
-            stdout: Some(dir.join(&signers)),
+            stdout: Some(PathBuf::from(format!("{DOC_DIR}/{signers}"))),
             ps: None,
         },
         GuideCommand {
@@ -1382,7 +1385,7 @@ fn render_statement(record: &Record, kind: Kind) -> Result<String, TrustError> {
             .map(Into::into)
             .to_vec(),
             cwd: dir.clone(),
-            stdin: Some(dir.join(&record.name)),
+            stdin: Some(PathBuf::from(format!("{DOC_DIR}/{}", record.name))),
             stdout: None,
             ps: None,
         },
