@@ -259,6 +259,50 @@ pub fn not_unicode(text: &str) -> std::ffi::OsString {
     }
 }
 
+/// A path as a message for a person or an agent shows it. On Windows a plain drive path
+/// (`\\?\C:\dir`) loses its `\\?\` prefix; a `\\?\UNC\` path and a path that needs the prefix stay
+/// as they are. Display only: identity, hashes and pipe names keep the canonical form. Elsewhere
+/// it is the path's lossy text.
+pub fn display_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        plain_drive_path(&text).to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
+/// `text` without a leading `\\?\` when the rest is a plain drive path that Win32 reads the same
+/// way: `X:\` and components with no `.` or `..`, no `/`, no trailing dot or space, no device
+/// name, and fewer than 260 characters. Any other text comes back unchanged. Pure text, so every
+/// platform tests it.
+pub fn plain_drive_path(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return text;
+    };
+    let b = rest.as_bytes();
+    if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
+        return text;
+    }
+    if rest.len() >= 260 || rest.contains('/') {
+        return text;
+    }
+    for comp in rest[3..].split('\\') {
+        if comp == "." || comp == ".." || comp.ends_with('.') || comp.ends_with(' ') {
+            return text;
+        }
+        let stem = comp.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let stem = stem.trim_end_matches(' ');
+        let numbered = stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit();
+        if matches!(stem, "CON" | "PRN" | "AUX" | "NUL") || numbered {
+            return text;
+        }
+    }
+    rest
+}
+
 fn bad_punch_range(why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,

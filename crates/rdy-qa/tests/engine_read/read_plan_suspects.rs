@@ -336,7 +336,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_qa::git_repo::git_hooks_dir().display()
+            ),
             "-c",
             "init.defaultBranch=main",
         ])

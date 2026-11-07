@@ -57,7 +57,7 @@ mod cli_redaction;
 mod cli_ref;
 mod cli_relay;
 mod cli_render_stream;
-mod cli_render_stream_unix;
+mod cli_render_stream_native;
 mod cli_repo_id;
 mod cli_search;
 mod cli_search_filters;

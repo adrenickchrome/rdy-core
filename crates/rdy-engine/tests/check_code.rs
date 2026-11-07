@@ -38,6 +38,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("run git");
     assert!(

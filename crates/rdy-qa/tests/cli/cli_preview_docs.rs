@@ -1093,9 +1093,18 @@ fn rsig3_release_key_fixtures_are_not_text_normalised() {
     for file in files {
         let rel = file.strip_prefix(root()).unwrap().to_owned();
         let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg(format!(
+                "core.hooksPath={}",
+                rdy_qa::git_repo::git_hooks_dir().display()
+            ))
             .args(["check-attr", "text", "--"])
             .arg(&rel)
             .current_dir(root())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output();
         let Ok(out) = out else { continue };
         if !out.status.success() {

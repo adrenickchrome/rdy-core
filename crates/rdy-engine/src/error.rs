@@ -546,7 +546,7 @@ impl From<StoreError> for RdyError {
                 E_LOCKED,
                 format!(
                     "the project store at {} is held by another rdy process (the daemon, or a command run with --no-daemon)",
-                    p.display()
+                    rdy_store::pio::display_path(&p)
                 ),
                 "drop --no-daemon, or stop the daemon with rdy serve --stop",
             ),

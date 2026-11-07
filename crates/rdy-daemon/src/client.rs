@@ -1034,7 +1034,7 @@ impl Start<'_> {
                         E_DAEMON_START,
                         format!(
                             "the store at {} is held by another rdy process that is not a daemon (a command run with --no-daemon, or rdy mcp --no-daemon)",
-                            store.display()
+                            rdy_store::pio::display_path(&store)
                         ),
                         "a --no-daemon rdy holds the store: close it, or drop --no-daemon",
                     ));

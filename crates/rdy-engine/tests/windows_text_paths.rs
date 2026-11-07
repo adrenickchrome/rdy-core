@@ -350,9 +350,16 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_engine::code_index::empty_hooks_dir().display()
+            ),
         ])
         .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("git runs")
 }
