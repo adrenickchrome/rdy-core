@@ -578,6 +578,10 @@ fn command(p: &Path, home: &Home, extra: &[(&str, &str)], args: &[&str]) -> Comm
     cmd.env_clear()
         // Windows sockets do not start in a process without it; no other platform has it
         .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
+        // without these a Windows process's temporary directory is the system's, which a
+        // standard user cannot write, and publish makes its upload scratch file there
+        .envs(std::env::var_os("TEMP").map(|dir| ("TEMP", dir)))
+        .envs(std::env::var_os("TMP").map(|dir| ("TMP", dir)))
         .envs(home.env())
         .envs(extra.iter().copied())
         .arg("--project")
