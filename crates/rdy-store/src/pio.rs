@@ -310,8 +310,38 @@ fn bad_punch_range(why: &str) -> io::Error {
     )
 }
 
+/// The start of `value` as text, at most `max` code units long, decoded lossily: each part that
+/// is not Unicode becomes one U+FFFD, on every platform. It decodes the platform's own units (the
+/// bytes on Unix, the UTF-16 units on Windows), never the internal encoding of `OsStr`, so an
+/// unpaired surrogate is one replacement character and not three. The work and the result are
+/// bounded by `max`, however long `value` is.
+pub fn lossy_head(value: &std::ffi::OsStr, max: usize) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = value.as_bytes();
+        String::from_utf8_lossy(&bytes[..bytes.len().min(max)]).into_owned()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        char::decode_utf16(value.encode_wide().take(max))
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wx33c_lossy_head_is_one_replacement_per_part_and_bounded() {
+        let odd = super::not_unicode("zo");
+        assert_eq!(super::lossy_head(&odd, 100), "zo\u{fffd}");
+        assert_eq!(super::lossy_head(&odd, 2), "zo");
+        let long = std::ffi::OsString::from("a".repeat(1000));
+        assert_eq!(super::lossy_head(&long, 5), "aaaaa");
+    }
+
     #[test]
     fn wx12d_not_unicode_text_keeps_its_start_and_has_no_str() {
         let odd = super::not_unicode("zo");

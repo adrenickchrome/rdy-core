@@ -131,11 +131,18 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
         ] {
             let (ok, out) = run_clean(&s, args);
             assert!(!ok, "{out}");
+            // JSON escapes a path's backslashes
+            let shown = uf.display().to_string();
+            let shown = if args.contains(&"--json") {
+                serde_json::to_string(&shown)
+                    .unwrap()
+                    .trim_matches('"')
+                    .to_string()
+            } else {
+                shown
+            };
             assert!(
-                out.contains(&format!(
-                    "config is not a valid bounded mapping in {}",
-                    uf.display()
-                )),
+                out.contains(&format!("config is not a valid bounded mapping in {shown}")),
                 "{args:?}: {out}"
             );
             assert!(

@@ -71,7 +71,7 @@ impl Home {
         std::fs::create_dir(dir.path().join("rdy")).unwrap();
         set_mode(&dir.path().join("rdy"), 0o700).unwrap();
         std::fs::write(
-            dir.path().join("rdy/config.yaml"),
+            dir.path().join("rdy").join("config.yaml"),
             format!("actor: {PERSON}\n"),
         )
         .unwrap();
@@ -79,11 +79,11 @@ impl Home {
     }
 
     fn config(&self) -> PathBuf {
-        self.dir.path().join("rdy/config.yaml")
+        self.dir.path().join("rdy").join("config.yaml")
     }
 
     fn creds(&self) -> PathBuf {
-        self.dir.path().join("rdy/credentials.yaml")
+        self.dir.path().join("rdy").join("credentials.yaml")
     }
 
     /// The environment of a child: this config home only.

@@ -856,11 +856,20 @@ fn no_start() -> RdyError {
 /// (a config file's parse error names it only in its fix), that file stops the project from
 /// opening; otherwise the loaded project does not pass, and the source needs the repair.
 fn fails_fsck(project: &Path, carried: &[String], e: RdyError) -> RdyError {
+    // a path is named with `/` or `\\` between its parts on Windows, by whichever call joined it
+    let slashed = |t: &str| -> String {
+        if cfg!(windows) {
+            t.replace('\\', "/")
+        } else {
+            t.to_string()
+        }
+    };
+    let (message, fix) = (slashed(&e.message), slashed(&e.fix));
     if let Some(at) = target_only(project, carried)
         .into_iter()
         .find(|(rel, at)| {
-            let full = at.display().to_string();
-            [&e.message, &e.fix]
+            let full = slashed(&at.display().to_string());
+            [&message, &fix]
                 .iter()
                 .any(|t| t.contains(&full) || t.contains(rel.as_str()))
         })

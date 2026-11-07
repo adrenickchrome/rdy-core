@@ -732,25 +732,49 @@ fn rtc6_cli_bad_forms_never_open_a_writer() {
 
     // the engine's checks, before any connection
     let long = "x".repeat(65_537);
-    let r = go(
-        AGENT,
-        &[
-            "--json",
-            "rule",
-            "add",
-            "--scope",
-            "project",
-            "--text",
-            &long,
-            "--why",
-            "w",
-            "--evidence",
-            "e",
-            "--relayed-by",
-            "agent:c6",
-        ],
-    );
-    let e = refused(&r, "E_LIMIT");
+    let e = if cfg!(windows) {
+        // a Windows command line holds 32 KiB at most, so this text cannot be passed to `rdy`:
+        // the same check runs over MCP, in a world of its own
+        let w2 = World::new();
+        let dir = w2.project();
+        let mut c = w2.mcp(dir.path());
+        assert!(
+            c.call(
+                "rdy_session",
+                json!({"actor": "agent:c6", "run": "r1", "role": "writer"})
+            )
+            .is_ok()
+        );
+        match c.call(
+            "rdy_rule",
+            json!({"scope": "project", "op": "add", "text": long, "why": "w",
+                "evidence": "e", "question": "q", "session_ref": "chat-1"}),
+        ) {
+            rdy_qa::mcp::Reply::ToolError(v) => v,
+            other => panic!("{other:?}"),
+        }
+    } else {
+        let r = go(
+            AGENT,
+            &[
+                "--json",
+                "rule",
+                "add",
+                "--scope",
+                "project",
+                "--text",
+                &long,
+                "--why",
+                "w",
+                "--evidence",
+                "e",
+                "--relayed-by",
+                "agent:c6",
+            ],
+        );
+        refused(&r, "E_LIMIT").clone()
+    };
+    assert_eq!(e["code"], "E_LIMIT", "{e}");
     assert_eq!(
         e["message"], "rdy_rule: \"text\" exceeds 65536 bytes",
         "{e}"
