@@ -1231,6 +1231,15 @@ class WindowsPlatformMatrix(unittest.TestCase):
         self.assertIn('windows_gate.ps1', text)
         self.assertIn('windows_gate_cleanup.ps1', text)
 
+    def test_wx34_windows_gate_quotes_paths_with_spaces(self):
+        # Start-Process joins ArgumentList without quoting; C:\Program Files\Git must stay one argument
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        start = gate.index('$arguments = @(')
+        block = gate[start:gate.index('Start-Process', start)]
+        self.assertIn('function Quote-Arg', gate)
+        for name in ('$inner', '$work', '$cargoHome', '$rustupHome', '$node', '$git'):
+            self.assertIn(f'(Quote-Arg {name})', block)
+
     def test_wx34_no_arm64_linux_job_is_restored(self):
         text = self.workflow()
         for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):

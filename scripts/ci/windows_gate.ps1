@@ -19,6 +19,13 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) { throw "$File failed with status $LASTEXITCODE" }
 }
 
+# Start-Process joins ArgumentList elements with spaces and does not quote them, so a path such as
+# C:\Program Files\Git would split. Each path value goes in double quotes.
+function Quote-Arg {
+    param([string]$Value)
+    return '"' + $Value + '"'
+}
+
 New-Item -ItemType Directory -Force -Path $root, $cargoHome, $rustupHome, $logs | Out-Null
 
 # The credential: random bytes, masked before first use, held in memory only.
@@ -63,8 +70,9 @@ $credential = New-Object System.Management.Automation.PSCredential(".\$account",
 $out = Join-Path $logs 'gate.out'
 $err = Join-Path $logs 'gate.err'
 $inner = Join-Path $work 'scripts\ci\windows_gate_inner.ps1'
-$arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $inner,
-    '-Work', $work, '-CargoHome', $cargoHome, '-RustupHome', $rustupHome, '-NodeDir', $node, '-GitDir', $git)
+$arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $inner),
+    '-Work', (Quote-Arg $work), '-CargoHome', (Quote-Arg $cargoHome), '-RustupHome', (Quote-Arg $rustupHome),
+    '-NodeDir', (Quote-Arg $node), '-GitDir', (Quote-Arg $git))
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `
     -Wait -PassThru
