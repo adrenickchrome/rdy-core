@@ -197,15 +197,11 @@ impl PublishWire for Wire {
 /// moves on.
 #[test]
 fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
-    let home = tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    pio::make_private_dir(home.path()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let rdy = home.path().join("rdy");
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
-        .create(&rdy)
-        .unwrap();
+    pio::create_private_dir(&rdy).unwrap();
     let user_file = rdy.join("config.yaml");
     fs::write(&user_file, "# person settings\n").unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
@@ -253,12 +249,13 @@ fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
         })),
     );
     let creds = rdy.join("credentials.yaml");
-    let mut f = pio::file_mode(
-        OpenOptions::new().write(true).create(true).truncate(true),
-        0o600,
-    )
-    .open(&creds)
-    .unwrap();
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&creds)
+        .unwrap();
+    pio::make_private_file(&f).unwrap();
     f.write_all(&encode_credentials(&file).unwrap()).unwrap();
     drop(f);
 
