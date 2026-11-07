@@ -69,7 +69,8 @@ pub(crate) fn device_input() -> &'static Path {
 }
 
 /// A command that writes exactly `text` to stdout and exits 0: a stand-in version probe.
-/// Windows PowerShell writes the argument's characters, with no added line ending.
+/// Windows PowerShell writes the characters of an environment variable, with no added line
+/// ending; `-Command` would split `text` into words if it were an argument.
 #[cfg(test)]
 pub(crate) fn print_command(text: &str) -> Command {
     let mut cmd = Command::new(system_file(r"WindowsPowerShell\v1.0\powershell.exe"));
@@ -77,9 +78,9 @@ pub(crate) fn print_command(text: &str) -> Command {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "[Console]::Out.Write($args[0])",
-        text,
+        "[Console]::Out.Write($env:RDY_QA_PRINT)",
     ]);
+    cmd.env("RDY_QA_PRINT", text);
     cmd
 }
 
