@@ -331,7 +331,7 @@ fn sr6_the_review_chip_count_is_the_entry_count() {
 fn pages_of(site: &Path) -> Vec<std::path::PathBuf> {
     pages(site)
         .into_iter()
-        .filter(|p| !p.to_string_lossy().contains("/go/"))
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "go"))
         .collect()
 }
 

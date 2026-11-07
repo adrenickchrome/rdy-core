@@ -1,6 +1,5 @@
-#![cfg(unix)]
-// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
-//! Rendering into an existing site (ren1).
+//! Rendering into an existing site (ren1). The link, read-only-folder and mode cases run on every
+//! platform through `rdy_qa::platform`; only the owner and mode bits are Unix-only (wx30a).
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use serde_json::json;
@@ -76,10 +75,9 @@ fn ren1_an_empty_directory_is_rendered_into() {
 }
 
 /// A destructive swap never follows a link: the link and its target stay as they were.
-#[cfg(unix)]
 #[test]
 fn ren1_a_symlinked_out_is_refused_untouched() {
-    use std::os::unix::fs::MetadataExt;
+    use rdy_store::fileid::FileId;
     let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let target = parent.path().join("target");
@@ -87,9 +85,9 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
     std::fs::write(target.join("keep.txt"), "mine").unwrap();
     // A marked target passes the marker gate, so only the link guard stands in the way.
     std::fs::write(target.join(rdy_render::SITE_MARKER), "old").unwrap();
-    let inode = std::fs::metadata(&target).unwrap().ino();
+    let identity = FileId::lstat(&target).unwrap();
     let link = parent.path().join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
+    rdy_qa::platform::dir_alias(&target, &link).unwrap();
     // Tab-completion appends a slash to a link to a directory, and `/.` names the same thing.
     for spelled in ["link", "link/", "link/."] {
         let out = parent.path().join(spelled);
@@ -102,7 +100,6 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
                 .is_symlink(),
             "{spelled}"
         );
-        assert_eq!(std::fs::read_link(&link).unwrap(), target, "{spelled}");
         assert_eq!(
             std::fs::read_to_string(target.join("keep.txt")).unwrap(),
             "mine",
@@ -119,8 +116,8 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
             "{spelled}"
         );
         assert_eq!(
-            std::fs::metadata(&target).unwrap().ino(),
-            inode,
+            FileId::lstat(&target).unwrap(),
+            identity,
             "{spelled}: the target was replaced"
         );
     }
@@ -131,39 +128,23 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
     assert_eq!(names.len(), 2, "no staging left beside the link: {names:?}");
 }
 
-#[cfg(unix)]
-const READ_ONLY_REASON: &str = "a read-only directory takes writes here (running as root?)";
+const READ_ONLY_REASON: &str =
+    "a read-only directory takes writes here (running as root or elevated?)";
+
 /// A parent that cannot be written (a mount point's parent, `/var/www` over a user-owned site).
-/// Restores the mode on drop so the temporary directory can be removed.
-#[cfg(unix)]
-struct ReadOnly(std::path::PathBuf);
-#[cfg(unix)]
+/// Restores the access on drop so the temporary directory can be removed.
+struct ReadOnly(#[allow(dead_code)] rdy_qa::platform::ReadOnlyDir);
 impl ReadOnly {
-    /// `test` is the calling test's name, for the skip line when the mode has no effect.
+    /// `test` is the calling test's name, for the skip line when the change has no effect.
     fn new(test: &str, dir: &std::path::Path) -> Option<ReadOnly> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let guard = ReadOnly(dir.to_path_buf());
-        // root ignores the mode: nothing to test then
-        let probe = dir.join(".probe");
-        if std::fs::write(&probe, "").is_ok() {
-            std::fs::remove_file(probe).unwrap();
-            drop(guard);
+        let guard = rdy_qa::wc::read_only_dir(dir);
+        if guard.is_none() {
             rdy_qa::skip::skip(test, rdy_qa::skip::Why::Prerequisite, READ_ONLY_REASON);
-            return None;
         }
-        Some(guard)
-    }
-}
-#[cfg(unix)]
-impl Drop for ReadOnly {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        guard.map(ReadOnly)
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into() {
     let (_d, r, _doc) = one_doc();
@@ -190,7 +171,6 @@ fn ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
     let (_d, mut r, doc) = one_doc();
@@ -233,7 +213,6 @@ fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
 }
 
 /// A failed unwritable swap leaves a refusal that names the path.
-#[cfg(unix)]
 #[test]
 fn ren1_an_unwritable_new_out_names_the_path() {
     let (_d, r, _doc) = one_doc();
@@ -255,7 +234,6 @@ fn ren1_an_unwritable_new_out_names_the_path() {
 
 /// The rename of `out` is refused (here: the old copy from a crashed render can't be cleared, as
 /// a busy mount can't be moved). The staged site is moved in place, and no staging is left.
-#[cfg(unix)]
 #[test]
 fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
     let (_d, mut r, doc) = one_doc();
@@ -288,7 +266,6 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
 
 /// `.rdy-site` as a link to a file is not the marker: `is_file()` would follow it and mark a
 /// directory that rdy never rendered, and the render would delete what it holds.
-#[cfg(unix)]
 #[test]
 fn ren1_a_symlinked_marker_does_not_mark_a_site() {
     let (_d, r, _doc) = one_doc();
@@ -298,7 +275,7 @@ fn ren1_a_symlinked_marker_does_not_mark_a_site() {
     let dir = parent.path().join("notsite");
     std::fs::create_dir(&dir).unwrap();
     std::fs::write(dir.join("notes.txt"), "mine").unwrap();
-    std::os::unix::fs::symlink(&elsewhere, dir.join(rdy_render::SITE_MARKER)).unwrap();
+    rdy_qa::platform::symlink(&elsewhere, &dir.join(rdy_render::SITE_MARKER)).unwrap();
     let e = rdy_render::render_site(&r.read(), &Scope::Canon, &dir).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert_eq!(
@@ -315,10 +292,9 @@ fn ren1_a_symlinked_marker_does_not_mark_a_site() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
 }
 
-#[cfg(unix)]
 mod in_cwd {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use rdy_store::fileid::FileId;
 
     fn render(
         project: &std::path::Path,
@@ -366,8 +342,9 @@ mod in_cwd {
         let parent = tempfile::tempdir().unwrap();
         let site = parent.path().join("site");
         std::fs::create_dir(&site).unwrap();
-        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o750)).unwrap();
-        let before = std::fs::metadata(&site).unwrap();
+        rdy_qa::platform::set_mode(&site, 0o750).unwrap();
+        let before_id = FileId::lstat(&site).unwrap();
+        let before_access = std::fs::metadata(&site).unwrap().permissions().readonly();
         let abs = std::fs::canonicalize(&site).unwrap();
         for (round, spelled) in [".", abs.to_str().unwrap(), "."].into_iter().enumerate() {
             if round > 0 {
@@ -377,14 +354,16 @@ mod in_cwd {
             }
             let (ok, out, err) = render(proj.path(), &site, spelled);
             assert!(ok, "round {round} --out {spelled}: {out} {err}");
-            let now = std::fs::metadata(&site).unwrap();
             assert_eq!(
-                now.ino(),
-                before.ino(),
+                FileId::lstat(&site).unwrap(),
+                before_id,
                 "round {round}: the directory was replaced"
             );
-            assert_eq!(now.mode(), before.mode(), "round {round}: mode");
-            assert_eq!(now.uid(), before.uid(), "round {round}: owner");
+            assert_eq!(
+                std::fs::metadata(&site).unwrap().permissions().readonly(),
+                before_access,
+                "round {round}: access"
+            );
             let n = names(&site);
             assert!(n.contains(&"index.html".to_string()), "{n:?}");
             assert!(n.contains(&rdy_render::SITE_MARKER.to_string()), "{n:?}");
@@ -437,10 +416,8 @@ mod in_cwd {
 
 /// The old copy of a swapped site that cannot be removed is a hidden full copy beside `out`: the
 /// render succeeds, and says where it is left.
-#[cfg(unix)]
 #[test]
 fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
-    use std::os::unix::fs::PermissionsExt;
     let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let site = parent.path().join("site");
@@ -461,7 +438,7 @@ fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     std::mem::forget(guard); // the directory has moved; restore its mode by its new path below
     let left = old.join("locked");
     let kept = left.join("f").exists();
-    std::fs::set_permissions(&left, std::fs::Permissions::from_mode(0o755)).ok();
+    rdy_qa::platform::set_mode(&left, 0o755).ok();
     assert!(kept, "the old copy is still there");
     assert_eq!(second.warnings.len(), 1, "{:?}", second.warnings);
     assert!(
