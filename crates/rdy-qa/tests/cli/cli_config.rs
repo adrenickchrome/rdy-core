@@ -124,17 +124,19 @@ fn cfgl1_rdy_config_show_origin() {
     let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
     assert!(
         text.lines()
-            .any(|l| l == format!("views.idle_days = 9  # {local_text}")),
+            .any(|l| l
+                == format!("views.idle_days = 9  # {local_text}  # set at: local, project, user")),
         "{text}"
     );
     assert!(
         text.lines()
-            .any(|l| l == "serve.start_timeout = 30  # default"),
+            .any(|l| l == "serve.start_timeout = 30  # default  # set at: local, project, user"),
         "{text}"
     );
     // cc17: coverage.target is a project key with the default 80
     assert!(
-        text.lines().any(|l| l == "coverage.target = 80  # default"),
+        text.lines()
+            .any(|l| l == "coverage.target = 80  # default  # set at: project"),
         "{text}"
     );
 }
@@ -164,7 +166,8 @@ fn dgm5_config_cli_lists_the_project_origin() {
     assert!(row["file"].is_null(), "{row}");
     let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
     assert!(
-        text.lines().any(|l| l == "site.base_path = /  # default"),
+        text.lines()
+            .any(|l| l == "site.base_path = /  # default  # set at: project"),
         "{text}"
     );
 
@@ -187,13 +190,15 @@ fn dgm5_config_cli_lists_the_project_origin() {
     let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
     assert!(
         text.lines()
-            .any(|l| l.starts_with("site.base_path = /docs/  # ") && l.ends_with(".rdy.yaml")),
+            .any(|l| l.starts_with("site.base_path = /docs/  # ")
+                && l.ends_with(".rdy.yaml  # set at: project")),
         "{text}"
     );
     // the same effective value without the origin column
     let text = String::from_utf8_lossy(&s.rdy(&["config"]).stdout).into_owned();
     assert!(
-        text.lines().any(|l| l == "site.base_path = /docs/"),
+        text.lines()
+            .any(|l| l == "site.base_path = /docs/  # set at: project"),
         "{text}"
     );
     // text and JSON list the same keys in the same order
@@ -655,5 +660,221 @@ fn id3_cold_start_transports_refuse_an_invalid_configured_actor_as_status_does()
         );
         assert!(!run.path().exists(), "{args:?} leaves no .rdy/run");
         assert!(s.daemon_pid().is_none(), "{args:?} starts no daemon");
+    }
+}
+
+/// The JSON rows and the text lines (settings only, no warnings) of `rdy config`.
+fn relc5_listing(s: &Served, show_origin: bool) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut json = vec!["--json", "config"];
+    let mut text = vec!["config"];
+    if show_origin {
+        json.push("--show-origin");
+        text.push("--show-origin");
+    }
+    let (okk, v) = s.json(&json);
+    assert!(okk, "{v}");
+    let out = String::from_utf8_lossy(&s.rdy(&text).stdout).into_owned();
+    let lines = out
+        .lines()
+        .filter(|l| !l.starts_with("warning "))
+        .map(str::to_string)
+        .collect();
+    (v.as_array().unwrap().clone(), lines)
+}
+
+/// The table slot of a listed key: a plain key is its own slot, an entry row belongs to its group.
+fn relc5_slot(key: &str) -> usize {
+    KEY_LEVELS
+        .iter()
+        .position(|r| {
+            r.key == key
+                || (["code_paths", "remotes", "hub.installs"].contains(&r.key)
+                    && key.starts_with(&format!("{}.", r.key)))
+        })
+        .unwrap_or_else(|| panic!("{key} is in no slot"))
+}
+
+fn relc5_levels(slot: usize) -> Vec<String> {
+    KEY_LEVELS[slot]
+        .levels
+        .iter()
+        .map(|l| {
+            serde_json::to_value(l)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Checks the rules every listing keeps, whatever the values: each table slot is listed, in
+/// table order, each row names its slot's allowed levels in declared order, and the text lines
+/// list the JSON rows' keys in the same order, each ending in the allowed levels.
+fn relc5_check(rows: &[serde_json::Value], lines: &[String], show_origin: bool) {
+    let slots: Vec<usize> = rows
+        .iter()
+        .map(|r| relc5_slot(r["key"].as_str().unwrap()))
+        .collect();
+    assert!(slots.windows(2).all(|w| w[0] <= w[1]), "{slots:?}");
+    for i in 0..KEY_LEVELS.len() {
+        assert!(slots.contains(&i), "{} is not listed", KEY_LEVELS[i].key);
+    }
+    assert_eq!(rows.len(), lines.len(), "{rows:?}\n{lines:?}");
+    for (r, l) in rows.iter().zip(lines) {
+        let key = r["key"].as_str().unwrap();
+        let want: Vec<String> = relc5_levels(relc5_slot(key));
+        let got: Vec<String> = r["levels"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{r}"))
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(got, want, "{r}");
+        assert!(l.starts_with(&format!("{key} = ")), "{l}");
+        assert!(
+            l.ends_with(&format!("  # set at: {}", want.join(", "))),
+            "{l}"
+        );
+        if r["level"].is_null() {
+            assert!(r["value"].is_null() && r["file"].is_null(), "{r}");
+            let tail = if show_origin { "  # unset" } else { "" };
+            assert!(
+                l.starts_with(&format!("{key} = unset{tail}  # set at: ")),
+                "{l}"
+            );
+        }
+    }
+}
+
+fn relc5_row<'a>(rows: &'a [serde_json::Value], key: &str) -> &'a serde_json::Value {
+    rows.iter()
+        .find(|r| r["key"] == key)
+        .unwrap_or_else(|| panic!("no row {key}: {rows:?}"))
+}
+
+#[test]
+fn relc5_config_lists_every_key_and_allowed_levels() {
+    use rdy_qa::git_repo::*;
+    let s = Served::new();
+    // nothing configured: every key is listed; one unset row per empty group
+    for show_origin in [false, true] {
+        let (rows, lines) = relc5_listing(&s, show_origin);
+        relc5_check(&rows, &lines, show_origin);
+        for key in [
+            "code_paths",
+            "remotes",
+            "hub.installs",
+            "signing.key",
+            "signing.agent_key",
+            "signing.allowed_signers",
+        ] {
+            let r = relc5_row(&rows, key);
+            assert!(
+                r["value"].is_null() && r["level"].is_null() && r["file"].is_null(),
+                "{r}"
+            );
+        }
+        let d = relc5_row(&rows, "serve.start_timeout");
+        assert_eq!(
+            (d["value"].clone(), d["level"].clone()),
+            (30.into(), "default".into())
+        );
+        assert!(d["file"].is_null(), "{d}");
+        assert_eq!(relc5_row(&rows, "pack")["level"], "project");
+        assert_eq!(relc5_row(&rows, "actor")["level"], "user");
+        let line = |k: &str| {
+            lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{k} = ")))
+                .unwrap()
+                .clone()
+        };
+        if show_origin {
+            assert_eq!(
+                line("signing.key"),
+                "signing.key = unset  # unset  # set at: local, user"
+            );
+            assert_eq!(
+                line("serve.start_timeout"),
+                "serve.start_timeout = 30  # default  # set at: local, project, user"
+            );
+        } else {
+            assert_eq!(
+                line("code_paths"),
+                "code_paths = unset  # set at: local, user"
+            );
+        }
+    }
+
+    // values at every level, two code repos with different winning levels, an explicit null
+    let app = GitRepo::at(&s.dir.path().join("checkouts").join("app"));
+    app.write("a.txt", "a\n");
+    app.commit("feat: a");
+    let lib = GitRepo::at(&s.dir.path().join("lib"));
+    lib.write("b.txt", "b\n");
+    lib.commit("feat: b");
+    append(
+        s.dir.path(),
+        PROJECT_FILE,
+        "code_repos: [app, lib]\nname:\npropose:\n  changes: 7\n",
+    );
+    append(
+        s.dir.path(),
+        LOCAL_FILE,
+        "code_paths:\n  app: checkouts/app\nsigning:\n  sign: always\n",
+    );
+    let uf = s.user_config();
+    let mut text = std::fs::read_to_string(&uf).unwrap();
+    text.push_str(&format!(
+        "views:\n  idle_days: 4\ncode_paths:\n  lib: {}\n  app: elsewhere\n",
+        serde_json::to_string(&lib.path().to_string_lossy()).unwrap()
+    ));
+    std::fs::write(&uf, text).unwrap();
+    let local_file = s.dir.path().join(".rdy").join("local.yaml");
+    for show_origin in [false, true] {
+        let (rows, lines) = relc5_listing(&s, show_origin);
+        relc5_check(&rows, &lines, show_origin);
+        let at = |k: &str| {
+            (
+                relc5_row(&rows, k)["level"].clone(),
+                relc5_row(&rows, k)["value"].clone(),
+            )
+        };
+        assert_eq!(at("propose.changes"), ("project".into(), 7.into()));
+        assert_eq!(at("views.idle_days"), ("user".into(), 4.into()));
+        assert_eq!(at("signing.sign"), ("local".into(), "always".into()));
+        let n = relc5_row(&rows, "name");
+        assert!(n["value"].is_null() && n["level"] == "project", "{n}");
+        assert!(n["file"].as_str().unwrap().ends_with(".rdy.yaml"), "{n}");
+        assert_eq!(
+            lines
+                .iter()
+                .find(|l| l.starts_with("name = "))
+                .unwrap()
+                .split("  #")
+                .next(),
+            Some("name = null")
+        );
+        let paths: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| r["key"].as_str().unwrap().starts_with("code_paths"))
+            .collect();
+        assert_eq!(
+            paths
+                .iter()
+                .map(|r| r["key"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["code_paths.app", "code_paths.lib"],
+            "no aggregate row beside the repo rows"
+        );
+        assert_eq!(
+            (paths[0]["level"].clone(), paths[0]["file"].clone()),
+            ("local".into(), serde_json::json!(local_file))
+        );
+        assert_eq!(
+            (paths[1]["level"].clone(), paths[1]["file"].clone()),
+            ("user".into(), serde_json::json!(uf))
+        );
     }
 }

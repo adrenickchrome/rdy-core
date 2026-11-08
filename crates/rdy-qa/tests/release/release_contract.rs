@@ -3973,6 +3973,51 @@ fn errors_row() -> Value {
 
 // ---- config ----
 
+/// relc5: `rdy config` lists every key of the table. One project with nothing set but the
+/// defaults, and one with values at each level and a populated `remotes` group, each run as
+/// text and as JSON, with and without `--show-origin`. The paths are normalized.
+fn config_listing() -> Value {
+    let run = |dir: &Path, env: &[(String, String)], paths: &[&Path], args: &[&str]| -> Value {
+        let (code, out, err) = rdy_in(dir, env, args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        let text = normalize(&out, paths);
+        if args.contains(&"--json") {
+            serde_json::from_str(&text).expect("json rows")
+        } else {
+            json!(text)
+        }
+    };
+    let capture = |dir: &Path, env: &[(String, String)], paths: &[&Path]| -> Value {
+        json!({
+            "text": run(dir, env, paths, &["config"]),
+            "text_show_origin": run(dir, env, paths, &["config", "--show-origin"]),
+            "json": run(dir, env, paths, &["--json", "config"]),
+            "json_show_origin": run(dir, env, paths, &["--json", "config", "--show-origin"]),
+        })
+    };
+    let (d, r) = project();
+    drop(r);
+    let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+    let paths = [d.path(), cfg.path()];
+    let defaults = capture(d.path(), &env, &paths);
+    let append = |path: PathBuf, text: &str| {
+        let mut t = std::fs::read_to_string(&path).unwrap_or_default();
+        t.push_str(text);
+        std::fs::write(path, t).expect("write config");
+    };
+    append(d.path().join(".rdy.yaml"), "propose:\n  changes: 7\n");
+    append(
+        config_levels::local_path(d.path()),
+        "signing:\n  sign: always\nremotes:\n  origin: {url: \"https://hub.example.com/team\", mode: share}\n",
+    );
+    append(
+        cfg.path().join("rdy/config.yaml"),
+        "views:\n  idle_days: 4\n",
+    );
+    let configured = capture(d.path(), &env, &paths);
+    json!({"defaults": defaults, "configured": configured})
+}
+
 fn config_row() -> Value {
     let keys: Vec<Value> = config_levels::KEY_LEVELS
         .iter()
@@ -4037,6 +4082,7 @@ fn config_row() -> Value {
         "project_file": config_levels::PROJECT_FILE,
         "local_file": config_levels::LOCAL_FILE,
         "keys": keys,
+        "listing": config_listing(),
         "propose_cadences": config_levels::PROPOSE_CADENCES,
         "sign_modes": config_levels::SIGN_MODES,
         "unknown_key_warning": warnings,
@@ -7148,18 +7194,24 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     for (name, want) in PINNED_SECTIONS {
         assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
     }
-    for (name, want) in [
-        (
-            "working_copy",
-            "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
-        ),
-        (
-            "config",
-            "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
-        ),
-    ] {
+    for (name, want) in [(
+        "working_copy",
+        "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
+    )] {
         assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
     }
+    // relc5 added `config.listing`; the section's earlier digest is of the rest
+    let mut config = fixture["config"].clone();
+    config
+        .as_object_mut()
+        .expect("config")
+        .remove("listing")
+        .expect("relc5 added the listing");
+    assert_eq!(
+        digest_of(&config),
+        "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
+        "section config moved"
+    );
     // the tools: every tool but the rule's, the names but its own, the results but its own
     // (and `rdy_schema`, which only the kungfu change moved)
     let mcp = fixture["mcp"].as_object().expect("mcp");
@@ -7238,10 +7290,22 @@ fn rtc7_contract_diff_is_limited_to_rules() {
         digest_of(&json!(others)),
         "91020aeffb2e3b0d48b86c76abba05c5348f95be31f69f3ce699abee373668e6"
     );
+    // relc5 gave the config probe its `levels` and unset rows; the historical digest is of the
+    // probe before them
+    let mut probes = without(&cli["runtime"]["probes"], &|k| {
+        !k.starts_with("rule ") && !k.starts_with("publication check")
+    });
+    probes["config"] = json!({
+        "exits": [0],
+        "stdout": [{
+            "file": "null|string",
+            "key": "string",
+            "level": "string",
+            "value": "bool|number|string"
+        }]
+    });
     assert_eq!(
-        digest_of(&without(&cli["runtime"]["probes"], &|k| {
-            !k.starts_with("rule ") && !k.starts_with("publication check")
-        })),
+        digest_of(&probes),
         "31041518cd31060f84815d85a99fa6193f25b0d807d8d53fd0a1651c842a9c85"
     );
     // relc4 probes `publication check`, so its exclusion row left `not_probed_commands`; the
@@ -7322,4 +7386,121 @@ fn relc4_contract_probes_populate_hidden_reports() {
             .unwrap()
             .contains(&json!("rdy_publication_check"))
     );
+}
+
+/// relc5 (D-C5955): the contract captures the complete config listing. The config probe holds
+/// the allowed levels, and nullable `level`, `file` and `value` from populated and unset rows.
+/// The listing holds the defaults and a configured project as text and JSON, with and without
+/// origins, with an empty and a populated per-entry group.
+#[test]
+fn relc5_contract_captures_complete_config_listing() {
+    let fixture = read_fixture();
+    // $.cli.runtime.probes.config.stdout
+    let probe = &fixture["cli"]["runtime"]["probes"]["config"]["stdout"];
+    let row = &probe[0];
+    assert_eq!(
+        shape_keys(row),
+        ["file", "key", "level", "levels", "value"],
+        "{row}"
+    );
+    for member in ["file", "level", "value"] {
+        let shape = row[member].as_str().unwrap();
+        assert!(shape.split('|').any(|s| s == "null"), "{member}: {shape}");
+        assert!(shape.split('|').any(|s| s != "null"), "{member}: {shape}");
+    }
+    assert_eq!(row["levels"], json!(["string"]));
+    // $.config.listing
+    let listing = &fixture["config"]["listing"];
+    let table: Vec<&str> = fixture["config"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap())
+        .collect();
+    for (scenario, entries) in [("defaults", false), ("configured", true)] {
+        let cap = &listing[scenario];
+        for member in ["text", "text_show_origin", "json", "json_show_origin"] {
+            assert!(!cap[member].is_null(), "{scenario}.{member}");
+        }
+        // the origin flag changes the text and not the rows
+        assert_eq!(cap["json"], cap["json_show_origin"], "{scenario}");
+        let rows = cap["json"].as_array().unwrap();
+        // every table key has a row, in table order; an entry row sits in its group's slot
+        let slot = |key: &str| {
+            table
+                .iter()
+                .position(|t| {
+                    key == *t
+                        || (["code_paths", "remotes", "hub.installs"].contains(t)
+                            && key.starts_with(&format!("{t}.")))
+                })
+                .unwrap_or_else(|| panic!("{key}"))
+        };
+        let slots: Vec<usize> = rows
+            .iter()
+            .map(|r| slot(r["key"].as_str().unwrap()))
+            .collect();
+        assert!(
+            slots.windows(2).all(|w| w[0] <= w[1]),
+            "{scenario}: {slots:?}"
+        );
+        assert!((0..table.len()).all(|i| slots.contains(&i)), "{scenario}");
+        for r in rows {
+            let want =
+                fixture["config"]["keys"][slot(r["key"].as_str().unwrap())]["levels"].clone();
+            assert_eq!(r["levels"], want, "{r}");
+        }
+        // an unset row has null value, level and file; a populated one has a level
+        let unset = rows.iter().filter(|r| r["level"].is_null()).count();
+        assert!(unset > 0, "{scenario} has unset rows");
+        assert!(
+            rows.iter()
+                .any(|r| r["level"] == "default" && r["file"].is_null()),
+            "{scenario} has default rows"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["level"] == "project" && r["file"].is_string()),
+            "{scenario} has configured rows"
+        );
+        for r in rows.iter().filter(|r| r["level"].is_null()) {
+            assert!(r["value"].is_null() && r["file"].is_null(), "{r}");
+        }
+        let group = |k: &str| {
+            rows.iter()
+                .filter(|r| r["key"].as_str().unwrap().starts_with(k))
+                .count()
+        };
+        assert_eq!(group("hub.installs"), 1, "an empty group is one unset row");
+        assert_eq!(group("code_paths"), 1, "an empty group is one unset row");
+        let origin_text = cap["text_show_origin"].as_str().unwrap();
+        let text = cap["text"].as_str().unwrap();
+        assert!(
+            text.contains("hub.installs = unset  # set at: local, user"),
+            "{text}"
+        );
+        assert!(
+            origin_text.contains("hub.installs = unset  # unset  # set at: local, user"),
+            "{origin_text}"
+        );
+        assert_eq!(text.lines().count(), rows.len(), "{scenario}");
+        // a populated group lists its entry beside no aggregate row
+        let remotes = group("remotes");
+        if entries {
+            assert_eq!(remotes, 1, "one remote");
+            assert!(
+                rows.iter().any(|r| r["key"] == "remotes.origin"),
+                "{rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r["key"] == "remotes"),
+                "no aggregate row"
+            );
+        } else {
+            assert!(
+                rows.iter()
+                    .any(|r| r["key"] == "remotes" && r["level"].is_null())
+            );
+        }
+    }
 }
