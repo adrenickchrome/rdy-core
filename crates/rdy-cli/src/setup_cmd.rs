@@ -2,7 +2,8 @@
 //! It creates the meta project at the configured place when nothing stands there, and writes
 //! three lines into `CLAUDE.md` and `AGENTS.md` of the chosen project root. Outside a project, or
 //! inside the meta project, it writes no stub. The stub goes first, before the person's own text,
-//! which stays byte for byte; a file that already holds the stub is left alone. A target that is
+//! which stays byte for byte; a file that already holds the stub is left alone, and a file that holds the 0.43.0 to 0.45.0
+//! stub gets the new one in its place. A target that is
 //! not a regular file is refused before either file is written, and a link is never followed.
 //! The meta project never gets rules, a copy of the guide, a policy or a stub. A failed meta step
 //! is a warning: the project's stubs still go in. No harness detection, MCP registration, skill,
@@ -17,7 +18,10 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// The stub, with its final newline.
-pub(crate) const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_instructions and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
+pub(crate) const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_session, then rdy_instructions, and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
+
+/// The stub of 0.43.0 to 0.45.0. A file that holds it gets the current stub in its place.
+const OLD_STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_instructions and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
 
 /// The files that take the stub, in the order they are written.
 pub(crate) const TARGETS: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
@@ -60,6 +64,9 @@ enum Plan {
     /// A regular file without the stub: the stub goes before its bytes, and the file keeps its
     /// permissions.
     Prepend(Vec<u8>, std::fs::Permissions),
+    /// A regular file that holds the old stub: the new stub takes its place, every other byte
+    /// stays, and the file keeps its permissions.
+    Replace(Vec<u8>, std::fs::Permissions),
     /// A regular file that holds the stub: left alone.
     Keep,
 }
@@ -88,11 +95,17 @@ fn preflight(path: &Path) -> Result<Plan, RdyError> {
     }
     let bytes = std::fs::read(path).map_err(|e| io(path, e))?;
     let has = bytes.windows(STUB.len()).any(|w| w == STUB.as_bytes());
-    Ok(if has {
-        Plan::Keep
-    } else {
-        Plan::Prepend(bytes, meta.permissions())
-    })
+    if has {
+        return Ok(Plan::Keep);
+    }
+    let old = OLD_STUB.as_bytes();
+    if let Some(at) = bytes.windows(old.len()).position(|w| w == old) {
+        let mut out = bytes[..at].to_vec();
+        out.extend_from_slice(STUB.as_bytes());
+        out.extend_from_slice(&bytes[at + old.len()..]);
+        return Ok(Plan::Replace(out, meta.permissions()));
+    }
+    Ok(Plan::Prepend(bytes, meta.permissions()))
 }
 
 /// The stub files of `root`: both targets are checked first, then each that needs it is written
@@ -114,6 +127,7 @@ fn stubs(root: &Path) -> Result<(Vec<Value>, Vec<String>), ErrorReply> {
                 continue;
             }
             Plan::Create => (STUB.as_bytes().to_vec(), None),
+            Plan::Replace(bytes, perms) => (bytes, Some(perms)),
             Plan::Prepend(old, perms) => ([STUB.as_bytes(), &old].concat(), Some(perms)),
         };
         let wrote = rdy_engine::write_durable(path, &bytes)
@@ -389,7 +403,7 @@ mod tests {
             STUB.lines().collect::<Vec<_>>(),
             [
                 "This project keeps its agent instructions in rdy.",
-                "At the start of every task, call rdy_instructions and load the rulesets your task needs.",
+                "At the start of every task, call rdy_session, then rdy_instructions, and load the rulesets your task needs.",
                 "Required rules arrive without asking.",
             ]
         );
