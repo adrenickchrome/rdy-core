@@ -2576,5 +2576,346 @@ class NativeBoundary(EvidenceCase):
         self.assertTrue((target / 'keep').exists())
 
 
+# ---------------------------------------------------------------------------------------------
+# The two workflows, wired to immutable helper pins (rprd4)
+# ---------------------------------------------------------------------------------------------
+
+import shlex  # noqa: E402
+from unittest import mock  # noqa: E402
+
+P_HELPERS = '43d8fd503ad055b3e123824038594bfc716c380e'   # the reviewed helper commit P (Tasks 1-3)
+CALLER_PIN = 'f17ab53482c2ed753c280e7e12850e39fe48efd4'  # release.yml's literal signer pin (C11)
+# Git object ids of the unchanged signer closure (C11) and of the helpers at P. The working tree must hold
+# exactly these objects; a clone that has the commit must agree, and only a shallow clone may lack it.
+CLOSURE = (
+    ('scripts/release', H, 'e5c9774e114687cfa58f81aaf134a2dd32cec31e'),
+    ('.github/workflows/release-sign.yml', H, 'df5a59519ff7af82c4ea910da5727676132a1359'),
+    ('.github/workflows/release-candidate.yml', H, '2fde8a7534997b726cefc4c8aa055feacd5f2d3f'),
+    ('.github/workflows/release.yml', CALLER_PIN, '4c82cca267147348ea1e9ab4b459bd8d6d0a8506'),
+    ('scripts/release_producers', P_HELPERS, 'b45a29c939492c04c7a4b24a4d3797d68a4c44a1'),
+)
+CHECKOUT_PATHS = {'trusted': H, 'producer': P_HELPERS}
+HOSTED = 'ubuntu-24.04'                     # the standard hosted label of every job that is not native
+RUNNER_VARIABLES = ('GITHUB_EVENT_PATH', 'GITHUB_STEP_SUMMARY', 'RUNNER_TEMP')
+HELPER_PREFIX = ['/usr/bin/python3', '-I', '-B']
+PERMISSIONS = {
+    (APPROVAL_WF, 'prepare-approval'): {'contents': 'read', 'actions': 'read'},
+    (APPROVAL_WF, 'accept-founder-approval'): {'contents': 'read', 'actions': 'read'},
+    (EVIDENCE_WF, 'authenticate-evidence'): {'contents': 'read', 'actions': 'read'},
+    (EVIDENCE_WF, 'install-mac'): {'contents': 'read', 'actions': 'read'},
+    (EVIDENCE_WF, 'install-linux'): {'contents': 'read', 'actions': 'read'},
+    (EVIDENCE_WF, 'seal-release-evidence'): {'contents': 'read', 'actions': 'read', 'security-events': 'read'},
+}
+# Every helper call of each job, as the helper's own argument parser receives it (after `--trusted trusted`).
+HELPER_CALLS = {
+    (APPROVAL_WF, 'prepare-approval'): [
+        ('approval', ['prepare', '--event', '$GITHUB_EVENT_PATH', '--summary', '$GITHUB_STEP_SUMMARY'])],
+    (APPROVAL_WF, 'accept-founder-approval'): [
+        ('approval', ['accept', '--event', '$GITHUB_EVENT_PATH', '--out', '$RUNNER_TEMP/approval'])],
+    (EVIDENCE_WF, 'authenticate-evidence'): [
+        ('evidence', ['authenticate', '--event', '$GITHUB_EVENT_PATH', '--summary', '$GITHUB_STEP_SUMMARY'])],
+    (EVIDENCE_WF, 'install-mac'): [
+        ('install', ['run', '--target', MAC, '--event', '$GITHUB_EVENT_PATH']),
+        ('install', ['cleanup', '--target', MAC])],
+    (EVIDENCE_WF, 'install-linux'): [
+        ('install', ['run', '--target', LINUX, '--event', '$GITHUB_EVENT_PATH']),
+        ('install', ['cleanup', '--target', LINUX])],
+    (EVIDENCE_WF, 'seal-release-evidence'): [
+        ('evidence', ['seal', '--event', '$GITHUB_EVENT_PATH', '--out', '$RUNNER_TEMP/evidence'])],
+}
+ACTIONLINT_CONFIG = ROOT / 'scripts' / 'ci' / 'actionlint.yaml'
+QUEUE_IGNORE = ('^unexpected key "queue" for "concurrency" section\\. '
+                'expected one of "cancel-in-progress", "group"$')
+# actionlint 1.7.12's own messages (captured from the pinned binary): the one the ignore admits, and others it
+# must never admit. The job and step lists are the linter's exact text.
+QUEUE_MESSAGE = 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
+OTHER_LINT_MESSAGES = (
+    'unexpected key "foo" for "concurrency" section. expected one of "cancel-in-progress", "group"',
+    'unexpected key "queue" for "job" section. expected one of "concurrency", "container", "continue-on-error", '
+    '"defaults", "env", "environment", "if", "name", "needs", "outputs", "permissions", "runs-on", "secrets", '
+    '"services", "snapshot", "steps", "strategy", "timeout-minutes", "uses", "with"',
+    'unexpected key "queue" for step to run shell command. expected one of "continue-on-error", "env", "id", "if", '
+    '"name", "run", "shell", "timeout-minutes", "working-directory"',
+    'unexpected key "queues" for "concurrency" section. expected one of "cancel-in-progress", "group"',
+    'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group", "queue"',
+    'x' + QUEUE_MESSAGE,
+)
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', str(ROOT)] + list(args), capture_output=True, text=True)
+
+
+def git_blob_id(data):
+    return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+
+def git_object_id(path):
+    """The git id of a working-tree file (blob) or flat folder of regular files (tree); `__pycache__` is no
+    source and is left out, any other entry that is not a regular file fails."""
+    if path.is_file() and not path.is_symlink():
+        return git_blob_id(path.read_bytes())
+    entries = []
+    for entry in sorted(path.iterdir(), key=lambda p: p.name.encode('utf-8')):
+        if entry.name == '__pycache__' and entry.is_dir() and not entry.is_symlink():
+            continue
+        info = os.lstat(str(entry))
+        if not stat.S_ISREG(info.st_mode):
+            raise AssertionError(str(entry) + ' is not a regular file')
+        mode = b'100755' if info.st_mode & stat.S_IXUSR else b'100644'
+        entries.append(mode + b' ' + entry.name.encode('utf-8') + b'\0'
+                       + bytes.fromhex(git_blob_id(entry.read_bytes())))
+    body = b''.join(entries)
+    return hashlib.sha1(b'tree ' + str(len(body)).encode() + b'\0' + body).hexdigest()
+
+
+class WiredWorkflows(WorkflowCase, Refusals):
+    """The workflow text as the producers and the frozen consumer see it."""
+
+    def helper_argv(self, run):
+        """A helper step's command as argv. Only fixed words and quoted runner variables: no shell evaluation."""
+        self.assertNotIn('\n', run.strip())
+        for word in (';', '&', '|', '<', '>', '`', '$(', '${', '\\', '*', '?', '[', '~', "'", '#', '{', '}'):
+            self.assertNotIn(word, run)
+        for match in re.finditer(r'\$', run):
+            tail = run[match.start() - 1:]
+            self.assertRegex(tail, r'^"\$(?:' + '|'.join(RUNNER_VARIABLES) + r')(?:/[a-z]+)?"', run)
+        argv = shlex.split(run)
+        self.assertEqual(argv[:3], HELPER_PREFIX, run)
+        return argv
+
+    def calls(self, job):
+        found = []
+        for step in self.steps(job):
+            run = step.get('run', '')
+            if 'release_producers' not in run:
+                continue
+            argv = self.helper_argv(run)
+            match = re.fullmatch(r'producer/scripts/release_producers/([a-z_]+)\.py', argv[3])
+            self.assertIsNotNone(match, argv)
+            self.assertEqual(argv[4:6], ['--trusted', 'trusted'])
+            found.append((match.group(1), argv[6:]))
+        return found
+
+    def checkouts(self, job):
+        return {s['with']['path']: s['with']['ref'] for s in self.steps(job) if s.get('uses') == CHECKOUT}
+
+    def test_rprd4_workflow_structure(self):
+        flows = self.both()
+        for path, flow in flows.items():
+            for job_id, job in flow['jobs'].items():
+                key = (path, job_id)
+                with self.subTest(workflow=path, job=job_id):
+                    # The exact permission matrix: read only, and only the sealer reads alerts.
+                    self.assertEqual(job['permissions'], PERMISSIONS[key])
+                    self.assertIsInstance(job['timeout-minutes'], int)
+                    self.assertTrue(1 <= job['timeout-minutes'] <= 60)
+                    if job_id not in NATIVE:
+                        self.assertEqual(job['runs-on'], HOSTED)
+                    # YAML maps to helper arguments with no shell evaluation; each helper's own parser takes them.
+                    calls = self.calls(job)
+                    self.assertEqual(calls, HELPER_CALLS[key])
+                    for helper, args in calls:
+                        producer(helper).parser().parse_args(args)
+                    # Helpers load from the literal checkouts only: H as `trusted`, P as `producer`; checkouts first.
+                    self.assertEqual(self.checkouts(job), CHECKOUT_PATHS)
+                    steps = self.steps(job)
+                    self.assertEqual([s.get('uses') for s in steps[:2]], [CHECKOUT, CHECKOUT])
+                    for step in steps:
+                        env = step.get('env') or {}
+                        if 'release_producers' in step.get('run', ''):
+                            # The only value a helper step receives from the workflow is the job's read token.
+                            self.assertLessEqual(set(env), {'GITHUB_TOKEN'})
+                            if helper_needs_token(step['run']):
+                                self.assertEqual(env, {'GITHUB_TOKEN': '${{ github.token }}'})
+                            self.assertNotIn('working-directory', step)
+                            if helper_needs_token(step['run']):
+                                self.assertNotIn('if', step)  # a failed earlier step stops the helper
+                        for name in env:
+                            self.assertNotRegex(name, r'^(?:AWS_|ACTIONS_ID_TOKEN|RDY_RELEASE_|GH_TOKEN|RDY_REHEARSAL)')
+        approval = flows[APPROVAL_WF]
+        self.assertEqual(approval['concurrency'], {'group': 'release-approval-${{ github.run_id }}',
+                                                   'cancel-in-progress': False})
+        accept = approval['jobs']['accept-founder-approval']
+        self.assertEqual(self.uploads(accept)[0]['with']['path'], '${{ runner.temp }}/approval/approval-request.json')
+        self.assertEqual(self.steps(accept)[-1], self.uploads(accept)[0])
+
+        evidence = flows[EVIDENCE_WF]
+        self.assertNotIn('concurrency', list(evidence))
+        jobs = evidence['jobs']
+        pev, inst = producer('evidence'), producer('install')
+        # Only the authenticated sealer enters the shared lane, at job level, after authentication and both natives.
+        self.assertEqual(jobs['seal-release-evidence']['concurrency'], pev.SEAL_CONCURRENCY)
+        self.assertEqual(sorted(as_list(jobs['seal-release-evidence']['needs'])), sorted(set(E_JOBS) - {
+            'seal-release-evidence'}))
+        for job_id in set(E_JOBS) - {'seal-release-evidence'}:
+            self.assertNotIn('concurrency', jobs[job_id])
+        seal = jobs['seal-release-evidence']
+        upload = self.uploads(seal)[0]
+        self.assertEqual(upload['with']['path'], '${{ runner.temp }}/evidence/' + pev.MEMBER)
+        self.assertEqual(upload['id'], 'upload')
+        # The summary after the upload shows nonsecret addresses and digests only.
+        summary = self.steps(seal)[-1]
+        self.assertEqual(self.steps(seal).index(upload) + 1, len(self.steps(seal)) - 1)
+        self.assertEqual(summary['env'], {'E_ARTIFACT_ID': '${{ steps.upload.outputs.artifact-id }}',
+                                          'E_ARTIFACT_DIGEST': '${{ steps.upload.outputs.artifact-digest }}'})
+        self.assertIn('>> "$GITHUB_STEP_SUMMARY"', summary['run'])
+        for word in ('attestation', 'event', 'token', 'cat '):
+            self.assertNotIn(word, summary['run'].lower())
+
+        # The native jobs: fixed labels and architectures, the H build recipe, fixed paths and cleanup.
+        self.assertEqual(pev.NATIVE, {MAC: 'macos-26', LINUX: 'ubuntu-26.04'})
+        self.assertEqual(inst.ARCHITECTURE, {MAC: ('ARM64', 'arm64'), LINUX: ('X64', 'x86_64')})
+        self.assertEqual(sha(inst.RECIPE.encode('utf-8')),
+                         'a5abc9b8e8689be5a7853ee48280f5017295f4d0e2380af89783829d2b909057')
+        temp = Path(tempfile.mkdtemp(prefix='rdy-rprd4-')).resolve()
+        self.addCleanup(shutil.rmtree, str(temp), True)
+
+        def rendered(path, variables):
+            text = str(path).replace(str(temp), variables[0]).replace('/111-222/', '/' + variables[1] + '/')
+            self.assertNotIn('111', text)
+            return text
+
+        for job_id, (target, label) in NATIVE.items():
+            job = jobs[job_id]
+            with self.subTest(job=job_id):
+                self.assertEqual((job['runs-on'], job['timeout-minutes']), (label, 60))
+                steps = self.steps(job)
+                kinds = [s.get('uses') or s.get('run', '').split()[0] for s in steps]
+                self.assertEqual(kinds, [CHECKOUT, CHECKOUT, 'rustup', 'cargo', 'umask', '/usr/bin/python3', UPLOAD,
+                                         '/usr/bin/python3'])
+                self.assertEqual(steps[2]['run'].strip(), 'rustup toolchain install 1.99.0 --profile minimal')
+                self.assertEqual((steps[3]['run'].strip(), steps[3]['working-directory']),
+                                 ('cargo +1.99.0 fetch --locked', 'trusted'))
+                # The reviewed recipe, verbatim, into the fixed task-specific build folder the helper reads.
+                build = steps[4]
+                self.assertEqual(build['working-directory'], 'trusted')
+                target_dir = rendered(inst.build_root(str(temp), 111, 222, target) / 'target',
+                                      ('$RUNNER_TEMP', '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT'))
+                self.assertEqual(build['run'].strip().splitlines(), [
+                    'umask 077', 'export CARGO_TARGET_DIR="' + target_dir + '"',
+                    inst.RECIPE.replace('<fixed-native-target>', target).rstrip('\n')])
+                self.assertNotIn('env', build)
+                # The sanitized receipt only, from the fixed job root, under its attempt-specific name.
+                receipt = self.uploads(job)[0]['with']
+                root = rendered(inst.job_root(str(temp), 111, 222, target),
+                                ('${{ runner.temp }}', '${{ github.run_id }}-${{ github.run_attempt }}'))
+                self.assertEqual(receipt['path'], root + '/out/' + pev.receipt_member(target))
+                self.assertEqual(receipt['name'], pev.receipt_artifact_name(target, '${{ github.run_attempt }}'))
+                self.assertEqual(receipt['retention-days'], 90)
+                self.assertNotIn('if', steps[6])
+                # Cleanup is last and unconditional.
+                self.assertEqual(steps[-1]['if'], 'always()')
+        # The disposable signer exists only inside H's rehearsal child: no workflow names it or its state.
+        for path in (APPROVAL_WF, EVIDENCE_WF):
+            text = (ROOT / path).read_text(encoding='utf-8')
+            for word in ('rehearsal_test_signer', 'RDY_REHEARSAL_STATE', 'ssh-keygen', '--signer', 'rehearse.py',
+                         'workflow_call', 'pull_request', 'download-artifact'):
+                self.assertNotIn(word, text, path)
+
+    def test_rprd4_workflow_source_closure(self):
+        # The unchanged signer closure is H; release.yml is its caller pin; the helpers are exactly P.
+        shallow = git('rev-parse', '--is-shallow-repository').stdout.strip()
+        for path, commit, object_id in CLOSURE:
+            with self.subTest(path=path):
+                self.assertEqual(git_object_id(ROOT / path), object_id)
+                if git('cat-file', '-e', commit + '^{commit}').returncode == 0:
+                    self.assertEqual(git('rev-parse', commit + ':' + path).stdout.strip(), object_id)
+                    self.assertEqual(git('merge-base', '--is-ancestor', commit, 'HEAD').returncode, 0)
+                else:
+                    self.assertEqual(shallow, 'true', commit + ' is missing from a full clone')
+        self.assertEqual(git('ls-files', '--others', '--exclude-standard', 'scripts/release',
+                             'scripts/release_producers').stdout, '')
+        # Both workflows check out literal P for the helpers and literal H for the trusted parsers, nothing else.
+        for path, flow in self.both().items():
+            for job_id, job in flow['jobs'].items():
+                with self.subTest(workflow=path, job=job_id):
+                    self.assertEqual(self.checkouts(job), CHECKOUT_PATHS)
+                    for step in self.steps(job):
+                        self.assertFalse(str(step.get('uses', '')).startswith('./'))
+                        for word in re.findall(r'[\w./-]*scripts/[\w./-]+', step.get('run', '')):
+                            self.assertTrue(word.startswith('producer/scripts/release_producers/'), word)
+
+        # Byte equality at S and W: the producers accept these exact workflow bytes only where they are equal.
+        approval_bytes = (ROOT / APPROVAL_WF).read_bytes()
+        evidence_bytes = (ROOT / EVIDENCE_WF).read_bytes()
+        changed = b'# changed\n'
+        with mock.patch.dict(globals(), {'APPROVAL_WF_BYTES': approval_bytes, 'EVIDENCE_WF_BYTES': evidence_bytes}):
+            approval = producer('approval')
+            case = ApprovalProducer('test_rprd2_approval_round_trip')
+            case.setUp()
+            world, request, result = case.produce('key_change')
+            self.assertEqual(world.channel['workflow_file_sha256'], sha(approval_bytes))
+            for place, message in ((HEAD, 'the approval workflow is not its pinned bytes'),
+                                   (P, 'the approval workflow is not its implementation pin')):
+                with self.subTest(approval=place):
+                    world = ApprovalWorld()
+                    world.files[(APPROVAL_WF, place)] = approval_bytes + changed
+                    inputs = case.inputs(world, request.decode('utf-8'))
+                    self.refuses(approval.prepare, case.facts(world), APPROVAL_RUN, 1, inputs, message=message)
+
+            evidence_case = EvidenceProducer('test_rprd3_evidence_round_trip')
+            evidence_case.setUp()
+            self.addCleanup(evidence_case.doCleanups)
+            world = evidence_case.world()
+            self.assertEqual((world.files[(EVIDENCE_WF, S)], world.files[(EVIDENCE_WF, P)]),
+                             (evidence_bytes, evidence_bytes))
+            record = evidence_case.seal(world)
+            self.assertEqual(evidence_case.consumer(world, record).evidence_bytes, record)
+            for place in (S, P):
+                with self.subTest(evidence=place):
+                    world = evidence_case.world()
+                    world.put(place, EVIDENCE_WF, evidence_bytes + changed)
+                    self.refuses(evidence_case.seal, world, message='not authorized: the evidence workflow at the '
+                                 'release commit is not its pinned implementation')
+
+    def test_rprd4_actionlint_queue_exception(self):
+        # Ruling C1: one ignore, for one path and one message; `queue: max` once, on the sealing job only.
+        if yaml is None:
+            self.fail(YAML_MISSING)
+        config = parse_yaml(ACTIONLINT_CONFIG.read_text(encoding='utf-8'))
+        self.assertEqual(sorted(config), ['paths', 'self-hosted-runner'])
+        self.assertEqual(config['paths'], {EVIDENCE_WF: {'ignore': [QUEUE_IGNORE]}})
+        pattern = re.compile(QUEUE_IGNORE)
+        self.assertTrue(pattern.search(QUEUE_MESSAGE))
+        for message in OTHER_LINT_MESSAGES:
+            self.assertIsNone(pattern.search(message), message)
+        # Go's RE2 and Python agree on this pattern: anchors, literals and one escaped dot only.
+        self.assertRegex(QUEUE_IGNORE, r'^\^[a-z "\-,.\\]+\$$')
+        found = []
+        for path in sorted(WORKFLOWS.glob('*.yml')):
+            for line in path.read_text(encoding='utf-8').splitlines():
+                if re.search(r'\bqueue\b', line):
+                    found.append((path.name, line.strip()))
+        self.assertEqual(found, [('release-evidence.yml', 'queue: max')])
+        jobs = self.workflow(EVIDENCE_WF)['jobs']
+        self.assertEqual([j for j, job in jobs.items() if 'queue' in (job.get('concurrency') or {})],
+                         ['seal-release-evidence'])
+        # CI lints with this configuration, unchanged.
+        self.assertIn('run: actionlint -config-file scripts/ci/actionlint.yaml -shellcheck= -pyflakes=\n',
+                      (WORKFLOWS / 'security.yml').read_text(encoding='utf-8'))
+
+    def test_rprd4_ci_installs_the_test_parser(self):
+        flow = self.workflow('.github/workflows/ci.yml')
+        steps = self.steps(flow['jobs']['policy-tests'])
+        names = [s.get('name') for s in steps]
+        index = names.index('CI control tests')
+        install = steps[index - 1]
+        self.assertEqual(install.get('name'), 'Test parser')
+        self.assertEqual(install['run'].strip().splitlines(), [
+            'python3 -m venv "$RUNNER_TEMP/ci-tests"',
+            '"$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes '
+            '-r tests/ci/requirements-release-producers.txt'])
+        self.assertEqual(steps[index]['run'].strip().splitlines(), [
+            '. "$RUNNER_TEMP/ci-tests/bin/activate"', 'python3 -m unittest discover -s tests/ci -v'])
+        self.assertEqual(steps[index - 2]['uses'],
+                         'actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97')
+
+
+def helper_needs_token(run):
+    """Every helper command reads GitHub except `install.py cleanup`, which touches only local paths."""
+    return ' cleanup ' not in run + ' '
+
+
 if __name__ == '__main__':
     unittest.main()

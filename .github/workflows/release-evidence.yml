@@ -1,0 +1,227 @@
+# The release evidence (E) producer. A coordinator dispatches it on the candidate tag at the release commit S.
+#
+# authenticate-evidence checks the dispatch against the protected policy before any attestation byte is decoded
+# or any native work starts. Each native job then runs on one fresh standard hosted VM of its target: it builds
+# the install checker from the reviewed signer revision with the reviewed recipe, and runs that revision's
+# unchanged rehearsal on the exact candidate archives. Its disposable test signer lives only inside that
+# rehearsal; the job uploads only the sanitized receipt and always removes its own paths. seal-release-evidence
+# alone enters the shared release lane, after authentication and both native jobs succeed, reads every fact
+# again and uploads exactly one release-record.json for this run attempt.
+#
+# Inputs are data in the event file, never an expression or a shell word. The helpers load from literal
+# checkouts: the reviewed producer revision and the reviewed signer revision for the release parsers. No job
+# has an environment, a write permission, an identity token, a cloud credential or a production key. The job
+# token is read only, in the env of the helper steps that read GitHub.
+name: release-evidence
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The candidate version V; dispatch on its candidate tag
+        type: string
+        required: true
+      candidate_run_id:
+        description: The candidate workflow run (decimal)
+        type: string
+        required: true
+      candidate_run_attempt:
+        description: Its run attempt (decimal)
+        type: string
+        required: true
+      candidate_artifact_id:
+        description: Its candidate artifact (decimal)
+        type: string
+        required: true
+      attestation_gzip_b64:
+        description: One gzip member of the original attestation JSON, canonical padded standard base64
+        type: string
+        required: true
+      attestation_sha256:
+        description: Lowercase SHA-256 of the original attestation JSON bytes
+        type: string
+        required: true
+      approval_runs:
+        description: JSON array of completed founder approval runs as run_id and artifact_id; [] for a standing preview
+        type: string
+        required: true
+permissions: {}
+jobs:
+  authenticate-evidence:
+    name: Authenticate release evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Authenticate the dispatch and its attestation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/evidence.py --trusted trusted
+          authenticate --event "$GITHUB_EVENT_PATH" --summary "$GITHUB_STEP_SUMMARY"
+  install-mac:
+    name: Native evidence install (aarch64-apple-darwin)
+    needs: authenticate-evidence
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Fetch the locked dependencies of the trusted checker
+        working-directory: trusted
+        run: cargo +1.99.0 fetch --locked
+      - name: Build the trusted checker with the reviewed recipe
+        working-directory: trusted
+        run: |
+          umask 077
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/rdy-release-checker/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/aarch64-apple-darwin/target"
+          cargo +1.99.0 build --locked --offline --release -p rdy-qa --bin qa-release-install --target aarch64-apple-darwin
+      - name: Rehearse the candidate install
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/install.py --trusted trusted
+          run --target aarch64-apple-darwin --event "$GITHUB_EVENT_PATH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rehearsal-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-rehearsal/${{ github.run_id }}-${{ github.run_attempt }}/aarch64-apple-darwin/out/rehearsal-aarch64-apple-darwin.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+      - name: Remove the task-owned paths
+        if: always()
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/install.py --trusted trusted
+          cleanup --target aarch64-apple-darwin
+  install-linux:
+    name: Native evidence install (x86_64-unknown-linux-gnu)
+    needs: authenticate-evidence
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Fetch the locked dependencies of the trusted checker
+        working-directory: trusted
+        run: cargo +1.99.0 fetch --locked
+      - name: Build the trusted checker with the reviewed recipe
+        working-directory: trusted
+        run: |
+          umask 077
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/rdy-release-checker/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/x86_64-unknown-linux-gnu/target"
+          cargo +1.99.0 build --locked --offline --release -p rdy-qa --bin qa-release-install --target x86_64-unknown-linux-gnu
+      - name: Rehearse the candidate install
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/install.py --trusted trusted
+          run --target x86_64-unknown-linux-gnu --event "$GITHUB_EVENT_PATH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rehearsal-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rdy-release-rehearsal/${{ github.run_id }}-${{ github.run_attempt }}/x86_64-unknown-linux-gnu/out/rehearsal-x86_64-unknown-linux-gnu.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+      - name: Remove the task-owned paths
+        if: always()
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/install.py --trusted trusted
+          cleanup --target x86_64-unknown-linux-gnu
+  seal-release-evidence:
+    name: Seal release evidence
+    needs: [authenticate-evidence, install-mac, install-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The shared release lane, for this job only. A pending run in the lane is never replaced by this job;
+    # when the lane is full, GitHub cancels this job and no E is produced (dispatch again). A release run that
+    # arrives while this job waits can cancel it under the release workflow's own lane setting.
+    concurrency:
+      group: rdy-core-release-authority
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      actions: read
+      contents: read
+      security-events: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Seal the release evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/evidence.py --trusted trusted
+          seal --event "$GITHUB_EVENT_PATH" --out "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: release-evidence-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/release-record.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+      - name: Show the release evidence address
+        env:
+          E_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          E_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "evidence run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "evidence artifact: $E_ARTIFACT_ID digest $E_ARTIFACT_DIGEST"
+            echo "release-record.json sha256: $(sha256sum "$RUNNER_TEMP/evidence/release-record.json" | cut -d' ' -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"
