@@ -1664,6 +1664,15 @@ mod tests {
             .unwrap()
     }
 
+    /// The error of `out`, which must have failed for the reason `what` names. The success types
+    /// here have no `Debug`, so `expect_err` does not apply.
+    fn failed<T, E>(out: Result<T, E>, what: &str) -> E {
+        match out {
+            Err(e) => e,
+            Ok(_) => panic!("{what}"),
+        }
+    }
+
     /// D-122E5 on KNOWN-ISSUES 1539: a daemon whose store moved under a write in flight takes the
     /// start lock before its socket and record go, and holds it until its drain ends. A fast load
     /// then places no store, so the old writer's segment roll finds none at its path. Once the
@@ -1683,7 +1692,7 @@ mod tests {
         .await;
         let write = drain_with_a_write_in_flight(&run, &store, in_flight).await;
 
-        let e = load(&dump, d.path()).await.err().expect("the load waits");
+        let e = failed(load(&dump, d.path()).await, "the load waits");
         assert_eq!(e.code, rdy_engine::E_LOCKED, "{e:?}");
         assert!(
             !store.exists(),
@@ -1731,10 +1740,10 @@ mod tests {
             o.start_timeout = Duration::ZERO;
             o
         };
-        let e = crate::client::connect_or_start(&run, start(&spawns))
-            .await
-            .err()
-            .expect("no successor while the old writer drains");
+        let e = failed(
+            crate::client::connect_or_start(&run, start(&spawns)).await,
+            "no successor while the old writer drains",
+        );
         assert_eq!(e.code, E_DAEMON_START, "{e:?}");
         assert_eq!(spawns.load(Ordering::SeqCst), 0);
         assert!(
@@ -1747,10 +1756,10 @@ mod tests {
         assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
         handle.drained();
 
-        let e = crate::client::connect_or_start(&run, start(&spawns))
-            .await
-            .err()
-            .expect("this test's spawn fails");
+        let e = failed(
+            crate::client::connect_or_start(&run, start(&spawns)).await,
+            "this test's spawn fails",
+        );
         assert_eq!(
             e.message,
             "could not start the daemon: no daemon in this test"
@@ -1818,10 +1827,7 @@ mod tests {
             Box::new(move || assert!(check.check_project())),
         ));
 
-        let e = load(&dump, d.path())
-            .await
-            .err()
-            .expect("the load is refused");
+        let e = failed(load(&dump, d.path()).await, "the load is refused");
         assert_eq!(e.code, rdy_engine::E_LOCKED, "{e:?}");
         assert!(e.message.starts_with("a daemon still runs for "), "{e:?}");
         assert!(!store.exists());
