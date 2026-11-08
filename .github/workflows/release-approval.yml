@@ -1,0 +1,90 @@
+# The founder approval producer for release exceptions (D-PZKAP). Ordinary standing previews never use it.
+#
+# prepare-approval runs outside the review environment. It authenticates the repository, the enrolled founder
+# as dispatcher and trigger, protected main, attempt 1, the enrolled channel and the pinned workflow bytes, then
+# shows the request's kind, scope, policy commit and SHA-256 and the exact review comment. It uploads nothing.
+# accept-founder-approval waits in release-exception-approval for the founder's review. After the review it
+# reads the same input bytes, authenticates again, requires exactly one approved review by the enrolled founder
+# in that environment with the exact comment, and uploads only the original request bytes.
+#
+# The request is data in the event file, never an expression or a shell word. The helpers load from literal
+# checkouts: the reviewed producer revision and the reviewed signer revision for the release parsers. The job
+# token is read only, in the env of the one helper step that reads GitHub. Nothing here writes to GitHub
+# except the artifact upload and the step summary, and nothing reaches a cloud provider or a key.
+# GitHub proves account use, not independent human review (founder ruling, 2026-11-08).
+name: release-approval
+on:
+  workflow_dispatch:
+    inputs:
+      request_body:
+        description: The exact canonical approval request JSON, final LF included (at most 60000 bytes)
+        type: string
+        required: true
+permissions: {}
+# One group per run: a pending founder review never blocks evidence production or the release lane.
+concurrency:
+  group: release-approval-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  prepare-approval:
+    name: prepare-approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Authenticate the request and show what the founder reviews
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/approval.py --trusted trusted
+          prepare --event "$GITHUB_EVENT_PATH" --summary "$GITHUB_STEP_SUMMARY"
+  accept-founder-approval:
+    name: accept-founder-approval
+    needs: prepare-approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release-exception-approval
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 3dac36753d9512773f91a2650c79e2805941ecbd
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: adrenickchrome/rdy-core
+          ref: 43d8fd503ad055b3e123824038594bfc716c380e
+          path: producer
+          persist-credentials: false
+      - name: Accept the founder's review of the exact request bytes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          /usr/bin/python3 -I -B producer/scripts/release_producers/approval.py --trusted trusted
+          accept --event "$GITHUB_EVENT_PATH" --out "$RUNNER_TEMP/approval"
+      # Attempt 1 only: a rerun refuses before this step.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: approval-request-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/approval/approval-request.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
