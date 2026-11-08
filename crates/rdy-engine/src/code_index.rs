@@ -118,7 +118,18 @@ pub fn git_command(root: &Path) -> Command {
     }
     c.env("GIT_NO_LAZY_FETCH", "1");
     c.stdin(Stdio::null());
+    // a detached daemon has no console: without this a Windows git child opens a window
+    rdy_store::pio::no_console_window(&mut c);
     c
+}
+
+/// A private, empty folder for `core.hooksPath` in test repositories: no host path such as
+/// `/dev/null` is needed, so the fixtures run on every host.
+#[cfg(any(test, feature = "test-support"))]
+pub fn empty_hooks_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().expect("empty hooks dir"))
+        .path()
 }
 
 /// What one commit did to one path.
@@ -927,7 +938,10 @@ mod tests {
                 "-c",
                 "commit.gpgsign=false",
                 "-c",
-                "core.hooksPath=/dev/null",
+                &format!(
+                    "core.hooksPath={}",
+                    crate::code_index::empty_hooks_dir().display()
+                ),
             ])
             .args(args)
             .env_remove("GIT_DIR")

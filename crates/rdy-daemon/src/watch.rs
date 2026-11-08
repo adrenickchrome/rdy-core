@@ -2,9 +2,11 @@
 //! they were last seen, cheaply: a `stat` of each file and a listing of `.rdy/packs/`, and their
 //! bytes only when a stat or the set of files differs, or a file is racily clean.
 //!
-//! A stat is a [`FileStamp`]: length, mtime, inode and `ctime`. A file renamed into place has a
-//! new inode, and every write, rename or `utimes` moves `ctime`, which the kernel sets and no tool
-//! can set back or ahead (an mtime can be set to anything, `touch -d`, `cp -p`, `rsync -t`).
+//! A stat is a [`FileStamp`] read from a handle on the file: length, mtime, the file's full
+//! identity and `ctime`. A file renamed into place has a new identity, and every write, rename or
+//! `utimes` moves `ctime`, which the kernel sets and no tool can set back or ahead (an mtime can
+//! be set to anything, `touch -d`, `cp -p`, `rsync -t`). A file that cannot be opened or stamped
+//! has no stamp, so it is read again.
 //!
 //! Racily clean (as git calls it): a filesystem stamps times at some granularity, so a second
 //! write inside one tick can leave the whole stamp as it was. A stamp is trusted only when its
@@ -18,7 +20,7 @@
 //! fresh stamp look old, so a same-tick rewrite there can be missed. (git compares with its index
 //! file's own mtime, stamped by the same server; a marker file under `.rdy/run` would do the same
 //! here, at the price of a write per check.)
-use rdy_engine::config_levels::{LOCAL_FILE, PROJECT_FILE};
+use rdy_engine::config_levels::{self, PROJECT_FILE};
 use rdy_engine::{FileStamp, PackFingerprint, pack_fingerprint};
 use rdy_model::Hash;
 use std::path::{Path, PathBuf};
@@ -51,8 +53,12 @@ pub struct PackWatch {
     window_ns: AtomicU64,
 }
 
+/// The stamp of the file `path` names, read from a handle on it. A file that cannot be opened or
+/// whose stamp cannot be read has none, so it never matches a stamp seen before and the next
+/// check reads its bytes.
 fn stat(path: &Path) -> Stat {
-    std::fs::metadata(path).ok().map(|m| FileStamp::of(&m))
+    let f = std::fs::File::open(path).ok()?;
+    FileStamp::of_open(&f, path).ok()
 }
 
 /// The fingerprint's files with their stamps as it took them (each just before its bytes were
@@ -113,7 +119,7 @@ impl PackWatch {
     /// `*.yaml` (and `*.yml`) of `.rdy/packs/` sorted by path.
     fn listing(&self) -> Vec<(PathBuf, Stat)> {
         let mut paths = vec![self.root.join(PROJECT_FILE)];
-        let local = self.root.join(LOCAL_FILE);
+        let local = config_levels::local_path(&self.root);
         if local.exists() {
             paths.push(local);
         }
@@ -219,7 +225,11 @@ mod tests {
         std::fs::write(d.path().join(PROJECT_FILE), "pack: p\nname: N\n").unwrap();
         assert!(w.changed(), "an edit of .rdy.yaml is a change");
         let w = watch(d.path(), LONG);
-        std::fs::write(d.path().join(LOCAL_FILE), "views:\n  idle_days: 2\n").unwrap();
+        std::fs::write(
+            d.path().join(config_levels::LOCAL_FILE),
+            "views:\n  idle_days: 2\n",
+        )
+        .unwrap();
         assert!(w.changed(), "a new .rdy/local.yaml is a change");
         assert_eq!(PROJECT_FILE, ".rdy.yaml");
     }
@@ -303,6 +313,53 @@ mod tests {
         assert_eq!(std::fs::metadata(&pack).unwrap().len(), A.len() as u64);
         assert_eq!(mtime(&pack), m);
         assert!(w.changed(), "same length and mtime, new inode and bytes");
+    }
+
+    /// The identity `id` with its low 64 bits kept and a higher bit changed: on Unix the same
+    /// inode on another device, on Windows the same low half of the 128-bit ID.
+    fn same_low_bits(id: rdy_store::fileid::FileId) -> rdy_store::fileid::FileId {
+        use rdy_store::fileid::FileId;
+        match id {
+            FileId::Unix { dev, ino } => FileId::Unix { dev: !dev, ino },
+            FileId::Windows { volume, mut id } => {
+                id[15] ^= 0x80;
+                FileId::Windows { volume, id }
+            }
+        }
+    }
+
+    #[test]
+    fn wx2_pack_stamp_change_forces_a_read() {
+        let (d, pack) = project();
+        settle();
+        let w = watch(d.path(), Duration::ZERO);
+        assert!(!w.changed());
+        let trusted = w.stats();
+        assert!(!w.changed());
+        assert_eq!(w.stats(), trusted, "the pack's stamp is trusted");
+        // the stamp holds the full identity of the opened file
+        let opened = std::fs::File::open(&pack).unwrap();
+        let id = rdy_store::fileid::FileId::of_open(&opened, &pack).unwrap();
+        assert_eq!(stat(&pack).map(|s| s.id), Some(id));
+        // a stamp that differs only above the identity's low 64 bits is another file
+        {
+            let mut table = w.table();
+            let (_, seen) = table
+                .files
+                .iter_mut()
+                .find(|(p, _)| *p == pack)
+                .expect("the pack is watched");
+            let stamp = seen.as_mut().expect("a trusted stamp");
+            stamp.id = same_low_bits(stamp.id);
+        }
+        assert!(!w.changed(), "the bytes are the same");
+        assert_eq!(w.stats(), trusted + 1, "the identity alone forced a read");
+        assert!(!w.changed());
+        assert_eq!(w.stats(), trusted + 1, "the read refreshed the stamp");
+        // a file that cannot be opened gets no stamp, so it never matches one
+        assert_eq!(stat(&d.path().join(".rdy/packs/missing.yaml")), None);
+        std::fs::remove_file(&pack).unwrap();
+        assert!(w.changed(), "a pack that is gone is a change");
     }
 
     #[test]

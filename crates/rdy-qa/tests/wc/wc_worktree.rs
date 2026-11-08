@@ -2,7 +2,6 @@
 //! removes the checkout and never the view (spec §12.1, FW-V2: no agent form).
 use rdy_engine::*;
 use rdy_qa::wc::*;
-use std::process::Command;
 
 #[test]
 fn wcwt1_add_ls_commit_inside_and_rm() {
@@ -158,13 +157,7 @@ fn msw16_rm_of_a_copied_worktree_dir_keeps_the_real_worktree() {
     let side = tmp.path().join("side");
     let copy = tmp.path().join("side2");
     ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
-    let o = Command::new("cp")
-        .arg("-R")
-        .arg(&side)
-        .arg(&copy)
-        .output()
-        .unwrap();
-    assert!(o.status.success());
+    copy_tree(&side, &copy).unwrap();
     let (okk, v) = json(&s, &["worktree", "rm", copy.to_str().unwrap()]);
     assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
     assert!(
@@ -245,13 +238,7 @@ fn msw16_a_command_in_a_copied_worktree_is_refused() {
     let side = tmp.path().join("side");
     let copy = tmp.path().join("side2");
     ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
-    let o = Command::new("cp")
-        .arg("-R")
-        .arg(&side)
-        .arg(&copy)
-        .output()
-        .unwrap();
-    assert!(o.status.success());
+    copy_tree(&side, &copy).unwrap();
     let before = std::fs::read_to_string(side.join("notes.yaml")).unwrap();
     let text = before.replace("Note.", "Copy.");
     assert_ne!(text, before);
@@ -288,13 +275,7 @@ fn side_and_copy(
     let side = tmp.path().join("side");
     let copy = tmp.path().join("side2");
     ok(s, &["worktree", "add", side.to_str().unwrap(), "side"]);
-    let o = Command::new("cp")
-        .arg("-R")
-        .arg(&side)
-        .arg(&copy)
-        .output()
-        .unwrap();
-    assert!(o.status.success());
+    copy_tree(&side, &copy).unwrap();
     (tmp, side, copy)
 }
 

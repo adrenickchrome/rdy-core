@@ -130,12 +130,6 @@ fn open_page(url: &str, path: &str) -> Sse {
     Sse::open(&http::events_url(url, &body(&page)))
 }
 
-/// Replaces the project's `.rdy` with a fresh directory, as a restore from a copy does.
-fn replace_project(dir: &Path) {
-    std::fs::rename(dir.join(".rdy"), dir.join(".rdy-old")).unwrap();
-    std::fs::create_dir(dir.join(".rdy")).unwrap();
-}
-
 /// Starts a host on the project in `h.dir` again, after `h.stop()`.
 fn restart(h: &mut Hosted) {
     let run = start(ServeOptions {
@@ -487,7 +481,7 @@ fn ls6_a_replaced_project_stops_the_site() {
     // connection's own check can stop the daemon
     let rt = Hosted::rt();
     let client = rt.block_on(h.client(None, None));
-    replace_project(h.dir.path());
+    rdy_qa::daemon::replace_rdy_dir(h.dir.path());
     let r = http::raw(
         sock(&url),
         &format!("GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
@@ -517,7 +511,7 @@ fn ls6_a_request_after_the_project_is_replaced_gets_no_reply() {
     // fence: one listener accepts in order, so once a later connection has its answer,
     // `early` was accepted, and passed the accept's check
     assert_eq!(http::get(&url).status, 200);
-    replace_project(h.dir.path());
+    rdy_qa::daemon::replace_rdy_dir(h.dir.path());
     write!(
         early,
         "GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
@@ -560,7 +554,7 @@ fn ls6_an_open_page_does_not_stop_the_project_check() {
     let mut page = open_page(&url, "alpha.html");
     let handle = h.run.as_ref().unwrap().handle();
     assert_eq!(handle.connections(), 0, "no socket connection");
-    replace_project(h.dir.path());
+    rdy_qa::daemon::replace_rdy_dir(h.dir.path());
     handle.tick();
     assert_eq!(page.next_event(T), None);
     assert!(page.ended(), "the stream ended before its deadline");

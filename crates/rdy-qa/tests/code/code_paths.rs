@@ -450,7 +450,7 @@ fn ps5_config_lists_each_code_path_with_its_own_level() {
         q(hidden.path())
     ));
     std::fs::write(&uf, text).unwrap();
-    let local_file = s.dir.path().join(LOCAL_FILE);
+    let local_file = s.dir.path().join(".rdy").join("local.yaml");
 
     let (ok, v) = s.json(&["--json", "config"]);
     assert!(ok, "{v}");

@@ -216,6 +216,10 @@ fn ec11_rdy_export_never_writes_into_a_symlinked_store() {
     let rdy = s.dir.path().join(".rdy");
     std::fs::rename(&rdy, &physical).unwrap();
     rdy_qa::platform::symlink(&physical, &rdy).unwrap();
+    // an account that may not follow the link cannot open the project through it: every export
+    // is refused (E_DUMP_CHAIN, the follower mark behind the link cannot be read), and the
+    // store behind the link stays as it was
+    let refused = rdy_qa::platform::follow_refused(&rdy);
     let segment = physical.join("store/segments/seg-000002.log");
     let segment_arg = segment.to_str().unwrap();
     let before = names(&physical);
@@ -231,20 +235,27 @@ fn ec11_rdy_export_never_writes_into_a_symlinked_store() {
                 format,
             ]);
             assert!(!ok, "{format} {out}: {v}");
-            assert_eq!(v["code"], "E_BAD_INPUT", "{format} {out}: {v}");
-            // a relative `out` is named as resolved against the working directory
-            let message = v["message"].as_str().unwrap();
-            assert!(
-                message.ends_with(&format!("{out} is inside the project .rdy directory")),
-                "{format}: {message}"
-            );
-            assert_eq!(v["fix"], "export to a path outside .rdy", "{format}");
+            if refused {
+                assert_eq!(v["code"], "E_DUMP_CHAIN", "{format} {out}: {v}");
+            } else {
+                assert_eq!(v["code"], "E_BAD_INPUT", "{format} {out}: {v}");
+                // a relative `out` is named as resolved against the working directory
+                let message = v["message"].as_str().unwrap();
+                assert!(
+                    message.ends_with(&format!("{out} is inside the project .rdy directory")),
+                    "{format}: {message}"
+                );
+                assert_eq!(v["fix"], "export to a path outside .rdy", "{format}");
+            }
             let mut now = names(&physical);
             let mut was = before.clone();
             now.sort();
             was.sort();
             assert_eq!(now, was, "{format} {out}: no new file in the store");
         }
+    }
+    if refused {
+        return;
     }
     let (ok, v) = s.json(&["--json", "--no-daemon", "fsck"]);
     assert!(ok, "the store opens and checks clean: {v}");
@@ -266,7 +277,17 @@ fn ec11_rdy_export_refuses_an_out_with_no_file_name_in_every_format() {
         ]);
         assert!(!ok, "{format}: {v}");
         assert_eq!(v["code"], "E_BAD_INPUT", "{format}: {v}");
-        assert_eq!(v["message"], "/ does not name a directory", "{format}");
+        if cfg!(windows) {
+            // `/` is the root of the working directory's drive, spelled natively: `C:\`
+            let m = v["message"].as_str().unwrap();
+            let b = m.as_bytes();
+            assert!(
+                b[0].is_ascii_alphabetic() && &m[1..] == r":\ does not name a directory",
+                "{format}: {m}"
+            );
+        } else {
+            assert_eq!(v["message"], "/ does not name a directory", "{format}");
+        }
         assert_eq!(
             v["fix"], "pass a directory path such as ./docs-md",
             "{format}"

@@ -41,11 +41,10 @@ fn inline() -> Revision {
     }
 }
 
-/// A peer: `sh -c script`, with `arg` as `$0`.
+/// A peer: the native stub child running `script` (the steps of the `script` fixture mode), with
+/// `arg` as the file its `record` and `append` steps write to.
 fn peer(script: &str, arg: &Path) -> Command {
-    let mut cmd = platform::shell_script(script);
-    cmd.arg(arg);
-    cmd
+    crate::mcp_windows::child_fixture::script_command(script, Some(arg))
 }
 
 /// A peer's reply to `initialize`.
@@ -54,7 +53,7 @@ const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-
 /// A peer script that answers `initialize`, reads the `initialized` notification, then runs
 /// `then`.
 fn after_init(then: &str) -> String {
-    format!("read -r l; echo '{INIT}'; read -r n; {then}")
+    format!("read\nsay {INIT}\nread\n{then}")
 }
 
 /// The server's form request with JSON-RPC id `id`.
@@ -291,7 +290,12 @@ fn mg2_client_keeps_notifications_and_call_ids_separate() {
     // the default session's initialize and calls stay byte for byte as before
     let c = McpClient::try_launch_bounded(
         peer(
-            r#"read -r l; printf '%s\n' "$l" > "$0"; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"peer","version":"0"}}}'; read -r n; printf '%s\n' "$n" >> "$0"; cat > /dev/null"#,
+            r#"read
+record
+say {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"peer","version":"0"}}}
+read
+append
+drain"#,
             &seen,
         ),
         platform::RELEASE_CHILD_OUTPUT_MAX,
@@ -314,7 +318,7 @@ fn mg2_client_keeps_notifications_and_call_ids_separate() {
     let progress = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":2,"progress":1}}"#;
     let note = r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"id 2"}}"#;
     let script = after_init(&format!(
-        r#"read -r c; echo '{progress}'; echo '{}'; read -r a; printf '%s\n' "$a" > "$0"; echo '{note}'; echo '{}'; cat > /dev/null"#,
+        "read\nsay {progress}\nsay {}\nread\nrecord\nsay {note}\nsay {}\ndrain",
         form_request(2),
         tool_reply(2)
     ));
@@ -368,16 +372,15 @@ fn mg2_client_keeps_notifications_and_call_ids_separate() {
         (
             "a ping inside an elicited call",
             after_init(
-                r#"read -r c; echo '{"jsonrpc":"2.0","id":5,"method":"ping"}'; exec sleep 1000"#,
+                r#"read
+say {"jsonrpc":"2.0","id":5,"method":"ping"}
+hang"#,
             ),
             true,
         ),
         (
             "a form request inside a plain call",
-            after_init(&format!(
-                "read -r c; echo '{}'; exec sleep 1000",
-                form_request(5)
-            )),
+            after_init(&format!("read\nsay {}\nhang", form_request(5))),
             false,
         ),
     ] {
@@ -404,7 +407,7 @@ fn mg2_client_disconnect_leaves_no_answer() {
     let dir = tempfile::tempdir().unwrap();
     let unused = dir.path().join("unused");
     // the server goes away while its form waits: the call fails, with no reply
-    let script = after_init(&format!("read -r c; echo '{}'; exit 0", form_request(7)));
+    let script = after_init(&format!("read\nsay {}\nexit 0", form_request(7)));
     let mut c = McpClient::try_launch_eliciting(peer(&script, &unused), in_call()).expect("launch");
     let mut p = |_: &Value| accept("approve");
     assert_eq!(
@@ -419,10 +422,7 @@ fn mg2_client_disconnect_leaves_no_answer() {
         "no fabricated reply"
     );
     // the person leaves: the session closes, and no answer is sent
-    let script = after_init(&format!(
-        "read -r c; echo '{}'; cat > /dev/null",
-        form_request(7)
-    ));
+    let script = after_init(&format!("read\nsay {}\ndrain", form_request(7)));
     let mut c = McpClient::try_launch_eliciting(peer(&script, &unused), in_call()).expect("launch");
     let mut p = |_: &Value| PersonAct::Leave;
     assert_eq!(
@@ -473,10 +473,7 @@ fn mg2_client_bounds_an_unfinished_form_exchange() {
     let dir = tempfile::tempdir().unwrap();
     let unused = dir.path().join("unused");
     // a server that asks again after every answer: the exchange stops at its message cap
-    let script = after_init(&format!(
-        "read -r c; while :; do echo '{}'; read -r a || exit 0; done",
-        form_request(7)
-    ));
+    let script = after_init(&format!("read\nloopsay {}", form_request(7)));
     let mut c = McpClient::try_launch_eliciting(peer(&script, &unused), in_call()).expect("launch");
     let mut p = |_: &Value| accept("approve");
     assert_eq!(
@@ -492,7 +489,7 @@ fn mg2_client_bounds_an_unfinished_form_exchange() {
     );
 
     // a server that answers every call with input_required: the retries stop at the call cap
-    let script = r#"n=0; while read -r l; do n=$((n+1)); printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"input_required","requestState":"h%s","inputRequests":{"answer":{"method":"elicitation/create","params":{"mode":"form","message":"m","requestedSchema":{"type":"object"}}}}}}\n' "$n" "$n"; done"#;
+    let script = "askforever";
     let mut c = McpClient::try_launch_eliciting(peer(script, &unused), inline()).expect("launch");
     let mut p = |_: &Value| accept("approve");
     assert_eq!(
@@ -517,8 +514,7 @@ fn mg2_client_bounds_an_unfinished_form_exchange() {
         (CONTINUATION_BOUND - Duration::from_secs(1), Ok(())),
         (CONTINUATION_BOUND, Err(McpFailure::Deadline)),
     ] {
-        let script =
-            format!("read -r l; echo '{required}'; read -r l; echo '{complete}'; cat > /dev/null");
+        let script = format!("read\nsay {required}\nread\nsay {complete}\ndrain");
         let mut c =
             McpClient::try_launch_eliciting(peer(&script, &unused), inline()).expect("launch");
         let base = Instant::now();

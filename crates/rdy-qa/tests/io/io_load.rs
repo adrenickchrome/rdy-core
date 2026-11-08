@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! dl6: rdy load rebuilds a project from a dump, byte for byte, then builds the index and runs
 //! fsck; a refused or failed load leaves the target as it was.
 use rdy_engine::{Rdy, load::load};
@@ -9,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Every path under `dir` with its bytes (None for a directory).
-fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(crate) fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut out = BTreeMap::new();
     if !dir.exists() {
         return out;
@@ -21,7 +19,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             if e.is_dir() {
                 None
             } else {
-                Some(std::fs::read(&e).unwrap())
+                Some(rdy_qa::platform::read_live_file(&e).unwrap())
             },
         );
     }
@@ -41,7 +39,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The every-kind project, a dump of it, and a scratch directory.
-fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+pub(crate) fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     let src = every_kind::project();
     let scratch = tempfile::tempdir().unwrap();
     let file = scratch.path().join("p.rdydump");
@@ -51,7 +49,7 @@ fn dumped() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     (src, scratch, file)
 }
 
-fn segs(p: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+pub(crate) fn segs(p: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     tree(&p.join(".rdy/store/segments"))
 }
 
@@ -405,7 +403,7 @@ fn dl6_a_missing_dump_is_refused_and_the_target_untouched() {
 /// Loads `file` into `to` while another thread opens the project as soon as `.rdy/store`
 /// appears, and holds it until the load returns. Returns the load's result and what the racer's
 /// opens returned: an error code, or `ok`.
-fn race(
+pub(crate) fn race(
     file: &Path,
     to: &Path,
 ) -> (
@@ -478,7 +476,7 @@ fn dl6_a_racing_open_does_not_break_a_load() {
 }
 
 /// A dump of the every-kind project with a view ref that names no view op: fsck refuses it.
-fn fsck_failing_dump(scratch: &Path) -> PathBuf {
+pub(crate) fn fsck_failing_dump(scratch: &Path) -> PathBuf {
     let src = every_kind::project();
     {
         let mut r = Rdy::open(src.path()).unwrap();
@@ -494,8 +492,9 @@ fn fsck_failing_dump(scratch: &Path) -> PathBuf {
     file
 }
 
-#[test]
-fn dl6_a_failed_check_undoes_while_locked() {
+/// Four loads of an fsck-failing dump into a target that holds a file, each raced by an opener:
+/// the opener never gets the store the load then removes, and the target ends as it began.
+pub(crate) fn failed_check_undoes_while_locked() {
     let scratch = tempfile::tempdir().unwrap();
     let file = fsck_failing_dump(scratch.path());
     let mut raced = false;
@@ -523,6 +522,11 @@ fn dl6_a_failed_check_undoes_while_locked() {
     assert!(raced, "the racer never tried an open while the load ran");
 }
 
+#[test]
+fn dl6_a_failed_check_undoes_while_locked() {
+    failed_check_undoes_while_locked();
+}
+
 /// `tree(dir)` without the paths under `skip` (relative to `dir`): a live daemon's run files and
 /// a store it still serves change by themselves.
 fn tree_but(dir: &Path, skip: &[&str]) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -537,7 +541,7 @@ fn tree_but(dir: &Path, skip: &[&str]) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             if e.is_dir() {
                 None
             } else {
-                Some(std::fs::read(&e).unwrap())
+                Some(rdy_qa::platform::read_live_file(&e).unwrap())
             },
         );
     }
@@ -559,32 +563,80 @@ fn dl6_a_live_daemon_on_the_target_refuses_the_load() {
     let p = host.dir.path().to_path_buf();
     let store = p.join(".rdy/store");
     let aside = p.join("store-aside");
+    // an open connection keeps the daemon serving: it runs no idle project check
+    let held = rdy_qa::daemon::HeldConnection::open(&p, "t");
     // the in-place move with the daemon still up: the daemon serves the store set aside
-    std::fs::rename(&store, &aside).unwrap();
+    let moved = rdy_qa::daemon::move_aside_under_daemon(&store, &aside);
+    // the tick the daemon runs by itself every 500 ms, now, so that no timing decides this test
+    host.run.as_ref().unwrap().handle().tick();
     let skip = [".rdy/run", "store-aside"];
     let before = tree_but(&p, &skip);
     let e = load(&file, &p).unwrap_err();
-    assert_eq!(e.code, "E_LOCKED", "{e}");
-    assert_eq!(
-        e.message,
-        format!(
-            "a daemon still runs for {} (pid {})",
-            p.display(),
-            std::process::id()
-        )
-    );
-    assert_eq!(
-        e.fix,
-        format!(
-            "run rdy serve --stop in {}, then load or clone again",
-            p.display()
-        )
-    );
+    if moved {
+        assert_eq!(e.code, "E_LOCKED", "{e}");
+        assert_eq!(
+            e.message,
+            format!(
+                "a daemon still runs for {} (pid {})",
+                p.display(),
+                std::process::id()
+            )
+        );
+        assert_eq!(
+            e.fix,
+            format!(
+                "run rdy serve --stop in {}, then load or clone again",
+                p.display()
+            )
+        );
+    } else {
+        // Windows: the store cannot move, so the store check refuses, in rdy's words
+        assert_eq!(e.code, "E_ALREADY_EXISTS", "{e}");
+        assert_eq!(e.message, format!("{} already has a store", p.display()));
+        assert_eq!(
+            e.fix,
+            "load into a new directory, or move .rdy/store aside first"
+        );
+    }
     assert_eq!(tree_but(&p, &skip), before, "the target is untouched");
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
-    std::fs::rename(&aside, &store).unwrap();
+    if moved {
+        std::fs::rename(&aside, &store).unwrap();
+    }
+    drop(held);
     host.stop();
     std::fs::rename(&store, &aside).unwrap();
+    let s = load(&file, &p).unwrap();
+    assert_eq!(s.files_kept, [".rdy.yaml"]);
+}
+
+/// With no connection open, a daemon whose store moved leaves by its own project check (D-6JZ5V):
+/// it removes its run files, stops and writes nothing more to the store. The load that follows
+/// passes no live daemon, so it goes ahead. This is the state that made
+/// `dl6_a_live_daemon_on_the_target_refuses_the_load` fail under load when that test held no
+/// connection: the check's 500 ms tick came while the load read its dump.
+#[test]
+fn wx33h_a_daemon_gone_by_its_own_project_check_does_not_refuse_the_load() {
+    rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
+    let dir = rdy_qa::daemon::short_tempdir();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    let r = Rdy::open(dir.path()).unwrap();
+    r.read().dump(&file).unwrap();
+    r.close().unwrap();
+    let mut host = rdy_qa::daemon::Hosted::start_in(dir);
+    let p = host.dir.path().to_path_buf();
+    let store = p.join(".rdy/store");
+    let aside = p.join("store-aside");
+    if !rdy_qa::daemon::move_aside_under_daemon(&store, &aside) {
+        // Windows: the store cannot move under its daemon, so this state cannot stand
+        return;
+    }
+    let run = host.run.take().unwrap();
+    run.handle().tick();
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+    assert_eq!(rdy_daemon::live_daemon(&p), None, "its run files are gone");
     let s = load(&file, &p).unwrap();
     assert_eq!(s.files_kept, [".rdy.yaml"]);
 }
@@ -667,7 +719,7 @@ fn dl6_a_file_that_is_not_a_dump_is_refused() {
 fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
     let (src, scratch, file) = dumped();
     let link = scratch.path().join("link");
-    std::os::unix::fs::symlink(src.path().join(".rdy"), &link).unwrap();
+    rdy_qa::platform::symlink(&src.path().join(".rdy"), &link).unwrap();
     let before = tree(src.path());
     for to in [
         src.path().join(".rdy"),
@@ -678,15 +730,19 @@ fn dl6_a_load_into_a_project_dot_rdy_is_refused() {
         link.clone(),
     ] {
         let e = load(&file, &to).unwrap_err();
-        assert_eq!(e.code, "E_BAD_INPUT", "{to:?}: {e}");
-        assert_eq!(
-            e.message,
-            format!("{} is inside a project's .rdy directory", to.display())
-        );
-        assert_eq!(
-            e.fix,
-            "load into a new directory outside any .rdy, for example a sibling of the project"
-        );
+        // an account that may not follow the link is refused in another wording; nothing is
+        // written either way
+        if !rdy_qa::platform::follow_refused(&to) {
+            assert_eq!(e.code, "E_BAD_INPUT", "{to:?}: {e}");
+            assert_eq!(
+                e.message,
+                format!("{} is inside a project's .rdy directory", to.display())
+            );
+            assert_eq!(
+                e.fix,
+                "load into a new directory outside any .rdy, for example a sibling of the project"
+            );
+        }
         assert_eq!(tree(src.path()), before, "{to:?}");
     }
 }

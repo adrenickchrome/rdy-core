@@ -225,24 +225,40 @@ fn dl7_rdy_load_refuses_a_target_whose_daemon_still_runs() {
     let dir = s.dir.path();
     let store = dir.join(".rdy/store");
     let aside = scratch.path().join("store-aside");
-    std::fs::rename(&store, &aside).unwrap();
+    // an open connection keeps the daemon serving: it runs no idle project check
+    let held = rdy_qa::daemon::HeldConnection::open(dir, env!("CARGO_PKG_VERSION"));
+    let moved = rdy_qa::daemon::move_aside_under_daemon(&store, &aside);
     let (ok, e) = s.json(&["--json", "load", file_arg, dir.to_str().unwrap()]);
     assert!(!ok, "{e}");
-    assert_eq!(e["code"], "E_LOCKED", "{e}");
-    assert_eq!(
-        e["message"],
-        format!("a daemon still runs for {} (pid {pid})", dir.display())
-    );
-    assert_eq!(
-        e["fix"],
-        format!(
-            "run rdy serve --stop in {}, then load or clone again",
-            dir.display()
-        )
-    );
-    assert!(!store.exists(), "the load wrote no store");
+    if moved {
+        assert_eq!(e["code"], "E_LOCKED", "{e}");
+        assert_eq!(
+            e["message"],
+            format!("a daemon still runs for {} (pid {pid})", dir.display())
+        );
+        assert_eq!(
+            e["fix"],
+            format!(
+                "run rdy serve --stop in {}, then load or clone again",
+                dir.display()
+            )
+        );
+        assert!(!store.exists(), "the load wrote no store");
+        std::fs::rename(&aside, &store).unwrap();
+    } else {
+        // Windows: the store cannot move, so the store check refuses, in rdy's words
+        assert_eq!(e["code"], "E_ALREADY_EXISTS", "{e}");
+        assert_eq!(
+            e["message"],
+            format!("{} already has a store", dir.display())
+        );
+        assert_eq!(
+            e["fix"],
+            "load into a new directory, or move .rdy/store aside first"
+        );
+    }
     // the order the fix of E_STORE_FORMAT gives: stop the daemon, then move the store aside
-    std::fs::rename(&aside, &store).unwrap();
+    drop(held);
     s.stop();
     assert!(s.daemon_pid().is_none(), "the daemon stopped");
     std::fs::rename(&store, &aside).unwrap();

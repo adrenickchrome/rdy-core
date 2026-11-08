@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! cbrief1: rdy_brief on a code path: the blocks the file's commits implement, the blocks whose
 //! reflects globs match it, and a briefing over them.
 use rdy_engine::code_brief::*;
@@ -188,9 +186,15 @@ fn cbrief1_with_no_code_repo_linked_only_reflects_answer() {
     assert!(cb.code.repos.is_empty());
     assert!(cb.code.implements.is_empty());
     assert_eq!(cb.code.reflects.len(), 1);
+    // an absolute path in the platform's own spelling (`/abs/..` is not absolute on Windows)
+    let abs = if cfg!(windows) {
+        r"C:\abs\src\new.rs"
+    } else {
+        "/abs/src/new.rs"
+    };
     let e = r
         .read()
-        .brief_code(&Scope::Canon, "/abs/src/new.rs", None, None)
+        .brief_code(&Scope::Canon, abs, None, None)
         .unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.fix.contains("code_repos"), "{}", e.fix);
@@ -278,7 +282,7 @@ fn cbrief1_a_new_file_in_a_new_folder_under_a_symlinked_prefix_is_inside_the_rep
     let tmp = tempfile::tempdir().unwrap();
     let g = GitRepo::at(&tmp.path().join("real"));
     g.link(r.root());
-    std::os::unix::fs::symlink(g.path(), tmp.path().join("link")).unwrap();
+    rdy_store::pio::symlink(g.path(), tmp.path().join("link")).unwrap();
     let new = tmp.path().join("link/src/newdir/new.rs");
     let cb = r
         .read()
@@ -353,4 +357,38 @@ fn cbrief1_coverage_over_the_limit_is_e_limit() {
         .unwrap_err();
     assert_eq!(e.code, "E_LIMIT", "{e}");
     assert_eq!(e.message, "neighbor walk exceeds 1000000 visits", "{e}");
+}
+
+/// An absolute code path in the host's own form (a drive letter and backslashes on Windows) names
+/// the file in its repo, and the briefing reports it with slashes. The test builds the sample from
+/// the repo's path, so no Unix path is needed.
+#[test]
+fn wx27_code_paths_with_drive_and_backslash_work_through_tools() {
+    let (_d, r) = project();
+    let g = linked(&r);
+    g.write("src/deep/a.rs", "a\n");
+    g.commit("feat: a");
+    let st = r.read();
+    let path_of = |text: &str| {
+        st.brief_code(&Scope::Canon, text, None, None)
+            .unwrap()
+            .code
+            .path
+    };
+    let abs = g.path().join("src").join("deep").join("a.rs");
+    assert!(abs.is_absolute());
+    assert_eq!(path_of(abs.to_str().unwrap()), "src/deep/a.rs");
+    let canon = std::fs::canonicalize(&abs).unwrap();
+    assert_eq!(path_of(canon.to_str().unwrap()), "src/deep/a.rs");
+    // a new file under a folder that does not exist yet
+    let new = g.path().join("src").join("fresh").join("b.rs");
+    assert_eq!(path_of(new.to_str().unwrap()), "src/fresh/b.rs");
+    #[cfg(windows)]
+    {
+        let text = abs.to_str().unwrap();
+        assert!(text.contains(':') && text.contains('\\'), "{text}");
+        assert_eq!(path_of(&text.replace('\\', "/")), "src/deep/a.rs");
+    }
+    // a relative path is slash-separated on every host; the engine takes no backslash as one
+    assert_eq!(path_of("src/deep/a.rs"), "src/deep/a.rs");
 }

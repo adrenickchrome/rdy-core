@@ -3,6 +3,9 @@
 //! id and the chain's last trailer digest."; "Writes: every write path refuses with
 //! `E_STORE_FOLLOWER`"). A marked store never opens as a writer, every ordinary write entry
 //! refuses before its fast path, and a follower's open writes no batch.
+#[path = "support/files.rs"]
+mod files;
+
 use rdy_model::*;
 use rdy_store::dump_chain::{BatchMarker, ChainEnd};
 use rdy_store::follower::{self, FOLLOWER_FILE, FollowerFile, FollowerMark};
@@ -63,11 +66,12 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut out = BTreeMap::new();
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
-        if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+        let m = std::fs::symlink_metadata(&p).unwrap();
+        if m.is_dir() {
             out.insert(p.clone(), None);
             out.extend(tree(&p));
         } else {
-            out.insert(p.clone(), Some(std::fs::read(&p).unwrap()));
+            out.insert(p.clone(), Some(files::contents(&p, &m)));
         }
     }
     out
@@ -234,8 +238,13 @@ fn mh3_mark_is_private_bounded_and_durable() {
     assert_eq!(read.files, mark.files);
     assert_eq!(segments(&f.dir), before, "no log frame or ref");
     // private, one compact JSON line after the header, with its keys in struct order
-    let meta = std::fs::symlink_metadata(mark_path(&f.dir)).unwrap();
-    assert!(pio::is_private_file(&meta));
+    #[cfg(unix)]
+    assert!(pio::is_private_file(
+        &std::fs::symlink_metadata(mark_path(&f.dir)).unwrap()
+    ));
+    let held = pio::open_no_follow(std::fs::OpenOptions::new().read(true), &mark_path(&f.dir));
+    let privacy = pio::privacy(&held.unwrap()).unwrap();
+    assert!(privacy.private && privacy.mine, "{privacy:?}");
     let text = String::from_utf8(std::fs::read(mark_path(&f.dir)).unwrap()).unwrap();
     let (head, body) = text.split_once('\n').unwrap();
     assert_eq!(head, "rdy follower 1");
@@ -390,24 +399,42 @@ fn mh3_mark_is_private_bounded_and_durable() {
     // a link, a directory and a shared file are not private regular files
     let private = "the follower mark is not a private regular file";
     raw_mark(&f.dir, &compact);
-    pio::set_mode(&mark_path(&f.dir), 0o644).unwrap();
+    open_to_others(&mark_path(&f.dir));
     assert_eq!(mark_refusal(&f.dir), private, "shared");
     std::fs::remove_file(mark_path(&f.dir)).unwrap();
     let target = f.dir.join("target");
     fsutil::write_private_durable(&target, &compact).unwrap();
-    pio::symlink(&target, mark_path(&f.dir)).unwrap();
+    file_link(&target, &mark_path(&f.dir));
     assert_eq!(mark_refusal(&f.dir), private, "a link");
     std::fs::remove_file(mark_path(&f.dir)).unwrap();
     std::fs::remove_file(&target).unwrap();
     std::fs::create_dir(mark_path(&f.dir)).unwrap();
     assert_eq!(mark_refusal(&f.dir), private, "a directory");
     std::fs::remove_dir(mark_path(&f.dir)).unwrap();
-    // a mark that cannot be read (a directory no one may search; root may search it)
+    // a mark that cannot be read: on Unix in a directory no one may search (root may search
+    // it); on Windows one that another handle holds with no sharing
     raw_mark(&f.dir, &compact);
-    if pio::own_uid() != 0 {
+    #[cfg(unix)]
+    let unreadable = pio::own_uid() != 0;
+    #[cfg(windows)]
+    let unreadable = true;
+    if unreadable {
+        #[cfg(unix)]
         pio::set_mode(&f.dir, 0o000).unwrap();
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(mark_path(&f.dir))
+                .unwrap()
+        };
         let read = follower::read_mark(&f.dir);
+        #[cfg(unix)]
         pio::set_mode(&f.dir, 0o755).unwrap();
+        #[cfg(windows)]
+        drop(held);
         assert_eq!(
             read.err().unwrap().to_string(),
             "the follower mark cannot be read"
@@ -878,4 +905,31 @@ fn mh3_bad_or_missing_mark_never_opens_as_a_writer() {
     let e = open_refusal(&f.dir);
     assert!(matches!(e, StoreError::UpgradeRequired), "{e:?}");
     assert_eq!(segments(&f.dir), log);
+}
+
+/// Lets other accounts read the file `path`: mode 0o644 on Unix; on Windows read access for
+/// Users.
+fn open_to_others(path: &Path) {
+    #[cfg(unix)]
+    pio::set_mode(path, 0o644).unwrap();
+    #[cfg(windows)]
+    icacls(path, &["/grant", "*S-1-5-32-545:(R)"]);
+}
+
+/// A symbolic link to the file `target` at `link`.
+fn file_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    pio::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let out = std::process::Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "icacls {args:?}: {out:?}");
 }

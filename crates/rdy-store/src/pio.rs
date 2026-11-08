@@ -1,404 +1,79 @@
-//! The store's platform calls (FW-XP1 D-1RXEA), one seam for the Unix-only file calls that store
-//! and engine code make:
+//! The store's platform calls (FW-XP1 D-1RXEA), one seam for the platform-specific file calls
+//! that store and engine code make:
 //! - positional reads and writes: at an offset, without moving the file's cursor;
 //! - no-follow opens (`open_no_follow`): a file that is a symbolic link is refused, never
 //!   followed;
-//! - privacy: this process's uid (`own_uid`), a file's owner (`owner`), private files of mode
-//!   0o600 (`private_file`, `make_private_file`, `is_private_file`), private directories of
-//!   mode 0o700 (`create_private_dir`, `make_private_dir`, `is_private_dir`), the mode
-//!   tests `is_shared_writable`, `is_world_writable_unsticky` and `is_owner_only`, and the umask
-//!   check `umask_keeps_0700_at`;
+//! - privacy: private files and directories (`private_file`, `make_private_file`,
+//!   `create_private_dir`, `make_private_dir`), and who may use an open file or directory
+//!   ([`privacy`], one query of its handle, as a [`Privacy`]);
+//! - durability: a directory flush ([`sync_dir`], [`sync_open_dir`]) and a durable rename
+//!   ([`rename_durable`]); a failure of either is an error, never a success. On Windows a flush is
+//!   `FlushFileBuffers` on a directory handle and a rename is a write-through `MoveFileExW`
+//!   (D-FPKPS). A test backend ([`on_durable`]) sees each flush and rename, `rename_at`'s too,
+//!   before and after its platform call, and can fail it;
 //! - calls in an open directory (`open_dir`, `open_dir_at`, `open_read_at`,
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
-//!   `remove_dir_at`, `set_mode_at`, `rename_at`, `is_link_refusal`): each names one entry of a
-//!   directory handle, so a path that is changed after the handle was opened cannot redirect
-//!   it, and none follows a link at that entry; `is_empty_dir` and `for_each_entry` list a
-//!   directory handle itself, and `entry_kind_at` reads an entry's kind without following or
-//!   opening it;
-//! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
-//! - hole punching (`punch_hole`) and a file's allocated bytes (`allocated_bytes`): a file
+//!   `remove_dir_at`, `rename_at`, `is_link_refusal`, and on Unix only `set_mode_at`): each names
+//!   one entry of a directory handle, so a path that is changed after the handle was opened
+//!   cannot redirect it, and none follows a link at that entry; `is_empty_dir` and
+//!   `for_each_entry` list a directory handle itself, and `entry_kind_at` reads an entry's kind
+//!   without following or opening it. Windows has no permission modes, so `set_mode_at` has no
+//!   Windows form: a private Windows create gives the object its private descriptor;
+//! - a child process that starts in an open directory (`start_in_dir`), and the path of a program
+//!   in that directory (`program_in_dir`), for the same reason; each gives a guard (`StartPin`,
+//!   `ProgramInDir`) that the caller holds until the child is waited;
+//! - hole punching ([`punch_hole`]) and a file's allocated bytes (`allocated_bytes`): a file
 //!   system's own best effort, which never changes a byte that a read returns;
-//! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
-//!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
-//!   child process under another umask (`under_umask`), so the store's and the engine's tests
-//!   need no Unix-only call of their own.
+//! - Unix only, for Unix mechanism tests and the Unix seams of the daemon and QA: this process's
+//!   uid (`own_uid`), a file's owner (`owner`), the mode tests `is_private_file`,
+//!   `is_private_dir`, `is_shared_writable`, `is_world_writable_unsticky` and `is_owner_only`,
+//!   and the test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
+//!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`), a Unix
+//!   socket (`bind_socket`) and a child process under another umask (`under_umask`), so the
+//!   store's and the engine's tests need no Unix-only call of their own;
+//! - child windows: `no_console_window` makes a console program that rdy starts run without a
+//!   console window of its own (Windows `CREATE_NO_WINDOW`; nothing on Unix), so a detached
+//!   daemon never flashes a window when it runs git;
+//! - on every platform, for tests that kill or abort a child: how the child ended (`ended`); and
+//!   for tests of text that is not Unicode: such text (`not_unicode`).
 //!
-//! Every other store module, and the engine, calls these functions. The daemon's `sys` seam
-//! re-exports the no-follow and privacy calls under the same names.
+//! Each platform's calls live in a child module: `unix` and `windows`. Every other store module,
+//! and the engine, calls these functions. The daemon's `sys` seam re-exports the no-follow and
+//! privacy calls under the same names.
 
-use std::ffi::OsStr;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::File;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::Path;
 
-/// Fills `buf` from `f` at `offset`. A file that ends first is `ErrorKind::UnexpectedEof`.
 #[cfg(unix)]
-pub fn read_exact_at(f: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
-    f.read_exact_at(buf, offset)
-}
+mod unix;
+#[cfg(unix)]
+pub use unix::*;
 
-/// Writes all of `buf` to `f` at `offset`. A write past the end extends the file.
-#[cfg(unix)]
-pub fn write_all_at(f: &File, buf: &[u8], offset: u64) -> io::Result<()> {
-    f.write_all_at(buf, offset)
-}
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::*;
 
-/// This process's effective uid.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn own_uid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
-}
+#[cfg(not(any(unix, windows)))]
+compile_error!("rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)");
 
-/// Opens `path` with `opts` and `O_NOFOLLOW`: a file that is a symlink is refused, never
-/// followed, so a checkout cannot point `.rdy/run/<file>` or a config file at a file elsewhere for
-/// rdy to write, chmod or read.
-#[cfg(unix)]
-pub fn open_no_follow(opts: &mut OpenOptions, path: &Path) -> io::Result<File> {
-    match opts.custom_flags(libc::O_NOFOLLOW).open(path) {
-        Ok(f) => Ok(f),
-        Err(e)
-            if e.raw_os_error() == Some(libc::ELOOP)
-                && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) =>
-        {
-            Err(io::Error::other(format!(
-                "{} is a symbolic link, which rdy does not follow",
-                path.display()
-            )))
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Makes a file that `opts` creates private to this user (mode 0o600).
-#[cfg(unix)]
-pub fn private_file(opts: &mut OpenOptions) -> &mut OpenOptions {
-    opts.mode(0o600)
-}
-
-/// Sets the open file `f` to mode 0o600: a file left by an older run keeps its mode through
-/// open.
-#[cfg(unix)]
-pub fn make_private_file(f: &File) -> io::Result<()> {
-    f.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-/// Creates the directory `path` with mode 0o700; an existing `path` is an error, as with
-/// `DirBuilder::create`.
-#[cfg(unix)]
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new().mode(0o700).create(path)
-}
-
-/// Sets the directory `path` to mode 0o700.
-#[cfg(unix)]
-pub fn make_private_dir(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-/// Whether `meta`'s mode is exactly 0o700.
-#[cfg(unix)]
-pub fn is_private_dir(meta: &Metadata) -> bool {
-    meta.permissions().mode() & 0o777 == 0o700
-}
-
-/// Whether `meta` is a regular file that this user owns, with mode exactly 0o600.
-#[cfg(unix)]
-pub fn is_private_file(meta: &Metadata) -> bool {
-    meta.is_file() && owner(meta) == own_uid() && meta.permissions().mode() & 0o777 == 0o600
-}
-
-/// The uid that owns the file `meta` describes.
-#[cfg(unix)]
-pub fn owner(meta: &Metadata) -> u32 {
-    meta.uid()
-}
-
-/// Whether group or others may write the file or directory `meta` describes (mode bit 0o020
-/// or 0o002). In such a directory another user can remove or replace an entry.
-#[cfg(unix)]
-pub fn is_shared_writable(meta: &Metadata) -> bool {
-    meta.permissions().mode() & 0o022 != 0
-}
-
-/// Whether others (all users, not only the group) may write the directory `meta` describes and
-/// its sticky bit is unset (mode bit 0o002 without 0o1000). In such a directory any user can
-/// remove or replace an entry; the sticky bit limits that to the entry's owner.
-#[cfg(unix)]
-pub fn is_world_writable_unsticky(meta: &Metadata) -> bool {
-    let mode = meta.permissions().mode();
-    mode & 0o002 != 0 && mode & 0o1000 == 0
-}
-
-/// Whether group and others have no permission bit on `meta` (mode & 0o077 is 0).
-#[cfg(unix)]
-pub fn is_owner_only(meta: &Metadata) -> bool {
-    meta.permissions().mode() & 0o077 == 0
-}
-
-/// Opens the directory `path` for the `*_at` calls below. Links in `path` are followed: the
-/// caller trusts this path. Anything that is not a directory is refused (`ENOTDIR`).
-#[cfg(unix)]
-pub fn open_dir(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY)
-        .open(path)
-}
-
-/// Opens the directory `name` in the open directory `dir`, never through a link: a link or a
-/// non-directory at `name` fails with an error that [`is_link_refusal`] accepts.
-#[cfg(unix)]
-pub fn open_dir_at(dir: &File, name: &OsStr) -> io::Result<File> {
-    open_at(
-        dir,
-        name,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        0,
-    )
-}
-
-/// Opens `name` in the open directory `dir` for reading, never through a link and without
-/// waiting on a FIFO. The caller judges the kind of file from the handle's metadata. The
-/// handle blocks as usual for later calls, such as `File::lock`.
-#[cfg(unix)]
-pub fn open_read_at(dir: &File, name: &OsStr) -> io::Result<File> {
-    let f = open_at(
-        dir,
-        name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-        0,
-    )?;
-    set_blocking(&f)?;
-    Ok(f)
-}
-
-/// Creates the new file `name` in the open directory `dir`, for reading and writing, with mode
-/// 0o600 less the umask (set it exactly with [`make_private_file`]). Anything at `name`,
-/// a link included, fails with `ErrorKind::AlreadyExists` and is never followed.
-#[cfg(unix)]
-pub fn create_private_at(dir: &File, name: &OsStr) -> io::Result<File> {
-    open_at(
-        dir,
-        name,
-        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
-        0o600,
-    )
-}
-
-/// Creates the directory `name` in the open directory `dir`, with mode 0o700 less the umask
-/// ([`umask_keeps_0700_at`] tells beforehand whether that is 0o700). An existing `name` is
-/// `ErrorKind::AlreadyExists`. mkdir returns no handle: nothing proves that the directory a
-/// later open finds at `name` is the one made here.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn create_private_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
-    let name = entry_name(name)?;
-    // SAFETY: `dir` is an open descriptor for the whole call and `name` is a NUL-terminated
-    // string that lives until the call returns.
-    cvt(unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) }).map(|_| ())
-}
-
-/// Whether this process's umask keeps mode 0o700 whole, so that [`create_private_dir_at`] makes
-/// a 0o700 directory: it creates the new file `name` in the open directory `dir` with mode 0o700
-/// (anything at `name`, a link included, fails with `ErrorKind::AlreadyExists` and is never
-/// followed), reads the mode the umask left from the file's handle, and removes the file again.
-#[cfg(unix)]
-pub fn umask_keeps_0700_at(dir: &File, name: &OsStr) -> io::Result<bool> {
-    let f = open_at(
-        dir,
-        name,
-        libc::O_RDONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
-        0o700,
-    )?;
-    let mode = f.metadata().map(|m| m.permissions().mode() & 0o777);
-    drop(f);
-    let removed = remove_file_at(dir, name);
-    let mode = mode?;
-    removed?;
-    Ok(mode == 0o700)
-}
-
-/// Removes the entry `name` (not a directory) from the open directory `dir`. A link is
-/// removed, never followed.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn remove_file_at(dir: &File, name: &OsStr) -> io::Result<()> {
-    let name = entry_name(name)?;
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string.
-    cvt(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) }).map(|_| ())
-}
-
-/// Removes the empty directory `name` from the open directory `dir`. A link at `name` is
-/// refused (`ENOTDIR`), never followed; a directory that is not empty stays (`ENOTEMPTY`).
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn remove_dir_at(dir: &File, name: &OsStr) -> io::Result<()> {
-    let name = entry_name(name)?;
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string.
-    cvt(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }).map(|_| ())
-}
-
-/// Sets the permission bits of the entry `name` in the open directory `dir` to `mode` (at most
-/// 0o7777), never through a link at `name`: for an entry that cannot be opened to set its mode
-/// through a handle, such as a directory the umask left without its owner's bits.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn set_mode_at(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
-    if mode > 0o7777 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a permission mode",
-        ));
-    }
-    let name = entry_name(name)?;
-    // the check above keeps `mode` within `mode_t` (16 bits on macOS)
-    #[allow(clippy::unnecessary_cast)]
-    let mode = mode as libc::mode_t;
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string.
-    cvt(unsafe {
-        libc::fchmodat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            mode,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    })
-    .map(|_| ())
-}
-
-/// Makes the child that `cmd` spawns start in the open directory `dir`: the child changes into
-/// it (`fchdir`) before its exec, so a path to `dir` that changes after `dir` was opened cannot
-/// move the child elsewhere. A relative program path (`./name`) is found in `dir`. `cmd` keeps
-/// its own copy of the handle, so the caller may close `dir`.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn start_in_dir(cmd: &mut std::process::Command, dir: &File) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let dir = dir.try_clone()?;
-    // SAFETY: the closure runs in the child between fork and exec. It calls only `fchdir`,
-    // which is async-signal-safe, on a descriptor the closure owns, and allocates nothing.
-    unsafe {
-        cmd.pre_exec(move || cvt(libc::fchdir(dir.as_raw_fd())).map(|_| ()));
-    }
-    Ok(())
-}
-
-/// Renames the entry `from` over the entry `to`, both in the open directory `dir`.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
-    let (from, to) = (entry_name(from)?, entry_name(to)?);
-    let fd = dir.as_raw_fd();
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and two live C strings.
-    cvt(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) }).map(|_| ())
-}
-
-/// Whether the open directory `dir` holds no entry but `.` and `..`. It is listed in this
-/// process through a new open of `dir` itself (`openat(dir, ".")`), so no path is resolved
-/// again and the listing has its own position. A failed listing is an error, never "empty".
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn is_empty_dir(dir: &File) -> io::Result<bool> {
-    use std::os::unix::io::IntoRawFd;
-    // SAFETY: an open descriptor and a static C string; without O_CREAT no mode is read.
-    let fd = cvt(unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c".".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    })?;
-    // SAFETY: `fd` is a new descriptor that nothing else owns.
-    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: `fd` is open; on success the stream owns it, and `closedir` closes it.
-    let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
-    if stream.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let _ = owned.into_raw_fd();
-    let empty = loop {
-        // SAFETY: a `dirent` is plain data; all zeros is a valid value for `readdir_r` to fill.
-        let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
-        let mut found: *mut libc::dirent = std::ptr::null_mut();
-        // SAFETY: an open stream, a whole `dirent` and a valid out pointer. `readdir_r` returns
-        // its error, so an end of the listing is never confused with a failure.
-        let r = unsafe { libc::readdir_r(stream, &mut entry, &mut found) };
-        if r != 0 {
-            break Err(io::Error::from_raw_os_error(r));
-        }
-        if found.is_null() {
-            break Ok(true);
-        }
-        // SAFETY: `found` points at `entry`, whose name `readdir_r` ended with a NUL.
-        let name = unsafe { std::ffi::CStr::from_ptr((*found).d_name.as_ptr()) }.to_bytes();
-        if name != b"." && name != b".." {
-            break Ok(false);
-        }
-    };
-    // SAFETY: the stream is open and is closed once, here.
-    unsafe { libc::closedir(stream) };
-    empty
-}
-
-/// Calls `f` with the name of each entry of the open directory `dir` but `.` and `..`, in the
-/// order the directory lists them. The listing goes through a new open of `dir` itself, as in
-/// [`is_empty_dir`], so no path is resolved again. A failed listing is an error, and so is the
-/// first error of `f`, which ends the listing.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn for_each_entry<E: From<io::Error>>(
-    dir: &File,
-    mut f: impl FnMut(&OsStr) -> Result<(), E>,
-) -> Result<(), E> {
-    use std::os::unix::io::IntoRawFd;
-    // SAFETY: as in `is_empty_dir`.
-    let fd = cvt(unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c".".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    })?;
-    // SAFETY: `fd` is a new descriptor that nothing else owns.
-    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: as in `is_empty_dir`.
-    let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
-    if stream.is_null() {
-        return Err(io::Error::last_os_error().into());
-    }
-    let _ = owned.into_raw_fd();
-    let listed = loop {
-        // SAFETY: as in `is_empty_dir`.
-        let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
-        let mut found: *mut libc::dirent = std::ptr::null_mut();
-        // SAFETY: as in `is_empty_dir`.
-        let r = unsafe { libc::readdir_r(stream, &mut entry, &mut found) };
-        if r != 0 {
-            break Err(io::Error::from_raw_os_error(r).into());
-        }
-        if found.is_null() {
-            break Ok(());
-        }
-        // SAFETY: as in `is_empty_dir`.
-        let name = unsafe { std::ffi::CStr::from_ptr((*found).d_name.as_ptr()) }.to_bytes();
-        if name == b"." || name == b".." {
-            continue;
-        }
-        if let Err(e) = f(OsStr::from_bytes(name)) {
-            break Err(e);
-        }
-    };
-    // SAFETY: the stream is open and is closed once, here.
-    unsafe { libc::closedir(stream) };
-    listed
+/// Who may use an open file or directory, as [`privacy`] reads it from the handle in one query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Privacy {
+    /// This account owns it.
+    pub mine: bool,
+    /// It is exactly as private as rdy makes a private file or directory: only its owner may use
+    /// it. On Unix, a regular file of mode 0o600 or a directory of mode 0o700; any other kind
+    /// of file is never private.
+    pub private: bool,
+    /// No other account may use it (on Unix, no permission bit for its group or others).
+    pub owner_only: bool,
+    /// Another account may write it; in a directory, it may remove or replace an entry (on Unix,
+    /// mode bit 0o020 or 0o002).
+    pub shared_writable: bool,
+    /// Every account may write it, and nothing limits the removal or replacement of an entry to
+    /// the entry's owner (on Unix, mode bit 0o002 without the sticky bit 0o1000).
+    pub open_to_all: bool,
 }
 
 /// The kind of a directory entry, as [`entry_kind_at`] reads it.
@@ -410,149 +85,6 @@ pub enum EntryKind {
     Link,
     /// A socket, FIFO, device or any other kind of file.
     Other,
-}
-
-/// The kind of the entry `name` of the open directory `dir`, from `fstatat` with
-/// `AT_SYMLINK_NOFOLLOW`: a link is reported as a link, and nothing is opened, so a FIFO or a
-/// device is never touched.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-pub fn entry_kind_at(dir: &File, name: &OsStr) -> io::Result<EntryKind> {
-    let name = entry_name(name)?;
-    // SAFETY: a `stat` is plain data; all zeros is a valid value for `fstatat` to fill.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string, and a
-    // whole `stat` to fill.
-    cvt(unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            &mut st,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    })?;
-    Ok(match st.st_mode & libc::S_IFMT {
-        libc::S_IFDIR => EntryKind::Dir,
-        libc::S_IFREG => EntryKind::File,
-        libc::S_IFLNK => EntryKind::Link,
-        _ => EntryKind::Other,
-    })
-}
-
-/// Whether `e`, from [`open_dir_at`] or [`open_read_at`], means that a link stands at the name,
-/// or something that is not a directory where a directory was opened (`ELOOP`, `ENOTDIR`).
-#[cfg(unix)]
-pub fn is_link_refusal(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
-}
-
-/// One entry name as a C string: not empty, not `.` or `..`, with no `/` and no NUL.
-#[cfg(unix)]
-fn entry_name(name: &OsStr) -> io::Result<std::ffi::CString> {
-    let b = name.as_bytes();
-    if b.is_empty() || b == b"." || b == b".." || b.contains(&b'/') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not one directory entry name",
-        ));
-    }
-    std::ffi::CString::new(b).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
-}
-
-/// `openat(dir, name, flags | O_CLOEXEC, mode)`, as a `File`.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn open_at(dir: &File, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
-    let name = entry_name(name)?;
-    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string. The mode
-    // is passed as the variadic argument `openat` reads only with O_CREAT.
-    let fd = cvt(unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_CLOEXEC,
-            libc::c_uint::from(mode),
-        )
-    })?;
-    // SAFETY: `fd` is a new descriptor that nothing else owns.
-    Ok(File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
-}
-
-/// Clears `O_NONBLOCK` on `f`.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn set_blocking(f: &File) -> io::Result<()> {
-    let fd = f.as_raw_fd();
-    // SAFETY: `fd` is open for the whole call; F_GETFL and F_SETFL take no pointer.
-    let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
-    // SAFETY: as above.
-    cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) }).map(|_| ())
-}
-
-/// A libc return value: -1 is the thread's `errno`.
-#[cfg(unix)]
-fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
-    if r == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(r)
-    }
-}
-
-/// The permission bits of the file `meta` describes, with the set-id and sticky bits
-/// (mode & 0o7777). For test fixtures and the upgrade backup's file modes.
-#[cfg(unix)]
-pub fn mode_of(meta: &Metadata) -> u32 {
-    meta.permissions().mode() & 0o7777
-}
-
-/// Permissions of exactly `mode` (for example 0o644), for `fs::set_permissions` or a
-/// `tempfile::Builder`. For test fixtures and the upgrade backup's file modes.
-#[cfg(unix)]
-pub fn permissions(mode: u32) -> fs::Permissions {
-    fs::Permissions::from_mode(mode)
-}
-
-/// Sets the file or directory `path` to `mode`, following a link at `path`. For test fixtures.
-#[cfg(unix)]
-pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-    fs::set_permissions(path, permissions(mode))
-}
-
-/// Makes the directories that `builder` creates `mode` less the umask. For test fixtures.
-#[cfg(unix)]
-pub fn dir_mode(builder: &mut fs::DirBuilder, mode: u32) -> &mut fs::DirBuilder {
-    builder.mode(mode)
-}
-
-/// Makes a file that `opts` creates `mode` less the umask. For test fixtures.
-#[cfg(unix)]
-pub fn file_mode(opts: &mut OpenOptions, mode: u32) -> &mut OpenOptions {
-    opts.mode(mode)
-}
-
-/// The inode number of the file `meta` describes: equal numbers on one device are one file.
-/// For test fixtures.
-#[cfg(unix)]
-pub fn inode(meta: &Metadata) -> u64 {
-    meta.ino()
-}
-
-/// Makes `link` a symbolic link to `target`. For test fixtures.
-#[cfg(unix)]
-pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-/// A command that runs `program` under the process umask `umask` (octal text, for example
-/// "002"); the caller adds the program's arguments. The umask is process-wide, so a test that
-/// needs another one runs a child under it. For test fixtures.
-#[cfg(unix)]
-pub fn under_umask(umask: &str, program: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.args(["-c", r#"umask "$1" && shift && exec "$@""#, "sh", umask])
-        .arg(program);
-    cmd
 }
 
 /// What a file system did with a hole punch. `Supported` means that it accepted the call, not that
@@ -585,7 +117,6 @@ pub fn on_punch(backend: Option<PunchBackend>) {
 /// call; a zero length makes no call and succeeds. On macOS only the range's aligned interior is
 /// punched, so a span with no aligned interior makes no call. A file system that cannot punch is
 /// `Unsupported`; any other failed call is an error.
-#[cfg(unix)]
 pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
     if len == 0 {
         return Ok(Punch::Supported);
@@ -600,11 +131,178 @@ pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
     let injected = PUNCH_BACKEND.with(|b| b.borrow_mut().as_mut().and_then(|f| f(offset, len)));
     match injected {
         Some(answer) => answer,
-        None => platform_punch(file, offset, len),
+        #[cfg(unix)]
+        None => unix::platform_punch(file, offset, len),
+        #[cfg(windows)]
+        None => windows::platform_punch(file, offset, len),
     }
 }
 
-#[cfg(unix)]
+/// One durable step, as a test backend of [`on_durable`] sees it.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurableStep {
+    /// A flush of the directory at the path ([`sync_dir`], [`sync_open_dir`]).
+    Flush(std::path::PathBuf),
+    /// A rename of `from` to `to` ([`rename_durable`], [`rename_at`]), with the flags of its
+    /// platform call: MoveFileExW's on Windows, none (0) on Unix. In a [`rename_at`] on Unix, the
+    /// two paths are the entry names.
+    Rename {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+        flags: u32,
+    },
+}
+
+/// Where a test backend of [`on_durable`] runs: just before a step's platform call, or just after
+/// the call succeeded.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    Before,
+    After,
+}
+
+/// A test backend of the durable steps: it sees each step at each [`Boundary`], and an error it
+/// gives fails the step. Before the call, the call is then not made; after it, the call was made.
+/// It can only fail a step: a call's own error is always the step's error.
+#[doc(hidden)]
+pub type DurableBackend = Box<dyn FnMut(&DurableStep, Boundary) -> io::Result<()>>;
+
+thread_local! {
+    static DURABLE_BACKEND: std::cell::RefCell<Option<DurableBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: every durable step on this thread calls `backend`. None removes it.
+#[doc(hidden)]
+pub fn on_durable(backend: Option<DurableBackend>) {
+    DURABLE_BACKEND.with(|b| *b.borrow_mut() = backend);
+}
+
+/// Runs `call`, the platform call of the durable step that `step` describes, with the test
+/// backend of [`on_durable`], if one is set, before and after it. `step` is made only for a
+/// backend.
+pub(crate) fn durable(
+    step: impl FnOnce() -> DurableStep,
+    call: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let step = DURABLE_BACKEND.with(|b| b.borrow().is_some()).then(step);
+    let at = |boundary| match &step {
+        Some(step) => DURABLE_BACKEND.with(|b| match b.borrow_mut().as_mut() {
+            Some(backend) => backend(step, boundary),
+            None => Ok(()),
+        }),
+        None => Ok(()),
+    };
+    at(Boundary::Before)?;
+    call()?;
+    at(Boundary::After)
+}
+
+/// How a test's child process ended, as [`ended`] reads it from its exit status.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// `Child::kill` ended it: `SIGKILL` on Unix; on Windows `TerminateProcess`, which
+    /// `Child::kill` calls with exit code 1.
+    Killed,
+    /// `std::process::abort` ended it: `SIGABRT` on Unix; on Windows the fail-fast status
+    /// `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409).
+    Aborted,
+    /// It ended any other way.
+    Other,
+}
+
+/// How the child process whose exit status is `status` ended: killed, aborted or otherwise. On
+/// Windows a child that exits with code 1 by itself also reads as killed: the test that kills a
+/// child knows that it did. For test fixtures.
+#[doc(hidden)]
+pub fn ended(status: &std::process::ExitStatus) -> Ended {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        match status.signal() {
+            Some(9) => Ended::Killed,
+            Some(6) => Ended::Aborted,
+            _ => Ended::Other,
+        }
+    }
+    #[cfg(windows)]
+    {
+        const STATUS_STACK_BUFFER_OVERRUN: u32 = 0xC000_0409;
+        match status.code().map(|c| c as u32) {
+            Some(1) => Ended::Killed,
+            Some(STATUS_STACK_BUFFER_OVERRUN) => Ended::Aborted,
+            _ => Ended::Other,
+        }
+    }
+}
+
+/// `text` followed by one code unit that is not Unicode: the byte 0xE9 on Unix, an unpaired
+/// surrogate on Windows. For test fixtures of paths and account names that are not Unicode.
+#[doc(hidden)]
+pub fn not_unicode(text: &str) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0xE9);
+        std::ffi::OsString::from_vec(bytes)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0xD800);
+        std::ffi::OsString::from_wide(&wide)
+    }
+}
+
+/// A path as a message for a person or an agent shows it. On Windows a plain drive path
+/// (`\\?\C:\dir`) loses its `\\?\` prefix; a `\\?\UNC\` path and a path that needs the prefix stay
+/// as they are. Display only: identity, hashes and pipe names keep the canonical form. Elsewhere
+/// it is the path's lossy text.
+pub fn display_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        plain_drive_path(&text).to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
+/// `text` without a leading `\\?\` when the rest is a plain drive path that Win32 reads the same
+/// way: `X:\` and components with no `.` or `..`, no `/`, no trailing dot or space, no device
+/// name, and fewer than 260 characters. Any other text comes back unchanged. Pure text, so every
+/// platform tests it.
+pub fn plain_drive_path(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return text;
+    };
+    let b = rest.as_bytes();
+    if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
+        return text;
+    }
+    if rest.len() >= 260 || rest.contains('/') {
+        return text;
+    }
+    for comp in rest[3..].split('\\') {
+        if comp == "." || comp == ".." || comp.ends_with('.') || comp.ends_with(' ') {
+            return text;
+        }
+        let stem = comp.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let stem = stem.trim_end_matches(' ');
+        let numbered = stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit();
+        if matches!(stem, "CON" | "PRN" | "AUX" | "NUL") || numbered {
+            return text;
+        }
+    }
+    rest
+}
+
 fn bad_punch_range(why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -612,197 +310,288 @@ fn bad_punch_range(why: &str) -> io::Error {
     )
 }
 
-/// The answer to a failed platform punch: a file system that cannot is `Unsupported`, and every
-/// other failure, an invalid range (`EINVAL`) included, stays an error.
-#[cfg(unix)]
-fn punch_outcome(e: io::Error) -> io::Result<Punch> {
-    match e.raw_os_error() {
-        // on Linux EOPNOTSUPP and ENOTSUP are one value, so these are not match patterns
-        Some(code) if [libc::ENOSYS, libc::EOPNOTSUPP, libc::ENOTSUP].contains(&code) => {
-            Ok(Punch::Unsupported)
-        }
-        _ => Err(e),
+/// The start of `value` as text, at most `max` code units long, decoded lossily: each part that
+/// is not Unicode becomes one U+FFFD, on every platform. It decodes the platform's own units (the
+/// bytes on Unix, the UTF-16 units on Windows), never the internal encoding of `OsStr`, so an
+/// unpaired surrogate is one replacement character and not three. The work and the result are
+/// bounded by `max`, however long `value` is.
+pub fn lossy_head(value: &std::ffi::OsStr, max: usize) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = value.as_bytes();
+        String::from_utf8_lossy(&bytes[..bytes.len().min(max)]).into_owned()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        char::decode_utf16(value.encode_wide().take(max))
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect()
     }
 }
-
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn platform_punch(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
-    let as_off = |v: u64| libc::off_t::try_from(v).map_err(|_| bad_punch_range("overflows"));
-    let (offset, len) = (as_off(offset)?, as_off(len)?);
-    // SAFETY: the call takes only an open descriptor and integers.
-    let r = unsafe {
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            offset,
-            len,
-        )
-    };
-    match cvt(r) {
-        Ok(_) => Ok(Punch::Supported),
-        Err(e) => punch_outcome(e),
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn platform_punch(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
-    // SAFETY: an all-zero statfs is a valid value of this plain C struct.
-    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `st` is valid for writes for the call.
-    cvt(unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) })?;
-    let Some((start, length)) = aligned_interior(offset, len, u64::from(st.f_bsize))? else {
-        return Ok(Punch::Supported);
-    };
-    let as_off = |v: u64| libc::off_t::try_from(v).map_err(|_| bad_punch_range("overflows"));
-    let args = libc::fpunchhole_t {
-        fp_flags: 0,
-        reserved: 0,
-        fp_offset: as_off(start)?,
-        fp_length: as_off(length)?,
-    };
-    // SAFETY: `args` is valid for reads for the call, and F_PUNCHHOLE reads this struct.
-    let r = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &args) };
-    match cvt(r) {
-        Ok(_) => Ok(Punch::Supported),
-        Err(e) => punch_outcome(e),
-    }
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn platform_punch(_file: &File, _offset: u64, _len: u64) -> io::Result<Punch> {
-    Ok(Punch::Unsupported)
-}
-
-/// The largest range inside `offset..offset + len` that starts and ends on a multiple of `block`,
-/// as (start, length); None if it holds no whole block. It rounds inward only. A zero block size
-/// or an overflow is an error.
-#[cfg(any(target_os = "macos", test))]
-fn aligned_interior(offset: u64, len: u64, block: u64) -> io::Result<Option<(u64, u64)>> {
-    if block == 0 {
-        return Err(io::Error::other("the file system reports no block size"));
-    }
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| bad_punch_range("overflows"))?;
-    let start = offset
-        .checked_next_multiple_of(block)
-        .ok_or_else(|| bad_punch_range("overflows"))?;
-    let end = end - end % block;
-    Ok((start < end).then(|| (start, end - start)))
-}
-
-/// The bytes the file system has allocated to `file`: its allocated block count times 512. This
-/// is not its length.
-#[cfg(unix)]
-pub fn allocated_bytes(file: &File) -> io::Result<u64> {
-    blocks_to_bytes(file.metadata()?.blocks())
-}
-
-#[cfg(unix)]
-fn blocks_to_bytes(blocks: u64) -> io::Result<u64> {
-    blocks
-        .checked_mul(512)
-        .ok_or_else(|| io::Error::other("the file's allocated size overflows"))
-}
-
-#[cfg(not(unix))]
-compile_error!("rdy_store::pio has no implementation for this platform yet (FW-XP1 Phase 4)");
-
-#[cfg(windows)]
-compile_error!(
-    "rdy_store::pio::punch_hole has no Windows implementation yet: FSCTL_SET_ZERO_DATA on a sparse file (FW-XP1 Phase 4)"
-);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::{Read, Seek, SeekFrom};
+    #[test]
+    fn wx33c_lossy_head_is_one_replacement_per_part_and_bounded() {
+        let odd = super::not_unicode("zo");
+        assert_eq!(super::lossy_head(&odd, 100), "zo\u{fffd}");
+        assert_eq!(super::lossy_head(&odd, 2), "zo");
+        let long = std::ffi::OsString::from("a".repeat(1000));
+        assert_eq!(super::lossy_head(&long, 5), "aaaaa");
+    }
 
     #[test]
-    fn mh1_ranges_and_allocation_are_checked() {
-        // the platform call never sees a range these refuse
-        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
-        let seen = std::rc::Rc::clone(&calls);
-        on_punch(Some(Box::new(move |offset, len| {
-            seen.borrow_mut().push((offset, len));
-            Some(Ok(Punch::Supported))
-        })));
-        let f = tempfile::tempfile().unwrap();
-        write_all_at(&f, &[0u8; 8192], 0).unwrap();
-        assert_eq!(punch_hole(&f, 100, 0).unwrap(), Punch::Supported);
-        assert_eq!(
-            punch_hole(&f, u64::MAX, 0).unwrap(),
-            Punch::Supported,
-            "zero length succeeds without a call, wherever it is"
-        );
-        for (offset, len) in [
-            (u64::MAX, 1),
-            (1, u64::MAX),
-            (8192, 1),
-            (8191, 2),
-            (i64::MAX as u64, 1),
-            (i64::MAX as u64 + 1, 1),
-        ] {
-            let e = punch_hole(&f, offset, len).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{offset} {len}");
+    fn wx12d_not_unicode_text_keeps_its_start_and_has_no_str() {
+        let odd = super::not_unicode("zo");
+        assert_eq!(odd.to_str(), None);
+        assert!(odd.to_string_lossy().starts_with("zo"), "{odd:?}");
+    }
+
+    use super::*;
+    use std::fs;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::path::Path;
+
+    /// The text of `rel`, a path under this crate.
+    fn source(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The message of each `compile_error!` in `code`, in order, and the code left outside them.
+    fn placeholders(code: &str) -> (Vec<String>, String) {
+        let mut found = vec![];
+        let mut rest = String::new();
+        let mut text = code;
+        while let Some(at) = text.find("compile_error!(") {
+            rest.push_str(&text[..at]);
+            let after = &text[at..];
+            let end = after.find(");").expect("a compile_error! ends with );") + 2;
+            let call = &after[..end];
+            let (open, close) = (call.find('"').unwrap(), call.rfind('"').unwrap());
+            found.push(call[open + 1..close].to_string());
+            text = &after[end..];
         }
-        assert!(calls.borrow().is_empty());
-        // the last valid byte
-        assert_eq!(punch_hole(&f, 8191, 1).unwrap(), Punch::Supported);
-        assert_eq!(*calls.borrow(), [(8191, 1)]);
-        on_punch(None);
+        rest.push_str(text);
+        (found, rest)
+    }
 
-        // the real call over a span with no aligned interior or a whole one is bounded
-        assert!(punch_hole(&f, 8191, 1).is_ok());
-        assert!(punch_hole(&f, 0, 8192).is_ok());
-        let mut back = [1u8; 8192];
-        read_exact_at(&f, &mut back, 0).unwrap();
-        assert_eq!(back, [0u8; 8192]);
+    /// The lines of `text` that are neither blank nor comments, joined by newlines.
+    fn code_lines(text: &str) -> String {
+        text.lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
-        // alignment rounds inward only
-        for (offset, len, want) in [
-            (0, 4096, Some((0, 4096))),
-            (0, 4095, None),
-            (1, 4095, None),
-            (4095, 2, None),
-            (1, 8191, Some((4096, 4096))),
-            (5000, 10_000, Some((8192, 4096))),
-            (4096, 8192, Some((4096, 8192))),
-        ] {
-            assert_eq!(aligned_interior(offset, len, 4096).unwrap(), want);
-            if let Some((start, n)) = want {
-                assert!(start >= offset && start + n <= offset + len);
+    /// What a body that compiles and answers without the platform call would hold.
+    const STUB_WORDS: &[&str] = &[
+        "fn ",
+        "impl ",
+        "Ok(",
+        "unreachable!",
+        "unimplemented!",
+        "todo!",
+        "Default::default",
+    ];
+
+    #[test]
+    fn wx1_isolated_interface_probe_has_no_success_stub() {
+        // The Windows provider source, which an isolated native probe compiles on its own, holds
+        // only the registrations of its built children, and no placeholder is left (Task 6): no
+        // body that compiles, and no answer made up without the platform call.
+        let (found, rest) = placeholders(&code_lines(&source("src/pio/windows.rs")));
+        assert_eq!(
+            rest.trim(),
+            "pub use windows_io::*;\n#[path = \"windows_io.rs\"]\nmod windows_io;\n\
+             pub use windows_security::*;\n#[path = \"windows_security.rs\"]\n\
+             mod windows_security;\n\
+             pub use windows_dir::*;\n#[path = \"windows_dir.rs\"]\nmod windows_dir;\n\
+             pub use windows_durable::*;\n#[path = \"windows_durable.rs\"]\n\
+             mod windows_durable;",
+            "code outside the placeholders"
+        );
+        assert!(found.is_empty(), "{found:?}");
+        // This module no longer stops the build on Windows: only a platform that is neither Unix
+        // nor Windows stops it.
+        let pio = source("src/pio.rs");
+        let (found, _) = placeholders(&code_lines(pio.split("#[cfg(test)]").next().unwrap()));
+        assert_eq!(
+            found,
+            ["rdy_store::pio has no implementation for this platform (FW-XP1 D-1RXEA)"]
+        );
+        // The file identity seam is built on Windows (Task 2): fileid/windows.rs makes each
+        // platform call, and neither file holds a stub body before its tests or a Windows
+        // placeholder.
+        let fileid = source("src/fileid.rs");
+        let product = code_lines(fileid.split("#[cfg(all(test").next().unwrap());
+        let provider = source("src/fileid/windows.rs");
+        let provider = code_lines(provider.split("#[cfg(test)]").next().unwrap());
+        for (file, code) in [("fileid.rs", &product), ("fileid/windows.rs", &provider)] {
+            for word in [
+                "unreachable!",
+                "unimplemented!",
+                "todo!",
+                "Default::default",
+            ] {
+                assert!(!code.contains(word), "{file} holds {word}");
             }
         }
-        assert!(aligned_interior(0, 4096, 0).is_err(), "a zero block size");
-        assert!(aligned_interior(u64::MAX, 1, 4096).is_err(), "end overflow");
-        assert!(
-            aligned_interior(u64::MAX - 1, 1, 4096).is_err(),
-            "rounding up overflows"
-        );
-
-        // the errors that mean the file system cannot, and the rest
-        for code in [libc::ENOSYS, libc::EOPNOTSUPP, libc::ENOTSUP] {
-            let got = punch_outcome(io::Error::from_raw_os_error(code)).unwrap();
-            assert_eq!(got, Punch::Unsupported, "{code}");
-        }
-        for code in [libc::EINVAL, libc::EPERM, libc::EACCES, libc::EIO] {
-            assert!(punch_outcome(io::Error::from_raw_os_error(code)).is_err());
-        }
-
-        // allocation is checked and is not the file's length
-        assert_eq!(blocks_to_bytes(0).unwrap(), 0);
-        assert_eq!(blocks_to_bytes(3).unwrap(), 1536);
         assert_eq!(
-            blocks_to_bytes(u64::MAX / 512).unwrap(),
-            u64::MAX / 512 * 512
+            placeholders(&product).0,
+            ["rdy_store::fileid has no implementation for this platform (FW-XP1 D-1RXEA)"]
         );
-        assert!(blocks_to_bytes(u64::MAX / 512 + 1).is_err());
-        let sparse = tempfile::tempfile().unwrap();
-        sparse.set_len(1 << 30).unwrap();
-        assert!(allocated_bytes(&sparse).unwrap() < 1 << 30);
+        assert!(placeholders(&provider).0.is_empty());
+        for call in [
+            "GetFileInformationByHandleEx",
+            "FileIdInfo",
+            "FileBasicInfo",
+            "FileStandardInfo",
+        ] {
+            assert!(provider.contains(call), "fileid/windows.rs calls {call}");
+        }
+        let windows_pio = code_lines(&source("src/pio/windows.rs"));
+        for word in STUB_WORDS {
+            assert!(!windows_pio.contains(word), "pio/windows.rs holds {word}");
+        }
+        // Positioned I/O, punching and allocation are built (Task 3): pio/windows_io.rs makes each
+        // platform call, and holds no stub body or placeholder before its tests.
+        let io = source("src/pio/windows_io.rs");
+        let io = code_lines(io.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(!io.contains(word), "pio/windows_io.rs holds {word}");
+        }
+        assert!(placeholders(&io).0.is_empty());
+        for call in [
+            "seek_read",
+            "seek_write",
+            "DeviceIoControl",
+            "FSCTL_SET_SPARSE",
+            "FSCTL_SET_ZERO_DATA",
+            "GetFileInformationByHandleEx",
+            "FileStandardInfo",
+        ] {
+            assert!(io.contains(call), "pio/windows_io.rs calls {call}");
+        }
+        // Privacy and no-follow opens are built (Task 4): pio/windows_security.rs reads the
+        // token's user and each object's descriptor, makes objects with the private descriptor,
+        // sets it, and refuses reparse points; it holds no stub body or placeholder before its
+        // tests.
+        let security = source("src/pio/windows_security.rs");
+        let security = code_lines(security.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(
+                !security.contains(word),
+                "pio/windows_security.rs holds {word}"
+            );
+        }
+        assert!(placeholders(&security).0.is_empty());
+        for call in [
+            "GetTokenInformation",
+            "GetKernelObjectSecurity",
+            "SetKernelObjectSecurity",
+            "ReOpenFile",
+            "CreateFileW",
+            "CreateDirectoryW",
+            "FileAttributeTagInfo",
+            "FILE_FLAG_OPEN_REPARSE_POINT",
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            "SE_DACL_PROTECTED",
+        ] {
+            assert!(
+                security.contains(call),
+                "pio/windows_security.rs calls {call}"
+            );
+        }
+        // Opens, entry kinds and listings in an open directory are built (Task 5a), and so are
+        // creates and removals (Task 5b) and renames (Task 5c): pio/windows_dir.rs opens and makes
+        // each entry relative to the directory handle, never following a reparse point, makes it
+        // with the private descriptor, removes the object it opened through that handle, lists
+        // the directory through a new open of its handle, and renames by path while a pin that
+        // does not share delete holds the directory, checking its path before and after, and
+        // starts a child in the directory's checked verbatim path while that pin is held (Task 5c,
+        // ruling R1); it holds no stub body or placeholder before its tests.
+        let dir = source("src/pio/windows_dir.rs");
+        // its test hook is under #[cfg(test)] too: the code ends where its test module starts
+        let dir = code_lines(dir.split("#[cfg(test)]\nmod tests {").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(!dir.contains(word), "pio/windows_dir.rs holds {word}");
+        }
+        assert!(placeholders(&dir).0.is_empty());
+        for call in [
+            "NtOpenFile",
+            "RootDirectory: dir.as_raw_handle()",
+            "OBJ_DONT_REPARSE",
+            "FILE_OPEN_REPARSE_POINT",
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            "FileFullDirectoryRestartInfo",
+            "FileFullDirectoryInfo",
+            "CreateFileW",
+            "NtCreateFile",
+            "FILE_CREATE",
+            "PrivateDescriptor::of_this_account",
+            "SecurityDescriptor: sd",
+            "FileDispositionInfoEx",
+            "FILE_DISPOSITION_FLAG_POSIX_SEMANTICS",
+            "move_entry(",
+            "FILE_SHARE_READ | FILE_SHARE_WRITE;",
+            "PinnedDir::of(dir)",
+            "cmd.current_dir(OsString::from_wide(&pinned.verbatim))",
+            "Ok(StartPin { pinned })",
+        ] {
+            assert!(dir.contains(call), "pio/windows_dir.rs calls {call}");
+        }
+        // Directory flushes and write-through renames are built (Task 6): pio/windows_durable.rs
+        // flushes a directory handle opened with backup semantics and the right to add a file,
+        // renames with MoveFileExW's write-through flag and never its copy flag, and holds no
+        // stub body or placeholder before its tests.
+        let durable = source("src/pio/windows_durable.rs");
+        let durable = code_lines(durable.split("#[cfg(test)]").next().unwrap());
+        for word in [
+            "unreachable!",
+            "unimplemented!",
+            "todo!",
+            "Default::default",
+        ] {
+            assert!(
+                !durable.contains(word),
+                "pio/windows_durable.rs holds {word}"
+            );
+        }
+        assert!(placeholders(&durable).0.is_empty());
+        for call in [
+            "FlushFileBuffers",
+            "FILE_FLAG_BACKUP_SEMANTICS",
+            "FILE_ADD_FILE | FILE_READ_ATTRIBUTES | SYNCHRONIZE",
+            "open_entry(dir, &[], FLUSH_ACCESS, FILE_DIRECTORY_FILE)",
+            "MoveFileExW(source.as_ptr(), target.as_ptr(), MOVE_FLAGS)",
+            "MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH",
+            "PinnedDir::of(&from_dir)",
+            "PinnedDir::of(&to_dir)",
+        ] {
+            assert!(
+                durable.contains(call),
+                "pio/windows_durable.rs calls {call}"
+            );
+        }
+        assert!(!durable.contains("MOVEFILE_COPY_ALLOWED"));
     }
 
     #[test]
@@ -881,141 +670,5 @@ mod tests {
         assert_eq!(&buf[..2], b"ab");
         assert_eq!(&buf[2..10], &[0u8; 8]);
         assert_eq!(&buf[10..], b"xyz");
-    }
-
-    #[test]
-    fn pre1_pio_removes_dirs_sets_modes_and_starts_children_in_a_dir_handle() {
-        let d = tempfile::tempdir().unwrap();
-        let root = open_dir(d.path()).unwrap();
-        // remove_dir_at: an empty directory goes; a full one, a file and a link stay.
-        fs::create_dir(d.path().join("empty")).unwrap();
-        remove_dir_at(&root, OsStr::new("empty")).unwrap();
-        assert!(!d.path().join("empty").exists());
-        fs::create_dir(d.path().join("full")).unwrap();
-        fs::write(d.path().join("full/f"), b"x").unwrap();
-        assert!(remove_dir_at(&root, OsStr::new("full")).is_err());
-        assert!(d.path().join("full/f").exists());
-        fs::write(d.path().join("file"), b"x").unwrap();
-        assert!(remove_dir_at(&root, OsStr::new("file")).is_err());
-        fs::create_dir(d.path().join("target")).unwrap();
-        symlink(d.path().join("target"), d.path().join("link")).unwrap();
-        assert!(remove_dir_at(&root, OsStr::new("link")).is_err());
-        assert!(d.path().join("target").is_dir());
-        assert!(remove_dir_at(&root, OsStr::new("a/b")).is_err());
-
-        // set_mode_at: a directory without its owner's bits opens again; a link's target keeps
-        // its mode.
-        set_mode(&d.path().join("target"), 0o000).unwrap();
-        assert!(open_dir_at(&root, OsStr::new("target")).is_err() || own_uid() == 0);
-        set_mode_at(&root, OsStr::new("target"), 0o700).unwrap();
-        assert_eq!(
-            mode_of(&fs::metadata(d.path().join("target")).unwrap()),
-            0o700
-        );
-        open_dir_at(&root, OsStr::new("target")).unwrap();
-        let _ = set_mode_at(&root, OsStr::new("link"), 0o777);
-        assert_eq!(
-            mode_of(&fs::metadata(d.path().join("target")).unwrap()),
-            0o700
-        );
-        assert!(set_mode_at(&root, OsStr::new("target"), 0o10000).is_err());
-
-        // start_in_dir: the child starts in the directory the handle opened, even after that
-        // directory was moved, and finds `./name` there.
-        let here = open_dir_at(&root, OsStr::new("target")).unwrap();
-        fs::rename(d.path().join("target"), d.path().join("moved")).unwrap();
-        fs::create_dir(d.path().join("target")).unwrap();
-        fs::write(d.path().join("moved/name"), b"#!/bin/sh\npwd -P\n").unwrap();
-        set_mode(&d.path().join("moved/name"), 0o700).unwrap();
-        let mut cmd = std::process::Command::new("./name");
-        start_in_dir(&mut cmd, &here).unwrap();
-        drop(here);
-        let out = cmd.output().unwrap();
-        assert!(out.status.success(), "{out:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim_end(),
-            fs::canonicalize(d.path().join("moved"))
-                .unwrap()
-                .to_string_lossy()
-        );
-    }
-
-    #[test]
-    fn ha1_pio_fixture_helpers_set_and_read_modes_links_and_umasks() {
-        let d = tempfile::Builder::new()
-            .permissions(permissions(0o700))
-            .tempdir()
-            .unwrap();
-        assert_eq!(mode_of(&fs::metadata(d.path()).unwrap()), 0o700);
-        let f = d.path().join("f");
-        file_mode(OpenOptions::new().write(true).create_new(true), 0o600)
-            .open(&f)
-            .unwrap();
-        assert_eq!(mode_of(&fs::metadata(&f).unwrap()), 0o600);
-        set_mode(&f, 0o644).unwrap();
-        assert_eq!(mode_of(&fs::metadata(&f).unwrap()), 0o644);
-        let sub = d.path().join("sub");
-        dir_mode(&mut fs::DirBuilder::new(), 0o700)
-            .create(&sub)
-            .unwrap();
-        assert_eq!(mode_of(&fs::metadata(&sub).unwrap()), 0o700);
-        set_mode(&sub, 0o1777).unwrap();
-        assert_eq!(mode_of(&fs::metadata(&sub).unwrap()), 0o1777);
-        let link = d.path().join("link");
-        symlink(&f, &link).unwrap();
-        let lm = fs::symlink_metadata(&link).unwrap();
-        assert!(lm.file_type().is_symlink());
-        assert_ne!(inode(&lm), inode(&fs::metadata(&f).unwrap()));
-        assert_eq!(
-            inode(&fs::metadata(&link).unwrap()),
-            inode(&fs::metadata(&f).unwrap())
-        );
-        let out = under_umask("077", Path::new("/bin/sh"))
-            .args(["-c", "umask"])
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0077");
-    }
-
-    #[test]
-    fn ok5_pio_lists_a_directory_handle_and_reads_entry_kinds_without_following() {
-        let d = tempfile::tempdir().unwrap();
-        fs::write(d.path().join("file"), b"x").unwrap();
-        fs::create_dir(d.path().join("dir")).unwrap();
-        symlink(d.path().join("file"), d.path().join("link")).unwrap();
-        let _socket = std::os::unix::net::UnixListener::bind(d.path().join("sock")).unwrap();
-        let dir = open_dir(d.path()).unwrap();
-        let mut names = vec![];
-        for_each_entry::<io::Error>(&dir, |n| {
-            names.push(n.to_os_string());
-            Ok(())
-        })
-        .unwrap();
-        names.sort();
-        assert_eq!(names, ["dir", "file", "link", "sock"]);
-        for (name, kind) in [
-            ("dir", EntryKind::Dir),
-            ("file", EntryKind::File),
-            ("link", EntryKind::Link),
-            ("sock", EntryKind::Other),
-        ] {
-            assert_eq!(entry_kind_at(&dir, name.as_ref()).unwrap(), kind, "{name}");
-        }
-        assert_eq!(
-            entry_kind_at(&dir, "gone".as_ref()).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-        // the first error of the callback ends the listing and is returned
-        let mut seen = 0;
-        let e = for_each_entry(&dir, |_| {
-            seen += 1;
-            Err(io::Error::other("stop"))
-        })
-        .unwrap_err();
-        assert_eq!((seen, e.to_string()), (1, "stop".to_string()));
-        // an empty directory lists nothing
-        let empty = open_dir_at(&dir, "dir".as_ref()).unwrap();
-        for_each_entry::<io::Error>(&empty, |_| panic!("no entry")).unwrap();
     }
 }

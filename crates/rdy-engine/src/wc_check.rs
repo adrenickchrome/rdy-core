@@ -107,23 +107,26 @@ mod relative_to_tests {
     /// a path with its `..` dropped.
     #[test]
     fn wcck1_relative_to_resolves_dotdot_and_refuses_a_path_outside() {
-        let root = Path::new("/nonexistent-root/tree");
+        // an absolute path on this host
+        let abs = |p: &str| format!("{}{p}", if cfg!(windows) { "C:" } else { "" });
+        let root = abs("/nonexistent-root/tree");
+        let root = Path::new(&root);
         let rel = |p: &str| relative_to(root, Path::new(p));
-        assert_eq!(rel("/nonexistent-root/tree").unwrap(), None);
+        assert_eq!(rel(&abs("/nonexistent-root/tree")).unwrap(), None);
         assert_eq!(
-            rel("/nonexistent-root/tree/a/../b/c.yaml")
+            rel(&abs("/nonexistent-root/tree/a/../b/c.yaml"))
                 .unwrap()
                 .as_deref(),
             Some("b/c.yaml")
         );
         assert_eq!(rel("a/./b.yaml").unwrap().as_deref(), Some("a/b.yaml"));
         for outside in [
-            "/nonexistent-root/tree/../elsewhere/x.yaml",
-            "/nonexistent-root/elsewhere",
-            "../elsewhere",
-            "a/../../elsewhere",
+            abs("/nonexistent-root/tree/../elsewhere/x.yaml"),
+            abs("/nonexistent-root/elsewhere"),
+            "../elsewhere".to_string(),
+            "a/../../elsewhere".to_string(),
         ] {
-            let e = rel(outside).unwrap_err();
+            let e = rel(&outside).unwrap_err();
             assert_eq!(e.code, E_BAD_INPUT, "{outside}");
         }
         assert_eq!(

@@ -9,28 +9,43 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// What one `stat` of a file says, for telling whether its bytes may have changed: length,
-/// modification time, inode number and status-change time (`ctime`), all at full precision.
-/// `ctime` is set by the kernel on every write, rename into place and `utimes`, and no tool can
-/// set it back or ahead, so it is what "changed since" is judged by.
+/// What the handle of an open file says, for telling whether its bytes may have changed:
+/// length, modification time, the file's full identity ([`FileId`], never cut to an inode
+/// number) and its change time (`ctime`), all at full precision. The change time is set by the
+/// system on every write, rename into place and time change, and no tool can set it back or
+/// ahead, so it is what "changed since" is judged by. A stamp is a hint for skipping a read,
+/// never proof that the bytes are the same: equal hashes are.
+///
+/// [`FileId`]: rdy_store::fileid::FileId
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp {
     pub len: u64,
     pub mtime: std::time::SystemTime,
-    pub ino: u64,
+    pub id: rdy_store::fileid::FileId,
     pub ctime: std::time::SystemTime,
 }
 
 impl FileStamp {
-    pub fn of(meta: &std::fs::Metadata) -> FileStamp {
-        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        let rdy_store::fileid::ChangeStamp { ino, ctime } = rdy_store::fileid::change_stamp(meta);
-        FileStamp {
+    /// The stamp of the open file `f`, which `path` names, read from its handle. A failed read
+    /// is an error (`could not read change stamp for {path}: {error}` when the length or mtime
+    /// cannot be read); no part of a stamp is made up.
+    pub fn of_open(f: &std::fs::File, path: &Path) -> std::io::Result<FileStamp> {
+        let unread = |e: std::io::Error| {
+            std::io::Error::new(
+                e.kind(),
+                format!("could not read change stamp for {}: {e}", path.display()),
+            )
+        };
+        let meta = f.metadata().map_err(unread)?;
+        let mtime = meta.modified().map_err(unread)?;
+        let rdy_store::fileid::ChangeStamp { id, ctime } =
+            rdy_store::fileid::change_stamp_of(f, path)?;
+        Ok(FileStamp {
             len: meta.len(),
             mtime,
-            ino,
+            id,
             ctime,
-        }
+        })
     }
 }
 
@@ -82,8 +97,9 @@ pub(crate) struct Sources {
     pub(crate) packs: Vec<(PathBuf, Vec<u8>)>,
 }
 
-/// Reads `.rdy.yaml`, `.rdy/local.yaml` when it exists, and the pack files, each stat'ed just before its bytes are read.
-/// No config file is `E_NO_PROJECT`; any other failure is an I/O error.
+/// Reads `.rdy.yaml`, `.rdy/local.yaml` when it exists, and the pack files: each is opened once,
+/// stamped from its handle, then read through that same handle, so the stamp is the stamp of
+/// the bytes read. No config file is `E_NO_PROJECT`; any other failure is an I/O error.
 pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     THREAD_SOURCE_READS.with(|n| n.set(n.get().wrapping_add(1)));
@@ -93,23 +109,25 @@ pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
         return Err(config_levels::missing_project(project));
     }
     let mut paths = vec![cfg_path];
-    let local = project.join(config_levels::LOCAL_FILE);
+    let local = config_levels::local_path(project);
     let has_local = local.exists();
     if has_local {
         paths.push(local);
     }
-    paths.extend(pack_files(&project.join(".rdy/packs"))?);
+    paths.extend(pack_files(&project.join(".rdy").join("packs"))?);
     let mut files = Vec::with_capacity(paths.len());
     let mut contents = Vec::with_capacity(paths.len());
     let mut buf = Vec::new();
     for path in paths {
-        let meta = std::fs::metadata(&path).map_err(io)?;
-        let bytes = std::fs::read(&path).map_err(io)?;
+        let mut file = std::fs::File::open(&path).map_err(io)?;
+        let stamp = FileStamp::of_open(&file, &path).map_err(io)?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).map_err(io)?;
         buf.extend_from_slice(path.as_os_str().as_encoded_bytes());
         buf.push(0);
         buf.extend_from_slice(&bytes);
         buf.push(0);
-        files.push((path.clone(), FileStamp::of(&meta)));
+        files.push((path.clone(), stamp));
         contents.push((path, bytes));
     }
     let mut contents = contents.into_iter();
@@ -202,7 +220,7 @@ pub(crate) fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
 
 pub(crate) fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
     let mut packs = vec![];
-    for f in pack_files(&root.join(".rdy/packs"))? {
+    for f in pack_files(&root.join(".rdy").join("packs"))? {
         let bytes = std::fs::read(&f).map_err(io)?;
         packs.push((f, bytes));
     }
@@ -347,10 +365,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("a.yaml");
         std::fs::write(&f, "x\n").unwrap();
-        let m = std::fs::metadata(&f).unwrap();
-        let seam = rdy_store::fileid::change_stamp(&m);
-        let stamp = FileStamp::of(&m);
-        assert_eq!(stamp.ino, seam.ino);
+        let h = std::fs::File::open(&f).unwrap();
+        let seam = rdy_store::fileid::change_stamp_of(&h, &f).unwrap();
+        let stamp = FileStamp::of_open(&h, &f).unwrap();
+        assert_eq!(stamp.id, seam.id);
+        assert_eq!(stamp.id, rdy_store::fileid::FileId::lstat(&f).unwrap());
         assert_eq!(stamp.ctime, seam.ctime);
+        assert_eq!(stamp.len, 2);
     }
 }

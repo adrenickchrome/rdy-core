@@ -300,9 +300,8 @@ pub fn status_rows(rdy_dir: &Path) -> Rows {
     let Ok(run) = pio::open_dir_at(&dir, OsStr::new(RUN_DIR)) else {
         return Rows::new();
     };
-    match run.metadata() {
-        Ok(m) if pio::is_private_dir(&m) => {}
-        _ => return Rows::new(),
+    if !is_private(&run).unwrap_or(false) {
+        return Rows::new();
     }
     let mut rows = read_counts(&run, today).unwrap_or_default();
     retain(&mut rows, today);
@@ -922,7 +921,7 @@ impl Core {
             }
             other => other?,
         };
-        if !pio::is_private_dir(&opened.metadata()?) {
+        if !is_private(&opened)? {
             return Err(io::Error::other("the run directory is not private"));
         }
         Ok(Some(opened))
@@ -1006,6 +1005,13 @@ impl Drop for Held {
     }
 }
 
+/// Whether this account owns the open file or directory `f` and it is private, read from the
+/// handle.
+fn is_private(f: &File) -> io::Result<bool> {
+    let privacy = pio::privacy(f)?;
+    Ok(privacy.mine && privacy.private)
+}
+
 /// Opens the lock file in the private run directory, making it when absent. A link, a file that
 /// is not private or a file with other links is refused.
 fn open_lock(run: &File) -> io::Result<File> {
@@ -1022,8 +1028,8 @@ fn open_lock(run: &File) -> io::Result<File> {
         },
         Err(e) => return Err(e),
     };
-    let meta = file.metadata()?;
-    if !pio::is_private_file(&meta) || fileid::links(&meta) != 1 {
+    let links = fileid::links_of(&file, Path::new(LOCK_NAME))?;
+    if !file.metadata()?.is_file() || !is_private(&file)? || links != 1 {
         return Err(io::Error::other("the count lock file is not private"));
     }
     Ok(file)

@@ -156,7 +156,7 @@ fn reload1_mcp_results_carry_the_notice_once() {
     let rt = Hosted::rt();
     rt.block_on(async {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let (r, mut w) = h.mcp_stream().await.into_split();
+        let (r, mut w) = rdy_daemon::sys::split(h.mcp_stream().await);
         let mut r = BufReader::new(r);
         let mut line = String::new();
         let line_of = |v: serde_json::Value| format!("{v}\n");

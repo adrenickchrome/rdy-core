@@ -23,3 +23,4 @@ mod store_reader;
 mod store_redaction_crash;
 mod store_resolve;
 mod store_viewops;
+mod store_windows;

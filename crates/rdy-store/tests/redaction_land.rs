@@ -693,6 +693,22 @@ fn rdx7_direct_store_landing_finishes_before_return() {
         assert!(stub.is_redacted() && stub.body == CONTENT_REMOVED);
         assert!(s.verify_report().unwrap().redaction.is_some());
         drop(s);
+        // Windows: the reader still holds the replaced index, whose database locks it against
+        // every other handle, so the reopen cannot zero the name that keeps it and is refused,
+        // naming it; once the reader drops, the file is zeroed and the name goes
+        #[cfg(windows)]
+        {
+            let e = Store::open(&w.path)
+                .err()
+                .expect("refused while the reader lives");
+            assert!(
+                e.to_string().contains(
+                    "index.redb.erase is a replaced index file kept for zeroing, and it could not be zeroed and removed"
+                ),
+                "{e}"
+            );
+            drop(reader);
+        }
         // the reopen checks the same human proof from the log alone
         let s = Store::open(&w.path).unwrap();
         assert_eq!(

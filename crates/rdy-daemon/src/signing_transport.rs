@@ -859,8 +859,8 @@ pub fn never_interrupted() -> InterruptSource {
     Arc::new(|| Box::pin(std::future::pending()))
 }
 
-/// The caller's `SIGINT`, caught (through the sys seam) only while a callback asks the agent:
-/// outside one, `SIGINT` does what it did before.
+/// The caller's interrupt (`SIGINT`; Ctrl-C and Ctrl-Break on Windows), caught through the sys
+/// seam only while a callback asks the agent: outside one, it does what it did before.
 pub fn sigint() -> InterruptSource {
     Arc::new(|| {
         let guard = crate::sys::catch_interrupt();

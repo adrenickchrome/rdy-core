@@ -118,7 +118,10 @@ fn kill2_a_daemon_killed_mid_write_loses_no_acknowledged_write_and_never_duplica
 #[test]
 fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
     let s = Served::new();
-    s.json(&["--json", "status"]);
+    // the daemon the next connect expects must be up and of this build: a failed start is named
+    // here, not as a missing daemon below
+    let (ok, st) = s.json(&["--json", "status"]);
+    assert!(ok, "the first status starts the daemon: {st}");
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let hello = Hello {
@@ -131,8 +134,14 @@ fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
                 .project_id()
                 .expect("the project's .rdy"),
         };
-        let Attempt::Ready(mut c) = connect(&RunDir::of_project(s.dir.path()), &hello).await else {
-            panic!("no daemon")
+        let mut c = match connect(&RunDir::of_project(s.dir.path()), &hello).await {
+            Attempt::Ready(c) => c,
+            Attempt::Exiting => panic!(
+                "the daemon is of another build than this test: the rdy binary was built from \
+                 other sources (rebuild it with cargo build -p rdy-cli, in the profile this \
+                 test runs in)"
+            ),
+            other => panic!("no daemon: {other:?}"),
         };
         c.ctl("session", json!({"actor": null, "run": null}))
             .await
@@ -314,8 +323,9 @@ fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
                 .project_id()
                 .expect("the project's .rdy"),
         };
-        let Attempt::Ready(mut c) = connect(&RunDir::of_project(s.dir.path()), &hello).await else {
-            panic!("no daemon")
+        let mut c = match connect(&RunDir::of_project(s.dir.path()), &hello).await {
+            Attempt::Ready(c) => c,
+            other => panic!("no daemon: {other:?}"),
         };
         c.ctl("session", json!({"actor": null, "run": null}))
             .await

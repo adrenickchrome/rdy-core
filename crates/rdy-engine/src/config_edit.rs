@@ -16,8 +16,9 @@
 //! under a umask of 002, `rdy init` makes `.rdy/` group-writable, and a group that can write it
 //! can already change the store. All users may write such a directory only when its sticky bit
 //! is set, so no other user can remove or replace this user's entries. A secret file must also
-//! be mode 0o600, and a lock must give group and others no access; a settings file keeps its mode
-//! through a replacement. Nothing here changes the mode of any directory, or of an existing
+//! be mode 0o600, and a lock must give group and others no access; on Unix a settings file keeps
+//! its mode through a replacement. On Windows a replaced file keeps the read-only attribute and
+//! ends private. Nothing here changes the mode of any directory, or of an existing
 //! file. mkdir returns no handle, so no call proves that the directory opened after it is the one
 //! it made: a directory is made only when the umask keeps 0o700 whole, and what then stands at
 //! its name is used only if it is a 0o700 directory of this user, as that mkdir makes it.
@@ -32,7 +33,7 @@ use rdy_store::{fsutil, pio};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A config file's bytes, read under its sibling lock, which is held until drop.
@@ -98,8 +99,9 @@ impl LockedConfig {
     }
 
     /// Replaces the file's bytes durably while the lock is held: the old bytes stay until the
-    /// complete new bytes are renamed into place. A secret file ends 0o600; a settings file keeps
-    /// its mode, and a new one is 0o600. Bytes over the limit are `E_LIMIT`, refused before any
+    /// complete new bytes are renamed into place. A secret file ends 0o600. On Unix a settings
+    /// file keeps its mode; on Windows a replaced file keeps the read-only attribute and ends
+    /// private. A new file is 0o600 on Unix. Bytes over the limit are `E_LIMIT`, refused before any
     /// temp file is made.
     ///
     /// The path must still lead to the directory checked at open, with the same checks, and a
@@ -116,7 +118,7 @@ impl LockedConfig {
         let keep = match pio::open_read_at(&self.dir, &self.name) {
             Ok(f) => {
                 let m = f.metadata().map_err(|_| save_failed())?;
-                check_target(&m, self.private)?;
+                check_target(&f, &m, self.private)?;
                 (!self.private).then(|| m.permissions())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -181,13 +183,21 @@ fn too_large(limit: usize) -> RdyError {
 /// not empty, with no `.`, `..` or empty component (a programming error guard: callers pass
 /// constants).
 fn split_rel(rel: &Path) -> Result<(Vec<&OsStr>, &OsStr), RdyError> {
+    // `components` drops an inner `.`, an empty part and a trailing separator, so these are read
+    // from the text
     let text = rel.to_str().ok_or_else(not_private)?;
+    if text
+        .split(std::path::is_separator)
+        .any(|part| part.is_empty() || part == ".")
+    {
+        return Err(not_private());
+    }
     let mut parts: Vec<&OsStr> = vec![];
-    for part in text.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            return Err(not_private());
+    for part in rel.components() {
+        match part {
+            Component::Normal(name) => parts.push(name),
+            _ => return Err(not_private()),
         }
-        parts.push(OsStr::new(part));
     }
     let name = parts.pop().ok_or_else(not_private)?;
     Ok((parts, name))
@@ -270,11 +280,12 @@ fn make_dir(parent: &File, parent_path: &Path, part: &OsStr) -> Result<File, Rdy
         Err(e) => return Err(open_failed(&e)),
     };
     let m = dir.metadata().map_err(|_| save_failed())?;
-    if !m.is_dir() || pio::owner(&m) != pio::own_uid() || !pio::is_private_dir(&m) {
+    let privacy = pio::privacy(&dir).map_err(|_| save_failed())?;
+    if !m.is_dir() || !privacy.mine || !privacy.private {
         return Err(not_private());
     }
-    dir.sync_all().map_err(|_| save_failed())?;
-    parent.sync_all().map_err(|_| save_failed())?;
+    pio::sync_open_dir(&dir, &parent_path.join(part)).map_err(|_| save_failed())?;
+    pio::sync_open_dir(parent, parent_path).map_err(|_| save_failed())?;
     fsutil::record(parent_path);
     Ok(dir)
 }
@@ -296,23 +307,25 @@ fn probe_name(name: &OsStr) -> OsString {
 /// it, and all users may write it only when the sticky bit is set.
 fn check_dir(dir: &File, private: bool) -> Result<(), RdyError> {
     let m = dir.metadata().map_err(|_| save_failed())?;
+    let privacy = pio::privacy(dir).map_err(|_| save_failed())?;
     let shared = if private {
-        pio::is_shared_writable(&m)
+        privacy.shared_writable
     } else {
-        pio::is_world_writable_unsticky(&m)
+        privacy.open_to_all
     };
-    if m.is_dir() && pio::owner(&m) == pio::own_uid() && !shared {
+    if m.is_dir() && privacy.mine && !shared {
         Ok(())
     } else {
         Err(not_private())
     }
 }
 
-/// The target, judged from its open handle: a regular file this user owns, and 0o600 when
-/// `private`.
-fn check_target(m: &Metadata, private: bool) -> Result<(), RdyError> {
-    let ours = m.is_file() && pio::owner(m) == pio::own_uid();
-    if ours && (!private || pio::is_private_file(m)) {
+/// The target, judged from its open handle `f`, whose metadata is `m`: a regular file this user
+/// owns, and private (0o600) when `private`.
+fn check_target(f: &File, m: &Metadata, private: bool) -> Result<(), RdyError> {
+    let privacy = pio::privacy(f).map_err(|_| save_failed())?;
+    let ours = m.is_file() && privacy.mine;
+    if ours && (!private || privacy.private) {
         Ok(())
     } else {
         Err(not_private())
@@ -346,7 +359,8 @@ fn open_lock(dir: &File, name: &OsStr) -> Result<File, RdyError> {
         Err(e) => return Err(open_failed(&e)),
     };
     let m = file.metadata().map_err(|_| save_failed())?;
-    if !m.is_file() || pio::owner(&m) != pio::own_uid() || !pio::is_owner_only(&m) {
+    let privacy = pio::privacy(&file).map_err(|_| save_failed())?;
+    if !m.is_file() || !privacy.mine || !privacy.owner_only {
         return Err(not_private());
     }
     Ok(file)
@@ -362,7 +376,7 @@ fn read_target(dir: &File, name: &OsStr, private: bool, limit: usize) -> Result<
         Err(e) => return Err(open_failed(&e)),
     };
     let m = file.metadata().map_err(|_| save_failed())?;
-    check_target(&m, private)?;
+    check_target(&file, &m, private)?;
     let cap = u64::try_from(limit)
         .ok()
         .and_then(|l| l.checked_add(1))
@@ -375,4 +389,51 @@ fn read_target(dir: &File, name: &OsStr, private: bool, limit: usize) -> Result<
         return Err(too_large(limit));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod split_rel_tests {
+    use super::*;
+
+    #[test]
+    fn splits_native_paths() {
+        let rel: PathBuf = [".rdy", "hub", "credentials"].iter().collect();
+        let (dirs, name) = split_rel(&rel).unwrap();
+        assert_eq!(dirs, [OsStr::new(".rdy"), OsStr::new("hub")]);
+        assert_eq!(name, OsStr::new("credentials"));
+        let (dirs, name) = split_rel(Path::new("file")).unwrap();
+        assert!(dirs.is_empty());
+        assert_eq!(name, OsStr::new("file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn splits_backslash_paths() {
+        let (dirs, name) = split_rel(Path::new(r"a\b\c")).unwrap();
+        assert_eq!(dirs, [OsStr::new("a"), OsStr::new("b")]);
+        assert_eq!(name, OsStr::new("c"));
+        assert!(split_rel(Path::new(r"a\..\c")).is_err());
+    }
+
+    #[test]
+    fn wx12d_refuses_what_path_components_drop() {
+        for bad in ["a/./b", "a/.", "a//b", "a/"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wx12d_refuses_what_path_components_drop_with_backslashes() {
+        for bad in [r"a\.\b", r"a\\b", r"a\", r"C:a"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn refuses_odd_paths() {
+        for bad in ["", ".", "..", "a/../b", "./a", "/a"] {
+            assert!(split_rel(Path::new(bad)).is_err(), "{bad}");
+        }
+    }
 }

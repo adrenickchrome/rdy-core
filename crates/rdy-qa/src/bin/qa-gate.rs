@@ -1,6 +1,9 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
-use rdy_qa::gate_steps::{build_steps, cargo, fail_tail};
+use rdy_qa::gate_steps::{
+    ChildOutput, build_steps, cargo, discover_command, discovered, fail_tail, list_guarded,
+    run_bounded,
+};
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report};
 use std::collections::BTreeMap;
@@ -40,18 +43,17 @@ fn root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// Runs a command, returning (success, stdout + stderr combined).
-fn step(name: &str, mut cmd: Command) -> (bool, String) {
+/// Runs a command with bounded output, keeping the exit status and the two streams apart.
+fn step_out(name: &str, mut cmd: Command) -> ChildOutput {
     eprintln!("==> {name}");
     cmd.current_dir(root());
-    match cmd.output() {
-        Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.success(), text)
-        }
-        Err(e) => (false, format!("could not run: {e}")),
-    }
+    run_bounded(cmd)
+}
+
+/// Runs a command, returning (success, stdout + stderr combined).
+fn step(name: &str, cmd: Command) -> (bool, String) {
+    let out = step_out(name, cmd);
+    (out.ok, out.combined())
 }
 
 /// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
@@ -189,6 +191,12 @@ fn perf_tier(
 
 fn main() {
     let args = Args::parse();
+    if cfg!(windows)
+        && let Err(e) = rdy_qa::gate_steps::step_aside()
+    {
+        eprintln!("could not move the running gate aside: {e}");
+        std::process::exit(2);
+    }
     let start = Instant::now();
     // A crashed run must not leave a stale verdict behind.
     for f in ["report.md", "report.json"] {
@@ -245,10 +253,7 @@ fn main() {
 
         let (ok, out) = step(
             "workspace tests",
-            with_require_all(
-                cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
-                &args,
-            ),
+            with_require_all(cargo(&report::WORKSPACE_TEST_ARGS), &args),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
@@ -274,9 +279,43 @@ fn main() {
         gate("unix seams", problems.is_empty(), problems.join("\n"));
     }
 
+    // Cargo's artifact record names every test executable. A binary it does not name is missing,
+    // and its area fails.
+    let mut exes = vec![];
+    let mut discovery_ok = true;
+    if plan.guarded || !plan.files.is_empty() {
+        let out = step_out("discover rdy-qa test binaries", discover_command());
+        match discovered(&out) {
+            Ok(found) => {
+                exes = found;
+                let names: Vec<String> = exes.iter().map(|e| e.name.clone()).collect();
+                let problems = report::missing_binaries(&plan.files, &names);
+                discovery_ok = problems.is_empty();
+                gate("rdy-qa test binaries", discovery_ok, problems.join("\n"));
+            }
+            Err(e) => {
+                discovery_ok = false;
+                eprintln!("{e}");
+                gate("rdy-qa test binaries", false, e);
+            }
+        }
+        if out.dropped > 0 {
+            notes.push(format!(
+                "discovery output cut: {} bytes dropped from the front",
+                out.dropped
+            ));
+        }
+    }
+
     // The hardening suite, one test binary at a time; each area reports as one row (an area
-    // of two binaries, `engine` and `engine_read`, sums them).
+    // of two binaries, `engine` and `engine_read`, sums them, and each binary keeps its own
+    // evidence row).
     for binary in &plan.files {
+        if discovery_ok && !exes.iter().any(|e| &e.name == binary) {
+            // not reachable after the check above; kept so a binary is never silently skipped
+            report::add_missing(&mut areas, binary);
+            continue;
+        }
         let mut c = with_require_all(
             cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
             &args,
@@ -284,39 +323,48 @@ fn main() {
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
         }
-        let (ok, out) = step(&format!("rdy-qa {binary}"), c);
-        let run = report::parse_cargo_test(&out);
-        seeds.extend(report::failing_seeds(&out));
-        if !ok && run.failures.is_empty() {
-            eprintln!("{out}");
+        let out = step_out(&format!("rdy-qa {binary}"), c);
+        let text = out.combined();
+        let run = report::parse_cargo_test(&text);
+        seeds.extend(report::failing_seeds(&text));
+        if !out.ok && run.failures.is_empty() {
+            eprintln!("{text}");
         }
-        report::add_run(&mut areas, binary, ok, run);
+        if out.dropped > 0 {
+            notes.push(format!(
+                "`{binary}` output cut: {} bytes dropped from the front",
+                out.dropped
+            ));
+        }
+        report::add_run_with_exit(&mut areas, binary, out.ok, &out.status_text(), run);
+    }
+    if !discovery_ok {
+        // a binary that Cargo did not name has no run above; name it in its area
+        for binary in &plan.files {
+            if !areas
+                .iter()
+                .any(|a| a.binaries.iter().any(|b| &b.name == binary))
+            {
+                report::add_missing(&mut areas, binary);
+            }
+        }
     }
 
     if plan.lib {
-        let (ok, out) = step(
+        let out = step_out(
             "rdy-qa unit tests",
             with_require_all(
                 cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
                 &args,
             ),
         );
-        let run = report::parse_cargo_test(&out);
-        seeds.extend(report::failing_seeds(&out));
-        if !ok && run.failures.is_empty() {
-            eprintln!("{out}");
+        let text = out.combined();
+        let run = report::parse_cargo_test(&text);
+        seeds.extend(report::failing_seeds(&text));
+        if !out.ok && run.failures.is_empty() {
+            eprintln!("{text}");
         }
-        areas.push(Area {
-            name: "lib".into(),
-            passed: run.passed,
-            failed: run.failed,
-            ignored: run.ignored,
-            skipped: run.skipped.len(),
-            skip_lines: run.skipped,
-            ok,
-            failures: run.failures,
-            panics: run.panics,
-        });
+        report::add_run_with_exit(&mut areas, "lib", out.ok, &out.status_text(), run);
     }
 
     let (perf_verdicts, perf_note, perf_ok) = if plan.perf {
@@ -325,21 +373,15 @@ fn main() {
         (vec![], "Skipped (`--skip-perf`).".to_string(), true)
     };
 
+    // Each executable lists its own tests, run directly (no shell); its stdout is the listing.
     let guarded = if plan.guarded {
-        // The `Running ...` headers go to stderr: merge the streams in order for the area parse.
-        let mut list_cmd = Command::new("sh");
-        list_cmd.args([
-            "-c",
-            "${CARGO:-cargo} test -p rdy-qa --release -- --list 2>&1",
-        ]);
-        let (list_ok, list) = step("list guarded tests", list_cmd);
-        if !list_ok {
-            notes.push(format!(
-                "guarded-id listing failed: {}",
-                report::tail(&list, 5)
-            ));
+        eprintln!("==> list guarded tests");
+        let dir = root().join("crates/rdy-qa");
+        let (guarded, problems) = list_guarded(&exes, &dir, run_bounded);
+        for p in problems {
+            notes.push(format!("guarded-id listing failed: {p}"));
         }
-        report::guarded_ids(&list)
+        guarded
     } else {
         BTreeMap::new()
     };
@@ -364,6 +406,7 @@ fn main() {
         failing_seeds: seeds,
         notes,
         guarded,
+        os_excluded: report::os_excluded(),
     };
 
     let dir = root().join("target/qa");

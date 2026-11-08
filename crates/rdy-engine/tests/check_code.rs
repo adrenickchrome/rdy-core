@@ -29,12 +29,16 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_engine::code_index::empty_hooks_dir().display()
+            ),
         ])
         .args(args)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("run git");
     assert!(
@@ -240,6 +244,7 @@ fn ck4_diff_reads_only_anchored_committed_files() {
     git(dir, &["config", "diff.evil.command", &evil]);
     git(dir, &["config", "diff.evil.textconv", &evil]);
     git(dir, &["config", "diff.external", &evil]);
+    #[cfg(unix)]
     rdy_store::pio::set_mode(&script, 0o755).unwrap();
     write(dir, ".gitattributes", b"*.rs diff=evil\n");
     write(dir, "src/kept.rs", b"one\nTWO\n");

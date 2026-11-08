@@ -1,18 +1,32 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets and path bytes. FW-XP1 Phase 4 ports it.
+//! The shared daemon fixture. It reaches the endpoint only through the `sys` seam, so one harness
+//! serves a Unix socket and a Windows named pipe.
 #![allow(dead_code)]
+pub mod agent;
 use rdy_daemon::*;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
+/// The stream of the daemon's endpoint: a Unix socket or a named pipe.
+pub type Conn = rdy_daemon::sys::Stream;
+
+/// A new project directory. On Unix it is under /tmp, so `.rdy/run/rdy.sock` fits `sun_path`.
+#[cfg(unix)]
 pub fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("rdyd")
         .tempdir_in("/tmp")
         .expect("tempdir in /tmp")
+}
+
+/// A new project directory. The endpoint is a named pipe, so the path length does not matter.
+#[cfg(windows)]
+pub fn short_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("rdyd")
+        .tempdir()
+        .expect("tempdir")
 }
 
 /// Echoes `args`; records ended sessions.
@@ -54,6 +68,17 @@ pub struct TestDaemon {
     pub readiness: Readiness,
     pub echo: Arc<Echo>,
     pub task: tokio::task::JoinHandle<std::io::Result<ExitReason>>,
+}
+
+impl TestDaemon {
+    /// Stops the daemon, waits for it to end and removes its directory. The removal fails while
+    /// any handle in the directory is open, which is the check that nothing leaked.
+    pub async fn finish(self) -> ExitReason {
+        self.handle.stop();
+        let reason = self.task.await.expect("daemon task").expect("daemon run");
+        self.dir.close().expect("the fixture directory closes");
+        reason
+    }
 }
 
 /// A bound daemon of `version` with the echo handler, not yet ready unless `ready`.
@@ -100,18 +125,35 @@ pub fn hello_built(version: &str, build: &str, cwd: &Path) -> String {
         + "\n"
 }
 
+/// The endpoint's name as a record holds it: a Unix path's bytes, or a pipe name (always UTF-8).
+#[cfg(unix)]
+fn endpoint_bytes(endpoint: &Path) -> Vec<u8> {
+    rdy_daemon::sys::path_bytes(endpoint).to_vec()
+}
+
+#[cfg(windows)]
+fn endpoint_bytes(endpoint: &Path) -> Vec<u8> {
+    endpoint
+        .to_str()
+        .expect("a pipe name is UTF-8")
+        .as_bytes()
+        .to_vec()
+}
+
 /// Writes `run`'s socket record as a daemon does: the socket, then the `.rdy` identity.
 pub fn write_record(run: &RunDir, socket: &Path, project: &ProjectId) {
-    use std::os::unix::ffi::OsStrExt;
-    let mut bytes = socket.as_os_str().as_bytes().to_vec();
+    let mut bytes = endpoint_bytes(socket);
     bytes.push(b'\n');
     bytes.extend_from_slice(format!("{project}\n").as_bytes());
-    std::fs::write(run.socket_record(), bytes).unwrap();
+    // private to this account, as a daemon writes it: a client believes no other record
+    rdy_store::fsutil::write_private_durable(&run.socket_record(), &bytes).unwrap();
 }
 
 /// Connects, sends `line` as the hello, and returns the reader and the first reply line.
-pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<UnixStream>, String) {
-    let mut s = UnixStream::connect(run.socket()).await.expect("connect");
+pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<Conn>, String) {
+    let mut s = rdy_daemon::sys::connect(&run.socket())
+        .await
+        .expect("connect");
     s.write_all(line.as_bytes()).await.unwrap();
     let mut r = BufReader::new(s);
     let mut out = String::new();
@@ -119,10 +161,176 @@ pub async fn connect_with(run: &RunDir, line: &str) -> (BufReader<UnixStream>, S
     (r, out)
 }
 
-pub async fn ctl(r: &mut BufReader<UnixStream>, id: u64, op: &str, args: Value) -> Value {
+pub async fn ctl(r: &mut BufReader<Conn>, id: u64, op: &str, args: Value) -> Value {
     let line = json!({"id": id, "op": op, "args": args}).to_string() + "\n";
     r.get_mut().write_all(line.as_bytes()).await.unwrap();
     let mut out = String::new();
     r.read_line(&mut out).await.unwrap();
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out:?}"))
+}
+
+/// Makes a symbolic link to a file at `link`. Windows needs the symbolic-link privilege, which the
+/// ordinary test account holds.
+pub fn symlink_file(target: &Path, link: &Path) {
+    rdy_store::pio::symlink(target, link).unwrap();
+}
+
+/// An endpoint name that once had a listener and has none now. On Unix the socket file stays; a
+/// pipe leaves no trace, so on Windows it is the valid, project-derived pipe name of a root that
+/// nothing ever served.
+#[cfg(unix)]
+pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
+    let dead = dir.join("dead.sock");
+    drop(rdy_daemon::sys::bind(&dead).unwrap());
+    dead
+}
+
+#[cfg(windows)]
+pub fn dead_endpoint(dir: &Path) -> std::path::PathBuf {
+    rdy_daemon::sys::project_endpoint(&dir.join("never-served")).0
+}
+
+/// What a refusal to follow a link says on this platform (`open_no_follow`).
+#[cfg(unix)]
+pub const LINK_REFUSAL: &str = "symbolic link";
+#[cfg(windows)]
+pub const LINK_REFUSAL: &str = "is a reparse point; rdy will not follow it";
+
+/// Whether the project's endpoint answers. A named pipe is not a file, so on Windows this asks the
+/// system's pipe namespace (`sys::endpoint_liveness`), not the file system.
+pub async fn socket_live(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        rdy_daemon::sys::endpoint_liveness(&run.socket()).await == rdy_daemon::sys::Liveness::Live
+    }
+}
+
+/// Whether the project's endpoint is proved gone: no socket file on Unix, no pipe of that name on
+/// Windows (`Liveness::Gone`, which is only ever a proved end). A pipe's name lasts until the last
+/// instance of it closes, so on Windows this waits up to 3 s for that; it cannot show an unlink
+/// while any connection to the daemon is open (the connection holds an instance).
+pub async fn socket_gone(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        !run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if rdy_daemon::sys::endpoint_liveness(&run.socket()).await
+                == rdy_daemon::sys::Liveness::Gone
+            {
+                return true;
+            }
+            if std::time::Instant::now() > end {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// A successor daemon's listener on the project's endpoint. On Unix the stopping daemon has
+/// unlinked its socket, so the bind is immediate. On Windows the name is held until the old
+/// daemon's listener drops, so this waits up to 3 s for that; call it after any run-file
+/// assertions, because waiting lets the old `run` go on to its cleanup.
+pub async fn bind_successor(run: &RunDir) -> rdy_daemon::sys::Listener {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match rdy_daemon::sys::bind(&run.socket()) {
+            Ok(l) => return l,
+            Err(_) if cfg!(windows) && std::time::Instant::now() < end => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("the successor could not bind: {e}"),
+        }
+    }
+}
+
+/// Whether `daemon.pid` is gone; on Windows it waits up to 3 s, as `socket_gone` does.
+pub async fn pid_file_gone(run: &RunDir) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while run.pid_file().exists() {
+        if cfg!(unix) || std::time::Instant::now() > end {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    true
+}
+
+pub fn opts(
+    version: &str,
+    cwd: &std::path::Path,
+    spawn: impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static,
+) -> StartOptions {
+    let mut o = StartOptions::new(
+        version.into(),
+        Proto::Ctl,
+        cwd.to_path_buf(),
+        Box::new(spawn),
+    );
+    o.start_timeout = std::time::Duration::from_secs(3);
+    o
+}
+
+/// A spawned daemon that never exits (an in-process one has no child to watch).
+pub fn running() -> Spawned {
+    Spawned {
+        exited: Box::new(|| None),
+    }
+}
+
+/// A spawn closure that starts an in-process echo daemon of `version` on the runtime (counting calls).
+pub fn in_process_spawn(
+    version: &'static str,
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    ready_after: std::time::Duration,
+) -> impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static {
+    move |run: &RunDir| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let run = run.clone();
+        tokio::spawn(async move {
+            let mut d = Daemon::new(
+                DaemonConfig::new(run, version.into()),
+                Arc::new(Echo::default()),
+            );
+            d.bind().await.unwrap();
+            let r = d.readiness();
+            let t = tokio::spawn(d.run());
+            r.progress("warming up");
+            tokio::time::sleep(ready_after).await;
+            r.ready();
+            let _ = t.await;
+        });
+        Ok(running())
+    }
+}
+
+pub fn hello_for(cwd: &std::path::Path) -> Hello {
+    Hello {
+        rdy: PROTO_VERSION,
+        version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
+        proto: Proto::Ctl,
+        cwd: cwd.to_path_buf(),
+        project: RunDir::of_project(cwd).project_id().unwrap(),
+    }
+}
+
+/// The permission bits of `p`, the bits below the set-id bits (a Unix mode).
+#[cfg(unix)]
+pub fn mode_bits(p: &Path) -> u32 {
+    rdy_store::pio::mode_of(&std::fs::metadata(p).unwrap()) & 0o777
+}
+
+/// Sets `p` to `mode` (a Unix mode).
+#[cfg(unix)]
+pub fn chmod(p: &Path, mode: u32) {
+    rdy_store::pio::set_mode(p, mode).unwrap();
 }

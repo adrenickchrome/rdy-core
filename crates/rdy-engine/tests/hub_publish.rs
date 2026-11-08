@@ -41,7 +41,7 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::pio;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::panic::{self, AssertUnwindSafe};
@@ -259,10 +259,9 @@ struct Env {
 }
 
 fn private_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap()
+    let dir = tempfile::tempdir().unwrap();
+    pio::make_private_dir(dir.path()).unwrap();
+    dir
 }
 
 /// The source tagged `v1.0.0`, a publish remote `hub` and a share remote `shared` on the
@@ -271,11 +270,10 @@ fn env_with(config: &str) -> Env {
     let home_dir = private_dir();
     let project_dir = private_dir();
     let rdy = home_dir.path().join("rdy");
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
-        .create(&rdy)
-        .unwrap();
+    pio::create_private_dir(&rdy).unwrap();
     let user_file = rdy.join("config.yaml");
     fs::write(&user_file, config).unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&user_file, pio::permissions(0o644)).unwrap();
     let project = project_dir.path().to_path_buf();
     let mut r = Rdy::init(&project, "rdy-standard").unwrap();
@@ -328,14 +326,10 @@ fn seed(creds: &Path, records: &[(&str, Credential)]) {
     }
     let bytes = encode_credentials(&file).unwrap();
     let tmp = creds.with_extension("seed");
-    let mut f = pio::file_mode(
-        OpenOptions::new().write(true).create(true).truncate(true),
-        0o600,
-    )
-    .open(&tmp)
-    .unwrap();
+    let mut f = fs::File::create(&tmp).unwrap();
+    pio::make_private_file(&f).unwrap();
     f.write_all(&bytes).unwrap();
-    fs::set_permissions(&tmp, pio::permissions(0o600)).unwrap();
+    drop(f);
     fs::rename(&tmp, creds).unwrap();
 }
 
@@ -367,7 +361,20 @@ fn every_file(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 walk(root, &path, out);
             } else {
                 let rel = path.strip_prefix(root).unwrap().to_path_buf();
-                out.insert(rel, fs::read(&path).unwrap());
+                // On Windows a file another handle holds locked cannot be read (byte-range locks
+                // are mandatory): a lock file holds no setting, so it reads as empty, and the
+                // open store's index stands in as its length.
+                let bytes = match fs::read(&path) {
+                    Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => {
+                        if path.extension().is_some_and(|x| x == "lock") {
+                            vec![]
+                        } else {
+                            format!("locked, {} bytes", meta.len()).into_bytes()
+                        }
+                    }
+                    other => other.unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+                };
+                out.insert(rel, bytes);
             }
         }
     }

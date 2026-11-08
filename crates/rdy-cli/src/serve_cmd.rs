@@ -106,13 +106,13 @@ fn configured_actor(env: &Env) -> Result<(), ErrorReply> {
 }
 
 /// The exit code of a daemon run: 0, or 2 when another rdy process holds the store, else 1. The
-/// host already logged an `AlreadyRunning` or `Open` error to stderr; the others are printed
+/// host already logged an `AlreadyRunning`, `Open` or `Start` error to stderr; the others are printed
 /// here.
 fn serve_exit(r: Result<rdy_daemon::ExitReason, ServeError>) -> ExitCode {
     match r {
         Ok(_) => ExitCode::SUCCESS,
         Err(ServeError::AlreadyRunning(_)) => ExitCode::from(2),
-        Err(ServeError::Open(_)) => ExitCode::FAILURE,
+        Err(ServeError::Open(_) | ServeError::Start(_)) => ExitCode::FAILURE,
         Err(e) => {
             // a closed stderr loses the line, never panics
             let _ = writeln!(std::io::stderr(), "{e}");
@@ -469,7 +469,11 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
             "the daemon is another rdy version and has other clients; sent a stop signal to its process {p}"
         );
     }
-    let gone = || exited(pid, || socket.exists(), process_alive);
+    // a pipe's name is no file: only a connect can say whether it still stands
+    let endpoint_stands = || {
+        rt.block_on(rdy_daemon::sys::endpoint_liveness(&socket)) != rdy_daemon::sys::Liveness::Gone
+    };
+    let gone = || exited(pid, endpoint_stands, process_alive);
     let quiet = STOP_GRACE + Duration::from_secs(1);
     let said = |p: Option<u32>| {
         let who = p.map_or_else(String::new, |p| format!(" (pid {p})"));
@@ -591,27 +595,60 @@ mod tests {
     fn df3_stop_without_a_pid_waits_for_the_recorded_socket() {
         let d = tempfile::tempdir().unwrap();
         let run = RunDir::of_project(d.path());
-        std::fs::create_dir_all(run.path()).unwrap();
-        // the daemon bound a socket other than the one this spelling computes
+        run.ensure().unwrap();
+        // the daemon bound an endpoint other than the one this spelling computes: a socket file
+        // where sockets are files, else a pipe name (which no test can create or remove, so a
+        // flag stands for its being there)
+        #[cfg(not(windows))]
         let bound = d.path().join("bound.sock");
+        #[cfg(windows)]
+        let bound = std::path::PathBuf::from(format!(r"\\.\pipe\rdy-{}", "0".repeat(64)));
         assert_ne!(bound, run.socket());
         let project = run.project_id().unwrap();
-        std::fs::write(
-            run.socket_record(),
-            format!("{}\n{project}\n", bound.display()),
-        )
-        .unwrap();
+        // the record is private to this account, as the daemon writes it: a client reads no other
+        {
+            use rdy_daemon::sys;
+            use std::io::Write;
+            let mut record = sys::open_no_follow(
+                sys::private_file(
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true),
+                ),
+                &run.socket_record(),
+            )
+            .unwrap();
+            sys::make_private_file(&record).unwrap();
+            record
+                .write_all(format!("{}\n{project}\n", bound.display()).as_bytes())
+                .unwrap();
+        }
+        let up = Cell::new(true);
+        #[cfg(not(windows))]
         std::fs::write(&bound, "").unwrap();
         assert!(!run.socket().exists());
         // read once, before the stop
         let socket = stop_socket(&run);
         assert_eq!(socket, bound);
-        let gone = || exited(None, || socket.exists(), |_| false);
+        let there = || {
+            #[cfg(not(windows))]
+            {
+                socket.exists()
+            }
+            #[cfg(windows)]
+            {
+                up.get()
+            }
+        };
+        let gone = || exited(None, there, |_| false);
         assert!(!gone(), "the recorded socket is still there");
         // the daemon removes its record first, then its socket
         std::fs::remove_file(run.socket_record()).unwrap();
         assert!(!gone(), "the socket outlives the record");
+        #[cfg(not(windows))]
         std::fs::remove_file(&bound).unwrap();
+        up.set(false);
         assert!(gone());
         // with no record, the client's own socket is all there is to go by
         assert_eq!(stop_socket(&run), run.socket());

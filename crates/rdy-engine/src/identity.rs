@@ -118,8 +118,9 @@ pub fn actor_run_text(actor: &str, run: Option<&str>) -> String {
     }
 }
 
-/// The most bytes of a value that is not Unicode that its refusal decodes: enough for the
-/// 80-scalar echo and its ellipsis, since each decoded scalar takes at most four bytes.
+/// The most code units of a value that is not Unicode that its refusal decodes (bytes on Unix,
+/// UTF-16 units on Windows): enough for the 80-scalar echo and its ellipsis, since each decoded
+/// scalar takes at most four.
 const ENV_ECHO_BYTES: usize = 4 * 81;
 
 /// A session identity read from the environment, as `refusal` refuses it: `None` when the
@@ -135,11 +136,7 @@ fn env_value(
     };
     match v.to_str() {
         Some(text) => Ok(Some(text.to_string())),
-        None => {
-            let bytes = v.as_encoded_bytes();
-            let head = &bytes[..bytes.len().min(ENV_ECHO_BYTES)];
-            Err(refusal(&String::from_utf8_lossy(head)))
-        }
+        None => Err(refusal(&rdy_store::pio::lossy_head(v, ENV_ECHO_BYTES))),
     }
 }
 

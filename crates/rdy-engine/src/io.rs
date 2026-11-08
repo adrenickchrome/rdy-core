@@ -855,8 +855,14 @@ impl ReadState {
                 return Err(e);
             }
         };
-        // POSIX rename atomically replaces an empty directory
-        std::fs::rename(&staging, out).map_err(io_err)?;
+        // POSIX rename atomically replaces an empty directory; Windows does not, so an empty
+        // `out` goes first (a directory with files was refused above). The move is the store's
+        // durable rename, and the entry is flushed.
+        if std::fs::symlink_metadata(out).is_ok_and(|m| m.is_dir()) {
+            std::fs::remove_dir(out).map_err(io_err)?;
+        }
+        rdy_store::pio::rename_durable(&staging, out).map_err(io_err)?;
+        rdy_store::fsutil::sync_dir(parent).map_err(io_err)?;
         Ok(summary)
     }
 

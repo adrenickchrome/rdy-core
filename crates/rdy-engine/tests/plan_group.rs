@@ -1108,7 +1108,10 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_engine::code_index::empty_hooks_dir().display()
+            ),
         ])
         .args(args)
         .env_remove("GIT_DIR")

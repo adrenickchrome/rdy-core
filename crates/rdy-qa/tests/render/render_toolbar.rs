@@ -291,10 +291,7 @@ fn tbar1_a_tap_shows_one_blocks_toolbar_and_a_tap_elsewhere_hides_it() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/copy.js"
-    );
+    let js = &rdy_qa::site::theme_js("copy.js");
     let o = std::process::Command::new("node")
         .args(["-e", TAP_HARNESS, "--", js])
         .output()

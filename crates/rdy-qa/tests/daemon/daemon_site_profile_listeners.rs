@@ -961,6 +961,7 @@ fn plx2_a_failed_child_reaches_the_report_once_with_its_cause() {
         failing_seeds: vec![],
         notes: vec![],
         guarded: Default::default(),
+        os_excluded: Default::default(),
     };
     let md = report::markdown(&r);
     assert_eq!(md.matches(&format!("- `{probe}`")).count(), 1, "{md}");
@@ -1740,8 +1741,7 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         let guide = port_of(&url_of(&info));
         let rec = Recorder::probing(w.h.dir.path(), &[guide]);
         let dir = w.h.dir.path().to_path_buf();
-        std::fs::rename(dir.join(".rdy"), dir.join(".rdy-old")).unwrap();
-        std::fs::create_dir(dir.join(".rdy")).unwrap();
+        rdy_qa::daemon::replace_rdy_dir(&dir);
         let run = w.h.run.take().unwrap();
         run.handle().tick();
         assert_eq!(run.wait().unwrap(), ExitReason::ProjectGone);
@@ -1908,11 +1908,14 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
 }
 
 /// The test name of [`plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon`].
+#[cfg(unix)]
 const HELD_FORK: &str = "plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon";
 
 /// A held child copies every descriptor of this process, and the area binary runs other tests
 /// beside this one: their sockets would stay open too. So the test re-runs itself as a child
-/// that runs it alone (`--exact`, one thread) and holds the fork there.
+/// that runs it alone (`--exact`, one thread) and holds the fork there. Unix only: Windows has no
+/// fork, and its sockets are never inherited (`wx19_live_and_profile_listeners_are_exclusive`).
+#[cfg(unix)]
 #[test]
 fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
     if std::env::var_os("RDY_QA_PLB4_CHILD").is_none() {
@@ -1928,11 +1931,12 @@ fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
-        assert!(
-            stdout.contains("test result: ok. 1 passed"),
-            "the child ran no test: {stdout}\n{stderr}"
-        );
+        if !out.status.success() || !stdout.contains("test result: ok. 1 passed") {
+            // the child's panic comes first and whole: the gate report keeps a failing test's
+            // first panic, and the child's own `failures:` lines would cut a panic message
+            eprintln!("child stderr:\n{stderr}\nchild stdout:\n{stdout}");
+            panic!("the child failed or ran no test ({})", out.status);
+        }
         return;
     }
     let mut w = world();
@@ -1956,11 +1960,21 @@ fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
         "{stages:?}"
     );
     assert!(sh.profile_sites.keys().is_empty());
+    // the held child's copy is the one listener left on the port
+    let held = child.pid();
+    assert_eq!(
+        platform::tcp_listener_pids(guide),
+        std::collections::BTreeSet::from([held]),
+        "only the held child {held} listens on port {guide}"
+    );
     assert!(child.release().success());
-    // the child has exited: nothing accepts any more
-    assert!(
-        TcpStream::connect(sock(guide)).is_err(),
-        "port {guide} still accepts"
+    // the child has exited: no process listens on the port any more. A refused connect cannot
+    // prove this on macOS, which still accepts for a short time on a listener that no process
+    // holds (seen under gate load)
+    assert_eq!(
+        platform::tcp_listener_pids(guide),
+        std::collections::BTreeSet::new(),
+        "a process still listens on port {guide}"
     );
 }
 

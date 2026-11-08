@@ -220,3 +220,53 @@ fn mg10_follower_matches_the_completed_m3_swarm_prefix() {
     src.close().unwrap();
     done.close().unwrap();
 }
+
+/// wx31b: the compact and follower witnesses run on this platform. The swarm's real compact
+/// was acknowledged and left the log it took before its removal; the follower, started by the
+/// QA command from copies of the frozen store, holds every source frame byte for byte, and the
+/// compact's removal shows in the source's frames, not as a lost write.
+#[test]
+fn wx31b_compact_and_follower_witnesses_run_on_windows() {
+    use rdy_qa::swarm::journal::Outcome as Met;
+    let o = seed_one();
+    let compacts: Vec<_> = o
+        .before_freeze()
+        .iter()
+        .filter(|e| e.act == "m3_compact_real" && e.outcome == Met::Ok)
+        .collect();
+    assert_eq!(
+        compacts.len(),
+        1,
+        "seed 1 ran one real compact: {compacts:#?}"
+    );
+    let before = o
+        .pre_removal
+        .as_ref()
+        .expect("the real compact kept the log it took before its removal");
+    // the copy is the store's segments directory itself
+    let logs = std::fs::read_dir(before)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|x| x == "log")
+        })
+        .count();
+    assert!(logs > 0, "the pre-removal copy holds log segments");
+    let (_keep, frozen) = copy_of(&o.frozen);
+    let d = tempfile::tempdir().unwrap();
+    let full = d.path().join("frozen.rdydump");
+    let src = Rdy::open(&frozen).unwrap();
+    src.read().dump(&full).unwrap();
+    let to = d.path().join("f");
+    let report = follow(&full, &to, &[]);
+    assert!(report["digest"].is_string(), "{report}");
+    let core = FollowerCore::open(&to).unwrap();
+    core.fsck().unwrap();
+    assert_eq!(core.end().unwrap(), src.read().seq());
+    assert_eq!(segments(&to), segments(src.root()), "the source frames");
+    drop(core);
+    src.close().unwrap();
+}

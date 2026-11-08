@@ -1,11 +1,9 @@
-#![cfg(unix)]
-// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
 //! cli2: every command is a client of the daemon; direct mode keeps the in-process path; serve
 //! starts, detaches and stops; the human comes from the user config and agents stay in their views.
+use crate::cli_editor::edit_with;
 use rdy_daemon::E_DAEMON_START;
 use rdy_engine::{E_LOCKED, E_PERMISSION, E_VIEW_OWNER, Rdy};
 use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::rdy_bin;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
@@ -208,7 +206,7 @@ fn cli2_serve_foreground_detach_and_stop() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("already running"));
     let out = s.rdy(&["serve", "--stop"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "stopped");
-    assert!(!s.run_dir().socket().exists());
+    rdy_qa::daemon::wait_endpoint_gone(&s.run_dir());
     assert!(s.daemon_pid().is_none());
     let r = Rdy::open(s.dir.path()).unwrap();
     assert!(!r.open_report().unclean_shutdown);
@@ -219,31 +217,8 @@ fn cli2_edit_goes_through_the_daemon() {
     let s = Served::new();
     let (ok, v) = s.json(&["--json", "new", "doc", "a", "--title", "Before"]);
     assert!(ok, "{v}");
-    let id = v["created"]
-        .as_object()
-        .unwrap()
-        .values()
-        .find(|x| x.as_str().unwrap().starts_with("d-"))
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string();
-    let script = s.dir.path().join("ed.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\nsed -i.bak 's/title: Before/title: After/' \"$1\"\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = rdy_qa::fixtures::rdy_command()
-        .args(["--project"])
-        .arg(s.dir.path())
-        .args(["--json", "edit", &id])
-        .env("EDITOR", &script)
-        .envs(s.env_pairs())
-        .output()
-        .unwrap();
+    let id = created_doc(&v);
+    let out = edit_with(&s, None, "replace title: Before\ttitle: After\n", &id);
     assert!(
         out.status.success(),
         "{}",
@@ -290,30 +265,6 @@ fn created_doc(v: &Value) -> String {
         .to_string()
 }
 
-/// Writes an executable editor script into the project.
-fn editor_script(s: &Served, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let script = s.dir.path().join("ed.sh");
-    std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
-}
-
-/// `rdy --project <dir> --json edit <id>` with `EDITOR=script`, as the human.
-fn edit_with(s: &Served, script: &std::path::Path, id: &str) -> std::process::Output {
-    rdy_qa::fixtures::rdy_command()
-        .args(["--project"])
-        .arg(s.dir.path())
-        .args(["--json", "edit", id])
-        .env("EDITOR", script)
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap()
-}
-
 #[test]
 fn cli2_a_relative_project_starts_the_daemon() {
     let s = Served::new();
@@ -340,19 +291,43 @@ fn cli2_a_relative_project_starts_the_daemon() {
 
 #[test]
 fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
-    edit_survives_stop_with_notice(None);
+    edit_survives_stop_with_notice(None, None);
 }
 
 /// A waiting notice on stderr (the stop writes one after its grace on a loaded machine) must not
 /// change what the stop prints on stdout. The notice is injected, so no grace has to run out.
 #[test]
 fn plc8_stop_waiting_notice_does_not_change_stdout() {
-    edit_survives_stop_with_notice(Some(
-        "waiting for the daemon (pid 12345) to finish its work and close the store",
-    ));
+    edit_survives_stop_with_notice(
+        Some("waiting for the daemon (pid 12345) to finish its work and close the store"),
+        None,
+    );
 }
 
-fn edit_survives_stop_with_notice(notice: Option<&str>) {
+/// The editor is a program whose path has a space (in double quotes on Windows, where rdy splits
+/// the command line itself) and the daemon stops while it runs: the edit still lands on a fresh
+/// session. Where `sh` splits the value, a path cannot have a space, so the directory has none.
+#[test]
+fn wx26b_edit_survives_daemon_stop_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let place = dir
+        .path()
+        .join(if cfg!(windows) { "an editor" } else { "editor" });
+    std::fs::create_dir(&place).unwrap();
+    let exe = place.join(if cfg!(windows) {
+        "edit fixture.exe"
+    } else {
+        "edit-fixture"
+    });
+    let current = std::env::current_exe().unwrap();
+    if std::fs::hard_link(&current, &exe).is_err() {
+        std::fs::copy(&current, &exe).unwrap();
+    }
+    assert_eq!(cfg!(windows), exe.to_str().unwrap().contains(' '));
+    edit_survives_stop_with_notice(None, Some(&exe));
+}
+
+fn edit_survives_stop_with_notice(notice: Option<&str>, exe: Option<&std::path::Path>) {
     let s = Served::new();
     // made directly, so the edit below is the command that spawns the daemon (and so its parent)
     let (ok, v) = s.json(&[
@@ -368,22 +343,13 @@ fn edit_survives_stop_with_notice(notice: Option<&str>) {
     let id = created_doc(&v);
     let stop_out = s.dir.path().join("stop.out");
     let stop_err = s.dir.path().join("stop.err");
-    let notice_cmd = notice
-        .map(|n| format!("printf '%s\\n' '{n}' >&2; "))
-        .unwrap_or_default();
-    let script = editor_script(
-        &s,
-        &format!(
-            "sed -i.bak 's/title: Before/title: After/' \"$1\"\n{{ {}'{}' --project '{}' serve --stop; }} > '{}' 2> '{}'\necho \"exit=$?\" >> '{}'\n",
-            notice_cmd,
-            rdy_bin().display(),
-            s.dir.path().display(),
-            stop_out.display(),
-            stop_err.display(),
-            stop_out.display()
-        ),
+    let script = format!(
+        "replace title: Before\ttitle: After\nstop {}\t{}\t{}\n",
+        stop_out.display(),
+        stop_err.display(),
+        notice.unwrap_or_default()
     );
-    let out = edit_with(&s, &script, &id);
+    let out = edit_with(&s, exe, &script, &id);
     let stopped = std::fs::read_to_string(&stop_out).unwrap();
     let stop_stderr = std::fs::read_to_string(&stop_err).unwrap_or_default();
     // stdout alone is asserted; a waiting notice may appear on stderr in either case
@@ -421,8 +387,21 @@ fn cli2_a_failed_edit_keeps_the_edited_file_and_names_it() {
     let (ok, v) = s.json(&["--json", "new", "doc", "a", "--title", "Before"]);
     assert!(ok, "{v}");
     let id = created_doc(&v);
-    let script = editor_script(&s, "printf 'not: [valid\\n' > \"$1\"\n");
-    let out = edit_with(&s, &script, &id);
+    let saved = failed_edit_keeps_its_file(&s, &id, None);
+    std::fs::remove_file(&saved).unwrap();
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["fields"]["title"], "Before");
+}
+
+/// An editor that saves a file the block cannot be read from: the edit is refused, the file is
+/// kept, and the refusal names its path in `saved_edit` and in the fix. Returns that path.
+fn failed_edit_keeps_its_file(
+    s: &Served,
+    id: &str,
+    exe: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let out = edit_with(s, exe, "write not: [valid\n", id);
     assert!(!out.status.success());
     let err: Value = serde_json::from_slice(&out.stderr).unwrap();
     let saved = std::path::PathBuf::from(err["saved_edit"].as_str().expect("saved_edit"));
@@ -434,54 +413,73 @@ fn cli2_a_failed_edit_keeps_the_edited_file_and_names_it() {
         "{err}"
     );
     assert_eq!(std::fs::read_to_string(&saved).unwrap(), "not: [valid\n");
+    saved
+}
+
+/// D-FARN9: a failed edit keeps the named recovery file whatever the editor command is. On
+/// Windows an editor value that cannot be parsed, or names a program that cannot start, is
+/// refused before any edit with the decided text, and the block is not changed.
+#[test]
+fn wx26b_failed_edit_keeps_the_named_recovery_file() {
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "new", "doc", "a", "--title", "Before"]);
+    assert!(ok, "{v}");
+    let id = created_doc(&v);
+    // the editor program has a space in its path on Windows, so its path is in double quotes
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join(if cfg!(windows) {
+        "my editor.exe"
+    } else {
+        "my-editor"
+    });
+    let current = std::env::current_exe().unwrap();
+    if std::fs::hard_link(&current, &exe).is_err() {
+        std::fs::copy(&current, &exe).unwrap();
+    }
+    let saved = failed_edit_keeps_its_file(&s, &id, Some(&exe));
     std::fs::remove_file(&saved).unwrap();
+    #[cfg(windows)]
+    {
+        let refuse = |editor: &str| {
+            let out = rdy_qa::fixtures::rdy_command()
+                .arg("--project")
+                .arg(s.dir.path())
+                .args(["--json", "edit", &id])
+                .env_remove("RDY_ACTOR")
+                .env_remove("RDY_RUN")
+                .env_remove("RDY_NO_DAEMON")
+                .envs(s.env_pairs())
+                .env_remove("VISUAL")
+                .env("EDITOR", editor)
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            serde_json::from_slice::<Value>(&out.stderr).unwrap()
+        };
+        let e = refuse("\"never closed");
+        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+        assert_eq!(
+            e["message"], "the editor command in %EDITOR% cannot be parsed: \"never closed",
+            "{e}"
+        );
+        assert_eq!(
+            e["fix"],
+            "set %VISUAL% or %EDITOR% to a program, in double quotes if its path has spaces, with any arguments after it",
+            "{e}"
+        );
+        let missing = s.dir.path().join("no such dir").join("editor.exe");
+        let e = refuse(&format!("\"{}\" --wait", missing.display()));
+        assert_eq!(e["code"], "E_IO", "{e}");
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{}: ", missing.display())),
+            "{e}"
+        );
+        assert_eq!(e["fix"], "set %VISUAL% or %EDITOR%", "{e}");
+    }
     let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
     assert!(ok, "{v}");
     assert_eq!(v["fields"]["title"], "Before");
-}
-
-/// Final review fix round 1 (minor 12): SIGINT (Ctrl-C) and SIGTERM stop a foreground
-/// `rdy serve` the way `rdy serve --stop` does: the run files go, the store closes cleanly and
-/// the process exits 0.
-#[test]
-fn cli2_sigint_and_sigterm_stop_a_foreground_serve_cleanly() {
-    for sig in ["-INT", "-TERM"] {
-        let s = Served::new();
-        let mut child = s.spawn(&["serve"]);
-        let t = Instant::now();
-        while s.daemon_pid() != Some(child.id()) {
-            assert!(
-                t.elapsed() < Duration::from_secs(30),
-                "{sig}: the foreground daemon did not write its pid"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let status = std::process::Command::new("kill")
-            .args([sig, &child.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let t = Instant::now();
-        let exit = loop {
-            if let Some(st) = child.try_wait().unwrap() {
-                break st;
-            }
-            if t.elapsed() > Duration::from_secs(30) {
-                let _ = child.kill();
-                panic!("{sig}: rdy serve did not exit within 30 s");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            exit.success(),
-            "{sig}: {exit:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(!s.run_dir().socket().exists(), "{sig}");
-        assert!(!s.run_dir().pid_file().exists(), "{sig}");
-        let r = Rdy::open(s.dir.path()).unwrap();
-        assert!(!r.open_report().unclean_shutdown, "{sig}");
-        drop(r);
-    }
 }

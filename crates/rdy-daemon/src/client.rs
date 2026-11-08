@@ -1,15 +1,18 @@
 //! The client side: connecting with a hello, `ctl` requests, and connect-or-start under
 //! `start.lock`.
 
+use crate::daemon::STOP_GRACE;
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION, valid_build};
 use crate::layout::{NotPrivateDir, RunDir, ShortDirError};
-use crate::lock::{FileLock, open_no_follow};
+use crate::lock::open_no_follow;
 use crate::session::{Proto, SessionId};
 use crate::signing_transport::{CallerLink, CallerSigner, InterruptSource, read_reply, sigint};
 use crate::socket::MAX_SOCKET_PATH;
-use crate::spawn::Spawned;
+use crate::spawn::{Launch, Launched, LaunchedChild, Spawned};
 use crate::sys;
+use crate::sys::stop_proof::StopOutcome;
+use rdy_store::start_lock::{ReservationState, StartGuard};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,6 +38,8 @@ pub fn connect_backoff(attempt: u32) -> Duration {
 }
 /// The pause between two tries of `start.lock`.
 pub const LOCK_RETRY: Duration = Duration::from_millis(50);
+/// The pause between two looks at whether a launched daemon has claimed its start.
+const CLAIM_POLL: Duration = Duration::from_millis(2);
 /// How many lines of `daemon.log` an `E_DAEMON_START` cites.
 pub const LOG_TAIL_LINES: usize = 20;
 
@@ -156,9 +161,7 @@ fn log_len(run: &RunDir) -> u64 {
 /// The pid `daemon.pid` names when that process is alive: a daemon (starting, or draining its
 /// store) that a held store lock may belong to.
 fn live_daemon_pid(run: &RunDir) -> Option<u32> {
-    fs::read_to_string(run.pid_file())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok())
+    run.pid_named()
         .filter(|&pid| crate::spawn::process_alive(pid))
 }
 
@@ -473,27 +476,34 @@ pub enum Attempt {
 
 /// Connects to the project's daemon (the socket recorded in `daemon.sock`, else the run dir's
 /// socket), sends `hello` and reads the first reply (within `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
-/// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
+/// path that is a symlink, and a peer that is not of our own account (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
-    connect_expecting_uid(run, hello, sys::own_uid()).await
+    match sys::own_account() {
+        Ok(account) => connect_expecting_account(run, hello, account).await,
+        Err(e) => Attempt::NoDaemon(e),
+    }
 }
 
-/// Test hook: `connect`, taking the peer to be ours only when it runs as `uid`.
+/// Test hook: `connect`, taking the peer to be ours only when it runs as `account`.
 #[doc(hidden)]
-pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Attempt {
-    match exchange_hello(run, hello, uid).await {
+pub async fn connect_expecting_account(
+    run: &RunDir,
+    hello: &Hello,
+    account: sys::Account,
+) -> Attempt {
+    match exchange_hello(run, hello, account).await {
         Ok(found) => attempt(run, found.stream, found.reply),
         Err(e) => Attempt::NoDaemon(e),
     }
 }
 
 /// What one hello exchange found: the connection, the daemon's first reply, the socket path the
-/// connection went to, and the pid of the process at its other end, when the system gives it.
+/// connection went to, and the process at its other end, as the system gives it.
 struct Found {
     stream: sys::Stream,
     reply: HelloReply,
     socket: PathBuf,
-    pid: Option<u32>,
+    process: sys::PeerProcess,
 }
 
 /// The connect, the peer check, the hello and its first reply; any error is "no daemon". The
@@ -504,36 +514,30 @@ struct Found {
 /// daemon that answers but serves another project refuses the hello, and that refusal is the
 /// reply: it is never retried elsewhere (`connect_or_start` tries once more only when that
 /// daemon says it is stopping).
-async fn exchange_hello(run: &RunDir, hello: &Hello, uid: u32) -> io::Result<Found> {
+async fn exchange_hello(run: &RunDir, hello: &Hello, account: sys::Account) -> io::Result<Found> {
     let own = run.socket();
     if let Some(recorded) = run.recorded_socket()
         && recorded != own
-        && let Ok(found) = exchange_hello_at(&recorded, hello, uid).await
+        && let Ok(found) = exchange_hello_at(&recorded, hello, account).await
     {
         return Ok(found);
     }
-    exchange_hello_at(&own, hello, uid).await
+    exchange_hello_at(&own, hello, account).await
 }
 
 /// `exchange_hello` on the socket `path`.
-async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<Found> {
+async fn exchange_hello_at(path: &Path, hello: &Hello, account: sys::Account) -> io::Result<Found> {
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if sys::endpoint_is_link(path) {
         return Err(io::Error::other(format!(
             "{} is a symbolic link, which rdy does not follow",
             path.display()
         )));
     }
     let mut stream = sys::connect(path).await?;
-    // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
-    let peer = sys::peer_uid(&stream)?;
-    if peer != uid {
-        return Err(io::Error::other(format!(
-            "the socket's peer is uid {peer}, not ours"
-        )));
-    }
-    // read before the hello, from the connection that gets the reply
-    let pid = sys::peer_pid(&stream);
+    // the mirror of the daemon's peer check: only a daemon of our own account hears the hello.
+    // The process is read here, before the hello, from the connection that gets the reply.
+    let process = sys::check_daemon(&stream, path, account)?;
     let mut line = serde_json::to_vec(hello).map_err(io::Error::other)?;
     line.push(b'\n');
     stream.write_all(&line).await?;
@@ -549,7 +553,7 @@ async fn exchange_hello_at(path: &Path, hello: &Hello, uid: u32) -> io::Result<F
             stream,
             reply,
             socket: path.to_path_buf(),
-            pid,
+            process,
         }),
     }
 }
@@ -600,27 +604,29 @@ const UNTIED_FIX: &str = "close the daemon's other sessions, then run rdy serve 
 ///
 /// A daemon of another version with other clients refuses every hello (`E_DAEMON_VERSION`,
 /// D-ABRC8), so the stop cannot go over its socket, and daemons already released cannot change.
-/// Then the client signals the daemon's process (`terminate`, `SIGTERM`, which `rdy serve` takes
-/// as a stop), only when all of these hold: the socket record names this project's `.rdy`
-/// (D-R7N9J); the refusal came on that recorded socket; the peer of that connection runs as our
-/// uid (the peer check of the exchange) and the system gives its pid `p > 1`; and
-/// `.rdy/run/daemon.pid` holds exactly `p`. Otherwise nothing is signalled.
+/// Then the client signals the daemon's process (`sys::stop_refused_daemon`: `SIGTERM`, which
+/// `rdy serve` takes as a stop, or on Windows the project's stop event), only when all of these
+/// hold: the socket record names this project's `.rdy` (D-R7N9J); the refusal came on that recorded
+/// socket; the peer of that connection runs as our account (the peer check of the exchange) and
+/// the system gives its pid `p > 1`; and `.rdy/run/daemon.pid` holds exactly `p`, with `p`'s
+/// creation time on Windows. Otherwise nothing is signalled. On Windows, a daemon that does not
+/// heed the event within `STOP_GRACE` is ended under the same proofs, read again
+/// (`sys::stop_proof`). So this call can take that long.
 pub async fn request_stop(
     run: &RunDir,
     hello: &Hello,
     start_timeout: Duration,
 ) -> Result<Option<StopRequest>, ErrorReply> {
-    let Ok(found) = exchange_hello(run, hello, sys::own_uid()).await else {
+    let Ok(account) = sys::own_account() else {
+        return Ok(None);
+    };
+    let Ok(found) = exchange_hello(run, hello, account).await else {
         return Ok(None);
     };
     if let HelloReply::Refused { error } = &found.reply
         && error.code == E_DAEMON_VERSION
     {
-        // `signal_stop` checks the four ties just before it signals. A narrow `kill(2)` race
-        // remains, as with any pid-based signal: the daemon could exit after the pid file is
-        // read and its pid be reused before the signal. Holding `found.stream` open does not
-        // prevent this, because the daemon closes its end after the refusal.
-        return signal_stop(run, &found).map(Some);
+        return signal_stop(run, found).await.map(Some);
     }
     let client = match attempt(run, found.stream, found.reply) {
         Attempt::NoDaemon(_) => return Ok(None),
@@ -653,38 +659,56 @@ pub async fn request_stop(
     }))
 }
 
-/// The fallback of `request_stop`: signals the process of the daemon that refused `found`'s
-/// hello, when the record, the connection and the pid file all tie it to this project.
-fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
-    let untied = || ErrorReply::new(E_DAEMON_VERSION, UNTIED_MESSAGE, UNTIED_FIX);
-    // 1. the record names this project's `.rdy`; 2. the refusal came on its socket
-    let recorded = run.recorded_socket().ok_or_else(untied)?;
-    if found.socket != recorded {
-        return Err(untied());
-    }
-    // 3. the peer's pid, from the connection itself; never init or a process group
-    let pid = found.pid.filter(|&p| p > 1).ok_or_else(untied)?;
-    // 4. the pid file, opened without following a link, names the same process
-    if read_pid_file(run) != Some(pid) {
-        return Err(untied());
-    }
-    match crate::spawn::terminate(pid) {
-        Ok(_) => Ok(StopRequest {
-            pid: Some(pid),
-            socket: recorded,
-            signalled: true,
-        }),
-        Err(e) => Err(ErrorReply::new(
+/// The fallback of `request_stop`: stops the process of the daemon that refused `found`'s hello.
+/// The connection plays no further part: the daemon closes its end after the refusal.
+async fn signal_stop(run: &RunDir, found: Found) -> Result<StopRequest, ErrorReply> {
+    let Found {
+        socket, process, ..
+    } = found;
+    let outcome = sys::stop_refused_daemon(run.clone(), socket.clone(), process, STOP_GRACE).await;
+    stop_reply(socket, outcome)
+}
+
+/// What `request_stop` answers for `outcome`. A failure to prove identity is always the untied
+/// refusal, and only a failure of the call itself names the process.
+fn stop_reply(socket: PathBuf, outcome: StopOutcome) -> Result<StopRequest, ErrorReply> {
+    let failed = |message: String, pid: u32| {
+        ErrorReply::new(
             E_DAEMON_VERSION,
-            format!("could not send the stop signal to the daemon's process {pid}: {e}"),
+            message,
             format!("end process {pid}, then run rdy serve --stop again"),
+        )
+    };
+    let request = |pid: u32, signalled: bool| StopRequest {
+        pid: Some(pid),
+        socket: socket.clone(),
+        signalled,
+    };
+    match outcome {
+        StopOutcome::Untied => Err(ErrorReply::new(
+            E_DAEMON_VERSION,
+            UNTIED_MESSAGE,
+            UNTIED_FIX,
+        )),
+        StopOutcome::Exited { pid } => Ok(request(pid, false)),
+        StopOutcome::Signalled { pid }
+        | StopOutcome::Stopped { pid }
+        | StopOutcome::Draining { pid }
+        | StopOutcome::Terminated { pid } => Ok(request(pid, true)),
+        StopOutcome::SignalFailed { pid, error } => Err(failed(
+            format!("could not send the stop signal to the daemon's process {pid}: {error}"),
+            pid,
+        )),
+        StopOutcome::TerminateFailed { pid, error } => Err(failed(
+            format!("could not terminate the daemon's process {pid}: {error}"),
+            pid,
         )),
     }
 }
 
 /// The pid of a live daemon of the project at `project`, by the ties `request_stop` checks
 /// before it signals (D-R7N9J): the socket record names this project's `.rdy`; a connection to
-/// that recorded socket (never a link) has a peer of our uid whose pid the system gives,
+/// that recorded socket (never a link) has a peer of our account whose pid the system gives,
 /// `p > 1`; and `.rdy/run/daemon.pid`, opened without following a link, holds exactly `p`.
 /// `None` when any tie fails. It sends nothing: the daemon reads an end of file where a hello
 /// would be, and closes the connection.
@@ -694,11 +718,7 @@ fn signal_stop(run: &RunDir, found: &Found) -> Result<StopRequest, ErrorReply> {
 pub fn live_daemon(project: &Path) -> Option<u32> {
     let run = RunDir::of_project(project);
     let recorded = run.recorded_socket()?;
-    if fs::symlink_metadata(&recorded)
-        .ok()?
-        .file_type()
-        .is_symlink()
-    {
+    if sys::endpoint_is_link(&recorded) {
         return None;
     }
     let pid = peer_pid(&recorded)?;
@@ -706,23 +726,23 @@ pub fn live_daemon(project: &Path) -> Option<u32> {
 }
 
 /// The pid of the process at the other end of a connection to `socket`, read as
-/// `exchange_hello_at` reads it: the peer's uid with `sys::peer_uid` (it must be ours), then
-/// the pid with `sys::peer_pid`, `p > 1`. The connection runs on a thread of its own with a
-/// current-thread runtime: `live_daemon`'s caller may have no runtime (`rdy load`), or may be in
-/// one (`rdy_load` on a blocking thread), where `block_on` would panic.
+/// `exchange_hello_at` reads it: `sys::check_daemon` with our own account, then the pid, `p > 1`.
+/// The connection runs on a thread of its own with a current-thread runtime: `live_daemon`'s
+/// caller may have no runtime (`rdy load`), or may be in one (`rdy_load` on a blocking thread),
+/// where `block_on` would panic.
 fn peer_pid(socket: &Path) -> Option<u32> {
     std::thread::scope(|s| {
         s.spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_io()
+                .enable_all()
                 .build()
                 .ok()?;
             rt.block_on(async {
                 let stream = sys::connect(socket).await.ok()?;
-                if sys::peer_uid(&stream).ok()? != sys::own_uid() {
-                    return None;
-                }
-                sys::peer_pid(&stream).filter(|&p| p > 1)
+                sys::check_daemon(&stream, socket, sys::own_account().ok()?)
+                    .ok()?
+                    .pid()
+                    .filter(|&p| p > 1)
             })
         })
         .join()
@@ -731,17 +751,9 @@ fn peer_pid(socket: &Path) -> Option<u32> {
     })
 }
 
-/// The pid `.rdy/run/daemon.pid` holds: decimal digits only, surrounding whitespace trimmed.
-/// `None` when it is missing, a link, too long or anything else.
+/// The pid `.rdy/run/daemon.pid` holds (`RunDir::pid_record`).
 fn read_pid_file(run: &RunDir) -> Option<u32> {
-    let f = open_no_follow(fs::OpenOptions::new().read(true), &run.pid_file()).ok()?;
-    let mut buf = Vec::new();
-    f.take(64).read_to_end(&mut buf).ok()?;
-    let text = std::str::from_utf8(&buf).ok()?.trim();
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok()
+    run.pid_record().map(|r| r.pid())
 }
 
 /// Starts a daemon for a run dir and returns at once, with a way to tell whether it has exited.
@@ -817,6 +829,9 @@ fn ensure_error(run: &RunDir, e: io::Error) -> ErrorReply {
             ),
         );
     }
+    if sys::names_its_path(&e) {
+        return start_error(format!("could not start the daemon: {e}"));
+    }
     start_error(format!(
         "could not create the run directory {}: {e}",
         run.path().display()
@@ -849,7 +864,9 @@ fn stopping(e: &ErrorReply) -> bool {
 }
 
 /// Connects to the project's daemon, starting one if none answers. At most one client spawns:
-/// the spawn happens under `start.lock`, after a second connect made while holding it. A refusal
+/// the spawn happens under `start.lock`, after a second connect made while holding it, and the
+/// daemon it launches takes the start over before this waits for it to answer
+/// (`rdy_store::start_lock`). A refusal
 /// from a daemon that is stopping (its own project is gone or replaced: a project restored in
 /// place) is retried once, within the same start timeout; that daemon removed its socket before
 /// it answered, so the retry starts this project's own daemon.
@@ -936,6 +953,8 @@ impl Start<'_> {
                         Some(deadline),
                     )
                     .await?;
+                    // its endpoint is gone, and its process may still drain the store
+                    saw_exiting = true;
                 }
                 Attempt::Refused(e) => return Err(e),
                 Attempt::Exiting => saw_exiting = true,
@@ -954,9 +973,9 @@ impl Start<'_> {
         run.ensure().map_err(|e| ensure_error(run, e))?;
         let hello = hello_of(run.project_id().map_err(|e| ensure_error(run, e))?);
         let lock_path = run.start_lock();
-        let _lock = loop {
-            match FileLock::try_take(&lock_path) {
-                Ok(Some(lock)) => break lock,
+        let start = loop {
+            match StartGuard::try_take(run.rdy_dir()) {
+                Ok(Some(start)) => break start,
                 Ok(None) => {}
                 Err(e) => {
                     return Err(start_error(format!(
@@ -1015,7 +1034,7 @@ impl Start<'_> {
                         E_DAEMON_START,
                         format!(
                             "the store at {} is held by another rdy process that is not a daemon (a command run with --no-daemon, or rdy mcp --no-daemon)",
-                            store.display()
+                            rdy_store::pio::display_path(&store)
                         ),
                         "a --no-daemon rdy holds the store: close it, or drop --no-daemon",
                     ));
@@ -1026,13 +1045,39 @@ impl Start<'_> {
 
         // 3b. a store that needs an upgrade, or the completion of a sealed one, is upgraded
         // before any daemon serves it: the full fsck, then `FORMAT`, then the spawn (D-WWAK7)
-        crate::maintenance::before_start(run, deadline).await?;
+        crate::maintenance::before_start(run, &start, deadline).await?;
 
         // 4. spawn
         let log_from = log_len(run);
-        let mut spawned = match spawn(run) {
+        let launch =
+            Launch::arm().map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
+        let result = spawn(run);
+        let launched = launch.finish();
+        let mut spawned = match result {
             Ok(s) => s,
             Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
+        };
+
+        // 4b. the start becomes the daemon's: it claims it before anything here waits for it to
+        // answer, and this side lets go of the lock it would need. A spawner of its own keeps the
+        // lock's exclusion here until its daemon answers.
+        let _kept = match launched {
+            Launched::OwnWay => Some(start),
+            Launched::NoProcess => {
+                drop(start);
+                None
+            }
+            Launched::Child(child) => {
+                let wait = Handoff {
+                    run,
+                    deadline,
+                    start_timeout,
+                    log_from,
+                };
+                wait.run(&start, child, &mut spawned).await?;
+                drop(start);
+                None
+            }
         };
 
         // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
@@ -1040,7 +1085,11 @@ impl Start<'_> {
         // waiting cannot help. Neither can waiting on a daemon that has exited.
         let mut attempt_no = 0u32;
         loop {
-            let reached = match exchange_hello(run, &hello, sys::own_uid()).await {
+            let found = match sys::own_account() {
+                Ok(account) => exchange_hello(run, &hello, account).await,
+                Err(e) => Err(e),
+            };
+            let reached = match found {
                 Ok(Found {
                     reply: HelloReply::Exiting { version: theirs },
                     ..
@@ -1089,10 +1138,123 @@ impl Start<'_> {
     }
 }
 
+/// A start's handoff to the daemon it launched.
+struct Handoff<'a> {
+    run: &'a RunDir,
+    deadline: Instant,
+    start_timeout: Duration,
+    log_from: u64,
+}
+
+impl Handoff<'_> {
+    /// Under `start`, records the start for `child`, sends it the token and waits until the child
+    /// has claimed it. A child that exits first ends the wait, with its reservation withdrawn:
+    /// the caller's wait for an answer reports the exit. A deadline withdraws it too, and is
+    /// `not_ready`: a child that claims later finds nothing and does not open the store.
+    async fn run(
+        &self,
+        start: &StartGuard,
+        child: LaunchedChild,
+        spawned: &mut Spawned,
+    ) -> Result<(), ErrorReply> {
+        let timed_out = || not_ready(self.run, self.start_timeout, Some(self.log_from));
+        let lock_error = |e: io::Error| {
+            start_error(format!(
+                "could not lock {}: {e}",
+                self.run.start_lock().display()
+            ))
+        };
+        let reservation = loop {
+            match start.reserve(child.pid, &child.token) {
+                Ok(Some(r)) => break r,
+                Ok(None) if Instant::now() >= self.deadline => return Err(timed_out()),
+                Ok(None) => tokio::time::sleep(CLAIM_POLL).await,
+                Err(e) => return Err(lock_error(e)),
+            }
+        };
+        child.send_token();
+        loop {
+            match reservation.state() {
+                Ok(ReservationState::Unclaimed) => {}
+                Ok(ReservationState::Claimed | ReservationState::Ended) => return Ok(()),
+                Err(e) => {
+                    let _ = reservation.withdraw();
+                    return Err(lock_error(e));
+                }
+            }
+            if (spawned.exited)().is_some() {
+                let _ = reservation.withdraw();
+                return Ok(());
+            }
+            if Instant::now() >= self.deadline {
+                let _ = reservation.withdraw();
+                return Err(timed_out());
+            }
+            tokio::time::sleep(CLAIM_POLL).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Every answer a stop of another version can give, by its exact words.
+    #[test]
+    fn wx16_every_stop_reply_is_pinned() {
+        let socket = || PathBuf::from("the-endpoint");
+        let denied = || io::Error::other("the system's words");
+        let refused = |outcome| {
+            let e = stop_reply(socket(), outcome).unwrap_err();
+            assert_eq!(e.code, E_DAEMON_VERSION);
+            (e.message, e.fix)
+        };
+        assert_eq!(
+            refused(StopOutcome::Untied),
+            (
+                "the running daemon is another rdy version and has other clients, and rdy cannot tie its process to this project".to_string(),
+                "close the daemon's other sessions, then run rdy serve --stop again".to_string(),
+            )
+        );
+        let end_it = "end process 7, then run rdy serve --stop again".to_string();
+        assert_eq!(
+            refused(StopOutcome::SignalFailed {
+                pid: 7,
+                error: denied()
+            }),
+            (
+                "could not send the stop signal to the daemon's process 7: the system's words"
+                    .to_string(),
+                end_it.clone(),
+            )
+        );
+        assert_eq!(
+            refused(StopOutcome::TerminateFailed {
+                pid: 7,
+                error: denied()
+            }),
+            (
+                "could not terminate the daemon's process 7: the system's words".to_string(),
+                end_it,
+            )
+        );
+
+        let sent = |outcome| {
+            let r = stop_reply(socket(), outcome).unwrap();
+            assert_eq!(r.socket, socket());
+            (r.pid, r.signalled)
+        };
+        assert_eq!(sent(StopOutcome::Exited { pid: 7 }), (Some(7), false));
+        for outcome in [
+            StopOutcome::Signalled { pid: 7 },
+            StopOutcome::Stopped { pid: 7 },
+            StopOutcome::Draining { pid: 7 },
+            StopOutcome::Terminated { pid: 7 },
+        ] {
+            assert_eq!(sent(outcome), (Some(7), true));
+        }
+    }
 
     #[test]
     fn df3_a_refused_short_socket_dir_is_e_daemon_start_with_its_own_fix() {
@@ -1108,6 +1270,88 @@ mod tests {
             e.fix,
             "remove /tmp/rdy-501, or move the project to a shorter path"
         );
+    }
+
+    /// A connection that fails under a request is that request's end: the client says a write may
+    /// or may not have committed, sends it nowhere else, and never connects again by itself.
+    #[tokio::test]
+    async fn wx17_connection_failure_does_not_retry_a_write() {
+        use crate::hello::read_hello;
+        use tokio::io::AsyncBufReadExt;
+
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join(".rdy")).unwrap();
+        let run = RunDir::of_project(d.path());
+        let (mut listener, _, project) = crate::socket::bind(&run).await.unwrap();
+        let (done, finished) = tokio::sync::oneshot::channel::<()>();
+        let daemon = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            read_hello(&mut stream).await.unwrap();
+            let ready = HelloReply::Ready {
+                version: "1.0.0".into(),
+                build: crate::BUILD.into(),
+                session: SessionId(1),
+            };
+            let mut line = serde_json::to_vec(&ready).unwrap();
+            line.push(b'\n');
+            stream.write_all(&line).await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            stream.read_line(&mut request).await.unwrap();
+            // the daemon dies under the request: no reply
+            drop(stream);
+            let connected_again = tokio::select! {
+                _ = listener.accept() => true,
+                _ = finished => false,
+            };
+            (request, connected_again)
+        });
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "1.0.0".into(),
+            build: crate::BUILD.into(),
+            proto: Proto::Ctl,
+            cwd: d.path().to_path_buf(),
+            project,
+        };
+        let Attempt::Ready(mut client) = connect(&run, &hello).await else {
+            panic!("the daemon answers ready");
+        };
+        let e = client.ctl("write", json!({"n": 1})).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_GONE);
+        assert_eq!(e.message, "the daemon closed the connection during write");
+        assert_eq!(
+            e.fix,
+            "check rdy status; a write may or may not have committed; it is not retried"
+        );
+        // and the next call goes nowhere
+        let e = client.ctl("write", json!({"n": 2})).await.unwrap_err();
+        assert_eq!(e.code, E_DAEMON_GONE);
+        done.send(()).unwrap();
+        let (request, connected_again) = daemon.await.unwrap();
+        assert!(request.contains(r#""n":1"#), "{request}");
+        assert!(!connected_again);
+    }
+
+    /// `ensure_error`'s words for a failure that has no path of its own.
+    #[test]
+    fn wx17_a_run_dir_failure_names_the_run_dir() {
+        let run = RunDir::of_project(Path::new("/p"));
+        let other = ensure_error(&run, io::Error::from(io::ErrorKind::OutOfMemory));
+        assert!(
+            other
+                .message
+                .starts_with("could not create the run directory "),
+            "{}",
+            other.message
+        );
+        assert_eq!(other.fix, START_FIX);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn df3_a_short_socket_dir_that_cannot_be_prepared_names_it() {
+        let run = RunDir::of_project(Path::new("/p"));
         let other = ensure_error(&run, io::Error::other("no space"));
         assert_eq!(
             other.message,
@@ -1122,7 +1366,7 @@ mod tests {
         let ro = d.path().join("read-only");
         fs::DirBuilder::new().mode(0o500).create(&ro).unwrap();
         let dir = ro.join("rdy-501");
-        let e = ensure_error(&run, crate::layout::ensure_short_dir(&dir).unwrap_err());
+        let e = ensure_error(&run, crate::sys::ensure_short_dir(&dir).unwrap_err());
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(e.code, E_DAEMON_START);
         assert_eq!(

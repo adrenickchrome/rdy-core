@@ -100,23 +100,27 @@ pub fn read_mark(dir: &Path) -> Result<Option<FollowerMark>, StoreError> {
         }
         Err(_) => return Err(refused(Why::Unreadable)),
     };
-    if !private_regular(&meta) {
+    // anything but a regular file (a link, a FIFO, a device) is refused before any open
+    if !meta.is_file() {
         return Err(refused(Why::NotPrivate));
+    }
+    let file = pio::open_no_follow(std::fs::OpenOptions::new().read(true), &path).map_err(|e| {
+        refused(
+            if pio::is_link_refusal(&e) || e.kind() == std::io::ErrorKind::PermissionDenied {
+                Why::NotPrivate
+            } else {
+                Why::Unreadable
+            },
+        )
+    })?;
+    let meta = file.metadata().map_err(|_| refused(Why::Unreadable))?;
+    match private_regular(&file, &meta, &path) {
+        Ok(true) => {}
+        Ok(false) => return Err(refused(Why::NotPrivate)),
+        Err(_) => return Err(refused(Why::Unreadable)),
     }
     if meta.len() > MAX_MARK_BYTES {
         return Err(refused(Why::TooLarge));
-    }
-    let file = pio::open_no_follow(std::fs::OpenOptions::new().read(true), &path).map_err(|e| {
-        refused(if pio::is_link_refusal(&e) {
-            Why::NotPrivate
-        } else {
-            Why::Unreadable
-        })
-    })?;
-    match file.metadata() {
-        Ok(m) if private_regular(&m) => {}
-        Ok(_) => return Err(refused(Why::NotPrivate)),
-        Err(_) => return Err(refused(Why::Unreadable)),
     }
     let mut bytes = Vec::new();
     file.take(MAX_MARK_BYTES + 1)
@@ -128,9 +132,19 @@ pub fn read_mark(dir: &Path) -> Result<Option<FollowerMark>, StoreError> {
     parse(&bytes).map(Some)
 }
 
-/// Whether `meta` is one private regular file: not a link's and not shared by a second name.
-fn private_regular(meta: &std::fs::Metadata) -> bool {
-    pio::is_private_file(meta) && crate::fileid::links(meta) == 1
+/// Whether the open `file` (named `path`), whose metadata is `meta`, is one private regular file
+/// of this account's: not shared by a second name. Its privacy and link count are read from the
+/// handle; a failed read is an error.
+fn private_regular(
+    file: &std::fs::File,
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> std::io::Result<bool> {
+    let privacy = pio::privacy(file)?;
+    Ok(meta.is_file()
+        && privacy.mine
+        && privacy.private
+        && crate::fileid::links_of(file, path)? == 1)
 }
 
 /// The mark in `bytes`, which is within the size bound.

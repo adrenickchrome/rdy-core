@@ -47,7 +47,7 @@ use ssh_encoding::{Decode, Encode};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
 use ssh_key::{Algorithm, HashAlg, Signature, SshSig};
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, TryLockError};
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -219,10 +219,9 @@ struct Env {
 }
 
 fn private_dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .permissions(pio::permissions(0o700))
-        .tempdir()
-        .unwrap()
+    let dir = tempfile::tempdir().unwrap();
+    pio::make_private_dir(dir.path()).unwrap();
+    dir
 }
 
 /// The user settings: `signing.key`, `signing.agent_key` and `signing.sign`, then `extra`.
@@ -245,11 +244,10 @@ fn env(config: &str) -> Env {
     let project_dir = private_dir();
     let home = home_dir.path().to_path_buf();
     let rdy = home.join("rdy");
-    pio::dir_mode(&mut fs::DirBuilder::new(), 0o700)
-        .create(&rdy)
-        .unwrap();
+    pio::create_private_dir(&rdy).unwrap();
     let user_file = rdy.join("config.yaml");
     fs::write(&user_file, config).unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&user_file, pio::permissions(0o644)).unwrap();
     let project = project_dir.path().to_path_buf();
     drop(Rdy::init(&project, "rdy-standard").unwrap());
@@ -305,14 +303,10 @@ fn seed_at(creds: &Path, records: &[(&str, Credential)]) {
     }
     let bytes = encode_credentials(&file).unwrap();
     let tmp = creds.with_extension("seed");
-    let mut f = pio::file_mode(
-        OpenOptions::new().write(true).create(true).truncate(true),
-        0o600,
-    )
-    .open(&tmp)
-    .unwrap();
+    let mut f = fs::File::create(&tmp).unwrap();
+    pio::make_private_file(&f).unwrap();
     f.write_all(&bytes).unwrap();
-    fs::set_permissions(&tmp, pio::permissions(0o600)).unwrap();
+    drop(f);
     fs::rename(&tmp, creds).unwrap();
 }
 
@@ -1403,7 +1397,7 @@ fn tls() -> Tls {
     fs::write(&ca, server.ca_pem()).unwrap();
     let mut config = fs::read_to_string(&e.user_file).unwrap();
     config.push_str(&format!(
-        "hub:\n  installs:\n    \"{o}\":\n      ca_file: \"{}\"\n",
+        "hub:\n  installs:\n    \"{o}\":\n      ca_file: '{}'\n",
         ca.display()
     ));
     fs::write(&e.user_file, config).unwrap();

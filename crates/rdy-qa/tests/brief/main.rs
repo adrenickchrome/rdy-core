@@ -6,6 +6,7 @@ mod brief_cli;
 mod brief_consequences;
 mod brief_coverage;
 mod brief_created;
+mod brief_editor;
 mod brief_engine;
 mod brief_entities;
 mod brief_inflight;

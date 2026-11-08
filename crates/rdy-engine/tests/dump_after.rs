@@ -1093,7 +1093,8 @@ fn hc4_a_project_file_that_grows_is_read_to_one_byte_past_the_limit() {
         let path = ignore.clone();
         on_project_file(Some(Box::new(move |p: &Path| {
             if p == path {
-                let f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+                // write access, not append: set_len needs it on Windows
+                let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
                 f.set_len(grown).unwrap();
             }
         })));

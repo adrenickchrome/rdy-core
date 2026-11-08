@@ -251,7 +251,7 @@ pub fn with_warnings(mut e: RdyError, warnings: &[Issue]) -> RdyError {
 /// settings that fail only those keep their person. A user config that does not read, or an
 /// actor outside the actor form, is its error: never a fallback identity.
 pub fn auth_person(settings: Option<&HubConfig>, user_file: &Path) -> Result<String, RdyError> {
-    let user = std::env::var("USER").ok();
+    let user = rdy_engine::instructions_config::actor_user_from_env();
     match settings {
         Some(s) => s.human_actor(user.as_deref()),
         None => configured_human_actor(None, Some(user_file), user.as_deref()),

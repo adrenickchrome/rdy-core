@@ -5,6 +5,28 @@ use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
+/// The name of `path` under `root` as a site URL path: components joined by `/`, so a native
+/// separator never reaches a URL check.
+pub fn slash_rel(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The native path of a script in the standard theme, for `node` to load.
+pub fn theme_js(name: &str) -> String {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    for part in ["rdy-render", "theme", "rdy-standard", "js"] {
+        p.push(part);
+    }
+    p.push(name);
+    p.to_string_lossy().into_owned()
+}
+
 /// Where a run of text sits on the page: authored content, the "Why ?" trail, or chrome
 /// (everything else).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

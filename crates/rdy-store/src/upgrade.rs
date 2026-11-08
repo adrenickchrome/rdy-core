@@ -939,14 +939,18 @@ fn naming(e: StoreError, backup: &Path) -> StoreError {
     }
 }
 
-/// Whether `meta` is owned by this user, with no permission bit for its group or others.
-fn is_owned_private(meta: &std::fs::Metadata) -> bool {
-    pio::owner(meta) == pio::own_uid() && pio::is_owner_only(meta)
+/// Whether the open file or directory `f` is this account's, and no other account may use it,
+/// read from its handle. A failed read is an error.
+fn is_owned_private(f: &File) -> io::Result<bool> {
+    let privacy = pio::privacy(f)?;
+    Ok(privacy.mine && privacy.owner_only)
 }
 
 /// The mode of a backup's copy of a file whose metadata is `source`: its owner may read it, and
 /// write it only when the source's owner may; its group and others get nothing. So a copy is
-/// never more open than its source.
+/// never more open than its source. Unix only: Windows has no permission modes, and the private
+/// create gives the copy its private descriptor.
+#[cfg(unix)]
 fn copy_mode(source: &std::fs::Metadata) -> u32 {
     0o400 | (pio::mode_of(source) & 0o200)
 }
@@ -962,10 +966,12 @@ fn make_private_dir_at(dir: &File, name: &OsStr) -> Result<File, StoreError> {
 /// Opens the directory `name` just created in the open directory `dir`
 /// ([`make_private_dir_at`]), with its mode set to 0o700 first.
 fn open_made_dir(dir: &File, name: &OsStr) -> Result<File, StoreError> {
+    // Windows has no permission modes: the private create already made the directory private
+    #[cfg(unix)]
     pio::set_mode_at(dir, name, 0o700)?;
     let made = pio::open_dir_at(dir, name).map_err(file_type_error)?;
-    let m = made.metadata()?;
-    if !(pio::is_private_dir(&m) && pio::owner(&m) == pio::own_uid() && pio::is_empty_dir(&made)?) {
+    let privacy = pio::privacy(&made)?;
+    if !(privacy.private && privacy.mine && pio::is_empty_dir(&made)?) {
         return Err(failed(UpgradeFailure::BackupMismatch, None));
     }
     Ok(made)
@@ -1037,7 +1043,7 @@ fn write_backup(
     from: &StoreFeatures,
     terminal: Hash,
 ) -> Result<(), StoreError> {
-    target.parent.sync_all()?;
+    pio::sync_open_dir(target.parent, target.parent_path)?;
     fsutil::record(target.parent_path);
     let root = open_made_dir(target.parent, target.name)?;
     let copy = make_private_dir_at(&root, BACKUP_STORE.as_ref())?;
@@ -1055,8 +1061,10 @@ fn write_backup(
         hit(Phase::Copy(rel))?;
         let (at, name) = split_rel(rel);
         let src = open_file_at(&open_rel_dir(&source.handle, at)?, name)?;
+        #[cfg(unix)]
         let mode = copy_mode(&src.metadata()?);
         let mut dst = pio::create_private_at(&open_rel_dir(&copy, at)?, name)?;
+        #[cfg(unix)]
         dst.set_permissions(pio::permissions(mode))?;
         let (n, digest) = stream(&src, Some(&mut dst), &mut buf)?;
         if n != *len {
@@ -1074,13 +1082,13 @@ fn write_backup(
     // the deepest directories first, then the copy and the backup itself
     for d in listing.dirs.iter().rev() {
         hit(Phase::Sync(d))?;
-        open_rel_dir(&copy, d)?.sync_all()?;
+        pio::sync_open_dir(&open_rel_dir(&copy, d)?, &copy_path.join(d))?;
         fsutil::record(&copy_path.join(d));
     }
     hit(Phase::Sync(""))?;
-    copy.sync_all()?;
+    pio::sync_open_dir(&copy, &copy_path)?;
     fsutil::record(&copy_path);
-    root.sync_all()?;
+    pio::sync_open_dir(&root, target.path)?;
     fsutil::record(target.path);
     let manifest = BackupManifest {
         source_manifest: from.hash().to_string(),
@@ -1092,7 +1100,7 @@ fn write_backup(
     // backup.json and its temp file stand beside the copy, so no store file can take their name
     fsutil::replace_in_dir(&root, target.path, BACKUP_MANIFEST.as_ref(), &json, None)?;
     in_place(source, target, &root, &copy)?;
-    target.parent.sync_all()?;
+    pio::sync_open_dir(target.parent, target.parent_path)?;
     fsutil::record(target.parent_path);
     Ok(())
 }
@@ -1119,7 +1127,7 @@ fn reuse_backup(
         }
     };
     let root = pio::open_dir_at(target.parent, target.name).map_err(opened)?;
-    if !is_owned_private(&root.metadata()?) {
+    if !is_owned_private(&root)? {
         return Err(mismatch());
     }
     // what backup.json must say: this store's files as they are now, and which files they are
@@ -1167,7 +1175,7 @@ fn reuse_backup(
         Err(StoreError::Upgrade { .. }) => return Err(mismatch()),
         Err(e) => return Err(e),
     };
-    if !is_owned_private(&manifest.metadata()?) {
+    if !is_owned_private(&manifest)? {
         return Err(mismatch());
     }
     let mut got = Vec::new();
@@ -1182,7 +1190,7 @@ fn reuse_backup(
     // the copy holds exactly what backup.json lists, each file private, independent of the
     // store's files and with its recorded digest
     let copy = pio::open_dir_at(&root, BACKUP_STORE.as_ref()).map_err(opened)?;
-    if !is_owned_private(&copy.metadata()?) {
+    if !is_owned_private(&copy)? {
         return Err(mismatch());
     }
     let mut digests: Vec<BackupFile> = Vec::new();
@@ -1190,7 +1198,7 @@ fn reuse_backup(
         .try_reserve_exact(expected.files.len())
         .map_err(|_| failed(UpgradeFailure::Limit, None))?;
     let held = list_tree(&copy, &[], |rel, f, m| {
-        if !is_owned_private(m) || ids.contains(&FileId::of(m)) {
+        if !is_owned_private(f)? || ids.contains(&FileId::of_file(f)?) {
             return Err(mismatch());
         }
         if m.is_file() {

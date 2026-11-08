@@ -67,7 +67,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "-c",
             "tag.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            &format!(
+                "core.hooksPath={}",
+                rdy_engine::code_index::empty_hooks_dir().display()
+            ),
             "-c",
             "init.defaultBranch=main",
         ])
@@ -315,16 +318,22 @@ fn ck3_source_probe_bounds_are_fixed() {
     assert_eq!(got[&ids2[1]], Unchecked, "4097 bytes are not");
 
     // git output is cut at the cap, on either pipe, and the child is reaped
-    let mut c = Command::new("yes");
-    c.arg("x");
-    let e = run_probe_for_tests(c).unwrap_err();
+    let shell = |unix: &str, windows: &str| {
+        let (program, flag, script) = if cfg!(windows) {
+            ("cmd", "/c", windows)
+        } else {
+            ("sh", "-c", unix)
+        };
+        let mut c = Command::new(program);
+        c.args([flag, script]);
+        c
+    };
+    let e = run_probe_for_tests(shell("yes x", "for /l %i in (0,0,1) do @echo x")).unwrap_err();
     assert_eq!(e.code, E_LIMIT, "{e}");
-    let mut c = Command::new("sh");
-    c.args(["-c", "yes x >&2"]);
-    let e = run_probe_for_tests(c).unwrap_err();
+    let e = run_probe_for_tests(shell("yes x >&2", "for /l %i in (0,0,1) do @echo x 1>&2"))
+        .unwrap_err();
     assert_eq!(e.code, E_LIMIT, "{e}");
-    let mut c = Command::new("sh");
-    c.args(["-c", "printf ok"]);
+    let c = shell("printf ok", "<nul set /p=ok");
     assert_eq!(run_probe_for_tests(c).unwrap().stdout, b"ok");
 }
 

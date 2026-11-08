@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes for an editor script. FW-XP1 Phase 4 ports it.
 //! rf5 (D-Z8P09, D-2WR0G, D-KQ4CA): rdy_schema's examples of a finding and a source are valid
 //! writes, the server instructions and the schema guides name the supporting types and the
 //! decision basis fixes, and `rdy new finding` and `rdy new source` build the same blocks as
@@ -12,7 +10,6 @@ use rdy_qa::fixtures::writer;
 use rdy_qa::mcp::McpClient;
 use rdy_schema::supporting::{EVIDENCE_FIX, EVIDENCE_MESSAGE};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 const FINDING_LINE: &str = "Finding: record what surfaced with `rdy_write`, type finding, statement and 1 to 20 evidence entries; cite it from a decision with `depends_on`";
 const TEXT_GUIDE: &str = "A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home, or the project root when the project names none.";
@@ -258,31 +255,26 @@ fn rf5_supporting_mcp_schema_and_cli_match() {
     assert_eq!(e["fix"], EVIDENCE_FIX, "{e}");
 
     // rdy edit reaches the write's checks: a bad time is refused, a good one is written
-    let editor = s.dir.path().join("ed.sh");
     let edit = |script: &str| {
-        std::fs::write(&editor, format!("#!/bin/sh\n{script}")).unwrap();
-        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-        rdy_qa::fixtures::rdy_command()
-            .arg("--project")
+        let mut cmd = rdy_qa::fixtures::rdy_command();
+        cmd.arg("--project")
             .arg(s.dir.path())
             .args(["edit", &decision])
-            .env("EDITOR", &editor)
             .env_remove("RDY_ACTOR")
             .env_remove("RDY_RUN")
             .env_remove("RDY_NO_DAEMON")
-            .envs(s.env_pairs())
-            .output()
-            .unwrap()
+            .envs(s.env_pairs());
+        crate::cli_editor::child_fixture::set_editor(&mut cmd, script);
+        crate::cli_editor::child_fixture::edit_output(&mut cmd).unwrap()
     };
-    let out =
-        edit("perl -0pi -e 's/^fields:\\n/fields:\\n  review_by: next quarter\\n/m' \"$1\"\n");
+    let out = edit("after fields:\t  review_by: next quarter\n");
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(
         err.contains("field \"review_by\" must be an RFC 3339 UTC time or a date"),
         "{err}"
     );
-    let out = edit("perl -0pi -e 's/^fields:\\n/fields:\\n  review_by: 2027-01-01\\n/m' \"$1\"\n");
+    let out = edit("after fields:\t  review_by: 2027-01-01\n");
     assert!(out.status.success(), "{}", stderr(&out));
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(text.starts_with("change "), "{text:?}");

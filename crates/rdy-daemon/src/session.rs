@@ -1,5 +1,6 @@
 //! The table of live sessions (connections past their hello).
 
+use crate::sys;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,7 +30,9 @@ pub struct SessionInfo {
     pub version: String,
     pub build: String,
     pub cwd: PathBuf,
-    pub peer_uid: u32,
+    /// The peer's account, under this platform's own field: `peer_uid` or `peer_sid` (D-FARN9).
+    #[serde(flatten)]
+    pub peer: sys::SessionPeer,
     pub connected_at_ms: u64,
 }
 
@@ -63,7 +66,7 @@ impl Sessions {
         version: String,
         build: String,
         cwd: PathBuf,
-        peer_uid: u32,
+        peer: sys::Account,
     ) -> SessionInfo {
         let id = SessionId(self.0.next.fetch_add(1, Ordering::Relaxed));
         let connected_at_ms = std::time::SystemTime::now()
@@ -76,7 +79,7 @@ impl Sessions {
             version,
             build,
             cwd,
-            peer_uid,
+            peer: peer.into(),
             connected_at_ms,
         };
         self.map().insert(id, info.clone());

@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes, makes symlinks and reads sessions. FW-XP1 Phase 4 ports it.
 //! The spawn command and detach (spawn1).
 mod common;
 use common::*;
@@ -60,15 +58,8 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
         run.log_file().exists(),
         "the log file is created for the child's stdio"
     );
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        std::fs::metadata(run.log_file())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
+    #[cfg(unix)]
+    assert_eq!(mode_bits(&run.log_file()), 0o600);
     // SAFETY: the test holds `_env`, so no other test of this binary runs and nothing else in this
     // process reads the environment meanwhile
     unsafe {
@@ -79,6 +70,7 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
     let _env = env_lock();
@@ -91,8 +83,7 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
         "#!/bin/sh\necho child-$$ >&2\nps -o pgid= -p $$ >&2\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    chmod(&fake, 0o755);
     let mut cmd = serve_command(&fake, dir.path(), &run).unwrap();
     spawn_serve(&mut cmd).unwrap();
     // poll until the child has written both lines (its name, then its pgid); a fixed sleep flaked
@@ -120,6 +111,7 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn spawn1_detach_makes_a_new_session_in_a_child() {
     let _env = env_lock();
@@ -155,6 +147,7 @@ fn spawn1_detach_makes_a_new_session_in_a_child() {
 /// What `rdy serve --detach` does once spawned: `detach()`, then it must lead a session of its
 /// own. A child made a process-group leader by `process_group(0)` cannot `setsid` (EPERM), so
 /// its `detach` silently stayed in the spawner's session.
+#[cfg(unix)]
 #[test]
 fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
     let _env = env_lock();
@@ -181,8 +174,7 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
         ),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    chmod(&fake, 0o755);
     let mut cmd = serve_command(&fake, dir.path(), &run).unwrap();
     spawn_serve(&mut cmd).unwrap();
     let t0 = std::time::Instant::now();
@@ -216,29 +208,27 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
 #[test]
 fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
     let _env = env_lock();
-    use std::os::unix::fs::PermissionsExt;
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
     let victim = dir.path().join("victim");
     std::fs::write(&victim, "keep\n").unwrap();
-    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
-    std::os::unix::fs::symlink(&victim, run.log_file()).unwrap();
+    #[cfg(unix)]
+    chmod(&victim, 0o644);
+    symlink_file(&victim, &run.log_file());
     let e = serve_command(std::path::Path::new("/bin/sh"), dir.path(), &run).unwrap_err();
-    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert!(e.to_string().contains(LINK_REFUSAL), "{e}");
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
-    assert_eq!(
-        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
-        0o644
-    );
+    #[cfg(unix)]
+    assert_eq!(mode_bits(&victim), 0o644);
 }
 
 /// df3 (D-YMWEM): a project whose `.rdy/run/rdy.sock` is over `sun_path` is no longer refused.
 /// The serve command for it prepares the run dir, its log and the short socket's private
 /// directory.
+#[cfg(unix)]
 #[test]
 fn spawn1_the_serve_command_for_a_long_project_path_prepares_the_short_socket_dir() {
-    use std::os::unix::fs::PermissionsExt;
     let _env = env_lock();
     let dir = short_tempdir();
     let deep = dir.path().join("a".repeat(120));
@@ -247,10 +237,8 @@ fn spawn1_the_serve_command_for_a_long_project_path_prepares_the_short_socket_di
     serve_command(std::path::Path::new("/bin/sh"), &deep, &run).unwrap();
     assert!(run.log_file().exists());
     let short = run.short_socket().expect("the socket leaves .rdy/run");
-    let mode = std::fs::symlink_metadata(short.parent().unwrap())
-        .unwrap()
-        .permissions()
-        .mode();
+    let mode =
+        rdy_store::pio::mode_of(&std::fs::symlink_metadata(short.parent().unwrap()).unwrap());
     assert_eq!(mode & 0o777, 0o700);
 }
 
@@ -273,6 +261,7 @@ fn spawn1_a_relative_project_reaches_the_child_absolute() {
 /// A spawned child that exits is reaped even after its `Spawned` is dropped: without a reaper a
 /// long-lived spawner (`rdy edit`, an `rdy mcp` proxy) keeps the daemon as a zombie, which
 /// `process_alive` still reports, so `rdy serve --stop` waits it out and fails (cli2 fix round 1).
+#[cfg(unix)]
 #[test]
 fn spawn1_a_spawned_child_is_reaped_and_reports_its_code_after_the_spawned_is_dropped() {
     let _env = env_lock();
@@ -280,8 +269,7 @@ fn spawn1_a_spawned_child_is_reaped_and_reports_its_code_after_the_spawned_is_dr
     let run = RunDir::of_project(dir.path());
     let fake = dir.path().join("fake-rdy");
     std::fs::write(&fake, "#!/bin/sh\necho pid-$$ >&2\nexit 3\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    chmod(&fake, 0o755);
     // a deadline, not an expected time: the child exits in well under a second, but a fork and
     // exec stalled past 5 s while other tracks built and tested on the same machine (M2c t15/t16
     // integration), and macOS can hold the first exec of a freshly written script for 20 s or

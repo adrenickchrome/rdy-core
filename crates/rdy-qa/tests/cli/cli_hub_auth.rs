@@ -71,7 +71,7 @@ impl Home {
         std::fs::create_dir(dir.path().join("rdy")).unwrap();
         set_mode(&dir.path().join("rdy"), 0o700).unwrap();
         std::fs::write(
-            dir.path().join("rdy/config.yaml"),
+            dir.path().join("rdy").join("config.yaml"),
             format!("actor: {PERSON}\n"),
         )
         .unwrap();
@@ -79,11 +79,11 @@ impl Home {
     }
 
     fn config(&self) -> PathBuf {
-        self.dir.path().join("rdy/config.yaml")
+        self.dir.path().join("rdy").join("config.yaml")
     }
 
     fn creds(&self) -> PathBuf {
-        self.dir.path().join("rdy/credentials.yaml")
+        self.dir.path().join("rdy").join("credentials.yaml")
     }
 
     /// The environment of a child: this config home only.
@@ -112,7 +112,7 @@ impl Home {
         }
         text.push_str(&format!(
             "    \"{origin}\":\n      ca_file: {}\n",
-            pem.display()
+            rdy_qa::fixtures::yaml_path(&pem)
         ));
         std::fs::write(self.config(), text).unwrap();
     }
@@ -176,6 +176,8 @@ impl Home {
     fn command(&self, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
         let mut cmd = rdy_qa::fixtures::rdy_command();
         cmd.env_clear()
+            // Windows sockets do not start in a process without it; no other platform has it
+            .envs(std::env::var_os("SystemRoot").map(|root| ("SystemRoot", root)))
             .envs(self.env())
             .envs(extra.iter().copied())
             .args(args)

@@ -511,7 +511,7 @@ pub(crate) fn write_text(v: &Value) -> String {
 }
 
 /// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
-/// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
+/// `#` lines above the YAML, the editor on a temp file, then the `edit_block` op citing the
 /// briefing's token, the block's `version` as the base and its `conflict`, with `reason` as the
 /// edit's editorial reason or `reflects` (rf8) as its raw reflects justification (a block or
 /// conflict changed while the editor was open is
@@ -535,27 +535,19 @@ fn edit(
         "brief",
         json!({"ids": [text(&block["id"])], "view": view}),
     )?;
+    // The handle closes at once, so an editor on Windows can open, write and replace the file.
     let tmp = tempfile::Builder::new()
         .prefix("rdy-edit-")
         .suffix(".yaml")
         .tempfile()
-        .map_err(|e| io_error(e, "check the temp directory"))?;
+        .map_err(|e| io_error(e, "check the temp directory"))?
+        .into_temp_path();
     std::fs::write(
-        tmp.path(),
+        &tmp,
         format!("{}{}", brief_text::header(&briefing), text(&block["yaml"])),
     )
     .map_err(|e| io_error(e, "check the temp directory"))?;
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("$EDITOR \"$1\"")
-        .arg("sh")
-        .arg(tmp.path())
-        .env("EDITOR", &editor)
-        .status()
-        .map_err(|e| {
-            ErrorReply::from(RdyError::new(E_IO, format!("{editor}: {e}"), "set $EDITOR"))
-        })?;
+    let status = run_editor(&tmp)?;
     if !status.success() {
         return Err(ErrorReply::new(
             E_BAD_INPUT,
@@ -563,7 +555,7 @@ fn edit(
             "save and quit the editor normally",
         ));
     }
-    let yaml = std::fs::read_to_string(tmp.path()).map_err(|e| io_error(e, "retry"))?;
+    let yaml = std::fs::read_to_string(&tmp).map_err(|e| io_error(e, "retry"))?;
     let brief = text(&briefing["base"]["token"]);
     call(
         env,
@@ -581,7 +573,7 @@ fn edit(
         }),
     )
     .map_err(|mut e| {
-        if let Ok(path) = tmp.into_temp_path().keep() {
+        if let Ok(path) = tmp.keep() {
             e.fix = format!(
                 "{}; your edit is saved at {}: run rdy edit {id} again and paste it in",
                 e.fix,
@@ -592,4 +584,192 @@ fn edit(
         }
         e
     })
+}
+
+/// Unix: `$EDITOR` (default `vi`) through `sh`, with the file as `$1`.
+#[cfg(not(windows))]
+fn run_editor(path: &std::path::Path) -> Result<std::process::ExitStatus, ErrorReply> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("$EDITOR \"$1\"")
+        .arg("sh")
+        .arg(path)
+        .env("EDITOR", &editor)
+        .status()
+        .map_err(|e| ErrorReply::from(RdyError::new(E_IO, format!("{editor}: {e}"), "set $EDITOR")))
+}
+
+/// Windows: `%VISUAL%`, else `%EDITOR%`, else `notepad.exe`, started directly (never through
+/// `cmd.exe` or `sh`) with the file path as one last argument.
+#[cfg(windows)]
+fn run_editor(path: &std::path::Path) -> Result<std::process::ExitStatus, ErrorReply> {
+    let (name, value) = editor_choice(|n| std::env::var_os(n).map(|v| v.to_string_lossy().into()));
+    let argv = split_command_line(&value).map_err(|_| bad_editor(&name, &value))?;
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| bad_editor(&name, &value))?;
+    std::process::Command::new(program)
+        .args(args)
+        .arg(path)
+        .status()
+        .map_err(|e| {
+            ErrorReply::from(RdyError::new(
+                E_IO,
+                format!("{program}: {e}"),
+                "set %VISUAL% or %EDITOR%",
+            ))
+        })
+}
+
+/// The editor variable and its value: `VISUAL`, else `EDITOR`, else `notepad.exe`. A variable
+/// that is unset, empty or only white space counts as unset.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn editor_choice(get: impl Fn(&str) -> Option<String>) -> (String, String) {
+    for name in ["VISUAL", "EDITOR"] {
+        if let Some(v) = get(name).filter(|v| !v.trim().is_empty()) {
+            return (name.into(), v);
+        }
+    }
+    ("EDITOR".into(), "notepad.exe".into())
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn bad_editor(name: &str, value: &str) -> ErrorReply {
+    ErrorReply::new(
+        E_BAD_INPUT,
+        format!("the editor command in %{name}% cannot be parsed: {value}"),
+        "set %VISUAL% or %EDITOR% to a program, in double quotes if its path has spaces, with any arguments after it",
+    )
+}
+
+/// Splits a command line by the Windows rules: items end at white space outside double quotes;
+/// `2n` backslashes before a quote give `n` backslashes and the quote toggles; `2n+1` give `n`
+/// backslashes and a literal quote; other backslashes stay. An unclosed quote is an error.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn split_command_line(s: &str) -> Result<Vec<String>, ()> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut started, mut quoted, mut slashes) = (false, false, 0usize);
+    for c in s.chars() {
+        match c {
+            '\\' => {
+                slashes += 1;
+                started = true;
+                continue;
+            }
+            '"' => {
+                cur.extend(std::iter::repeat_n('\\', slashes / 2));
+                if slashes % 2 == 1 {
+                    cur.push('"');
+                } else {
+                    quoted = !quoted;
+                }
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                cur.extend(std::iter::repeat_n('\\', slashes));
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.extend(std::iter::repeat_n('\\', slashes));
+                cur.push(c);
+                started = true;
+            }
+        }
+        slashes = 0;
+    }
+    if quoted {
+        return Err(());
+    }
+    cur.extend(std::iter::repeat_n('\\', slashes));
+    if started {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod wx20_tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |n| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn wx20_visual_precedes_editor_and_notepad() {
+        let both = [("VISUAL", "v.exe"), ("EDITOR", "e.exe")];
+        assert_eq!(editor_choice(env(&both)), ("VISUAL".into(), "v.exe".into()));
+        for blank in ["", "   ", "\t "] {
+            let p = [("VISUAL", blank), ("EDITOR", "e.exe")];
+            assert_eq!(editor_choice(env(&p)), ("EDITOR".into(), "e.exe".into()));
+            let p = [("VISUAL", blank), ("EDITOR", blank)];
+            assert_eq!(editor_choice(env(&p)).1, "notepad.exe");
+        }
+        assert_eq!(editor_choice(env(&[])).1, "notepad.exe");
+    }
+
+    #[test]
+    fn wx20_editor_receives_one_literal_native_path() {
+        let s =
+            split_command_line(r#""C:\Program Files\Ed it\ed.exe" -w --x="a b" plain"#).unwrap();
+        assert_eq!(
+            s,
+            [r"C:\Program Files\Ed it\ed.exe", "-w", "--x=a b", "plain"]
+        );
+        // the path is never part of the parse: it is appended as its own item
+        let path = std::path::Path::new(r"C:\Users\Zoë & 100%\rdy-edit-1.yaml");
+        let mut argv = split_command_line("ed.exe").unwrap();
+        argv.push(path.to_string_lossy().into());
+        assert_eq!(argv[1], r"C:\Users\Zoë & 100%\rdy-edit-1.yaml");
+        assert_eq!(argv.len(), 2);
+        // backslash rules
+        assert_eq!(split_command_line(r#"a\\"b c""#).unwrap(), [r"a\b c"]);
+        assert_eq!(split_command_line(r#"a\"b"#).unwrap(), [r#"a"b"#]);
+        assert_eq!(split_command_line(r"C:\dir\").unwrap(), [r"C:\dir\"]);
+        // refused: an unclosed quote, and no program
+        assert!(split_command_line(r#""C:\Program Files\ed.exe"#).is_err());
+        assert!(split_command_line("  ").unwrap().is_empty());
+        let e = bad_editor("VISUAL", "\"x");
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(
+            e.message,
+            "the editor command in %VISUAL% cannot be parsed: \"x"
+        );
+        assert_eq!(
+            e.fix,
+            "set %VISUAL% or %EDITOR% to a program, in double quotes if its path has spaces, with any arguments after it"
+        );
+    }
+
+    #[test]
+    fn wx20_editor_can_reopen_the_closed_temp_file() {
+        let tmp = tempfile::Builder::new()
+            .prefix("rdy-edit-")
+            .suffix(".yaml")
+            .tempfile()
+            .unwrap()
+            .into_temp_path();
+        std::fs::write(&tmp, "a").unwrap();
+        // another handle opens, replaces and renames over it, as an editor would
+        let mut f = std::fs::OpenOptions::new().write(true).open(&tmp).unwrap();
+        std::io::Write::write_all(&mut f, b"b").unwrap();
+        drop(f);
+        let side = tmp.with_extension("new");
+        std::fs::write(&side, "c").unwrap();
+        std::fs::rename(&side, &tmp).unwrap();
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "c");
+        let kept = tmp.keep().unwrap();
+        assert!(kept.exists());
+        std::fs::remove_file(kept).unwrap();
+    }
 }

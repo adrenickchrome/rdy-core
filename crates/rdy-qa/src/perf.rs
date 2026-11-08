@@ -885,6 +885,25 @@ pub fn machine_class() -> String {
                     .map(|v| v.trim().to_string())
             }),
         )
+    } else if cfg!(windows) {
+        (
+            // `Microsoft Windows [Version 10.0.26100.1]` from the command interpreter
+            cmd("cmd", &["/C", "ver"]).map(|v| {
+                v.trim_matches(['[', ']', '\r', '\n', ' '])
+                    .replace("[Version ", "")
+            }),
+            std::env::var("PROCESSOR_IDENTIFIER").ok(),
+            // the file system of the drive that holds the working directory
+            cmd(
+                "powershell.exe",
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[IO.DriveInfo]::new([IO.Path]::GetPathRoot((Get-Location).Path)).DriveFormat",
+                ],
+            ),
+        )
     } else {
         (
             std::fs::read_to_string("/etc/os-release")
@@ -5172,7 +5191,7 @@ fn dir_digest(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64, Hash)> {
         if std::fs::symlink_metadata(&p).expect("metadata").is_dir() {
             out.extend(dir_digest(&p));
         } else {
-            let bytes = std::fs::read(&p).expect("read");
+            let bytes = crate::platform::read_live_file(&p).expect("read");
             out.push((p, bytes.len() as u64, Hash::of(&bytes)));
         }
     }
@@ -7226,7 +7245,7 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
         Attempt::Ready(c) => c.into_stream(),
         other => panic!("the daemon did not answer the mcp hello: {other:?}"),
     };
-    let (r, mut w) = stream.into_split();
+    let (r, mut w) = rdy_daemon::sys::split(stream);
     let mut r = tokio::io::BufReader::new(r);
     let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "perf", "version": "0"}}});
     w.write_all(format!("{init}\n").as_bytes())
@@ -8347,6 +8366,18 @@ mod tests {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
         assert!(host.is_empty() || !c.contains(&host), "{c}");
+        assert_eq!(c.matches(" / ").count(), 2, "{c}");
+    }
+
+    /// wx33g: on Windows the class names the system, the processor and the file system, so the
+    /// report header never reads `unknown` there.
+    #[test]
+    fn wx33g_the_machine_class_is_read_on_windows() {
+        let c = machine_class();
+        if cfg!(windows) {
+            assert!(!c.contains("unknown"), "{c}");
+            assert!(c.starts_with("Microsoft Windows"), "{c}");
+        }
         assert_eq!(c.matches(" / ").count(), 2, "{c}");
     }
 
@@ -10094,10 +10125,20 @@ mod tests {
             .build()
             .expect("client runtime");
         let (run, hold) = site_daemon_start(&proj, Duration::from_millis(300));
-        drop(rt.block_on(daemon_ready(&proj)));
+        // The client is dropped inside the runtime and the runtime is driven a moment more: on
+        // Windows a named-pipe handle closes when its cancelled I/O completes, and a runtime that
+        // is not polled again never delivers that completion, so the daemon would keep the
+        // connection (and the idle timer would never arm).
+        let connect_and_close = || {
+            rt.block_on(async {
+                drop(daemon_ready(&proj).await);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+        };
+        connect_and_close();
         std::thread::sleep(Duration::from_millis(1500));
         assert!(run.handle().keepers() >= 1, "the hold keeps the daemon up");
-        drop(rt.block_on(daemon_ready(&proj)));
+        connect_and_close();
         drop(hold);
         let started = Instant::now();
         // the idle timer runs again: the daemon exits on its own
@@ -11092,6 +11133,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         };
         let md = crate::report::markdown(&report);
         assert!(

@@ -8,6 +8,7 @@ use rdy_engine::config_levels::{
 };
 use rdy_engine::hub_config::*;
 use rdy_engine::hub_types::{Origin, RemoteUrl, Secret};
+use rdy_engine::instructions_config::{PathEnv, Platform, actor_user};
 use rdy_engine::{E_BAD_INPUT, E_CONFIG, E_LIMIT, E_NOT_FOUND, E_REMOTE_EXISTS, E_REMOTE_REQUIRED};
 use rdy_schema::Issue;
 use serde_yaml_ng::{Mapping, Value};
@@ -17,6 +18,19 @@ const O: &str = "https://hub.example.com";
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 const REFRESH: &str = "rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC";
 const SENTINEL: &str = "SENTINEL-hsa3-do-not-print";
+
+/// A native absolute path for a CA fixture: a drive path on Windows, a rooted one elsewhere.
+fn abs(name: &str) -> PathBuf {
+    std::env::temp_dir().join("rdy-hub-config").join(name)
+}
+
+/// [`abs`] as a YAML scalar, quoted as the emitter needs, so Windows backslashes survive.
+fn ay(name: &str) -> String {
+    serde_yaml_ng::to_string(abs(name).to_str().unwrap())
+        .unwrap()
+        .trim_end()
+        .to_string()
+}
 
 const SYNTAX_FIX: &str = "fix the config syntax, duplicate keys or aliases";
 const LIMIT_FIX: &str = "reduce the config file to the stated limit";
@@ -292,23 +306,22 @@ fn hsa3_two_share_remotes_are_refused() {
 #[test]
 fn hsa3_ca_and_origin_list_levels_are_enforced() {
     let user = format!(
-        "hub:\n  installs:\n    \"{O}\":\n      ca_file: /etc/rdy/ca.pem\n      pinned_origins: [\"https://b.example.com\", \"https://a.example.com\"]\n"
+        "hub:\n  installs:\n    \"{O}\":\n      ca_file: {}\n      pinned_origins: [\"https://b.example.com\", \"https://a.example.com\"]\n",
+        ay("etc/rdy/ca.pem")
     );
     let project = format!(
-        "hub:\n  installs:\n    \"{O}\":\n      ca_file: /etc/x.pem\n      pinned_origins: [\"https://p.example.com\"]\n"
+        "hub:\n  installs:\n    \"{O}\":\n      ca_file: {}\n      pinned_origins: [\"https://p.example.com\"]\n",
+        ay("etc/x.pem")
     );
     let local = format!(
-        "hub:\n  installs:\n    \"{O}\":\n      ca_file: /etc/y.pem\n      pinned_origins: [\"https://c.example.com\"]\n"
+        "hub:\n  installs:\n    \"{O}\":\n      ca_file: {}\n      pinned_origins: [\"https://c.example.com\"]\n",
+        ay("etc/y.pem")
     );
     let fx = Fx::new(&project, Some(&local), Some(&user));
     let c = fx.load().unwrap();
     let o = Origin::parse(O).unwrap();
     let i = c.install(&o).unwrap();
-    assert_eq!(
-        i.ca_file,
-        Some(PathBuf::from("/etc/rdy/ca.pem")),
-        "user only"
-    );
+    assert_eq!(i.ca_file, Some(abs("etc/rdy/ca.pem")), "user only");
     assert_eq!(
         i.pinned_origins,
         [Origin::parse("https://c.example.com").unwrap()],
@@ -426,10 +439,11 @@ fn hsa3_ca_and_origin_list_levels_are_enforced() {
         (e.code, e.message.as_str()),
         (E_LIMIT, "config input exceeds 16 origins")
     );
+    let ca = ay("ca.pem");
     let mut many = String::from("hub:\n  installs:\n");
     for i in 0..33 {
         many.push_str(&format!(
-            "    \"https://h{i}.example.com\":\n      ca_file: /ca.pem\n"
+            "    \"https://h{i}.example.com\":\n      ca_file: {ca}\n"
         ));
     }
     let fx = Fx::new("", None, Some(&many));
@@ -812,8 +826,9 @@ fn hsa3_config_bounds_duplicates_and_aliases_fail_closed() {
 
 #[test]
 fn hsa3_settings_updates_preserve_unrelated_values() {
+    let ca = ay("ca.pem");
     let text = format!(
-        "# a comment\nactor: human:ada\nsigning:\n  key: ssh-ed25519 AAAA\nserve:\n  idle_timeout: 5\nlater: [1, 2]\nremotes:\n  a: {}\nhub:\n  installs:\n    \"{O}\":\n      ca_file: /ca.pem\n      later: x\n",
+        "# a comment\nactor: human:ada\nsigning:\n  key: ssh-ed25519 AAAA\nserve:\n  idle_timeout: 5\nlater: [1, 2]\nremotes:\n  a: {}\nhub:\n  installs:\n    \"{O}\":\n      ca_file: {ca}\n      later: x\n",
         remote(O, "publish")
     );
     let original = parse_settings(text.as_bytes()).unwrap();
@@ -852,7 +867,10 @@ fn hsa3_settings_updates_preserve_unrelated_values() {
         )
     );
     let install = back["hub"]["installs"][O].as_mapping().unwrap();
-    assert_eq!(install.get("ca_file"), Some(&Value::from("/ca.pem")));
+    assert_eq!(
+        install.get("ca_file"),
+        Some(&Value::from(abs("ca.pem").to_str().unwrap()))
+    );
     assert_eq!(
         install.get("later"),
         Some(&Value::from("x")),
@@ -876,26 +894,16 @@ fn hsa3_settings_updates_preserve_unrelated_values() {
         1,
         "later stays"
     );
-    set_install_field(
-        &mut m,
-        &p,
-        InstallField::CaFile(Some(PathBuf::from("/p.pem"))),
-    )
-    .unwrap();
+    set_install_field(&mut m, &p, InstallField::CaFile(Some(abs("p.pem")))).unwrap();
     assert_eq!(
         m["hub"]["installs"]["https://p.example.com"]["ca_file"],
-        Value::from("/p.pem")
+        Value::from(abs("p.pem").to_str().unwrap())
     );
     set_remote(&mut m, "a", None).unwrap();
     set_remote(&mut m, "b", None).unwrap();
     assert!(m.get("remotes").is_none(), "an empty remotes section goes");
     let mut bare = parse_settings(b"actor: human:ada\n").unwrap();
-    set_install_field(
-        &mut bare,
-        &o,
-        InstallField::CaFile(Some(PathBuf::from("/ca.pem"))),
-    )
-    .unwrap();
+    set_install_field(&mut bare, &o, InstallField::CaFile(Some(abs("ca.pem")))).unwrap();
     set_install_field(&mut bare, &o, InstallField::CaFile(None)).unwrap();
     assert_eq!(
         bare,
@@ -1066,7 +1074,7 @@ fn hsa3_settings_edits_refuse_containers_the_loader_ignores() {
         let mut m = parse_settings(text.as_bytes()).unwrap();
         let before = m.clone();
         for field in [
-            InstallField::CaFile(Some(PathBuf::from("/ca.pem"))),
+            InstallField::CaFile(Some(abs("ca.pem"))),
             InstallField::PinnedOrigins(Some(vec![o.clone()])),
         ] {
             let e = set_install_field(&mut m, &o, field).unwrap_err();
@@ -1082,21 +1090,20 @@ fn hsa3_settings_edits_refuse_containers_the_loader_ignores() {
         }
     }
     let mut m = parse_settings(b"hub:\n  installs:\n").unwrap();
-    set_install_field(
-        &mut m,
-        &o,
-        InstallField::CaFile(Some(PathBuf::from("/ca.pem"))),
-    )
-    .unwrap();
-    assert_eq!(m["hub"]["installs"][O]["ca_file"], Value::from("/ca.pem"));
+    set_install_field(&mut m, &o, InstallField::CaFile(Some(abs("ca.pem")))).unwrap();
+    assert_eq!(
+        m["hub"]["installs"][O]["ca_file"],
+        Value::from(abs("ca.pem").to_str().unwrap())
+    );
 }
 
 #[test]
 fn hsa3_nested_dotted_hub_keys_name_only_safe_paths() {
+    let ca = ay("ca.pem");
     // a dotted key below the top level is no setting either: its path is the static section,
     // or hub.installs.credential for a reserved secret segment, and never the key itself
     let text = format!(
-        "hub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: /ca.pem\n      ca_file.{SENTINEL}: x\n      pinned_origins.access_token: {SENTINEL}\n    {SENTINEL}/x.device_code: {SENTINEL}\nremotes:\n  origin:\n    url: \"{O}/team\"\n    mode: share\n    url.{SENTINEL}: x\n    mode.credential: x\n"
+        "hub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: {ca}\n      ca_file.{SENTINEL}: x\n      pinned_origins.access_token: {SENTINEL}\n    {SENTINEL}/x.device_code: {SENTINEL}\nremotes:\n  origin:\n    url: \"{O}/team\"\n    mode: share\n    url.{SENTINEL}: x\n    mode.credential: x\n"
     );
     let fx = Fx::new("", None, Some(&text));
     let c = fx.load().unwrap();
@@ -1129,7 +1136,7 @@ fn hsa3_nested_dotted_hub_keys_name_only_safe_paths() {
     assert_eq!(
         c.install(&Origin::parse(O).unwrap())
             .and_then(|i| i.ca_file.clone()),
-        Some(PathBuf::from("/ca.pem"))
+        Some(abs("ca.pem"))
     );
     let e = effective(fx.project(), Some(&fx.user_file())).unwrap();
     let all = format!("{:?}{:?}{:?}", e.origins, e.merged, e.warnings);
@@ -1607,4 +1614,107 @@ fn id3_a_null_actor_is_a_type_error_and_differs_from_empty_and_absent() {
     assert_eq!(all(&fx)[0], Ok("human:u".to_string()));
     let fx = Fx::new("", None, Some(""));
     assert_eq!(all(&fx)[0], Ok("human:qa".to_string()));
+}
+
+fn account(user: Option<&std::ffi::OsStr>, username: Option<&std::ffi::OsStr>) -> PathEnv {
+    PathEnv {
+        user: user.map(Into::into),
+        username: username.map(Into::into),
+        ..PathEnv::default()
+    }
+}
+
+/// The fallback human actor is shaped from `USERNAME` on Windows and `USER` elsewhere, by the one
+/// actor shaper, under the same rules for absent, empty and non-Unicode text.
+#[test]
+fn wx9_username_uses_the_human_actor_shaper() {
+    use std::ffi::OsStr;
+    let both = account(Some(OsStr::new("unixname")), Some(OsStr::new("Zoë Ünal")));
+    assert_eq!(
+        actor_user(Platform::Unix, &both).as_deref(),
+        Some("unixname")
+    );
+    assert_eq!(
+        actor_user(Platform::Windows, &both).as_deref(),
+        Some("Zoë Ünal")
+    );
+    // only the platform's own name counts
+    let user_only = account(Some(OsStr::new("unixname")), None);
+    assert_eq!(actor_user(Platform::Windows, &user_only), None);
+    let name_only = account(None, Some(OsStr::new("winname")));
+    assert_eq!(actor_user(Platform::Unix, &name_only), None);
+    let fx = Fx::new("", None, None);
+    let actor = |platform: Platform, env: &PathEnv| {
+        human_actor_for(
+            fx.project(),
+            Some(&fx.user_file()),
+            actor_user(platform, env).as_deref(),
+        )
+        .unwrap()
+    };
+    // the shaper: lower case, a run of other characters is one dash, the ends are trimmed
+    assert_eq!(
+        actor(Platform::Windows, &both),
+        rdy_engine::identity::fallback_actor(Some("Zoë Ünal"))
+    );
+    assert_eq!(actor(Platform::Windows, &both), "human:zo-nal");
+    assert_eq!(actor(Platform::Windows, &user_only), "human:unknown");
+    assert_eq!(
+        actor(Platform::Windows, &PathEnv::default()),
+        "human:unknown"
+    );
+    assert_eq!(
+        actor(Platform::Windows, &account(None, Some(OsStr::new("")))),
+        "human:unknown"
+    );
+    let long = "A".repeat(500);
+    let shaped = actor(Platform::Windows, &account(None, Some(OsStr::new(&long))));
+    assert!(
+        shaped.starts_with("human:a") && shaped.len() < 200,
+        "{shaped}"
+    );
+    // a configured actor still wins over the account name
+    let fx = Fx::new("", None, Some("actor: human:ada\n"));
+    assert_eq!(
+        human_actor_for(fx.project(), Some(&fx.user_file()), Some("Zoë")).unwrap(),
+        "human:ada"
+    );
+    // non-Unicode text is absent
+    let odd = rdy_store::pio::not_unicode("z");
+    let env = account(Some(&odd), Some(&odd));
+    assert_eq!(actor_user(Platform::Unix, &env), None);
+    assert_eq!(actor_user(Platform::Windows, &env), None);
+    // the effective config and the environment reader take the same name
+    let p = Fx::new("", None, None);
+    let e = effective(p.project(), Some(&p.user_file())).unwrap();
+    let default = e.origins.iter().find(|o| o.key == "actor").unwrap();
+    assert_eq!(default.level, Level::Default);
+    let host = actor_user(Platform::HOST, &PathEnv::from_process());
+    assert_eq!(
+        default.value.as_str(),
+        Some(rdy_engine::identity::fallback_actor(host.as_deref()).as_str())
+    );
+}
+
+/// The user-only actor reader takes the config place from the one resolver.
+#[test]
+fn wx9_user_only_actor_reads_the_resolved_config_place() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("rdy")).unwrap();
+    std::fs::write(d.path().join("rdy/config.yaml"), "actor: human:qa\n").unwrap();
+    let env = PathEnv {
+        xdg_config_home: Some(d.path().as_os_str().to_owned()),
+        ..PathEnv::default()
+    };
+    assert_eq!(
+        rdy_engine::human_actor(&env, Some("nobody")).unwrap(),
+        "human:qa"
+    );
+    let empty = PathEnv::default();
+    if rdy_engine::instructions_config::user_config_path(Platform::HOST, &empty).is_none() {
+        assert_eq!(
+            rdy_engine::human_actor(&empty, Some("Zoe")).unwrap(),
+            "human:zoe"
+        );
+    }
 }

@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcco1: rdy checkout writes the view as files with the metadata split (MS, FW-D10, FW-D14,
 //! FW-F2a), refuses over edits and untracked files, writes blobs, and the checked-out tree reads
 //! back as the view (invariant 7). The bound view is the CLI default view (D-874AS).
@@ -243,7 +241,7 @@ fn wcco1_a_symlinked_tracked_folder_is_never_read_or_deleted_through() {
     let outside = tempfile::tempdir().unwrap();
     let x = outside.path().join("x");
     std::fs::rename(at(&s, "guides"), &x).unwrap();
-    std::os::unix::fs::symlink(&x, at(&s, "guides")).unwrap();
+    rdy_qa::platform::symlink(&x, &at(&s, "guides")).unwrap();
     // _folder.yaml keeps the base copy's bytes; intro.yaml is someone else's file
     let folder = std::fs::read_to_string(x.join("_folder.yaml")).unwrap();
     std::fs::write(x.join("intro.yaml"), "not rdy's\n").unwrap();
@@ -275,21 +273,6 @@ fn wcco1_a_symlinked_tracked_folder_is_never_read_or_deleted_through() {
     ok(&s, &["checkout", "other"]);
 }
 
-/// Sets `dir`'s mode; returns whether a write in it is now refused (never for root).
-fn read_only(dir: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let probe = dir.join(".probe");
-    let refused = std::fs::write(&probe, "x").is_err();
-    let _ = std::fs::remove_file(probe);
-    refused
-}
-
-fn writable(dir: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 #[test]
 fn wcco1_an_interrupted_checkout_is_refused_until_forced() {
     let (s, seed) = seeded();
@@ -300,18 +283,16 @@ fn wcco1_an_interrupted_checkout_is_refused_until_forced() {
         json!([{"op": "update", "id": seed.section, "fields": {"title": "Other start"}}]),
     );
     // the marker cannot be written: nothing changes
-    let wc = at(&s, ".rdy/wc");
-    if !read_only(&wc) {
-        writable(&wc);
+    let Some(wc) = read_only_dir(&at(&s, ".rdy/wc")) else {
         rdy_qa::skip::skip(
             "wcco1_an_interrupted_checkout_is_refused_until_forced",
             rdy_qa::skip::Why::Prerequisite,
-            "a read-only directory takes writes here (running as root?)",
+            READ_ONLY_REASON,
         );
         return;
-    }
+    };
     let (okk, v) = json(&s, &["checkout", "other"]);
-    writable(&wc);
+    drop(wc);
     assert!(!okk);
     assert_eq!(v["code"], E_IO, "{v}");
     assert!(
@@ -320,10 +301,9 @@ fn wcco1_an_interrupted_checkout_is_refused_until_forced() {
     );
     ok(&s, &["checkout"]);
     // the save fails after the files are written
-    let stage = at(&s, ".rdy/wc/stage");
-    assert!(read_only(&stage));
+    let stage = read_only_dir(&at(&s, ".rdy/wc/stage")).expect("a read-only directory");
     let (okk, v) = json(&s, &["checkout", "other"]);
-    writable(&stage);
+    drop(stage);
     assert!(!okk);
     assert_eq!(v["code"], E_IO, "{v}");
     assert!(read(&s, "guides/intro.yaml").contains("Other start"));
@@ -470,25 +450,14 @@ fn msw10_damaged_wc_state_refuses_rdy_edit_before_the_editor() {
     ok(&s, &["checkout", "side"]);
     std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
     let marker = at(&s, "editor-ran");
-    let script = at(&s, "ed.sh");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\ntouch '{}'\nsed -i.bak 's/Claims hold./Edited./' \"$1\"\n",
-            marker.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let o = rdy_qa::daemon::human_command(
+    let mut cmd = rdy_qa::daemon::human_command(
         s.dir.path(),
         &s.env_pairs(),
         &["--json", "edit", &seed.claim],
-    )
-    .env("EDITOR", &script)
-    .output()
-    .unwrap();
+    );
+    let script = format!("copy {}\nreplace Claims hold.\tEdited.\n", marker.display());
+    crate::wc_editor::child_fixture::set_editor(&mut cmd, &script);
+    let o = cmd.output().unwrap();
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success(), "{err}");
     let v: serde_json::Value = serde_json::from_str(&err).unwrap_or_else(|_| panic!("{err}"));

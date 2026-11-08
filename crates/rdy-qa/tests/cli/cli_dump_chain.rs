@@ -472,7 +472,7 @@ fn hc8_paths_use_project_root_for_mcp_and_session_cwd_for_cli() {
         text.contains(" after i1.rdydump, ")
             && text.contains(&format!(
                 ", to {} (",
-                work.canonicalize().unwrap().join("next.rdydump").display()
+                rdy_engine::display_path(&work.canonicalize().unwrap().join("next.rdydump"))
             )),
         "{text:?}"
     );
@@ -494,7 +494,9 @@ fn hc8_paths_use_project_root_for_mcp_and_session_cwd_for_cli() {
         e["message"]
             .as_str()
             .unwrap()
-            .contains(arg(&work.canonicalize().unwrap().join("gone.rdydump"))),
+            .contains(&rdy_engine::display_path(
+                &work.canonicalize().unwrap().join("gone.rdydump")
+            )),
         "{e}"
     );
     // load: the file, each --then and the dir are the caller's too
@@ -574,18 +576,24 @@ fn hc8_limit_precedes_nonexistent_paths() {
         .into_iter()
         .map(String::from)
         .collect();
-    for i in 0..4097 {
+    // Windows takes a command line of 32 KiB at most, and 4097 increments do not fit in it: the
+    // over-limit case runs there over MCP (mcp_dump_chain's own hc8_limit_precedes_nonexistent_paths),
+    // and only the first missing path is checked here
+    let count = if cfg!(windows) { 8 } else { 4097 };
+    for i in 0..count {
         args.push("--then".into());
         args.push(format!("missing/{i}"));
     }
     args.push("--stop-at".into());
     args.push("bogus".into());
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (ok, e) = c.s.json(&refs);
-    assert!(!ok, "{e}");
-    assert_eq!(e["code"], "E_LIMIT", "{e}");
-    assert!(e["message"].as_str().unwrap().contains("4096"), "{e}");
-    assert!(!to.exists());
+    if cfg!(not(windows)) {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (ok, e) = c.s.json(&refs);
+        assert!(!ok, "{e}");
+        assert_eq!(e["code"], "E_LIMIT", "{e}");
+        assert!(e["message"].as_str().unwrap().contains("4096"), "{e}");
+        assert!(!to.exists());
+    }
     // at the limit the first missing path is what fails
     let n = args.len() - 2 - 2;
     let refs: Vec<&str> = args[..n].iter().map(String::as_str).collect();

@@ -227,6 +227,7 @@ fn producer_commit() -> String {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success(), "git rev-parse HEAD");

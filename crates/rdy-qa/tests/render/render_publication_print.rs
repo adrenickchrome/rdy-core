@@ -188,7 +188,12 @@ fn entries(dir: &Path) -> Vec<String> {
             if p.is_dir() {
                 stack.push(p.clone());
             }
-            out.push(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+            out.push(
+                p.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
         }
     }
     out.sort();
@@ -1018,18 +1023,22 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
             other.join("..").join(".rdy").join(name),
         ] {
             let e = export(&st, "orgp", &out, format, layout).unwrap_err();
-            assert_eq!(
-                e.code,
-                E_BAD_INPUT,
-                "{short} {}: {}",
-                out.display(),
-                e.message
-            );
-            assert_eq!(
-                e.message,
-                format!("{} is inside the project .rdy directory", out.display()),
-                "{short}"
-            );
+            // an account that may not follow the link is refused in another wording; nothing
+            // is written either way
+            if !rdy_qa::platform::follow_refused(&out) {
+                assert_eq!(
+                    e.code,
+                    E_BAD_INPUT,
+                    "{short} {}: {}",
+                    out.display(),
+                    e.message
+                );
+                assert_eq!(
+                    e.message,
+                    format!("{} is inside the project .rdy directory", out.display()),
+                    "{short}"
+                );
+            }
             assert_eq!(entries(&rdy), store_before, "{short}: no file in the store");
         }
         // a parent that does not exist, an out with no file name

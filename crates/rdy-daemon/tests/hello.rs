@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The hello, starting/ready and the version handshake (hello1).
 mod common;
 use common::*;
@@ -8,7 +6,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 fn parsed(line: &str) -> Value {
     serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
@@ -42,7 +39,7 @@ async fn hello1_a_ready_daemon_answers_ready_with_the_session_id() {
 async fn hello1_a_starting_daemon_streams_progress_then_ready() {
     let d = daemon("1", false, |_| {}).await;
     d.readiness.progress("catching up 1/3");
-    let mut s = UnixStream::connect(d.run.socket()).await.unwrap();
+    let mut s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
     s.write_all(hello("1", "ctl", d.dir.path()).as_bytes())
         .await
         .unwrap();
@@ -130,7 +127,7 @@ async fn hello1_junk_and_oversized_hellos_are_refused_with_a_reason() {
 #[tokio::test]
 async fn hello1_a_connection_that_never_sends_a_hello_is_closed_after_the_timeout() {
     let d = daemon("1", true, |_| {}).await;
-    let s = UnixStream::connect(d.run.socket()).await.unwrap();
+    let s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
     let mut r = BufReader::new(s);
     let start = std::time::Instant::now();
     let mut out = String::new();
@@ -185,7 +182,7 @@ async fn hello1_another_version_with_no_sessions_makes_the_daemon_exit() {
         .unwrap();
     assert!(matches!(reason, ExitReason::VersionReplaced), "{reason:?}");
     assert!(
-        !d.run.socket().exists(),
+        socket_gone(&d.run).await,
         "the socket is gone, so the client's next connect fails and it spawns"
     );
 }
@@ -229,7 +226,7 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
     let (handle, readiness) = (d.handle(), d.readiness());
     readiness.ready();
     let task = tokio::spawn(d.run());
-    let mut s = UnixStream::connect(run.socket()).await.unwrap();
+    let mut s = rdy_daemon::sys::connect(&run.socket()).await.unwrap();
     let both = hello("1", "mcp", dir.path())
         + "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n";
     s.write_all(both.as_bytes()).await.unwrap();
@@ -354,4 +351,48 @@ async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
         RunDir::of_project(other.path()).project_id().unwrap()
     );
     assert_eq!(log.lines(), [line.clone(), line]);
+}
+
+/// wx21b: the transport bounds a frame on either side of the hello, and a frame that stops half
+/// way costs the daemon nothing but its connection. The same on a socket and on a named pipe.
+#[tokio::test]
+async fn wx21b_transport_rejects_oversized_and_partial_frames() {
+    let d = daemon("1", true, |_| {}).await;
+    // an oversized request line: E_LIMIT, then the connection closes
+    let (mut r, first) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+    assert_eq!(parsed(&first)["status"], "ready", "{first}");
+    let big = "a".repeat(rdy_daemon::ctl::MAX_CTL_LINE_BYTES + 10) + "\n";
+    r.get_mut().write_all(big.as_bytes()).await.unwrap();
+    let mut reply = String::new();
+    r.read_line(&mut reply).await.unwrap();
+    assert_eq!(parsed(&reply)["error"]["code"], "E_LIMIT", "{reply:.200}");
+    let mut rest = String::new();
+    assert_eq!(
+        r.read_line(&mut rest).await.unwrap(),
+        0,
+        "closed after E_LIMIT"
+    );
+    drop(r);
+    // a request that stops half way, then the client goes away
+    let (mut r, _) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+    r.get_mut().write_all(br#"{"id":1,"op":"ec"#).await.unwrap();
+    r.get_mut().flush().await.unwrap();
+    drop(r);
+    // a hello that stops half way, then the client goes away
+    let mut s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
+    s.write_all(br#"{"rdy":1,"vers"#).await.unwrap();
+    s.flush().await.unwrap();
+    drop(s);
+    // every one of them ends without a reply, and the daemon serves on
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while d.handle.connections() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the cut connections end");
+    assert_eq!(d.handle.sessions().len(), 0);
+    let (_r, first) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+    assert_eq!(parsed(&first)["status"], "ready", "{first}");
+    d.finish().await;
 }

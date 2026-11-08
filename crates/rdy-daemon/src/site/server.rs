@@ -1245,4 +1245,38 @@ mod tests {
         }
         drop(rt);
     }
+
+    /// Windows plan task 19: the profile-only listener is as exclusive as the full one.
+    #[test]
+    fn wx19_profile_listener_second_bind_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".rdy")).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _rt = rt.enter();
+        let cfg = serve_config(&root);
+        let p = open(&root, &cfg, &addr::profile_candidates(&root, "guide"), None).unwrap();
+        for at in &p.info.addrs {
+            for reuse in [false, true] {
+                let socket = if at.is_ipv4() {
+                    TcpSocket::new_v4().unwrap()
+                } else {
+                    TcpSocket::new_v6().unwrap()
+                };
+                if reuse {
+                    socket.set_reuseaddr(true).unwrap();
+                }
+                assert!(
+                    socket
+                        .bind(*at)
+                        .and_then(|()| socket.listen(8).map(drop))
+                        .is_err(),
+                    "{at} (reuseaddr {reuse})"
+                );
+            }
+        }
+    }
 }

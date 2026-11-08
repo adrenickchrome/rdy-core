@@ -5,14 +5,16 @@
 //!   state: a store opened normally is already upgraded, so it reports no steps and the last
 //!   `meta/upgrade` receipt. It never opens, locks or stops anything.
 //! - [`run`] plans the store at a project directory with no store open ([`plan`]), and applies
-//!   the plan under the store's lock ([`apply_planned`]): the backup, the one upgrade batch, the
-//!   reindex and the store check, then the engine's open under that same lock, whose completion
-//!   runs the full fsck and only then publishes `FORMAT`. It stops no daemon: a caller that may
-//!   meet one (the CLI) stops it first.
+//!   the plan under the project's start lock, then the store's lock ([`apply_planned`]): the
+//!   backup, the one upgrade batch, the reindex and the store check, then the engine's open under
+//!   that same lock, whose completion runs the full fsck and only then publishes `FORMAT`. It
+//!   stops no daemon: a caller that may meet one (the CLI) stops it first. A caller that already
+//!   holds the start lock lends it ([`apply_planned_under`]): nothing here takes that lock again.
 //!
 //! [`report_json`] is the one JSON shape both surfaces return.
 use crate::{E_STORE_FORMAT, Rdy, RdyError, ReadState};
 use rdy_store::format::{self, FeatureClass, StoreAccess, UpgradeReceipt};
+use rdy_store::start_lock::StartGuard;
 use rdy_store::upgrade::{UpgradePlan, UpgradeStep};
 use rdy_store::{StoreError, StoreLock, layout};
 use serde::Deserialize;
@@ -166,7 +168,17 @@ fn run_with(
     if dry_run || !needs_work(&planned) {
         return unchanged(root, &planned, dry_run);
     }
-    apply_with(root, &planned, registry)
+    apply_with(root, &planned, registry, &own_start(root)?)
+}
+
+/// The start lock of the project at `root`, for a call that holds it from its outer entry point:
+/// another holder is `E_LOCKED`.
+fn own_start(root: &Path) -> Result<StartGuard, RdyError> {
+    match StartGuard::try_take(&root.join(".rdy")) {
+        Ok(Some(start)) => Ok(start),
+        Ok(None) => Err(StoreError::Locked(store_dir(root)).into()),
+        Err(e) => Err(crate::handle::io(e)),
+    }
 }
 
 /// Applies `planned` to the store of the project at `root`: takes the store's lock, plans
@@ -178,7 +190,18 @@ fn run_with(
 /// written, so a project that cannot open is refused as [`Rdy::open`] refuses it, with no
 /// backup or batch. The completed report goes to the caller.
 pub fn apply_planned(root: &Path, planned: &UpgradePlan) -> Result<UpgradeReport, RdyError> {
-    apply_with(root, planned, None)
+    apply_with(root, planned, None, &own_start(root)?)
+}
+
+/// [`apply_planned`] under `start`, the project's start lock, which the caller holds and keeps:
+/// the upgrade and its reopen borrow it. A guard of another project is `E_LOCKED`, with nothing
+/// written.
+pub fn apply_planned_under(
+    root: &Path,
+    planned: &UpgradePlan,
+    start: &StartGuard,
+) -> Result<UpgradeReport, RdyError> {
+    apply_with(root, planned, None, start)
 }
 
 /// Test hook: [`apply_planned`] with the steps `registry`.
@@ -188,7 +211,18 @@ pub fn apply_planned_with_registry_for_tests(
     planned: &UpgradePlan,
     registry: &[UpgradeStep],
 ) -> Result<UpgradeReport, RdyError> {
-    apply_with(root, planned, Some(registry))
+    apply_with(root, planned, Some(registry), &own_start(root)?)
+}
+
+/// Test hook: [`apply_planned_under`] with the steps `registry`.
+#[doc(hidden)]
+pub fn apply_planned_under_with_registry_for_tests(
+    root: &Path,
+    planned: &UpgradePlan,
+    start: &StartGuard,
+    registry: &[UpgradeStep],
+) -> Result<UpgradeReport, RdyError> {
+    apply_with(root, planned, Some(registry), start)
 }
 
 /// Whether two plans plan the same upgrade: the same manifests, steps and pending completion.
@@ -209,7 +243,9 @@ fn apply_with(
     root: &Path,
     planned: &UpgradePlan,
     registry: Option<&[UpgradeStep]>,
+    start: &StartGuard,
 ) -> Result<UpgradeReport, RdyError> {
+    crate::handle::check_start(root, start)?;
     let dir = store_dir(root);
     rdy_store::follower::refuse_follower(&dir)?;
     let lock = StoreLock::take(&dir)?;
@@ -230,7 +266,7 @@ fn apply_with(
         Some(r) => rdy_store::upgrade::apply_locked_with_registry_for_tests(&dir, &lock, &plan, r)?,
     };
     // the engine's open completes the sealed upgrade: the full fsck, then `FORMAT`
-    let r = Rdy::open_locked_with(root, &lock, mode, context)?;
+    let r = Rdy::open_locked_with(root, &lock, mode, context, start)?;
     let receipt = receipt_of(r.store().get_ref(format::REF_UPGRADE)?)?;
     let backup = applied.backup.clone().or_else(|| {
         receipt

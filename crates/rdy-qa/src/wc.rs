@@ -171,3 +171,39 @@ pub fn store_block(s: &Served, view: &str, id: &str) -> rdy_model::Block {
     r.close().expect("close");
     b
 }
+
+/// Why a test skips when a read-only directory takes writes.
+pub const READ_ONLY_REASON: &str =
+    "a read-only directory takes writes here (root or an elevated token)";
+
+/// Makes `dir` read-only until the value is dropped, and proves it with a refused write. `None`,
+/// with `dir` writable again, when this account writes there anyway (root or an elevated token):
+/// the caller skips with [`READ_ONLY_REASON`].
+pub fn read_only_dir(dir: &std::path::Path) -> Option<crate::platform::ReadOnlyDir> {
+    let guard = crate::platform::ReadOnlyDir::new(dir).expect("make the directory read-only");
+    let probe = dir.join(".read-only-probe");
+    if std::fs::write(&probe, "").is_ok() {
+        std::fs::remove_file(&probe).expect("remove the probe");
+        return None;
+    }
+    Some(guard)
+}
+
+/// Copies the directory `from` to `to` (which must not exist), keeping links as links and file
+/// bytes as they are. The portable stand-in for `cp -R`.
+pub fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            crate::platform::copy_link(&src, &dst)?;
+        } else if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}

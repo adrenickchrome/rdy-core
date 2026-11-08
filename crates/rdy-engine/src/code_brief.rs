@@ -131,16 +131,9 @@ fn inside(
     repos.iter().enumerate().find_map(|(i, repo)| {
         let rest = p.strip_prefix(&repo.root).ok()?;
         // Normal components only: a path that did not canonicalise may still hold `..`.
-        let parts: Option<Vec<&str>> = rest
-            .components()
-            .map(|c| match c {
-                std::path::Component::Normal(s) => s.to_str(),
-                _ => None,
-            })
-            .collect();
-        Some(match parts {
-            Some(parts) if !parts.is_empty() => Ok((Some(i), parts.join("/"))),
-            _ => Err(not_a_code_path(code_path, TOP_FIX)),
+        Some(match crate::logical_of(rest) {
+            Some(logical) => Ok((Some(i), logical)),
+            None => Err(not_a_code_path(code_path, TOP_FIX)),
         })
     })
 }

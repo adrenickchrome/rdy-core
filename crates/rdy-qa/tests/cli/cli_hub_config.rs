@@ -3,6 +3,7 @@
 //! reaches a warning or error: not a dotted key, not one at the wrong level, not a file that
 //! does not parse.
 use rdy_qa::daemon::Served;
+use rdy_qa::fixtures::yaml_path;
 use rdy_qa::mcp::McpClient;
 use std::path::Path;
 
@@ -42,6 +43,8 @@ fn run_clean(s: &Served, args: &[&str]) -> (bool, String) {
 fn hsa3_config_cli_never_reads_or_displays_credentials() {
     let s = Served::new();
     let uf = s.user_config();
+    let ca = s.dir.path().join("trust").join("ca.pem");
+    let ca_y = yaml_path(&ca);
     // a credential file that no settings read may open: unreadable, and holding the sentinel
     let cred = uf.with_file_name("credentials.yaml");
     write(
@@ -53,7 +56,7 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
     write(
         &uf,
         &format!(
-            "actor: human:qa\nremotes:\n  origin: {{url: \"{O}/team\", mode: share}}\nhub:\n  installs:\n    \"{O}\":\n      ca_file: /etc/rdy/ca.pem\n      access_token: {SENTINEL}\n      tokn: {SENTINEL}\n\"hub.installs.{O}.refresh_token\": {SENTINEL}\n"
+            "actor: human:qa\nremotes:\n  origin: {{url: \"{O}/team\", mode: share}}\nhub:\n  installs:\n    \"{O}\":\n      ca_file: {ca_y}\n      access_token: {SENTINEL}\n      tokn: {SENTINEL}\n\"hub.installs.{O}.refresh_token\": {SENTINEL}\n"
         ),
     );
     // the wrong level: no hub setting comes from the shared project config
@@ -74,7 +77,7 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("hub.installs.{O}.ca_file = /etc/rdy/ca.pem")),
+        text.contains(&format!("hub.installs.{O}.ca_file = {}", ca.display())),
         "{text}"
     );
     let (ok, json) = run_clean(&s, &["config", "--json"]);
@@ -83,7 +86,7 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
     let (ok, shown) = run_clean(&s, &["config", "--show-origin"]);
     assert!(ok, "{shown}");
     for expected in [
-        format!("hub.installs.{O}.ca_file = /etc/rdy/ca.pem  # {}", uf.display()),
+        format!("hub.installs.{O}.ca_file = {}  # {}", ca.display(), uf.display()),
         "warning W_CONFIG_UNKNOWN: unknown hub setting hub.installs.credential; remove hub.installs.credential".to_string(),
         format!("warning W_CONFIG_UNKNOWN: unknown hub setting hub.installs.{O}.tokn; remove hub.installs.{O}.tokn"),
         format!("warning W_CONFIG_UNKNOWN: hub.installs.{O}.ca_file is not allowed in .rdy.yaml; set hub.installs.{O}.ca_file in user config and remove it from .rdy.yaml"),
@@ -128,11 +131,18 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
         ] {
             let (ok, out) = run_clean(&s, args);
             assert!(!ok, "{out}");
+            // JSON escapes a path's backslashes
+            let shown = uf.display().to_string();
+            let shown = if args.contains(&"--json") {
+                serde_json::to_string(&shown)
+                    .unwrap()
+                    .trim_matches('"')
+                    .to_string()
+            } else {
+                shown
+            };
             assert!(
-                out.contains(&format!(
-                    "config is not a valid bounded mapping in {}",
-                    uf.display()
-                )),
+                out.contains(&format!("config is not a valid bounded mapping in {shown}")),
                 "{args:?}: {out}"
             );
             assert!(
@@ -150,6 +160,7 @@ fn hsa3_config_cli_never_reads_or_displays_credentials() {
 fn hsa3_config_cli_refuses_tagged_keys_and_hides_nested_dotted_secrets() {
     let s = Served::new();
     let uf = s.user_config();
+    let ca_y = yaml_path(&s.dir.path().join("trust").join("ca.pem"));
     let project_file = s.dir.path().join(".rdy.yaml");
     let original = std::fs::read_to_string(&project_file).unwrap();
     // a tagged key names only its file, in every file and every view
@@ -189,7 +200,7 @@ fn hsa3_config_cli_refuses_tagged_keys_and_hides_nested_dotted_secrets() {
     write(
         &uf,
         &format!(
-            "actor: human:qa\nhub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: /etc/rdy/ca.pem\n      pinned_origins.access_token: {SENTINEL}\n"
+            "actor: human:qa\nhub:\n  installs.{SENTINEL}/bad.refresh_token: ignored\n  installs.{SENTINEL}/bad: {SENTINEL}\n  installs:\n    \"{O}\":\n      ca_file: {ca_y}\n      pinned_origins.access_token: {SENTINEL}\n"
         ),
     );
     for args in [

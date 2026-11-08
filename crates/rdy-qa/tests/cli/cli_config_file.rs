@@ -423,8 +423,13 @@ fn rg6_rdy_status_refuses_a_pack_with_an_empty_version() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("E_CONFIG"), "{err}");
+    // the path is spelled natively end to end: `.rdy\packs\team.yaml` on Windows
+    let pack_file = Path::new(".rdy").join("packs").join("team.yaml");
+    let pack_file = pack_file.to_string_lossy().replace('\\', "\\\\");
     assert!(
-        err.contains(".rdy/packs/team.yaml: invalid pack: the pack version must be 1 to 256 bytes"),
+        err.contains(&format!(
+            "{pack_file}: invalid pack: the pack version must be 1 to 256 bytes"
+        )),
         "{err}"
     );
     assert!(err.contains("fix the pack file"), "{err}");

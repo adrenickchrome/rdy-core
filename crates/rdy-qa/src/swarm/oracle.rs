@@ -17,8 +17,7 @@ use std::time::Duration;
 /// A command's hang guard, not a speed check.
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 
-/// Copies the tree `from` to `to` (which must not exist): directories, files and symbolic
-/// links. A socket or another special file is left out: it means nothing without its process.
+/// Copies the tree `from` to `to` (which must not exist): directories, files and links. A socket or another special file is left out: it means nothing without its process.
 pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -28,9 +27,13 @@ pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_tree(&src, &dst)?;
         } else if kind.is_file() {
-            std::fs::copy(&src, &dst)?;
+            // a live store holds a byte-range lock on some platforms that refuses a plain copy;
+            // the seam reads the bytes the way a kill would leave them
+            if std::fs::copy(&src, &dst).is_err() {
+                std::fs::write(&dst, crate::platform::read_live_file(&src)?)?;
+            }
         } else if kind.is_symlink() {
-            crate::platform::symlink(&std::fs::read_link(&src)?, &dst)?;
+            crate::platform::copy_link(&src, &dst)?;
         }
     }
     Ok(())
@@ -782,5 +785,44 @@ mod tests {
             vec!["duplicate_definition on t-1, t-2".to_string()]
         );
         assert!(new_blocking_canon(&after, &before).is_empty());
+    }
+    /// wx31b: a copy of the project keeps each link as a link of the same target, made through
+    /// the platform's link seam: a directory alias and a file link, never the content they name.
+    #[test]
+    fn wx31b_oracle_copy_preserves_native_links() {
+        let keep = tempfile::tempdir().expect("tempdir");
+        let from = keep.path().join("from");
+        std::fs::create_dir_all(from.join("real/inner")).unwrap();
+        std::fs::write(from.join("real/inner/f.txt"), b"one").unwrap();
+        std::fs::write(from.join("plain.txt"), b"two").unwrap();
+        crate::platform::dir_alias(&from.join("real"), &from.join("alias")).expect("an alias");
+        crate::platform::symlink(&from.join("plain.txt"), &from.join("file-link"))
+            .expect("the symlink privilege is a machine prerequisite");
+        let to = keep.path().join("to");
+        copy_tree(&from, &to).expect("copy the tree");
+        for name in ["alias", "file-link"] {
+            let meta = std::fs::symlink_metadata(to.join(name)).unwrap();
+            assert!(meta.file_type().is_symlink(), "{name} is still a link");
+            assert_eq!(
+                std::fs::read_link(to.join(name)).unwrap(),
+                std::fs::read_link(from.join(name)).unwrap(),
+                "{name} names the same target"
+            );
+        }
+        if crate::platform::follow_refused(&to.join("alias")) {
+            // a logon whose process policy refuses links a standard user made: following one
+            // fails with 448 and nothing else, so the content check cannot run
+            let refused = |p: PathBuf| std::fs::read(p).unwrap_err().raw_os_error();
+            assert_eq!(refused(to.join("file-link")), Some(448));
+            assert_eq!(refused(to.join("alias/inner/f.txt")), Some(448));
+            eprintln!("wx31b: the link path was not exercised (error 448)");
+            return;
+        }
+        assert_eq!(std::fs::read(to.join("file-link")).unwrap(), b"two");
+        assert_eq!(std::fs::read(to.join("alias/inner/f.txt")).unwrap(), b"one");
+        // the alias is not a second tree: a write through the copy's alias lands in the source
+        std::fs::write(to.join("alias/inner/g.txt"), b"x").unwrap();
+        assert!(from.join("real/inner/g.txt").is_file());
+        assert!(std::fs::read(to.join("real/inner/g.txt")).is_err());
     }
 }

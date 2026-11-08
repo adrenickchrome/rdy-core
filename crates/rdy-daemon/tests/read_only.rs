@@ -163,6 +163,9 @@ fn ok9_read_only_fsck_and_reads_run_through_the_ops() {
     assert_eq!(e2.code, rdy_engine::E_STORE_READ_ONLY, "{e2:?}");
     drop(e);
     shared.shutdown().unwrap();
+    // the last published state holds a reader, and a reader holds the store's lock file, until
+    // `shared` goes; Windows refuses a read of that locked file (os error 33)
+    drop(shared);
     assert_eq!(tree(&root), before, "daemon: no project byte changed");
 }
 
@@ -201,5 +204,8 @@ fn ok9_read_only_fsck_clean_quarantine_refuses_and_changes_no_byte() {
     fsck_passes(&c, "daemon");
     drop(e);
     shared.shutdown().unwrap();
+    // the last published state holds a reader, and a reader holds the store's lock file, until
+    // `shared` goes; Windows refuses a read of that locked file (os error 33)
+    drop(shared);
     assert_eq!(tree(&root), before, "daemon: no project byte changed");
 }

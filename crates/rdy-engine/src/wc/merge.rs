@@ -769,6 +769,8 @@ pub fn plan_update(
                 "check the file, then update again",
             )
         })?;
+        // CR LF line syntax merges as LF, as the reader and the comparisons read it
+        let text = text.replace("\r\n", "\n");
         local.add(f.head.clone(), path.clone(), text, f.kind);
     }
     let mut blocks_of: BTreeMap<&str, Vec<&WcBlock>> = BTreeMap::new();

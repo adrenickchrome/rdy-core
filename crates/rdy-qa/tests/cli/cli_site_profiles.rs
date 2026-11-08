@@ -569,7 +569,8 @@ fn always_exiting(dir: &Path) -> (tokio::runtime::Runtime, Arc<AtomicUsize>) {
     let n = Arc::clone(&count);
     rt.spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        while let Ok((stream, _)) = listener.accept().await {
+        let mut listener = listener;
+        while let Ok(stream) = listener.accept().await {
             let n = Arc::clone(&n);
             tokio::spawn(async move {
                 let mut stream = tokio::io::BufReader::new(stream);
@@ -633,7 +634,8 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
     let n = Arc::clone(&accepts);
     rt.spawn(async move {
         let mut script = Some((hello_tx, sent_tx, released, req_tx, site));
-        while let Ok((stream, _)) = listener.accept().await {
+        let mut listener = listener;
+        while let Ok(stream) = listener.accept().await {
             n.fetch_add(1, Ordering::SeqCst);
             // a later connection is counted and closed: the client must not need one
             let Some((hello_tx, sent_tx, released, req_tx, site)) = script.take() else {
@@ -725,6 +727,15 @@ fn spv10_starting_peer_teardown_never_waits_on_its_release() {
     drop(attempt);
 }
 
+/// The pid in the project's `daemon.pid`: one line on Unix, the pid and the creation time on
+/// Windows.
+fn daemon_pid(project: &Path) -> u32 {
+    let bytes = std::fs::read(RunDir::of_project(project).pid_file()).unwrap();
+    rdy_daemon::sys::parse_pid_record(&bytes)
+        .expect("a pid record")
+        .pid()
+}
+
 /// The start races, each behind a barrier: a daemon still starting (a scripted peer that holds
 /// `ready`, and a held foreground callback), a concurrent foreground winner, and a daemon
 /// exiting to be replaced. Configured timeouts give the existing `E_DAEMON_START` texts.
@@ -755,8 +766,8 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
         "{first}"
     );
     child.tail();
-    let pid = std::fs::read_to_string(RunDir::of_project(&p).pid_file()).unwrap();
-    assert_eq!(pid.trim(), child.pid.to_string(), "the command serves");
+    let pid = daemon_pid(&p);
+    assert_eq!(pid, child.pid, "the command serves");
     let stop = human_command(&p, &env, &["serve", "--stop"])
         .output()
         .unwrap();
@@ -917,11 +928,7 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
     a.tail();
     b.tail();
     // the loser exits 0 after reusing the winner; the winner serves until the stop
-    let pid: u32 = std::fs::read_to_string(RunDir::of_project(&p).pid_file())
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = daemon_pid(&p);
     let (winner, loser) = if pid == a.pid { (a, b) } else { (b, a) };
     assert_eq!(winner.pid, pid);
     let (status, rest, err) = loser.finish();

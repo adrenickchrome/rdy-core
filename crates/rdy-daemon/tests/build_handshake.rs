@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! The build handshake (D-CCC6E): the hello and `ready` carry the build, a daemon alone with
 //! another build exits to be replaced, and a busy one serves and exits at its last close.
 mod common;
@@ -11,7 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// A build that is not this binary's: a fixed synthetic id, never the live one.
 const OTHER: &str = "0123456789abcdef";
@@ -101,10 +98,10 @@ fn start_options(
     o
 }
 
-fn run_files_gone(run: &RunDir) {
-    assert!(!run.socket().exists(), "the socket is gone");
+async fn run_files_gone(run: &RunDir) {
+    assert!(socket_gone(run).await, "the socket is gone");
     assert!(!run.socket_record().exists(), "the socket record is gone");
-    assert!(!run.pid_file().exists(), "the pid file is gone");
+    assert!(pid_file_gone(run).await, "the pid file is gone");
 }
 
 #[tokio::test]
@@ -204,10 +201,10 @@ async fn mh5_hello_and_ready_add_build_and_ignore_unknown_fields() {
         let dir = short_tempdir();
         std::fs::create_dir_all(dir.path().join(".rdy/run")).unwrap();
         let run = RunDir::of_project(dir.path());
-        let l = tokio::net::UnixListener::bind(run.socket()).unwrap();
+        let mut l = rdy_daemon::sys::bind(&run.socket()).unwrap();
         let answer = bad.to_string();
         tokio::spawn(async move {
-            let (s, _) = l.accept().await.unwrap();
+            let s = l.accept().await.unwrap();
             let mut s = BufReader::new(s);
             let mut line = String::new();
             s.read_line(&mut line).await.unwrap();
@@ -239,7 +236,7 @@ async fn mh5_same_build_keeps_the_existing_daemon() {
     c.close();
     connections_reach(&d.handle, 0).await;
     assert!(!*stopped.borrow(), "no replacement");
-    assert!(d.run.socket().exists());
+    assert!(socket_live(&d.run).await);
     // a later client reaches the same daemon
     ready(&d.run, &typed("1", OTHER, cwd)).await.close();
 
@@ -284,7 +281,10 @@ async fn mh5_idle_other_build_is_replaced_before_retry() {
     let v = parsed(&first);
     assert_eq!(v["status"], "exiting");
     assert_eq!(v["version"], "1");
-    run_files_gone(&d.run);
+    // on Windows the open connection holds an instance of the pipe, so its name stays until it closes
+    #[cfg(windows)]
+    drop(_r);
+    run_files_gone(&d.run).await;
     let reason = tokio::time::timeout(T, d.task).await.unwrap().unwrap();
     assert_eq!(reason.unwrap(), ExitReason::BuildReplaced);
     assert!(
@@ -341,7 +341,7 @@ async fn mh5_busy_other_build_serves_then_exits_at_last_connection() {
     later.close();
     connections_reach(&d.handle, 1).await;
     assert!(!*stopped.borrow(), "one client still open");
-    assert!(d.run.socket().exists(), "still serving");
+    assert!(socket_live(&d.run).await, "still serving");
 
     // the last close stops it, with a site hold alive
     other.close();
@@ -350,7 +350,7 @@ async fn mh5_busy_other_build_serves_then_exits_at_last_connection() {
         .await
         .unwrap()
         .unwrap();
-    run_files_gone(&d.run);
+    run_files_gone(&d.run).await;
     assert_eq!(
         tokio::time::timeout(T, d.task)
             .await
@@ -367,7 +367,7 @@ async fn mh5_prehello_clients_and_concurrent_closes_are_counted() {
     // a client held before its hello counts as a connection
     let d = daemon("1", true, |_| {}).await;
     let cwd = d.dir.path().to_path_buf();
-    let silent = UnixStream::connect(d.run.socket()).await.unwrap();
+    let silent = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap();
     connections_reach(&d.handle, 1).await;
     let other = ready(&d.run, &typed("1", OTHER, &cwd)).await;
     let stopped = d.handle.stopped();
@@ -426,7 +426,7 @@ async fn mh5_prehello_clients_and_concurrent_closes_are_counted() {
             .unwrap(),
         ExitReason::BuildReplaced
     );
-    run_files_gone(&d.run);
+    run_files_gone(&d.run).await;
 
     // simultaneous mismatched clients with nothing else open start at most one daemon: either
     // the old daemon latched and serves them all, or one successor does

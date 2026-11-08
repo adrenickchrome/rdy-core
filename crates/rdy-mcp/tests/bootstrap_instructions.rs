@@ -23,7 +23,9 @@ impl PersonHost for Home {
         resolve_person(
             Platform::HOST,
             &PathEnv {
+                // the home of each family: HOME on Unix, USERPROFILE on Windows
                 home: Some(self.0.clone().into()),
+                user_profile: Some(self.0.clone().into()),
                 xdg_config_home: Some(self.0.join("cfg").into()),
                 ..PathEnv::default()
             },

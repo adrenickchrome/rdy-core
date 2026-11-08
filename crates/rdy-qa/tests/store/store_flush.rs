@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! The write and open path of one flush per write (plan M2.0): batch markers (mark1), segment
 //! rolls at batch boundaries (roll1), index rollback versus damage (kill1), checkpoints (ckpt1)
 //! and the streaming catch-up (cat1).
@@ -45,7 +43,7 @@ fn copy_store(from: &Path, to: &Path) {
         if p.is_dir() {
             copy_store(&p, &t)
         } else if p.file_name().unwrap() != "lock" {
-            std::fs::copy(&p, &t).unwrap();
+            std::fs::write(&t, rdy_qa::platform::read_live_file(&p).unwrap()).unwrap();
         }
     }
 }
@@ -450,7 +448,7 @@ fn kill1_the_sentinel_never_truncates_through_a_symlink() {
     drop(Store::create(&dir).unwrap());
     let target = base.path().join("precious");
     std::fs::write(&target, b"keep me").unwrap();
-    std::os::unix::fs::symlink(&target, dir.join(rdy_store::INDEX_OPEN_SENTINEL)).unwrap();
+    rdy_qa::platform::symlink(&target, &dir.join(rdy_store::INDEX_OPEN_SENTINEL)).unwrap();
     let s = Store::create(&dir).unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
     drop(s);

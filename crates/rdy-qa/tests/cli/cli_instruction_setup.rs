@@ -113,12 +113,17 @@ fn no_stub_files(dir: &Path) {
     );
 }
 
+/// A path as a message shows it.
+fn shown(p: &Path) -> String {
+    rdy_store::pio::display_path(p)
+}
+
 fn created_message(meta: &Path) -> String {
-    format!("Created your rules project at {}.", meta.display())
+    format!("Created your rules project at {}.", shown(meta))
 }
 
 fn kept_message(meta: &Path) -> String {
-    format!("Your rules project already exists at {}.", meta.display())
+    format!("Your rules project already exists at {}.", shown(meta))
 }
 
 #[test]
@@ -242,7 +247,7 @@ fn ain5_setup_is_idempotent_and_never_overwrites_a_link_target() {
     assert_eq!(v["code"], "E_IO", "{v}");
     assert_eq!(
         v["message"].as_str().unwrap(),
-        format!("{} is not a regular instruction file", link.display()),
+        format!("{} is not a regular instruction file", shown(&link)),
         "{v}"
     );
     assert_eq!(v["fix"], NOT_REGULAR_FIX);
@@ -261,11 +266,7 @@ fn ain5_setup_is_idempotent_and_never_overwrites_a_link_target() {
         v["message"].as_str().unwrap(),
         format!(
             "{} is not a regular instruction file",
-            dird.path()
-                .canonicalize()
-                .unwrap()
-                .join("CLAUDE.md")
-                .display()
+            shown(&dird.path().canonicalize().unwrap().join("CLAUDE.md"))
         )
     );
     assert!(!dird.path().join("AGENTS.md").exists());
@@ -283,7 +284,7 @@ fn ain5_setup_is_idempotent_and_never_overwrites_a_link_target() {
         v["message"]
             .as_str()
             .unwrap()
-            .contains(&format!("{} was written", claude.display())),
+            .contains(&format!("{} was written", shown(&claude))),
         "{v}"
     );
     assert_eq!(read(&claude), STUB);
@@ -469,7 +470,7 @@ fn agi4_setup_warnings_do_not_prevent_project_stubs() {
     stubs_written(&v, pd.path());
     let message = format!(
         "Cannot create your rules project at {}: the path is not an rdy project.",
-        file.display()
+        shown(&file)
     );
     assert_eq!(v["meta"]["message"], message, "{v}");
     assert_eq!(v["meta"]["fix"], OCCUPIED_FIX, "{v}");
@@ -489,7 +490,7 @@ fn agi4_setup_warnings_do_not_prevent_project_stubs() {
         v["meta"]["message"],
         format!(
             "Cannot create your rules project at {}: the path is not an rdy project.",
-            dir.path().display()
+            shown(dir.path())
         ),
         "{v}"
     );
@@ -505,7 +506,7 @@ fn agi4_setup_warnings_do_not_prevent_project_stubs() {
     w.person(&under);
     let v = ok_json(&w, pd.path(), &["setup"]);
     stubs_written(&v, pd.path());
-    let prefix = format!("Cannot create your rules project at {}: ", under.display());
+    let prefix = format!("Cannot create your rules project at {}: ", shown(&under));
     let m = v["meta"]["message"].as_str().unwrap();
     assert!(m.starts_with(&prefix) && m.len() > prefix.len(), "{v}");
     assert!(
@@ -562,14 +563,18 @@ fn agi4_setup_never_stubs_meta_or_its_alias() {
     // configured place
     let alias = w.home.path().join("meta-link");
     rdy_qa::platform::symlink(&meta, &alias).unwrap();
-    skipped(&ok_json(&w, &alias, &["setup"]));
-    skipped(&ok_json(
-        &w,
-        elsewhere.path(),
-        &["--project", alias.to_str().unwrap(), "setup"],
-    ));
-    w.person(&alias);
-    skipped(&ok_json(&w, &meta, &["setup"]));
+    // An account that the system refuses to follow a link (error 448) cannot enter the alias, so
+    // that part has nothing to compare (D-6JZ5V; Task 7 ruling 2).
+    if !rdy_qa::platform::follow_refused(&alias) {
+        skipped(&ok_json(&w, &alias, &["setup"]));
+        skipped(&ok_json(
+            &w,
+            elsewhere.path(),
+            &["--project", alias.to_str().unwrap(), "setup"],
+        ));
+        w.person(&alias);
+        skipped(&ok_json(&w, &meta, &["setup"]));
+    }
     // a worktree of it: the pointer names the project
     let wt = short_tempdir();
     std::fs::write(
@@ -599,7 +604,7 @@ fn agi4_setup_keeps_finished_steps_after_stub_failure() {
         v["message"].as_str().unwrap(),
         format!(
             "{} is not a regular instruction file; {}",
-            agents.display(),
+            shown(&agents),
             created_message(&meta)
         ),
         "{v}"
@@ -634,7 +639,7 @@ fn agi4_setup_keeps_finished_steps_after_stub_failure() {
     let m = v["message"].as_str().unwrap();
     assert_eq!(v["code"], "E_IO", "{v}");
     assert!(
-        m.contains(&format!("; {} was written", claude.display())),
+        m.contains(&format!("; {} was written", shown(&claude))),
         "{v}"
     );
     assert!(m.ends_with(&format!("; {}", created_message(&meta))), "{v}");

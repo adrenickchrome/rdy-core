@@ -1,11 +1,11 @@
-#![cfg(unix)]
-// Unix only: a token that is not UTF-8 is made with OsStrExt for the guide renderer's refusal.
 //! `qa-release-install` with the actual release build, and the preview note's three surfaces.
-use rdy_qa::fixtures::{output_within, rdy_bin};
+//! The checker runs on every release platform (Task 36a); a token that is not UTF-8 is made with
+//! `OsStrExt` for the Unix refusal, in `release_install_unix.rs`.
+use rdy_qa::fixtures::{output_within, rdy_bin, rdy_exe_name};
 use rdy_qa::platform::{self, RELEASE_CHILD_DEADLINE, RELEASE_CHILD_OUTPUT_MAX};
 use rdy_qa::release_install::{
     self, GuideCommand, InstallInput, MSG_INSTALL_INVALID_ARGUMENTS, MSG_INVALID_ARGUMENTS,
-    MSG_INVALID_COMMAND, PREVIEW_NOTE, TAR_SKIP_REASON, TARGETS,
+    MSG_INVALID_COMMAND, PREVIEW_NOTE, TAR_SKIP_REASON, TARGETS, WINDOWS_TARGET,
 };
 use rdy_qa::skip::{self, Why};
 use std::ffi::{OsStr, OsString};
@@ -93,7 +93,9 @@ fn entries(dir: &Path) -> Vec<String> {
     v
 }
 
-/// Whether any running process's command line names `binary`.
+/// Whether a running process uses `binary`. On Unix, any process's command line names it. On
+/// Windows, a running executable cannot be removed, so a removal that fails means it runs.
+#[cfg(unix)]
 fn runs(binary: &Path) -> bool {
     let out = tool("ps", &["-A", "-ww", "-o", "args="]);
     String::from_utf8_lossy(&out)
@@ -101,9 +103,44 @@ fn runs(binary: &Path) -> bool {
         .any(|l| l.contains(&*binary.to_string_lossy()))
 }
 
+#[cfg(windows)]
+fn runs(binary: &Path) -> bool {
+    fs::remove_file(binary).is_err()
+}
+
+/// The SHA-256 of `file` in lowercase hex.
+fn sha256_hex(file: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(fs::read(file).expect("read"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The archives a manifest lists for `target`, in name order: the two Unix archives, and for
+/// the Windows target all three.
+fn listed(target: &str) -> Vec<&'static str> {
+    if target == WINDOWS_TARGET {
+        vec![TARGETS[0], WINDOWS_TARGET, TARGETS[1]]
+    } else {
+        TARGETS.to_vec()
+    }
+}
+
 #[test]
 #[ignore = "requires a native preview archive target"]
 fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
+    installed_binary_runs_cli_and_mcp();
+}
+
+#[test]
+fn wx36a_installed_cli_and_stdio_mcp_use_the_verified_exe() {
+    // The same check on the fast gate, on each platform: the exe the checker installs is the
+    // verified archive's, and its CLI and its stdio MCP server run from an empty home.
+    installed_binary_runs_cli_and_mcp();
+}
+
+fn installed_binary_runs_cli_and_mcp() {
     // Native release qualification: no skip path. A missing tool or target fails the test.
     let target = platform::release_target().expect("a native preview archive target");
     assert!(
@@ -118,27 +155,19 @@ fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
     let archive =
         release_install::package(&rdy, V, target, &work.path().join("out")).expect("package");
     let download = work.path().join("download");
-    fs::create_dir(&download).expect("mkdir");
-    platform::set_mode(&download, 0o700).expect("private download");
+    let parent = platform::open_dir(work.path()).expect("open the work directory");
+    platform::create_private_dir_at(&parent, "download".as_ref()).expect("private download");
     let name = release_install::archive_name(V, target);
     fs::copy(&archive, download.join(&name)).expect("copy the archive");
 
     // Two manifest lines (only the native archive is present), signed by a disposable test key.
     // This key is never a release key.
-    let lines: String = TARGETS
+    let lines: String = listed(target)
         .iter()
         .map(|t| {
             let file = download.join(release_install::archive_name(V, t));
             let hash = if file.exists() {
-                let out = if *t == TARGETS[0] {
-                    tool(
-                        "shasum",
-                        &[OsStr::new("-a"), "256".as_ref(), file.as_os_str()],
-                    )
-                } else {
-                    tool("sha256sum", &[file.as_os_str()])
-                };
-                String::from_utf8(out).expect("utf-8")[..64].to_string()
+                sha256_hex(&file)
             } else {
                 "ab".repeat(32)
             };
@@ -215,7 +244,8 @@ fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let binary = input.prefix.join("bin").join("rdy");
+    let exe = rdy_exe_name();
+    let binary = input.prefix.join("bin").join(&exe);
     let os = platform::release_os().expect("os");
     let checks: Vec<String> = [
         "signature",
@@ -239,11 +269,17 @@ fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
     );
 
     // The installed product is bin/rdy alone, the verified archive's bytes, marked as a preview.
-    assert_eq!(entries(&input.prefix), ["bin", "bin/rdy"]);
+    assert_eq!(
+        entries(&input.prefix),
+        [
+            "bin".to_string(),
+            format!("bin{}{exe}", std::path::MAIN_SEPARATOR)
+        ]
+    );
     let unpacked = work.path().join("check");
     fs::create_dir(&unpacked).expect("mkdir");
     tool(
-        "tar",
+        platform::tar_program().to_str().expect("utf-8"),
         &[
             OsStr::new("-xzf"),
             download.join(&name).as_os_str(),
@@ -252,7 +288,7 @@ fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
         ],
     );
     let stem = name.strip_suffix(".tar.gz").expect("stem");
-    let verified = fs::read(unpacked.join(stem).join("rdy")).expect("archive binary");
+    let verified = fs::read(unpacked.join(stem).join(&exe)).expect("archive binary");
     assert!(
         fs::read(&binary).expect("installed") == verified,
         "the installed bytes are the archive's"
@@ -339,7 +375,7 @@ fn pre3_preview_note_matches_readme_and_archive() {
     let into = work.path().join("x");
     fs::create_dir(&into).expect("mkdir");
     tool(
-        "tar",
+        platform::tar_program().to_str().expect("utf-8"),
         &[
             OsStr::new("-xzf"),
             archive.as_os_str(),
@@ -359,14 +395,21 @@ fn pre3_preview_note_matches_readme_and_archive() {
 fn pre3_cli_prints_the_guide_and_refuses_bad_arguments() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = ssh_key_line();
+    // The guide for a POSIX target is text that a person runs elsewhere, so it takes POSIX paths
+    // on every host. A Windows tempdir is not one, and this path stands nowhere on Windows.
+    let base = if cfg!(windows) {
+        "/rdy-pre3-no-such-dir".to_string()
+    } else {
+        dir.path().display().to_string()
+    };
     let input = InstallInput {
-        download: dir.path().join("no download"),
+        download: format!("{base}/no download").into(),
         signer_line: key,
         version: "0.14.0".into(),
         commit: COMMIT.into(),
         target: TARGETS[1].into(),
-        unpack: dir.path().join("no unpack"),
-        prefix: dir.path().join("no parent").join("rdy-0.14.0"),
+        unpack: format!("{base}/no unpack").into(),
+        prefix: format!("{base}/no parent/rdy-0.14.0").into(),
         browser: false,
     };
 
@@ -451,32 +494,60 @@ fn pre3_cli_prints_the_guide_and_refuses_bad_arguments() {
     assert!(out.stdout.is_empty());
 }
 
-#[test]
-fn pre3_render_refuses_non_utf8_tokens() {
-    use std::os::unix::ffi::OsStrExt;
-    let at = PathBuf::from("/tmp");
-    let command = |program: &OsStr| GuideCommand {
+/// A guide command that runs `program` in `/tmp`.
+fn command_of(program: &OsStr) -> GuideCommand {
+    GuideCommand {
         program: program.to_os_string(),
         args: vec![],
-        cwd: at.clone(),
+        cwd: PathBuf::from("/tmp"),
         stdin: None,
         stdout: None,
-    };
-    let bad = OsStr::from_bytes(b"a\xffb");
+        ps: None,
+    }
+}
+
+#[test]
+fn pre3_render_refuses_non_utf8_tokens() {
+    // the portable parts: text that is fine renders, and NUL, CR and LF are refused in both
+    // shells; the raw Unix-byte case is in release_install_unix.rs, the Windows one below
     assert_eq!(
-        release_install::render_commands(&[command(bad)]),
-        Err(MSG_INVALID_COMMAND.to_string())
-    );
-    let mut redirected = command(OsStr::new("printf"));
-    redirected.stdout = Some(PathBuf::from(bad));
-    assert_eq!(
-        release_install::render_commands(&[redirected]),
-        Err(MSG_INVALID_COMMAND.to_string())
-    );
-    assert_eq!(
-        release_install::render_commands(&[command(OsStr::new("true"))]),
+        release_install::render_commands(&[command_of(OsStr::new("true"))]),
         Ok("cd '/tmp' &&\n'true'".to_string())
     );
+    assert_eq!(
+        release_install::render_powershell(&[command_of(OsStr::new("true"))]),
+        Ok("& {\n$ErrorActionPreference = 'Stop'\nSet-Location -LiteralPath '/tmp'\n& 'true'\nif ($LASTEXITCODE -ne 0) { throw 'a step failed' }\n}".to_string())
+    );
+    for bad in ["a\nb", "a\rb", "a\0b"] {
+        assert_eq!(
+            release_install::render_commands(&[command_of(OsStr::new(bad))]),
+            Err(MSG_INVALID_COMMAND.to_string())
+        );
+        assert_eq!(
+            release_install::render_powershell(&[command_of(OsStr::new(bad))]),
+            Err(MSG_INVALID_COMMAND.to_string())
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn wx36a_render_refuses_unpaired_surrogate_tokens() {
+    // the Windows counterpart of a byte that is not UTF-8: a UTF-16 unit with no pair
+    use std::os::windows::ffi::OsStringExt;
+    let bad = OsString::from_wide(&[0x61, 0xd800, 0x62]);
+    let mut redirected = command_of(OsStr::new("true"));
+    redirected.args = vec![bad.clone()];
+    for commands in [vec![command_of(&bad)], vec![redirected]] {
+        assert_eq!(
+            release_install::render_powershell(&commands),
+            Err(MSG_INVALID_COMMAND.to_string())
+        );
+        assert_eq!(
+            release_install::render_commands(&commands),
+            Err(MSG_INVALID_COMMAND.to_string())
+        );
+    }
 }
 
 /// A signer line from fixed key bytes.

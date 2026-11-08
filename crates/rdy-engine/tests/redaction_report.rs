@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: the report fixtures make symlinks and set file modes (seams rule, FW-XP1 D-1RXEA).
 //! rdx5: the complete redaction blast radius and the request (D-6B1W1, D-14SAY, D-EPK1Z, D-33JR0,
 //! D-ST423). A report reads the whole log: every stored version, closed views and withdrawn
 //! proposals included; every embedding change and shared chunk; every landing, tag, view,
@@ -234,7 +232,23 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             } else if meta.is_dir() {
                 stack.push(p);
             } else {
-                out.insert(p.clone(), std::fs::read(&p).unwrap());
+                // the open store holds a byte-range lock on its lock file and its derived index,
+                // and Windows refuses to read them (os error 33): their length stands for them,
+                // and every log byte is still read
+                let bytes = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) if e.raw_os_error() == Some(33) => {
+                        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                        assert!(
+                            ["lock", "index.redb"].contains(&name.as_str()),
+                            "{}",
+                            p.display()
+                        );
+                        std::fs::metadata(&p).unwrap().len().to_le_bytes().to_vec()
+                    }
+                    Err(e) => panic!("{}: {e}", p.display()),
+                };
+                out.insert(p.clone(), bytes);
             }
         }
     }
@@ -290,6 +304,7 @@ fn rdx5_quarantine_listing_reuses_both_existing_name_rules() {
     std::fs::create_dir(store.join("index.redb.damaged-2")).unwrap();
     std::fs::write(store.join("index.redb"), b"x").unwrap();
     std::fs::write(store.join("x.torn-1"), b"x").unwrap();
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut expected = vec![
         "index.redb.damaged-1",
         "index.redb.damaged-2",
@@ -298,13 +313,12 @@ fn rdx5_quarantine_listing_reuses_both_existing_name_rules() {
     ];
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(
+        rdy_store::pio::symlink(
             "/nonexistent/rdx5",
             store.join("segments/seg-000001.log.torn-2"),
         )
         .unwrap();
-        std::os::unix::fs::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-3"))
-            .unwrap();
+        rdy_store::pio::symlink("/nonexistent/rdx5", store.join("index.redb.damaged-3")).unwrap();
         expected.extend(["index.redb.damaged-3", "segments/seg-000001.log.torn-2"]);
         expected.sort();
     }
@@ -1130,14 +1144,9 @@ fn rdx5_quarantine_names_are_reported_without_erasure() {
     std::fs::create_dir(store.join("index.redb.damaged-6")).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         // unreadable and dangling: reading either for content would fail
-        std::fs::set_permissions(
-            store.join("index.redb.damaged-5"),
-            std::fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(
+        rdy_store::pio::set_mode(&store.join("index.redb.damaged-5"), 0o000).unwrap();
+        rdy_store::pio::symlink(
             "/nonexistent/rdx5",
             store.join("segments/seg-000001.log.torn-6"),
         )
@@ -1186,14 +1195,7 @@ fn rdx5_quarantine_names_are_reported_without_erasure() {
         );
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            store.join("index.redb.damaged-5"),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
-    }
+    rdy_store::pio::set_mode(&store.join("index.redb.damaged-5"), 0o644).unwrap();
     assert_eq!(
         std::fs::read(store.join("index.redb.damaged-5")).unwrap(),
         b"damaged bytes"
@@ -3161,5 +3163,60 @@ fn cp3_plan_quotes_use_the_existing_report_only_policy() {
             let f = fields[plans.iter().position(|(x, _)| x == h).unwrap()];
             quoting_plan(f)
         });
+    }
+}
+
+/// The segment files under `root`, by name, with their bytes.
+fn segment_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    let dir = store_dir(root).join("segments");
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-"))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+// Recording a redaction and then a reindex only append to the log: every byte the project
+// acknowledged before stays where it was, on every platform.
+#[test]
+fn wx12a_redaction_and_reindex_keep_acknowledged_bytes() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let before = segment_bytes(p.dir.path());
+    assert!(before.values().any(|b| contains(b, SECRET.as_bytes())));
+    let t = vec![p.prose.to_string()];
+    p.r.redact(&writer(), input(&t, false)).unwrap();
+    let recorded = segment_bytes(p.dir.path());
+    for (name, bytes) in &before {
+        let now = recorded
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is gone"));
+        assert!(now.starts_with(bytes), "{name}: acknowledged bytes moved");
+    }
+    assert!(recorded != before, "the redaction request is in the log");
+    // the report is the same before and after a reindex, and the log is not touched
+    let report = dry(&p.r, &t);
+    p.r.reindex().unwrap();
+    assert_eq!(
+        segment_bytes(p.dir.path()),
+        recorded,
+        "reindex keeps the log"
+    );
+    assert_eq!(dry(&p.r, &t), report);
+    // a reopen after a clean close leaves the acknowledged bytes alone too
+    let P { dir, r, .. } = p;
+    r.close().unwrap();
+    let after = segment_bytes(dir.path());
+    for (name, bytes) in &recorded {
+        assert!(
+            after.get(name).is_some_and(|n| n.starts_with(bytes)),
+            "{name}"
+        );
     }
 }

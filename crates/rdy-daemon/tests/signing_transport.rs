@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it runs a daemon on its Unix socket and sends SIGINT to itself. FW-XP1 Phase 4 ports it.
 //! sig5: a signing request goes to the process at the other end of the request's own
 //! connection (D-QVH4N), over that connection, while the writer goes on (D-1Z951).
 
@@ -377,9 +375,13 @@ fn served(
 ) {
     let i = info();
     let (client, server) = tokio::io::duplex(1 << 20);
-    let session = i
-        .sessions
-        .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
+    let session = i.sessions.insert(
+        Proto::Ctl,
+        "t".into(),
+        BUILD.into(),
+        "/".into(),
+        sys::own_account().unwrap(),
+    );
     let (r, w) = tokio::io::split(server);
     (
         BufReader::new(client),
@@ -811,12 +813,18 @@ async fn sig5_disconnect_and_cancel_release_the_signer() {
         "no signing worker remains"
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 2, "nothing is retried");
+}
 
-    // 4. CLI: SIGINT while the caller's agent waits cancels the request.
+/// The caller's interrupt while its agent waits cancels the request and ends the worker. `deliver`
+/// makes the interrupt once the agent waits; `inject` is the interrupt source the client uses, or
+/// `None` for the caller's own (the platform's handler).
+async fn interrupt_cancels_a_waiting_request(
+    inject: Option<InterruptSource>,
+    deliver: impl FnOnce(),
+) {
     let (signer, mut results) = Signer::with_results();
     let up = daemon(signer.clone()).await;
     let (fake, mut ready) = Fake::gated(vec![key(1)]);
-    // the caller's own SIGINT handling (no injected interrupt)
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
@@ -829,13 +837,12 @@ async fn sig5_disconnect_and_cancel_release_the_signer() {
         panic!("not ready")
     };
     let mut c = c.with_agent(fake.clone());
+    if let Some(source) = inject {
+        c = c.with_interrupt(source);
+    }
     let signing = tokio::spawn(async move { c.ctl("sign", json!({"key": 1})).await });
     recv(&mut ready).await;
-    let status = std::process::Command::new("kill")
-        .args(["-INT", &std::process::id().to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    deliver();
     assert_no_agent(&signing.await.unwrap(), NoAgentCause::Cancelled);
     assert_cause(&results.recv().await.unwrap(), NoAgentCause::Cancelled);
     assert_eq!(
@@ -848,6 +855,34 @@ async fn sig5_disconnect_and_cancel_release_the_signer() {
         1,
         "the write is not retried"
     );
+}
+
+/// The Windows counterpart of the Unix `SIGINT` case below runs the real Ctrl-C and Ctrl-Break in
+/// the daemon's `sys::catch_interrupt` tests. Here the interrupt comes through the client's
+/// interrupt source, on every platform.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_an_interrupt_cancels_a_request_while_the_callers_agent_waits() {
+    let (fire, _) = tokio::sync::watch::channel(0u64);
+    let (source, armed) = armed_interrupt(&fire);
+    interrupt_cancels_a_waiting_request(Some(source), || {
+        armed.recv().unwrap();
+        fire.send_replace(1);
+    })
+    .await;
+}
+
+/// A real `SIGINT` to this process, caught by the caller's own handler (no injected interrupt).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sig5_unix_sigint_cancels_a_request_while_the_callers_agent_waits() {
+    interrupt_cancels_a_waiting_request(None, || {
+        let status = std::process::Command::new("kill")
+            .args(["-INT", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1024,37 +1059,28 @@ async fn sig5_callback_ids_and_bounds_are_connection_local() {
     );
 }
 
-/// A fake SSH agent on a Unix socket in `dir` (identities requests only): it answers each with
-/// one identity, `key(5)`, and counts the requests it answered.
-fn agent_socket(dir: &std::path::Path) -> (std::path::PathBuf, Arc<AtomicUsize>) {
-    use std::io::{Read, Write};
-    let path = dir.join("agent.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+/// A fake SSH agent on the native endpoint (identities requests only): it answers each with one
+/// identity, `key(5)`, and counts the requests it answered.
+fn agent_endpoint() -> (common::agent::Fake, Arc<AtomicUsize>) {
     let served = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&served);
-    std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut conn) = conn else { return };
-            let mut len = [0u8; 4];
-            if conn.read_exact(&mut len).is_err() {
-                continue;
-            }
-            let mut body = vec![0u8; usize::try_from(u32::from_be_bytes(len)).unwrap()];
-            if conn.read_exact(&mut body).is_err() || body != [11] {
-                continue;
-            }
-            let mut answer = vec![12u8];
-            answer.extend(1u32.to_be_bytes());
-            answer.extend(string(&key(5)));
-            answer.extend(string(b""));
-            let mut packet = u32::try_from(answer.len()).unwrap().to_be_bytes().to_vec();
-            packet.extend(answer);
-            if conn.write_all(&packet).is_ok() {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
+    let script: common::agent::Script = Arc::new(move |ty, body| {
+        if ty != 11 || !body.is_empty() {
+            return vec![];
         }
+        let mut answer = vec![12u8];
+        answer.extend(1u32.to_be_bytes());
+        answer.extend(string(&key(5)));
+        answer.extend(string(b""));
+        let mut packet = u32::try_from(answer.len()).unwrap().to_be_bytes().to_vec();
+        packet.extend(answer);
+        count.fetch_add(1, Ordering::SeqCst);
+        packet
     });
-    (path, served)
+    (
+        common::agent::start(common::agent::Act::Reply(script), |_| {}),
+        served,
+    )
 }
 
 /// Runs this test again in a child process, in `mode`, with `env` (SSH_AUTH_SOCK removed
@@ -1075,6 +1101,7 @@ fn run_child(mode: &str, env: &[(&str, &std::path::Path)]) {
     ])
     .env_remove("SSH_AUTH_SOCK")
     .env("HOME", home.path())
+    .env("USERPROFILE", home.path())
     .env("RDY_SIG5_CHILD", mode)
     .stdin(std::process::Stdio::null());
     for (k, v) in env {
@@ -1148,9 +1175,8 @@ async fn sig5_direct_cli_and_stdio_receive_the_caller_agent() {
         _ => {}
     }
     run_child("unset", &[]);
-    let sock = short_tempdir();
-    let (path, served) = agent_socket(sock.path());
-    run_child("agent", &[("SSH_AUTH_SOCK", &path)]);
+    let (agent, served) = agent_endpoint();
+    run_child("agent", &[("SSH_AUTH_SOCK", &agent.path)]);
     assert_eq!(
         served.load(Ordering::SeqCst),
         2,

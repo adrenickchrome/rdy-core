@@ -371,11 +371,10 @@ fn docs_in(dir: &Path) -> Vec<String> {
 
 /// Kills the daemon whose pid file is `pid_file`, and returns once it is gone.
 fn kill_daemon(pid_file: &Path) {
-    let pid: u32 = std::fs::read_to_string(pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    // the record is the pid alone on Unix and the pid with a creation time on Windows
+    let pid = rdy_daemon::sys::parse_pid_record(&std::fs::read(pid_file).unwrap())
+        .expect("a pid record")
+        .pid();
     rdy_qa::platform::kill_hard(pid);
     while !rdy_qa::platform::process_exited(pid) {
         std::thread::yield_now();
@@ -492,6 +491,13 @@ fn rtc4_meta_session_scopes_share_one_destination() {
     // the configured path is another spelling of the same directory
     let link = w.home.path().join("meta-link");
     rdy_qa::platform::symlink(md.path(), &link).unwrap();
+    // A link made by a standard user on a Windows build box can be refused on traversal
+    // (ERROR_UNTRUSTED_MOUNT_POINT, 448; ruled at Task 7). The second spelling is then a
+    // path with a `.` step, which names the same directory without a link.
+    let link = match std::fs::symlink_metadata(link.join(".rdy.yaml")) {
+        Err(e) if e.raw_os_error() == Some(448) => md.path().join("."),
+        _ => link,
+    };
     w.person(&link);
     signing(md.path(), "never", false);
     let (host, starts) = reader(&w, false);

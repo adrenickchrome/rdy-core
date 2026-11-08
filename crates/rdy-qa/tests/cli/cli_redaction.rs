@@ -4,6 +4,7 @@
 //! no force, yes, policy or approval switch. A request is proposed and its removal card is the
 //! approval card of the queue. These tests stop before a successful removal landing (Task 15
 //! owns that flow).
+use crate::cli_editor::edit_with;
 use rdy_daemon::{OpContext, dispatch};
 use rdy_engine::engine::Local;
 use rdy_engine::redaction::{RedactInput, RedactResult, report_text};
@@ -1057,25 +1058,6 @@ fn rdx13_show_text_prints_the_removal_card_or_its_error() {
     assert!(!stdout.contains("card hash:"), "{stdout}");
 }
 
-/// `rdy --project <dir> --json edit <id>` as the human, with `EDITOR` a shell script whose body
-/// is `body` (it edits the file named by `$1`).
-fn edit_with_script(s: &Served, id: &str, body: &str) -> std::process::Output {
-    let script = s.dir.path().join("ed.sh");
-    std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
-    rdy_qa::platform::set_mode(&script, 0o755).unwrap();
-    rdy_qa::fixtures::rdy_command()
-        .args(["--project"])
-        .arg(s.dir.path())
-        .args(["--json", "edit", id])
-        .env("EDITOR", &script)
-        .env_remove("RDY_ACTOR")
-        .env_remove("RDY_RUN")
-        .env_remove("RDY_NO_DAEMON")
-        .envs(s.env_pairs())
-        .output()
-        .unwrap()
-}
-
 /// Final review fix round 1, finding 3 (the CLI path; this test lands a removal, unlike the
 /// others here): after a person's approved removal, `rdy edit` that replaces the notice with
 /// fresh safe text writes a normal version; an edit that saves the notice unchanged is refused
@@ -1112,15 +1094,17 @@ fn rdx13_an_edit_replaces_the_removal_notice_with_fresh_text() {
     assert_eq!(v["body"], rdy_model::redaction::CONTENT_REMOVED, "{v}");
 
     // saving the notice unchanged: refused
-    let o = edit_with_script(&s, &id, "true\n");
+    let seen = s.dir.path().join("seen.txt");
+    let o = edit_with(&s, None, &format!("copy {}\n", seen.display()), &id);
     let e = error_of(&o);
     assert_eq!(e["code"], E_REDACTED, "{e}");
 
     // the notice replaced with fresh safe text: a normal version
-    let o = edit_with_script(
+    let o = edit_with(
         &s,
+        None,
+        "replace Content removed.\tFresh safe text.\n",
         &id,
-        "sed -i.bak 's/Content removed\\./Fresh safe text./' \"$1\"\n",
     );
     let (ok, stdout, stderr) = out(&o);
     assert!(ok, "{stdout}\n{stderr}");

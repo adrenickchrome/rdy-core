@@ -14,7 +14,8 @@ use std::process::ExitCode;
 )]
 struct Args {
     /// The directory holding the archive, SHA256SUMS and SHA256SUMS.sig (absolute). It must be
-    /// owned by you and not writable by group or others (for example, made with `mkdir -m 700`).
+    /// owned by you and not writable by group or others (for example, made with `mkdir -m 700`;
+    /// on Windows, a directory in your profile that only you can write).
     #[arg(long, value_name = "DIR")]
     download: String,
     /// The trusted allowed-signers line, as the README and the release notes print it.
@@ -26,7 +27,8 @@ struct Args {
     /// The 40-hex commit from the build receipt.
     #[arg(long, value_name = "S")]
     commit: String,
-    /// The target triple: aarch64-apple-darwin or x86_64-unknown-linux-gnu.
+    /// The target triple: aarch64-apple-darwin, x86_64-unknown-linux-gnu or
+    /// x86_64-pc-windows-msvc.
     #[arg(long, value_name = "TRIPLE")]
     target: String,
     /// A new directory to extract into (absolute; it must not exist).
@@ -65,12 +67,11 @@ fn main() -> ExitCode {
         browser: args.browser,
     };
     // the grammar of every argument first: a failure here is an argument error
-    let commands = match release_install::commands(&input) {
-        Ok(commands) => commands,
-        Err(_) => return refuse(MSG_INSTALL_INVALID_ARGUMENTS, 2),
-    };
+    if release_install::commands(&input).is_err() {
+        return refuse(MSG_INSTALL_INVALID_ARGUMENTS, 2);
+    }
     if args.print_commands {
-        return match release_install::render_commands(&commands) {
+        return match release_install::render_guide(&input) {
             Ok(block) => print(&format!("{block}\n")),
             Err(_) => refuse(MSG_INSTALL_INVALID_ARGUMENTS, 2),
         };

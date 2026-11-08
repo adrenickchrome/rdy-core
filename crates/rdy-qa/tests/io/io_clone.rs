@@ -629,6 +629,16 @@ fn ec5_a_dump_replaced_after_its_header_check_is_never_cloned_from_the_new_bytes
             Err(e) if e.code == "E_DUMP" && e.message == o10 => {
                 assert!(!to.exists(), "attempt {i}: the target is untouched");
             }
+            // Windows renames the new bytes over an existing file without a guarantee that
+            // the name is always there: a clone can meet the gap and find no source. Nothing
+            // was read then, so nothing was ingested, and the target stays untouched.
+            Err(e)
+                if cfg!(windows)
+                    && e.code == "E_BAD_INPUT"
+                    && e.message == format!("{} does not exist", src.display()) =>
+            {
+                assert!(!to.exists(), "attempt {i}: the target is untouched");
+            }
             Err(e) => {
                 outcome = Err(format!("attempt {i}: {e}"));
                 break;
@@ -655,6 +665,18 @@ fn ec5_a_clone_into_a_symlinked_source_dot_rdy_is_refused_and_both_are_untouched
     // a second link to the source's .rdy, not named .rdy
     let link = scratch.path().join("link");
     rdy_qa::platform::symlink(&src.path().join(".rdy"), &link).unwrap();
+    if rdy_qa::platform::follow_refused(&src.path().join(".rdy")) {
+        // an account that may not follow the link cannot open the project through it: that is
+        // the refusal, and the store behind the link stays as it was
+        let before = tree(&physical);
+        assert!(
+            Rdy::open(src.path()).is_err(),
+            "no open through a refused link"
+        );
+        assert_eq!(tree(&physical), before, "the store is untouched");
+        eprintln!("ec5: the clone path through the link was not exercised (error 448)");
+        return;
+    }
     let a = Rdy::open(src.path()).unwrap();
     let file = scratch.path().join("p.rdydump");
     a.read().dump(&file).unwrap();

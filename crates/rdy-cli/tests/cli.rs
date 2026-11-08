@@ -1,51 +1,6 @@
-#![cfg(unix)]
-// Unix only: it sets file modes. FW-XP1 Phase 4 ports it.
+mod common;
+use common::*;
 use serde_json::Value;
-use std::process::Command;
-
-/// A user config naming `human:tester` as the human actor, and the environment that points at it.
-fn human_config() -> (tempfile::TempDir, (&'static str, std::path::PathBuf)) {
-    let cfg = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(cfg.path().join("rdy")).unwrap();
-    std::fs::write(cfg.path().join("rdy/config.yaml"), "actor: human:tester\n").unwrap();
-    let env = ("XDG_CONFIG_HOME", cfg.path().to_path_buf());
-    (cfg, env)
-}
-
-/// `rdy --no-daemon <args>` in `dir` as the human `human:tester` (these tests drive the direct
-/// path; the daemon path is covered by rdy-qa's cli_daemon).
-fn rdy_cmd(dir: &std::path::Path, args: &[&str]) -> (tempfile::TempDir, Command) {
-    let (cfg, (k, v)) = human_config();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rdy"));
-    cmd.arg("--no-daemon")
-        .args(args)
-        .current_dir(dir)
-        .env("RDY_ACTOR", "human:tester")
-        .env(k, v)
-        // ain: no real home, so no real meta project is read
-        .env("HOME", cfg.path())
-        .env("USERPROFILE", cfg.path())
-        .env("APPDATA", cfg.path());
-    (cfg, cmd)
-}
-
-fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let (_cfg, mut cmd) = rdy_cmd(dir, args);
-    let out = cmd.output().unwrap();
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into(),
-        String::from_utf8_lossy(&out.stderr).into(),
-    )
-}
-
-fn json(dir: &std::path::Path, args: &[&str]) -> Value {
-    let mut a = vec!["--json"];
-    a.extend_from_slice(args);
-    let (ok, out, err) = rdy(dir, &a);
-    assert!(ok, "rdy {args:?} failed: {err}");
-    serde_json::from_str(&out).unwrap_or_else(|e| panic!("bad json from {args:?}: {e}\n{out}"))
-}
 
 #[test]
 fn init_status_and_errors() {
@@ -123,61 +78,6 @@ fn import_propose_approve_render_fsck() {
     let f = json(dir.path(), &["fsck"]);
     assert_eq!(f["landings"], 1);
     assert!(f["frames"].as_u64().unwrap() > 0);
-}
-
-fn rdy_env(dir: &std::path::Path, editor: &str, args: &[&str]) -> (bool, String, String) {
-    let (_cfg, mut cmd) = rdy_cmd(dir, args);
-    let out = cmd.env("EDITOR", editor).output().unwrap();
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into(),
-        String::from_utf8_lossy(&out.stderr).into(),
-    )
-}
-
-fn project_with_term() -> (tempfile::TempDir, String) {
-    use rdy_engine::*;
-    use rdy_model::Role;
-    let dir = tempfile::tempdir().unwrap();
-    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let w = Session {
-        actor: "agent:a".into(),
-        run: None,
-        role: Role::Writer,
-        kind: rdy_engine::SessionKind::Human,
-    };
-    let res = r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "page"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
-        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."}
-    ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let id = res.created["$t"].clone();
-    drop(r);
-    (dir, id)
-}
-
-#[test]
-fn edit_runs_editor_with_args_and_failure_changes_nothing() {
-    use std::os::unix::fs::PermissionsExt;
-    let (dir, id) = project_with_term();
-    let script = dir.path().join("ed.sh");
-    std::fs::write(&script, "#!/bin/sh\n[ \"$1\" = \"--flag\" ] && shift\nsed 's/^body: .*/body: Edited by script/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let editor = format!("{} --flag", script.display());
-    let (ok, _, err) = rdy_env(dir.path(), &editor, &["edit", &id, "--view", "work"]);
-    assert!(ok, "{err}");
-    assert_eq!(
-        json(dir.path(), &["show", &id, "--scope", "work"])["body"],
-        "Edited by script"
-    );
-
-    let (dir2, id2) = project_with_term();
-    let (ok, _, _) = rdy_env(dir2.path(), "false", &["edit", &id2, "--view", "work"]);
-    assert!(!ok);
-    assert_eq!(
-        json(dir2.path(), &["show", &id2, "--scope", "work"])["body"],
-        "Balances."
-    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The rdy daemon transport: a per-project Unix socket serving `ctl` (line-delimited JSON
+//! The rdy daemon transport: a per-project local endpoint (`sys`) serving `ctl` (line-delimited JSON
 //! requests) and `mcp` connections, with a session table and a handler trait the host fills in.
 
 /// The build id: the first 16 hex digits of the BLAKE3 hash of the workspace sources.
@@ -42,7 +42,9 @@ pub use client::{
     SpawnFn, StartOptions, StopRequest, connect, connect_backoff, connect_or_start, live_daemon,
     log_tail, log_tail_since, not_ready, request_stop, stop_socket,
 };
-pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve, terminate};
+#[cfg(unix)]
+pub use spawn::terminate;
+pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
 mod notify;
 pub mod shared;
 pub mod writer;

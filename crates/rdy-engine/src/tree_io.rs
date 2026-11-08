@@ -523,6 +523,12 @@ impl Reader<'_> {
                 return None;
             }
         };
+        // CR LF line syntax reads as LF: the hash, the positions and the parse see one form
+        let text = if text.contains("\r\n") {
+            text.replace("\r\n", "\n")
+        } else {
+            text
+        };
         let pos = match positions(&text) {
             Ok(p) => p,
             Err((line, col, msg)) => {

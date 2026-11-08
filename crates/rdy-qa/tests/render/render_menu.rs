@@ -507,10 +507,7 @@ fn sr8_the_menu_script_opens_and_closes_the_popover() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/menu.js"
-    );
+    let js = &rdy_qa::site::theme_js("menu.js");
     let o = std::process::Command::new("node")
         .args(["-e", &format!("{MENU_DOM}{MENU_CASES}"), "--", js])
         .output()
@@ -639,10 +636,7 @@ fn sr8_the_menu_script_survives_failed_refreshes_overlaps_and_a_new_pill() {
         );
         return;
     }
-    let js = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../rdy-render/theme/rdy-standard/js/menu.js"
-    );
+    let js = &rdy_qa::site::theme_js("menu.js");
     let o = std::process::Command::new("node")
         .args(["-e", &format!("{MENU_DOM}{MENU_RACES}"), "--", js])
         .output()

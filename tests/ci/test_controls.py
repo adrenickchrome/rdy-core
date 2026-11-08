@@ -1194,5 +1194,90 @@ class CodeqlConfig(unittest.TestCase):
         self.assertIn('config-file: ./.github/codeql/codeql-config.yml', init.group(1))
 
 
+class WindowsPlatformMatrix(unittest.TestCase):
+    def workflow(self):
+        return (ROOT / '.github/workflows/platform.yml').read_text()
+
+    def test_wx34_windows_runs_the_full_fast_gate(self):
+        text = self.workflow()
+        self.assertNotIn('windows-portable', text)
+        self.assertNotIn('-p rdy-model', text)
+        self.assertIn('runner: windows-2025', text)
+        self.assertIn('runner: macos-26', text)
+        windows = text[text.index("runner.os == 'Windows'"):]
+        self.assertIn('shell: pwsh', windows)
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
+        self.assertIn('cargo qa --skip-perf --require-all', inner)
+        self.assertIn('cargo fetch --locked', inner)
+        # an ordinary account, a private checkout, cache and profile; the credential is for this run only
+        self.assertIn('New-LocalUser', gate)
+        self.assertIn('Start-Process', gate)
+        self.assertIn('-Credential', gate)
+        self.assertIn('-LoadUserProfile', gate)
+        self.assertIn('::add-mask::', gate)
+        self.assertIn('RandomNumberGenerator', gate)
+        self.assertIn('CARGO_HOME', gate)
+        self.assertIn('RUSTUP_HOME', gate)
+        self.assertIn('Remove-LocalUser', (ROOT / 'scripts/ci/windows_gate_cleanup.ps1').read_text())
+        self.assertIn('IsInRole', inner)
+        self.assertIn('CARGO_NET_OFFLINE', inner)
+        # the password never reaches the environment, a file or the step output
+        for line in gate.splitlines():
+            if 'password' in line.lower():
+                self.assertNotIn('GITHUB_ENV', line)
+                self.assertNotIn('Out-File', line)
+                self.assertNotIn('Write-Host', line)
+        self.assertIn('windows_gate.ps1', text)
+        self.assertIn('windows_gate_cleanup.ps1', text)
+
+    def test_wx34_windows_gate_quotes_paths_with_spaces(self):
+        # Start-Process joins ArgumentList without quoting; C:\Program Files\Git must stay one argument
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        start = gate.index('$arguments = @(')
+        block = gate[start:gate.index('Start-Process', start)]
+        self.assertIn('function Quote-Arg', gate)
+        for name in ('$inner', '$work', '$cargoHome', '$rustupHome', '$node', '$git'):
+            self.assertIn(f'(Quote-Arg {name})', block)
+
+    def test_wx34_no_arm64_linux_job_is_restored(self):
+        text = self.workflow()
+        for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
+            self.assertNotIn(word, text)
+        self.assertNotIn('ubuntu-26.04-arm', (ROOT / 'scripts/ci/actionlint.yaml').read_text())
+        self.assertNotIn('ubuntu-26.04-arm', text)
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        self.assertIn('runs-on: ubuntu-26.04\n', ci)
+        self.assertIn('cargo qa --skip-perf --require-all', ci)
+        self.assertIn('runner: macos-26', text)
+
+    def test_wx34_windows_failures_propagate_and_publish_counts(self):
+        text = self.workflow()
+        scripts = [(ROOT / 'scripts/ci' / n).read_text() for n in (
+            'windows_gate.ps1', 'windows_gate_inner.ps1', 'windows_gate_cleanup.ps1', 'windows_report.ps1')]
+        for script in scripts[:2]:
+            self.assertIn('$ErrorActionPreference', script)
+            self.assertIn('LASTEXITCODE', script)
+        self.assertIn('ExitCode', scripts[0])
+        self.assertIn('exit $', scripts[1])
+        windows = text[text.index("runner.os == 'Windows'"):]
+        self.assertNotRegex(windows, r'(?m)^\s+run:.*\b(sed|id -u|bash)\b')
+        self.assertIn('windows_report.ps1', text)
+        self.assertIn('GITHUB_STEP_SUMMARY', scripts[3])
+        self.assertIn('Failing in', scripts[3])
+        for word in ('passed', 'failed', 'skipped', 'ignored'):
+            self.assertIn(word, scripts[3])
+        # the report is read even when the gate failed, and a failed tracked-file check fails the job
+        report_step = text[text.index('windows_report.ps1') - 400:text.index('windows_report.ps1')]
+        self.assertIn('if: always()', report_step)
+        self.assertIn('git diff --exit-code', text)
+        self.assertIn('continue-on-error: true', text)
+        self.assertIn('permissions: {}', text)
+        self.assertEqual(text.count('persist-credentials: false'), text.count('actions/checkout@'))
+        for line in text.splitlines():
+            if 'uses:' in line:
+                self.assertRegex(line, r'@[0-9a-f]{40}\b')
+
+
 if __name__ == '__main__':
     unittest.main()

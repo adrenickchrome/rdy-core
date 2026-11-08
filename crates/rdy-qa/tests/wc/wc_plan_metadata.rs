@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it runs the working-copy CLI against a served project. FW-XP1 Phase 4 ports it.
 //! cp7: the engine metadata fields (`reaffirmed`, `reflects_at`) live only in the store. A
 //! checkout and a refresh omit them, a staged file that sets one is refused with the store-only
 //! diagnostic, and a normal edit of a file keeps the stored values (p-8YP1G, D-F0904).

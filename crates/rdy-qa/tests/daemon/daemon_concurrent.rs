@@ -256,8 +256,7 @@ fn msw6_a_protocol_error_is_not_a_success() {
 
 #[test]
 fn msw6_a_hung_command_is_killed_at_its_budget_not_waited_on() {
-    let mut cmd = std::process::Command::new("sleep");
-    cmd.arg("600");
+    let mut cmd = crate::daemon_children::child_fixture::fixture_command("hang");
     let r = rdy_qa::fixtures::output_within(&mut cmd, Duration::from_millis(200));
     assert!(
         r.is_err(),

@@ -435,9 +435,10 @@ fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
         let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)
             .map_err(refused)?;
         let meta = f.metadata().map_err(refused)?;
-        let links = crate::fileid::links(&meta);
+        let links = crate::fileid::links_of(&f, &path).map_err(refused)?;
         let shared_with_index = links == 2
-            && crate::fileid::FileId::lstat(&index).ok() == Some(crate::fileid::FileId::of(&meta));
+            && crate::fileid::FileId::lstat(&index).ok()
+                == Some(crate::fileid::FileId::of_open(&f, &path).map_err(refused)?);
         if !meta.is_file() || !(links == 1 || shared_with_index) {
             not_ours();
             continue;
@@ -513,7 +514,7 @@ fn set_aside(path: &Path) -> Result<(), StoreError> {
         match std::fs::hard_link(path, path.with_file_name(name)) {
             Ok(()) => {
                 std::fs::remove_file(path)?;
-                File::open(path.parent().expect("store dir"))?.sync_all()?;
+                fsutil::sync_dir(path.parent().expect("store dir"))?;
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -551,7 +552,7 @@ impl HeldLock {
 
 /// The lock of a store directory, held (lock1). An open store holds one; a caller can take one
 /// first and give it to [`Store::open_locked`], so no other process opens the store between
-/// the two (a load holds it from before the rename of its store until the load ends). The lock
+/// the two (a load holds it from after the rename of its store until the load ends). The lock
 /// is released when the last holder drops it.
 #[derive(Clone)]
 pub struct StoreLock(Arc<HeldLock>);
@@ -580,6 +581,17 @@ impl StoreLock {
             Err(e) => return Err(e.into()),
         };
         Ok(StoreLock(Arc::new(HeldLock::take(file, dir)?)))
+    }
+
+    /// Closes the lock file, when this is its last holder. Otherwise gives the lock back.
+    pub(crate) fn close(self) -> Result<(), StoreLock> {
+        match Arc::try_unwrap(self.0) {
+            Ok(held) => {
+                drop(held);
+                Ok(())
+            }
+            Err(shared) => Err(StoreLock(shared)),
+        }
     }
 
     /// Whether this is the lock of the store at `dir`: the held file is the file at `dir/lock`.
@@ -2717,7 +2729,8 @@ impl Store {
             Ok(old) => old.close_and_erase(),
             Err(_) => Ok(()),
         };
-        // the new index takes the name even when the zeros failed, so the old file is gone
+        // the new index takes the name even when the zeros failed, so the old file is gone; the
+        // rename is not `pio::rename_durable` for the reason `reindex_with` gives
         let renamed = std::fs::rename(tmp, path);
         erased?;
         renamed?;
@@ -2781,6 +2794,10 @@ impl Store {
         if erase_old {
             self.publish_erasing(&path, &tmp, ix)?;
         } else {
+            // The old index is still open here (this store's reader, and maybe a reader cloned
+            // before), and Windows' write-through `MoveFileExW` refuses to replace an open file
+            // (ERROR_ACCESS_DENIED). So the new index takes the name with the platform rename
+            // that replaces an open file, and the directory flush below makes it durable.
             if let Err(e) = std::fs::rename(&tmp, &path) {
                 drop(ix);
                 let _ = remove_if_present(&tmp);

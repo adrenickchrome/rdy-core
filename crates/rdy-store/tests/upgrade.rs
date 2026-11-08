@@ -1,10 +1,11 @@
-#![cfg(unix)]
-// Unix only: it sets file modes, makes symlinks and reads a child's signal. FW-XP1 Phase 4 ports it.
 //! The store upgrade transaction (D-WWAK7): a dry run writes nothing; an upgrade backs the closed
 //! store up completely, then appends one marked batch with the new manifest and its receipt,
 //! rebuilds the index and runs the store check. FORMAT keeps the old mirror until the engine's
 //! completion publishes it. Every failure keeps the acknowledged bytes and the backup. These
 //! tests use an injected step registry; production registers no step.
+#[path = "support/files.rs"]
+mod files;
+
 use rdy_model::*;
 use rdy_store::error::UpgradeFailure;
 use rdy_store::format::{
@@ -20,7 +21,6 @@ use rdy_store::upgrade::{
 use rdy_store::{Store, StoreError, StoreLock, kinds};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
@@ -154,7 +154,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
             out.insert(p.clone(), None);
             out.extend(tree(&p));
         } else if m.is_file() {
-            out.insert(p.clone(), Some(std::fs::read(&p).unwrap()));
+            out.insert(p.clone(), Some(files::contents(&p, &m)));
         } else {
             out.insert(p.clone(), None);
         }
@@ -480,7 +480,13 @@ fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
     let mut want: Vec<String> = old_tree
         .iter()
         .filter(|(_, c)| c.is_some())
-        .map(|(p, _)| p.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+        // the manifest separates path parts with `/` on every platform
+        .map(|(p, _)| {
+            p.strip_prefix(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .filter(|p| p != "lock" && p != "index.open")
         .collect();
     want.sort();
@@ -754,7 +760,8 @@ fn ok5_upgrade_child() {
     println!("OK5-DONE {r:?}");
 }
 
-/// Runs the child on `dir` and kills it with SIGKILL once it reports `phase`.
+/// Runs the child on `dir` and kills it once it reports `phase`: `SIGKILL` on Unix,
+/// `TerminateProcess` on Windows.
 fn kill_at(dir: &Path, phase: &str) {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -785,7 +792,11 @@ fn kill_at(dir: &Path, phase: &str) {
     }
     child.kill().unwrap();
     let status = child.wait().unwrap();
-    assert_eq!(status.signal(), Some(9), "{phase}: {status:?}");
+    assert_eq!(
+        rdy_store::pio::ended(&status),
+        rdy_store::pio::Ended::Killed,
+        "{phase}: {status:?}"
+    );
 }
 
 #[test]
@@ -1187,17 +1198,20 @@ fn ok5_backup_limits_and_links_fail_closed() {
         (base, dir, plan)
     };
 
-    // a link to a file, a link to a directory and a socket, at the top and deeper
+    // a link to a file, a link to a directory and (Unix) a socket, at the top and deeper
     let (_b, dir, plan) = fresh();
-    std::os::unix::fs::symlink(dir.join("FORMAT"), dir.join("FORMAT.link")).unwrap();
+    link(&dir.join("FORMAT"), &dir.join("FORMAT.link")).unwrap();
     refused(&dir, &plan, UpgradeFailure::BackupFileType);
     let (b, dir, plan) = fresh();
-    std::os::unix::fs::symlink(b.path(), dir.join("segments").join("elsewhere")).unwrap();
+    link(b.path(), &dir.join("segments").join("elsewhere")).unwrap();
     refused(&dir, &plan, UpgradeFailure::BackupFileType);
-    let (_b, dir, plan) = fresh();
-    std::fs::create_dir(dir.join("extra")).unwrap();
-    let _socket = std::os::unix::net::UnixListener::bind(dir.join("extra").join("s")).unwrap();
-    refused(&dir, &plan, UpgradeFailure::BackupFileType);
+    #[cfg(unix)]
+    {
+        let (_b, dir, plan) = fresh();
+        std::fs::create_dir(dir.join("extra")).unwrap();
+        let _socket = rdy_store::pio::bind_socket(&dir.join("extra").join("s")).unwrap();
+        refused(&dir, &plan, UpgradeFailure::BackupFileType);
+    }
 
     // the entry and path bounds, each refused one past and accepted at its value
     let (b, dir, plan) = fresh();
@@ -1254,20 +1268,20 @@ fn ok5_backup_limits_and_links_fail_closed() {
     };
     let e = with_hook_for_tests(stop, || upgrade(&dir)).unwrap_err();
     assert!(matches!(e, StoreError::Io(_)), "{e:?}");
-    std::os::unix::fs::symlink(dir.join("FORMAT"), backup.join("planted")).unwrap();
+    link(&dir.join("FORMAT"), &backup.join("planted")).unwrap();
     let lock = StoreLock::take(&dir).unwrap();
     assert_eq!(
         upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
         (UpgradeFailure::BackupMismatch, Some(backup.clone()))
     );
     assert!(
-        backup.join("planted").exists(),
+        std::fs::symlink_metadata(backup.join("planted")).is_ok(),
         "nothing in a backup changes"
     );
     assert_eq!(upgrade_batches(&dir), 0);
     std::fs::remove_file(backup.join("planted")).unwrap();
     // a link in the copy, and a stray entry in place of the copy, are refused too
-    std::os::unix::fs::symlink(dir.join("FORMAT"), copy_of(&backup, "planted")).unwrap();
+    link(&dir.join("FORMAT"), &copy_of(&backup, "planted")).unwrap();
     assert_eq!(
         upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
         (UpgradeFailure::BackupMismatch, Some(backup.clone()))
@@ -1285,19 +1299,107 @@ fn ok5_backup_limits_and_links_fail_closed() {
     assert_eq!(upgrade_batches(&dir), 1);
 }
 
-/// The mode bits of `path`, never through a link.
+/// The mode bits of `path`, never through a link (Unix).
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::symlink_metadata(path)
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o7777
+    rdy_store::pio::mode_of(&std::fs::symlink_metadata(path).unwrap())
 }
 
+/// Sets `path` to `mode` (Unix).
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    rdy_store::pio::set_mode(path, mode).unwrap();
+}
+
+/// Whether no other account may use what `path` names, never through a link: no group or
+/// other bit on Unix; on Windows a private object of this account's, whose DACL holds exactly
+/// the one ACE that rdy gives a private object of its kind.
+fn assert_private(path: &Path) {
+    #[cfg(unix)]
+    assert_eq!(
+        mode(path) & 0o077,
+        0,
+        "{}: {:o}",
+        path.display(),
+        mode(path)
+    );
+    #[cfg(windows)]
+    {
+        let f = rdy_store::pio::open_no_follow(std::fs::OpenOptions::new().read(true), path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let privacy = rdy_store::pio::privacy(&f).unwrap();
+        assert!(
+            privacy.private && privacy.mine,
+            "{}: {privacy:?}",
+            path.display()
+        );
+        let kind = if f.metadata().unwrap().is_dir() {
+            rdy_store::pio::ObjectKind::Dir
+        } else {
+            rdy_store::pio::ObjectKind::File
+        };
+        let me = rdy_store::pio::current_account().unwrap();
+        let s = rdy_store::pio::security_of(&f).unwrap();
+        assert_eq!(s.owner, Some(me), "{}: the owner", path.display());
+        assert!(s.protected, "{}: no inherited access", path.display());
+        assert_eq!(
+            s.dacl,
+            Some(vec![rdy_store::pio::Ace::private(me, kind)]),
+            "{}: the ACEs",
+            path.display()
+        );
+    }
+}
+
+/// Makes `path` as private as rdy makes a backup's entry: mode 0o700 (a directory) or 0o600 on
+/// Unix; on Windows the private descriptor.
+fn make_private(path: &Path) {
+    let is_dir = std::fs::symlink_metadata(path).unwrap().is_dir();
+    #[cfg(unix)]
+    set_mode(path, if is_dir { 0o700 } else { 0o600 });
+    #[cfg(windows)]
+    if is_dir {
+        rdy_store::pio::make_private_dir(path).unwrap();
+    } else {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        rdy_store::pio::make_private_file(&f).unwrap();
+    }
+}
+
+/// Lets other accounts read `path`: mode 0o755 (a directory) or 0o644 on Unix; on Windows read
+/// access for Users.
+fn open_to_others(path: &Path) {
+    let is_dir = std::fs::symlink_metadata(path).unwrap().is_dir();
+    #[cfg(unix)]
+    set_mode(path, if is_dir { 0o755 } else { 0o644 });
+    #[cfg(windows)]
+    {
+        let inherit = if is_dir { "(OI)(CI)" } else { "" };
+        let out = Command::new("icacls")
+            .arg(path)
+            .arg("/grant")
+            .arg(format!("*S-1-5-32-545:{inherit}(R)"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+}
+
+/// A symbolic link at `link` to `target`: on Windows a directory link when `target` is a
+/// directory, else a file link.
+fn link(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return rdy_store::pio::symlink(target, link);
+    #[cfg(windows)]
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 }
 
 /// The entry names of the directory `dir`, sorted.
@@ -1359,21 +1461,27 @@ fn ok5_backup_is_private_to_its_owner() {
     let _f = known();
     let base = tempfile::tempdir().unwrap();
     let dir = project(base.path());
-    set_mode(&dir, 0o700);
-    set_mode(&dir.join("FORMAT"), 0o600);
-    set_mode(&dir.join("index.redb"), 0o400);
+    #[cfg(unix)]
+    {
+        set_mode(&dir, 0o700);
+        set_mode(&dir.join("FORMAT"), 0o600);
+        set_mode(&dir.join("index.redb"), 0o400);
+    }
     let report = upgrade(&dir).unwrap();
     let backup = report.backup.unwrap();
-    // no group or other bit on the backup or on anything in it
-    assert_eq!(mode(&backup) & 0o077, 0, "{:o}", mode(&backup));
+    // no other account may use the backup or anything in it: no group or other bit on Unix
+    assert_private(&backup);
     let all = tree(&backup);
     assert!(all.len() > 4);
     for p in all.keys() {
-        assert_eq!(mode(p) & 0o077, 0, "{}: {:o}", p.display(), mode(p));
+        assert_private(p);
     }
     // a file keeps no more of its owner's bits than its source has
-    assert_eq!(mode(&copy_of(&backup, "FORMAT")), 0o600);
-    assert_eq!(mode(&copy_of(&backup, "index.redb")), 0o400);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&copy_of(&backup, "FORMAT")), 0o600);
+        assert_eq!(mode(&copy_of(&backup, "index.redb")), 0o400);
+    }
 
     // a backup that other users can read is not reused
     let base = tempfile::tempdir().unwrap();
@@ -1383,12 +1491,12 @@ fn ok5_backup_is_private_to_its_owner() {
     let plan = inspect_with(&dir, &registry()).unwrap();
     with_hook_for_tests(stop_at_backup, || upgrade(&dir)).unwrap_err();
     let lock = StoreLock::take(&dir).unwrap();
-    for (path, open, private) in [
-        (copy_of(&backup, "FORMAT"), 0o644, 0o600),
-        (backup.join("store").join("segments"), 0o755, 0o700),
-        (backup.clone(), 0o755, 0o700),
+    for path in [
+        copy_of(&backup, "FORMAT"),
+        backup.join("store").join("segments"),
+        backup.clone(),
     ] {
-        set_mode(&path, open);
+        open_to_others(&path);
         assert_eq!(
             upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
             (UpgradeFailure::BackupMismatch, Some(backup.clone())),
@@ -1396,7 +1504,7 @@ fn ok5_backup_is_private_to_its_owner() {
             path.display()
         );
         assert_eq!(upgrade_batches(&dir), 0);
-        set_mode(&path, private);
+        make_private(&path);
     }
     let report = apply_with(&dir, &lock, &plan, &registry()).unwrap();
     assert_eq!(report.backup, Some(backup));
@@ -1429,15 +1537,24 @@ fn ok5_backup_never_follows_a_substituted_path() {
             {
                 done = true;
                 std::fs::rename(&backup, &moved)?;
-                std::os::unix::fs::symlink(&outside, &backup)?;
+                link(&outside, &backup)?;
             }
             Ok(())
         }
     };
     let e = with_hook_for_tests(swap, || upgrade(&dir)).unwrap_err();
+    // Unix: the move succeeds and the upgrade finds the substitution. Windows: the upgrade
+    // holds the backup directory open without delete sharing while it fills it, so the move
+    // itself is refused (ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION).
+    #[cfg(unix)]
     assert_eq!(
         upgrade_error(e),
         (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    #[cfg(windows)]
+    assert!(
+        matches!(&e, StoreError::Io(io) if matches!(io.raw_os_error(), Some(5 | 32))),
+        "{e:?}"
     );
     assert_eq!(names(outside.path()), ["backup.json"], "nothing is added");
     assert_eq!(
@@ -1463,7 +1580,7 @@ fn ok5_backup_never_follows_a_substituted_path() {
         move |p: Phase<'_>| {
             if let Phase::Copy("note") = p {
                 std::fs::remove_file(&note)?;
-                std::os::unix::fs::symlink(&secret, &note)?;
+                link(&secret, &note)?;
             }
             Ok(())
         }
@@ -1516,10 +1633,10 @@ fn ok5_backup_copy_directory_is_never_substituted() {
                     done = true;
                     std::fs::rename(&copy, &moved)?;
                     if by_link {
-                        std::os::unix::fs::symlink(&empty, &copy)?;
+                        link(&empty, &copy)?;
                     } else {
                         std::fs::create_dir(&copy)?;
-                        set_mode(&copy, 0o700);
+                        make_private(&copy);
                     }
                 }
                 Ok(())
@@ -1532,10 +1649,13 @@ fn ok5_backup_copy_directory_is_never_substituted() {
             "by link: {by_link}"
         );
         assert!(names(empty.path()).is_empty(), "by link: {by_link}");
-        assert!(
-            names(&backup.join("store")).is_empty(),
-            "by link: {by_link}"
-        );
+        // a link is not listed through: its target is the empty directory above
+        if !by_link {
+            assert!(
+                names(&backup.join("store")).is_empty(),
+                "by link: {by_link}"
+            );
+        }
         assert_eq!(segments(&dir), old_segments, "nothing is appended");
         assert_eq!(upgrade_batches(&dir), 0);
         assert!(!inspect_with(&dir, &registry()).unwrap().pending_check);
@@ -1557,9 +1677,9 @@ fn ok5_reused_backup_refuses_hard_links_and_a_linked_manifest() {
     let old_segments = segments(&dir);
     let lock = StoreLock::take(&dir).unwrap();
 
-    // the copied segment is replaced by a hard link to the active one, with a copy's mode, so
-    // the same bytes and the same privacy: only its identity tells it from a copy
-    set_mode(&dir.join(seg), 0o600);
+    // the copied segment is replaced by a hard link to the active one, made as private as a
+    // copy, so the same bytes and the same privacy: only its identity tells it from a copy
+    make_private(&dir.join(seg));
     std::fs::remove_file(&copy).unwrap();
     std::fs::hard_link(dir.join(seg), &copy).unwrap();
     assert_eq!(
@@ -1575,14 +1695,14 @@ fn ok5_reused_backup_refuses_hard_links_and_a_linked_manifest() {
     assert_eq!(upgrade_batches(&dir), 0);
     std::fs::remove_file(&copy).unwrap();
     std::fs::write(&copy, &saved).unwrap();
-    set_mode(&copy, 0o600);
+    make_private(&copy);
 
     // backup.json is moved out and a link to it takes its place
     let manifest = backup.join("backup.json");
     let outside = tempfile::tempdir().unwrap();
     let moved = outside.path().join("backup.json");
     std::fs::rename(&manifest, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &manifest).unwrap();
+    link(&moved, &manifest).unwrap();
     assert_eq!(
         upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
         (UpgradeFailure::BackupMismatch, Some(backup.clone()))
@@ -1669,5 +1789,150 @@ fn ok9_an_open_with_no_registered_step_walks_no_log() {
     assert!(
         upgrade::sealed_walks_for_tests() > walks,
         "an open with a registry plans from the sealed log"
+    );
+}
+
+/// What a durable backend saw: each step and its boundary, in order.
+type Seen = Vec<(rdy_store::pio::DurableStep, rdy_store::pio::Boundary)>;
+
+/// Runs `run` with a durable backend on this thread that records each step and fails the steps
+/// for which `fail` gives an error; the backend is removed again even if `run` panics.
+fn durable_steps<T>(
+    mut fail: impl FnMut(
+        &rdy_store::pio::DurableStep,
+        rdy_store::pio::Boundary,
+    ) -> Option<std::io::Error>
+    + 'static,
+    run: impl FnOnce() -> T,
+) -> (T, Seen) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            rdy_store::pio::on_durable(None);
+        }
+    }
+    let seen: Rc<RefCell<Seen>> = Rc::default();
+    let log = seen.clone();
+    rdy_store::pio::on_durable(Some(Box::new(move |step, at| {
+        log.borrow_mut().push((step.clone(), at));
+        fail(step, at).map_or(Ok(()), Err)
+    })));
+    let off = Off;
+    let out = run();
+    drop(off);
+    let seen = seen.borrow().clone();
+    (out, seen)
+}
+
+/// The directories whose flush completed, in order.
+fn flushed(seen: &Seen) -> Vec<PathBuf> {
+    seen.iter()
+        .filter_map(|(step, at)| match (step, at) {
+            (rdy_store::pio::DurableStep::Flush(p), rdy_store::pio::Boundary::After) => {
+                Some(p.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// FW-XP1 phase 4: an upgrade's backup gets rdy's private security, never its source's, and
+/// every directory of it is flushed through the platform's durable call. Each directory of the
+/// copy is flushed after its files, the deepest first, then the copy, the backup, and the
+/// backup's parent; the parent is flushed once before the backup is filled too. A source store
+/// open to other accounts gives its backup no access for them: on Windows each entry holds only
+/// the private ACE, whatever ACEs its source has. A failed flush of a backup directory fails the
+/// upgrade before anything is appended, and the incomplete backup is never used.
+#[test]
+fn wx7_upgrade_preserves_private_security_and_syncs_directories() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    std::fs::create_dir_all(dir.join("extra").join("deeper")).unwrap();
+    std::fs::write(dir.join("extra").join("deeper").join("note"), b"kept").unwrap();
+    for p in [
+        dir.clone(),
+        dir.join("FORMAT"),
+        dir.join("segments"),
+        dir.join("extra").join("deeper").join("note"),
+    ] {
+        open_to_others(&p);
+    }
+    let backup = base
+        .path()
+        .join(".rdy")
+        .join(backup_name(&baseline_features(), terminal(&dir)));
+    let copy = backup.join("store");
+    let parent = base.path().join(".rdy");
+
+    // a flush of the copy's deepest directory fails: nothing is appended, no manifest is
+    // written, and the next upgrade refuses the incomplete backup
+    let deeper = copy.join("extra").join("deeper");
+    let old_segments = segments(&dir);
+    let target = deeper.clone();
+    let (e, seen) = durable_steps(
+        move |step, at| match step {
+            rdy_store::pio::DurableStep::Flush(p)
+                if *p == target && at == rdy_store::pio::Boundary::Before =>
+            {
+                Some(std::io::Error::from_raw_os_error(5))
+            }
+            _ => None,
+        },
+        || upgrade(&dir),
+    );
+    let e = e.unwrap_err();
+    assert!(matches!(e, StoreError::Io(_)), "{e:?}");
+    let done = flushed(&seen);
+    assert_eq!(done.first(), Some(&parent), "the parent, before");
+    for p in [&deeper, &copy.join("extra"), &copy, &backup] {
+        assert!(!done.contains(p), "{} is flushed: {done:?}", p.display());
+    }
+    assert_eq!(done.iter().filter(|p| **p == parent).count(), 1, "{done:?}");
+    assert!(!backup.join("backup.json").exists(), "no manifest");
+    assert_eq!(segments(&dir), old_segments, "nothing is appended");
+    assert_eq!(upgrade_batches(&dir), 0);
+    assert_eq!(
+        upgrade_error(upgrade(&dir).unwrap_err()),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    std::fs::rename(&backup, base.path().join("aside")).unwrap();
+
+    // the upgrade: every directory of the backup flushed, after its contents
+    let (report, seen) = durable_steps(|_, _| None, || upgrade(&dir));
+    let report = report.unwrap();
+    assert_eq!(report.backup, Some(backup.clone()));
+    assert_eq!(upgrade_batches(&dir), 1);
+    let flushed = flushed(&seen);
+    let at = |p: &Path| {
+        flushed
+            .iter()
+            .position(|f| f == p)
+            .unwrap_or_else(|| panic!("{} is never flushed: {flushed:?}", p.display()))
+    };
+    assert!(at(&deeper) < at(&copy.join("extra")));
+    assert!(at(&copy.join("extra")) < at(&copy));
+    assert!(at(&copy.join("segments")) < at(&copy));
+    assert!(at(&copy) < at(&backup));
+    let last_parent = flushed.iter().rposition(|f| *f == parent).unwrap();
+    assert!(
+        at(&parent) < at(&deeper),
+        "the parent first, once it holds the backup"
+    );
+    assert!(
+        at(&backup) < last_parent,
+        "and again once the backup is complete"
+    );
+
+    // the backup is private, each entry with only rdy's private security
+    assert_private(&backup);
+    for p in tree(&backup).keys() {
+        assert_private(p);
+    }
+    assert_eq!(
+        std::fs::read(copy_of(&backup, "extra/deeper/note")).unwrap(),
+        b"kept"
     );
 }

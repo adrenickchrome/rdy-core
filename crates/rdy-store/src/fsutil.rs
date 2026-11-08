@@ -1,7 +1,11 @@
 //! Directory durability: a new file or directory entry survives a power loss only once its
 //! parent directory is fsynced.
 //!
-//! Private and settings replacements reach every mode call through [`crate::pio`].
+//! Every directory flush and every rename here is [`crate::pio`]'s ([`pio::sync_dir`],
+//! [`pio::sync_open_dir`], [`pio::rename_durable`], [`pio::rename_at`]): on Windows a flush is
+//! `FlushFileBuffers` on a directory handle and a rename is a write-through `MoveFileExW` (D-FPKPS),
+//! and a failure of either is an error, never a success. Private and settings replacements reach
+//! every mode call through [`crate::pio`] too.
 use crate::pio;
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
@@ -90,7 +94,7 @@ pub fn zero_file(path: &Path) -> io::Result<()> {
             path.display()
         )));
     }
-    let links = crate::fileid::links(&meta);
+    let links = crate::fileid::links_of(&f, path)?;
     if links != 1 {
         let why = format!(
             "{} has more than one link ({links}), so it was not zeroed",
@@ -274,20 +278,20 @@ pub fn record_syncs<T>(f: impl FnOnce() -> T) -> (T, Vec<PathBuf>) {
     (out, synced)
 }
 
-/// Fsyncs a directory, so entries created in it survive a power loss.
-///
-/// This uses `File::sync_all`, never `sync_data`. std implements `sync_all` on Apple targets as
-/// `fcntl(F_FULLFSYNC)` (a drive-cache flush, also on a directory descriptor), and on Linux as
-/// `fsync`. So no platform code is needed here.
+/// Fsyncs a directory, so entries created in it survive a power loss: [`pio::sync_dir`], whose
+/// failure is the error `could not sync directory {path}: {error}`. Records `dir` in the sync
+/// recorder once the flush is done.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()?;
+    pio::sync_dir(dir)?;
     record(dir);
     Ok(())
 }
 
 /// Makes `bytes` the durable content of `path`, as a replacement that is atomic against crashes:
-/// writes `<parent>/.<file name>.tmp`, fsyncs it, renames it over `path`, then fsyncs the parent
-/// directory (`.` for a bare file name). Records `path`, then the parent, in the sync recorder.
+/// writes `<parent>/.<file name>.tmp`, fsyncs it, renames it over `path` ([`pio::rename_durable`]),
+/// then fsyncs the parent directory (`.` for a bare file name). Records `path`, then the parent,
+/// in the sync recorder. A failed rename leaves the target as it was, and the temp file with the
+/// new bytes, fsynced.
 ///
 /// The temp name is predictable, so whatever stands there is removed first, and the temp file is
 /// created with `create_new` (`O_EXCL`): a link planted at the temp name is never followed, and
@@ -299,7 +303,7 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, path)?;
+    pio::rename_durable(&tmp, path)?;
     record(path);
     sync_dir(parent_of(path))
 }
@@ -379,7 +383,7 @@ pub fn replace_in_dir(
     }
     record(&target);
     probe(PrivateWriteStage::Renamed, &target)?;
-    dir.sync_all()?;
+    pio::sync_open_dir(dir, dir_path)?;
     record(dir_path);
     probe(PrivateWriteStage::DirSynced, dir_path)
 }
@@ -423,7 +427,7 @@ pub fn write_durable_batch(
     let result = stage_all(items, &mut staged).and_then(|()| {
         let mut dirs: std::collections::BTreeSet<PathBuf> = extra_dirs.iter().cloned().collect();
         for (tmp, path) in &staged {
-            std::fs::rename(tmp, path).map_err(|e| (path.clone(), e))?;
+            pio::rename_durable(tmp, path).map_err(|e| (path.clone(), e))?;
             record(path);
             dirs.insert(parent_of(path).to_path_buf());
         }
@@ -535,7 +539,10 @@ mod tests {
         let victim = outside.path().join("victim.txt");
         std::fs::write(&victim, b"keep me").unwrap();
         let path = dir.path().join("blob.png");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&victim, dir.path().join(".blob.png.tmp")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&victim, dir.path().join(".blob.png.tmp")).unwrap();
         write_durable(&path, b"new bytes").unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
         assert!(std::fs::symlink_metadata(&path).unwrap().is_file());

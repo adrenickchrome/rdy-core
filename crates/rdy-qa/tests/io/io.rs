@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
 use rdy_engine::*;
@@ -286,15 +284,14 @@ fn ord3_import_and_check_refuse_an_order_key_over_24_characters() {
 
 /// A symlink from docs/ to a valid doc file outside the export must be refused (sym1): rdy
 /// never follows links in an export, and names the link at line 1.
-#[cfg(unix)]
 #[test]
 fn io_symlink_out_of_the_export_is_refused() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("real.yaml"), DOC).unwrap();
     let t = export_dir(&[]);
-    std::os::unix::fs::symlink(
-        outside.path().join("real.yaml"),
-        t.path().join("docs/linked.yaml"),
+    rdy_qa::platform::symlink(
+        &outside.path().join("real.yaml"),
+        &t.path().join("docs/linked.yaml"),
     )
     .unwrap();
     refused(t.path());

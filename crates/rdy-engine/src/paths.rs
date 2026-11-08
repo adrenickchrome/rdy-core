@@ -5,7 +5,33 @@ use crate::{Session, WriteRequest, WriteResult};
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
 use serde_json::json;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+/// A logical path (slash-separated, as stored and shown) under the host folder `root`: each
+/// segment joins on its own, so the host separator is used and a segment never changes the root
+/// (a drive letter or a leading slash in `logical` is not special here).
+pub fn native_join(root: &Path, logical: &str) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for seg in logical.split('/').filter(|s| !s.is_empty()) {
+        p.push(seg);
+    }
+    p
+}
+
+/// The logical path (slash-separated) of a host path that is relative to a root: normal
+/// components only. A drive, a UNC prefix, a root, `.`, `..` or a name that is not UTF-8 gives
+/// `None`, as does an empty path.
+pub fn logical_of(rel: &Path) -> Option<String> {
+    let parts: Option<Vec<&str>> = rel
+        .components()
+        .map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    parts.filter(|p| !p.is_empty()).map(|p| p.join("/"))
+}
 
 pub(crate) fn resolve_in(m: &Materialized, path: &str) -> Result<BlockId, RdyError> {
     m.resolve_path(path).map_err(|miss| {

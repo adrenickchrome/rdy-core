@@ -32,6 +32,15 @@ rdy-render = { workspace = true, features = ["probe"] }
 tempfile.workspace = true
 rdy-schema.workspace = true
 blake3.workspace = true
+# the signing tests sign with fixed in-memory test keys only
+ed25519-dalek.workspace = true
+ssh-key.workspace = true
+
+# its own main: the test binary is also the daemon a test starts (`rdy serve --detach ...`), and a
+# test harness would refuse those arguments
+[[test]]
+name = "windows_lifecycle"
+harness = false
 
 [lints]
 workspace = true

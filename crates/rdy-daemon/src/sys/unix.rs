@@ -1,5 +1,10 @@
 //! The Unix side of `sys`: every item, each body the code it replaces.
 
+use super::DirState;
+use crate::layout::{NotPrivateDir, RUN_DIR, SHORT_SOCKET_ROOT, SOCKET_FILE, short_dir_error};
+use crate::socket::MAX_SOCKET_PATH;
+use rdy_model::Hash;
+use rdy_store::fileid::FileId;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -14,27 +19,27 @@ use tokio::net::{UnixListener, UnixStream};
 // 1. Transport
 
 /// The daemon's listener: a Unix socket.
-pub type Listener = UnixListener;
+#[derive(Debug)]
+pub struct Listener(UnixListener);
+
+impl Listener {
+    /// The next connection. Cancel safe: a future dropped before it ends loses no connection.
+    pub async fn accept(&mut self) -> io::Result<Stream> {
+        self.0.accept().await.map(|(stream, _)| stream)
+    }
+}
+
 /// One connection to or from the daemon.
 pub type Stream = UnixStream;
-/// The read half of a `Stream`.
-pub type ReadHalf = tokio::net::unix::OwnedReadHalf;
-/// The write half of a `Stream`.
-pub type WriteHalf = tokio::net::unix::OwnedWriteHalf;
 
 /// Binds a listener at `path`.
 pub fn bind(path: &Path) -> io::Result<Listener> {
-    UnixListener::bind(path)
+    UnixListener::bind(path).map(Listener)
 }
 
 /// Connects to the listener at `path`.
 pub async fn connect(path: &Path) -> io::Result<Stream> {
     UnixStream::connect(path).await
-}
-
-/// Splits `stream` into halves that can move to different tasks.
-pub fn split(stream: Stream) -> (ReadHalf, WriteHalf) {
-    stream.into_split()
 }
 
 /// The bytes of `p`, as the operating system holds them.
@@ -102,6 +107,73 @@ pub fn peer_pid(stream: &Stream) -> Option<u32> {
 /// This process's effective uid (moved to `rdy_store::pio`, re-exported here).
 pub use rdy_store::pio::own_uid;
 
+/// An account, as this platform names one: an effective uid.
+pub type Account = u32;
+
+/// This process's account.
+pub fn own_account() -> io::Result<Account> {
+    Ok(own_uid())
+}
+
+/// A session's peer account, under its field on this platform (D-FARN9).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionPeer {
+    peer_uid: Account,
+}
+
+impl From<Account> for SessionPeer {
+    fn from(peer_uid: Account) -> SessionPeer {
+        SessionPeer { peer_uid }
+    }
+}
+
+/// The process at the other end of a stream, as the system gives it.
+#[derive(Debug)]
+pub struct PeerProcess {
+    account: Account,
+    pid: Option<u32>,
+}
+
+impl PeerProcess {
+    /// Its account.
+    pub fn account(&self) -> Account {
+        self.account
+    }
+
+    /// Its pid, `None` when the system does not say.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+}
+
+/// The daemon's check of a new connection, before it reads a byte: the peer runs as `expected`.
+/// The error is the daemon's log line; the daemon then closes the connection without a reply.
+pub fn check_client(stream: &Stream, expected: Account) -> Result<PeerProcess, String> {
+    let account =
+        peer_uid(stream).map_err(|e| format!("could not read a connection's peer uid: {e}"))?;
+    if account != expected {
+        return Err(format!("refused a connection from uid {account}"));
+    }
+    Ok(PeerProcess {
+        account,
+        pid: peer_pid(stream),
+    })
+}
+
+/// A client's check of a new connection, before it sends its hello: the peer runs as `expected`.
+pub fn check_daemon(stream: &Stream, _path: &Path, expected: Account) -> io::Result<PeerProcess> {
+    let account = peer_uid(stream)?;
+    if account != expected {
+        return Err(io::Error::other(format!(
+            "the socket's peer is uid {account}, not ours"
+        )));
+    }
+    Ok(PeerProcess {
+        account,
+        pid: peer_pid(stream),
+    })
+}
+
 // 3. No-follow opens
 
 /// Opening with `O_NOFOLLOW` (moved to `rdy_store::pio`, re-exported here): a run-dir file that
@@ -121,12 +193,214 @@ pub fn make_private_path(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
+/// What stands at `path`, from `lstat`.
+pub fn dir_state(path: &Path) -> io::Result<DirState> {
+    let m = fs::symlink_metadata(path)?;
+    Ok(if !m.is_dir() {
+        DirState::NotDir
+    } else if is_private_dir(&m) {
+        DirState::Private
+    } else {
+        DirState::NotPrivate
+    })
+}
+
+/// Whether the open run file `f` may be believed. Here its name was opened without following a
+/// link, and that is all that is asked of it.
+pub fn run_file_is_private(_f: &fs::File) -> io::Result<bool> {
+    Ok(true)
+}
+
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
 pub fn no_hard_links(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(n) if n == libc::EPERM || n == libc::ENOTSUP || n == libc::EOPNOTSUPP
     )
+}
+
+// 4b. The project's endpoint and its run files
+
+/// The longest `daemon.sock`: the socket, its newline, and `u64:u64` with its newline.
+pub const MAX_ENDPOINT_RECORD: usize = MAX_SOCKET_PATH + 1 + 2 * 20 + 2;
+/// The longest `daemon.pid`.
+pub const MAX_PID_RECORD: usize = 64;
+
+/// The socket of the canonical project root `root` (D-YMWEM), and whether it is the short one:
+/// `<root>/.rdy/run/rdy.sock` when that is at most `MAX_SOCKET_PATH` bytes, else
+/// `/tmp/rdy-<uid>/<hash of the root>.sock`.
+pub fn project_endpoint(root: &Path) -> (PathBuf, bool) {
+    let long = root.join(".rdy").join(RUN_DIR).join(SOCKET_FILE);
+    if long.as_os_str().len() <= MAX_SOCKET_PATH {
+        return (long, false);
+    }
+    let hash = Hash::of(path_bytes(root)).short();
+    (short_dir(own_uid()).join(format!("{hash}.sock")), true)
+}
+
+/// Nothing to resolve here: `RunDir` falls back to the absolute path, as it says.
+pub fn check_project_root(_root: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// When the socket of `root` is the short one, makes sure its directory is private to this user
+/// (`ensure_short_dir`).
+pub fn prepare_endpoint_place(root: &Path) -> io::Result<()> {
+    match project_endpoint(root) {
+        (path, true) => match path.parent() {
+            Some(dir) => ensure_short_dir(dir),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// `/tmp/rdy-<uid>`: the directory of the short sockets of user `uid`.
+pub(crate) fn short_dir(uid: u32) -> PathBuf {
+    Path::new(SHORT_SOCKET_ROOT).join(format!("rdy-{uid}"))
+}
+
+/// `ensure_short_dir_as` for this process's user.
+pub(crate) fn ensure_short_dir(dir: &Path) -> io::Result<()> {
+    ensure_short_dir_as(dir, own_uid())
+}
+
+/// Makes `dir` a directory private to user `uid` (D-YMWEM): creates it with mode 0o700 when it
+/// is missing; tightens a directory of `uid` with another mode to 0o700; refuses anything else
+/// (a symlink, a file, a directory of another user) with [`NotPrivateDir`], and leaves it as it
+/// is. It never follows a symlink. A failed `mkdir`, `lstat` or `chmod` is a
+/// [`ShortDirError`](crate::layout::ShortDirError) that names `dir`.
+pub(crate) fn ensure_short_dir_as(dir: &Path, uid: u32) -> io::Result<()> {
+    let failed = |e| short_dir_error(dir, e);
+    let m = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match create_private_dir(dir) {
+                Ok(()) => {}
+                // another process made it first: check what it made
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(failed(e)),
+            }
+            fs::symlink_metadata(dir).map_err(failed)?
+        }
+        Err(e) => return Err(failed(e)),
+    };
+    if !m.is_dir() || owner(&m) != uid {
+        return Err(io::Error::other(NotPrivateDir(dir.to_path_buf())));
+    }
+    // the umask may have narrowed a new directory's mode, and an old one may be open to others
+    if !is_private_dir(&m) {
+        make_private_dir(dir).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// `e`, naming the socket `path`.
+fn named(path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+}
+
+/// Removes what a dead daemon left at the socket's name, before a bind. The caller holds the
+/// store lock.
+pub fn clear_endpoint(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(named(path, e)),
+    }
+}
+
+/// `bind`, with an error that names the socket.
+pub fn bind_endpoint(path: &Path) -> io::Result<Listener> {
+    bind(path).map_err(|e| named(path, e))
+}
+
+/// Makes the socket a bind just made private: mode 0o600.
+pub fn seal_endpoint(path: &Path) -> io::Result<()> {
+    make_private_path(path).map_err(|e| named(path, e))
+}
+
+/// Removes the socket of a bind that will serve nothing.
+pub fn remove_endpoint(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+/// Whether the endpoint `path` is a symbolic link, which may lead anywhere: rdy does not follow it.
+pub fn endpoint_is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// What tells the socket at `path` from a later one at the same path. `None` when none stands.
+pub fn endpoint_identity(path: &Path) -> Option<FileId> {
+    FileId::lstat(path).ok()
+}
+
+/// How a failed bind of the daemon starts its message.
+pub const BIND_REFUSED: &str = "could not bind the socket";
+
+/// Whether a refused bind or stop object means another process holds the name for now. A socket's
+/// path is cleared first and a signal has no name, so never here.
+pub fn name_is_held(_e: &io::Error) -> bool {
+    false
+}
+
+/// Whether `e`, from making a run directory, is a whole sentence that names its own path. Here the
+/// caller names the directory, or `layout` has its own error type.
+pub fn names_its_path(_e: &io::Error) -> bool {
+    false
+}
+
+/// The socket a `daemon.sock` line names: an absolute path of at most `MAX_SOCKET_PATH` bytes.
+fn endpoint_from_line(line: &[u8]) -> Option<PathBuf> {
+    let well_formed =
+        line.first() == Some(&b'/') && line.len() <= MAX_SOCKET_PATH && !line.contains(&0);
+    well_formed.then(|| path_from_bytes(line))
+}
+
+/// `daemon.sock` as written: the socket, then the identity of the project's `.rdy`
+/// (`{dev}:{ino}`), each ended by a newline. `None` for anything else.
+pub fn parse_endpoint_record(bytes: &[u8]) -> Option<(PathBuf, FileId)> {
+    let (socket, rest) = bytes.split_at(bytes.iter().position(|&b| b == b'\n')?);
+    let project = std::str::from_utf8(rest.strip_prefix(b"\n")?.strip_suffix(b"\n")?).ok()?;
+    let project = project.parse::<FileId>().ok()?;
+    Some((endpoint_from_line(socket)?, project))
+}
+
+/// What `daemon.pid` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PidRecord {
+    pid: u32,
+}
+
+impl PidRecord {
+    /// The process the record names.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+/// This process's `daemon.pid`: `<pid>\n`.
+pub fn own_pid_record() -> io::Result<Vec<u8>> {
+    Ok(format!("{}\n", std::process::id()).into_bytes())
+}
+
+/// `daemon.pid` as written: decimal digits only, surrounding whitespace trimmed. `None` for
+/// anything else.
+pub fn parse_pid_record(bytes: &[u8]) -> Option<PidRecord> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(PidRecord {
+        pid: text.parse().ok()?,
+    })
+}
+
+/// Test hook: sets the named stop object of the project at the canonical `root`. Signals have
+/// none: `Ok(false)`.
+#[doc(hidden)]
+pub fn signal_project_stop(_root: &Path) -> io::Result<bool> {
+    Ok(false)
 }
 
 // 5. Process lifecycle
@@ -170,6 +444,40 @@ pub fn alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// What `kill(pid, 0)` says of `pid`: `ESRCH` is gone, success and `EPERM` (a process of another
+/// user) are live, and anything else, a pid out of range included, proves neither.
+#[allow(unsafe_code)]
+pub fn process_liveness(pid: u32) -> super::Liveness {
+    use super::Liveness;
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Liveness::Ambiguous;
+    };
+    // SAFETY: signal 0 sends nothing; `kill` only checks that the process exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Liveness::Live;
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Liveness::Gone,
+        Some(libc::EPERM) => Liveness::Live,
+        _ => Liveness::Ambiguous,
+    }
+}
+
+/// What a connect to the endpoint at `path` says. No name there and a refused connect are gone: no
+/// process listens. A connect is live (it closes at once, and the daemon reads an end of file where
+/// a hello would be), and so is access denied. Anything else proves neither.
+pub async fn endpoint_liveness(path: &Path) -> super::Liveness {
+    use super::Liveness;
+    match connect(path).await {
+        Ok(_) => Liveness::Live,
+        Err(e) => match e.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Liveness::Gone,
+            io::ErrorKind::PermissionDenied => Liveness::Live,
+            _ => Liveness::Ambiguous,
+        },
+    }
+}
+
 /// Sends `SIGTERM` to `pid`, which `rdy serve` takes as `rdy serve --stop`. `Ok(true)` when it
 /// was sent, `Ok(false)` when the process is gone (`ESRCH`). A `pid` of 1 or less is refused:
 /// never init, and never a process group (`kill(0, ..)` and negative pids).
@@ -194,6 +502,11 @@ pub fn terminate(pid: u32) -> io::Result<bool> {
     } else {
         Err(e)
     }
+}
+
+/// Where a daemon that `serve_command` starts runs: in its project.
+pub fn daemon_start_dir(_rdy_bin: &Path, project: &Path) -> PathBuf {
+    project.to_path_buf()
 }
 
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process
@@ -229,20 +542,35 @@ pub fn own_sid() -> i32 {
 
 // 6. Stop signals
 
-/// SIGINT and SIGTERM, registered in the current tokio runtime.
+/// SIGINT and SIGTERM, registered in the current tokio runtime. They are the process's, so the
+/// project plays no part.
 pub struct StopSignals {
     int: tokio::signal::unix::Signal,
     term: tokio::signal::unix::Signal,
 }
 
 impl StopSignals {
+    /// Whether a daemon may not start without these: it may here, as `rdy serve --stop` needs none
+    /// of them.
+    pub const REQUIRED: bool = false;
+
     /// Registers the handlers in the current tokio runtime; call it inside one.
-    pub fn install() -> io::Result<StopSignals> {
+    pub fn install(_root: &Path) -> io::Result<StopSignals> {
+        Self::early()
+    }
+
+    /// What can be registered before the store opens: all of it here.
+    pub fn early() -> io::Result<StopSignals> {
         use tokio::signal::unix::{SignalKind, signal};
         Ok(StopSignals {
             int: signal(SignalKind::interrupt())?,
             term: signal(SignalKind::terminate())?,
         })
+    }
+
+    /// Signals name no project, so nothing is left to claim.
+    pub fn claim_project(&mut self, _root: &Path) -> io::Result<()> {
+        Ok(())
     }
 
     /// Waits for the next signal and names it: "SIGINT" or "SIGTERM".
@@ -251,6 +579,39 @@ impl StopSignals {
             _ = self.int.recv() => "SIGINT",
             _ = self.term.recv() => "SIGTERM",
         }
+    }
+}
+
+/// Stops a daemon of another version that refused a connection to `endpoint`, whose peer check
+/// gave `process`: `SIGTERM`, when the record and the pid file tie that process to this project
+/// ([`proved`](super::stop_proof::proved)), and never more than that. A Unix pid file has no
+/// creation time, so a narrow `kill(2)` race remains, as with any pid-based signal: the daemon
+/// could exit after the pid file is read and its pid be reused before the signal. A process that
+/// has gone by then is no failure. Nothing here waits, so `_grace` plays no part.
+pub async fn stop_refused_daemon(
+    run: crate::layout::RunDir,
+    endpoint: std::path::PathBuf,
+    process: PeerProcess,
+    _grace: std::time::Duration,
+) -> super::stop_proof::StopOutcome {
+    use super::stop_proof::{Refusal, StopOutcome, proved};
+    let refusal = Refusal {
+        endpoint,
+        pid: process.pid(),
+        created: 0,
+    };
+    let pid_file = run.pid_record().map(|r| (r.pid(), 0));
+    let Some(pid) = proved(
+        &refusal,
+        run.recorded_socket().as_deref(),
+        pid_file,
+        Some(0),
+    ) else {
+        return StopOutcome::Untied;
+    };
+    match terminate(pid) {
+        Ok(_) => StopOutcome::Signalled { pid },
+        Err(error) => StopOutcome::SignalFailed { pid, error },
     }
 }
 
@@ -719,10 +1080,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("s.sock");
         rt().block_on(async {
-            let listener = bind(&path).unwrap();
+            let mut listener = bind(&path).unwrap();
             let (client, accepted) = tokio::join!(connect(&path), listener.accept());
             let client = client.unwrap();
-            let (server, _) = accepted.unwrap();
+            let server = accepted.unwrap();
             for s in [&client, &server] {
                 assert_eq!(peer_uid(s).unwrap(), own_uid());
                 assert_eq!(peer_pid(s), Some(std::process::id()));
@@ -915,6 +1276,49 @@ mod tests {
         // reaped by the wait, so the pid names no process
         assert!(!alive(pid));
         assert!(!terminate(pid).unwrap());
+    }
+
+    #[test]
+    fn wx8a_process_liveness_proves_only_an_end() {
+        use crate::sys::{Liveness, process_liveness};
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        assert_eq!(process_liveness(child.id()), Liveness::Live);
+        // pid 1 is another user's unless the test runs as root: live either way
+        assert_eq!(process_liveness(1), Liveness::Live);
+        assert_eq!(process_liveness(u32::MAX), Liveness::Ambiguous);
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(process_liveness(pid), Liveness::Gone);
+    }
+
+    #[test]
+    fn wx8a_endpoint_liveness_proves_only_an_end() {
+        use crate::sys::{Liveness, endpoint_liveness};
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("s.sock");
+        rt().block_on(async {
+            // a missing name; then a listener; then a name left with no listener
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
+            let listener = bind(&path).unwrap();
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Live);
+            drop(listener);
+            assert!(path.exists(), "the listener's drop leaves the name");
+            assert_eq!(endpoint_liveness(&path).await, Liveness::Gone);
+            // what is no socket proves nothing
+            let plain = d.path().join("plain");
+            fs::write(&plain, b"x").unwrap();
+            assert_ne!(endpoint_liveness(&plain).await, Liveness::Live);
+            // no access: not an end
+            let closed = d.path().join("closed");
+            create_private_dir(&closed).unwrap();
+            let inside = closed.join("s.sock");
+            let _kept = bind(&inside).unwrap();
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+            let seen = endpoint_liveness(&inside).await;
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(seen, Liveness::Live, "access denied");
+        });
     }
 
     #[test]
@@ -1131,6 +1535,6 @@ mod tests {
     fn ps6_stop_signals_install_in_a_runtime() {
         let rt = rt();
         let _g = rt.enter();
-        StopSignals::install().unwrap();
+        StopSignals::install(Path::new("/")).unwrap();
     }
 }

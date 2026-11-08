@@ -91,3 +91,5 @@ mod mcp_trace;
 mod mcp_upgrade;
 mod mcp_view_brief;
 mod mcp_views;
+mod mcp_windows;
+mod mcp_windows_roundtrip;

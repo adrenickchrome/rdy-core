@@ -1,10 +1,12 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks. FW-XP1 Phase 4 ports it.
 //! Export trees: symbolic links (sym1).
 use rdy_engine::check_path;
 use rdy_qa::fixtures::*;
-use std::os::unix::fs::symlink;
 use std::path::Path;
+
+/// A native link: a symbolic link on every platform.
+fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    rdy_qa::platform::symlink(target.as_ref(), link.as_ref())
+}
 
 const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: page\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 const FOLDER: &str = "id: fd-AAAAA\ntype: folder\norder: a1\n";

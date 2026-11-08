@@ -100,17 +100,10 @@ fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
     ));
 }
 
-/// Final review (Important 2), pinning what redb 4.3 reports, which `open_index`'s classification
-/// rests on: a copy of a live index (a non-durable commit pending, as a kill leaves it) is
-/// repaired at open (the repair callback fires) and `check_integrity` then reports it clean. So a
-/// kill reaches the trusted `Ok` arm through `clean`, not through the sentinel; the sentinel only
-/// decides the `Ok(clean == false)` arm, which redb 4.3 was not seen to produce. If a redb upgrade
-/// changes this, revisit `open_index`.
-#[test]
-fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("index.redb");
-    let idx = Index::open(&path).unwrap();
+/// Opens the index at `path` and applies one entry with a commit that is not durable, as a
+/// write leaves it before a kill.
+fn live_index(path: &std::path::Path) -> Index {
+    let idx = Index::open(path).unwrap();
     let upto = Location {
         segment: 0,
         offset: 64,
@@ -124,6 +117,68 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
         upto,
     )
     .unwrap();
+    idx
+}
+
+/// The child of `kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean`
+/// on Windows: holds [`live_index`] on `RDY_WX7_INDEX`, says so, and waits to be killed.
+#[test]
+#[ignore = "kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean runs this in a child process"]
+fn wx7_live_index_child() {
+    use std::io::Write;
+    let Ok(path) = std::env::var("RDY_WX7_INDEX") else {
+        return;
+    };
+    let _idx = live_index(std::path::Path::new(&path));
+    println!("WX7-LIVE");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Final review (Important 2), pinning what redb 4.3 reports, which `open_index`'s classification
+/// rests on: a copy of a live index (a non-durable commit pending, as a kill leaves it) is
+/// repaired at open (the repair callback fires) and `check_integrity` then reports it clean. So a
+/// kill reaches the trusted `Ok` arm through `clean`, not through the sentinel; the sentinel only
+/// decides the `Ok(clean == false)` arm, which redb 4.3 was not seen to produce. If a redb upgrade
+/// changes this, revisit `open_index`. On Windows a live index is locked against every other
+/// handle, so the live index is a child's, copied once the child is killed.
+#[test]
+fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    #[cfg(unix)]
+    let idx = live_index(&path);
+    #[cfg(windows)]
+    {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "wx7_live_index_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env("RDY_WX7_INDEX", &path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("WX7-LIVE") {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "the child ended");
+        }
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            rdy_store::pio::ended(&status),
+            rdy_store::pio::Ended::Killed
+        );
+    }
     let copy = dir.path().join("copy.redb");
     std::fs::copy(&path, &copy).unwrap();
     let c = Index::open_checked(&copy).unwrap();
@@ -133,7 +188,11 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
     let c = Index::open_checked(&copy).unwrap();
     assert!(c.clean && !c.repaired_at_open, "a second open is clean");
     drop(c);
+    #[cfg(unix)]
     drop(idx);
+    // the killed child's file, repaired at this open and closed cleanly
+    #[cfg(windows)]
+    drop(Index::open(&path).unwrap());
     let c = Index::open_checked(&path).unwrap();
     assert!(c.clean && !c.repaired_at_open, "a cleanly closed file");
 }

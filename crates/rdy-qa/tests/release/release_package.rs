@@ -3,7 +3,7 @@ use rdy_qa::fixtures::output_within;
 use rdy_qa::platform;
 use rdy_qa::release_install::{
     self, BINARY_MAX, MSG_FILE_OPERATION, MSG_INVALID_ARGUMENTS, MSG_INVALID_INPUT,
-    MSG_OUTPUT_EXISTS, MSG_SIZE_LIMIT, TAR_SKIP_REASON, TARGETS,
+    MSG_OUTPUT_EXISTS, MSG_SIZE_LIMIT, TAR_SKIP_REASON, TARGETS, WINDOWS_TARGET,
 };
 use rdy_qa::skip::{self, Why};
 use std::ffi::{OsStr, OsString};
@@ -12,15 +12,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+/// Every release target the tool knows: the two Unix ones and Windows.
+fn all_targets() -> [&'static str; 3] {
+    [TARGETS[0], TARGETS[1], WINDOWS_TARGET]
+}
+
+/// An absolute path of exactly `len` bytes whose last entry does not exist.
+fn long_path(len: usize) -> String {
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    format!("{root}{}", "a".repeat(len - root.len()))
+}
+
 /// This machine's release target, the only one the package tool packages for (its version
 /// probe runs the binary here). On a machine with none, such as Linux arm64, the tool refuses
-/// both targets as invalid arguments, which this asserts for `binary` and `out`; then `None`.
+/// every target as invalid arguments, which this asserts for `binary` and `out`; then `None`.
 /// The unit pins cover packaging there through a stand-in setup.
-fn native_or_refused(binary: &OsStr, out: &Path) -> Option<&'static str> {
+pub(crate) fn native_or_refused(binary: &OsStr, out: &Path) -> Option<&'static str> {
     if let Ok(target) = platform::release_target() {
         return Some(target);
     }
-    for t in TARGETS {
+    for t in all_targets() {
         let what = format!("{t} on a machine with no release target");
         refused(
             &run(&flags(binary, "0.14.0", t, out.as_os_str())),
@@ -38,14 +49,14 @@ fn root() -> PathBuf {
 }
 
 /// Runs `qa-release-package` with `args`.
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
+pub(crate) fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_qa-release-package"));
     cmd.args(args);
     output_within(&mut cmd, Duration::from_secs(600)).expect("run qa-release-package")
 }
 
 /// The four flags, each with its value.
-fn flags(binary: &OsStr, version: &str, target: &str, out: &OsStr) -> Vec<OsString> {
+pub(crate) fn flags(binary: &OsStr, version: &str, target: &str, out: &OsStr) -> Vec<OsString> {
     vec![
         "--binary".into(),
         binary.into(),
@@ -185,10 +196,10 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
         cases.push(("a bad target", flags(b, "0.14.0", t, o)));
     }
     // The other release target: the version probe runs the binary here, so it is native.
-    for t in TARGETS.into_iter().filter(|t| *t != target) {
+    for t in all_targets().into_iter().filter(|t| *t != target) {
         cases.push(("another machine's target", flags(b, "0.14.0", t, o)));
     }
-    let long = format!("/{}", "a".repeat(4096));
+    let long = long_path(4097);
     for (what, binary, out_arg) in [
         ("a relative binary", OsString::from("rdy"), o.to_owned()),
         ("a relative OUT", b.to_owned(), OsString::from("out")),
@@ -227,7 +238,7 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     );
 
     // Input files: exit 1.
-    let path_4096 = format!("/{}", "a".repeat(4095));
+    let path_4096 = long_path(4096);
     let missing = dir.path().join("missing");
     let empty = dir.path().join("empty");
     fs::write(&empty, b"").expect("empty");
@@ -313,22 +324,22 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     }
     assert_eq!(fs::read(&bin).expect("binary"), b"rdy fixture\n");
 
-    // A binary of exactly the cap is packaged: a sparse file whose script answers --version.
+    // A binary of exactly the cap is packaged: a sparse file that answers --version.
     if !tar_available_or_skip(&rdy_qa::test_name!(
         "pre1_package_refuses_inputs_and_never_overwrites"
     )) {
         return;
     }
     let full = dir.path().join("full");
-    fs::write(&full, b"#!/bin/sh\nprintf 'rdy 0.14.0\\n'\nexit 0\n").expect("script");
+    let (version, stem) = answering_binary(&full, target);
     let f = fs::OpenOptions::new()
         .write(true)
         .open(&full)
         .expect("open");
     f.set_len(BINARY_MAX).expect("a sparse file at the cap");
     drop(f);
-    let done = run(&flags(full.as_os_str(), "0.14.0", target, o));
-    let archive = out.join(format!("rdy-0.14.0-{target}.tar.gz"));
+    let done = run(&flags(full.as_os_str(), &version, target, o));
+    let archive = out.join(format!("{stem}.tar.gz"));
     assert_eq!(done.status.code(), Some(0), "{done:?}");
     assert_eq!(
         String::from_utf8_lossy(&done.stdout),
@@ -339,7 +350,46 @@ fn pre1_package_refuses_inputs_and_never_overwrites() {
     assert_eq!(fs::read_dir(&out).expect("read_dir").count(), 1);
 }
 
-fn tar_available_or_skip(test: &str) -> bool {
+/// The `--version` line of the built `rdy`, without its LF, and its plain version.
+fn built_identity() -> (String, String) {
+    let mut cmd = Command::new(rdy_qa::fixtures::rdy_bin());
+    cmd.arg("--version");
+    let out = output_within(&mut cmd, Duration::from_secs(600)).expect("run rdy --version");
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    let line = String::from_utf8(out.stdout)
+        .expect("utf-8")
+        .strip_suffix('\n')
+        .expect("one LF")
+        .to_string();
+    let version = line
+        .strip_prefix("rdy ")
+        .and_then(|v| v.split(' ').next())
+        .expect("rdy <version>")
+        .to_string();
+    (line, version)
+}
+
+/// Writes at `path` a small executable that answers `--version` for the package tool, and
+/// returns the version it answers and the archive stem it gets for `target`. On Unix it is a
+/// script that prints `rdy 0.14.0`. Windows has no script that a probe can run as `rdy.exe`, so
+/// it is a copy of the built `rdy`, which answers with its own version.
+fn answering_binary(path: &Path, target: &str) -> (String, String) {
+    if cfg!(windows) {
+        fs::copy(rdy_qa::fixtures::rdy_bin(), path).expect("copy the built rdy");
+        let (line, version) = built_identity();
+        let stem = if line.ends_with(" (preview)") {
+            format!("rdy-{version}-preview-{target}")
+        } else {
+            format!("rdy-{version}-{target}")
+        };
+        (version, stem)
+    } else {
+        fs::write(path, b"#!/bin/sh\nprintf 'rdy 0.14.0\\n'\nexit 0\n").expect("script");
+        ("0.14.0".to_string(), format!("rdy-0.14.0-{target}"))
+    }
+}
+
+pub(crate) fn tar_available_or_skip(test: &str) -> bool {
     if release_install::tar_available() {
         return true;
     }
@@ -347,96 +397,87 @@ fn tar_available_or_skip(test: &str) -> bool {
     false
 }
 
-/// Makes a named pipe at `path`.
-fn fifo(path: &Path) {
-    let made = Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .expect("run mkfifo");
-    assert!(made.success(), "mkfifo {}", path.display());
+/// The members of a `.tar.gz` archive, sorted, from the system's own `tar`.
+fn members_of(archive: &Path) -> Vec<String> {
+    let mut cmd = Command::new(platform::tar_program());
+    cmd.arg("-tzf").arg(archive);
+    let out = output_within(&mut cmd, Duration::from_secs(600)).expect("run tar -tzf");
+    assert!(out.status.success(), "{out:?}");
+    let mut v: Vec<String> = String::from_utf8(out.stdout)
+        .expect("utf-8 listing")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    v.sort();
+    v
 }
 
 #[test]
-fn pre1_package_stage_stays_private_under_any_umask() {
+fn wx35a_native_package_run_takes_the_native_branch() {
+    // a machine with a release target packages for it, and the tool does not refuse it as
+    // another machine's target; a machine with none refuses every target (see native_or_refused)
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out");
+    let got = native_or_refused(dir.path().join("rdy").as_os_str(), &out);
+    assert_eq!(got, platform::release_target().ok());
+    if cfg!(windows) {
+        assert_eq!(got, Some(WINDOWS_TARGET), "Windows is MSVC amd64");
+    }
+    let Some(target) = got else {
+        return;
+    };
     if !tar_available_or_skip(&rdy_qa::test_name!(
-        "pre1_package_stage_stays_private_under_any_umask"
+        "wx35a_native_package_run_takes_the_native_branch"
     )) {
         return;
     }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let Some(target) =
-        native_or_refused(dir.path().join("rdy").as_os_str(), &dir.path().join("out"))
-    else {
-        return;
+    // the built rdy is the binary: its archive holds it as rdy or rdy.exe, byte for byte, and
+    // the packaged copy answers with the same build identity
+    let built = rdy_qa::fixtures::rdy_bin();
+    let (line, version) = built_identity();
+    let stem = if line.ends_with(" (preview)") {
+        format!("rdy-{version}-preview-{target}")
+    } else {
+        format!("rdy-{version}-{target}")
     };
-    let (ready, go) = (dir.path().join("ready"), dir.path().join("go"));
-    fifo(&ready);
-    fifo(&go);
-    // The binary's --version waits on the pipes, so the stage can be inspected mid-probe.
-    let bin = dir.path().join("rdy");
-    fs::write(
-        &bin,
-        format!(
-            "#!/bin/sh\necho ready > '{}'\nread go < '{}'\nprintf 'rdy 0.14.0\\n'\n",
-            ready.display(),
-            go.display()
-        ),
-    )
-    .expect("binary");
-    let out = dir.path().join("out");
-    let mut cmd =
-        rdy_store::pio::under_umask("000", Path::new(env!("CARGO_BIN_EXE_qa-release-package")));
-    cmd.args(flags(bin.as_os_str(), "0.14.0", target, out.as_os_str()));
-    let cli = std::thread::spawn(move || output_within(&mut cmd, Duration::from_secs(600)));
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut line = String::new();
-        let read =
-            fs::File::open(&ready).and_then(|f| std::io::BufReader::new(f).read_line(&mut line));
-        let _ = tx.send(read.map(|_| line));
-    });
-    let line = rx
-        .recv_timeout(Duration::from_secs(60))
-        .expect("the version probe started")
-        .expect("read the readiness pipe");
-    assert_eq!(line, "ready\n");
-    let out_mode = platform::mode_of(&out).expect("OUT's mode");
-    let inside: Vec<(String, u32)> = fs::read_dir(&out)
-        .expect("read OUT")
-        .map(|e| {
-            let e = e.expect("entry");
-            (
-                e.file_name().to_string_lossy().into_owned(),
-                platform::mode_of(&e.path()).expect("mode"),
-            )
-        })
-        .collect();
-    {
-        use std::io::Write;
-        fs::File::options()
-            .write(true)
-            .open(&go)
-            .and_then(|mut g| g.write_all(b"go\n"))
-            .expect("let the probe finish");
-    }
-    let done = cli
-        .join()
-        .expect("the command's thread")
-        .expect("run qa-release-package");
-    assert_eq!(out_mode, 0o700, "OUT is private under umask 000");
-    assert_eq!(inside.len(), 1, "OUT holds only the stage: {inside:?}");
-    assert_eq!(inside[0].1, 0o700, "the stage is private under umask 000");
+    let exe = if target == WINDOWS_TARGET {
+        "rdy.exe"
+    } else {
+        "rdy"
+    };
+    let done = run(&flags(built.as_os_str(), &version, target, out.as_os_str()));
     assert_eq!(done.status.code(), Some(0), "{done:?}");
-    let archive = out.join(format!("rdy-0.14.0-{target}.tar.gz"));
+    let archive = out.join(format!("{stem}.tar.gz"));
     assert_eq!(
         String::from_utf8_lossy(&done.stdout),
         format!("{}\n", archive.display())
     );
+    let mut want = vec![
+        format!("{stem}/"),
+        format!("{stem}/LICENSE-APACHE"),
+        format!("{stem}/LICENSE-MIT"),
+        format!("{stem}/THIRD-PARTY-NOTICES.txt"),
+        format!("{stem}/{exe}"),
+    ];
+    if line.ends_with(" (preview)") {
+        want.push(format!("{stem}/PREVIEW.txt"));
+    }
+    want.sort();
+    assert_eq!(members_of(&archive), want);
+    let into = dir.path().join("x");
+    fs::create_dir(&into).expect("mkdir");
+    let mut cmd = Command::new(platform::tar_program());
+    cmd.arg("-xzf").arg(&archive).arg("-C").arg(&into);
+    let un = output_within(&mut cmd, Duration::from_secs(600)).expect("run tar -xzf");
+    assert!(un.status.success(), "{un:?}");
+    let packaged = into.join(&stem).join(exe);
     assert_eq!(
-        platform::mode_of(&archive).expect("the archive's mode"),
-        0o644,
-        "the archive is not writable by others under umask 000"
+        fs::read(&packaged).expect("packaged"),
+        fs::read(&built).expect("built"),
+        "the archive holds the built executable"
     );
-    assert_eq!(fs::read_dir(&out).expect("read_dir").count(), 1);
+    let mut cmd = Command::new(&packaged);
+    cmd.arg("--version");
+    let ran = output_within(&mut cmd, Duration::from_secs(600)).expect("run the packaged rdy");
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), format!("{line}\n"));
 }

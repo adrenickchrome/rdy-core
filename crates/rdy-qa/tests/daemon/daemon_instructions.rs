@@ -220,10 +220,19 @@ fn ain4_same_project_is_read_once_and_later_landings_are_seen() {
     let w = World::new();
     let pd = w.project();
     let a = author(pd.path(), "One spelling in every reply", META_SETS);
-    // the person layer is this project, under another spelling of its path
-    let link = w.home.path().join("meta-link");
-    rdy_qa::platform::symlink(pd.path(), &link).unwrap();
-    w.person(&link);
+    // the person layer is this project, under another spelling of its path: a symbolic link on
+    // Unix, the directory's 8.3 name on Windows (no link is needed, and an ordinary account may
+    // not traverse one that it made)
+    #[cfg(unix)]
+    let alias = {
+        let link = w.home.path().join("meta-link");
+        rdy_qa::platform::symlink(pd.path(), &link).unwrap();
+        link
+    };
+    #[cfg(windows)]
+    let alias = rdy_qa::platform::short_alias(pd.path()).unwrap();
+    assert_ne!(alias, pd.path(), "another spelling of the project");
+    w.person(&alias);
     let mut c = w.mcp(pd.path());
     session(&mut c, "agent:s", "s1", "writer");
     let v = c.call("rdy_instructions", json!({})).ok();

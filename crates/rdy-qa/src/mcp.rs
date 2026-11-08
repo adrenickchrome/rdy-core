@@ -258,6 +258,13 @@ impl Bound {
     }
 }
 
+/// The environment variable that makes a command a scripted stub child
+/// (`platform::child_fixture::MODE_ENV`; the fixture exists only in a test build).
+const STUB_MODE_ENV: &str = "RDY_QA_CHILD_FIXTURE";
+/// The bytes libtest writes to a stub child's stdout before the entry test runs
+/// (`platform::child_fixture::BANNER`).
+const STUB_BANNER: &[u8] = b"\nrunning 1 test\n";
+
 /// How long a bounded session's stop waits for each worker to end once the server's process
 /// group is killed: a hang guard.
 const JOIN_GUARD: Duration = DEADLINE;
@@ -289,8 +296,11 @@ pub struct McpClient {
     bound: Option<Arc<Bound>>,
     /// A bounded session's per-operation hang guard.
     budget: Duration,
-    /// The server's PID, which also leads its process group in a bounded session.
+    /// The server's PID, which the tests check for a reaped server.
+    #[cfg_attr(not(test), allow(dead_code))]
     pid: u32,
+    /// A bounded session's process group (its server leads it); `None` for the others.
+    group: Option<platform::ProcessGroup>,
     /// A bounded session that was stopped: its group killed, its child reaped, its workers
     /// joined.
     stopped: bool,
@@ -320,8 +330,8 @@ pub fn supply_kungfu(tool: &str, args: &mut Value) {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        if self.bound.is_some() && !self.stopped {
-            let _ = platform::kill_process_group(self.pid);
+        if let (Some(group), false) = (&self.group, self.stopped) {
+            let _ = group.kill();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -335,11 +345,16 @@ impl Drop for McpClient {
 /// is counted before it is kept, a line that is not UTF-8 or bytes with no LF at the end are
 /// [`Incoming::Invalid`], passing the cap is [`Incoming::Overflow`], and the end of stdout is
 /// [`Incoming::Closed`].
+///
+/// A scripted stub child (a `strip` stream) starts with the bytes libtest writes before its entry
+/// test runs ([`STUB_BANNER`]). They are dropped before anything is counted or kept, so a stub's
+/// stdout holds only its own bytes and the cap counts only those.
 fn read_lines(
     mut out: impl Read,
     tx: &Sender<Incoming>,
     raw: Option<&Arc<Mutex<String>>>,
     bound: Option<&Bound>,
+    strip: bool,
 ) {
     let deliver = |line: &[u8]| -> bool {
         let text = match bound {
@@ -364,6 +379,8 @@ fn read_lines(
     let mut partial: Vec<u8> = Vec::new();
     let mut scanned = 0;
     let mut buf = [0u8; 8192];
+    // the first bytes of a stub's stdout, until they are known to be the banner or not
+    let mut head: Option<Vec<u8>> = strip.then(Vec::new);
     loop {
         let n = match out.read(&mut buf) {
             Ok(0) => break,
@@ -371,13 +388,34 @@ fn read_lines(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        let kept: Option<Vec<u8>> = match head.as_mut() {
+            None => None,
+            Some(h) => {
+                h.extend_from_slice(&buf[..n]);
+                if h.starts_with(STUB_BANNER) {
+                    let rest = h[STUB_BANNER.len()..].to_vec();
+                    head = None;
+                    Some(rest)
+                } else if STUB_BANNER.starts_with(h) {
+                    continue;
+                } else {
+                    let all = std::mem::take(h);
+                    head = None;
+                    Some(all)
+                }
+            }
+        };
+        let data: &[u8] = kept.as_deref().unwrap_or(&buf[..n]);
+        if data.is_empty() {
+            continue;
+        }
         if let Some(b) = bound
-            && !b.admit(n)
+            && !b.admit(data.len())
         {
             let _ = tx.send(Incoming::Overflow);
             return;
         }
-        partial.extend_from_slice(&buf[..n]);
+        partial.extend_from_slice(data);
         while let Some(at) = partial[scanned..].iter().position(|&c| c == b'\n') {
             let line: Vec<u8> = partial.drain(..=scanned + at).collect();
             scanned = 0;
@@ -386,6 +424,10 @@ fn read_lines(
             }
         }
         scanned = partial.len();
+    }
+    // a stream that ended inside the first bytes: they are its output
+    if let Some(h) = head.take() {
+        partial.extend_from_slice(&h);
     }
     match bound {
         None => {
@@ -631,18 +673,17 @@ impl McpClient {
     /// `APPDATA` all point there, so a tool that reads the person layer (`<home>/.rdy/meta`) or
     /// the user config never reads the real ones.
     pub fn start_isolated(project: &Path, home: &Path) -> McpClient {
-        let home = home.to_str().expect("a UTF-8 home");
-        let config = Path::new(home).join(".config");
-        let config = config.to_str().expect("a UTF-8 config dir");
-        McpClient::start_with_env(
-            project,
-            &[
-                ("HOME", home),
-                ("USERPROFILE", home),
-                ("XDG_CONFIG_HOME", config),
-                ("APPDATA", config),
-            ],
-        )
+        McpClient::launch_with(McpClient::isolated_command(project, home), false)
+    }
+
+    /// The command of [`McpClient::start_isolated`].
+    pub(crate) fn isolated_command(project: &Path, home: &Path) -> Command {
+        let mut cmd = crate::fixtures::rdy_command();
+        crate::fixtures::isolate_person(&mut cmd, home, &home.join(".config"));
+        cmd.args(["mcp", "--no-daemon", "--project"])
+            .arg(project)
+            .stderr(Stdio::null());
+        cmd
     }
 
     /// `start_with_env` with the child's stderr kept, for a check of everything the server
@@ -673,7 +714,15 @@ impl McpClient {
         McpClient::launch_with(McpClient::proxy_command(dir, env), false)
     }
 
-    fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
+    /// `cmd` as the server in `group`, which owns it and everything it starts: `keep` is as for
+    /// [`McpClient::launch`] (true) or `start_proxy_at` (false).
+    pub fn launch_in(cmd: Command, keep: bool, group: &platform::ProcessGroup) -> McpClient {
+        let mut c = McpClient::spawn_session(cmd, keep, None, Some(group)).expect("spawn rdy mcp");
+        McpClient::initialize(&mut c);
+        c
+    }
+
+    pub(crate) fn proxy_command(dir: &Path, env: &[(String, String)]) -> Command {
         let mut cmd = crate::fixtures::rdy_command();
         cmd.args(["mcp", "--project"])
             .arg(dir)
@@ -693,12 +742,16 @@ impl McpClient {
     }
 
     fn launch_with(cmd: Command, keep: bool) -> McpClient {
-        let mut c = McpClient::spawn_session(cmd, keep, None).expect("spawn rdy mcp");
+        let mut c = McpClient::spawn_session(cmd, keep, None, None).expect("spawn rdy mcp");
+        McpClient::initialize(&mut c);
+        c
+    }
+
+    fn initialize(c: &mut McpClient) {
         let id = c.next_id();
         c.send(&McpClient::initialize_request(id));
         c.init = c.recv(id, DEADLINE);
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-        c
     }
 
     /// The `initialize` request with `id`.
@@ -714,15 +767,29 @@ impl McpClient {
         mut cmd: Command,
         keep: bool,
         bound: Option<Arc<Bound>>,
+        shared: Option<&platform::ProcessGroup>,
     ) -> std::io::Result<McpClient> {
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+        // a bounded session owns its server's group; a shared group owns it for a world
+        let group = bound
+            .is_some()
+            .then(platform::ProcessGroup::new)
+            .transpose()?;
+        // a scripted stub child is a test executable: libtest writes its banner first
+        let stub = cmd
+            .get_envs()
+            .any(|(key, value)| key == STUB_MODE_ENV && value.is_some());
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = match group.as_ref().or(shared) {
+            Some(g) => g.spawn(&mut cmd)?,
+            None => cmd.spawn()?,
+        };
         // the command holds no pipe end of the child's, but it is not needed any more
         drop(cmd);
         let pid = child.id();
         // a worker that cannot start: the server is stopped and reaped, and the error returned
         let abandon = |child: &mut Child, e: std::io::Error| {
-            if bound.is_some() {
-                let _ = platform::kill_process_group(pid);
+            if let Some(group) = &group {
+                let _ = group.kill();
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -753,7 +820,7 @@ impl McpClient {
             let (raw, bound) = (stdout.clone(), bound.clone());
             std::thread::Builder::new()
                 .name("rdy-qa-mcp-stdout".into())
-                .spawn(move || read_lines(out, &tx, raw.as_ref(), bound.as_deref()))
+                .spawn(move || read_lines(out, &tx, raw.as_ref(), bound.as_deref(), stub))
         };
         let stdout_drain = match stdout_drain {
             Ok(h) => h,
@@ -797,6 +864,7 @@ impl McpClient {
             bound,
             budget: DEADLINE,
             pid,
+            group,
             stopped: false,
             eliciting: None,
             raw: false,
@@ -844,14 +912,13 @@ impl McpClient {
         max_output: usize,
         revision: Option<Revision>,
     ) -> Result<McpClient, (McpFailure, Option<Box<McpClient>>)> {
-        platform::own_process_group(&mut command);
         command.stderr(Stdio::piped());
         let bound = Arc::new(Bound {
             max: max_output,
             count: AtomicUsize::new(0),
             over: AtomicBool::new(false),
         });
-        let mut c = McpClient::spawn_session(command, true, Some(bound))
+        let mut c = McpClient::spawn_session(command, true, Some(bound), None)
             .map_err(|_| (McpFailure::Io, None))?;
         let initialize = match &revision {
             None => Some((PROTOCOL_VERSION.to_string(), json!({}))),
@@ -1159,7 +1226,7 @@ impl McpClient {
         }
         self.stopped = true;
         self.close_stdin();
-        let mut clean = platform::kill_process_group(self.pid).is_ok();
+        let mut clean = self.group.as_ref().is_none_or(|g| g.kill().is_ok());
         let code = match self.child.wait() {
             Ok(status) => status.code(),
             Err(_) => {
@@ -1559,13 +1626,15 @@ mod tests {
     /// A fake server: answers `initialize`, then sends one notification and one reply with an id
     /// the client is not waiting for.
     fn fake() -> McpClient {
-        let script = r#"read line
-echo '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"resources":{"subscribe":true}}}}'
-echo '{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"rdy://inbox"}}'
-echo '{"jsonrpc":"2.0","id":99,"result":{}}'
-sleep 20"#;
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", script]).stderr(Stdio::null());
+        let script = steps(&[
+            "read",
+            r#"say {"jsonrpc":"2.0","id":1,"result":{"capabilities":{"resources":{"subscribe":true}}}}"#,
+            r#"say {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"rdy://inbox"}}"#,
+            r#"say {"jsonrpc":"2.0","id":99,"result":{}}"#,
+            "hang",
+        ]);
+        let mut cmd = peer(&script, &[]);
+        cmd.stderr(Stdio::null());
         McpClient::launch(cmd)
     }
 
@@ -1596,7 +1665,36 @@ sleep 20"#;
     /// A peer script that answers `initialize`, reads the `initialized` notification, then runs
     /// `then`.
     fn after_init(then: &str) -> String {
-        format!("read -r l; echo '{INIT}'; read -r n; {then}")
+        format!("read\nsay {INIT}\nread\n{then}")
+    }
+
+    /// The steps of a stub peer script, one per line.
+    fn steps(lines: &[&str]) -> String {
+        lines.join("\n")
+    }
+
+    /// `text` as the hex pairs the stub's `rawout` and `rawerr` steps take.
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Waits until `done` is true. The wait only guards against a hang; no speed is asserted.
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(120);
+        while !done() {
+            assert!(Instant::now() < end, "never: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The text a stub step wrote to `file`, once its last line is complete.
+    fn written(file: &Path) -> String {
+        let mut text = String::new();
+        wait_for("the stub wrote its line", || {
+            text = std::fs::read_to_string(file).unwrap_or_default();
+            text.ends_with('\n')
+        });
+        text.trim_end().to_string()
     }
 
     /// A started bounded session of the peer `script`.
@@ -1615,71 +1713,88 @@ sleep 20"#;
         let cases: [Case; 14] = [
             (
                 "a line that is not JSON",
-                "cat > /dev/null; echo 'not json'".into(),
+                "drain\nsay not json".into(),
                 Err(Protocol),
             ),
             (
                 "a line that is not UTF-8",
-                r"cat > /dev/null; printf '\377\n'".into(),
+                "drain\nrawout ff0a".into(),
                 Err(Protocol),
             ),
             (
                 "a last line with no LF",
-                r#"cat > /dev/null; printf '{"jsonrpc":"2.0","method":"notifications/message"}'"#
+                r#"drain
+put {"jsonrpc":"2.0","method":"notifications/message"}"#
                     .into(),
                 Err(Protocol),
             ),
             (
                 "a JSON line that is not JSON-RPC",
-                r#"cat > /dev/null; echo '{"id":9,"result":{}}'"#.into(),
+                r#"drain
+say {"id":9,"result":{}}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a response with neither a result nor an error",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":9}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a trailing error that is a string",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":"bad"}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":9,"error":"bad"}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a trailing error with no message",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":{"code":1}}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":9,"error":{"code":1}}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a trailing result that is a number",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"result":5}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":9,"result":5}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a trailing result that is null",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"result":null}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":9,"result":null}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a well-formed trailing error that answers no request",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":{"code":1,"message":"m"}}'"#
+                r#"drain
+say {"jsonrpc":"2.0","id":9,"error":{"code":1,"message":"m"}}"#
                     .into(),
                 Err(Protocol),
             ),
             (
                 "a well-formed trailing result that answers no request",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":1,"result":{}}'"#.into(),
+                r#"drain
+say {"jsonrpc":"2.0","id":1,"result":{}}"#
+                    .into(),
                 Err(Protocol),
             ),
             (
                 "a notification",
-                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","method":"notifications/message","params":{}}'"#
+                r#"drain
+say {"jsonrpc":"2.0","method":"notifications/message","params":{}}"#
                     .into(),
                 Ok(Some(0)),
             ),
-            ("nothing more", "cat > /dev/null".into(), Ok(Some(0))),
+            ("nothing more", "drain".into(), Ok(Some(0))),
             (
                 "a nonzero exit, for the caller to judge",
-                "cat > /dev/null; exit 17".into(),
+                "drain\nexit 17".into(),
                 Ok(Some(17)),
             ),
         ];
@@ -1691,12 +1806,10 @@ sleep 20"#;
         }
         // Output past the cap still wins over a malformed line, and over an unmatched response.
         for bad in [
-            "echo 'not json'",
-            r#"echo '{"jsonrpc":"2.0","id":9,"error":"bad"}'"#,
+            "say not json",
+            r#"say {"jsonrpc":"2.0","id":9,"error":"bad"}"#,
         ] {
-            let c = bounded(&after_init(&format!(
-                "cat > /dev/null; {bad}; head -c {CAP} /dev/zero >&2"
-            )));
+            let c = bounded(&after_init(&format!("drain\n{bad}\nfill err {CAP} 00")));
             assert_eq!(
                 c.try_finish(DEADLINE).map(|_| ()),
                 Err(OutputLimit),
@@ -1711,7 +1824,10 @@ sleep 20"#;
             r#"{"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"{}"}]}}"#,
         ] {
             let mut c = bounded(&after_init(&format!(
-                r#"read -r c; echo '{stray}'; echo '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{{}}"}}]}}}}'; cat > /dev/null"#
+                r#"read
+say {stray}
+say {{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{{}}"}}]}}}}
+drain"#
             )));
             assert!(
                 matches!(c.try_call("rdy_overview", json!({})), Ok(Reply::Ok(_))),
@@ -1728,9 +1844,7 @@ sleep 20"#;
         use McpFailure::*;
         // One tools/call reply line (id 2) from a peer; the session stops after a failure.
         let call = |reply: &str| -> Result<Reply, McpFailure> {
-            let mut c = bounded(&after_init(&format!(
-                "read -r c; echo '{reply}'; cat > /dev/null"
-            )));
+            let mut c = bounded(&after_init(&format!("read\nsay {reply}\ndrain")));
             let got = c.try_call("rdy_overview", json!({}));
             if got.is_err() {
                 assert_stopped(&c, reply);
@@ -1869,7 +1983,7 @@ sleep 20"#;
                 r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#,
             ),
         ] {
-            let script = format!("read -r l; echo '{init}'; exec sleep 1000");
+            let script = format!("read\nsay {init}\nhang");
             match McpClient::try_launch_inner(peer(&script, &[]), CAP) {
                 Ok(_) => panic!("{what}: the session started"),
                 Err((got, c)) => {
@@ -1892,7 +2006,8 @@ sleep 20"#;
         ] {
             let lead = 4096 - (ch.len() - 1);
             let c = bounded(&after_init(&format!(
-                "cat > /dev/null; {{ head -c {lead} /dev/zero | tr '\\0' a; printf '{ch}'; }} >&2"
+                "drain\nfill err {lead} 61\nrawerr {}",
+                hex(ch.as_bytes())
             )));
             let t = c
                 .try_finish(DEADLINE)
@@ -1900,21 +2015,17 @@ sleep 20"#;
             assert_eq!(t.stderr, format!("{}{ch}", "a".repeat(lead)), "{what}");
         }
         for (what, bytes) in [
-            ("a byte that is never UTF-8", r"\377"),
-            ("a character cut off at the end", r"a\303"),
-            ("an unpaired continuation byte", r"\200"),
+            ("a byte that is never UTF-8", "ff"),
+            ("a character cut off at the end", "61c3"),
+            ("an unpaired continuation byte", "80"),
         ] {
-            let c = bounded(&after_init(&format!(
-                "cat > /dev/null; printf '{bytes}' >&2"
-            )));
+            let c = bounded(&after_init(&format!("drain\nrawerr {bytes}")));
             let pid = c.pid;
             assert_eq!(c.try_finish(DEADLINE).map(|_| ()), Err(Protocol), "{what}");
             assert!(platform::process_exited(pid), "{what}: the server reaped");
         }
         // During a call, too.
-        let mut c = bounded(&after_init(
-            r"read -r c; printf '\377' >&2; exec sleep 1000",
-        ));
+        let mut c = bounded(&after_init("read\nrawerr ff\nhang"));
         assert_eq!(
             c.try_call("rdy_overview", json!({})).map(|_| ()),
             Err(Protocol)
@@ -1923,20 +2034,16 @@ sleep 20"#;
         drop(c);
 
         // An unlimited client keeps its lossy stderr.
-        let mut cmd = peer(
-            &format!(r"read -r l; printf '\377' >&2; echo '{INIT}'; read -r n; cat > /dev/null"),
-            &[],
-        );
+        let mut cmd = peer(&format!("read\nrawerr ff\nsay {INIT}\nread\ndrain"), &[]);
         cmd.stderr(Stdio::piped());
         let t = McpClient::launch(cmd).finish(DEADLINE);
         assert_eq!(t.stderr, "\u{fffd}");
     }
 
-    /// A peer: `sh -c script`, with `args` as `$0`, `$1`, ...
+    /// A peer: the native stub child running `script`, with the first of `args` as the file its
+    /// `note`, `record` and `append` steps write to.
     fn peer(script: &str, args: &[&Path]) -> Command {
-        let mut cmd = platform::shell_script(script);
-        cmd.args(args);
-        cmd
+        platform::script_command(script, args.first().copied())
     }
 
     /// A session that was stopped: its workers joined and its server reaped.
@@ -1950,46 +2057,58 @@ sleep 20"#;
 
     #[test]
     fn pre3_bounded_mcp_is_fallible_and_reaps() {
-        use crate::platform::test_support::{eventually, fifo, fifo_line};
         use McpFailure::*;
-        let deep = format!("read -r l; echo '{}'; exec sleep 1000", "[".repeat(200));
-        let over_stdout = format!("read -r l; head -c {} /dev/zero; exec sleep 1000", CAP + 1);
-        let over_stderr = format!("head -c {} /dev/zero >&2; exec sleep 1000", CAP + 1);
+        let deep = format!("read\nsay {}\nhang", "[".repeat(200));
+        let over_stdout = format!("read\nfill out {} 00\nhang", CAP + 1);
+        let over_stderr = format!("fill err {} 00\nhang", CAP + 1);
         let at_launch: Vec<(&str, String, McpFailure)> = vec![
-            ("malformed JSON", "read -r l; echo 'not json'; exec sleep 1000".into(), Protocol),
+            (
+                "malformed JSON",
+                "read\nsay not json\nhang".into(),
+                Protocol,
+            ),
             (
                 "a line that is not JSON-RPC 2.0",
-                r#"read -r l; echo '{"id":1,"result":{}}'; exec sleep 1000"#.into(),
+                r#"read
+say {"id":1,"result":{}}
+hang"#
+                    .into(),
                 Protocol,
             ),
             (
                 "a result that is not an object",
-                r#"read -r l; echo '{"jsonrpc":"2.0","id":1,"result":5}'; exec sleep 1000"#.into(),
+                r#"read
+say {"jsonrpc":"2.0","id":1,"result":5}
+hang"#
+                    .into(),
                 Protocol,
             ),
             (
                 "an error in place of the result",
-                r#"read -r l; echo '{"jsonrpc":"2.0","id":1,"error":{"code":-1}}'; exec sleep 1000"#
+                r#"read
+say {"jsonrpc":"2.0","id":1,"error":{"code":-1}}
+hang"#
                     .into(),
                 Protocol,
             ),
             (
                 "neither a response nor a notification",
-                r#"read -r l; echo '{"jsonrpc":"2.0"}'; exec sleep 1000"#.into(),
+                r#"read
+say {"jsonrpc":"2.0"}
+hang"#
+                    .into(),
                 Protocol,
             ),
             ("nesting past the parser's limit", deep, Protocol),
-            (
-                "invalid UTF-8",
-                "read -r l; printf '\\377\\n'; exec sleep 1000".into(),
-                Protocol,
-            ),
+            ("invalid UTF-8", "read\nrawout ff0a\nhang".into(), Protocol),
             (
                 "unterminated JSON",
-                r#"read -r l; printf '{"jsonrpc":"2.0","id":1'"#.into(),
+                r#"read
+put {"jsonrpc":"2.0","id":1"#
+                    .into(),
                 Protocol,
             ),
-            ("closed output", "read -r l; exit 0".into(), Io),
+            ("closed output", "read\nexit 0".into(), Io),
             ("oversized JSON", over_stdout, OutputLimit),
             ("stderr overflow", over_stderr, OutputLimit),
         ];
@@ -2010,27 +2129,19 @@ sleep 20"#;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
-        fifo(&ready);
         // The server closes its input: the call cannot be written. A child that another test
         // forks while this session's pipe is being made holds a copy of the pipe's read end
         // until that child's exec, and the write then succeeds and the call waits. So each try
         // has a short hang guard, and a try passes only with the write's failure (Io).
         let mut waited = Vec::new();
         loop {
+            let _ = std::fs::remove_file(&ready);
             let mut c = McpClient::try_launch_bounded(
-                peer(
-                    &after_init("exec 0<&-; echo ready > \"$0\"; exec sleep 1000"),
-                    &[&ready],
-                ),
+                peer(&after_init("closein\nnote ready\nhang"), &[&ready]),
                 CAP,
             )
             .expect("launch");
-            let line = fifo_line(ready.clone());
-            assert_eq!(
-                line.recv_timeout(DEADLINE).as_deref(),
-                Ok("ready"),
-                "the peer closed its input"
-            );
+            assert_eq!(written(&ready), "ready", "the peer closed its input");
             c.budget = Duration::from_secs(5);
             let got = c.try_call("rdy_overview", json!({})).map(|_| ());
             assert_stopped(&c, "closed input");
@@ -2043,27 +2154,20 @@ sleep 20"#;
         }
 
         // An injected expiry: no reply within the budget. The peer's own child is killed with it.
+        let _ = std::fs::remove_file(&ready);
         let mut c = McpClient::try_launch_bounded(
-            peer(
-                &after_init("sleep 1000 & echo $! > \"$0\"; exec sleep 1000"),
-                &[&ready],
-            ),
+            peer(&after_init("bghang\nrecord\nhang"), &[&ready]),
             CAP,
         )
         .expect("launch");
-        let line = fifo_line(ready.clone());
-        let grandchild: u32 = line
-            .recv_timeout(DEADLINE)
-            .expect("the peer's child")
-            .parse()
-            .expect("a pid");
+        let grandchild: u32 = written(&ready).parse().expect("a pid");
         c.budget = Duration::ZERO;
         assert_eq!(
             c.try_call("rdy_overview", json!({})).map(|_| ()),
             Err(Deadline)
         );
         assert_stopped(&c, "expiry");
-        eventually("the peer's child was killed", || {
+        wait_for("the peer's child was killed", || {
             platform::process_exited(grandchild)
         });
         drop(c);
@@ -2072,7 +2176,9 @@ sleep 20"#;
         let mut c = McpClient::try_launch_bounded(
             peer(
                 &after_init(
-                    r#"read -r c; echo '{"jsonrpc":"2.0","id":2,"result":{"content":"x"}}'; exec sleep 1000"#,
+                    r#"read
+say {"jsonrpc":"2.0","id":2,"result":{"content":"x"}}
+hang"#,
                 ),
                 &[],
             ),
@@ -2091,9 +2197,7 @@ sleep 20"#;
         let note = r#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#;
         let mut c = McpClient::try_launch_bounded(
             peer(
-                &after_init(&format!(
-                    "read -r c; echo '{note}'; echo '{reply}'; cat > /dev/null"
-                )),
+                &after_init(&format!("read\nsay {note}\nsay {reply}\ndrain")),
                 &[],
             ),
             CAP,
@@ -2116,10 +2220,7 @@ sleep 20"#;
         for (extra, want) in [(0, Ok(CAP)), (1, Err(OutputLimit))] {
             let c = McpClient::try_launch_bounded(
                 peer(
-                    &after_init(&format!(
-                        "head -c {} /dev/zero >&2; cat > /dev/null",
-                        rest + extra
-                    )),
+                    &after_init(&format!("fill err {} 00\ndrain", rest + extra)),
                     &[],
                 ),
                 CAP,
@@ -2134,8 +2235,7 @@ sleep 20"#;
         }
 
         // A server that does not exit when its input closes: the finish's own expiry.
-        let c = McpClient::try_launch_bounded(peer(&after_init("exec sleep 1000"), &[]), CAP)
-            .expect("launch");
+        let c = McpClient::try_launch_bounded(peer(&after_init("hang"), &[]), CAP).expect("launch");
         let pid = c.pid;
         assert_eq!(c.try_finish(Duration::ZERO).map(|_| ()), Err(Deadline));
         assert!(

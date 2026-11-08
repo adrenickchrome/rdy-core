@@ -169,7 +169,7 @@ pub fn project_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
     if let Some(bytes) = read_bounded(&root.join(IGNORE_FILE), IGNORE_FILE)? {
         files.push((IGNORE_FILE.to_string(), bytes));
     }
-    for f in pack_files(&root.join(PACKS_DIR))? {
+    for f in pack_files(&root.join(".rdy").join("packs"))? {
         let name = f.file_name().unwrap_or_default();
         let path = format!("{PACKS_DIR}/{}", name.to_string_lossy());
         if name.to_str().is_none() || !is_project_file(&path) {

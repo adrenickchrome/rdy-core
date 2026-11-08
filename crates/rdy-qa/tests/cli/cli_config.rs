@@ -115,14 +115,16 @@ fn cfgl1_rdy_config_show_origin() {
     let row = rows.iter().find(|r| r["key"] == "views.idle_days").unwrap();
     assert_eq!(row["value"], 9);
     assert_eq!(row["level"], "local");
-    assert!(row["file"].as_str().unwrap().ends_with(".rdy/local.yaml"));
+    let local_file = s.dir.path().join(".rdy").join("local.yaml");
+    let local_text = local_file.display().to_string();
+    assert_eq!(row["file"].as_str(), Some(local_text.as_str()), "{row}");
     let actor = rows.iter().find(|r| r["key"] == "actor").unwrap();
     assert_eq!(actor["value"], "human:qa");
     assert_eq!(actor["level"], "user");
     let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
     assert!(
         text.lines()
-            .any(|l| l.starts_with("views.idle_days = 9  # ") && l.ends_with(".rdy/local.yaml")),
+            .any(|l| l == format!("views.idle_days = 9  # {local_text}")),
         "{text}"
     );
     assert!(

@@ -559,13 +559,19 @@ fn ok10_replay_rejects_extra_fields_and_limits() {
     assert!(out.contains("required"), "{out}");
     // limits: too many changes, and a token budget over the range
     let many: Vec<&str> = vec![ids.cx.as_str(); 1001];
+    // a Windows command line holds 32 KiB at most: 1001 full hashes do not fit, their 12-digit starts do
+    let short: Vec<&str> = vec![&ids.cx[..12]; 1001];
     let e = tool_error(c.call(
         "rdy_view",
         json!({"op": "replay", "view": "cli", "changes": many}),
     ));
     assert_eq!(e["code"], "E_LIMIT", "{e}");
     let mut args = vec!["--json", "view", "replay", "cli"];
-    args.extend(many.iter());
+    args.extend(if cfg!(windows) {
+        short.iter()
+    } else {
+        many.iter()
+    });
     let (ok, e) = cli(&s, &args);
     assert!(!ok, "{e}");
     assert_eq!(e["code"], "E_LIMIT", "{e}");

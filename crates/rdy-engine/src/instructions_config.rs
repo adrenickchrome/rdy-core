@@ -47,6 +47,10 @@ pub struct PathEnv {
     pub home_drive: Option<OsString>,
     pub home_path: Option<OsString>,
     pub app_data: Option<OsString>,
+    /// `USER`, the Unix account name that shapes the fallback human actor.
+    pub user: Option<OsString>,
+    /// `USERNAME`, the Windows account name that shapes the fallback human actor.
+    pub username: Option<OsString>,
 }
 
 impl PathEnv {
@@ -60,8 +64,26 @@ impl PathEnv {
             home_drive: get("HOMEDRIVE"),
             home_path: get("HOMEPATH"),
             app_data: get("APPDATA"),
+            user: get("USER"),
+            username: get("USERNAME"),
         }
     }
+}
+
+/// The account name that shapes the fallback human actor (D-Q8NFG): `USERNAME` on Windows,
+/// `USER` elsewhere. Absent or not Unicode is `None`; an empty value stays empty, and the actor
+/// shaper turns both into `human:unknown`.
+pub fn actor_user(platform: Platform, env: &PathEnv) -> Option<String> {
+    let name = match platform {
+        Platform::Unix => env.user.as_ref(),
+        Platform::Windows => env.username.as_ref(),
+    };
+    name.and_then(|n| n.to_str()).map(str::to_string)
+}
+
+/// [`actor_user`] over this process. The one place product code reads the account name.
+pub fn actor_user_from_env() -> Option<String> {
+    actor_user(Platform::HOST, &PathEnv::from_process())
 }
 
 /// Whether `p` is absolute under `platform`'s rules. The host's own rule is `Path::is_absolute`;

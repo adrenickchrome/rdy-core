@@ -5,7 +5,7 @@ use rdy_daemon::site::LanOverride;
 use rdy_daemon::{
     Attempt, Client, CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, ExitReason,
     Handler, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, SessionInfo, Spawned,
-    StartOptions, connect, spawn_serve, start,
+    StartOptions, connect, start,
 };
 use rdy_engine::Rdy;
 use serde_json::{Value, json};
@@ -13,8 +13,8 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The child's project root; unset in a normal test run.
@@ -35,6 +35,54 @@ const ENV_READY_FILE: &str = "RDY_DAEMON_READY_FILE";
 
 /// How long `client`'s `connect_or_start` waits for a daemon.
 const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Moves `store` to `aside` while a daemon serves it. Windows refuses that move with error 5
+/// (access denied) while the daemon holds the store (D-6JZ5V); then nothing moved and this is
+/// false. Any other failure is a test failure.
+pub fn move_aside_under_daemon(store: &Path, aside: &Path) -> bool {
+    match std::fs::rename(store, aside) {
+        Ok(()) => true,
+        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            assert!(
+                store.exists() && !aside.exists(),
+                "a refused move changes nothing"
+            );
+            false
+        }
+        Err(e) => panic!("move {} aside: {e}", store.display()),
+    }
+}
+
+/// A `ctl` connection to the daemon of the project at `dir`, open until this drops. A daemon runs
+/// its project check at each hello and, with no connection open, on its idle tick (every 500 ms).
+/// So a test that moves the store under a daemon holds one from before the move: else the daemon
+/// sees the move at some tick, removes its run files and stops, and the test no longer has the
+/// daemon it asks about.
+pub struct HeldConnection {
+    _client: Client,
+    _rt: tokio::runtime::Runtime,
+}
+
+impl HeldConnection {
+    /// Connects past `ready`, with a hello of `version` and this build.
+    pub fn open(dir: &Path, version: &str) -> HeldConnection {
+        let run = RunDir::of_project(dir);
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: version.into(),
+            build: rdy_daemon::BUILD.to_string(),
+            proto: Proto::Ctl,
+            cwd: dir.into(),
+            project: run.project_id().expect("the project's .rdy"),
+        };
+        let rt = Hosted::rt();
+        let client = rt.block_on(connect_ready(&run, &hello));
+        HeldConnection {
+            _client: client,
+            _rt: rt,
+        }
+    }
+}
 
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
@@ -110,6 +158,19 @@ pub fn child_daemon_entry() {
         .build()
         .expect("child runtime");
     let code = rt.block_on(async move {
+        // SIGTERM ends this process on Unix. On Windows a stop of another version sets the
+        // project's event, so the child holds it. A predecessor may hold the name for a moment,
+        // and only the stop tests need it: their child has no predecessor.
+        #[cfg(windows)]
+        match rdy_daemon::sys::StopSignals::install(&run.root()) {
+            Ok(mut signals) => {
+                tokio::spawn(async move {
+                    signals.recv().await;
+                    std::process::exit(0);
+                });
+            }
+            Err(e) => eprintln!("race1 child: no stop event: {e}"),
+        }
         let mut config = DaemonConfig::new(run, version);
         config.idle_timeout = Some(idle);
         let mut d = Daemon::new(config, Arc::new(EchoHandler::default()));
@@ -154,9 +215,35 @@ pub struct ChildSpawner {
     version: String,
     extra_env: Vec<(String, String)>,
     count: Arc<AtomicUsize>,
+    /// Owns every child this spawner starts and the processes they start. On Windows that is one
+    /// Job Object, which ends them when the last spawner clone drops; on Unix each child leads a
+    /// process group.
+    group: Arc<platform::ProcessGroup>,
 }
 
 impl ChildSpawner {
+    /// The command that starts a child daemon for `project`, before its streams and group: the
+    /// test binary on `test_fn`, with the person in the empty home ([`isolate_person`]), only
+    /// the `RDY_DAEMON_*` variables this spawner sets, and `extra_env` last.
+    pub(crate) fn child_command(&self, project: &Path) -> io::Result<Command> {
+        let mut cmd = Command::new(std::env::current_exe()?);
+        cmd.args([self.test_fn.as_str(), "--exact", "--nocapture"])
+            .current_dir(project);
+        let home = crate::fixtures::empty_home();
+        crate::fixtures::isolate_person(&mut cmd, home, &home.join(".config"));
+        // nothing from the parent's environment steers the child; only what we set here
+        for (k, _) in std::env::vars_os() {
+            if k.as_encoded_bytes().starts_with(b"RDY_DAEMON_") {
+                cmd.env_remove(k);
+            }
+        }
+        cmd.env(ENV_CHILD, project).env(ENV_VERSION, &self.version);
+        for (k, v) in &self.extra_env {
+            cmd.env(k, v);
+        }
+        Ok(cmd)
+    }
+
     /// Runs `<current_exe> <test_fn> --exact --nocapture` with `RDY_DAEMON_CHILD` set to the
     /// project root, stdin null, stdout and stderr appended to the run dir's log, in a process
     /// group of its own. Does not wait for it (the `Spawned` watches it), and counts the spawn.
@@ -174,24 +261,25 @@ impl ChildSpawner {
         let project = project_of(run)?;
         run.ensure()?;
         let log = platform::open_private_log(&run.log_file())?;
-        let mut cmd = Command::new(std::env::current_exe()?);
-        cmd.args([self.test_fn.as_str(), "--exact", "--nocapture"])
-            .current_dir(&project)
-            .stdin(Stdio::null())
+        let mut cmd = self.child_command(&project)?;
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
-        platform::own_process_group(&mut cmd);
-        // nothing from the parent's environment steers the child; only what we set here
-        for (k, _) in std::env::vars_os() {
-            if k.as_encoded_bytes().starts_with(b"RDY_DAEMON_") {
-                cmd.env_remove(k);
-            }
-        }
-        cmd.env(ENV_CHILD, &project).env(ENV_VERSION, &self.version);
-        for (k, v) in &self.extra_env {
-            cmd.env(k, v);
-        }
-        let spawned = spawn_serve(&mut cmd)?;
+        let mut child = self.group.spawn(&mut cmd)?;
+        let code = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&code);
+        // the reaper of `rdy_daemon::spawn_serve`: an exited child is reaped, never a zombie
+        std::thread::Builder::new()
+            .name("rdy-qa-daemon-reaper".into())
+            .spawn(move || {
+                if let Ok(status) = child.wait() {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(rdy_daemon::sys::exit_code(status));
+                }
+            })?;
+        let spawned = Spawned {
+            exited: Box::new(move || *code.lock().unwrap_or_else(|e| e.into_inner())),
+        };
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(spawned)
     }
@@ -224,6 +312,7 @@ pub fn spawn_child_daemon(
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         count: count.clone(),
+        group: Arc::new(platform::ProcessGroup::new().expect("the spawner's process group")),
     };
     (spawner, count)
 }
@@ -459,6 +548,109 @@ pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Com
     cmd
 }
 
+/// What `f` gives from a runtime of its own on a thread of its own, so a test may ask from inside
+/// a runtime or outside one.
+fn on_own_runtime<T: Send>(f: impl std::future::Future<Output = T> + Send) -> T {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime")
+                    .block_on(f)
+            })
+            .join()
+            .expect("the endpoint probe")
+    })
+}
+
+/// Whether the project's endpoint stands: its socket file on Unix, an instance of its pipe on
+/// Windows. A pipe is no file, so on Windows this asks by connecting (`sys::endpoint_liveness`).
+pub fn endpoint_live(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        on_own_runtime(rdy_daemon::sys::endpoint_liveness(&run.socket()))
+            == rdy_daemon::sys::Liveness::Live
+    }
+}
+
+/// Whether the project's endpoint is proved gone: no socket file on Unix, no pipe of that name on
+/// Windows. A pipe's name lasts until its last instance closes, so an open connection keeps it.
+pub fn endpoint_gone(run: &RunDir) -> bool {
+    #[cfg(unix)]
+    {
+        !run.socket().exists()
+    }
+    #[cfg(windows)]
+    {
+        on_own_runtime(rdy_daemon::sys::endpoint_liveness(&run.socket()))
+            == rdy_daemon::sys::Liveness::Gone
+    }
+}
+
+/// How long a test waits for a daemon's endpoint or process to end: a hang guard, never a measure.
+const STOP_WAIT: Duration = Duration::from_secs(30);
+
+/// Waits until the project's endpoint is proved gone ([`endpoint_gone`]), or panics past
+/// [`STOP_WAIT`]. A missing run file proves nothing here: only the endpoint answers.
+pub fn wait_endpoint_gone(run: &RunDir) {
+    let t0 = std::time::Instant::now();
+    while !endpoint_gone(run) {
+        assert!(
+            t0.elapsed() < STOP_WAIT,
+            "the daemon's endpoint {} still stands",
+            run.socket().display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Waits until the project's endpoint stands ([`endpoint_live`]), or panics past [`STOP_WAIT`].
+pub fn wait_endpoint_live(run: &RunDir) {
+    let t0 = std::time::Instant::now();
+    while !endpoint_live(run) {
+        assert!(
+            t0.elapsed() < STOP_WAIT,
+            "the daemon never bound {}",
+            run.socket().display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// An endpoint nothing answers on: a socket file nothing listens on (Unix), the name of a pipe
+/// nothing ever served (Windows).
+pub fn dead_endpoint(dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let dead = dir.join("dead.sock");
+        on_own_runtime(async { drop(rdy_daemon::sys::bind(&dead).expect("bind the dead socket")) });
+        dead
+    }
+    #[cfg(windows)]
+    {
+        rdy_daemon::sys::project_endpoint(&dir.join("never-served")).0
+    }
+}
+
+/// Replaces the `.rdy` of the project at `dir` with a fresh directory, as a restore from a copy
+/// does. While a daemon has the store open the system refuses to move the directory on Windows, so
+/// there the old one is deleted.
+pub fn replace_rdy_dir(dir: &Path) {
+    let rdy = dir.join(".rdy");
+    if cfg!(windows) {
+        std::fs::remove_dir_all(&rdy).expect("delete the old .rdy");
+    } else {
+        std::fs::rename(&rdy, dir.join(".rdy-old")).expect("move the old .rdy");
+    }
+    std::fs::create_dir(&rdy).expect("a fresh .rdy");
+}
+
 /// How long `Served::kill9` waits for the killed daemon to exit.
 const KILL_WAIT: Duration = Duration::from_secs(30);
 
@@ -495,9 +687,17 @@ impl Served {
         Served { dir, cfg, env }
     }
 
+    /// Every later command and chat session of the human has `socket` as its SSH agent.
+    pub fn set_caller_agent(&mut self, socket: &Path) {
+        self.env.push((
+            "SSH_AUTH_SOCK".to_string(),
+            socket.to_str().expect("an agent socket's path").to_string(),
+        ));
+    }
+
     /// The user config the served commands read (`$XDG_CONFIG_HOME/rdy/config.yaml`).
     pub fn user_config(&self) -> PathBuf {
-        self.cfg.path().join("rdy/config.yaml")
+        self.cfg.path().join("rdy").join("config.yaml")
     }
 
     /// The command `rdy --project <dir> <args>` in the project, as the human (`human_command`).
@@ -604,11 +804,8 @@ impl Served {
     }
 
     fn pid_file(&self) -> Option<u32> {
-        std::fs::read_to_string(self.run_dir().pid_file())
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        let bytes = std::fs::read(self.run_dir().pid_file()).ok()?;
+        rdy_daemon::sys::parse_pid_record(&bytes).map(|record| record.pid())
     }
 
     /// SIGKILLs the daemon named by the pid file, then waits until that process is gone
@@ -735,7 +932,8 @@ pub fn sorted_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::binary_carries_build;
+    use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn a_binary_of_another_build_is_named_with_the_rebuild_fix() {
@@ -749,5 +947,126 @@ mod tests {
         assert!(e.contains("cargo build --release -p rdy-cli"), "{e}");
         let gone = dir.path().join("missing");
         assert!(binary_carries_build(&gone, "a2d03e9895a586e4").is_err());
+    }
+
+    /// The environment a command sets over what it inherits: a name with `None` is removed.
+    fn set_env(cmd: &Command) -> BTreeMap<String, Option<String>> {
+        cmd.get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// The person of `cmd` is isolated: every home and config variable is set below one of
+    /// `roots` or removed (the drive form exists only where a path has a drive), the account name
+    /// is the fixture's, and the agent socket is removed.
+    fn assert_isolated(what: &str, cmd: &Command, roots: &[&Path]) {
+        let env = set_env(cmd);
+        for name in ["HOME", "USERPROFILE", "APPDATA", "XDG_CONFIG_HOME"] {
+            let value = env
+                .get(name)
+                .unwrap_or_else(|| panic!("{what}: {name} is inherited"))
+                .as_deref()
+                .unwrap_or_else(|| panic!("{what}: {name} is removed"));
+            assert!(
+                roots.iter().any(|r| Path::new(value).starts_with(r)),
+                "{what}: {name}={value} is outside {roots:?}"
+            );
+        }
+        for name in ["HOMEDRIVE", "HOMEPATH"] {
+            let value = env
+                .get(name)
+                .unwrap_or_else(|| panic!("{what}: {name} is inherited"));
+            assert_eq!(value.is_some(), cfg!(windows), "{what}: {name}={value:?}");
+        }
+        assert_eq!(
+            env.get("USERNAME"),
+            Some(&Some(crate::fixtures::FIXTURE_USERNAME.to_string())),
+            "{what}"
+        );
+        assert_eq!(
+            env.get("SSH_AUTH_SOCK"),
+            Some(&None),
+            "{what}: agent socket"
+        );
+    }
+
+    /// Every way the harness starts a child gives it an empty home of its own: no variable that
+    /// places a home, a config or an account is inherited from the machine running the tests.
+    #[test]
+    fn wx25a_every_child_gets_an_empty_windows_home() {
+        let empty = crate::fixtures::empty_home();
+        assert_isolated("rdy_command", &crate::fixtures::rdy_command(), &[empty]);
+
+        let (cfg, env) = crate::fixtures::human_env("human:qa");
+        let dir = short_tempdir();
+        assert_isolated(
+            "human_command",
+            &human_command(dir.path(), &env, &["status"]),
+            &[cfg.path()],
+        );
+        assert_isolated(
+            "an unset-home human_command",
+            &human_command(dir.path(), &[], &["status"]),
+            &[empty],
+        );
+
+        let world = crate::instructions::World::new();
+        let wdir = world.project();
+        let cmd = world.command(wdir.path(), &["status"]);
+        assert_isolated("World", &cmd, &[world.home.path(), &world.config_dir()]);
+        // a command a test builds itself is isolated by the world too
+        let mut own = Command::new("x");
+        own.env("USERNAME", "someone")
+            .env("SSH_AUTH_SOCK", "/agent");
+        world.isolate(&mut own);
+        assert_isolated(
+            "World::isolate",
+            &own,
+            &[world.home.path(), &world.config_dir()],
+        );
+        let bare = crate::instructions::World::without_home();
+        let mut own = Command::new("x");
+        bare.isolate(&mut own);
+        let env = set_env(&own);
+        for name in ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA"] {
+            assert_eq!(env.get(name), Some(&None), "no-home world: {name}");
+        }
+        assert_eq!(env.get("SSH_AUTH_SOCK"), Some(&None));
+
+        let mcp_home = short_tempdir();
+        let proxy = crate::mcp::McpClient::proxy_command(dir.path(), &env_pairs_of(&mcp_home));
+        assert_isolated("proxy", &proxy, &[mcp_home.path()]);
+        let isolated = crate::mcp::McpClient::isolated_command(dir.path(), mcp_home.path());
+        assert_isolated("start_isolated", &isolated, &[mcp_home.path()]);
+
+        let run = RunDir::of_project(dir.path());
+        let (spawner, _) = spawn_child_daemon("child", &run, "1", &[("RDY_DAEMON_X", "1")]);
+        let child = spawner.child_command(dir.path()).expect("child command");
+        assert_isolated("child daemon", &child, &[empty]);
+        assert_eq!(
+            set_env(&child).get("RDY_DAEMON_X"),
+            Some(&Some("1".to_string())),
+            "an explicit variable of the spawner stays"
+        );
+    }
+
+    fn env_pairs_of(home: &tempfile::TempDir) -> Vec<(String, String)> {
+        crate::fixtures::person_env_pairs(home.path(), &home.path().join(".config"))
+    }
+
+    /// A caller that sets an agent socket after the isolation keeps it: a signing fixture.
+    #[test]
+    fn wx25a_a_signing_fixture_sets_its_own_agent_socket() {
+        let mut cmd = crate::fixtures::rdy_command();
+        cmd.env("SSH_AUTH_SOCK", "/fixture/agent");
+        assert_eq!(
+            set_env(&cmd).get("SSH_AUTH_SOCK"),
+            Some(&Some("/fixture/agent".to_string()))
+        );
     }
 }

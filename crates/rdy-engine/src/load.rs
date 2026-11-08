@@ -24,9 +24,11 @@
 //!    holder dump that carries one is refused here, after the ingest has validated the mode and
 //!    before any file is written, and step 8 takes the store back.
 //! 5. Write each project file the target does not have.
-//! 6. Take the new store's lock, then rename `.rdy/store.loading` to `.rdy/store`. The load
-//!    holds the lock until it ends, so no other rdy process opens the project before step 7
-//!    ends (D-R7N9J, D-A6ZZA).
+//! 6. Close every handle below `.rdy/store.loading`, its lock too, then rename it to `.rdy/store`
+//!    (`rdy_store::layout::install_loading_store`): Windows renames no directory with an open file
+//!    below it. The start lock keeps the store from every other rdy process across the close and
+//!    the rename. Then take the new store's lock, and hold it until the load ends, so no other rdy
+//!    process opens the project before step 7 ends (D-R7N9J, D-A6ZZA).
 //! 7. Open the project under that lock (the index build), run the caller's step if any (a
 //!    clone's origin batch, `crate::clone`) once the store's meta refs pass their check (a
 //!    failure is the load's fsck failure, ruling task-5), run `fsck`, and count landings, tags
@@ -44,11 +46,17 @@
 //! then steps 5 to 7 here (`place`). Every summary lists the inputs (`chain`), the stop
 //! (`stopped_at`) and one warning per carried record (`warnings`).
 //!
+//! The project's start lock (`.rdy/run/start.lock`) is the load's from step 3, right after `.rdy`
+//! stands, until the load ends. Another holder refuses the load with `E_LOCKED` before it writes
+//! a store. Every load takes this one path: a single file, a chain, a holder, a clone, a seed.
+//!
 //! A failure in steps 3 to 7 removes the store, every file step 5 wrote and every directory
 //! step 3 or 5 created, so the target is as it was. The removal runs while the load holds the
-//! store's lock; a load that finds it does not hold the lock removes nothing. The load never
+//! start lock; a load that finds it does not hold the store's lock removes nothing. The load never
 //! deletes a file it did not write: a pack file at the target that the dump does not hold stays
-//! where it is.
+//! where it is, and so does the run state of a target that had it. A load that succeeds removes
+//! the run directory and start lock it made too, under that lock, as its last step: a target holds
+//! what the dump holds, and a daemon makes its own run directory.
 use crate::Rdy;
 use crate::carried_warning::CarriedWarning;
 use crate::config_levels::{LOCAL_FILE, PROJECT_FILE};
@@ -66,8 +74,9 @@ use rdy_store::format::FORMAT_FILE;
 use rdy_store::fsutil::{create_dir_durable, sync_dir};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds;
-use rdy_store::layout::STORE_DIR;
+use rdy_store::layout::{LOADING_DIR, RUN_DIR, START_LOCK_FILE, STORE_DIR, install_loading_store};
 use rdy_store::segment::Location;
+use rdy_store::start_lock::StartGuard;
 use rdy_store::{StoreError, StoreLock};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -75,8 +84,6 @@ use std::io::{BufReader, ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The store directory a load writes before it renames it to `.rdy/store`.
-const LOADING_DIR: &str = "store.loading";
 /// The directory of the pack files, relative to the project root.
 const PACKS_DIR: &str = ".rdy/packs";
 /// What the person does after a load: a dump carries no working copy (O9).
@@ -129,6 +136,59 @@ fn place_fault(step: PlaceFault) -> std::io::Result<()> {
         }
         _ => Ok(()),
     })
+}
+
+/// A point of a load's installation where a test hook runs ([`with_placement_hook_for_tests`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceStep {
+    /// Every handle under `.rdy/store.loading` is closed; the rename has not run.
+    Closed,
+    /// `.rdy/store` stands and `.rdy` is synced; the store lock is not taken again yet.
+    Renamed,
+    /// The installed store is open under its lock; `fsck` has not run.
+    Reopened,
+    /// The installed store passed its check and is closed; its lock is still held.
+    Checked,
+    /// A failed load starts to take back what it made.
+    Undoing,
+    /// A failed load has taken back everything; it has not let its locks go.
+    Undone,
+}
+
+type PlaceHook = Box<dyn FnMut(PlaceStep) -> std::io::Result<()>>;
+
+thread_local! {
+    static PLACE_HOOK: std::cell::RefCell<Option<PlaceHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tests only: runs `f` with `hook` called at each [`PlaceStep`] of a load on this thread. An error
+/// the hook gives fails the load there, as an i/o error at that point would; an undo has nothing
+/// to fail. No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn with_placement_hook_for_tests<T>(
+    hook: impl FnMut(PlaceStep) -> std::io::Result<()> + 'static,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            PLACE_HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    PLACE_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    let _off = Off;
+    f()
+}
+
+/// Calls this thread's placement hook, if any, at `step`.
+fn place_point(step: PlaceStep) -> std::io::Result<()> {
+    let Some(mut hook) = PLACE_HOOK.with(|h| h.borrow_mut().take()) else {
+        return Ok(());
+    };
+    let out = hook(step);
+    PLACE_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    out
 }
 
 /// What `rdy load` did: the project, the dump's formats, what it held, the project files it
@@ -333,9 +393,7 @@ pub(crate) fn load_opened<R: Read>(
         })
     })();
     // step 8: a failure takes back everything this load wrote
-    if out.is_err() {
-        made.undo();
-    }
+    made.end(out.is_ok());
     out
 }
 
@@ -355,9 +413,9 @@ pub(crate) struct Placed {
 }
 
 /// Steps 5 to 7 of a load whose ingest has finished `.rdy/store.loading`: writes each of the
-/// dump's project files `files` that step 2 found `absent`, takes the store's lock, renames the
-/// store into place, then opens it, runs `after_open`, `fsck` and the counts (`check`). The
-/// caller undoes `made` on a failure. A follower's seed gives its `mark`: it is durable under that
+/// dump's project files `files` that step 2 found `absent`, closes the store and renames the
+/// store into place under the start lock `create_store` took, then opens it, runs `after_open`,
+/// `fsck` and the counts (`check`). The caller undoes `made` on a failure. A follower's seed gives its `mark`: it is durable under that
 /// lock before the rename, so no placed store lacks it, and the open is the follower's.
 pub(crate) fn place(
     project: &Path,
@@ -378,7 +436,7 @@ pub(crate) fn place(
             kept.push(path.clone());
         }
     }
-    // step 6: the store takes its place, locked by this load until the load ends
+    // step 6: the store takes its place, closed, under the start lock
     let dot = project.join(".rdy");
     let loading = dot.join(LOADING_DIR);
     let store = dot.join(STORE_DIR);
@@ -386,18 +444,31 @@ pub(crate) fn place(
         return Err(has_store(project));
     }
     let lock = StoreLock::take(&loading).map_err(|e| target_error(&loading, e))?;
-    made.lock = Some(lock.clone());
     if let Some(mark) = mark {
         rdy_store::follower::write_seed_mark(&loading, &lock, mark)
             .map_err(|e| target_error(&loading, e))?;
     }
-    place_fault(PlaceFault::Rename)
-        .and_then(|()| std::fs::rename(&loading, &store))
-        .map_err(|e| io_at(&loading, e))?;
-    made.store = Some(store);
+    let start = made.start.as_ref().ok_or_else(no_start)?;
+    install_loading_store(&dot, start, lock, || {
+        place_point(PlaceStep::Closed).and_then(|()| place_fault(PlaceFault::Rename))
+    })
+    .map_err(|e| target_error(&loading, e))?;
+    made.store = Some(store.clone());
     place_fault(PlaceFault::SyncAfterRename)
         .and_then(|()| sync_dir(&dot))
         .map_err(|e| io_at(&dot, e))?;
+    place_point(PlaceStep::Renamed).map_err(|e| io_at(&dot, e))?;
+    // the store's lock, until the load ends. A holder here came past the start lock: not the
+    // load's to remove
+    let lock = match StoreLock::take(&store) {
+        Ok(lock) => lock,
+        Err(StoreError::Locked(_)) => {
+            made.keep = true;
+            return Err(raced(project));
+        }
+        Err(e) => return Err(target_error(&store, e)),
+    };
+    made.lock = Some(lock.clone());
     // step 7: the index build, fsck and the counts
     let (fsck, tags, views) = check(project, &carried, &lock, made, after_open, mark.is_some())?;
     Ok(Placed {
@@ -626,11 +697,13 @@ fn ingest<R: Read>(
     Ok((report.batches, report.frames, holder))
 }
 
-/// Step 3: creates the project and its `.rdy` if missing, then `.rdy/store.loading` with an
-/// empty log. Returns the ingest and the loading directory, which `made` owns from here on.
+/// Step 3: creates the project and its `.rdy` if missing, takes the project's start lock for the
+/// rest of the load (`made` keeps it), then creates `.rdy/store.loading` with an empty log. Returns
+/// the ingest and the loading directory, which `made` owns from here on.
 pub(crate) fn create_store(project: &Path, made: &mut Made) -> Result<(Ingest, PathBuf), RdyError> {
     let dot = project.join(".rdy");
     made.create_dirs(&dot)?;
+    made.take_start(&dot)?;
     let loading = dot.join(LOADING_DIR);
     let ingest = match Ingest::create(&loading) {
         Ok(i) => i,
@@ -675,7 +748,7 @@ pub(crate) fn holder_files() -> RdyError {
 /// Step 5: writes one project file the target does not have, durably, never over a file.
 fn write_new(project: &Path, path: &str, bytes: &[u8], made: &mut Made) -> Result<(), RdyError> {
     if path.starts_with(&format!("{PACKS_DIR}/")) {
-        made.create_dirs(&project.join(PACKS_DIR))?;
+        made.create_dirs(&project.join(".rdy").join("packs"))?;
     }
     let at = project.join(path);
     let mut f = OpenOptions::new()
@@ -706,28 +779,27 @@ fn check(
     follower: bool,
 ) -> Result<(FsckReport, usize, usize), RdyError> {
     let fails = |e: RdyError| fails_fsck(project, carried, e);
-    let opened = if follower {
-        crate::follower::open_locked(project, lock)
-    } else {
-        Rdy::open_locked(project, lock)
+    let opened = {
+        // the load's start lock, borrowed
+        let start = made.start.as_ref().ok_or_else(no_start)?;
+        if follower {
+            crate::follower::open_locked(project, lock, start)
+        } else {
+            Rdy::open_locked(project, lock, start)
+        }
     };
     let mut r = match opened {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED || e.code == E_HELD_BY_READER => {
             made.keep = true;
-            let dir = project.display();
-            return Err(RdyError::new(
-                E_DUMP,
-                format!(
-                    "the dump loaded into {dir}, but another rdy process opened the project before the check finished"
-                ),
-                format!(
-                    "close the other sessions on {dir}, then run rdy fsck there; if it fails, delete {dir} and load again"
-                ),
-            ));
+            return Err(raced(project));
         }
         Err(e) => return Err(fails(e)),
     };
+    if let Err(e) = place_point(PlaceStep::Reopened) {
+        let _ = r.close();
+        return Err(io_at(&project.join(".rdy"), e));
+    }
     if let Some(step) = after_open {
         // a step writes meta refs, never over bad ones (ruling task-5): first the loaded store's
         // meta refs pass the store's own check, with the source's repo id, and a failure is the
@@ -751,7 +823,32 @@ fn check(
         Ok((fsck, tags, views))
     })();
     r.close().map_err(fails)?;
-    counted.map_err(fails)
+    let counted = counted.map_err(fails)?;
+    place_point(PlaceStep::Checked).map_err(|e| io_at(&project.join(".rdy"), e))?;
+    Ok(counted)
+}
+
+/// The load of a store that another rdy process opened before the check finished.
+fn raced(project: &Path) -> RdyError {
+    let dir = project.display();
+    RdyError::new(
+        E_DUMP,
+        format!(
+            "the dump loaded into {dir}, but another rdy process opened the project before the check finished"
+        ),
+        format!(
+            "close the other sessions on {dir}, then run rdy fsck there; if it fails, delete {dir} and load again"
+        ),
+    )
+}
+
+/// A load that reached its placement with no start lock: `create_store` takes it first.
+fn no_start() -> RdyError {
+    RdyError::new(
+        crate::error::E_INTERNAL,
+        "a load reached its placement without the start lock",
+        "report this as a bug",
+    )
 }
 
 /// A failure of step 7 other than the lock. When it names a target file that the dump does not
@@ -759,11 +856,20 @@ fn check(
 /// (a config file's parse error names it only in its fix), that file stops the project from
 /// opening; otherwise the loaded project does not pass, and the source needs the repair.
 fn fails_fsck(project: &Path, carried: &[String], e: RdyError) -> RdyError {
+    // a path is named with `/` or `\\` between its parts on Windows, by whichever call joined it
+    let slashed = |t: &str| -> String {
+        if cfg!(windows) {
+            t.replace('\\', "/")
+        } else {
+            t.to_string()
+        }
+    };
+    let (message, fix) = (slashed(&e.message), slashed(&e.fix));
     if let Some(at) = target_only(project, carried)
         .into_iter()
         .find(|(rel, at)| {
-            let full = at.display().to_string();
-            [&e.message, &e.fix]
+            let full = slashed(&at.display().to_string());
+            [&message, &fix]
                 .iter()
                 .any(|t| t.contains(&full) || t.contains(rel.as_str()))
         })
@@ -791,7 +897,7 @@ fn fails_fsck(project: &Path, carried: &[String], e: RdyError) -> RdyError {
 /// relative to the project and in full.
 fn target_only(project: &Path, carried: &[String]) -> Vec<(String, PathBuf)> {
     let mut rel = vec![LOCAL_FILE.to_string(), IGNORE_FILE.to_string()];
-    if let Ok(entries) = std::fs::read_dir(project.join(PACKS_DIR)) {
+    if let Ok(entries) = std::fs::read_dir(project.join(".rdy").join("packs")) {
         let mut packs: Vec<String> = entries
             .filter_map(Result::ok)
             .filter_map(|e| e.file_name().to_str().map(|n| format!("{PACKS_DIR}/{n}")))
@@ -809,7 +915,8 @@ fn target_only(project: &Path, carried: &[String]) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// What a load wrote at the target, to take it back on a failure (step 8).
+/// What a load wrote at the target, to take it back on a failure (step 8). The fields drop in this
+/// order when a load succeeds: the store's lock, then the start lock.
 #[derive(Default)]
 pub(crate) struct Made {
     /// The directories this load created, outermost first.
@@ -818,9 +925,15 @@ pub(crate) struct Made {
     files: Vec<PathBuf>,
     /// The store directory this load created, under its current name.
     store: Option<PathBuf>,
-    /// The new store's lock, held from before the rename until the load ends: the undo runs
-    /// under it.
+    /// The new store's lock, held from after the rename until the load ends.
     lock: Option<StoreLock>,
+    /// The project's start lock, held from before `.rdy/store.loading` exists until the load ends:
+    /// the undo runs under it.
+    start: Option<StartGuard>,
+    /// The run directory this load created. Run state that stood before stays.
+    new_run: Option<PathBuf>,
+    /// The start lock file this load created.
+    new_start_file: Option<PathBuf>,
     /// Set when the load finds it does not hold the store: the undo then removes nothing.
     keep: bool,
 }
@@ -844,20 +957,69 @@ impl Made {
         Ok(())
     }
 
-    /// Removes the store, every file and every directory this load created, while the load
-    /// still holds the store's lock; then releases the lock. A directory that holds anything
-    /// else stays. A load that does not hold the store (`keep`) removes nothing.
-    pub(crate) fn undo(self) {
+    /// Takes the start lock of the project whose `.rdy` is `dot`, and remembers the run objects
+    /// that did not stand before. Another holder is `E_LOCKED`, in the store's words.
+    fn take_start(&mut self, dot: &Path) -> Result<(), RdyError> {
+        let run = dot.join(RUN_DIR);
+        let file = run.join(START_LOCK_FILE);
+        // remembered first: a take that fails half way is taken back too
+        if std::fs::symlink_metadata(&run).is_err() {
+            self.new_run = Some(run.clone());
+        }
+        let had_file = std::fs::symlink_metadata(&file).is_ok();
+        match StartGuard::try_take(dot) {
+            Ok(Some(start)) => {
+                self.start = Some(start);
+                if !had_file {
+                    self.new_start_file = Some(file);
+                }
+                Ok(())
+            }
+            Ok(None) => Err(StoreError::Locked(dot.join(STORE_DIR)).into()),
+            Err(e) => Err(io_at(&run, e)),
+        }
+    }
+
+    /// Ends the load: what it made stays when it `passed`, but for its run objects.
+    pub(crate) fn end(mut self, passed: bool) {
+        if passed {
+            drop(self.lock.take());
+            self.remove_run_objects();
+            drop(self.start.take());
+        } else {
+            self.undo();
+        }
+    }
+
+    /// Removes the run objects this load created. Its lock stays held by the open handle, and a
+    /// rival that opened this file finds that it left its name.
+    fn remove_run_objects(&self) {
+        if let Some(file) = &self.new_start_file {
+            let _ = std::fs::remove_file(file);
+        }
+        if let Some(run) = &self.new_run {
+            let _ = std::fs::remove_dir(run);
+        }
+    }
+
+    /// Removes the store, every file and every directory this load created, the run objects
+    /// included, while the load still holds the start lock; then releases it. The store's lock
+    /// closes first: Windows neither renames nor removes a directory with an open file below it,
+    /// and the start lock keeps the store from here. A directory that holds anything else stays.
+    /// A load that does not hold the store (`keep`) removes nothing.
+    fn undo(mut self) {
         if self.keep {
             return;
         }
+        let _ = place_point(PlaceStep::Undoing);
+        drop(self.lock.take());
         if let Some(store) = &self.store {
             // `.rdy/store` goes back to its loading name first, in one step: an open that races
             // the removal then finds no store, and never adds a file to the one being removed
             let gone = match store.parent() {
                 Some(dot) if store.file_name() == Some(STORE_DIR.as_ref()) => {
                     let back = dot.join(LOADING_DIR);
-                    match std::fs::rename(store, &back) {
+                    match rdy_store::pio::rename_durable(store, &back) {
                         Ok(()) => back,
                         Err(_) => store.clone(),
                     }
@@ -869,11 +1031,13 @@ impl Made {
         for f in self.files.iter().rev() {
             let _ = std::fs::remove_file(f);
         }
+        self.remove_run_objects();
         for d in self.dirs.iter().rev() {
             let _ = std::fs::remove_dir(d);
         }
-        // only now may another process take the store, which no longer exists
-        drop(self.lock);
+        let _ = place_point(PlaceStep::Undone);
+        // only now may another process start here
+        drop(self.start.take());
     }
 }
 

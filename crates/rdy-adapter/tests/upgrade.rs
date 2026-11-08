@@ -187,7 +187,13 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<(u64, Vec<u8>)>> {
             out.insert(p.clone(), None);
             out.extend(tree(&p));
         } else {
-            out.insert(p.clone(), Some((m.len(), std::fs::read(&p).unwrap())));
+            // On Windows a file another handle holds locked cannot be read (byte-range locks are
+            // mandatory): its length stands in for its bytes.
+            let bytes = match std::fs::read(&p) {
+                Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => vec![],
+                other => other.unwrap(),
+            };
+            out.insert(p.clone(), Some((m.len(), bytes)));
         }
     }
     out

@@ -1,24 +1,22 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks and uses path bytes. FW-XP1 Phase 4 ports it.
 //! wcly1: which files belong to the working tree (spec §12.1, D-7BKK5), what is untracked, and the
 //! working-copy reader, where new entries need no id, order or parent.
 use rdy_engine::wc::ignore::Ignore;
 use rdy_engine::wc::layout::*;
 use std::path::Path;
 
-fn pack() -> rdy_schema::Pack {
+pub(crate) fn pack() -> rdy_schema::Pack {
     rdy_schema::PackSet::with_builtin()
         .resolve("rdy-standard")
         .unwrap()
 }
 
-fn put(root: &Path, rel: &str, text: &str) {
+pub(crate) fn put(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, text).unwrap();
 }
 
-const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: Intro\n    doc_type: page\n- id: p-AAAAA\n  type: prose\n  parent: d-AAAAA\n  order: a1\n  body: Hi.\n";
+pub(crate) const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: Intro\n    doc_type: page\n- id: p-AAAAA\n  type: prose\n  parent: d-AAAAA\n  order: a1\n  body: Hi.\n";
 const FOLDER: &str = "id: fd-AAAAA\ntype: folder\norder: a1\nfields:\n  title: Guides\n";
 
 #[test]
@@ -124,15 +122,9 @@ fn wcly1_hostile_entries_are_untracked_never_followed() {
     let t = tempfile::tempdir().unwrap();
     let r = t.path();
     put(r, "ok.yaml", DOC);
-    std::os::unix::fs::symlink("/", r.join("root.yaml")).unwrap();
-    std::os::unix::fs::symlink("/", r.join("rootdir")).unwrap();
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(r.join("pipe.yaml"))
-            .status()
-            .unwrap()
-            .success()
-    );
+    let top = Path::new("/");
+    rdy_qa::platform::symlink(top, &r.join("root.yaml")).unwrap();
+    rdy_qa::platform::symlink(top, &r.join("rootdir")).unwrap();
     std::fs::write(r.join("huge.yaml"), vec![b'#'; MAX_MEMBER_BYTES + 1]).unwrap();
     let mut deep = r.to_path_buf();
     for i in 0..(rdy_model::tree::MAX_FOLDER_DEPTH + 2) {
@@ -144,10 +136,14 @@ fn wcly1_hostile_entries_are_untracked_never_followed() {
         )
         .unwrap();
     }
-    #[cfg(target_os = "linux")]
+    // a name that is not Unicode, and an entry that holds no data: a lone surrogate and a socket
+    // on Windows. On Unix they are raw bytes and a FIFO (`wc_unix.rs`).
+    #[cfg(windows)]
     {
-        use std::os::unix::ffi::OsStrExt;
-        std::fs::write(r.join(std::ffi::OsStr::from_bytes(b"bad\xff.yaml")), DOC).unwrap();
+        let mut name = rdy_qa::platform::not_unicode("bad");
+        name.push(".yaml");
+        std::fs::write(r.join(name), DOC).unwrap();
+        rdy_qa::platform::socket_entry(&r.join("pipe.yaml")).unwrap();
     }
     let w = read_tree(r, &Ignore::empty(), &pack());
     assert!(w.files.contains_key("ok.yaml"));
@@ -161,16 +157,17 @@ fn wcly1_hostile_entries_are_untracked_never_followed() {
         "{reasons:?}"
     );
     assert!(reasons["rootdir"].contains("symbolic link"), "{reasons:?}");
-    assert!(
-        reasons["pipe.yaml"].contains("not a regular file"),
-        "{reasons:?}"
-    );
     assert!(reasons["huge.yaml"].contains("over 16 MiB"), "{reasons:?}");
     assert!(
         reasons.values().any(|v| v.contains("too deep")),
         "{reasons:?}"
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(windows)]
+    assert!(
+        reasons["pipe.yaml"].contains("cannot read the file"),
+        "{reasons:?}"
+    );
+    #[cfg(windows)]
     assert!(
         reasons
             .iter()

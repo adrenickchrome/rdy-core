@@ -469,7 +469,7 @@ fn ain5_explicit_projects_and_broken_pointers_never_fall_back() {
         v["message"].as_str().unwrap(),
         format!(
             "{} has .rdy.yaml but no store",
-            partial.path().canonicalize().unwrap().display()
+            rdy_store::pio::display_path(&partial.path().canonicalize().unwrap())
         )
     );
     let out = rdy_at(&w, &deep, &["mcp"]);
@@ -697,9 +697,15 @@ fn ain5_full_chat_authoring_and_loading_survive_restart() {
         ["person", "person"]
     );
     drop(c);
-    // meta under another spelling of the same directory is read once
+    // meta under another spelling of the same directory (a native alias: a symbolic link, or a
+    // junction where a link needs a privilege) is read once
     let alias: PathBuf = w.home.path().join("meta-link");
-    rdy_qa::platform::symlink(&meta, &alias).unwrap();
+    rdy_qa::platform::dir_alias(&meta, &alias).unwrap();
+    // An account that the system refuses to follow a link (error 448) cannot read the alias, so
+    // that part has nothing to compare (Task 7 ruling 2).
+    if rdy_qa::platform::follow_refused(&alias) {
+        return;
+    }
     w.person(&alias);
     let mut c = w.mcp(&meta);
     session(&mut c, "reader");

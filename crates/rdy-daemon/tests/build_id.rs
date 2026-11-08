@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it makes symlinks and non-UTF-8 file names. FW-XP1 Phase 4 gives them a seam.
 //! The source build id (D-CCC6E): framing, closed inputs, bounds and rerun directives.
 #[path = "../build_support.rs"]
 mod build_support;
@@ -125,21 +123,20 @@ fn mh2_framed_paths_cannot_alias_contents() {
 fn mh2_walk_refuses_links_and_bounds_before_allocation() {
     let d = tempfile::tempdir().unwrap();
     tiny(d.path());
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::os::unix::fs::symlink("lib.rs", d.path().join("crates/x/src/link")).unwrap();
-        assert_eq!(
-            reason(source_build_id(d.path())),
-            "input is not a regular file: crates/x/src/link"
-        );
-        fs::remove_file(d.path().join("crates/x/src/link")).unwrap();
-        let bad = std::ffi::OsStr::from_bytes(b"bad\xff");
-        // Some file systems refuse non-UTF-8 names; the check applies where they exist.
-        if fs::write(d.path().join("crates/x").join(bad), b"z").is_ok() {
-            assert_eq!(reason(source_build_id(d.path())), "input path is not UTF-8");
-            fs::remove_file(d.path().join("crates/x").join(bad)).unwrap();
-        }
+    let link = d.path().join("crates/x/src/link");
+    // The ordinary account that runs the Windows tests holds the symbolic-link privilege.
+    rdy_store::pio::symlink("lib.rs", &link).unwrap();
+    assert_eq!(
+        reason(source_build_id(d.path())),
+        "input is not a regular file: crates/x/src/link"
+    );
+    fs::remove_file(&link).unwrap();
+    // The name has no UTF-8 form: a stray byte on Unix, an unpaired surrogate on Windows.
+    let bad = rdy_store::pio::not_unicode("bad");
+    // Some file systems refuse such names; the check applies where they exist.
+    if fs::write(d.path().join("crates/x").join(&bad), b"z").is_ok() {
+        assert_eq!(reason(source_build_id(d.path())), "input path is not UTF-8");
+        fs::remove_file(d.path().join("crates/x").join(&bad)).unwrap();
     }
     // Entries: 2 root files + crates/x + crates/x/src + lib.rs + crates = 5 entries below crates and root.
     let base = source_build_id(d.path()).unwrap();

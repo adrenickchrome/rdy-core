@@ -2086,7 +2086,7 @@ impl Index {
                 path.display()
             ))));
         }
-        let links = crate::fileid::links(&meta);
+        let links = crate::fileid::links_of(&file, path)?;
         if links != 1 {
             crate::notice(&format!(
                 "rdy: the replaced index file {} has more than one link ({links}), so it was not zeroed",
@@ -2099,7 +2099,7 @@ impl Index {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("index.redb");
-        let id = crate::fileid::FileId::of(&meta);
+        let id = crate::fileid::FileId::of_open(&file, path)?;
         let mut kept = None;
         for n in 0u32.. {
             let name = if n == 0 {

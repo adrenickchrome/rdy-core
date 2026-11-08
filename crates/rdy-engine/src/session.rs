@@ -1,6 +1,5 @@
 use crate::error::{E_PERMISSION, RdyError};
 use rdy_model::{Provenance, Role};
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The run a human session records: the CLI is the human's one run.
@@ -141,17 +140,20 @@ impl Session {
     }
 }
 
-/// The human actor of the user config alone: `actor` in `<xdg>/rdy/config.yaml` (else
-/// `<home>/.config/rdy/config.yaml`), read within the config bounds, else the bounded fallback
-/// of `user` (D-Q8NFG). A file that does not read, a wrong type or an actor outside the form is
-/// its error, never the fallback.
+/// The human actor of the user config alone: `actor` in the user config that `env` places
+/// (`instructions_config::user_config_path`, the one resolver), read within the config bounds,
+/// else the bounded fallback of `user` (D-Q8NFG). A file that does not read, a wrong type or an
+/// actor outside the form is its error, never the fallback.
 pub fn human_actor(
-    xdg_config_home: Option<&Path>,
-    home: Option<&Path>,
+    env: &crate::instructions_config::PathEnv,
     user: Option<&str>,
 ) -> Result<String, RdyError> {
     crate::config_levels::user_actor(
-        crate::config_levels::user_file_of(xdg_config_home, home).as_deref(),
+        crate::instructions_config::user_config_path(
+            crate::instructions_config::Platform::HOST,
+            env,
+        )
+        .as_deref(),
         user,
     )
 }

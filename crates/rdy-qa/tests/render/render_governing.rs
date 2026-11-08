@@ -284,7 +284,11 @@ fn rf7_supporting_types_get_no_site_or_working_page() {
     let files = files_under(out.path());
     assert!(!files.is_empty());
     for path in &files {
-        let name = path.strip_prefix(out.path()).unwrap().to_string_lossy();
+        let name = path
+            .strip_prefix(out.path())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         for k in ["$f", "$x"] {
             let bid = id(k);
             if name.contains(&bid) {

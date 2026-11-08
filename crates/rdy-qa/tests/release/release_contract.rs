@@ -249,13 +249,22 @@ fn merge_shape(a: &Value, b: &Value) -> Value {
 /// and dates are fixed by the seed helpers, so they stay in the text and are pinned with it.
 fn normalize(text: &str, paths: &[&Path]) -> String {
     let mut out = text.to_string();
+    // a path as it stands in JSON text too: on Windows its backslashes are doubled there
+    let mut replace = |s: &str| {
+        out = out.replace(s, "<path>");
+        out = out.replace(&s.replace('\\', "\\\\"), "<path>");
+    };
     for p in paths {
-        let s = p.to_string_lossy();
-        out = out.replace(s.as_ref(), "<path>");
+        // the canonical form first: on Windows it holds the plain one (`\\?\C:\...`)
         if let Ok(c) = p.canonicalize() {
-            out = out.replace(c.to_string_lossy().as_ref(), "<path>");
+            replace(c.to_string_lossy().as_ref());
         }
+        replace(p.to_string_lossy().as_ref());
     }
+    // a file below the path keeps one separator, as the fixture has it
+    out = out
+        .replace("<path>\\\\", "<path>/")
+        .replace("<path>\\", "<path>/");
     let port = Regex::new(r"127\.0\.0\.1:[0-9]+").unwrap();
     port.replace_all(&out, "127.0.0.1:<port>").into_owned()
 }

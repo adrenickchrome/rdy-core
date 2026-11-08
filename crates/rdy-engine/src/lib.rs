@@ -78,6 +78,7 @@ pub mod mention_review;
 pub mod neighbors;
 mod pack_load;
 mod paths;
+pub use paths::{logical_of, native_join};
 pub mod pending;
 pub mod plan;
 pub mod policy;
@@ -209,6 +210,7 @@ pub use pack_load::{
 pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
+pub use rdy_store::pio::display_path;
 pub use rdy_store::{CachedDrawing, DiagramCache};
 /// The notice channel of the library crates: stderr, unless a test captures the notice it
 /// provokes ([`capture_notices_for_tests`]).

@@ -2645,14 +2645,11 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
         let mut server = Server::start();
         let o = server.origin().to_string();
         let install = Origin::parse(&o).unwrap();
-        let dir = tempfile::Builder::new()
-            .permissions(pio::permissions(0o700))
-            .tempdir()
-            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        pio::make_private_dir(dir.path()).unwrap();
         let cfg = dir.path().join("cfg/rdy");
-        pio::dir_mode(std::fs::DirBuilder::new().recursive(true), 0o700)
-            .create(&cfg)
-            .unwrap();
+        std::fs::create_dir(dir.path().join("cfg")).unwrap();
+        pio::create_private_dir(&cfg).unwrap();
         let ca = dir.path().join("ca.pem");
         std::fs::write(&ca, server.ca_pem()).unwrap();
         let user_file = cfg.join("config.yaml");
@@ -2678,8 +2675,10 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
                 interval_seconds: 5,
             })),
         );
-        std::fs::write(&creds, encode_credentials(&file).unwrap()).unwrap();
-        std::fs::set_permissions(&creds, pio::permissions(0o600)).unwrap();
+        let mut cf = std::fs::File::create(&creds).unwrap();
+        pio::make_private_file(&cf).unwrap();
+        std::io::Write::write_all(&mut cf, &encode_credentials(&file).unwrap()).unwrap();
+        drop(cf);
 
         server.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
         server.reply(Reply::json(200, TOKEN_REPLY));

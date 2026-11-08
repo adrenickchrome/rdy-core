@@ -16,9 +16,7 @@
 //! alias, no tagged key) before the semantic parse, and rely on serde_yaml_ng's own duplicate-key
 //! refusal. Encoding checks the same bounds on the borrowed value and writes through a buffer
 //! that stops at 1 MiB.
-use crate::config_levels::{
-    self, LOCAL_FILE, Level, Origin as SettingOrigin, PROJECT_FILE, is_repo_name,
-};
+use crate::config_levels::{self, Level, Origin as SettingOrigin, PROJECT_FILE, is_repo_name};
 use crate::did_you_mean::nearest;
 use crate::error::{
     E_BAD_INPUT, E_CONFIG, E_LIMIT, E_NOT_FOUND, RdyError, remote_exists, remote_required,
@@ -974,7 +972,7 @@ pub(crate) fn merge(
     let file_of = |level: Level| match level {
         Level::User => user_file.map(Path::to_path_buf),
         Level::Project => project.map(|p| p.join(PROJECT_FILE)),
-        Level::Local => project.map(|p| p.join(LOCAL_FILE)),
+        Level::Local => project.map(config_levels::local_path),
         Level::Default => None,
     };
     let mut levels = levels;
@@ -1066,7 +1064,10 @@ fn read_levels(
         }
     }
     if let Some(p) = project {
-        for (level, rel) in [(Level::Project, PROJECT_FILE), (Level::Local, LOCAL_FILE)] {
+        for (level, rel) in [
+            (Level::Project, std::path::PathBuf::from(PROJECT_FILE)),
+            (Level::Local, config_levels::local_rel()),
+        ] {
             let shown = config_levels::file_name(level, user_file);
             if let Some(m) = config_levels::read_file(&p.join(rel), &shown)? {
                 files.push((level, m));

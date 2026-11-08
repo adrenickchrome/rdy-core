@@ -116,7 +116,12 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, TreeEntry> {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         let m = std::fs::symlink_metadata(&p).unwrap();
-        let bytes = m.is_file().then(|| std::fs::read(&p).unwrap());
+        // On Windows a file another handle holds locked cannot be read (byte-range locks are
+        // mandatory): its length, already in the entry, stands in for its bytes.
+        let bytes = m.is_file().then(|| match std::fs::read(&p) {
+            Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => vec![],
+            other => other.unwrap(),
+        });
         if m.is_dir() {
             out.extend(tree(&p));
         }

@@ -12,12 +12,55 @@ pub struct TestRun {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
-    /// One entry per skip line (`skip::SKIP_MARK`), `<test>: <reason>`.
+    /// One entry per test that skipped for a missing prerequisite (`skip::SKIP_MARK`),
+    /// `<test>: <reason>`. A test that writes the line twice counts once.
     pub skipped: Vec<String>,
+    /// The same for a deep-only skip (`skip::DEEP_TAG`): a legitimate exclusion of a standard
+    /// run, kept apart from `skipped`.
+    pub deep_excluded: Vec<String>,
+    /// The names of the tests that completed `ok`, in libtest's order.
+    pub completed: Vec<String>,
     pub failures: Vec<String>,
     /// Each failing test's first panic: its `thread '...' panicked at ...:` header line and the
     /// lines after it, cut to `PANIC_LINES` lines and `PANIC_BYTES` bytes.
     pub panics: BTreeMap<String, String>,
+}
+
+impl TestRun {
+    /// The tests that ran their checks: the libtest successes, less the tests that skipped. A
+    /// skipping test returns early and libtest counts it as passed, so it earns no credit. A
+    /// skip name is taken off once, and only when libtest names a completion for it (when the
+    /// output names no completion at all, every distinct skip name is taken off).
+    pub fn executed(&self) -> usize {
+        let names: BTreeSet<&str> = self
+            .skipped
+            .iter()
+            .chain(&self.deep_excluded)
+            .map(|r| skip_name(r))
+            .collect();
+        let credited = if self.completed.is_empty() {
+            names.len()
+        } else {
+            names
+                .iter()
+                .filter(|n| self.completed.iter().any(|d| same_test(n, d)))
+                .count()
+        };
+        self.passed.saturating_sub(credited)
+    }
+}
+
+/// The test name of a skip record (`<test>: <reason>`).
+fn skip_name(record: &str) -> &str {
+    record.split_once(": ").map_or(record, |(n, _)| n)
+}
+
+/// Whether libtest's `done` (`module::test`) is the test that a skip line names.
+fn same_test(skip: &str, done: &str) -> bool {
+    done == skip
+        || done
+            .strip_suffix(skip)
+            .is_some_and(|head| head.ends_with("::"))
 }
 
 /// The most lines of a panic the report keeps, the truncation marker included.
@@ -97,6 +140,7 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
     let mut block: Option<String> = None;
     let mut panic = Panic::Done;
     let mut found: BTreeMap<String, String> = BTreeMap::new();
+    let mut skip_seen: BTreeSet<String> = BTreeSet::new();
     // stores the panic being read, once the block or the input ends
     fn flush(found: &mut BTreeMap<String, String>, block: &Option<String>, panic: &mut Panic) {
         if let (Some(name), Panic::Reading(e)) = (block, &*panic) {
@@ -106,8 +150,15 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
     }
     for line in output.lines() {
         if let Some(i) = line.find(crate::skip::SKIP_MARK) {
-            let rest = &line[i + crate::skip::SKIP_MARK.len()..];
-            run.skipped.push(rest.trim().to_string());
+            let rest = line[i + crate::skip::SKIP_MARK.len()..].trim();
+            // a second record for the same test is ignored
+            if skip_seen.insert(skip_name(rest).to_string()) {
+                if crate::skip::is_deep(rest) {
+                    run.deep_excluded.push(rest.to_string());
+                } else {
+                    run.skipped.push(rest.to_string());
+                }
+            }
         }
         let header = line
             .strip_prefix("---- ")
@@ -154,13 +205,25 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
         } else if let Some(rest) = line.strip_prefix("test ")
             && let Some(name) = rest.strip_suffix(" ... FAILED")
         {
-            run.failures.push(name.to_string());
+            run.failures.push(result_name(name).to_string());
+        } else if let Some(rest) = line.strip_prefix("test ")
+            && let Some(name) = rest.strip_suffix(" ... ok")
+        {
+            run.completed.push(result_name(name).to_string());
         }
     }
     flush(&mut found, &block, &mut panic);
     found.retain(|name, _| run.failures.contains(name));
     run.panics = found;
     run
+}
+
+/// The test a result line names. A test that runs its own binary as a crashing child leaves
+/// the start of a line, `test <child> ... `, with no result, and the next result is appended to
+/// it (`test <child> ... test <name> ... FAILED`). The name is what follows the last
+/// `... test `.
+fn result_name(name: &str) -> &str {
+    name.rsplit(" ... test ").next().unwrap_or(name)
 }
 
 /// The failing tests of one report area, in the given order, as a Markdown list. A test with
@@ -181,6 +244,16 @@ pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> 
     }
     s
 }
+
+/// The workspace-tests gate step's cargo arguments. Every binary runs: without `--no-fail-fast`
+/// cargo stops at the first failing binary, and the ones after it neither run nor count.
+pub const WORKSPACE_TEST_ARGS: [&str; 5] = [
+    "test",
+    "--workspace",
+    "--exclude",
+    "rdy-qa",
+    "--no-fail-fast",
+];
 
 /// The detail of the workspace-tests gate step: the counts, then (when tests failed) the failing
 /// names with their panic excerpts, then (when the step failed) the last 20 lines of `output`,
@@ -233,7 +306,8 @@ pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut area: Option<String> = None;
     for line in list_output.lines() {
-        let t = line.trim();
+        let t = line.trim().replace('\\', "/");
+        let t = t.as_str();
         if let Some(rest) = t.strip_prefix("Running ") {
             area = rest
                 .split_whitespace()
@@ -243,14 +317,34 @@ pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
                 .map(|a| area_of(a).to_string());
             continue;
         }
-        let (Some(area), Some(name)) = (&area, t.strip_suffix(": test")) else {
-            continue;
-        };
-        if let Some(id) = guard_id(name) {
-            out.entry(area.clone()).or_default().insert(id);
+        if let Some(area) = &area {
+            add_guarded_line(&mut out, area, t);
         }
     }
     out
+}
+
+/// Adds the pinned-defect id of one `<test>: test` line of `--list` output to `area`.
+fn add_guarded_line(out: &mut BTreeMap<String, BTreeSet<String>>, area: &str, line: &str) {
+    if let Some(name) = line.trim().strip_suffix(": test")
+        && let Some(id) = guard_id(name)
+    {
+        out.entry(area.to_string()).or_default().insert(id);
+    }
+}
+
+/// Adds the pinned-defect ids that the `--list` output of one test executable names, to the area
+/// of its binary (`area_of(binary)`). The listing needs no `Running` header: the binary name
+/// comes from Cargo's artifact record.
+pub fn add_guarded_listing(
+    out: &mut BTreeMap<String, BTreeSet<String>>,
+    binary: &str,
+    list_stdout: &str,
+) {
+    let area = area_of(binary);
+    for line in list_stdout.lines() {
+        add_guarded_line(out, area, line);
+    }
 }
 
 /// The `--only` area that runs the perf tier alone.
@@ -456,6 +550,13 @@ pub struct Area {
     pub skipped: usize,
     /// The skip lines, `<test>: <reason>`.
     pub skip_lines: Vec<String>,
+    /// Deep-only tests that a standard run leaves out (`TestRun::deep_excluded`). They are not
+    /// prerequisite skips and earn no execution credit.
+    pub deep_excluded: usize,
+    /// The deep-only skip lines, `<test>: (deep) <reason>`.
+    pub deep_lines: Vec<String>,
+    /// One row of evidence per test binary of the area.
+    pub binaries: Vec<BinaryRun>,
     /// False when a test binary exited non-zero, even if no test is named as failing
     /// (a compile error, a crash).
     pub ok: bool,
@@ -464,35 +565,160 @@ pub struct Area {
     pub panics: BTreeMap<String, String>,
 }
 
-/// Adds one `rdy-qa` test binary's run to the report's area rows, under `area_of(binary)`: an
-/// area of more than one binary (`engine`, `engine_read`) is one row with their sums.
-pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
-    let name = area_of(binary).to_string();
-    match areas.iter_mut().find(|a| a.name == name) {
-        Some(a) => {
-            a.passed += run.passed;
-            a.failed += run.failed;
-            a.ignored += run.ignored;
-            a.skipped += run.skipped.len();
-            a.skip_lines.extend(run.skipped);
-            a.ok &= ok;
-            a.failures.extend(run.failures);
-            for (name, panic) in run.panics {
-                a.panics.entry(name).or_insert(panic);
-            }
+/// What one test binary did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryState {
+    /// It exited zero, no test failed, and at least one test ran its checks.
+    Executed,
+    /// It exited non-zero or a test failed. A failed test is executed, and the gate fails.
+    Failed,
+    /// It exited zero and ran no checks: it is empty, every test is ignored, or every test that
+    /// completed skipped. This is never a pass.
+    Unexecuted,
+    /// The gate found no test executable for it.
+    Missing,
+}
+
+impl BinaryState {
+    pub fn label(self) -> &'static str {
+        match self {
+            BinaryState::Executed => "executed",
+            BinaryState::Failed => "failed",
+            BinaryState::Unexecuted => "not executed",
+            BinaryState::Missing => "missing",
         }
-        None => areas.push(Area {
-            name,
-            passed: run.passed,
-            failed: run.failed,
-            ignored: run.ignored,
-            skipped: run.skipped.len(),
-            skip_lines: run.skipped,
-            ok,
-            failures: run.failures,
-            panics: run.panics,
-        }),
     }
+}
+
+/// The evidence of one test binary, kept in its area.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct BinaryRun {
+    pub name: String,
+    /// False when no test executable was found for the binary.
+    pub found: bool,
+    /// Whether the binary exited zero.
+    pub exit_ok: bool,
+    /// The exit status as text: `exit 0`, `exit 101`, `no exit code`, or `not run`.
+    pub exit: String,
+    pub passed: usize,
+    pub failed: usize,
+    pub ignored: usize,
+    /// Tests that skipped for a missing prerequisite.
+    pub skipped: usize,
+    /// Deep-only tests left out of this run.
+    pub deep_excluded: usize,
+    /// Tests that ran their checks (`TestRun::executed`).
+    pub executed: usize,
+}
+
+impl BinaryRun {
+    pub fn state(&self) -> BinaryState {
+        if !self.found {
+            BinaryState::Missing
+        } else if !self.exit_ok || self.failed > 0 {
+            BinaryState::Failed
+        } else if self.executed == 0 {
+            BinaryState::Unexecuted
+        } else {
+            BinaryState::Executed
+        }
+    }
+}
+
+/// Adds one `rdy-qa` test binary's run to the report's area rows, under `area_of(binary)`: an
+/// area of more than one binary (`engine`, `engine_read`) is one row with their sums, and each
+/// binary keeps its own evidence row.
+pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
+    let exit = if ok { "exit 0" } else { "failed" };
+    add_run_with_exit(areas, binary, ok, exit, run);
+}
+
+/// `add_run` with the binary's exit status as text.
+pub fn add_run_with_exit(areas: &mut Vec<Area>, binary: &str, ok: bool, exit: &str, run: TestRun) {
+    let evidence = BinaryRun {
+        name: binary.to_string(),
+        found: true,
+        exit_ok: ok,
+        exit: exit.to_string(),
+        passed: run.passed,
+        failed: run.failed,
+        ignored: run.ignored,
+        skipped: run.skipped.len(),
+        deep_excluded: run.deep_excluded.len(),
+        executed: run.executed(),
+    };
+    let area = area_row(areas, binary);
+    area.passed += run.passed;
+    area.failed += run.failed;
+    area.ignored += run.ignored;
+    area.skipped += run.skipped.len();
+    area.skip_lines.extend(run.skipped);
+    area.deep_excluded += run.deep_excluded.len();
+    area.deep_lines.extend(run.deep_excluded);
+    area.ok &= ok;
+    area.failures.extend(run.failures);
+    for (name, panic) in run.panics {
+        area.panics.entry(name).or_insert(panic);
+    }
+    area.binaries.push(evidence);
+}
+
+/// Adds a binary that has no test executable: its area fails, whatever its sibling binaries did.
+pub fn add_missing(areas: &mut Vec<Area>, binary: &str) {
+    let area = area_row(areas, binary);
+    area.ok = false;
+    area.binaries.push(BinaryRun {
+        name: binary.to_string(),
+        exit: "not run".into(),
+        ..BinaryRun::default()
+    });
+}
+
+/// The row of `binary`'s area, added (passing, empty) when it is not there yet.
+fn area_row<'a>(areas: &'a mut Vec<Area>, binary: &str) -> &'a mut Area {
+    let name = area_of(binary);
+    let at = match areas.iter().position(|a| a.name == name) {
+        Some(i) => i,
+        None => {
+            areas.push(Area {
+                name: name.to_string(),
+                ok: true,
+                ..Area::default()
+            });
+            areas.len() - 1
+        }
+    };
+    &mut areas[at]
+}
+
+/// The gate's exit status: zero only for a passing report.
+pub fn exit_code(pass: bool) -> i32 {
+    if pass { 0 } else { 1 }
+}
+
+/// The tests this OS does not compile, as `<file>: <test>`, from Task 32's manifest. Only Windows
+/// compiles the `#[cfg(unix)]` tests out, so every other OS has none.
+pub fn os_excluded() -> Vec<String> {
+    if cfg!(windows) {
+        crate::platform::exclusions::names()
+            .into_iter()
+            .map(|(f, t)| format!("{f}: {t}"))
+            .collect()
+    } else {
+        vec![]
+    }
+}
+
+/// The expected binaries (`crates/rdy-qa/tests/<dir>`) that Cargo's artifact record does not
+/// list, one line each. The gate checks this before it runs a binary, so a missing area cannot
+/// pass by its absence.
+pub fn missing_binaries(expected: &[String], found: &[String]) -> Vec<String> {
+    expected
+        .iter()
+        .filter(|e| !found.contains(e))
+        .map(|e| format!("`{e}`: no test executable was built for tests/{e}/main.rs"))
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -513,6 +739,9 @@ pub struct Report {
     /// Observations that do not affect the verdict (baseline drift, a failed listing).
     pub notes: Vec<String>,
     pub guarded: BTreeMap<String, BTreeSet<String>>,
+    /// Tests this OS does not compile (`platform::exclusions`), as `<file>: <test>`. They are
+    /// neither ignored nor deep-only tests.
+    pub os_excluded: Vec<String>,
 }
 
 /// The M3 gate's required witnesses that another area proves, not the swarm (rulings task-8
@@ -622,10 +851,57 @@ pub fn markdown(r: &Report) -> String {
             a.skipped
         );
     }
+    if r.areas.iter().any(|a| !a.binaries.is_empty()) {
+        let _ = writeln!(
+            s,
+            "\n## Test binaries\n\n| Binary | Area | State | Exit | Executed | Passed | Failed | Ignored | Skipped | Deep-only |\n|---|---|---|---|---|---|---|---|---|---|"
+        );
+        for a in &r.areas {
+            for b in &a.binaries {
+                let _ = writeln!(
+                    s,
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                    b.name,
+                    a.name,
+                    b.state().label(),
+                    b.exit,
+                    b.executed,
+                    b.passed,
+                    b.failed,
+                    b.ignored,
+                    b.skipped,
+                    b.deep_excluded
+                );
+            }
+        }
+    }
     for a in r.areas.iter().filter(|a| !a.skip_lines.is_empty()) {
         let _ = writeln!(s, "\nSkipped in `{}`:", a.name);
         for l in &a.skip_lines {
             let _ = writeln!(s, "- {l}");
+        }
+    }
+    for a in r.areas.iter().filter(|a| !a.deep_lines.is_empty()) {
+        let _ = writeln!(
+            s,
+            "\nDeep-only in `{}` (left out of a standard run):",
+            a.name
+        );
+        for l in &a.deep_lines {
+            let _ = writeln!(s, "- {l}");
+        }
+    }
+    for a in &r.areas {
+        let bad: Vec<&BinaryRun> = a
+            .binaries
+            .iter()
+            .filter(|b| matches!(b.state(), BinaryState::Unexecuted | BinaryState::Missing))
+            .collect();
+        if !bad.is_empty() {
+            let _ = writeln!(s, "\nNot executed in `{}`:", a.name);
+            for b in bad {
+                let _ = writeln!(s, "- `{}`: {}", b.name, b.state().label());
+            }
         }
     }
     for a in r.areas.iter().filter(|a| !a.failures.is_empty() || !a.ok) {
@@ -637,6 +913,15 @@ pub fn markdown(r: &Report) -> String {
             );
         }
         s += &failure_lines(&a.failures, &a.panics);
+    }
+
+    let _ = writeln!(
+        s,
+        "\n## OS exclusions\n\nTests this OS does not compile (`#[cfg(unix)]` gates, listed in `platform::exclusions`). They are not ignored tests, not deep-only tests and not prerequisite skips.\n\n{} excluded.",
+        r.os_excluded.len()
+    );
+    for t in &r.os_excluded {
+        let _ = writeln!(s, "- {t}");
     }
 
     let _ = writeln!(s, "\n## Perf\n\n{}\n", r.perf_note);
@@ -727,9 +1012,15 @@ pub fn overall(gates: &[Gate], areas: &[Area], perf_ok: bool) -> bool {
     gates.iter().all(|g| g.pass) && areas.iter().all(area_ok) && perf_ok
 }
 
-/// An area passes when its binaries exited zero, no test failed, and it ran at least one test.
+/// An area passes when its binaries exited zero, no test failed, it ran at least one test, and
+/// every one of its binaries executed. A binary that is empty, all ignored, all skipped at run
+/// time, or missing fails its area even beside a populated sibling.
 pub fn area_ok(a: &Area) -> bool {
-    a.ok && a.failed == 0 && a.passed + a.failed + a.ignored > 0
+    a.ok && a.failed == 0
+        && a.passed + a.failed + a.ignored > 0
+        && a.binaries
+            .iter()
+            .all(|b| b.state() == BinaryState::Executed)
 }
 
 /// True when a parsed test run saw no tests at all (a build that "passed" but ran nothing).
@@ -908,8 +1199,7 @@ mod tests {
             failed,
             ignored,
             failures: failures.iter().map(|f| f.to_string()).collect(),
-            panics: Default::default(),
-            skipped: vec![],
+            ..TestRun::default()
         };
         add_run(&mut rows, "engine", true, run(134, 0, 0, &[]));
         add_run(
@@ -1165,6 +1455,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         };
         assert!(
             markdown(&r).contains(
@@ -1191,6 +1482,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         }
     }
 
@@ -1349,6 +1641,43 @@ mod tests {
     }
 
     #[test]
+    fn wx33h_the_workspace_step_runs_every_binary_and_counts_them() {
+        // cargo stops at the first failing test binary without this flag, and the binaries after
+        // it neither run nor count: Windows' `read_only` failures hid behind `client`'s
+        assert_eq!(
+            WORKSPACE_TEST_ARGS,
+            [
+                "test",
+                "--workspace",
+                "--exclude",
+                "rdy-qa",
+                "--no-fail-fast"
+            ]
+        );
+        assert!(
+            include_str!("bin/qa-gate.rs").contains("cargo(&report::WORKSPACE_TEST_ARGS)"),
+            "the gate runs these arguments"
+        );
+        let out = "\
+     Running tests/a.rs (target/debug/deps/a-1)
+test a1 ... FAILED
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.1s
+error: test failed, to rerun pass `-p x --test a`
+     Running tests/b.rs (target/debug/deps/b-1)
+test b1 ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s
+error: test failed, to rerun pass `-p x --test b`
+error: 2 targets failed:
+    `-p x --test a`
+    `-p x --test b`
+";
+        let run = parse_cargo_test(out);
+        assert_eq!((run.passed, run.failed, run.ignored), (5, 2, 1));
+        assert!(run.failures.iter().any(|f| f == "a1"), "{:?}", run.failures);
+        assert!(run.failures.iter().any(|f| f == "b1"), "{:?}", run.failures);
+    }
+
+    #[test]
     fn plx3_workspace_failures_keep_their_panic_excerpt() {
         let mut out = String::from(
             "running 2 tests\ntest w::ok ... ok\ntest w::bad ... FAILED\n\nfailures:\n\n---- w::bad stdout ----\nthread 'w::bad' (7) panicked at crates/w.rs:4:9:\nassertion `left == right` failed\n  left: 1\n right: 2\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nfailures:\n    w::bad\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
@@ -1451,6 +1780,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         };
         let md = markdown(&r);
         assert!(
@@ -1512,6 +1842,7 @@ mod tests {
             failing_seeds: vec![],
             notes: vec![],
             guarded: BTreeMap::new(),
+            os_excluded: Vec::new(),
         };
         let md = markdown(&r);
         assert!(
@@ -1761,5 +2092,291 @@ mod tests {
             assert!(mdp.starts_with("# rdy QA gate: FAIL"), "{mdp}");
             assert!(mdp.contains(&format!("## Perf\n\n{note}\n")), "{mdp}");
         }
+    }
+
+    // ---- Windows plan task 33: execution is counted, never assumed ----
+
+    /// Libtest-shaped output with Windows line ends: `ok` tests, then skip lines on stderr.
+    fn libtest(ok: &[&str], skips: &[String], ignored: usize, failed: &[&str]) -> String {
+        let mut t = String::from("running tests\r\n");
+        for n in ok {
+            t += &format!("test {n} ... ok\r\n");
+        }
+        for n in failed {
+            t += &format!("test {n} ... FAILED\r\n");
+        }
+        for i in 0..ignored {
+            t += &format!("test ign::t{i} ... ignored\r\n");
+        }
+        for s in skips {
+            t += &format!("{s}\r\n");
+        }
+        t += &format!(
+            "\r\ntest result: {}. {} passed; {} failed; {ignored} ignored; 0 measured; 0 filtered out; finished in 0.10s\r\n",
+            if failed.is_empty() { "ok" } else { "FAILED" },
+            ok.len(),
+            failed.len()
+        );
+        t
+    }
+
+    fn skip_rec(name: &str) -> String {
+        crate::skip::skip_line(name, "node is not installed")
+    }
+
+    fn deep_rec(name: &str) -> String {
+        crate::skip::skip_line_for(name, crate::skip::Why::DeepOnly, "runs in a deep gate only")
+    }
+
+    fn run_of(text: &str) -> TestRun {
+        parse_cargo_test(text)
+    }
+
+    fn only_state(areas: &[Area], binary: &str) -> BinaryState {
+        areas
+            .iter()
+            .flat_map(|a| &a.binaries)
+            .find(|b| b.name == binary)
+            .unwrap()
+            .state()
+    }
+
+    #[test]
+    fn wx33_missing_windows_area_fails() {
+        let expected: Vec<String> = ["cli", "daemon", "engine", "engine_read"]
+            .map(String::from)
+            .to_vec();
+        let found: Vec<String> = ["cli", "daemon", "engine"].map(String::from).to_vec();
+        let problems = missing_binaries(&expected, &found);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("`engine_read`"), "{problems:?}");
+        assert!(missing_binaries(&expected, &expected).is_empty());
+
+        let ok_run = run_of(&libtest(&["m::a", "m::b"], &[], 0, &[]));
+        let mut areas = vec![];
+        add_run(&mut areas, "cli", true, ok_run.clone());
+        add_run(&mut areas, "engine", true, ok_run);
+        assert!(overall(&[gate(true)], &areas, true));
+        add_missing(&mut areas, "daemon");
+        assert_eq!(only_state(&areas, "daemon"), BinaryState::Missing);
+        let verdict = overall(&[gate(true)], &areas, true);
+        assert!(!verdict, "a missing area fails the report");
+        assert_eq!(exit_code(verdict), 1, "and the gate exits non-zero");
+        assert_eq!(exit_code(true), 0);
+        let md = markdown(&report_of(areas));
+        assert!(md.contains("Not executed in `daemon`:"), "{md}");
+        assert!(
+            md.contains("| daemon | daemon | missing | not run |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn wx33_prerequisites_and_os_exclusions_are_separate() {
+        let text = libtest(
+            &["m::a", "m::needs_node", "m::deep_one"],
+            &[skip_rec("needs_node"), deep_rec("deep_one")],
+            2,
+            &[],
+        );
+        let mut areas = vec![];
+        add_run(&mut areas, "render", true, run_of(&text));
+        let a = &areas[0];
+        assert_eq!((a.skipped, a.deep_excluded, a.ignored), (1, 1, 2));
+        let mut r = report_of(areas);
+        r.os_excluded = vec!["crates/x/tests/u.rs: u1_unix_only".into()];
+        let md = markdown(&r);
+        let skipped = md.split("Skipped in `render`").nth(1).unwrap();
+        assert!(skipped.contains("needs_node"), "{md}");
+        assert!(md.contains("Deep-only in `render`"), "{md}");
+        assert!(md.contains("1 excluded."), "{md}");
+        let os = md.split("## OS exclusions").nth(1).unwrap();
+        let os = os.split("## Perf").next().unwrap();
+        assert!(
+            os.contains("u1_unix_only") && !os.contains("needs_node"),
+            "{os}"
+        );
+        assert!(!os.contains("deep_one"), "{os}");
+        let js: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        assert_eq!(js["os_excluded"].as_array().unwrap().len(), 1);
+        assert_eq!(js["areas"][0]["skipped"], 1);
+        assert_eq!(js["areas"][0]["deep_excluded"], 1);
+        // a missing prerequisite still fails a test when every prerequisite is required
+        assert!(crate::skip::fails(crate::skip::Why::Prerequisite, true));
+        // the manifest is the source on Windows; other systems compile every test
+        assert_eq!(os_excluded().is_empty(), !cfg!(windows));
+        if cfg!(windows) {
+            assert_eq!(os_excluded().len(), crate::platform::exclusions::count());
+        }
+    }
+
+    #[test]
+    fn wx33_failure_and_skip_counts_survive_child_output() {
+        let text = libtest(
+            &["m::a", "m::b", "m::skips"],
+            &[skip_rec("skips"), skip_rec("skips"), deep_rec("d")],
+            1,
+            &["m::bad"],
+        );
+        let run = run_of(&text);
+        assert_eq!((run.passed, run.failed, run.ignored), (3, 1, 1));
+        assert_eq!(run.failures, ["m::bad"]);
+        assert_eq!(run.skipped.len(), 1, "a duplicate record counts once");
+        assert_eq!(run.deep_excluded.len(), 1);
+        assert_eq!(run.completed, ["m::a", "m::b", "m::skips"]);
+        assert_eq!(run.executed(), 2);
+        // a failed test is executed, and it still fails the gate
+        let mut areas = vec![];
+        add_run_with_exit(&mut areas, "cli", false, "exit 101", run);
+        assert_eq!(only_state(&areas, "cli"), BinaryState::Failed);
+        assert!(!overall(&[gate(true)], &areas, true));
+        assert_eq!(areas[0].binaries[0].exit, "exit 101");
+        // a flood of output keeps the end, where the counts are
+        let mut flood = "test m::x ... ok\r\n".repeat(5000);
+        flood += &text;
+        let (kept, dropped) =
+            crate::gate_steps::read_tail(std::io::Cursor::new(flood.clone()), 4096);
+        assert!(dropped > 0 && kept.len() == 4096);
+        let tail = String::from_utf8_lossy(&kept).into_owned();
+        let run = run_of(&tail);
+        assert_eq!((run.passed, run.failed), (3, 1));
+        assert_eq!(run.skipped.len(), 1);
+    }
+
+    /// Found by the native run (fix round 2): a test that runs its own binary as a crashing child
+    /// (`io_follower::mh8_*`, `--nocapture --test-threads=1`) leaves the start of a line,
+    /// `test <child> ... `, with no result. The next test's result is then appended to that
+    /// partial line. The report named the child, which passed, as a failing test and lost the
+    /// real name.
+    #[test]
+    fn wx33_a_partial_start_line_never_renames_the_next_result() {
+        let text = "running 3 tests\n\
+                    test m::a ... ok\n\
+                    test io_follower::mh8_child ... test io_load::dl6_real ... FAILED\n\
+                    test io_follower::other ... test io_load::fine ... ok\n\
+                    \nfailures:\n\n---- io_load::dl6_real stdout ----\n\
+                    thread 'io_load::dl6_real' panicked at x.rs:1:1:\nboom\n\n\
+                    failures:\n    io_load::dl6_real\n\n\
+                    test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = run_of(text);
+        assert_eq!(run.failures, ["io_load::dl6_real"]);
+        assert_eq!(run.completed, ["m::a", "io_load::fine"]);
+        assert!(run.panics.contains_key("io_load::dl6_real"));
+        assert_eq!((run.passed, run.failed), (2, 1));
+    }
+
+    #[test]
+    fn wx33_all_ignored_is_unexecuted() {
+        let run = run_of(&libtest(&[], &[], 7, &[]));
+        assert_eq!((run.passed, run.ignored, run.executed()), (0, 7, 0));
+        let mut areas = vec![];
+        add_run(&mut areas, "wc", true, run);
+        assert_eq!(only_state(&areas, "wc"), BinaryState::Unexecuted);
+        assert!(!area_ok(&areas[0]));
+        let verdict = overall(&[gate(true)], &areas, true);
+        assert!(!verdict);
+        assert_eq!(exit_code(verdict), 1);
+        let empty = run_of(&libtest(&[], &[], 0, &[]));
+        let mut areas = vec![];
+        add_run(&mut areas, "wc", true, empty);
+        assert_eq!(only_state(&areas, "wc"), BinaryState::Unexecuted);
+        assert!(!area_ok(&areas[0]));
+    }
+
+    #[test]
+    fn wx33_all_runtime_skipped_is_unexecuted() {
+        let text = libtest(
+            &["m::a", "m::b", "other::b2"],
+            &[skip_rec("a"), skip_rec("b"), skip_rec("b2")],
+            0,
+            &[],
+        );
+        let run = run_of(&text);
+        assert_eq!((run.passed, run.skipped.len(), run.executed()), (3, 3, 0));
+        let mut areas = vec![];
+        add_run(&mut areas, "render", true, run);
+        assert_eq!(only_state(&areas, "render"), BinaryState::Unexecuted);
+        assert!(!area_ok(&areas[0]));
+        // one test that really ran is enough
+        let text = libtest(&["m::a", "m::b"], &[skip_rec("a")], 0, &[]);
+        let mut areas = vec![];
+        add_run(&mut areas, "render", true, run_of(&text));
+        assert_eq!(only_state(&areas, "render"), BinaryState::Executed);
+        assert!(area_ok(&areas[0]));
+        // a skip line for a test that did not complete earns no deduction
+        let text = libtest(&["m::a"], &[skip_rec("elsewhere")], 0, &[]);
+        assert_eq!(run_of(&text).executed(), 1);
+        // a name that only ends the same way is another test
+        let text = libtest(&["m::xa"], &[skip_rec("a")], 0, &[]);
+        assert_eq!(run_of(&text).executed(), 1);
+    }
+
+    #[test]
+    fn wx33_empty_engine_read_cannot_hide_in_engine() {
+        let full = run_of(&libtest(&["m::a", "m::b", "m::c"], &[], 0, &[]));
+        let empty = run_of(&libtest(&[], &[], 0, &[]));
+        let mut areas = vec![];
+        add_run(&mut areas, "engine", true, full.clone());
+        add_run(&mut areas, "engine_read", true, empty);
+        assert_eq!(areas.len(), 1, "one engine row");
+        assert_eq!(areas[0].passed, 3);
+        assert_eq!(areas[0].binaries.len(), 2);
+        assert_eq!(only_state(&areas, "engine_read"), BinaryState::Unexecuted);
+        assert!(
+            !area_ok(&areas[0]),
+            "a populated engine does not cover engine_read"
+        );
+        assert!(!overall(&[gate(true)], &areas, true));
+        // engine_read missing altogether
+        let mut areas = vec![];
+        add_run(&mut areas, "engine", true, full.clone());
+        add_missing(&mut areas, "engine_read");
+        assert!(!area_ok(&areas[0]));
+        // engine_read all skipped
+        let mut areas = vec![];
+        add_run(&mut areas, "engine", true, full.clone());
+        let skipped = run_of(&libtest(&["m::a"], &[skip_rec("a")], 0, &[]));
+        add_run(&mut areas, "engine_read", true, skipped);
+        assert!(!area_ok(&areas[0]));
+        // both populated
+        let mut areas = vec![];
+        add_run(&mut areas, "engine", true, full.clone());
+        add_run(&mut areas, "engine_read", true, full);
+        assert!(area_ok(&areas[0]));
+    }
+
+    #[test]
+    fn wx33_deep_exclusions_do_not_inflate_execution() {
+        let text = libtest(
+            &["m::real1", "m::real2", "m::d1", "m::d2", "m::d3"],
+            &[
+                deep_rec("d1"),
+                deep_rec("d2"),
+                deep_rec("d3"),
+                deep_rec("d3"),
+            ],
+            0,
+            &[],
+        );
+        let run = run_of(&text);
+        assert_eq!(
+            (run.passed, run.deep_excluded.len(), run.skipped.len()),
+            (5, 3, 0)
+        );
+        assert_eq!(run.executed(), 2, "three deep exclusions earn nothing");
+        let mut areas = vec![];
+        add_run(&mut areas, "daemon", true, run);
+        assert_eq!(only_state(&areas, "daemon"), BinaryState::Executed);
+        assert_eq!((areas[0].skipped, areas[0].deep_excluded), (0, 3));
+        assert!(area_ok(&areas[0]));
+        let md = markdown(&report_of(areas));
+        assert!(md.contains("Deep-only in `daemon`"), "{md}");
+        assert!(!md.contains("Skipped in `daemon`"), "{md}");
+        // a binary of nothing but deep tests executed nothing in a standard run
+        let text = libtest(&["m::d1"], &[deep_rec("d1")], 0, &[]);
+        let mut areas = vec![];
+        add_run(&mut areas, "daemon", true, run_of(&text));
+        assert_eq!(only_state(&areas, "daemon"), BinaryState::Unexecuted);
+        assert!(!area_ok(&areas[0]));
     }
 }

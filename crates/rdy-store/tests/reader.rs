@@ -373,3 +373,105 @@ fn rdr1_check_objects_reads_the_open_refs_and_their_table_at_one_point() {
     }
     r.check_objects().unwrap();
 }
+
+/// FW-XP1 phase 4: the identity checks that reader, lock and follower guards make hold with the
+/// platform's own file identity. An open handle keeps its file's identity through a rename of
+/// that file, a second name (a hard link) is the same file and a copy is another. So a held
+/// store lock still guards its store after its file was renamed away and back, and guards
+/// nothing once a copy takes its name; a follower mark with a second name is refused; and a
+/// reader that outlived its store still reads, while a reopen is refused, not rebuilt.
+#[test]
+fn wx7_reader_and_follower_identity_survive_rename_checks() {
+    use rdy_store::fileid::{FileId, links_of};
+    use rdy_store::{StoreError, StoreLock, follower, fsutil};
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::create(&dir).unwrap();
+    let h = s.write(vec![(kinds::BLOB_CHUNK, b"x".to_vec())]).unwrap()[0];
+    s.close().unwrap();
+
+    // a handle's identity through a rename, a hard link and a copy
+    let a = base.path().join("a");
+    std::fs::write(&a, b"one").unwrap();
+    let f = std::fs::File::open(&a).unwrap();
+    let id = FileId::of_open(&f, &a).unwrap();
+    assert_eq!(FileId::lstat(&a).unwrap(), id);
+    let moved = base.path().join("moved");
+    std::fs::rename(&a, &moved).unwrap();
+    assert_eq!(
+        FileId::of_open(&f, &moved).unwrap(),
+        id,
+        "a rename keeps it"
+    );
+    assert_eq!(FileId::lstat(&moved).unwrap(), id);
+    assert!(FileId::lstat(&a).is_err());
+    std::fs::hard_link(&moved, &a).unwrap();
+    assert_eq!(
+        FileId::lstat(&a).unwrap(),
+        id,
+        "a second name is the same file"
+    );
+    assert_eq!(links_of(&f, &moved).unwrap(), 2);
+    let copy = base.path().join("copy");
+    std::fs::copy(&moved, &copy).unwrap();
+    assert_ne!(FileId::lstat(&copy).unwrap(), id, "a copy is another file");
+    drop(f);
+
+    // a held lock guards its store through a rename of its file away and back, and a copy that
+    // takes the lock file's name is not the held lock
+    let lock = StoreLock::take(&dir).unwrap();
+    // Windows moves no directory while a file in it is open: a held store stays at its path
+    #[cfg(windows)]
+    {
+        let e = std::fs::rename(&dir, base.path().join("elsewhere")).unwrap_err();
+        assert!(matches!(e.raw_os_error(), Some(5 | 32)), "{e}");
+    }
+    let away = dir.join("lock.away");
+    std::fs::rename(dir.join("lock"), &away).unwrap();
+    assert!(matches!(
+        Store::open_locked(&dir, &lock),
+        Err(StoreError::Locked(_))
+    ));
+    std::fs::rename(&away, dir.join("lock")).unwrap();
+    Store::open_locked(&dir, &lock).unwrap().close().unwrap();
+    std::fs::rename(dir.join("lock"), &away).unwrap();
+    std::fs::copy(&away, dir.join("lock")).unwrap();
+    assert!(
+        matches!(Store::open_locked(&dir, &lock), Err(StoreError::Locked(_))),
+        "a copy of the lock file guards nothing"
+    );
+    drop(lock);
+    std::fs::remove_file(&away).unwrap();
+
+    // a follower mark with a second name is not a private regular file
+    let mark = dir.join(follower::FOLLOWER_FILE);
+    fsutil::write_private_durable(&mark, b"rdy follower 1\n{}\n").unwrap();
+    let second = base.path().join("second");
+    std::fs::hard_link(&mark, &second).unwrap();
+    assert_eq!(
+        follower::read_mark(&dir).unwrap_err().to_string(),
+        "the follower mark is not a private regular file"
+    );
+    std::fs::remove_file(&second).unwrap();
+    assert_ne!(
+        follower::read_mark(&dir).unwrap_err().to_string(),
+        "the follower mark is not a private regular file",
+        "one name: the mark is judged by its text"
+    );
+    std::fs::remove_file(&mark).unwrap();
+
+    // a reader that outlived its store reads on; a reopen is refused while it lives
+    let s = Store::open(&dir).unwrap();
+    let r = s.reader();
+    drop(s);
+    assert!(matches!(
+        Store::open(&dir),
+        Err(StoreError::HeldByReader(_))
+    ));
+    assert_eq!(r.get_raw(&h).unwrap().1, b"x");
+    drop(r);
+    let s = Store::open(&dir).unwrap();
+    assert!(!s.open_report().index_rebuilt);
+    assert_eq!(s.get_raw(&h).unwrap().1, b"x");
+    s.close().unwrap();
+}

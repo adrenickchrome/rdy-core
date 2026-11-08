@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: the fixtures write real project directories (seams rule, FW-XP1 D-1RXEA).
 //! ok8: a redaction report scans every carried text and reports the retained copies (D-EPK1Z:
 //! "In this release a redaction reports, and does not erase, the stored records that quote the
 //! redacted content"; D-B9S45 fixes the warning text). The carried records are ASSESSMENT,

@@ -158,6 +158,7 @@ fn missing_objects(dir: &std::path::Path) -> usize {
         .arg(dir)
         .args(["rev-list", "--objects", "--all", "--missing=print"])
         .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -375,4 +376,29 @@ fn msw18_a_checkout_made_shallow_after_its_first_index_is_refused() {
     let e = index_of(&r).unwrap_err();
     assert_eq!(e.code, "E_CONFIG", "{e}");
     assert!(e.message.contains("shallow clone"), "{}", e.message);
+}
+
+/// The fixture runs git with an empty private folder as `core.hooksPath`, not a host path such as
+/// `/dev/null`: the same fixture then runs on every host, and no hook of the machine or of the
+/// repository runs.
+#[test]
+fn wx27_git_fixture_uses_an_empty_hooks_directory() {
+    let g = GitRepo::new();
+    let hooks = std::path::PathBuf::from(g.run(&["config", "core.hooksPath"]));
+    assert!(hooks.is_absolute(), "{hooks:?} is a native absolute path");
+    assert!(hooks.is_dir(), "{hooks:?} is a folder");
+    assert_eq!(
+        std::fs::read_dir(&hooks).unwrap().count(),
+        0,
+        "{hooks:?} is empty"
+    );
+    assert_eq!(hooks, git_hooks_dir());
+    // a failing hook of the repository's own folder does not run
+    let hook = g.path().join(".git").join("hooks").join("pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    rdy_store::pio::set_mode(&hook, 0o755).unwrap();
+    g.write("a.rs", "a\n");
+    g.run(&["add", "-A"]);
+    g.run(&["commit", "-q", "-m", "feat: a"]);
 }

@@ -3,6 +3,8 @@
 //! source store: no sentinel, quarantine, cut, `FORMAT` repair, source index or removal. Every
 //! write entry refuses before it appends, and every reader holds the store's lock and the
 //! private index until the last one drops.
+#[path = "support/files.rs"]
+mod files;
 #[path = "support/redaction.rs"]
 mod redaction_fixture;
 
@@ -27,8 +29,11 @@ fn tree(dir: &Path) -> Tree {
         if m.is_dir() {
             out.insert(p.clone(), None);
             out.extend(tree(&p));
+        } else if m.is_symlink() {
+            // a link is recorded, never read through
+            out.insert(p.clone(), Some((m.len(), vec![])));
         } else {
-            out.insert(p.clone(), Some((m.len(), std::fs::read(&p).unwrap())));
+            out.insert(p.clone(), Some((m.len(), files::contents(&p, &m))));
         }
     }
     out
@@ -631,7 +636,6 @@ fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
 
 /// A store whose upgrade plan cannot be made never opens as current: the planner's refusal is
 /// the open's, under both policies, and nothing is upgraded or written.
-#[cfg(unix)]
 #[test]
 fn ok9_a_plan_that_cannot_be_made_never_opens() {
     use rdy_store::error::UpgradeFailure;
@@ -654,7 +658,11 @@ fn ok9_a_plan_that_cannot_be_made_never_opens() {
     let mut s = Store::create(&dir).unwrap();
     s.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
     s.close().unwrap();
+    // a file link: on Windows a file symbolic link
+    #[cfg(unix)]
     rdy_store::pio::symlink(dir.join("FORMAT"), dir.join("stray")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(dir.join("FORMAT"), dir.join("stray")).unwrap();
     let before = tree(base.path());
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         let e = Store::open_with_registry_for_tests(&dir, policy, &add_test)

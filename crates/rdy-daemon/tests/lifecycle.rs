@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it uses Unix sockets. FW-XP1 Phase 4 ports it.
 //! Idle shutdown, stop and drain (life1).
 mod common;
 use common::*;
@@ -7,7 +5,6 @@ use rdy_daemon::*;
 use serde_json::json;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 #[tokio::test]
 async fn life1_a_detached_daemon_exits_after_the_idle_timeout() {
@@ -23,7 +20,7 @@ async fn life1_a_detached_daemon_exits_after_the_idle_timeout() {
         .unwrap();
     assert!(matches!(reason, ExitReason::Idle), "{reason:?}");
     assert!(start.elapsed() >= Duration::from_millis(600));
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    assert!(socket_gone(&d.run).await && pid_file_gone(&d.run).await);
 }
 
 #[tokio::test]
@@ -60,7 +57,7 @@ async fn life1_a_connection_still_in_its_hello_holds_off_the_idle_timer() {
         c.idle_timeout = Some(Duration::from_millis(400))
     })
     .await;
-    let _s = UnixStream::connect(d.run.socket()).await.unwrap(); // no hello sent
+    let _s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap(); // no hello sent
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(
         !d.task.is_finished(),
@@ -91,7 +88,10 @@ async fn life1_stop_drains_an_in_flight_request_then_closes() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let t0 = Instant::now();
     d.handle.stop();
-    assert!(!d.run.socket().exists(), "the socket goes first");
+    // a pipe's name lasts while the in-flight connection holds an instance: only a Unix socket
+    // shows the unlink before the drain ends
+    #[cfg(unix)]
+    assert!(socket_gone(&d.run).await, "the socket goes first");
     let mut out = String::new();
     r.read_line(&mut out).await.unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -104,6 +104,11 @@ async fn life1_stop_drains_an_in_flight_request_then_closes() {
     );
     let reason = d.task.await.unwrap().unwrap();
     assert!(matches!(reason, ExitReason::Stopped));
+    drop(r);
+    assert!(
+        socket_gone(&d.run).await,
+        "the endpoint is gone after the drain"
+    );
     assert!(t0.elapsed() < Duration::from_secs(3));
     assert_eq!(d.echo.ended.lock().unwrap().len(), 1);
 }
@@ -161,14 +166,14 @@ async fn life1_connections_after_stop_are_refused() {
     let d = daemon("1", true, |_| {}).await;
     d.handle.stop();
     d.task.await.unwrap().unwrap();
-    assert!(UnixStream::connect(d.run.socket()).await.is_err());
+    assert!(rdy_daemon::sys::connect(&d.run.socket()).await.is_err());
 }
 
 #[tokio::test]
 async fn life1_a_stop_closes_a_connection_still_in_its_hello() {
     use tokio::io::AsyncReadExt;
     let d = daemon("1", true, |_| {}).await;
-    let mut s = UnixStream::connect(d.run.socket()).await.unwrap(); // no hello sent
+    let mut s = rdy_daemon::sys::connect(&d.run.socket()).await.unwrap(); // no hello sent
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(d.handle.connections(), 1);
     let t0 = Instant::now();
@@ -187,22 +192,55 @@ async fn life1_a_stop_closes_a_connection_still_in_its_hello() {
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 }
 
+/// `stop` removes the run files before it returns, and `run` is a task of this single-threaded
+/// test runtime, so nothing here yields until the successor's files are in place: `run` reaches
+/// its cleanup only at the `await` after them. That order does not depend on how long the
+/// endpoint takes to go, which on Windows is until the old listener drops.
 #[tokio::test]
 async fn life1_a_handle_stop_leaves_a_successors_run_files_alone() {
     let d = daemon("1", true, |_| {}).await;
     d.handle.stop();
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
-    // a successor binds the same paths before the old `run` gets to its cleanup
-    let successor = std::os::unix::net::UnixListener::bind(d.run.socket()).unwrap();
+    // synchronous: no await between `stop` and the successor's files
+    assert!(!d.run.pid_file().exists(), "stop removed the pid file");
     std::fs::write(d.run.pid_file(), "424242\n").unwrap();
+    // a Unix successor binds the unlinked socket path now; a Windows pipe name is held until the
+    // old listener drops, so there the endpoint is checked on its own below
+    #[cfg(unix)]
+    let successor = {
+        assert!(!d.run.socket().exists(), "stop unlinked the socket");
+        rdy_daemon::sys::bind(&d.run.socket()).unwrap()
+    };
     assert!(matches!(
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(d.run.socket().exists(), "the successor's socket is kept");
     assert_eq!(
         std::fs::read_to_string(d.run.pid_file()).unwrap(),
-        "424242\n"
+        "424242\n",
+        "the old daemon's cleanup keeps the successor's pid file"
+    );
+    #[cfg(unix)]
+    {
+        assert!(socket_live(&d.run).await, "the successor's socket is kept");
+        drop(successor);
+    }
+}
+
+/// The endpoint of a stopped daemon goes with it (on Windows, with its listener), and a successor
+/// can then take the name.
+#[tokio::test]
+async fn life1_a_stopped_daemons_endpoint_is_gone_and_can_be_taken() {
+    let d = daemon("1", true, |_| {}).await;
+    d.handle.stop();
+    assert!(matches!(
+        d.task.await.unwrap().unwrap(),
+        ExitReason::Stopped
+    ));
+    assert!(socket_gone(&d.run).await && pid_file_gone(&d.run).await);
+    let successor = bind_successor(&d.run).await;
+    assert!(
+        socket_live(&d.run).await,
+        "the successor's endpoint answers"
     );
     drop(successor);
 }
@@ -219,7 +257,7 @@ async fn life1_the_stop_op_removes_the_run_files() {
         d.task.await.unwrap().unwrap(),
         ExitReason::Stopped
     ));
-    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    assert!(socket_gone(&d.run).await && pid_file_gone(&d.run).await);
 }
 
 /// A client that hears `exiting` spawns a successor at once; the old daemon must have removed
@@ -231,13 +269,21 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
     // not when the runtime next gets round to it
     let (run, line) = (d.run.clone(), hello("2", "ctl", d.dir.path()));
     let seen = std::thread::spawn(move || {
-        use std::io::{BufRead, Write};
-        let mut s = std::os::unix::net::UnixStream::connect(run.socket()).unwrap();
-        s.write_all(line.as_bytes()).unwrap();
-        let mut first = String::new();
-        std::io::BufReader::new(&s).read_line(&mut first).unwrap();
-        let present = (run.socket().exists(), run.pid_file().exists());
-        (first, present)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let mut r =
+                tokio::io::BufReader::new(rdy_daemon::sys::connect(&run.socket()).await.unwrap());
+            r.get_mut().write_all(line.as_bytes()).await.unwrap();
+            let mut first = String::new();
+            r.read_line(&mut first).await.unwrap();
+            // the client holds an instance of the pipe, so a pipe's name proves nothing here
+            let socket_present = cfg!(unix) && !socket_gone(&run).await;
+            let present = (socket_present, run.pid_file().exists());
+            (first, present)
+        })
     })
     .join()
     .unwrap();
@@ -248,14 +294,15 @@ async fn life1_a_version_replaced_daemon_removes_its_run_files_before_it_answers
         (false, false),
         "the run files are gone by the time the client reads exiting"
     );
-    // the client's successor binds the same paths at once
-    let successor = std::os::unix::net::UnixListener::bind(d.run.socket()).unwrap();
+    // the client's successor writes its pid file at once, then binds the endpoint (on Windows
+    // that waits for the old listener, so the pid file goes first)
     std::fs::write(d.run.pid_file(), "424242\n").unwrap();
+    let successor = bind_successor(&d.run).await;
     assert!(matches!(
         d.task.await.unwrap().unwrap(),
         ExitReason::VersionReplaced
     ));
-    assert!(d.run.socket().exists(), "the successor's socket is kept");
+    assert!(socket_live(&d.run).await, "the successor's socket is kept");
     assert_eq!(
         std::fs::read_to_string(d.run.pid_file()).unwrap(),
         "424242\n"

@@ -1,0 +1,16 @@
+# The isolated probe of what an operating system's file lock does across a handle clone and a
+# child process (FW-XP1 Phase 4). rdy's start lock chooses its parent-to-child handoff from these
+# results. It uses the standard library only and is no member of the workspace. Run it on each
+# platform with `cargo run --release` in this directory: it prints one line per case.
+[package]
+name = "rdy-start-lock-transfer-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[[bin]]
+name = "rdy-start-lock-transfer-probe"
+path = "src/main.rs"

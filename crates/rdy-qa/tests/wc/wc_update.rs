@@ -1,5 +1,3 @@
-#![cfg(unix)]
-// Unix only: it sets file modes and makes symlinks. FW-XP1 Phase 4 ports it.
 //! wcup1: rdy update brings in the view's changes made elsewhere, keeps local edits, merges disjoint
 //! ones, writes conflicts beside the file as .theirs.yaml, handles a folder renamed on both sides,
 //! and resolution goes through rdy add (spec §12.4, D-WY79P).
@@ -559,23 +557,8 @@ fn wcup1_a_folder_the_store_deleted_stays_while_a_doc_in_it_is_edited_here() {
     );
 }
 
-/// Why a test skips when a read-only directory takes writes.
-const READ_ONLY_REASON: &str = "a read-only directory takes writes here (running as root?)";
-
-/// Whether `dir` takes a write although its mode is read-only (running as root). The probe file
-/// is removed again.
-fn takes_writes_when_read_only(dir: &std::path::Path) -> bool {
-    let probe = dir.join(".hd10-probe");
-    let wrote = std::fs::write(&probe, "").is_ok();
-    if wrote {
-        let _ = std::fs::remove_file(&probe);
-    }
-    wrote
-}
-
 #[test]
 fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
-    use std::os::unix::fs::PermissionsExt;
     let (s, seed) = seeded();
     ok(&s, &["checkout"]);
     set_body(&s, "notes.yaml", &seed.note, "My precious local edit.");
@@ -584,21 +567,16 @@ fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
         "work",
         json!([{"op": "create", "type": "doc", "parent": seed.folder, "fields": {"name": "zz", "title": "Zz", "doc_type": "page"}}]),
     );
-    let mode = |m: u32| {
-        std::fs::set_permissions(at(&s, "guides"), std::fs::Permissions::from_mode(m)).unwrap()
-    };
-    mode(0o555);
-    if takes_writes_when_read_only(&at(&s, "guides")) {
-        mode(0o755);
+    let Some(guides) = read_only_dir(&at(&s, "guides")) else {
         rdy_qa::skip::skip(
             "wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker",
             rdy_qa::skip::Why::Prerequisite,
             READ_ONLY_REASON,
         );
         return;
-    }
+    };
     let (okk, v) = json(&s, &["update"]);
-    mode(0o755);
+    drop(guides);
     assert!(!okk && v["code"] == E_IO, "{v}");
     ok(&s, &["status"]);
     let (okk, v) = json(&s, &["update"]);
@@ -612,7 +590,6 @@ fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
 
 #[test]
 fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
-    use std::os::unix::fs::PermissionsExt;
     let (s, seed) = seeded();
     ok(&s, &["checkout"]);
     set_body(&s, "guides/intro.yaml", &seed.prose, "Local.");
@@ -625,21 +602,16 @@ fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
         ]),
     );
     // guides/intro.yaml is written first; notes.yaml then fails in the read-only root
-    let root = s.dir.path().to_path_buf();
-    let mode =
-        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
-    mode(0o555);
-    if takes_writes_when_read_only(&root) {
-        mode(0o755);
+    let Some(root) = read_only_dir(s.dir.path()) else {
         rdy_qa::skip::skip(
             "wcup1_an_interrupted_update_is_finished_by_rdy_update",
             rdy_qa::skip::Why::Prerequisite,
             READ_ONLY_REASON,
         );
         return;
-    }
+    };
     let (okk, v) = json(&s, &["update"]);
-    mode(0o755);
+    drop(root);
     assert!(!okk && v["code"] == E_IO, "{v}");
     assert_eq!(
         entry(&s, "guides/intro.yaml", &seed.claim)["body"].as_str(),
@@ -909,7 +881,6 @@ fn wcup1_update_of_a_kept_rename_asks_for_the_file_in_the_way_first() {
 
 #[test]
 fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
-    use std::os::unix::fs::PermissionsExt;
     let (s, seed) = seeded();
     ok(&s, &["checkout"]);
     store_write(
@@ -922,22 +893,17 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
         ]),
     );
     // guides/intro.yaml is written, notes.yaml fails in the read-only root, zfold/ is not reached
-    let root = s.dir.path().to_path_buf();
-    let mode =
-        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
-    mode(0o555);
-    // as root a read-only directory still takes writes: the update cannot be stopped here
-    if takes_writes_when_read_only(&root) {
-        mode(0o755);
+    // as root or elevated a read-only directory still takes writes: the update cannot be stopped
+    let Some(root) = read_only_dir(s.dir.path()) else {
         rdy_qa::skip::skip(
             "msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes",
             rdy_qa::skip::Why::Prerequisite,
             READ_ONLY_REASON,
         );
         return;
-    }
+    };
     let (okk, v) = json(&s, &["update"]);
-    mode(0o755);
+    drop(root);
     assert!(!okk && v["code"] == E_IO, "{v}");
     assert!(!at(&s, "zfold").exists(), "stopped before the new folder");
     put(&s, "zfold", "mine\n");
@@ -955,7 +921,7 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
 /// Stops an update midway, as `msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes`
 /// does: the claim and the note change with `extra`, the root goes read-only, so
 /// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
-/// still takes writes (running as root): the caller skips. `test` is the caller's name, for the
+/// still takes writes (root or an elevated token): the caller skips. `test` is the caller's name, for the
 /// skip line.
 fn msw5_interrupt(
     test: &str,
@@ -963,24 +929,18 @@ fn msw5_interrupt(
     seed: &Seed,
     extra: &[serde_json::Value],
 ) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     let mut ops = vec![
         json!({"op": "update", "id": seed.claim, "body": "Theirs claim."}),
         json!({"op": "update", "id": seed.note, "body": "Theirs."}),
     ];
     ops.extend_from_slice(extra);
     store_write(s, "work", serde_json::Value::Array(ops));
-    let root = s.dir.path().to_path_buf();
-    let mode =
-        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
-    mode(0o555);
-    if takes_writes_when_read_only(&root) {
-        mode(0o755);
+    let Some(root) = read_only_dir(s.dir.path()) else {
         rdy_qa::skip::skip(test, rdy_qa::skip::Why::Prerequisite, READ_ONLY_REASON);
         return false;
-    }
+    };
     let (okk, v) = json(s, &["update"]);
-    mode(0o755);
+    drop(root);
     assert!(!okk && v["code"] == E_IO, "{v}");
     true
 }
@@ -1002,7 +962,7 @@ fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("mine.yaml");
     std::fs::write(&target, "mine\n").unwrap();
-    std::os::unix::fs::symlink(&target, at(&s, "zdoc.yaml")).unwrap();
+    rdy_qa::platform::symlink(&target, &at(&s, "zdoc.yaml")).unwrap();
     let (okk, v) = json(&s, &["update"]);
     assert!(
         std::fs::symlink_metadata(at(&s, "zdoc.yaml"))
@@ -1086,7 +1046,7 @@ fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() 
     let target = outside.path().join("mine.yaml");
     std::fs::write(&target, "mine\n").unwrap();
     std::fs::remove_file(at(&s, "zlink.yaml")).unwrap();
-    std::os::unix::fs::symlink(&target, at(&s, "zlink.yaml")).unwrap();
+    rdy_qa::platform::symlink(&target, &at(&s, "zlink.yaml")).unwrap();
     let (okk, v) = json(&s, &["update"]);
     assert!(okk, "{v}");
     assert_eq!(
