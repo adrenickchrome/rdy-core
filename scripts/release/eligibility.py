@@ -105,6 +105,13 @@ RECORDS_PATH = 'release-keys/records.txt'
 
 # The historical key signs through v0.41.0 (D-Z5ES3; `HISTORICAL_LAST` in rdy-qa's release_keys.rs).
 HISTORICAL_LAST_MINOR = 41
+# The release kind is S's one product switch: `const PREVIEW: bool = <literal>;` in the CLI's main.rs.
+PREVIEW_SOURCE = 'crates/rdy-cli/src/main.rs'
+PREVIEW_DECLARATION_RE = re.compile(r'const PREVIEW: bool = (true|false);')
+PREVIEW_MENTION_RE = re.compile(r'\bPREVIEW\s*:')
+# The target set that published releases already support. A policy target outside it needs a new_platform
+# card. It is not the packaging target table.
+QUALIFIED_TARGETS = ('aarch64-apple-darwin', 'x86_64-unknown-linux-gnu')
 FIRST_PARENT_MAX = 1000          # commits walked down main's first-parent chain
 RUNS_MAX = 64                    # run attempts named by one release
 APPROVALS_MAX = ev.RECEIPTS_MAX  # first-use approval runs named by one request
@@ -719,16 +726,54 @@ def _published(releases):
     return minors
 
 
-def _required_cards(version, policy, releases):
-    """Current policy and the published history decide which exception cards a release needs."""
+def preview_declared(data):
+    """The value of the one `const PREVIEW: bool = true;` or `... = false;` line of `data`, the bytes of
+    PREVIEW_SOURCE. Any other line that declares PREVIEW makes the declaration ambiguous, and an ambiguous,
+    computed, indented or missing declaration refuses."""
+    try:
+        lines = data.decode('utf-8').split('\n')
+    except UnicodeDecodeError:
+        lines = []
+    declared = [line for line in lines if PREVIEW_MENTION_RE.search(line)]
+    match = PREVIEW_DECLARATION_RE.fullmatch(declared[0]) if len(declared) == 1 else None
+    if match is None:
+        raise Refused(MISMATCH, 'the release commit has no single literal PREVIEW declaration in ' + PREVIEW_SOURCE)
+    return match.group(1) == 'true'
+
+
+def _release_kind(facts, record, version, commit):
+    """True for a preview: S's one exact PREVIEW declaration, read from the product source at S. The caller
+    never supplies it. The candidate archive names must be the ones that declaration packages: the packager
+    names an archive from the binary's version output, and each native checker's passed `version` check
+    in E ties that output to the archive name, so the names also bind the packaged version output."""
+    preview = preview_declared(facts.file(PREVIEW_SOURCE, commit, SOURCE_FILE_MAX).data)
+    if preview:
+        names = [cand.archive_name(version, t) for t in TARGETS]
+    else:
+        names = ['rdy-' + version + '-' + t + '.tar.gz' for t in TARGETS]
+    if ([f['name'] for f in record.value['candidate']['artifacts']] != names
+            or [t['archive']['name'] for t in record.value['targets']] != names):
+        raise Refused(MISMATCH, 'the candidate archive names do not match the PREVIEW declaration at the release commit')
+    return preview
+
+
+def _required_cards(version, policy, releases, preview):
+    """The exception cards a release needs, from authenticated facts only. Each applies on its own and
+    they accumulate, in this order: `release_1` when S disables PREVIEW, `key_change` while no published
+    release has shipped the policy's first machine tag, and `new_platform` when the policy admits a target
+    that published releases do not already support. No card stands in for another, and a revocation card
+    satisfies none of them: `_card_authority` refuses it."""
     minor = _minor(version)
     earlier = [m for m in _published(releases) if m < minor]
     first = int(TAG_RE.fullmatch(policy.value['first_machine_tag']).group(1))
-    if not any(m > HISTORICAL_LAST_MINOR for m in earlier):
-        return ('release_1',)
+    required = []
+    if not preview:
+        required.append('release_1')
     if not any(m >= first for m in earlier):
-        return ('key_change',)
-    return ()
+        required.append('key_change')
+    if set(policy.value['targets']) - set(QUALIFIED_TARGETS):
+        required.append('new_platform')
+    return tuple(required)
 
 
 def _channel_receipt(card, channel):
@@ -1038,6 +1083,7 @@ def _authenticate(facts, request, mode, releases, reserved, resolve_cards, inher
     if len(named_runs | runs) > RUNS_MAX:
         raise Refused(LIMIT, 'the release names more than ' + str(RUNS_MAX) + ' run attempts')
     _source(facts, record, version, commit)
+    preview = _release_kind(facts, record, version, commit)
     _security(facts, record, commit)
     if reserved is not None:
         observation = None
@@ -1058,7 +1104,7 @@ def _authenticate(facts, request, mode, releases, reserved, resolve_cards, inher
             raise Refused(MISMATCH, 'the approval scope ' + key.replace('_', ' ')
                           + ' does not match the authenticated release facts')
     cards = resolve_cards(facts, main, request, record, evidence_policy, current_evidence_policy, expected,
-                          _required_cards(version, policy, releases))
+                          _required_cards(version, policy, releases, preview))
 
     signer = {'key_arn': policy.value['key_arn'], 'fingerprint': policy.value['fingerprint'],
               'first_machine_tag': policy.value['first_machine_tag'],
