@@ -25,6 +25,11 @@ import zlib
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts' / 'release'))
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The consumer and controller tests load the release scripts as one module set; import them first so that this
+# module, run alone or in the discovered suite, shares that set (one error class, one eligibility module).
+import test_release_controller as ctl  # noqa: E402
+import test_release_publish as pub  # noqa: E402
 import candidate as cand  # noqa: E402
 import evidence as ev  # noqa: E402
 import github as gh  # noqa: E402
@@ -2915,6 +2920,573 @@ class WiredWorkflows(WorkflowCase, Refusals):
 def helper_needs_token(run):
     """Every helper command reads GitHub except `install.py cleanup`, which touches only local paths."""
     return ' cleanup ' not in run + ' '
+
+
+# ---------------------------------------------------------------------------------------------
+# The handoff: producer output through the unchanged consumer and controller (rprd5)
+# ---------------------------------------------------------------------------------------------
+
+import contextlib  # noqa: E402
+import http.client  # noqa: E402
+import importlib.util  # noqa: E402
+import inspect  # noqa: E402
+import socket  # noqa: E402
+import types  # noqa: E402
+import urllib.request  # noqa: E402
+
+FORBIDDEN_ENV_PREFIXES = ('AWS_', 'ACTIONS_ID_TOKEN_REQUEST_')
+FORBIDDEN_ENV_NAMES = ('RDY_RELEASE_KEY_ARN', 'RDY_RELEASE_ROLE_ARN', 'GITHUB_TOKEN', 'GH_TOKEN')
+PRIVILEGED_NAME_RE = re.compile(r'(create|reserve|sign|promote|publish|mint|issue|assume|retain|upload|put_item|'
+                                r'delete|update|open_session|before_)', re.I)
+KEY_COMMENT_FREE_BOUNDS = (61440, 57344, 43008, 1048576, 65536, 60000)   # the plan's size bounds: not identifiers
+
+
+class SpyEnviron(dict):
+    """The process environment, recording every read of a credential or AWS name."""
+
+    def __init__(self, values, events):
+        dict.__init__(self, values)
+        self.events = events
+
+    def _note(self, key):
+        if isinstance(key, str) and (key.startswith(FORBIDDEN_ENV_PREFIXES) or key in FORBIDDEN_ENV_NAMES):
+            self.events.append(('environment', key))
+
+    def __getitem__(self, key):
+        self._note(key)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        self._note(key)
+        return dict.get(self, key, default)
+
+    def __contains__(self, key):
+        self._note(key)
+        return dict.__contains__(self, key)
+
+
+class AwsSpy(types.ModuleType):
+    """Stands in for an AWS client library: any use is an event and a failure."""
+
+    def __init__(self, name, events):
+        types.ModuleType.__init__(self, name)
+        self.__dict__['_events'] = events
+
+    def __getattr__(self, name):
+        self._events.append(('aws', self.__name__ + '.' + name))
+        raise AssertionError('spy: a producer used ' + self.__name__ + '.' + name)
+
+
+class Effects(object):
+    """Spies that fail on every effect a producer must never have: AWS, a production Sign, a reservation,
+    a publication, a secret read, a spawned program and a network connection. `allow` names the one program
+    that may start (the disposable test signer's fixed ssh-keygen); every start is recorded."""
+
+    def __init__(self, allow=()):
+        self.events, self.allow, self.started, self.stack = [], tuple(allow), [], None
+
+    def _refuse(self, label):
+        events = self.events
+
+        def spy(*args, **kwargs):
+            events.append((label,))
+            raise AssertionError('spy: ' + label)
+        return spy
+
+    def __enter__(self):
+        self.stack = contextlib.ExitStack()
+        enter, events, real = self.stack.enter_context, self.events, subprocess.Popen
+
+        def popen(argv, *args, **kwargs):
+            program = argv[0] if isinstance(argv, (list, tuple)) and argv else argv
+            if program in self.allow:
+                self.started.append((list(argv), kwargs.get('env')))
+                return real(argv, *args, **kwargs)
+            events.append(('spawn', str(program)))
+            raise AssertionError('spy: a producer started ' + str(program))
+        enter(mock.patch.object(subprocess, 'Popen', popen))
+        for owner, names in ((os, ('system', 'execv', 'execve', 'posix_spawn', 'fork')),
+                             (socket.socket, ('connect', 'connect_ex')),
+                             (socket, ('create_connection', 'getaddrinfo')),
+                             (urllib.request, ('urlopen',)),
+                             (http.client.HTTPConnection, ('connect',))):
+            for name in names:
+                if hasattr(owner, name):
+                    enter(mock.patch.object(owner, name, self._refuse(owner.__name__ + '.' + name
+                                                                      if hasattr(owner, '__name__') else name)))
+        enter(mock.patch.object(os, 'environ', SpyEnviron(os.environ, events)))
+        enter(mock.patch.dict(sys.modules, {n: AwsSpy(n, events) for n in ('boto3', 'botocore', 'awscli')}))
+        # The signer, the reservation, the release and the publisher: no call from a producer, ever.
+        for module in (ctl.CONTROLLER, pub.PUBLISH, pub.SIGN):
+            for name, value in list(vars(module).items()):
+                if inspect.isfunction(value) and value.__module__ == module.__name__ and PRIVILEGED_NAME_RE.match(name):
+                    enter(mock.patch.object(module, name, self._refuse(module.__name__ + '.' + name)))
+        for name in ('before_public_key', 'before_sign', 'reserve', 'retain_signature', 'issue_credentials',
+                     'open_session'):
+            enter(mock.patch.object(ctl.CONTROLLER.Controller, name, self._refuse('Controller.' + name)))
+        for name in dir(ctl.GITHUB.GitHub):
+            if PRIVILEGED_NAME_RE.match(name) and callable(getattr(ctl.GITHUB.GitHub, name)):
+                enter(mock.patch.object(ctl.GITHUB.GitHub, name, self._refuse('GitHub.' + name)))
+        return self
+
+    def __exit__(self, *exc):
+        self.stack.close()
+        return False
+
+
+class Handoff(WorkflowCase):
+    def setUp(self):
+        self.approval = producer('approval')
+        self.pev = producer('evidence')
+        self.elig = self.approval.elig
+        self.assertIs(self.elig, ctl.ELIGIBILITY, 'one module set with the consumer tests')
+
+    def refused(self, text, call, *args, **kwargs):
+        with self.assertRaises((ctl.Refused, self.elig.Refused)) as caught:
+            call(*args, **kwargs)
+        self.assertEqual(str(caught.exception), text)
+
+    # -- the controller world, fed by the producer ------------------------------------------------------
+
+    def first_use(self, schema=2):
+        """The first machine preview under a key_change card whose approval run is live (not archived)."""
+        rig = ctl.Rig(ctl.base.first_machine_world())
+        receipt = rig.w.add_card('key_change', via='first_use', schema=schema)
+        return rig, receipt, dict(rig.w.approval_runs[0])
+
+    def produce(self, rig, run):
+        """The approval producer's receipt bridge over the controller world's read-only fact source."""
+        produced = self.approval.receipt(rig.git, run['run_id'], run['artifact_id'], 'key_change', ctl.P)
+        self.assertEqual(rig.w.mutations, [])
+        return produced
+
+    def archive(self, rig, produced):
+        """The signer's archive record for the producer's exact bytes, seeded with the enrolled lineage."""
+        rig.w.archive[produced.receipt_sha256] = rig.w.envelope(produced.request_bytes, produced.receipt_bytes,
+                                                                produced.projection_bytes)
+        return rig.seed_archive(produced.receipt_sha256)
+
+    @staticmethod
+    def key(receipt):
+        return ('APPROVAL#' + receipt, 'RECORD')
+
+    def to_credentials(self, rig):
+        rig.reserve_version()
+        ctrl = rig.controller()
+        ctrl.admit()
+        ctrl.issue_credentials(rig.provider())
+        return ctrl
+
+    def approval_puts(self, rig):
+        return [w for w in rig.table.writes if w[0][0].startswith('APPROVAL#')]
+
+    def test_rprd5_first_use_and_retained_reuse(self):
+        elig, evidence = self.elig, ctl.EVIDENCE
+        # -- Before STS: first use is provisional, built from the producer's exact bytes. -----------------------
+        rig, receipt, run = self.first_use()
+        produced = self.produce(rig, run)
+        self.assertEqual((produced.receipt_sha256, produced.locator), (receipt, run))
+        first = rig.qualify()
+        card = first.cards[0]
+        self.assertIsInstance(first, elig.Preliminary)
+        self.assertIsInstance(card, elig.ProvisionalCard)
+        self.assertEqual(card.source, 'first_use')
+        self.assertEqual((card.request_bytes, card.receipt_bytes, card.projection_bytes),
+                         (produced.request_bytes, produced.receipt_bytes, produced.projection_bytes))
+        self.assertEqual((rig.table.reads, rig.table.writes), ([], []))
+
+        # -- A retained approval is a pending archive card: no bytes, no provider read, no archive read. -----------
+        held, _, held_run = self.first_use()
+        held_produced = self.produce(held, held_run)
+        seeded = self.archive(held, held_produced)
+        held.w.approval_runs.clear()
+        for name in ('approval_record', 'approval_lineage', 'run_approvals', 'approval_responses'):
+            held.w.errors[name] = AssertionError('a read before credentials: ' + name)
+        pending = held.qualify().cards[0]
+        self.assertIsInstance(pending, elig.PendingCard)
+        self.assertEqual((pending.kind, pending.receipt_sha256, pending.source),
+                         ('key_change', held_produced.receipt_sha256, 'pending_archive'))
+        self.assertNotIsInstance(pending, elig.ProvisionalCard)
+        self.assertNotIsInstance(card, elig.PendingCard)
+        for name in ('request_bytes', 'receipt_bytes', 'projection_bytes', 'envelope_bytes'):
+            self.assertFalse(hasattr(pending, name), name)
+        self.assertEqual(held.table.reads, [])
+        held.w.errors.clear()
+
+        # -- After STS and authenticated archive access: first use archives the exact producer bytes. ---------
+        e_bytes = rig.w.members[(ctl.base.EVID_ART, 'release-record.json')]
+        ctrl = self.to_credentials(rig)
+        reservation = rig.w.tags[rig.w.refs['tags/reserve/v' + rig.w.v][1]]['message_bytes']
+        self.assertEqual(reservation, first.tuple_bytes)
+        self.assertNotIn(self.key(receipt), rig.table.items)
+        ctrl.open_session(rig.table)
+        stored = rig.table.items[self.key(receipt)]
+        envelope = evidence.parse_archive_envelope(stored)
+        self.assertEqual((envelope.value['request_body'].encode(), envelope.value['receipt_body'].encode(),
+                          envelope.value['provider_projection_body'].encode()),
+                         (produced.request_bytes, produced.receipt_bytes, produced.projection_bytes))
+        acceptance = dict(envelope.acceptance)
+        self.assertEqual((acceptance['receipt_sha256'], acceptance['request_sha256'],
+                          acceptance['provider_projection_sha256']),
+                         (receipt, sha(produced.request_bytes), sha(produced.projection_bytes)))
+        self.assertEqual(ctrl.qualified.cards[0].source, 'archive')
+        self.assertEqual(rig.kms.calls, [])
+        self.assertEqual(len(self.approval_puts(rig)), 1)
+        # The retained card meets the same archive step with the producer's bytes: pending, then archive.
+        held_ctrl = self.to_credentials(held)
+        held_ctrl.open_session(held.table)
+        retained = held_ctrl.qualified.cards[0]
+        self.assertEqual((retained.source, retained.envelope_bytes), ('archive', seeded))
+        self.assertEqual((retained.request_bytes, retained.receipt_bytes, retained.projection_bytes),
+                         (held_produced.request_bytes, held_produced.receipt_bytes, held_produced.projection_bytes))
+        self.assertEqual(held.table.items[self.key(held_produced.receipt_sha256)], seeded)
+        self.assertEqual(self.approval_puts(held), [], 'a retained approval is read, never rewritten')
+
+        # -- Reuse keeps the exact envelope and acceptance after the provider evidence changes or goes. --------
+        self.assertEqual(rig.sign(ctrl), ctl.SIGNATURE)
+        self.assertEqual(rig.kms.signs, 1)
+        retained_signature = rig.table.items[(rig.tuple_pk(), 'SIGNATURE')]
+        ctl.base.respond(rig.w, run['run_id'], repository=digest(95), run_attempt=digest(96), artifact=digest(97),
+                         job=digest(98))
+        rig.w.artifacts[run['artifact_id']]['expired'] = True
+        rig.w.reviews[run['run_id']] = []
+        rig.w.calls = []
+        fresh = rig.session(rig.rerun())
+        again = fresh.qualified.cards[0]
+        self.assertEqual((again.source, again.envelope_bytes), ('archive', stored))
+        self.assertEqual(rig.table.items[self.key(receipt)], stored)
+        self.assertEqual(evidence.parse_archive_envelope(rig.table.items[self.key(receipt)]).acceptance, acceptance)
+        self.assertEqual(len(self.approval_puts(rig)), 1, 'no overwrite')
+        for name in ('run_approvals', 'approval_responses'):
+            self.assertNotIn(name, [c[0] for c in rig.w.calls])
+        self.assertEqual(json.loads(again.projection_bytes)['audit'], json.loads(produced.projection_bytes)['audit'])
+        self.assertEqual(sha(again.projection_bytes), sha(produced.projection_bytes))
+        # Recovery keeps E and T; the retained signature returns and no second Sign exists.
+        answer = fresh.recover(first.tuple_bytes)
+        self.assertEqual(answer.signature, retained_signature)
+        self.assertEqual(rig.kms.signs, 1)
+        self.assertEqual(rig.w.members[(ctl.base.EVID_ART, 'release-record.json')], e_bytes)
+        self.assertEqual(fresh.qualified.evidence_bytes, e_bytes)
+        self.assertEqual(fresh.qualified.tuple_bytes, first.tuple_bytes)
+        self.assertEqual(rig.w.tags[rig.w.refs['tags/reserve/v' + rig.w.v][1]]['message_bytes'], reservation)
+
+        # -- An unknown signing result permits no new Sign, and E, T and the archive stay as they were. --------
+        rig, receipt, run = self.first_use()
+        first = rig.qualify()
+        e_bytes = rig.w.members[(ctl.base.EVID_ART, 'release-record.json')]
+        ctrl = rig.ready()
+        stored = rig.table.items[self.key(receipt)]
+        with self.assertRaises(ctl.Death):
+            rig.sign(ctrl, die_at='after dispatch')
+        self.assertEqual(rig.kms.signs, 1)
+        fresh = rig.session(rig.rerun())
+        self.refused('signing outcome unknown: the attempt has no retained signature', fresh.recover,
+                     first.tuple_bytes)
+        self.refused('signing outcome unknown: the reservation is already attempted', rig.sign, fresh)
+        self.assertEqual(rig.kms.signs, 1)
+        self.assertEqual(rig.w.members[(ctl.base.EVID_ART, 'release-record.json')], e_bytes)
+        self.assertEqual(rig.w.tags[rig.w.refs['tags/reserve/v' + rig.w.v][1]]['message_bytes'], first.tuple_bytes)
+        self.assertEqual(rig.table.items[self.key(receipt)], stored)
+        self.assertEqual(fresh.qualified.cards[0].envelope_bytes, stored)
+
+        # -- Response formatting changes; the typed identity and the schema 2 receipt stay put. ----------------
+        rig, receipt, run = self.first_use()
+        before = self.produce(rig, run)
+        rig.w.repository_sha, rig.w.runs[(run['run_id'], 1)]['sha256'] = digest(95), digest(96)
+        rig.w.artifacts[run['artifact_id']]['sha256'] = digest(97)
+        ctl.base.respond(rig.w, run['run_id'], repository=digest(95), run_attempt=digest(96), artifact=digest(97),
+                         job=digest(98), review_history=digest(99), implementation_source=digest(100))
+        after = self.produce(rig, run)
+        self.assertEqual((after.receipt_bytes, after.receipt_sha256, after.request_bytes, after.locator),
+                         (before.receipt_bytes, before.receipt_sha256, before.request_bytes, before.locator))
+        self.assertNotEqual(after.projection_bytes, before.projection_bytes)
+        identity = json.loads(after.projection_bytes)['identity']
+        self.assertEqual(identity, json.loads(before.projection_bytes)['identity'])
+        issuer = evidence.parse_approval_receipt(after.receipt_bytes).value['issuer']
+        self.assertEqual(issuer['stable_identity_sha256'], sha(canon(identity)))
+        self.assertEqual(json.loads(after.projection_bytes)['audit']['source_responses'], rig.w.responses[run['run_id']])
+        self.assertEqual(rig.qualify().cards[0].receipt_bytes, before.receipt_bytes)
+
+        # -- A typed identity field changes; first use refuses. -------------------------------------------------
+        named = 'not authorized: the key_change card does not name the founder-approved receipt'
+        restate = ctl.base.restate
+        for label, change in (
+                ('job', lambda r, a: r.w.jobs[(run['run_id'], 1)][0].update(job_id=9999)),
+                ('scope', lambda r, a: restate(r.w, run['run_id'], a, scope=dict(
+                    r.w.scope_for('key_change'), transition_sha256=digest(77)))),
+                ('kind', lambda r, a: restate(r.w, run['run_id'], a, kind='release_1',
+                                              scope=r.w.scope_for('release_1'))),
+                ('artifact digest', lambda r, a: (r.w.artifacts[a].update(digest=digest(78)),
+                                                  ctl.base.respond(r.w, run['run_id'], request_archive=digest(78)))),
+                ('policy commit', lambda r, a: restate(r.w, run['run_id'], a, policy_commit=ctl.S))):
+            rig, receipt, run = self.first_use()
+            original = self.produce(rig, run)
+            change(rig, run['artifact_id'])
+            with self.subTest(label):
+                try:
+                    changed = self.produce(rig, run)
+                except ctl.ControllerError:
+                    pass
+                else:
+                    self.assertNotEqual(changed.receipt_sha256, original.receipt_sha256)
+                self.refused(named, rig.qualify)
+                self.assertEqual(rig.git.created, [])
+                self.assertEqual((rig.table.reads, rig.table.writes), ([], []))
+
+        # -- Historical schema 1 keeps its meaning: the whole projection, the original bytes, no rewrite. -----
+        world = ctl.base.first_machine_world()
+        rig = ctl.Rig(world)
+        receipt = world.add_card('key_change', schema=1)
+        seeded = rig.seed_archive(receipt)
+        self.assertIsInstance(rig.qualify().cards[0], elig.PendingCard)
+        ctrl = self.to_credentials(rig)
+        ctrl.open_session(rig.table)
+        legacy = ctrl.qualified.cards[0]
+        self.assertEqual((legacy.source, legacy.envelope_bytes), ('archive', seeded))
+        self.assertEqual(rig.table.items[self.key(receipt)], seeded)
+        self.assertEqual(self.approval_puts(rig), [])
+        parsed = evidence.parse_approval_receipt(legacy.receipt_bytes)
+        self.assertEqual(parsed.value['schema'], 1)
+        self.assertEqual(sorted(parsed.value['issuer']), sorted(evidence.ISSUER_KEYS))
+        self.assertEqual(parsed.value['issuer']['provider_evidence_sha256'], sha(legacy.projection_bytes))
+        self.assertEqual(json.loads(legacy.projection_bytes)['schema'], 1)
+        # The producer writes schema 2 only: a live v1 first use is not its receipt and never takes a reservation.
+        rig, receipt, run = self.first_use(schema=1)
+        made = self.produce(rig, run)
+        self.assertEqual(evidence.parse_approval_receipt(made.receipt_bytes).value['schema'], 2)
+        self.assertNotEqual(made.receipt_sha256, receipt)
+        self.refused(named, rig.qualify)
+        self.assertEqual(rig.git.created, [])
+
+    def test_rprd5_no_privileged_effects(self):
+        # Every producer path, on fakes, under spies that fail on AWS, Sign, a reservation, a publication, a
+        # secret read, a started program and a network connection.
+        with Effects() as spies:
+            for kind in ('release_1', 'key_change', 'revocation', 'new_platform'):
+                world = ApprovalWorld()
+                request = approval_request(kind)
+                facts = ApprovalFacts(world, self.approval.gh)
+                prepared = self.approval.prepare_dispatch(request)
+                inputs = producer('common').load_event(world.event(prepared['inputs']['request_body']))['inputs']
+                self.approval.prepare(facts, APPROVAL_RUN, 1, inputs)
+                world.reviewed(request)
+                body = self.approval.accept(facts, APPROVAL_RUN, 1, inputs)
+                world.uploaded(body)
+                self.approval.receipt(facts, APPROVAL_RUN, APPROVAL_ARTIFACT, kind, POLICY)
+                self.assertEqual(world.blocked, [])
+            for first_tag, published in (('v0.45.0', ('0.41.0', '0.45.0')), ('v0.46.0', ('0.41.0',))):
+                world = EvidenceWorld(first_tag=first_tag, published=published)
+                self.addCleanup(shutil.rmtree, world.tmp, True)
+                runs = ()
+                if first_tag == 'v0.46.0':
+                    world.add_approval('key_change')
+                    runs = [{'artifact_id': APPROVAL_ART_E, 'run_id': APPROVAL_RUN_E}]
+                facts = EvidenceFacts(world, self.pev.gh)
+                self.pev.authenticate(facts, E_RUN, 1, world.inputs(runs))
+                record = self.pev.seal(facts, E_RUN, 1, world.inputs(runs))
+                world.uploaded(record)
+                self.elig.qualify_new(self.elig.parse_request(world.request(record, [
+                    self.approval.receipt(facts, APPROVAL_RUN_E, APPROVAL_ART_E, 'key_change', S).locator]
+                    if runs else [])), EvidenceFacts(world, self.pev.gh, trust=True))
+                self.assertEqual(world.blocked, [])
+            inst = producer('install')
+            runner_temp = tempfile.mkdtemp(prefix='rdy-rprd5-runner-')
+            self.addCleanup(shutil.rmtree, runner_temp, True)
+            root = inst.job_root(os.path.realpath(runner_temp), 5, 1, MAC)
+            argv = inst.rehearse_argv('/trusted', root, MAC, digest(1), digest(2))
+            self.assertEqual(argv[0], inst.PYTHON)
+            polluted = {'PATH': '/usr/bin', 'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'AWS_ACCESS_KEY_ID': 'x',
+                        'AWS_SESSION_TOKEN': 'x', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'x',
+                        'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'x', 'RDY_RELEASE_KEY_ARN': 'x',
+                        'RDY_RELEASE_ROLE_ARN': 'x', 'GITHUB_TOKEN': 'x', 'GH_TOKEN': 'x', 'SSH_AUTH_SOCK': 'x'}
+            self.assertEqual(inst.rehearsal_env(polluted), {k: polluted[k] for k in ('PATH', 'LANG', 'LC_ALL', 'TZ')})
+        self.assertEqual(spies.events, [])
+        self.assertEqual(spies.started, [])
+
+        # The spies themselves work: each effect, attempted, is recorded and fails.
+        probes = (lambda: subprocess.run(['/bin/echo', 'x']), lambda: os.system('true'),
+                  lambda: socket.create_connection(('127.0.0.1', 9)), lambda: urllib.request.urlopen('http://127.0.0.1:9/'),
+                  lambda: __import__('boto3').client('kms'), lambda: os.environ.get('AWS_ACCESS_KEY_ID'),
+                  lambda: os.environ.get('GITHUB_TOKEN'), lambda: ctl.CONTROLLER.Controller.before_sign,
+                  lambda: ctl.GITHUB.GitHub.create_ref)
+        for probe in probes:
+            with Effects() as spy, self.subTest(probe=inspect.getsource(probe).strip()[:60]):
+                try:
+                    result = probe()
+                    if callable(result):
+                        result()
+                except (AssertionError, TypeError, OSError):
+                    pass
+                self.assertNotEqual(spy.events, [])
+
+        # No producer source other than the install helper and the test signer starts programs, opens sockets
+        # or names the disposable signer; none uses an AWS library, the trust tool or a write call.
+        for name in ('approval', 'evidence', 'common'):
+            tree = ast.parse((PRODUCERS / (name + '.py')).read_text(encoding='utf-8'))
+            imported = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.update(a.name.split('.')[0] for a in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imported.add((node.module or '').split('.')[0])
+            with self.subTest(module=name):
+                self.assertFalse(imported & {'subprocess', 'socket', 'ssl', 'http', 'boto3', 'botocore', 'ctypes',
+                                             'controller', 'publish', 'reserve'}, imported)
+            source = (PRODUCERS / (name + '.py')).read_text(encoding='utf-8')
+            for word in ('ssh-keygen', 'rehearsal_test_signer', 'release_trust(', 'create_ref', 'create_tag',
+                         'publish_draft', 'AWS_', 'ACTIONS_ID_TOKEN', 'RDY_RELEASE_KEY_ARN', 'GH_TOKEN'):
+                self.assertNotIn(word, source, name + ' names ' + word)
+
+        # The one contracted operation: the disposable test signer inside the isolated native child. The
+        # allowance is one program, the fixed ssh-keygen; it opens nothing else, and a producer beside it
+        # starts nothing.
+        spec = importlib.util.spec_from_file_location('rprd5_test_signer', str(SIGNER_PATH))
+        signer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(signer)
+        state = tempfile.mkdtemp(prefix='rdy-rprd5-')
+        self.addCleanup(shutil.rmtree, state, True)
+        os.chmod(state, 0o700)
+        manifest = (sha(b'a') + '  rdy-0.46.0-aarch64-apple-darwin.tar.gz\n').encode('ascii')
+        values = dict(polluted, RDY_REHEARSAL_STATE=state, HOME=state, TMPDIR=state)
+        values.pop('SSH_AUTH_SOCK')
+
+        def sign_in(folder, extra=None):
+            env = dict(values, RDY_REHEARSAL_STATE=folder, HOME=folder, TMPDIR=folder)
+            env.update(extra or {})
+            out, err = io.StringIO(), io.StringIO()
+            stdin = types.SimpleNamespace(buffer=io.BytesIO(manifest))
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, 'stdin', stdin), \
+                    mock.patch.object(sys, 'stdout', out), mock.patch.object(sys, 'stderr', err):
+                code = signer.main(['rehearsal_test_signer.py', 'sign'])
+            return code, out.getvalue(), err.getvalue()
+
+        with Effects(allow=(SSH_KEYGEN,)) as spies:
+            code, out, err = sign_in(state)
+            self.assertEqual((code, err), (0, ''))
+            answer = json.loads(out)
+            self.assertEqual(sorted(answer), ['signature', 'signer_line'])
+            self.assertTrue(answer['signature'].startswith('-----BEGIN SSH SIGNATURE-----\n'))
+            self.assertEqual(sorted(os.listdir(state)), ['rehearsal_ed25519', 'rehearsal_ed25519.pub'])
+            # The helper's own environment is the six names; none of the polluted credentials reach ssh-keygen.
+            self.assertGreaterEqual(len(spies.started), 2)
+            for started, env in spies.started:
+                self.assertEqual(started[0], SSH_KEYGEN)
+                self.assertFalse(set(env) - {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}, env)
+            # A second signing in the same state, an agent in reach and an unisolated HOME all refuse.
+            self.assertEqual(sign_in(state)[0], 1)
+            other = tempfile.mkdtemp(prefix='rdy-rprd5-')
+            self.addCleanup(shutil.rmtree, other, True)
+            os.chmod(other, 0o700)
+            count = len(spies.started)
+            self.assertEqual(sign_in(other, {'SSH_AUTH_SOCK': '/tmp/agent'})[0], 1)
+            self.assertEqual(sign_in(other, {'HOME': '/'})[0], 1)
+            self.assertEqual(os.listdir(other), [])
+            self.assertEqual(len(spies.started), count, 'a refused signing starts nothing')
+            # Destroy leaves the state empty.
+            with mock.patch.dict(os.environ, dict(values), clear=True):
+                self.assertEqual(signer.main(['rehearsal_test_signer.py', 'destroy']), 0)
+            self.assertEqual(os.listdir(state), [])
+            # The permission does not escape: another program, a socket and a producer all fail or start nothing.
+            for escape in (lambda: subprocess.run(['/bin/echo', 'x']), lambda: subprocess.run(['/usr/bin/ssh', '-V']),
+                           lambda: socket.create_connection(('127.0.0.1', 9))):
+                with self.assertRaises(AssertionError):
+                    escape()
+            started = len(spies.started)
+            world = ApprovalWorld()
+            request = approval_request('key_change')
+            facts = ApprovalFacts(world, self.approval.gh)
+            inputs = producer('common').load_event(world.event(request))['inputs']
+            self.approval.prepare(facts, APPROVAL_RUN, 1, inputs)
+            world.reviewed(request)
+            self.approval.accept(facts, APPROVAL_RUN, 1, inputs)
+            self.assertEqual(len(spies.started), started)
+        self.assertEqual([e for e in spies.events if e[0] not in ('spawn', 'socket.create_connection')], [])
+        self.assertEqual({e[1] for e in spies.events if e[0] == 'spawn'}, {'/bin/echo', '/usr/bin/ssh'})
+
+    def test_rprd5_release_inputs_are_complete(self):
+        # The final caller inputs come only from producer outputs, with synthetic identities.
+        world = EvidenceWorld(first_tag='v0.46.0', published=('0.41.0',))
+        self.addCleanup(shutil.rmtree, world.tmp, True)
+        world.add_approval('key_change')
+        facts = EvidenceFacts(world, self.pev.gh)
+        dispatch = world.inputs([{'artifact_id': APPROVAL_ART_E, 'run_id': APPROVAL_RUN_E}])
+        self.assertEqual(sorted(dispatch), sorted(E_INPUTS))
+        record = self.pev.seal(facts, E_RUN, 1, dispatch)
+        located = self.approval.receipt(facts, APPROVAL_RUN_E, APPROVAL_ART_E, 'key_change', S)
+        world.uploaded(record)
+        listed = [a for a in facts.run_artifacts(E_RUN) if a.name == self.pev.artifact_name(E_RUN, 1)]
+        self.assertEqual(len(listed), 1)
+        supplied = {   # caller input -> the producer output that supplies it
+            'version': dispatch['version'], 'candidate_run_id': dispatch['candidate_run_id'],
+            'candidate_run_attempt': dispatch['candidate_run_attempt'],
+            'candidate_artifact_id': dispatch['candidate_artifact_id'],
+            'evidence_run_id': str(E_RUN), 'evidence_run_attempt': str(world.attempt),
+            'evidence_artifact_id': str(listed[0].artifact_id), 'evidence_sha256': sha(record),
+            'approvals': json.dumps([located.locator], sort_keys=True, separators=(',', ':'))}
+        environ = {'RDY_INPUT_' + key.upper(): value for key, value in supplied.items()}
+        environ.update(GITHUB_RUN_ID=str(RELEASE_RUN), GITHUB_RUN_ATTEMPT='1')
+        request = pub.PUBLISH.request_from_inputs(environ)
+        self.assertEqual(request, self.elig.parse_request(world.request(record, [located.locator])))
+        self.assertEqual(request.approvals[0].receipt_sha256, located.receipt_sha256)
+        result = self.elig.qualify_new(request, EvidenceFacts(world, self.pev.gh, trust=True))
+        self.assertEqual((result.approval_mode, [c.kind for c in result.cards]), ('founder_card', ['key_change']))
+        self.assertEqual(result.evidence_bytes, record)
+        self.assertEqual(world.blocked, [])
+        # Only synthetic identities: none of these is the enrolled production founder or a real run.
+        values = ' '.join(list(supplied.values()) + [str(FOUNDER), str(COORDINATOR), str(APPROVAL_RUN_E)])
+        self.assertNotIn('32169767', values)
+
+        # release.yml takes exactly those inputs (and its mode), passes each one to the eligibility step by name,
+        # and supplies its own run and attempt.
+        release = self.workflow('.github/workflows/release.yml')
+        inputs = release['on']['workflow_dispatch']['inputs']
+        expected = set(self.elig.REQUEST_KEYS) - {'dispatch_run_id', 'dispatch_run_attempt'}
+        self.assertEqual(set(inputs) - {'mode'}, expected)
+        self.assertEqual(set(supplied), expected)
+        self.assertEqual(inputs['approvals']['default'], '[]')
+        mapped = {}
+        for job in release['jobs'].values():
+            for step in job.get('steps') or []:
+                for name, value in (step.get('env') or {}).items():
+                    if name.startswith('RDY_INPUT_'):
+                        mapped[name] = value
+        self.assertEqual(mapped, {'RDY_INPUT_' + key.upper(): '${{ inputs.' + key + ' }}' for key in expected})
+        # A standing preview names no approval run: the workflow default is the empty list, and it qualifies.
+        standing = EvidenceWorld()
+        self.addCleanup(shutil.rmtree, standing.tmp, True)
+        sfacts = EvidenceFacts(standing, self.pev.gh)
+        sdispatch = standing.inputs()
+        self.assertEqual(sdispatch['approval_runs'], '[]')
+        srecord = self.pev.seal(sfacts, E_RUN, 1, sdispatch)
+        standing.uploaded(srecord)
+        senv = {'RDY_INPUT_' + key.upper(): sdispatch[key] for key in
+                ('version', 'candidate_run_id', 'candidate_run_attempt', 'candidate_artifact_id')}
+        senv.update(RDY_INPUT_EVIDENCE_RUN_ID=str(E_RUN), RDY_INPUT_EVIDENCE_RUN_ATTEMPT='1',
+                    RDY_INPUT_EVIDENCE_ARTIFACT_ID=str(E_UPLOAD), RDY_INPUT_EVIDENCE_SHA256=sha(srecord),
+                    RDY_INPUT_APPROVALS=inputs['approvals']['default'], GITHUB_RUN_ID=str(RELEASE_RUN),
+                    GITHUB_RUN_ATTEMPT='1')
+        srequest = pub.PUBLISH.request_from_inputs(senv)
+        self.assertEqual(srequest.approvals, ())
+        self.assertEqual(self.elig.qualify_new(srequest, EvidenceFacts(standing, self.pev.gh, trust=True)).approval_mode,
+                         'standing_preview')
+
+        # The registration inventory fabricates nothing: every value launch ops registers comes from enrollment.
+        # No producer source or workflow holds a production identifier; only the plan's size bounds are numbers.
+        # Registration items and their consumers: the policy keys that name them are the closed sets below.
+        self.assertEqual(ev.EVIDENCE_WORKFLOW_KEYS, ('id', 'path', 'sha'))
+        self.assertEqual(ev.COORDINATOR_KEYS, ('actor_id', 'app_id', 'installation_id'))
+        self.assertIn('workflow_id', ev.CHANNEL_KEYS)
+        self.assertIn('environment_id', ev.CHANNEL_KEYS)
+        self.assertIn('implementation_sha', ev.CHANNEL_KEYS)
+        sources = [p for p in PRODUCERS.glob('*.py')] + [WORKFLOWS / 'release-approval.yml',
+                                                         WORKFLOWS / 'release-evidence.yml']
+        for path in sources:
+            text = path.read_text(encoding='utf-8')
+            with self.subTest(path=path.name):
+                self.assertNotIn('32169767', text)
+                self.assertNotIn('1403751388', text)
+                for number in re.findall(r'(?<![0-9A-Za-z_.-])[0-9]{5,}(?![0-9A-Za-z_])', text):
+                    self.assertIn(int(number), KEY_COMMENT_FREE_BOUNDS, path.name + ' holds the number ' + number)
 
 
 if __name__ == '__main__':
