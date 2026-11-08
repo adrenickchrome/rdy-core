@@ -173,18 +173,34 @@ fn totals(rows: &[Value], name: &str) -> (u64, u64, u64) {
 /// How a raw client's misses reach the file: one sentinel miss at a time. The worker flushes every
 /// earlier count with or before a later one, so a file that shows the sentinel holds them all.
 struct Drain {
+    /// The `rdy:parallel` misses this client has made: its own calls and the sentinels.
     sent: u64,
 }
 
 impl Drain {
+    /// A drain for a client that has made no `rdy:parallel` miss.
     fn new() -> Drain {
-        Drain { sent: 0 }
+        Drain::after(0)
+    }
+
+    /// A drain for a client that has made `misses` `rdy:parallel` misses of its own. The
+    /// sentinel is the next one: a total of the earlier ones alone does not stand for it.
+    fn after(misses: u64) -> Drain {
+        Drain { sent: misses }
     }
 
     /// The rows once every count of `c`'s earlier replies is in the file. The deadline is a hang
     /// guard: the loop waits for the sentinel and asserts nothing about the time it took.
     fn rows(&mut self, c: &mut McpClient, dir: &Path) -> Vec<Value> {
-        // `rdy:parallel` is the sentinel's owner, so no test here counts it
+        // `rdy:parallel` is the sentinel's owner: a miss of it this drain was not told of would
+        // stand for the sentinel before the sentinel's own count is in the file
+        let (a, b, d) = totals(&file_rows(dir), "parallel");
+        assert!(
+            a + b + d <= self.sent,
+            "the file has {} rdy:parallel misses, more than the {} this drain knows of",
+            a + b + d,
+            self.sent
+        );
         self.sent += 1;
         body(c.call("rdy_view", json!({"op": "show"})));
         let start = Instant::now();
@@ -782,7 +798,8 @@ fn run_script(mode: Mode) -> Ran {
     let scratch = tempfile::tempdir().unwrap();
     let mut x = Script::new(&w, pd.path(), scratch.path(), mode);
     script(&mut x, &spec, scratch.path());
-    let mut drain = Drain::new();
+    // the script's own `rdy:parallel` misses come before the sentinel's
+    let mut drain = Drain::after(x.calls.get("parallel").copied().unwrap_or(0));
     let rows = drain.rows(&mut x.c, pd.path());
     Ran {
         out: std::mem::take(&mut x.out),
