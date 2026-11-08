@@ -959,5 +959,495 @@ class Transport(Refusals):
         self.assertEqual(error.sizes['document'], DOCUMENT_MAX + 1)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# The approval producer and its receipt bridge (rprd2)
+# ---------------------------------------------------------------------------------------------
+
+APPROVAL_RUN = 990001
+PREPARE_JOB, ACCEPT_JOB, APPROVAL_ARTIFACT = 991001, 991002, 991003
+OTHER_COMMIT = '9' * 40
+APPROVAL_WF_BYTES = b'name: release-approval\non: workflow_dispatch\n'
+SOURCE_KINDS = ('artifact', 'implementation_source', 'job', 'protected_policy', 'repository', 'request_archive',
+                'review_history', 'run_attempt', 'workflow_source')
+
+
+def full_scope():
+    return {'repository': REPO, 'version': VERSION, 'commit': S, 'design_landing': 'L-test',
+            'manifest_sha256': MANIFEST, 'artifacts': sorted(ARCHIVES, key=lambda f: f['name']),
+            'key_arn': KEY_ARN, 'fingerprint': FINGERPRINT, 'first_machine_tag': 'v' + VERSION,
+            'transition_sha256': digest(31), 'targets': [MAC, LINUX]}
+
+
+def scope_for(kind):
+    full = full_scope()
+    if kind == 'release_1':
+        return full
+    if kind == 'key_change':
+        return {k: full[k] for k in ('repository', 'key_arn', 'fingerprint', 'first_machine_tag',
+                                     'transition_sha256', 'targets')}
+    if kind == 'revocation':
+        return {'repository': REPO, 'key_arn': KEY_ARN, 'fingerprint': FINGERPRINT,
+                'revocation_sha256': digest(32), 'last_good_tag': None}
+    return {'repository': REPO, 'targets': [MAC, LINUX]}
+
+
+def approval_request(kind, policy_commit=POLICY):
+    return canon({'schema': 1, 'decision': 'D-PZKAP', 'policy_commit': policy_commit, 'kind': kind,
+                  'scope': scope_for(kind)})
+
+
+class ApprovalWorld(object):
+    """One founder approval run on protected main, with the facts GitHub would hold. Every identity is
+    synthetic. Main's first-parent chain is HEAD -> POLICY -> P; the run ran at HEAD."""
+
+    def __init__(self, founder=FOUNDER):
+        self.founder = founder
+        self.attempt = 1
+        self.calls, self.blocked = [], []
+        self.commits = {HEAD: (POLICY,), POLICY: (P,), P: ()}
+        self.channel = dict(channel(founder), workflow_file_sha256=sha(APPROVAL_WF_BYTES))
+        self.policy = canon({'schema': 1, 'repository_id': REPO_ID,
+                             'coordinators': [{'actor_id': COORDINATOR, 'app_id': None, 'installation_id': None}],
+                             'evidence_workflow': {'id': EVIDENCE_WF_ID, 'path': EVIDENCE_WF, 'sha': P},
+                             'release_workflow_path': '.github/workflows/release.yml',
+                             'approval_channel': self.channel})
+        self.files = {('release-keys/evidence-policy.json', HEAD): self.policy,
+                      ('release-keys/evidence-policy.json', POLICY): self.policy,
+                      (APPROVAL_WF, HEAD): APPROVAL_WF_BYTES, (APPROVAL_WF, P): APPROVAL_WF_BYTES}
+        self.runs = {(APPROVAL_RUN, 1): dict(
+            run_id=APPROVAL_RUN, run_attempt=1, workflow_id=APPROVAL_WF_ID, path=APPROVAL_WF, head_sha=HEAD,
+            head_branch='main', event='workflow_dispatch', status='in_progress', conclusion=None, actor_id=founder,
+            triggering_actor_id=founder, repository_id=REPO_ID, head_repository_id=REPO_ID,
+            html_url=ACTIONS + str(APPROVAL_RUN), sha256=digest(7))}
+        self.jobs = {(APPROVAL_RUN, 1): [self.job(PREPARE_JOB, 'prepare-approval', 'in_progress', None),
+                                         self.job(ACCEPT_JOB, 'accept-founder-approval', 'queued', None)]}
+        self.artifacts, self.members, self.reviews, self.responses = {}, {}, {}, {}
+
+    @staticmethod
+    def job(job_id, name, status, conclusion, attempt=1):
+        return dict(job_id=job_id, run_id=APPROVAL_RUN, run_attempt=attempt, name=name, status=status,
+                    conclusion=conclusion, html_url=ACTIONS + str(APPROVAL_RUN) + '/job/' + str(job_id), head_sha=HEAD)
+
+    def event(self, body):
+        return canon({'inputs': {'request_body': body.decode('utf-8') if isinstance(body, bytes) else body},
+                      'ref': 'refs/heads/main', 'repository': {'id': REPO_ID}})
+
+    def review(self, body, **changes):
+        value = dict(state='approved', comment='APPROVE sha256:' + sha(body), user_id=self.founder, user_type='User',
+                     environments=((ENVIRONMENT_ID, 'release-exception-approval'),))
+        value.update(changes)
+        return value
+
+    def reviewed(self, body):
+        """The founder approved; preparation succeeded and acceptance is running."""
+        self.reviews[APPROVAL_RUN] = [self.review(body)]
+        self.jobs[(APPROVAL_RUN, 1)] = [self.job(PREPARE_JOB, 'prepare-approval', 'completed', 'success'),
+                                        self.job(ACCEPT_JOB, 'accept-founder-approval', 'in_progress', None)]
+
+    def uploaded(self, body):
+        """Acceptance uploaded exactly `body`, and the run completed."""
+        zip_digest = digest(500 + len(body))
+        self.artifacts[APPROVAL_ARTIFACT] = dict(
+            artifact_id=APPROVAL_ARTIFACT, name='approval-request-' + str(APPROVAL_RUN) + '-1', size=400 + len(body),
+            digest=zip_digest, expired=False, run_id=APPROVAL_RUN, repository_id=REPO_ID, head_repository_id=REPO_ID,
+            head_sha=HEAD, sha256=digest(8))
+        self.members[(APPROVAL_ARTIFACT, 'approval-request.json')] = body
+        self.runs[(APPROVAL_RUN, 1)].update(status='completed', conclusion='success')
+        self.jobs[(APPROVAL_RUN, 1)] = [self.job(PREPARE_JOB, 'prepare-approval', 'completed', 'success'),
+                                        self.job(ACCEPT_JOB, 'accept-founder-approval', 'completed', 'success')]
+        art = self.artifacts[APPROVAL_ARTIFACT]
+        known = {'protected_policy': (sha(self.policy), len(self.policy)),
+                 'request_archive': (art['digest'], art['size']),
+                 'workflow_source': (sha(APPROVAL_WF_BYTES), len(APPROVAL_WF_BYTES)),
+                 'implementation_source': (sha(APPROVAL_WF_BYTES), len(APPROVAL_WF_BYTES))}
+        self.responses[APPROVAL_RUN] = [{'kind': k, 'sha256': known.get(k, (digest(600 + i), 0))[0],
+                                         'bytes': known.get(k, (None, 700 + i))[1]}
+                                        for i, k in enumerate(SOURCE_KINDS)]
+
+
+class ApprovalFacts(object):
+    """The read-only fact source over an ApprovalWorld. Its write and trust-tool methods only record that a
+    producer reached them, which the ReadOnly wrapper must prevent."""
+
+    def __init__(self, world, gh_module):
+        self.w = world
+        self.gh = gh_module
+
+    def _absent(self, operation):
+        return self.gh.Absent(operation, 'not found', 404)
+
+    def repository(self):
+        self.w.calls.append(('repository',))
+        return self.gh.RepositoryFact(REPO_ID, REPO, digest(90))
+
+    def run_attempt(self, run_id, attempt):
+        self.w.calls.append(('run_attempt', run_id, attempt))
+        if (run_id, attempt) not in self.w.runs:
+            raise self._absent('run attempt')
+        return self.gh.RunFact(**self.w.runs[(run_id, attempt)])
+
+    def attempt_jobs(self, run_id, attempt):
+        self.w.calls.append(('attempt_jobs', run_id, attempt))
+        return [self.gh.JobFact(**j) for j in self.w.jobs.get((run_id, attempt), [])]
+
+    def artifact(self, artifact_id, run_id):
+        self.w.calls.append(('artifact', artifact_id, run_id))
+        if artifact_id not in self.w.artifacts:
+            raise self._absent('artifact')
+        fact = self.gh.ArtifactFact(**self.w.artifacts[artifact_id])
+        if fact.run_id != run_id:
+            raise self.gh.Malformed('artifact', 'the artifact is not from run ' + str(run_id))
+        if fact.expired:
+            raise self.gh.ArtifactExpired('artifact', 'the artifact expired')
+        return fact
+
+    def artifact_member(self, fact, name, limit):
+        data = self.w.members.get((fact.artifact_id, name))
+        if data is None or len(data) > limit:
+            raise self.gh.ControllerError('the artifact does not hold ' + name)
+        return data
+
+    def run_approvals(self, run_id):
+        self.w.calls.append(('run_approvals', run_id))
+        return [self.gh.ApprovalFact(**r) for r in self.w.reviews.get(run_id, [])]
+
+    def approval_responses(self, run_id, artifact_id):
+        return [dict(r) for r in self.w.responses[run_id]]
+
+    def ref(self, name):
+        return self.gh.RefFact('refs/' + name, 'commit', HEAD, digest(91))
+
+    def commit(self, sha_):
+        if sha_ not in self.w.commits:
+            raise self._absent('commit')
+        return self.gh.CommitFact(sha_, '8' * 40, tuple(self.w.commits[sha_]), digest(92))
+
+    def contents(self, path, ref_sha, limit=1048576):
+        data = self.w.files.get((path, ref_sha))
+        if data is None:
+            raise self._absent('contents')
+        blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+        return self.gh.FileFact(path, ref_sha, blob, data, sha(data))
+
+    def release_trust(self, *args):
+        self.w.blocked.append('release_trust')
+        raise AssertionError('a producer called release_trust')
+
+    def create_ref(self, *args):
+        self.w.blocked.append('create_ref')
+        raise AssertionError('a producer wrote a ref')
+
+
+class ApprovalProducer(Refusals):
+    def setUp(self):
+        self.approval = producer('approval')
+        self.common = producer('common')
+        self.elig = self.approval.elig
+
+    def facts(self, world):
+        return ApprovalFacts(world, self.approval.gh)
+
+    def inputs(self, world, body):
+        return self.common.load_event(world.event(body))['inputs']
+
+    def produce(self, kind, founder=FOUNDER, world=None):
+        """The whole producer path: dispatch, preparation, review, acceptance, upload, receipt."""
+        world = world or ApprovalWorld(founder)
+        request = approval_request(kind)
+        prepared = self.approval.prepare_dispatch(request)
+        self.assertEqual(prepared['ref'], 'refs/heads/main')
+        inputs = self.inputs(world, prepared['inputs']['request_body'])
+        facts = self.facts(world)
+        text = self.approval.prepare(facts, APPROVAL_RUN, 1, inputs)
+        self.assertIn('APPROVE sha256:' + sha(request), text)
+        self.assertIn(kind, text)
+        world.reviewed(request)
+        body = self.approval.accept(facts, APPROVAL_RUN, 1, inputs)
+        self.assertEqual(body, request)
+        world.uploaded(body)
+        result = self.approval.receipt(facts, APPROVAL_RUN, APPROVAL_ARTIFACT, kind, POLICY)
+        self.assertEqual(world.blocked, [])
+        return world, request, result
+
+    def consumer(self, world):
+        """The consumer's own view: wrapped facts, main, E's evidence policy and current authority."""
+        wrapped = self.elig._Facts(self.facts(world))
+        main = self.elig._Main(wrapped)
+        policy = self.approval.ev.parse_evidence_policy(world.policy)
+        return wrapped, main, policy, policy.value['approval_channel']
+
+    def card(self, kind, receipt_sha256):
+        return {'kind': kind, 'sha256': receipt_sha256,
+                'reference': 'dynamodb://' + ACCOUNT + '/us-east-2/rdy-test-approvals/APPROVAL%23' + receipt_sha256
+                             + '/RECORD'}
+
+    def test_rprd2_approval_round_trip(self):
+        ev_ = self.approval.ev
+        for founder in (FOUNDER, OTHER_FOUNDER):
+            for kind in ('release_1', 'key_change', 'revocation', 'new_platform'):
+                with self.subTest(founder=founder, kind=kind):
+                    world, request, result = self.produce(kind, founder)
+                    # Only the existing schema 2 records and the caller's locator shape.
+                    receipt = ev_.parse_approval_receipt(result.receipt_bytes)
+                    self.assertEqual(receipt.value['schema'], 2)
+                    self.assertEqual(sorted(receipt.value['issuer']), sorted(ev_.ISSUER_V2_KEYS))
+                    self.assertEqual(receipt.sha256, result.receipt_sha256)
+                    self.assertEqual(receipt.value['workflow_scope_digest'], sha(request))
+                    self.assertEqual(receipt.value['issuer']['review_comment_sha256'],
+                                     sha(('APPROVE sha256:' + sha(request)).encode('utf-8')))
+                    self.assertEqual((receipt.value['issuer']['actor_id'], receipt.value['issuer']['reviewer_id']),
+                                     (founder, founder))
+                    projection = ev_.parse_provider_evidence(result.projection_bytes)
+                    self.assertEqual(sorted(projection.value), sorted(ev_.PROJECTION_V2_KEYS))
+                    self.assertEqual([r['kind'] for r in projection.value['audit']['source_responses']],
+                                     list(SOURCE_KINDS))
+                    self.assertEqual(receipt.value['issuer']['stable_identity_sha256'],
+                                     sha(canon(projection.value['identity'])))
+                    self.assertEqual(result.request_bytes, request)
+                    self.assertEqual(sorted(result.locator), sorted(self.elig.APPROVAL_RUN_KEYS))
+                    self.assertEqual(result.locator, {'receipt_sha256': receipt.sha256, 'run_id': APPROVAL_RUN,
+                                                      'artifact_id': APPROVAL_ARTIFACT})
+                    # The locator is the release caller's existing `approvals` entry.
+                    call = self.elig.parse_request(
+                        {'version': VERSION, 'candidate_run_id': 1, 'candidate_run_attempt': 1,
+                         'candidate_artifact_id': 2, 'evidence_run_id': 3, 'evidence_run_attempt': 1,
+                         'evidence_artifact_id': 4, 'evidence_sha256': digest(5), 'dispatch_run_id': 6,
+                         'dispatch_run_attempt': 1, 'approvals': [result.locator]})
+                    # The unchanged consumer rebuilds the same receipt from the same facts on first use.
+                    wrapped, main, policy, authority = self.consumer(world)
+                    card = self.card(kind, receipt.sha256)
+                    self.assertEqual(ev_.card_receipt_sha256(card, authority), receipt.sha256)
+                    qualified, rebuilt = self.elig._first_use(wrapped, main, policy, authority, call.approvals[0],
+                                                              card, receipt.sha256)
+                    self.assertEqual((qualified.receipt_bytes, qualified.request_bytes, qualified.projection_bytes),
+                                     (result.receipt_bytes, request, result.projection_bytes))
+                    self.assertEqual(qualified.source, 'first_use')
+                    self.elig._card_scope(kind, rebuilt, scope_for(kind))
+                    if kind == 'revocation':
+                        # A revocation receipt is a valid record, and it never qualifies a release.
+                        self.refuses(self.elig._card_authority, card, authority, authority,
+                                     message='not authorized: a revocation card never permits signing')
+                    else:
+                        self.assertEqual(self.elig._card_authority(card, authority, authority), receipt.sha256)
+        # No source change: the founder is enrollment data, so the other enrolled founder needs no constant.
+        source = (PRODUCERS / 'approval.py').read_text(encoding='utf-8') + \
+            (PRODUCERS / 'common.py').read_text(encoding='utf-8')
+        for founder in (str(FOUNDER), str(OTHER_FOUNDER), '32169767'):
+            self.assertNotIn(founder, source)
+
+    def test_rprd2_custody_limit_same_account(self):
+        # Custody limit (founder ruling 2026-11-08): when one agent holds the founder's credential and both
+        # dispatches and reviews, every fact is the enrolled account's, so the producer accepts. This proves
+        # account use, not that a person reviewed.
+        world, request, result = self.produce('key_change')
+        issuer = self.approval.ev.parse_approval_receipt(result.receipt_bytes).value['issuer']
+        self.assertEqual({issuer['actor_id'], issuer['triggering_actor_id'], issuer['reviewer_id']}, {FOUNDER})
+
+    def test_rprd2_review_and_request_are_exact(self):
+        approval = self.approval
+        request = approval_request('key_change')
+        self.assertEqual(approval.required_comment(request), 'APPROVE sha256:' + sha(request))
+
+        def accept_with(review_changes=None, reviews=None, body=request):
+            world = ApprovalWorld()
+            world.reviewed(request)
+            if reviews is not None:
+                world.reviews[APPROVAL_RUN] = reviews
+            elif review_changes:
+                world.reviews[APPROVAL_RUN] = [world.review(request, **review_changes)]
+            return approval.accept(self.facts(world), APPROVAL_RUN, 1, self.inputs(world, body))
+
+        self.assertEqual(accept_with(), request)
+        comment = 'APPROVE sha256:' + sha(request)
+        for wrong in (comment + '\n', comment + ' ok', ' ' + comment, comment.upper(),
+                      'APPROVE sha256:' + sha(request[:-1]), 'APPROVE ' + sha(request), ''):
+            with self.subTest(comment=wrong):
+                self.refuses(accept_with, {'comment': wrong},
+                             message='the founder review does not approve this request')
+        # The input must be the exact canonical request bytes the comment names.
+        for body in (request[:-1] + b'\n\n', request.replace(b'"schema":1', b'"schema": 1'),
+                     request.replace(b'"kind":"key_change"', b'"kind":"key_change" ')):
+            with self.subTest(body=body[:40]):
+                self.refuses(accept_with, None, None, body)
+        # A different request that the founder did not approve.
+        other = approval_request('new_platform')
+        self.refuses(accept_with, None, None, other, message='the founder review does not approve this request')
+        # The summary is escaped text: no input renders as HTML or Markdown.
+        world = ApprovalWorld()
+        text = approval.prepare(self.facts(world), APPROVAL_RUN, 1, self.inputs(world, request))
+        self.assertTrue(text.startswith('## Founder approval request\n\n<pre>\n'))
+        self.assertTrue(text.endswith('\n</pre>\n'))
+        inner = text[len('## Founder approval request\n\n<pre>\n'):-len('\n</pre>\n')]
+        for raw in ('<', '>', '`', '"'):
+            self.assertNotIn(raw, inner)
+        self.assertIn('policy commit: ' + POLICY, inner)
+        self.assertIn('request sha256: ' + sha(request), inner)
+        self.assertIn('kind: key_change', inner)
+
+    def test_rprd2_authority_refusals(self):
+        approval = self.approval
+        request = approval_request('key_change')
+
+        def accept_after(change):
+            world = ApprovalWorld()
+            world.reviewed(request)
+            change(world)
+            return approval.accept(self.facts(world), APPROVAL_RUN, world.attempt, self.inputs(world, request))
+
+        def receipt_after(change):
+            world, _, _ = self.produce('key_change')
+            change(world)
+            return approval.receipt(self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'key_change', POLICY)
+
+        def run(**changes):
+            return lambda w: w.runs[(APPROVAL_RUN, 1)].update(changes)
+
+        def review(**changes):
+            return lambda w: w.reviews.__setitem__(APPROVAL_RUN, [w.review(request, **changes)])
+
+        def rerun(w):
+            w.runs[(APPROVAL_RUN, 2)] = dict(w.runs[(APPROVAL_RUN, 1)], run_attempt=2)
+            w.jobs[(APPROVAL_RUN, 2)] = [dict(j, run_attempt=2) for j in w.jobs[(APPROVAL_RUN, 1)]]
+            w.attempt = 2
+
+        def jobs(*entries):
+            return lambda w: w.jobs.__setitem__((APPROVAL_RUN, 1), [ApprovalWorld.job(*e) for e in entries])
+
+        def forged_workflow(w):
+            w.files[(APPROVAL_WF, HEAD)] = b'name: release-approval\nrun: forged\n'
+
+        stranger_env = ((ENVIRONMENT_ID + 1, 'release-exception-approval'),)
+        accepting = (
+            ('job: preparation failed', jobs((PREPARE_JOB, 'prepare-approval', 'completed', 'failure'),
+                                             (ACCEPT_JOB, 'accept-founder-approval', 'in_progress', None))),
+            ('job: preparation missing', jobs((ACCEPT_JOB, 'accept-founder-approval', 'in_progress', None))),
+            ('job: an extra job', jobs((PREPARE_JOB, 'prepare-approval', 'completed', 'success'),
+                                       (ACCEPT_JOB, 'accept-founder-approval', 'in_progress', None),
+                                       (ACCEPT_JOB + 9, 'upload', 'in_progress', None))),
+            ('job: renamed acceptance', jobs((PREPARE_JOB, 'prepare-approval', 'completed', 'success'),
+                                             (ACCEPT_JOB, 'accept', 'in_progress', None))),
+            ('environment id', review(environments=stranger_env)),
+            ('environment name', review(environments=((ENVIRONMENT_ID, 'release'),))),
+            ('two environments', review(environments=((ENVIRONMENT_ID, 'release-exception-approval'),
+                                                      (ENVIRONMENT_ID + 1, 'release')))),
+            ('reviewer', review(user_id=STRANGER)),
+            ('reviewer type', review(user_type='Bot')),
+            ('rejected', review(state='rejected')),
+            ('comment', review(comment='APPROVE sha256:' + sha(request) + '\n')),
+            ('zero reviews', lambda w: w.reviews.__setitem__(APPROVAL_RUN, [])),
+            ('two reviews', lambda w: w.reviews.__setitem__(APPROVAL_RUN, [w.review(request), w.review(request)])),
+            ('workflow bytes', forged_workflow),
+            ('implementation pin', lambda w: w.files.__setitem__((APPROVAL_WF, P), b'name: other\n')),
+            ('main ref', run(head_branch='feature')),
+            ('no branch', run(head_branch=None)),
+            ('head off main', run(head_sha=OTHER_COMMIT)),
+            ('fork', run(head_repository_id=FORK_ID)),
+            ('repository', run(repository_id=FORK_ID)),
+            ('dispatcher', run(actor_id=STRANGER)),
+            ('trigger', run(triggering_actor_id=STRANGER)),
+            ('event', run(event='push')),
+            ('workflow id', run(workflow_id=APPROVAL_WF_ID + 1)),
+            ('attempt', rerun),
+            ('channel disabled', lambda w: w.files.__setitem__(
+                ('release-keys/evidence-policy.json', HEAD),
+                w.policy.replace(b'"enabled":true', b'"enabled":false'))),
+        )
+        for name, change in accepting:
+            with self.subTest(stage='accept', case=name):
+                self.refuses(accept_after, change)
+        receiving = (
+            ('job', lambda w: w.jobs[(APPROVAL_RUN, 1)][1].update(name='accept')),
+            ('environment', review(environments=stranger_env)),
+            ('reviewer', review(user_id=STRANGER)),
+            ('comment', review(comment='APPROVE sha256:' + sha(request) + '\n')),
+            ('zero reviews', lambda w: w.reviews.__setitem__(APPROVAL_RUN, [])),
+            ('two reviews', lambda w: w.reviews.__setitem__(APPROVAL_RUN, [w.review(request), w.review(request)])),
+            ('workflow bytes', forged_workflow),
+            ('main ref', run(head_branch='feature')),
+            ('fork', run(head_repository_id=FORK_ID)),
+            ('dispatcher', run(actor_id=STRANGER)),
+            ('trigger', run(triggering_actor_id=STRANGER)),
+            ('not completed', run(status='in_progress', conclusion=None)),
+            ('failed', run(conclusion='failure')),
+            ('artifact name', lambda w: w.artifacts[APPROVAL_ARTIFACT].update(
+                name='approval-request-' + str(APPROVAL_RUN) + '-2')),
+            ('expired artifact', lambda w: w.artifacts[APPROVAL_ARTIFACT].update(expired=True)),
+            ('artifact head', lambda w: w.artifacts[APPROVAL_ARTIFACT].update(head_sha=OTHER_COMMIT)),
+            ('changed bytes', lambda w: w.members.__setitem__((APPROVAL_ARTIFACT, 'approval-request.json'),
+                                                              approval_request('new_platform'))),
+        )
+        for name, change in receiving:
+            with self.subTest(stage='receipt', case=name):
+                self.refuses(receipt_after, change)
+        # The receipt names the kind its caller asked for, and the policy commit its request names.
+        world, _, _ = self.produce('key_change')
+        self.refuses(approval.receipt, self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'new_platform', POLICY,
+                     message='the approval run approved a key_change request, not new_platform')
+        self.refuses(approval.receipt, self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'key_change', P)
+        world.files[('release-keys/evidence-policy.json', P)] = world.policy
+        self.refuses(approval.receipt, self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'key_change', P,
+                     message='the approval request names another policy commit')
+        self.refuses(approval.receipt, self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'key_change', OTHER_COMMIT)
+        self.refuses(approval.receipt, self.facts(world), APPROVAL_RUN, APPROVAL_ARTIFACT, 'release', POLICY)
+        self.assertEqual(world.blocked, [])
+        # Oversize input refuses before JSON parsing; a shell payload stays data and never runs.
+        world = ApprovalWorld()
+        world.reviewed(request)
+        self.refuses(approval.accept, self.facts(world), APPROVAL_RUN, 1,
+                     {'request_body': ' ' * 60000 + '\n'}, message='request_body is larger than 60000 bytes')
+        self.refuses(approval.prepare, self.facts(world), APPROVAL_RUN, 1,
+                     {'request_body': ' ' * 60000 + '\n'}, message='request_body is larger than 60000 bytes')
+        marker = Path(self.scratch()) / 'owned'
+        for payload in ('$(touch ' + str(marker) + ')\n', '`touch ' + str(marker) + '`\n',
+                        '"; touch ' + str(marker) + '; echo "\n', "'; touch " + str(marker) + "; '\n"):
+            with self.subTest(payload=payload):
+                inputs = self.inputs(world, payload)
+                self.assertEqual(inputs['request_body'], payload)
+                self.refuses(approval.prepare, self.facts(world), APPROVAL_RUN, 1, inputs)
+                self.refuses(approval.accept, self.facts(world), APPROVAL_RUN, 1, inputs)
+                self.assertFalse(marker.exists())
+        self.assertEqual(world.blocked, [])
+
+    def test_rprd2_cli_writes_only_records(self):
+        # The command line runs through `--trusted` with isolated Python and refuses without credentials or
+        # a run identity; it never echoes the input.
+        approval_py = str(PRODUCERS / 'approval.py')
+        env = {'PATH': '/usr/bin:/bin', 'GITHUB_RUN_ID': str(APPROVAL_RUN), 'GITHUB_RUN_ATTEMPT': '1'}
+        hostile = '$(id) SECRET-INPUT-TEXT\n'
+        world = ApprovalWorld()
+        out = Path(self.scratch()) / 'event.json'
+        out.write_bytes(world.event(hostile))
+        done = subprocess.run([sys.executable, '-I', '-B', approval_py, '--trusted', str(ROOT), 'accept',
+                               '--event', str(out), '--out', str(out.parent / 'out')],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stderr, 'release producer: the step has no GITHUB_TOKEN\n')
+        self.assertNotIn('SECRET-INPUT-TEXT', done.stdout + done.stderr)
+        self.assertFalse((out.parent / 'out').exists())
+        missing = subprocess.run([sys.executable, '-I', '-B', approval_py, 'accept'], capture_output=True, text=True,
+                                 env=env)
+        self.assertEqual(missing.returncode, 2)
+        request_file = out.parent / 'request.json'
+        request = approval_request('key_change')
+        request_file.write_bytes(request)
+        dispatch = subprocess.run([sys.executable, '-I', '-B', approval_py, '--trusted', str(ROOT), 'dispatch',
+                                   '--request', str(request_file)], capture_output=True, env=env)
+        self.assertEqual(dispatch.returncode, 0, dispatch.stderr)
+        self.assertEqual(dispatch.stdout, canon({'inputs': {'request_body': request.decode('utf-8')},
+                                                 'ref': 'refs/heads/main'}))
+        # Records go to a new private folder, never over an existing file.
+        folder = out.parent / 'records'
+        self.common.write_record(folder, 'approval-request.json', request)
+        self.assertEqual((folder / 'approval-request.json').read_bytes(), request)
+        self.refuses(self.common.write_record, folder, 'approval-request.json', request)
+
+    def scratch(self):
+        import tempfile
+        folder = tempfile.mkdtemp(prefix='rdy-rprd2-')
+        self.addCleanup(__import__('shutil').rmtree, folder, True)
+        return folder
+
+
 if __name__ == '__main__':
     unittest.main()
