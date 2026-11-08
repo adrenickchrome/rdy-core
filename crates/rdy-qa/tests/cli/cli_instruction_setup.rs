@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_instructions and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
+const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_session, then rdy_instructions, and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
+
+/// The 0.43.0 to 0.45.0 stub.
+const OLD_STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_instructions and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
 
 const NOT_REGULAR_FIX: &str = "replace it with a regular file, then run rdy setup again";
 
@@ -734,4 +737,37 @@ fn agi4_init_of_the_meta_project_prints_no_prompt() {
     let other = hold.path().join("other");
     let v = ok_json(&w, elsewhere.path(), &["init", other.to_str().unwrap()]);
     assert_eq!(v["setup_hint"], INIT_PROMPT, "{v}");
+}
+
+#[test]
+fn s1_setup_replaces_the_old_stub_in_place() {
+    let w = World::new();
+    let pd = w.project();
+    let root = pd.path();
+    let claude = format!("Mine first.\n\n{OLD_STUB}\nMore of mine.\n");
+    let agents = format!("{OLD_STUB}Tail without newline");
+    std::fs::write(root.join("CLAUDE.md"), &claude).unwrap();
+    std::fs::write(root.join("AGENTS.md"), &agents).unwrap();
+    assert!(rdy_at(&w, root, &["setup"]).status.success());
+    let want_c = format!("Mine first.\n\n{STUB}\nMore of mine.\n");
+    let want_a = format!("{STUB}Tail without newline");
+    assert_eq!(read(&root.join("CLAUDE.md")), want_c);
+    assert_eq!(read(&root.join("AGENTS.md")), want_a);
+    // a repeat gives the same bytes
+    assert!(rdy_at(&w, root, &["setup"]).status.success());
+    assert_eq!(read(&root.join("CLAUDE.md")), want_c);
+    assert_eq!(read(&root.join("AGENTS.md")), want_a);
+}
+
+#[test]
+fn s1_setup_leaves_a_file_with_no_stub_alone() {
+    let w = World::new();
+    let pd = w.project();
+    let root = pd.path();
+    let mine = "# Mine\n\nAt the start of every task, call rdy_instructions.\n";
+    std::fs::write(root.join("CLAUDE.md"), mine).unwrap();
+    assert!(rdy_at(&w, root, &["setup"]).status.success());
+    // today's behaviour: the stub goes first, the person's bytes stay
+    assert_eq!(read(&root.join("CLAUDE.md")), format!("{STUB}{mine}"));
+    assert_eq!(read(&root.join("AGENTS.md")), STUB);
 }

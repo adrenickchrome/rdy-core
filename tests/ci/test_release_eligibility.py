@@ -66,6 +66,14 @@ SOURCE_KINDS = ('artifact', 'implementation_source', 'job', 'protected_policy', 
 SECURITY = {'CodeQL (actions)': SEC_RUN, 'CodeQL (rust)': SEC_RUN, 'Core CI': CI_RUN, 'Core security': SEC_RUN,
             'Dependency, secret and workflow policy': SEC_RUN, 'Fast gate (Linux x86-64)': CI_RUN}
 CHECKS = ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')
+WINDOWS = 'x86_64-pc-windows-msvc'
+PREVIEW_SOURCE = 'crates/rdy-cli/src/main.rs'
+
+
+def product_source(declaration='const PREVIEW: bool = true;'):
+    """The lines of the CLI's main.rs that eligibility reads: the one PREVIEW declaration and its use."""
+    return ('mod wc;\n\n/// True until Release 1: the human version output carries the preview mark.\n' + declaration
+            + '\n\nconst VERSION_TEXT: &str = if PREVIEW {\n    "(preview)"\n} else {\n    ""\n};\n').encode()
 
 
 def sha(data):
@@ -248,7 +256,8 @@ class World(object):
         self.source = {'schema': 1, 'version': version, 'design_landing': LANDING, 'notes_sha256': sha(self.notes),
                        'guide_sha256': sha(self.guide)}
         self.put(S, 'release/source.json', canon(self.source))
-        self.evidence_wf = b'name: release-evidence\non: workflow_dispatch\n'
+        self.put(S, PREVIEW_SOURCE, product_source())
+        self.evidence_wf =b'name: release-evidence\non: workflow_dispatch\n'
         self.put(S, EVIDENCE_WF, self.evidence_wf)
         self.put(H, EVIDENCE_WF, self.evidence_wf)
         self.approval_wf = b'name: release-approval\non: workflow_dispatch\n'
@@ -1099,27 +1108,33 @@ class Eligibility(Base):
         self.qualifies(World())
 
     def test_rsig5_self_asserted_approval_refuses(self):
-        # Release 1 cannot ride the standing preview approval.
+        # The first machine-signed preview cannot ride the standing preview approval.
         w = first_machine_world()
-        self.refuses(w, 'not authorized: a standing preview cannot cover a release_1 release')
+        self.refuses(w, 'not authorized: a standing preview cannot cover a key_change release')
+        # Release 1 comes from S's PREVIEW declaration, not from E or numeric history. A source that disables
+        # PREVIEW cannot ride the standing approval with preview archives either.
+        w = World()
+        w.put(S, PREVIEW_SOURCE, product_source('const PREVIEW: bool = false;'))
+        self.refuses(w, 'evidence mismatch: the candidate archive names do not match the PREVIEW declaration at the '
+                        'release commit')
         # A card that only E asserts: no accepted receipt and no approval run.
         w = first_machine_world()
-        receipt = w.add_card('release_1')
+        receipt = w.add_card('key_change')
         w.archive.clear()
         w.reserve()
-        self.refuses(w, 'not authorized: the release_1 card has no accepted founder receipt', recovery=True)
+        self.refuses(w, 'not authorized: the key_change card has no accepted founder receipt', recovery=True)
         # The archived receipt must come from the enrolled archive, through protected lineage.
         for change, message in (
                 (lambda w, r: w.lineage.update(table_id='fedcba98-7654-4321-8fed-cba987654321'),
-                 'not authorized: the archived release_1 approval is not from the enrolled archive'),
+                 'not authorized: the archived key_change approval is not from the enrolled archive'),
                 (lambda w, r: w.lineage.update(genesis_sha256=digest(66)),
-                 'not authorized: the archived release_1 approval is not from the enrolled archive'),
+                 'not authorized: the archived key_change approval is not from the enrolled archive'),
                 (lambda w, r: accept(w, r, policy_sha256=digest(65)),
-                 'not authorized: the archived release_1 approval policy is not the protected policy'),
+                 'not authorized: the archived key_change approval policy is not the protected policy'),
                 (lambda w, r: accept(w, r, signer_workflow_sha=OTHER),
-                 'not authorized: the archived release_1 approval was not accepted by its policy signer'),
+                 'not authorized: the archived key_change approval was not accepted by its policy signer'),
                 (lambda w, r: accept(w, r, policy_commit=OTHER),
-                 "evidence mismatch: the archived release_1 approval policy commit is not on main's first-parent chain"),
+                 "evidence mismatch: the archived key_change approval policy commit is not on main's first-parent chain"),
                 (lambda w, r: w.archive.update({r: b'{}\n'}),
                  "eligibility incomplete: missing field 'acceptance'"),
                 (lambda w, r: w.ep['approval_channel'].update(enabled=False) or w.publish_policy(P) or
@@ -1127,86 +1142,86 @@ class Eligibility(Base):
                  'not authorized: the founder approval channel is disabled'),
                 (lambda w, r: w.ep['approval_channel'].update(revoked_receipts=[r]) or w.publish_policy(P) or
                  w.publish_policy(HEAD),
-                 'not authorized: the release_1 card receipt is revoked')):
+                 'not authorized: the key_change card receipt is revoked')):
             w = first_machine_world()
-            receipt = w.add_card('release_1')
+            receipt = w.add_card('key_change')
             w.reserve()
             change(w, receipt)
             with self.subTest(message=message):
                 self.refuses(w, message, recovery=True)
         # A card reference outside the pinned archive.
         w = first_machine_world()
-        receipt = w.add_card('release_1')
-        w.e['approval_basis']['cards'][0]['reference'] = w.card(receipt, 'release_1')['reference'].replace(
+        receipt = w.add_card('key_change')
+        w.e['approval_basis']['cards'][0]['reference'] = w.card(receipt, 'key_change')['reference'].replace(
             'rdy-test-release-control', 'attacker-table')
         w.seal()
-        self.refuses(w, 'not authorized: the release_1 card is not in the pinned approval archive')
+        self.refuses(w, 'not authorized: the key_change card is not in the pinned approval archive')
 
         # First use: the live GitHub join must prove the founder approved exactly this request.
         def first_use(change):
             w = first_machine_world()
-            w.add_card('release_1', via='first_use')
+            w.add_card('key_change', via='first_use')
             change(w, w.approval_runs[0]['run_id'], w.approval_runs[0]['artifact_id'])
             return w
 
         for change, message in (
                 (lambda w, r, a: w.runs[(r, 1)].update(actor_id=PERSON, triggering_actor_id=PERSON),
-                 'not authorized: the release_1 approval run was not dispatched by the founder'),
+                 'not authorized: the key_change approval run was not dispatched by the founder'),
                 (lambda w, r, a: w.runs[(r, 1)].update(triggering_actor_id=APP),
-                 'not authorized: the release_1 approval run was not dispatched by the founder'),
+                 'not authorized: the key_change approval run was not dispatched by the founder'),
                 (lambda w, r, a: w.runs[(r, 1)].update(path=EVIDENCE_WF),
-                 'not authorized: the release_1 approval run is not the pinned founder approval workflow'),
+                 'not authorized: the key_change approval run is not the pinned founder approval workflow'),
                 (lambda w, r, a: w.runs[(r, 1)].update(head_branch='candidate/v0.42.0'),
-                 'not authorized: the release_1 approval run is not the pinned founder approval workflow'),
+                 'not authorized: the key_change approval run is not the pinned founder approval workflow'),
                 (lambda w, r, a: w.put(HEAD, APPROVAL_WF, b'name: release-approval\nrun: forged\n'),
-                 'not authorized: the release_1 approval workflow is not its pinned bytes'),
+                 'not authorized: the key_change approval workflow is not its pinned bytes'),
                 (lambda w, r, a: w.reviews[r][0].update(user_id=PERSON),
-                 'not authorized: the release_1 review is not the founder approval in the pinned environment'),
+                 'not authorized: the key_change review is not the founder approval in the pinned environment'),
                 (lambda w, r, a: w.reviews[r][0].update(environments=((42, 'release'),)),
-                 'not authorized: the release_1 review is not the founder approval in the pinned environment'),
+                 'not authorized: the key_change review is not the founder approval in the pinned environment'),
                 (lambda w, r, a: w.reviews[r][0].update(state='rejected'),
-                 'not authorized: the release_1 review is not the founder approval in the pinned environment'),
+                 'not authorized: the key_change review is not the founder approval in the pinned environment'),
                 (lambda w, r, a: w.reviews[r][0].update(comment='APPROVE sha256:' + digest(64)),
-                 'not authorized: the founder review does not approve the release_1 request'),
+                 'not authorized: the founder review does not approve the key_change request'),
                 (lambda w, r, a: w.reviews[r].append(dict(w.reviews[r][0])),
-                 'not authorized: the release_1 approval run needs exactly one founder review'),
+                 'not authorized: the key_change approval run needs exactly one founder review'),
                 (lambda w, r, a: w.reviews[r].clear(),
-                 'not authorized: the release_1 approval run needs exactly one founder review'),
+                 'not authorized: the key_change approval run needs exactly one founder review'),
                 (lambda w, r, a: w.artifacts[a].update(name='approval-request-' + str(r) + '-2'),
-                 'evidence mismatch: the release_1 approval artifact is not the request of its run'),
+                 'evidence mismatch: the key_change approval artifact is not the request of its run'),
                 (lambda w, r, a: w.runs.update({(r, 2): w.runs.pop((r, 1))}),
                  'eligibility incomplete: GitHub run attempt: not found'),
                 (lambda w, r, a: w.responses[r][3].update(sha256=digest(63)),
-                 'evidence mismatch: the release_1 approval source responses do not match the authenticated facts')):
+                 'evidence mismatch: the key_change approval source responses do not match the authenticated facts')):
             w = first_use(change)
             with self.subTest(message=message):
                 self.refuses(w, message)
         # The coordinator cannot approve itself: a request in an artifact the coordinator made,
         # carried by a run the coordinator dispatched, is not a founder receipt.
         w = first_machine_world()
-        w.add_card('release_1', via='first_use')
+        w.add_card('key_change', via='first_use')
         run_id = w.approval_runs[0]['run_id']
         w.runs[(run_id, 1)].update(actor_id=APP, triggering_actor_id=APP, workflow_id=81, path=EVIDENCE_WF,
                                    head_branch='candidate/v0.42.0')
-        self.refuses(w, 'not authorized: the release_1 approval run is not the pinned founder approval workflow')
+        self.refuses(w, 'not authorized: the key_change approval run is not the pinned founder approval workflow')
         # A requested approval run that E's cards do not name.
         w = first_machine_world()
-        w.add_card('release_1')
+        w.add_card('key_change')
         self.refuses(w, 'evidence mismatch: a requested approval run names no card of the release record',
                      request=w.request(approvals=[{'receipt_sha256': digest(61), 'run_id': 6100, 'artifact_id': 6200}]))
         # Valid founder receipts qualify: an archived one, and a first use with its bytes for the archive.
         w = first_machine_world()
-        receipt = w.add_card('release_1')
+        receipt = w.add_card('key_change')
         w.reserve()
         q = self.qualifies(w, recovery=True)
-        self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in q.cards], [('release_1', receipt, 'archive')])
+        self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in q.cards], [('key_change', receipt, 'archive')])
         self.assertEqual(q.cards[0].envelope_bytes, w.archive[receipt])
         w = first_machine_world()
-        receipt = w.add_card('release_1', via='first_use')
+        receipt = w.add_card('key_change', via='first_use')
         q = self.qualifies(w)
         card = q.cards[0]
         self.assertEqual((card.kind, card.receipt_sha256, card.source, card.envelope_bytes),
-                         ('release_1', receipt, 'first_use', None))
+                         ('key_change', receipt, 'first_use', None))
         self.assertEqual(sha(card.receipt_bytes), receipt)
         self.assertEqual(EVIDENCE.parse_approval_receipt(card.receipt_bytes).value['issuer']['stable_identity_sha256'],
                          stable_identity(card.projection_bytes))
@@ -1256,10 +1271,11 @@ class Eligibility(Base):
         w.add_card('key_change', receipt_kind='new_platform')
         w.reserve()
         self.refuses(w, 'evidence mismatch: the key_change card names a new_platform receipt', recovery=True)
-        # Release 1 needs its own card; a key card does not stand in for it, and its scope is exact.
+        # Every applicable card is required on its own: the first machine-signed preview needs its key card, a
+        # Release 1 card does not stand in for it, and every card's scope is exact.
         w = first_machine_world()
-        w.add_card('key_change')
-        self.refuses(w, 'not authorized: the release needs a release_1 card')
+        w.add_card('release_1')
+        self.refuses(w, 'not authorized: the release needs a key_change card')
         w = first_machine_world()
         w.add_card('release_1', scope=dict(w.full_scope(), version='0.44.0'))
         w.reserve()
@@ -1443,6 +1459,146 @@ class Eligibility(Base):
                 self.refuses(w, message)
 
 
+def releases_of(*published, drafts=()):
+    """Release facts: each version in `published` published, each in `drafts` an unpublished draft."""
+    return [GITHUB.ReleaseFact(release_id=100 + i, tag_name='v' + v, target_commitish=digest(200 + i)[:40],
+                               draft=v in drafts, prerelease=True, assets=())
+            for i, v in enumerate(published + tuple(drafts))]
+
+
+class ReleaseKind(Base):
+    """The cards a release needs come from authenticated facts: S's PREVIEW declaration, the shipped key
+    boundary and the admitted target set. They accumulate; none of them comes from the caller."""
+
+    def test_relc1_preview_uses_key_change_not_release_one(self):
+        # The first machine-signed preview: nothing after the historical range has shipped, and S keeps PREVIEW.
+        w = first_machine_world()
+        self.refuses(w, 'not authorized: a standing preview cannot cover a key_change release')
+        self.assertIn(('contents', PREVIEW_SOURCE, S), w.calls)
+        # A fabricated Release 1 card does not stand in for the first-machine key card.
+        w = first_machine_world()
+        w.add_card('release_1')
+        self.refuses(w, 'not authorized: the release needs a key_change card')
+        w = first_machine_world()
+        w.add_card('release_1', via='first_use')
+        self.refuses(w, 'not authorized: the release needs a key_change card')
+        # The key card alone qualifies the preview, as a new reservation and in recovery.
+        w = first_machine_world()
+        receipt = w.add_card('key_change')
+        q = self.qualifies(w)
+        self.assertEqual([(c.kind, c.receipt_sha256) for c in q.cards], [('key_change', receipt)])
+        self.assertEqual((q.version, q.first_machine_tag, q.artifacts),
+                         ('0.42.0', 'v0.42.0', tuple((f['name'], f['sha256'], f['size']) for f in w.archives)))
+        self.assertTrue(all('-preview-' in name for name, _, _ in q.artifacts))
+        w.reserve()
+        q = self.qualifies(w, recovery=True)
+        self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in q.cards], [('key_change', receipt, 'archive')])
+        # After the key's first release, a later preview needs no card at all.
+        self.qualifies(World())
+        # This checkpoint keeps the product a preview: the real declaration reads as one literal true.
+        self.assertIs(ELIGIBILITY.preview_declared((ROOT / PREVIEW_SOURCE).read_bytes()), True)
+
+    def test_relc1_release_one_and_platform_cards_accumulate(self):
+        def policy(targets):
+            w = World(version='0.47.0', published=('0.41.0',), first_tag='v0.46.0')
+            w.policy['targets'] = targets
+            return EVIDENCE.parse_policy(canon(w.policy))
+
+        histories = {'shipped': releases_of('0.17.0', '0.41.0', '0.46.0'),
+                     'unshipped': releases_of('0.17.0', '0.41.0'),
+                     # A draft of the first machine tag has not shipped the key boundary.
+                     'draft only': releases_of('0.17.0', '0.41.0', drafts=('0.46.0',))}
+        for preview in (True, False):
+            for history, releases in sorted(histories.items()):
+                for targets in ([MAC, LINUX], [MAC, WINDOWS, LINUX], [MAC, WINDOWS]):
+                    want = tuple(kind for kind, needed in (
+                        ('release_1', not preview),
+                        ('key_change', history != 'shipped'),
+                        ('new_platform', WINDOWS in targets)) if needed)
+                    with self.subTest(preview=preview, history=history, targets=targets):
+                        self.assertEqual(ELIGIBILITY._required_cards('0.47.0', policy(targets), releases, preview),
+                                         want)
+        # Every applicable card is required on its own: a preview before the key boundary has shipped needs
+        # the key card, and another kind does not stand in for it.
+        for kind in ('release_1', 'new_platform'):
+            w = first_machine_world()
+            w.add_card(kind, scope=w.scope_for(kind) if kind == 'release_1' else
+                       {'repository': REPO, 'targets': [MAC, LINUX]})
+            with self.subTest(kind=kind):
+                self.refuses(w, 'not authorized: the release needs a key_change card')
+        # A revocation card never grants Sign authority, even beside every card the release needs.
+        w = first_machine_world()
+        w.add_card('key_change')
+        w.add_card('revocation')
+        self.refuses(w, 'not authorized: a revocation card never permits signing')
+
+    def test_relc1_untrusted_release_kind_cannot_change_cards(self):
+        # A request field cannot name the release kind.
+        w = World()
+        for field, near in (('release_kind', None), ('preview', None), ('approvals_mode', 'approvals')):
+            with self.subTest(field=field):
+                with self.assertRaises(Refused) as caught:
+                    w.request(**{field: 'preview'})
+                self.assertEqual(str(caught.exception), "evidence mismatch: unknown field '" + field + "'"
+                                 + ("; did you mean '" + near + "'?" if near else ''))
+        # Missing or ambiguous source proof never falls back to the standing preview approval.
+        absent_source = 'eligibility incomplete: GitHub contents: not found'
+        ambiguous = 'evidence mismatch: the release commit has no single literal PREVIEW declaration in ' + PREVIEW_SOURCE
+        for label, change, message in (
+                ('missing', lambda w: w.files.pop((PREVIEW_SOURCE, S)), absent_source),
+                ('elsewhere', lambda w: (w.files.pop((PREVIEW_SOURCE, S)),
+                                         w.put(S, 'crates/rdy-cli/src/preview.rs', product_source())),
+                 absent_source),
+                ('at main only', lambda w: (w.put(HEAD, PREVIEW_SOURCE, w.files.pop((PREVIEW_SOURCE, S))),),
+                 absent_source),
+                ('none', lambda w: w.put(S, PREVIEW_SOURCE, product_source('')), ambiguous),
+                ('twice', lambda w: w.put(S, PREVIEW_SOURCE, product_source(
+                    'const PREVIEW: bool = true;\nconst PREVIEW: bool = false;')), ambiguous),
+                ('cfg pair', lambda w: w.put(S, PREVIEW_SOURCE, product_source(
+                    '#[cfg(unix)]\nconst PREVIEW: bool = true;\n#[cfg(windows)]\nconst PREVIEW: bool = false;')),
+                 ambiguous),
+                ('computed', lambda w: w.put(S, PREVIEW_SOURCE, product_source('const PREVIEW: bool = !false;')),
+                 ambiguous),
+                ('public', lambda w: w.put(S, PREVIEW_SOURCE, product_source('pub const PREVIEW: bool = true;')),
+                 ambiguous),
+                ('static', lambda w: w.put(S, PREVIEW_SOURCE, product_source('static PREVIEW: bool = true;')),
+                 ambiguous),
+                ('indented', lambda w: w.put(S, PREVIEW_SOURCE, product_source('    const PREVIEW: bool = true;')),
+                 ambiguous),
+                ('crlf', lambda w: w.put(S, PREVIEW_SOURCE, product_source('const PREVIEW: bool = true;\r')),
+                 ambiguous),
+                ('not utf-8', lambda w: w.put(S, PREVIEW_SOURCE, product_source() + b'\xff\n'), ambiguous)):
+            for recovery in (False, True):
+                w = World()
+                if recovery:
+                    w.reserve()
+                change(w)
+                with self.subTest(label=label, recovery=recovery):
+                    self.refuses(w, message, recovery=recovery)
+        # A forged archive name: preview archives from a source that disables PREVIEW cannot ride the standing
+        # preview approval, and a card does not change that.
+        mismatch = 'evidence mismatch: the candidate archive names do not match the PREVIEW declaration at the release commit'
+        for card in (None, 'release_1'):
+            for recovery in (False, True):
+                w = World()
+                w.put(S, PREVIEW_SOURCE, product_source('const PREVIEW: bool = false;'))
+                w.put(HEAD, PREVIEW_SOURCE, product_source())
+                if card:
+                    w.add_card(card)
+                if recovery:
+                    w.reserve()
+                with self.subTest(card=card, recovery=recovery):
+                    self.refuses(w, mismatch, recovery=recovery)
+        # Plain archive names from a source that keeps PREVIEW refuse too.
+        w = World()
+        for entry in w.e['candidate']['artifacts']:
+            entry['name'] = entry['name'].replace('-preview-', '-')
+        w.seal()
+        self.refuses(w, 'evidence mismatch: the candidate artifacts are not exactly the two archives in name order')
+        # The exact declaration at S qualifies.
+        self.qualifies(World())
+
+
 def restate(world, run_id, artifact_id, **changes):
     """Changes the founder's approval request consistently: its bytes, and the review that approves them."""
     key = (artifact_id, 'approval-request.json')
@@ -1473,7 +1629,7 @@ def current_channel(world, **changes):
 class FirstUseIdentity(Base):
     def first_use(self):
         w = first_machine_world()
-        receipt = w.add_card('release_1', via='first_use')
+        receipt = w.add_card('key_change', via='first_use')
         return w, receipt, w.approval_runs[0]['run_id'], w.approval_runs[0]['artifact_id']
 
     def test_rsig5_first_use_receipt_survives_provider_metadata_changes(self):
@@ -1501,7 +1657,7 @@ class FirstUseIdentity(Base):
         recovered = self.qualifies(w, recovery=True)
         self.assertEqual(recovered.mode, 'recovery')
         self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in recovered.cards],
-                         [('release_1', receipt, 'first_use')])
+                         [('key_change', receipt, 'first_use')])
         self.assertEqual(recovered.cards[0].receipt_bytes, first.receipt_bytes)
         w.repository_sha, w.runs[(r, 1)]['sha256'] = digest(104), digest(105)
         respond(w, r, repository=digest(104), run_attempt=digest(105))
@@ -1511,31 +1667,31 @@ class FirstUseIdentity(Base):
         changes = (
             # The approver is current authority: it refuses with its own reason.
             (lambda w, r, a: w.reviews[r][0].update(user_id=PERSON),
-             'not authorized: the release_1 review is not the founder approval in the pinned environment'),
+             'not authorized: the key_change review is not the founder approval in the pinned environment'),
             # Kind, scope and artifact digest are the approval's identity: E's card no longer names it.
-            (lambda w, r, a: restate(w, r, a, kind='key_change', scope=w.scope_for('key_change')),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
-            (lambda w, r, a: restate(w, r, a, scope=dict(w.full_scope(), design_landing=digest(77))),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
+            (lambda w, r, a: restate(w, r, a, kind='release_1', scope=w.scope_for('release_1')),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
+            (lambda w, r, a: restate(w, r, a, scope=dict(w.scope_for('key_change'), transition_sha256=digest(77))),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
             (lambda w, r, a: (w.artifacts[a].update(digest=digest(78)), respond(w, r, request_archive=digest(78))),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
             # So are the policy commit, the job and the run head, each changed consistently.
             (lambda w, r, a: restate(w, r, a, policy_commit=S),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
             (lambda w, r, a: w.jobs[(r, 1)][0].update(job_id=9999),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
             (lambda w, r, a: (w.runs[(r, 1)].update(head_sha=P), w.artifacts[a].update(head_sha=P),
                               w.put(P, APPROVAL_WF, w.approval_wf)),
-             'not authorized: the release_1 card does not name the founder-approved receipt'),
+             'not authorized: the key_change card does not name the founder-approved receipt'),
             # A changed source, attempt or comment, and competing reviews, refuse with their own reasons.
             (lambda w, r, a: w.put(HEAD, APPROVAL_WF, b'name: release-approval\nrun: forged\n'),
-             'not authorized: the release_1 approval workflow is not its pinned bytes'),
+             'not authorized: the key_change approval workflow is not its pinned bytes'),
             (lambda w, r, a: w.runs.update({(r, 2): dict(w.runs.pop((r, 1)), run_attempt=2)}),
              'eligibility incomplete: GitHub run attempt: not found'),
             (lambda w, r, a: w.reviews[r][0].update(comment='APPROVE sha256:' + digest(64)),
-             'not authorized: the founder review does not approve the release_1 request'),
+             'not authorized: the founder review does not approve the key_change request'),
             (lambda w, r, a: w.reviews[r].append(dict(w.reviews[r][0], user_id=PERSON)),
-             'not authorized: the release_1 approval run needs exactly one founder review'),
+             'not authorized: the key_change approval run needs exactly one founder review'),
         )
         for recovery in (False, True):
             for change, message in changes:
@@ -1549,13 +1705,13 @@ class FirstUseIdentity(Base):
         # that E froze: a revoked receipt, a disabled channel or another founder refuses.
         for via in ('first_use', 'archive'):
             for channel, message in (
-                    ({'revoked_receipts': None}, 'not authorized: the release_1 card receipt is revoked'),
+                    ({'revoked_receipts': None}, 'not authorized: the key_change card receipt is revoked'),
                     ({'enabled': False}, 'not authorized: the founder approval channel is disabled'),
                     ({'founder_user_id': 4343}, 'not authorized: ' + {
-                        'first_use': 'the release_1 approval run was not dispatched by the founder',
-                        'archive': 'the archived release_1 approval is not the founder approval'}[via])):
+                        'first_use': 'the key_change approval run was not dispatched by the founder',
+                        'archive': 'the archived key_change approval is not the founder approval'}[via])):
                 w = first_machine_world()
-                receipt = w.add_card('release_1', via=via)
+                receipt = w.add_card('key_change', via=via)
                 w.reserve()
                 self.qualifies(w, recovery=True)
                 if 'revoked_receipts' in channel:
@@ -1573,7 +1729,7 @@ class FirstUseIdentity(Base):
                 (lambda w, r, a: w.errors.update(approval_responses=ControllerError('approval responses unavailable')),
                  'eligibility incomplete: approval responses unavailable'),
                 (lambda w, r, a: w.reviews[r].clear(),
-                 'not authorized: the release_1 approval run needs exactly one founder review')):
+                 'not authorized: the key_change approval run needs exactly one founder review')):
             w, receipt, r, a = self.first_use()
             change(w, r, a)
             with self.subTest(message=message):
@@ -1618,7 +1774,7 @@ class FirstUseIdentity(Base):
         self.assertEqual(self.qualifies(w, recovery=True, request=w.request(approvals=[])).cards[0].envelope_bytes,
                          record)
         other = [dict(w.approval_runs[0], run_id=r + 50)]
-        self.refuses(w, 'evidence mismatch: the requested release_1 approval run is not the accepted one',
+        self.refuses(w, 'evidence mismatch: the requested key_change approval run is not the accepted one',
                      recovery=True, request=w.request(approvals=other))
         # Current authority is still checked apart from the accepted identity.
         current_channel(w, enabled=False)
@@ -1627,7 +1783,7 @@ class FirstUseIdentity(Base):
     def test_rsig5_frozen_v1_approvals_keep_full_projection_semantics(self):
         # A frozen v1 archive record still authenticates: its receipt binds the whole projection.
         w = first_machine_world()
-        receipt = w.add_card('release_1', schema=1)
+        receipt = w.add_card('key_change', schema=1)
         w.reserve()
         card = self.qualifies(w, recovery=True).cards[0]
         self.assertEqual((card.source, card.envelope_bytes), ('archive', w.archive[receipt]))
@@ -1636,10 +1792,10 @@ class FirstUseIdentity(Base):
         # A new first use writes schema 2 only: a card that names a v1 receipt refuses, in both phases,
         # before it can take a reservation that nothing can then authorize.
         w = first_machine_world()
-        w.add_card('release_1', via='first_use', schema=1)
-        self.refuses(w, 'not authorized: the release_1 card does not name the founder-approved receipt')
+        w.add_card('key_change', via='first_use', schema=1)
+        self.refuses(w, 'not authorized: the key_change card does not name the founder-approved receipt')
         w.reserve()
-        self.refuses(w, 'not authorized: the release_1 card does not name the founder-approved receipt', recovery=True)
+        self.refuses(w, 'not authorized: the key_change card does not name the founder-approved receipt', recovery=True)
 
 
 if __name__ == '__main__':

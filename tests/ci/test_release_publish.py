@@ -2480,7 +2480,7 @@ class CurrentAuthority(Base):
         self.assertNotIn(GENUINE_ART[target], stage.w.artifacts)
 
     def card_stage(self):
-        """Release 1 under an approval the signer archived, signed, with the card in its authorization."""
+        """The first machine-signed preview under an archived key card, signed, with the card in its authorization."""
         world = release_world(base.first_machine_world)
         transition = b'{"scheme":"filler"}\n'
         world.put(P, 'release-keys/transition-v0.42.0.json', transition)
@@ -2489,7 +2489,7 @@ class CurrentAuthority(Base):
         world.e['approval_basis']['scope'] = world.full_scope()
         world.seal()
         stage = self.stage(world)
-        receipt = stage.w.add_card('release_1')
+        receipt = stage.w.add_card('key_change')
         stage.rig.seed_archive(receipt)
         stage.rig.install()
         stage.sign()
@@ -2640,7 +2640,7 @@ class CurrentAuthority(Base):
         self.assertEqual(outcomes[0], outcomes[1], 'the same bytes and the same evidence under both states')
 
     def test_rsig13_a_revoked_approval_refuses_the_draft_and_the_genuine_check(self):
-        text = 'not authorized: the release_1 card receipt is revoked'
+        text = 'not authorized: the key_change card receipt is revoked'
         stage, receipt = self.card_stage()
         self.after_gather_read(stage, self.revoke_card(receipt))
         self.refused(text, stage.draft)

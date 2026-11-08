@@ -2097,16 +2097,16 @@ class Approval(Base):
     def first_use(self):
         world = base.first_machine_world()
         rig = Rig(world)
-        receipt = world.add_card('release_1', via='first_use')
+        receipt = world.add_card('key_change', via='first_use')
         run_id = world.approval_runs[0]['run_id']
         artifact_id = world.approval_runs[0]['artifact_id']
         return rig, receipt, run_id, artifact_id
 
     def archived(self, schema=2):
-        """Release 1 under an approval the signer archived earlier. The request names no run."""
+        """The first machine-signed preview under a key card archived earlier. The request names no run."""
         world = base.first_machine_world()
         rig = Rig(world)
-        receipt = world.add_card('release_1', schema=schema)
+        receipt = world.add_card('key_change', schema=schema)
         rig.seed_archive(receipt)
         return rig, receipt
 
@@ -2130,7 +2130,7 @@ class Approval(Base):
         self.assertNotIsInstance(preliminary, ELIGIBILITY.Qualified)
         pending = preliminary.cards[0]
         self.assertIsInstance(pending, ELIGIBILITY.PendingCard)
-        self.assertEqual((pending.kind, pending.receipt_sha256, pending.source), ('release_1', receipt, 'pending_archive'))
+        self.assertEqual((pending.kind, pending.receipt_sha256, pending.source), ('key_change', receipt, 'pending_archive'))
         for name in ('request_bytes', 'receipt_bytes', 'projection_bytes', 'envelope_bytes'):
             self.assertFalse(hasattr(pending, name), name)
         # It permits only the reservation bookkeeping. E, its card and T are not regenerated.
@@ -2162,10 +2162,10 @@ class Approval(Base):
             self.assertFalse(hasattr(preliminary, name), name)
         # A pending reference that the archive cannot resolve refuses after STS, before any grant.
         rig = Rig(base.first_machine_world())
-        receipt = rig.w.add_card('release_1')
+        receipt = rig.w.add_card('key_change')
         rig.w.archive.clear()
         ctrl = self.to_session(rig)
-        self.refused('not authorized: the release_1 card has no accepted founder receipt', ctrl.open_session, rig.table)
+        self.refused('not authorized: the key_change card has no accepted founder receipt', ctrl.open_session, rig.table)
         self.assertNotIn(('GRANT#' + ctrl.grant_id, 'RECORD'), rig.table.items)
         self.refused('authority unavailable: the signing session is not open',
                      lambda: ctrl.reserve(**rig.adapter_args()).__enter__())
@@ -2185,13 +2185,13 @@ class Approval(Base):
         self.refused('not authorized: the founder approval channel is disabled', rig.qualify)
         rig, receipt = self.archived()
         channel(rig, revoked_receipts=[receipt])
-        self.refused('not authorized: the release_1 card receipt is revoked', rig.qualify)
+        self.refused('not authorized: the key_change card receipt is revoked', rig.qualify)
         rig = Rig(base.first_machine_world())
         rig.w.add_card('revocation')
         self.refused('not authorized: a revocation card never permits signing', rig.qualify)
         rig = Rig(base.first_machine_world())
-        rig.w.add_card('key_change')
-        self.refused('not authorized: the release needs a release_1 card', rig.qualify)
+        rig.w.add_card('release_1')
+        self.refused('not authorized: the release needs a key_change card', rig.qualify)
         # Standing previews keep their path: no card, nothing pending, nothing read.
         rig = Rig()
         preliminary = rig.qualify()
@@ -2259,7 +2259,7 @@ class Approval(Base):
         # Only expiry defers. Malformed or conflicting evidence is not relabelled.
         for change, message in (
                 (lambda r, a: r.w.artifacts[a].update(name='another-artifact'),
-                 'evidence mismatch: the release_1 approval artifact is not the request of its run'),
+                 'evidence mismatch: the key_change approval artifact is not the request of its run'),
                 (lambda r, a: r.w.artifacts[a].update(run_id=1),
                  'evidence mismatch: GitHub artifact: the artifact is not from run ' + 'RUN'),
                 (lambda r, a: r.w.artifacts.pop(a), 'eligibility incomplete: GitHub artifact: not found')):
@@ -2277,7 +2277,7 @@ class Approval(Base):
         ctrl = rig.controller(request=rig.w.request(approvals=[]))
         ctrl.admit()
         ctrl.issue_credentials(rig.provider())
-        self.refused('not authorized: the release_1 card has no accepted founder receipt', ctrl.open_session, rig.table)
+        self.refused('not authorized: the key_change card has no accepted founder receipt', ctrl.open_session, rig.table)
         self.assertEqual(rig.kms.calls, [])
         # An uncertain create reconciles only the exact accepted record. Absence stays uncertain.
         for mode in ('lost_ack', 'unsent', 'down', 'replay'):
@@ -2408,14 +2408,14 @@ class Approval(Base):
         # Typed provenance still refuses, each with its own reason.
         for label, change, message in (
                 ('source', lambda r, a: r.w.put(HEAD, base.APPROVAL_WF, b'name: release-approval\nrun: forged\n'),
-                 'not authorized: the release_1 approval workflow is not its pinned bytes'),
+                 'not authorized: the key_change approval workflow is not its pinned bytes'),
                 ('scope', lambda r, a: base.restate(r.w, r.w.approval_runs[0]['run_id'], a,
-                                                    scope=dict(r.w.full_scope(), design_landing=digest(77))),
-                 'not authorized: the release_1 card does not name the founder-approved receipt'),
+                                                    scope=dict(r.w.scope_for('key_change'), transition_sha256=digest(77))),
+                 'not authorized: the key_change card does not name the founder-approved receipt'),
                 ('reviewer', lambda r, a: r.w.reviews[r.w.approval_runs[0]['run_id']][0].update(user_id=base.PERSON),
-                 'not authorized: the release_1 review is not the founder approval in the pinned environment'),
+                 'not authorized: the key_change review is not the founder approval in the pinned environment'),
                 ('run', lambda r, a: r.w.jobs[(r.w.approval_runs[0]['run_id'], 1)][0].update(job_id=9999),
-                 'not authorized: the release_1 card does not name the founder-approved receipt')):
+                 'not authorized: the key_change card does not name the founder-approved receipt')):
             rig, receipt, run_id, artifact_id = self.first_use()
             change(rig, artifact_id)
             with self.subTest(label, phase='before credentials'):
@@ -2428,13 +2428,14 @@ class Approval(Base):
                 self.assertNotIn(self.approval_key(receipt), rig.table.items)
         # The archived receipt's scope must still cover the release.
         rig = Rig(base.first_machine_world())
-        receipt = rig.w.add_card('release_1', scope=dict(rig.w.full_scope(), version='0.44.0'))
+        receipt = rig.w.add_card('key_change', scope=dict(rig.w.scope_for('key_change'), first_machine_tag='v0.44.0'))
         rig.seed_archive(receipt)
         ctrl = self.to_session(rig)
-        self.refused('not authorized: the release_1 card does not cover the release version', ctrl.open_session, rig.table)
+        self.refused('not authorized: the key_change card does not cover the release first machine tag',
+                     ctrl.open_session, rig.table)
         # Revocation and a disabled channel are checked apart from the identity, at every stage.
         for changes, message in (({'enabled': False}, 'not authorized: the founder approval channel is disabled'),
-                                 ({'revoked_receipts': 'R'}, 'not authorized: the release_1 card receipt is revoked')):
+                                 ({'revoked_receipts': 'R'}, 'not authorized: the key_change card receipt is revoked')):
             rig, receipt = self.archived()
             ctrl = self.to_session(rig)
             values = {k: ([receipt] if v == 'R' else v) for k, v in changes.items()}
@@ -2726,7 +2727,7 @@ class Lineage(Base):
         base.accept(rig.w, receipt, table_id='fedcba98-7654-4321-8fed-cba987654321')
         rig.table.items[('APPROVAL#' + receipt, 'RECORD')] = rig.w.archive[receipt]
         ctrl = Approval.to_session(self, rig)
-        self.refused('not authorized: the archived release_1 approval is not from the enrolled archive', ctrl.open_session,
+        self.refused('not authorized: the archived key_change approval is not from the enrolled archive', ctrl.open_session,
                      rig.table)
 
     def test_rsig5_mirror_prepared_before_active_commit(self):
@@ -3216,12 +3217,12 @@ class Repairs(Base):
         self.authority(rig)
         # A change that only reduces authority takes effect at once: the next unfinished act refuses on it.
         rig = Rig(base.first_machine_world())
-        receipt = rig.w.add_card('release_1')
+        receipt = rig.w.add_card('key_change')
         rig.seed_archive(receipt)
         rig.install()
         rig.reserve_version()
         self.land(rig, self.channel(revoked_receipts=[receipt]))
-        self.refused('not authorized: the release_1 card receipt is revoked', rig.controller().admit)
+        self.refused('not authorized: the key_change card receipt is revoked', rig.controller().admit)
 
     def test_rsig12_a_a_lost_revocation_refuses_against_history(self):
         # Each end equals the epoch's first baseline. Only the protected history shows what happened.
