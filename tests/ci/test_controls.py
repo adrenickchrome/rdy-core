@@ -776,6 +776,75 @@ class ToolArchive(unittest.TestCase):
                 self.extract(entries)
 
 
+class ToolDownload(unittest.TestCase):
+    # Runs f17ab534 and 6f62675a: GitHub timed out unauthenticated requests (incident 2026-11-08
+    # 10:36Z to 12:32Z), urlopen raised, and the refusal named neither the tool nor the cause.
+    URL = 'https://github.com/owner/tool/releases/download/v1/tool.tar.gz'
+
+    class Body(io.BytesIO):
+        def geturl(self):
+            return ToolDownload.URL
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    def run_download(self, outcomes):
+        calls, sleeps = [], []
+        outcomes = iter(outcomes)
+
+        def urlopen(request, timeout):
+            calls.append((request.full_url, timeout))
+            outcome = next(outcomes)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return self.Body(outcome)
+        return TOOLS.download(self.URL, urlopen=urlopen, sleep=sleeps.append), calls, sleeps
+
+    def test_transient_network_errors_are_retried_then_the_body_is_returned(self):
+        body, calls, sleeps = self.run_download([
+            TimeoutError('timed out'),
+            urllib.error.URLError(ConnectionResetError()),
+            urllib.error.HTTPError(self.URL, 503, 'unavailable', {}, None),
+            b'archive'])
+        self.assertEqual(body, b'archive')
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sleeps, list(TOOLS.RETRY_DELAYS))
+
+    def test_retries_are_bounded(self):
+        with self.assertRaises(TimeoutError):
+            self.run_download([TimeoutError('timed out')] * (len(TOOLS.RETRY_DELAYS) + 1))
+
+    def test_a_client_error_is_not_retried(self):
+        with self.assertRaises(urllib.error.HTTPError):
+            self.run_download([urllib.error.HTTPError(self.URL, 404, 'not found', {}, None), b'x'])
+
+    def test_a_retried_download_is_still_verified(self):
+        payload = ToolArchive.archive([('tool', 'file')])
+        manifest = {'tools': {'tool': {'version': '1', 'platforms': {'K': {
+            'url': self.URL, 'sha256': '0' * 64, 'binary': 'tool'}}}}}
+        with tempfile.TemporaryDirectory() as out, \
+                mock.patch.object(TOOLS, 'download', return_value=payload) as download:
+            with self.assertRaises(SystemExit) as refused:
+                TOOLS.install(manifest, 'K', Path(out), ['tool'])
+            self.assertEqual(os.listdir(out), [])
+        download.assert_called_once()
+        self.assertIn('tool: tool archive digest/size mismatch', str(refused.exception))
+        self.assertIn('no unverified executable was run', str(refused.exception))
+
+    def test_the_refusal_names_the_tool_and_the_network_cause(self):
+        manifest = {'tools': {'gitleaks': {'version': '1', 'platforms': {'K': {
+            'url': self.URL, 'sha256': '0' * 64, 'binary': 'gitleaks'}}}}}
+        error = urllib.error.URLError(TimeoutError('timed out'))
+        with tempfile.TemporaryDirectory() as out, \
+                mock.patch.object(TOOLS, 'download', side_effect=error):
+            with self.assertRaises(SystemExit) as refused:
+                TOOLS.install(manifest, 'K', Path(out), ['gitleaks'])
+        self.assertIn('gitleaks: download failed (TimeoutError)', str(refused.exception))
+
+
 
 CI_WORKFLOW = (ROOT / '.github/workflows/ci.yml').read_text()
 PROFILE_ROOT = 'target/llvm-cov-target'
@@ -1281,6 +1350,18 @@ class WindowsPlatformMatrix(unittest.TestCase):
         self.assertIn('C:\\rdy-ci\\work\\target\\qa\\report.*', text)
         self.assertIn('cat target/qa/report.md', text)
         self.assertIn('| FAIL', (ROOT / 'scripts/ci/windows_report.ps1').read_text())
+
+    def test_platform_time_limits_fit_the_full_gate(self):
+        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
+        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
+        text = self.workflow()
+        self.assertIn('    continue-on-error: true\n', text)
+        self.assertIn('    timeout-minutes: ${{ matrix.timeout }}\n', text)
+        limits = dict(re.findall(r'label: (.+)\n\s+timeout: (\d+)', text))
+        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
+        self.assertGreaterEqual(int(limits['macOS ARM64']), 120)
+        self.assertGreaterEqual(int(limits['Windows Server 2025']), 240)
+        self.assertLessEqual(max(map(int, limits.values())), 360)
 
     def test_wx34_no_arm64_linux_job_is_restored(self):
         text = self.workflow()
