@@ -719,7 +719,7 @@ fn serve_thread(
     // the site accepts until the daemon stops; the runtime's drop below ends what is left of
     // it before the store closes, so a successor finds the port free
     if let Some(site) = site {
-        rt.spawn(site.run(Arc::clone(&shared), handle));
+        rt.spawn(site.run(Arc::clone(&shared), handle.clone()));
     }
     readiness.progress("building canon");
     log("building canon");
@@ -777,6 +777,9 @@ fn serve_thread(
         log("store closed");
         profiles::report(&root, TestEvent::Stage("store-closed"));
     }
+    // the last write has ended: a daemon whose project is gone kept its pid file until now, so a
+    // client waited for it (p-3MJBQ); after any other stop the file is gone already
+    handle.drained();
     ran.map_err(ServeError::Runtime)
 }
 

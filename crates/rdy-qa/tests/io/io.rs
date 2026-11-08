@@ -313,3 +313,32 @@ fn fmt1_a_format_1_manifest_over_a_format_2_tree_is_refused_not_imported_empty()
     .unwrap();
     refused_import(t.path());
 }
+
+/// A pack file that rdy cannot open is named in the error, with what rdy tried, a path a person
+/// can read, and the system's own error; the code stays `E_IO`.
+#[test]
+fn s2_an_unreadable_pack_names_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: rdy-standard\n").unwrap();
+    let packs = dir.path().join(".rdy").join("packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let pack = packs.join("mine.yaml");
+    std::fs::write(&pack, "name: mine\n").unwrap();
+    rdy_qa::platform::set_mode(&pack, 0o000).unwrap();
+    let os = match std::fs::File::open(&pack) {
+        Err(os) => os,
+        Ok(_) => {
+            // root opens a file whatever its mode: there is no refusal to name
+            rdy_qa::platform::set_mode(&pack, 0o600).unwrap();
+            return;
+        }
+    };
+    let e = pack_fingerprint(dir.path()).unwrap_err();
+    rdy_qa::platform::set_mode(&pack, 0o600).unwrap();
+    assert_eq!(e.code, E_IO, "{e}");
+    assert_eq!(
+        e.message,
+        format!("could not open {}: {os}", display_path(&pack))
+    );
+    assert_eq!(e.fix, "check file permissions and disk space");
+}

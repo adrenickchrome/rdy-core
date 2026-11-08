@@ -338,11 +338,20 @@ impl DaemonHandle {
     }
 
     /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` or another of its
-    /// parts (`project_parts`) is gone or replaced, removes this daemon's run files that still
-    /// name it and stops the daemon with `ProjectGone`. True when the project is gone. False before
-    /// the bind.
+    /// parts (`project_parts`) is gone or replaced, removes this daemon's socket record and socket
+    /// that still name it and stops the daemon with `ProjectGone`; `daemon.pid` stays until
+    /// [`Self::drained`]. True when the project is gone. False before the bind.
     pub fn check_project(&self) -> bool {
         self.check.check()
+    }
+
+    /// The host's word that the daemon's last write has ended: removes `daemon.pid` while it
+    /// still names this process. A daemon that the project check stops leaves that file in place
+    /// when `run` returns, because a host may still finish writes on the blocking pool, and a
+    /// client keeps waiting while the file names a live process (p-3MJBQ). Every other stop has
+    /// removed it already, and then this does nothing.
+    pub fn drained(&self) {
+        self.files.lock().remove_pid(&self.run);
     }
 }
 
@@ -439,7 +448,8 @@ impl Daemon {
     /// Serves connections until stopped, idle for `idle_timeout`, or replaced by another
     /// version. Then, in order: stops accepting and drops the listener, removes the socket and
     /// the pid file (unless `DaemonHandle::stop` already did), tells every connection to finish,
-    /// and waits for them up to `STOP_GRACE`.
+    /// and waits for them up to `STOP_GRACE`. After `ProjectGone` the pid file stays: the host
+    /// removes it with `DaemonHandle::drained` once its last write has ended.
     pub async fn run(mut self) -> io::Result<ExitReason> {
         let (mut listener, project) = self
             .listener
@@ -539,8 +549,13 @@ impl Daemon {
         let reason = self.reason.get().copied().unwrap_or(ExitReason::Stopped);
         // (1) stop accepting
         drop(listener);
-        // (2) the socket and the pid file, unless `DaemonHandle::stop` already removed them
-        self.files.remove(&self.config.run);
+        // (2) the socket and the pid file, unless `DaemonHandle::stop` already removed them. A
+        // daemon whose project is gone keeps its pid file for the host (`DaemonHandle::drained`)
+        if reason == ExitReason::ProjectGone {
+            self.files.remove_endpoint(&self.config.run);
+        } else {
+            self.files.remove(&self.config.run);
+        }
         // (3) every connection task sees `info.stop` and finishes
         while tasks.try_join_next().is_some() {}
         if reason != ExitReason::Idle {
@@ -585,13 +600,50 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
 /// across the removal, so every caller returns only once the files are gone. The endpoint is the
 /// one `bind` bound, so a project renamed or deleted while the daemon runs still has its socket
 /// removed. Before a bind nothing is this daemon's.
+///
+/// The record and the endpoint can go before the pid file (`remove_endpoint`): a daemon that the
+/// project check stops takes no new client, and keeps `daemon.pid` until its writes in flight have
+/// drained, since a client keeps waiting while that file names a live process (p-3MJBQ).
 #[derive(Clone, Default)]
 struct RunFiles(Arc<Mutex<Files>>);
 
 #[derive(Default)]
 struct Files {
-    removed: bool,
+    /// The record and the endpoint are removed, or were not this daemon's when the first
+    /// removal came.
+    endpoint_removed: bool,
+    /// The same for the pid file.
+    pid_removed: bool,
     bound: Option<Bound>,
+}
+
+impl Files {
+    fn remove_endpoint(&mut self, run: &RunDir) {
+        if std::mem::replace(&mut self.endpoint_removed, true) {
+            return;
+        }
+        let Some(bound) = &self.bound else {
+            return;
+        };
+        // the record first: no client follows it to a socket that is going away
+        if run.record_names(&bound.socket, bound.project) {
+            remove_if_present(&run.socket_record());
+        }
+        if bound.socket_id.is_some() && sys::endpoint_identity(&bound.socket) == bound.socket_id {
+            remove_if_present(&bound.socket);
+        }
+    }
+
+    fn remove_pid(&mut self, run: &RunDir) {
+        if std::mem::replace(&mut self.pid_removed, true) || self.bound.is_none() {
+            return;
+        }
+        let own = sys::own_pid_record().ok();
+        let own = own.as_deref().and_then(sys::parse_pid_record);
+        if own.is_some() && run.pid_record() == own {
+            remove_if_present(&run.pid_file());
+        }
+    }
 }
 
 /// What a bind made.
@@ -622,26 +674,16 @@ impl RunFiles {
             .map_or_else(|| run.socket(), |b| b.socket.clone())
     }
 
+    /// The record, the endpoint and the pid file, whichever are still to go.
     fn remove(&self, run: &RunDir) {
         let mut files = self.lock();
-        if std::mem::replace(&mut files.removed, true) {
-            return;
-        }
-        let Some(bound) = &files.bound else {
-            return;
-        };
-        // the record first: no client follows it to a socket that is going away
-        if run.record_names(&bound.socket, bound.project) {
-            remove_if_present(&run.socket_record());
-        }
-        if bound.socket_id.is_some() && sys::endpoint_identity(&bound.socket) == bound.socket_id {
-            remove_if_present(&bound.socket);
-        }
-        let own = sys::own_pid_record().ok();
-        let own = own.as_deref().and_then(sys::parse_pid_record);
-        if own.is_some() && run.pid_record() == own {
-            remove_if_present(&run.pid_file());
-        }
+        files.remove_endpoint(run);
+        files.remove_pid(run);
+    }
+
+    /// The record and the endpoint only; the pid file stays (see the type).
+    fn remove_endpoint(&self, run: &RunDir) {
+        self.lock().remove_endpoint(run);
     }
 }
 
@@ -715,9 +757,10 @@ impl ProjectCheck {
                 .is_some_and(|parts| parts.iter().any(|(path, id)| changed(path, *id)))
     }
 
-    /// When the project is gone, removes this daemon's run files that still name it
-    /// (`RunFiles::remove`), then stops with `ProjectGone`. True when the project is
-    /// gone; false before the bind.
+    /// When the project is gone, removes this daemon's socket record and endpoint while they
+    /// still name it (`RunFiles::remove_endpoint`), then stops with `ProjectGone`. `daemon.pid`
+    /// stays until the host's writes in flight have drained (`DaemonHandle::drained`). True when
+    /// the project is gone; false before the bind.
     fn check(&self) -> bool {
         let Some(project) = self.project.get().copied() else {
             return false;
@@ -732,7 +775,7 @@ impl ProjectCheck {
             ));
         }
         // before any reply: a client's retry may start a successor at once
-        self.files.remove(&self.run);
+        self.files.remove_endpoint(&self.run);
         self.stop.send_replace(true);
         true
     }
@@ -744,10 +787,11 @@ impl ProjectCheck {
 /// `stopping: true`, and the client retries once, which starts the project's own daemon.
 /// Otherwise the client's own daemon is not running.
 fn another_project(socket: &Path, root: &Path, pid: u32, stopping: bool) -> ErrorReply {
+    // D-EDS38: the root as a person reads it; identity and I/O keep the canonical path
     let message = format!(
         "the daemon on {} serves another project ({}, process {pid})",
         socket.display(),
-        root.display()
+        rdy_store::pio::display_path(root)
     );
     if !stopping {
         return ErrorReply::new(
@@ -1201,7 +1245,7 @@ mod tests {
             format!(
                 "the daemon on {} serves another project ({}, process {})",
                 endpoint.display(),
-                run.root().display(),
+                rdy_store::pio::display_path(&run.root()),
                 std::process::id()
             )
         );
@@ -1288,6 +1332,103 @@ mod tests {
         assert!(!run.pid_file().exists());
         drop(alone);
         assert_eq!(sys::endpoint_liveness(&endpoint).await, sys::Liveness::Gone);
+    }
+
+    /// Blocks each request in `ctl` until the test lets it go: a write in flight.
+    struct Holding {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl Handler for Holding {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn SigningAgent>,
+        ) -> Result<Value, ErrorReply> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.blocking_recv();
+            }
+            Ok(Value::Null)
+        }
+    }
+
+    /// p-3MJBQ on a project check (D-A6ZZA, D-6JZ5V): a client keeps waiting while `daemon.pid`
+    /// names a live process, so a daemon that the check stops keeps that file until its writes in
+    /// flight have drained. The socket record goes at once, so no new client reaches it.
+    #[tokio::test]
+    async fn s2_run_files_stay_until_in_flight_writes_drain() {
+        let (d, run) = project();
+        let store = d.path().join(".rdy").join(STORE_DIR);
+        fs::create_dir(&store).unwrap();
+        fs::write(store.join("lock"), b"").unwrap();
+        let (entered, in_flight) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let handler = Arc::new(Holding {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(Some(released)),
+        });
+        let mut daemon = Daemon::new(DaemonConfig::new(run.clone(), VERSION.to_string()), handler);
+        daemon.bind().await.unwrap();
+        let handle = daemon.handle();
+        daemon.readiness().ready();
+        let serving = tokio::spawn(daemon.run());
+        let project = run.project_id().unwrap();
+
+        let Attempt::Ready(mut writer) = connect(&run, &hello(project)).await else {
+            panic!("the writer gets a session");
+        };
+        let write = tokio::spawn(async move { writer.ctl("write", Value::Null).await });
+        in_flight.await.unwrap();
+
+        // the store moved under the live writer; the next hello's project check sees it
+        fs::rename(&store, d.path().join("store-aside")).unwrap();
+        let Attempt::Refused(e) = connect(&run, &hello(project)).await else {
+            panic!("a hello after the move is refused");
+        };
+        assert_eq!(e.extra.get("stopping"), Some(&Value::Bool(true)));
+        assert!(!run.socket_record().exists(), "no new client reaches it");
+        assert_eq!(
+            run.pid_named(),
+            Some(std::process::id()),
+            "daemon.pid stays while the write is in flight"
+        );
+
+        release.send(()).unwrap();
+        assert_eq!(write.await.unwrap().unwrap(), Value::Null);
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        assert_eq!(
+            run.pid_named(),
+            Some(std::process::id()),
+            "daemon.pid stays until the host's last write has ended"
+        );
+        handle.drained();
+        assert!(!run.pid_file().exists());
+    }
+
+    /// D-EDS38: a message shows a plain drive path, never the `\\?\` prefix of a canonical root.
+    #[test]
+    fn s2_another_project_message_shows_a_plain_drive_path() {
+        let (root, shown) = if cfg!(windows) {
+            (Path::new(r"\\?\C:\w\orig"), r"C:\w\orig")
+        } else {
+            (Path::new("/w/orig"), "/w/orig")
+        };
+        let socket = Path::new("/tmp/rdy-501/abc.sock");
+        for stopping in [false, true] {
+            let e = another_project(socket, root, 4242, stopping);
+            assert_eq!(
+                e.message,
+                format!(
+                    "the daemon on {} serves another project ({shown}, process 4242)",
+                    socket.display()
+                )
+            );
+        }
     }
 
     /// df3 fix round 2 (ruling task-3-round1): the refusal of a hello from another project. The
