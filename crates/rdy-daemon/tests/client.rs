@@ -577,7 +577,10 @@ async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
         "refused a client of another project ({})",
         run.project_id().unwrap()
     );
-    assert_eq!(log.lines(), [line.clone(), line]);
+    // the capture matches by text in the whole process, so a parallel test's refusal of its own
+    // project can land here too: count only this copy's lines
+    let mine: Vec<String> = log.lines().into_iter().filter(|l| *l == line).collect();
+    assert_eq!(mine, [line.clone(), line]);
 }
 
 /// wx21b: a copy of a project, a restored one and a deleted one never reach the daemon of the
