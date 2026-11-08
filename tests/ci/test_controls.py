@@ -1240,6 +1240,18 @@ class WindowsPlatformMatrix(unittest.TestCase):
         for name in ('$inner', '$work', '$cargoHome', '$rustupHome', '$node', '$git'):
             self.assertIn(f'(Quote-Arg {name})', block)
 
+    def test_wx34_windows_account_has_private_temp_and_profile_paths(self):
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
+        for name in ('TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'):
+            self.assertRegex(inner, rf'\$env:{name} = ')
+        self.assertIn('(Quote-Arg $home_)', gate)
+        self.assertIn('[string]$PrivateHome', inner)
+        self.assertIn('/inheritance:r', gate)
+        self.assertIn("'/setowner', $account", gate)
+        # the paths are set before the first build command
+        self.assertLess(inner.index('$env:LOCALAPPDATA'), inner.index('cargo fetch'))
+
     def test_wx34_no_arm64_linux_job_is_restored(self):
         text = self.workflow()
         for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):
