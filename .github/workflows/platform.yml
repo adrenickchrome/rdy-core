@@ -19,12 +19,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Minutes. macOS runs the full gate in 70 to 80. On f17ab534 the Windows gate was still in
+          # the rdy-qa areas when a 90-minute limit cancelled it.
           - runner: macos-26
             label: macOS ARM64
+            timeout: 120
           - runner: windows-2025
             label: Windows Server 2025
+            timeout: 240
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout }}
     continue-on-error: true
     permissions:
       contents: read
