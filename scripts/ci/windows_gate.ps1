@@ -11,6 +11,7 @@ $work = Join-Path $root 'work'
 $cargoHome = Join-Path $root 'cargo'
 $rustupHome = Join-Path $root 'rustup'
 $logs = Join-Path $root 'logs'
+$home_ = Join-Path $root 'home'
 $channel = '1.99.0'
 
 function Invoke-Native {
@@ -26,7 +27,8 @@ function Quote-Arg {
     return '"' + $Value + '"'
 }
 
-New-Item -ItemType Directory -Force -Path $root, $cargoHome, $rustupHome, $logs | Out-Null
+$homeDirs = @((Join-Path $home_ 'temp'), (Join-Path $home_ 'appdata'), (Join-Path $home_ 'localappdata'))
+New-Item -ItemType Directory -Force -Path (@($root, $cargoHome, $rustupHome, $logs) + $homeDirs) | Out-Null
 
 # The credential: random bytes, masked before first use, held in memory only.
 $bytes = New-Object byte[] 24
@@ -62,6 +64,13 @@ foreach ($dir in @($work, $cargoHome, $rustupHome, $logs)) {
     Invoke-Native 'icacls' @($dir, '/grant', "${account}:(OI)(CI)F", '/T', '/C', '/Q')
 }
 
+# The account's own TEMP, TMP, APPDATA and LOCALAPPDATA live here, private to the account. Without
+# them the child inherits the runner account's paths, which the standard account cannot write
+# (the linker fails with LNK1104). Only the account and the administrators can open this folder.
+Invoke-Native 'icacls' @($home_, '/setowner', $account, '/T', '/C', '/Q')
+Invoke-Native 'icacls' @($home_, '/inheritance:r', '/C', '/Q')
+Invoke-Native 'icacls' @($home_, '/grant', "${account}:(OI)(CI)F", '/grant', '*S-1-5-32-544:(OI)(CI)F', '/T', '/C', '/Q')
+
 # Tool directories the account needs on its PATH: Node from setup-node, and Git.
 $node = Split-Path -Parent (Get-Command node).Source
 $git = Split-Path -Parent (Get-Command git).Source
@@ -71,7 +80,7 @@ $out = Join-Path $logs 'gate.out'
 $err = Join-Path $logs 'gate.err'
 $inner = Join-Path $work 'scripts\ci\windows_gate_inner.ps1'
 $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $inner),
-    '-Work', (Quote-Arg $work), '-CargoHome', (Quote-Arg $cargoHome), '-RustupHome', (Quote-Arg $rustupHome),
+    '-Work', (Quote-Arg $work), '-PrivateHome', (Quote-Arg $home_), '-CargoHome', (Quote-Arg $cargoHome), '-RustupHome', (Quote-Arg $rustupHome),
     '-NodeDir', (Quote-Arg $node), '-GitDir', (Quote-Arg $git))
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `

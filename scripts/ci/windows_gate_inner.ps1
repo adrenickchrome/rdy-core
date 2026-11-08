@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$CargoHome,
     [Parameter(Mandatory = $true)][string]$RustupHome,
     [Parameter(Mandatory = $true)][string]$NodeDir,
-    [Parameter(Mandatory = $true)][string]$GitDir
+    [Parameter(Mandatory = $true)][string]$GitDir,
+    [Parameter(Mandatory = $true)][string]$PrivateHome
 )
 $ErrorActionPreference = 'Stop'
 
@@ -16,6 +17,11 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
     exit 1
 }
 
+# The runner account's TEMP, TMP, APPDATA and LOCALAPPDATA are not writable here. Use private ones.
+$env:TEMP = Join-Path $PrivateHome 'temp'
+$env:TMP = $env:TEMP
+$env:APPDATA = Join-Path $PrivateHome 'appdata'
+$env:LOCALAPPDATA = Join-Path $PrivateHome 'localappdata'
 $env:CARGO_HOME = $CargoHome
 $env:RUSTUP_HOME = $RustupHome
 $env:PATH = (Join-Path $CargoHome 'bin') + ';' + $NodeDir + ';' + $GitDir + ';' + $env:PATH
