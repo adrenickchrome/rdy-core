@@ -153,9 +153,10 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
 }
 
 /// The closed keys of the report (RULING F4, D-KQ4CA): nothing rides beside them.
-const REPORT_KEYS: [&str; 9] = [
+const REPORT_KEYS: [&str; 10] = [
     "against",
     "disclosure",
+    "hidden_planned",
     "profile",
     "references",
     "release",
@@ -355,4 +356,208 @@ fn pub9_check_is_read_only_and_works_without_a_daemon() {
         before,
         "the daemon wrote nothing"
     );
+}
+
+/// A public profile `plan` over four docs. At `v1.0.0` it hides one planned note in `guide`, the
+/// planned doc `ghost` with its prose, and the empty planned doc `nothing`; `late` is shown. A
+/// second landing hides one more note in `guide` and marks `late` planned.
+fn seed_planned(dir: &Path) {
+    let mut r = Rdy::open(dir).unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$ghost", "fields": {"name": "ghost", "title": "Ghost", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$nothing", "fields": {"name": "nothing", "title": "Nothing", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$late", "fields": {"name": "late", "title": "Late", "doc_type": "page"}}
+        ]),
+    )
+    .unwrap();
+    let id = |k: &str| w.created[k].clone();
+    let (admin, guide, ghost, nothing, late) = (
+        id("$admin"),
+        id("$guide"),
+        id("$ghost"),
+        id("$nothing"),
+        id("$late"),
+    );
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": guide, "body": "Shown words."},
+            {"op": "create", "type": "note", "parent": guide, "body": "Planned note.", "fields": {"planned": true}},
+            {"op": "create", "type": "prose", "parent": ghost, "body": "Ghost words."},
+            {"op": "create", "type": "prose", "parent": late, "body": "Late words."},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "plan", "title": "Plan", "audience": "public", "select": [guide, ghost, nothing, late]}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
+            {"op": "update", "id": late, "fields": {"planned": true}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.close().unwrap();
+}
+
+#[test]
+fn relc4_mcp_cli_and_no_daemon_reports_agree() {
+    let s = Served::new();
+    seed_planned(s.dir.path());
+    let mut c = McpClient::start_proxy(&s);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:p", "role": "reader", "view": "canon"}),
+    )
+    .ok();
+    let mut seen = vec![];
+    let mut runs = vec![];
+    for against in [None, Some("tag:v1.0.0")] {
+        let mut args = vec!["--json", "publication", "check", "--profile", "plan"];
+        let mut chat = json!({"profile": "plan"});
+        if let Some(a) = against {
+            args.extend(["--against", a]);
+            chat["against"] = json!(a);
+        }
+        let (ok, cli) = s.json(&args);
+        assert!(ok, "{cli}");
+        let mcp = c.call("rdy_publication_check", chat).ok();
+        assert_eq!(cli, mcp, "{against:?}");
+        assert_eq!(cli.to_string(), mcp.to_string(), "{against:?}");
+        seen.push(cli);
+        runs.push((against, args));
+    }
+    // the same report with no daemon: one process holds the store at a time
+    drop(c);
+    s.stop();
+    for ((against, args), cli) in runs.iter().zip(&seen) {
+        let mut bare = vec!["--no-daemon"];
+        bare.extend(args);
+        let (ok, direct) = s.json(&bare);
+        assert!(ok, "{direct}");
+        assert_eq!(cli, &direct, "{against:?}");
+        assert_eq!(cli.to_string(), direct.to_string(), "{against:?}");
+    }
+    // canon holds: guide (two notes), ghost (hidden, one prose), nothing (hidden, empty), late
+    // (hidden, one prose)
+    let rows = |v: &Value| -> Vec<(String, u64, bool)> {
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["title"].as_str().unwrap().to_string(),
+                    r["hidden_blocks"].as_u64().unwrap(),
+                    r["doc_hidden"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let full = &seen[0]["hidden_planned"];
+    assert_eq!(
+        (full["docs"].as_u64(), full["blocks"].as_u64()),
+        (Some(4), Some(4)),
+        "{full}"
+    );
+    assert_eq!(full["omitted_rows"], 0);
+    assert!(seen[0]["disclosure"].is_null());
+    let mut got = rows(full);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("Ghost".to_string(), 1, true),
+            ("Guide".to_string(), 2, false),
+            ("Late".to_string(), 1, true),
+            ("Nothing".to_string(), 0, true),
+        ]
+    );
+    for row in full["rows"].as_array().unwrap() {
+        assert_eq!(row["redacted"], false);
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["doc", "doc_hidden", "hidden_blocks", "redacted", "title"]
+        );
+    }
+    // against v1.0.0: one more note in guide, and late is newly hidden with its prose
+    let new = &seen[1]["disclosure"]["newly_hidden_planned"];
+    assert_eq!(
+        (new["docs"].as_u64(), new["blocks"].as_u64()),
+        (Some(2), Some(2)),
+        "{new}"
+    );
+    let mut got = rows(new);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("Guide".to_string(), 1, false),
+            ("Late".to_string(), 1, true)
+        ]
+    );
+    // a comparison carries no first-publication list beside it
+    assert_eq!(seen[1]["hidden_planned"]["docs"], 4);
+}
+
+#[test]
+fn relc4_cli_hides_empty_lines_and_names_new_counts() {
+    let s = Served::new();
+    seed_planned(s.dir.path());
+    let first = stdout(&s.rdy(&["publication", "check", "--profile", "plan"]));
+    assert!(
+        first.contains("\nHidden as planned: 4 blocks in 4 docs."),
+        "{first}"
+    );
+    assert!(!first.contains("Newly hidden"), "{first}");
+    let later = stdout(&s.rdy(&[
+        "publication",
+        "check",
+        "--profile",
+        "plan",
+        "--against",
+        "tag:v1.0.0",
+    ]));
+    let lines: Vec<&str> = later.lines().collect();
+    assert_eq!(
+        lines[4], "Hidden as planned: 4 blocks in 4 docs.",
+        "{later}"
+    );
+    assert_eq!(
+        lines.last().copied(),
+        Some("Newly hidden as planned: 2 blocks in 2 docs."),
+        "{later}"
+    );
+    // a baseline that already hides everything: the new list is empty, so its line is absent
+    let same = stdout(&s.rdy(&[
+        "publication",
+        "check",
+        "--profile",
+        "plan",
+        "--against",
+        "canon",
+    ]));
+    assert!(
+        same.contains("Hidden as planned: 4 blocks in 4 docs."),
+        "{same}"
+    );
+    assert!(!same.contains("Newly hidden"), "{same}");
 }

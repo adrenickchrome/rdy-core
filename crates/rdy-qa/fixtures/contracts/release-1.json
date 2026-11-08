@@ -38,7 +38,6 @@
         "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
         "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
-        "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
         "redact": "destroys content; no dry run is probed",
@@ -1041,6 +1040,197 @@
             "tensions": [],
             "title": "string",
             "version": "number",
+            "warnings": []
+          }
+        },
+        "publication check against": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "against": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "disclosure": {
+              "added_attachments": [],
+              "added_docs": [],
+              "after_profile_version": "string",
+              "after_selection_hash": "string",
+              "after_selection_identity": "string",
+              "audience": "string",
+              "before_profile_version": "string",
+              "before_selection_hash": "string",
+              "before_selection_identity": "string",
+              "changed_attachments": [],
+              "changed_docs": [],
+              "changed_folders": [],
+              "changed_outside_docs": [],
+              "new_reference_count": "number",
+              "new_references": [],
+              "newly_hidden_planned": {
+                "blocks": "number",
+                "docs": "number",
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "doc": "string",
+                    "doc_hidden": "bool",
+                    "hidden_blocks": "number",
+                    "redacted": "bool",
+                    "title": "string"
+                  }
+                ]
+              },
+              "omitted": {
+                "added_attachments": "number",
+                "added_docs": "number",
+                "changed_attachments": "number",
+                "changed_docs": "number",
+                "changed_folders": "number",
+                "changed_outside_docs": "number",
+                "new_references": "number",
+                "redactions": "number",
+                "removed_attachments": "number",
+                "removed_docs": "number"
+              },
+              "profile_changed": "bool",
+              "profile_id": "string",
+              "redactions": [],
+              "removed_attachments": [],
+              "removed_docs": [
+                {
+                  "digest": "string",
+                  "id": "string",
+                  "path": "string",
+                  "redacted": "bool"
+                }
+              ]
+            },
+            "hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "profile": {
+              "audience": "string",
+              "id": "string",
+              "key": "string",
+              "title": "string",
+              "trail": "bool",
+              "version": "string"
+            },
+            "references": {
+              "excluded": "number",
+              "links_outside": {
+                "count": "number",
+                "omitted_rows": "number",
+                "rows": []
+              },
+              "missing": "number",
+              "omitted_rows": "number",
+              "rows": [],
+              "status": "string",
+              "total": "number"
+            },
+            "release": "null",
+            "scope": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "selection": {
+              "attachments": "number",
+              "blocks": "number",
+              "docs": "number",
+              "entries": [
+                {
+                  "id": "string",
+                  "redaction": "null",
+                  "version": "string"
+                }
+              ],
+              "folders": "number",
+              "hash": "string",
+              "identity": "string",
+              "omitted_entries": "number"
+            },
+            "status": "string",
+            "warnings": []
+          }
+        },
+        "publication check first": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "against": "null",
+            "disclosure": "null",
+            "hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "profile": {
+              "audience": "string",
+              "id": "string",
+              "key": "string",
+              "title": "string",
+              "trail": "bool",
+              "version": "string"
+            },
+            "references": {
+              "excluded": "number",
+              "links_outside": {
+                "count": "number",
+                "omitted_rows": "number",
+                "rows": []
+              },
+              "missing": "number",
+              "omitted_rows": "number",
+              "rows": [],
+              "status": "string",
+              "total": "number"
+            },
+            "release": "null",
+            "scope": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "selection": {
+              "attachments": "number",
+              "blocks": "number",
+              "docs": "number",
+              "entries": [
+                {
+                  "id": "string",
+                  "redaction": "null",
+                  "version": "string"
+                }
+              ],
+              "folders": "number",
+              "hash": "string",
+              "identity": "string",
+              "omitted_entries": "number"
+            },
+            "status": "string",
             "warnings": []
           }
         },
@@ -18571,6 +18761,191 @@
           ]
         }
       },
+      "rdy_publication_check against": {
+        "ok": {
+          "against": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "disclosure": {
+            "added_attachments": [],
+            "added_docs": [],
+            "after_profile_version": "string",
+            "after_selection_hash": "string",
+            "after_selection_identity": "string",
+            "audience": "string",
+            "before_profile_version": "string",
+            "before_selection_hash": "string",
+            "before_selection_identity": "string",
+            "changed_attachments": [],
+            "changed_docs": [],
+            "changed_folders": [],
+            "changed_outside_docs": [],
+            "new_reference_count": "number",
+            "new_references": [],
+            "newly_hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "omitted": {
+              "added_attachments": "number",
+              "added_docs": "number",
+              "changed_attachments": "number",
+              "changed_docs": "number",
+              "changed_folders": "number",
+              "changed_outside_docs": "number",
+              "new_references": "number",
+              "redactions": "number",
+              "removed_attachments": "number",
+              "removed_docs": "number"
+            },
+            "profile_changed": "bool",
+            "profile_id": "string",
+            "redactions": [],
+            "removed_attachments": [],
+            "removed_docs": [
+              {
+                "digest": "string",
+                "id": "string",
+                "path": "string",
+                "redacted": "bool"
+              }
+            ]
+          },
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          },
+          "profile": {
+            "audience": "string",
+            "id": "string",
+            "key": "string",
+            "title": "string",
+            "trail": "bool",
+            "version": "string"
+          },
+          "references": {
+            "excluded": "number",
+            "links_outside": {
+              "count": "number",
+              "omitted_rows": "number",
+              "rows": []
+            },
+            "missing": "number",
+            "omitted_rows": "number",
+            "rows": [],
+            "status": "string",
+            "total": "number"
+          },
+          "release": "null",
+          "scope": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "selection": {
+            "attachments": "number",
+            "blocks": "number",
+            "docs": "number",
+            "entries": [
+              {
+                "id": "string",
+                "redaction": "null",
+                "version": "string"
+              }
+            ],
+            "folders": "number",
+            "hash": "string",
+            "identity": "string",
+            "omitted_entries": "number"
+          },
+          "status": "string",
+          "warnings": []
+        }
+      },
+      "rdy_publication_check first": {
+        "ok": {
+          "against": "null",
+          "disclosure": "null",
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          },
+          "profile": {
+            "audience": "string",
+            "id": "string",
+            "key": "string",
+            "title": "string",
+            "trail": "bool",
+            "version": "string"
+          },
+          "references": {
+            "excluded": "number",
+            "links_outside": {
+              "count": "number",
+              "omitted_rows": "number",
+              "rows": []
+            },
+            "missing": "number",
+            "omitted_rows": "number",
+            "rows": [],
+            "status": "string",
+            "total": "number"
+          },
+          "release": "null",
+          "scope": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "selection": {
+            "attachments": "number",
+            "blocks": "number",
+            "docs": "number",
+            "entries": [
+              {
+                "id": "string",
+                "redaction": "null",
+                "version": "string"
+              }
+            ],
+            "folders": "number",
+            "hash": "string",
+            "identity": "string",
+            "omitted_entries": "number"
+          },
+          "status": "string",
+          "warnings": []
+        }
+      },
       "rdy_query": {
         "ok": {
           "matches": [
@@ -20651,7 +21026,6 @@
       "rdy_land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
-      "rdy_publication_check": "needs a publication profile",
       "rdy_publish": "uploads a site to a host",
       "rdy_redact": "destroys content; no dry run is probed",
       "rdy_remote": "edits the remotes of the project",

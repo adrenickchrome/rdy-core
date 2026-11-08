@@ -1954,7 +1954,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
-    ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
     (
         "reaffirm",
@@ -1994,6 +1993,98 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "working copy: the working_copy row records its replies",
     ),
 ];
+
+/// relc4: a project for the publication check probes. The public profile `plan` selects four
+/// docs: `guide` (shown prose and one planned note), the planned doc `ghost` with one prose, the
+/// empty planned doc `nothing`, and `late`. The public profile `quiet` selects `calm`, which
+/// hides nothing. `v1.0.0` is tagged; a later landing plans one more note in `guide` and marks
+/// `late` planned, so `plan` hides more than at the tag. Closed again.
+fn publication_project() -> tempfile::TempDir {
+    use rdy_qa::fixtures::{approver, land, write};
+    let (dir, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$ghost", "fields": {"name": "ghost", "title": "Ghost", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$nothing", "fields": {"name": "nothing", "title": "Nothing", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$late", "fields": {"name": "late", "title": "Late", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$calm", "fields": {"name": "calm", "title": "Calm", "doc_type": "page"}}
+        ]),
+    )
+    .expect("the documents");
+    let id = |k: &str| w.created[k].clone();
+    let (admin, guide, ghost, nothing, late, calm) = (
+        id("$admin"),
+        id("$guide"),
+        id("$ghost"),
+        id("$nothing"),
+        id("$late"),
+        id("$calm"),
+    );
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": guide, "body": "Shown words."},
+            {"op": "create", "type": "note", "parent": guide, "body": "Planned note.", "fields": {"planned": true}},
+            {"op": "create", "type": "prose", "parent": ghost, "body": "Ghost words."},
+            {"op": "create", "type": "prose", "parent": late, "body": "Late words."},
+            {"op": "create", "type": "prose", "parent": calm, "body": "Calm words."},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "plan", "title": "Plan", "audience": "public", "select": [guide, ghost, nothing, late]}},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "quiet", "title": "Quiet", "audience": "public", "select": [calm]}}
+        ]),
+    )
+    .expect("the profiles");
+    land(&mut r, "work").expect("the first landing");
+    r.tag(&approver(), "v1.0.0", None, None).expect("the tag");
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
+            {"op": "update", "id": late, "fields": {"planned": true}}
+        ]),
+    )
+    .expect("the second change");
+    land(&mut r, "work").expect("the second landing");
+    r.close().expect("close");
+    dir
+}
+
+/// The publication check over the command line: a first publication and a comparison, each for
+/// a profile that hides planned blocks and for one that hides none, so a hidden list is seen
+/// both empty and with rows.
+fn cli_publication_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let dir = publication_project();
+    for profile in ["plan", "quiet"] {
+        cli_probe(
+            seen,
+            dir.path(),
+            env,
+            "publication check first",
+            &["publication", "check", "--profile", profile],
+        );
+        cli_probe(
+            seen,
+            dir.path(),
+            env,
+            "publication check against",
+            &[
+                "publication",
+                "check",
+                "--profile",
+                profile,
+                "--against",
+                "tag:v1.0.0",
+            ],
+        );
+    }
+}
 
 /// The facts of the release binary: exit values and the merged JSON field sets of read, write,
 /// answer and review commands run against the seeded project.
@@ -2176,6 +2267,7 @@ fn cli_runtime() -> Value {
     setup_env.push(("USERPROFILE".to_string(), setup_text));
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     cli_rule_probes(&mut seen);
+    cli_publication_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2462,7 +2554,6 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
         "rdy_policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
-    ("rdy_publication_check", "needs a publication profile"),
     ("rdy_publish", "uploads a site to a host"),
     ("rdy_redact", "destroys content; no dry run is probed"),
     ("rdy_remote", "edits the remotes of the project"),
@@ -3646,11 +3737,39 @@ fn kungfu_counts_row() -> Value {
     })
 }
 
+/// The publication check over the chat tool, as the CLI probes run it.
+fn mcp_publication_probes(seen: &mut Seen) {
+    let dir = publication_project();
+    let mut c = isolated_mcp(dir.path());
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:pub", "run": "pub", "role": "reader"}),
+    );
+    assert!(opened.is_ok(), "the reader session opens");
+    for profile in ["plan", "quiet"] {
+        mcp_probe(
+            seen,
+            &mut c,
+            "rdy_publication_check",
+            "rdy_publication_check first",
+            json!({"profile": profile}),
+        );
+        mcp_probe(
+            seen,
+            &mut c,
+            "rdy_publication_check",
+            "rdy_publication_check against",
+            json!({"profile": profile, "against": "tag:v1.0.0"}),
+        );
+    }
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
+    mcp_publication_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -5501,6 +5620,21 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/plan/items",
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
+    "cli/publication check against/stdout/disclosure/added_attachments",
+    "cli/publication check against/stdout/disclosure/added_docs",
+    "cli/publication check against/stdout/disclosure/changed_attachments",
+    "cli/publication check against/stdout/disclosure/changed_docs",
+    "cli/publication check against/stdout/disclosure/changed_folders",
+    "cli/publication check against/stdout/disclosure/changed_outside_docs",
+    "cli/publication check against/stdout/disclosure/new_references",
+    "cli/publication check against/stdout/disclosure/redactions",
+    "cli/publication check against/stdout/disclosure/removed_attachments",
+    "cli/publication check against/stdout/references/links_outside/rows",
+    "cli/publication check against/stdout/references/rows",
+    "cli/publication check against/stdout/warnings",
+    "cli/publication check first/stdout/references/links_outside/rows",
+    "cli/publication check first/stdout/references/rows",
+    "cli/publication check first/stdout/warnings",
     "cli/remote list/stdout/remotes",
     "cli/remote list/stdout/warnings",
     "cli/review request/stdout/case/code",
@@ -5614,6 +5748,21 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
+    "mcp/rdy_publication_check against/ok/disclosure/added_attachments",
+    "mcp/rdy_publication_check against/ok/disclosure/added_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_attachments",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/new_references",
+    "mcp/rdy_publication_check against/ok/disclosure/redactions",
+    "mcp/rdy_publication_check against/ok/disclosure/removed_attachments",
+    "mcp/rdy_publication_check against/ok/references/links_outside/rows",
+    "mcp/rdy_publication_check against/ok/references/rows",
+    "mcp/rdy_publication_check against/ok/warnings",
+    "mcp/rdy_publication_check first/ok/references/links_outside/rows",
+    "mcp/rdy_publication_check first/ok/references/rows",
+    "mcp/rdy_publication_check first/ok/warnings",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",
     "mcp/rdy_review run/ok/case/code",
@@ -7040,7 +7189,9 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     );
     assert_eq!(
         digest_of(&without(&mcp["result_fields"], &|k| {
-            !k.starts_with("rdy_rule") && k != "rdy_schema"
+            !k.starts_with("rdy_rule")
+                && k != "rdy_schema"
+                && !k.starts_with("rdy_publication_check")
         })),
         "854e7292a55cd4ab9ed0bda185267e218ce9aecb77e2c27223592cd974a2b565"
     );
@@ -7088,11 +7239,87 @@ fn rtc7_contract_diff_is_limited_to_rules() {
         "91020aeffb2e3b0d48b86c76abba05c5348f95be31f69f3ce699abee373668e6"
     );
     assert_eq!(
-        digest_of(&without(&cli["runtime"]["probes"], &|k| !k.starts_with("rule "))),
+        digest_of(&without(&cli["runtime"]["probes"], &|k| {
+            !k.starts_with("rule ") && !k.starts_with("publication check")
+        })),
         "31041518cd31060f84815d85a99fa6193f25b0d807d8d53fd0a1651c842a9c85"
     );
+    // relc4 probes `publication check`, so its exclusion row left `not_probed_commands`; the
+    // historical digest is of the runtime with that one row back
+    let mut runtime = without(&cli["runtime"], &|k| k != "probes");
+    runtime["not_probed_commands"]["publication"] = json!("needs a publication profile");
     assert_eq!(
-        digest_of(&without(&cli["runtime"], &|k| k != "probes")),
+        digest_of(&runtime),
         "8d518aab09e1206edfb24fd47a7dca339e54af78df76cf6d029e5626435f59be"
+    );
+}
+
+/// relc4 (D-B2AC3): the contract probes the publication check, once as a first publication and
+/// once against a baseline, for a profile that hides planned blocks and one that hides none. The
+/// shapes hold the hidden lists with their row members, on both surfaces, and the exclusions
+/// that said the check could not be probed are gone.
+#[test]
+fn relc4_contract_probes_populate_hidden_reports() {
+    let fixture = read_fixture();
+    let row = ["doc", "doc_hidden", "hidden_blocks", "redacted", "title"];
+    let list = ["blocks", "docs", "omitted_rows", "rows"];
+    let cli = &fixture["cli"]["runtime"]["probes"];
+    let mcp = &fixture["mcp"]["result_fields"];
+    for (reply, newly) in [
+        (&cli["publication check first"]["stdout"], None),
+        (
+            &cli["publication check against"]["stdout"],
+            Some(&cli["publication check against"]["stdout"]["disclosure"]),
+        ),
+        (&mcp["rdy_publication_check first"]["ok"], None),
+        (
+            &mcp["rdy_publication_check against"]["ok"],
+            Some(&mcp["rdy_publication_check against"]["ok"]["disclosure"]),
+        ),
+    ] {
+        assert_eq!(shape_keys(&reply["hidden_planned"]), list, "{reply}");
+        assert_eq!(
+            shape_keys(&reply["hidden_planned"]["rows"][0]),
+            row,
+            "a populated row"
+        );
+        if let Some(d) = newly {
+            let n = &d["newly_hidden_planned"];
+            assert_eq!(shape_keys(n), list, "{d}");
+            assert_eq!(shape_keys(&n["rows"][0]), row, "a populated row");
+        }
+    }
+    // the first publication has no comparison, and the comparison is an object
+    assert_eq!(
+        cli["publication check first"]["stdout"]["disclosure"],
+        json!("null")
+    );
+    assert!(cli["publication check against"]["stdout"]["disclosure"].is_object());
+    // both surfaces answer with one shape
+    assert_eq!(
+        cli["publication check first"]["stdout"],
+        mcp["rdy_publication_check first"]["ok"]
+    );
+    assert_eq!(
+        cli["publication check against"]["stdout"],
+        mcp["rdy_publication_check against"]["ok"]
+    );
+    // the check is probed, so neither exclusion list holds it
+    assert!(
+        fixture["cli"]["runtime"]["not_probed_commands"]
+            .get("publication")
+            .is_none()
+    );
+    assert!(
+        fixture["mcp"]["result_fields_not_captured"]
+            .get("rdy_publication_check")
+            .is_none()
+    );
+    // the tools, the tool names and the unprobed operations did not move
+    assert!(
+        fixture["mcp"]["tool_names"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rdy_publication_check"))
     );
 }

@@ -261,3 +261,94 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
         )
     );
 }
+
+/// A public profile `plan` over `guide`, which holds shown prose and one planned note, tagged
+/// `v1.0.0`; a second landing plans one more note.
+fn seed_planned(dir: &std::path::Path) {
+    let mut r = Rdy::open(dir).unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    )
+    .unwrap();
+    let (guide, admin) = (w.created["$guide"].clone(), w.created["$admin"].clone());
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": guide, "body": "Shown words."},
+            {"op": "create", "type": "note", "parent": guide, "body": "Planned.", "fields": {"planned": true}},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "plan", "title": "Plan", "audience": "public", "select": [guide]}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "note", "parent": guide, "body": "Also planned.", "fields": {"planned": true}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    r.close().unwrap();
+}
+
+#[test]
+fn relc4_the_tool_reports_hidden_planned_blocks_to_every_role() {
+    let d = tempfile::tempdir().unwrap();
+    drop(Rdy::init(d.path(), "rdy-standard").unwrap());
+    seed_planned(d.path());
+    for (i, role) in ["reader", "writer", "reviewer"].into_iter().enumerate() {
+        let mut m = McpClient::start(d.path());
+        m.call(
+            "rdy_session",
+            json!({"actor": format!("agent:{role}"), "run": format!("r{i}"), "role": role}),
+        )
+        .ok();
+        let first = m
+            .call("rdy_publication_check", json!({"profile": "plan"}))
+            .ok();
+        let list = &first["hidden_planned"];
+        assert_eq!(
+            (list["docs"].clone(), list["blocks"].clone()),
+            (json!(1), json!(2)),
+            "{role}"
+        );
+        assert_eq!(list["rows"][0]["title"], "Guide");
+        assert_eq!(list["rows"][0]["doc_hidden"], false);
+        assert_eq!(first["disclosure"], Value::Null);
+        // no hidden text or id of a hidden block is in the report
+        let text = first.to_string();
+        assert!(
+            !text.contains("Planned.") && !text.contains("Also planned."),
+            "{text}"
+        );
+        let later = m
+            .call(
+                "rdy_publication_check",
+                json!({"profile": "plan", "against": "tag:v1.0.0"}),
+            )
+            .ok();
+        let new = &later["disclosure"]["newly_hidden_planned"];
+        assert_eq!(
+            (new["docs"].clone(), new["blocks"].clone()),
+            (json!(1), json!(1)),
+            "{role}"
+        );
+        assert_eq!(new["omitted_rows"], 0);
+        // the closed input keys are unchanged
+        let r = m.call(
+            "rdy_publication_check",
+            json!({"profile": "plan", "hidden_planned": true}),
+        );
+        assert_eq!(r.code(), Some("E_BAD_INPUT"), "{role}: {r:?}");
+    }
+}

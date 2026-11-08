@@ -38,7 +38,9 @@ fn omitted_any(v: &Value) -> bool {
     let top = num(&v["selection"]["omitted_entries"])
         + num(&refs["omitted_rows"])
         + num(&refs["links_outside"]["omitted_rows"])
-        + num(&v["release"]["omitted_rows"]);
+        + num(&v["release"]["omitted_rows"])
+        + num(&v["hidden_planned"]["omitted_rows"])
+        + num(&v["disclosure"]["newly_hidden_planned"]["omitted_rows"]);
     let diff: u64 = v["disclosure"]["omitted"]
         .as_object()
         .map_or(0, |o| o.values().map(num).sum());
@@ -48,6 +50,18 @@ fn omitted_any(v: &Value) -> bool {
 /// The listed rows of a disclosure array plus the rows the report left out: its full count.
 fn full_count(d: &Value, name: &str) -> u64 {
     d[name].as_array().map_or(0, |a| a.len() as u64) + num(&d["omitted"][name])
+}
+
+/// The line for one hidden list, or nothing for an empty one. A doc row with no hidden block still
+/// counts as a doc.
+fn hidden_line(label: &str, list: &Value) -> Option<String> {
+    (num(&list["docs"]) > 0).then(|| {
+        format!(
+            "{label}: {} blocks in {} docs.",
+            num(&list["blocks"]),
+            num(&list["docs"])
+        )
+    })
 }
 
 /// The text of a `publication_check` reply (the lines are in the order the docs list). The
@@ -94,6 +108,7 @@ fn check_text(v: &Value, asked: &str) -> String {
             num(&rel["decisions_later"])
         ));
     }
+    lines.extend(hidden_line("Hidden as planned", &v["hidden_planned"]));
     let d = &v["disclosure"];
     if d.is_object() {
         let changed = if d["profile_changed"].as_bool().unwrap_or(false) {
@@ -118,6 +133,10 @@ fn check_text(v: &Value, asked: &str) -> String {
             full_count(d, "changed_folders"),
             full_count(d, "changed_outside_docs"),
             num(&d["new_reference_count"]),
+        ));
+        lines.extend(hidden_line(
+            "Newly hidden as planned",
+            &d["newly_hidden_planned"],
         ));
     }
     if omitted_any(v) {
@@ -213,5 +232,33 @@ mod tests {
             check_text(&report(false, 1), "site")
                 .ends_with("\nSome rows are omitted. Counts include every row.")
         );
+    }
+
+    #[test]
+    fn relc4_the_hidden_lines_follow_the_other_lines_and_skip_empty_lists() {
+        let mut v = report(true, 0);
+        v["hidden_planned"] = json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0});
+        v["disclosure"]["newly_hidden_planned"] =
+            json!({"docs": 0, "blocks": 0, "rows": [], "omitted_rows": 0});
+        let plain = check_text(&v, "site");
+        assert!(!plain.contains("planned"), "{plain}");
+        // a zero-block doc row is nonempty
+        v["hidden_planned"] = json!({"docs": 2, "blocks": 0, "rows": [{}, {}], "omitted_rows": 0});
+        v["disclosure"]["newly_hidden_planned"] =
+            json!({"docs": 1, "blocks": 3, "rows": [{}], "omitted_rows": 0});
+        let t = check_text(&v, "site");
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines[4], "Hidden as planned: 0 blocks in 2 docs.");
+        assert_eq!(lines[7], "Newly hidden as planned: 3 blocks in 1 docs.");
+        // either list's omitted rows reach the existing notice
+        let mut w = report(false, 0);
+        w["hidden_planned"] = json!({"docs": 300, "blocks": 9, "rows": [], "omitted_rows": 100});
+        assert!(check_text(&w, "site").ends_with("Counts include every row."));
+        let mut w = report(true, 0);
+        w["disclosure"]["omitted"] = json!({});
+        assert!(!check_text(&w, "site").contains("omitted"));
+        w["disclosure"]["newly_hidden_planned"] =
+            json!({"docs": 300, "blocks": 9, "rows": [], "omitted_rows": 100});
+        assert!(check_text(&w, "site").ends_with("Counts include every row."));
     }
 }

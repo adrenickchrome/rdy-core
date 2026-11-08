@@ -9,6 +9,7 @@
 //! open.
 
 mod diff;
+mod hidden;
 mod references;
 mod release;
 mod report;
@@ -19,6 +20,7 @@ pub use diff::{
     ChangedAttachment, ChangedDoc, ChangedFolder, ChangedOutsideDoc, DisclosureDiff,
     disclosure_diff,
 };
+pub use hidden::{HiddenList, HiddenPlanned, HiddenRow};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
