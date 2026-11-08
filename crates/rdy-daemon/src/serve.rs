@@ -314,6 +314,7 @@ fn start_checked(
         build: crate::BUILD.to_string(),
         idle_timeout: opts.idle_timeout,
         expected_account: None,
+        start_timeout: rdy_engine::serve_config(&opts.project).start_timeout,
     };
     let handler = ServeHandler::new(Arc::clone(&shared), opts.human_actor.clone());
     let mut daemon = Daemon::new(config, Arc::new(handler));
@@ -777,8 +778,9 @@ fn serve_thread(
         log("store closed");
         profiles::report(&root, TestEvent::Stage("store-closed"));
     }
-    // the last write has ended: a daemon whose project is gone kept its pid file until now, so a
-    // client waited for it (p-3MJBQ); after any other stop the file is gone already
+    // the last write has ended: a daemon whose project is gone kept its pid file and the start
+    // lock (or, without the lock, its socket) until now, so no load or successor acted on the
+    // project before (p-3MJBQ, D-122E5); after any other stop this does nothing
     handle.drained();
     ran.map_err(ServeError::Runtime)
 }

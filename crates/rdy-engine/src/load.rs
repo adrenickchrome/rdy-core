@@ -46,9 +46,11 @@
 //! then steps 5 to 7 here (`place`). Every summary lists the inputs (`chain`), the stop
 //! (`stopped_at`) and one warning per carried record (`warnings`).
 //!
-//! The project's start lock (`.rdy/run/start.lock`) is the load's from step 3, right after `.rdy`
-//! stands, until the load ends. Another holder refuses the load with `E_LOCKED` before it writes
-//! a store. Every load takes this one path: a single file, a chain, a holder, a clone, a seed.
+//! The project's start lock (`.rdy/run/start.lock`) is the load's from step 2 when the target's
+//! `.rdy` stands, else from step 3, right after `.rdy` stands, until the load ends (D-122E5: a
+//! daemon that drains an old store holds it, so no load places a store under its writes). Another
+//! holder refuses the load with `E_LOCKED` before it writes a store. Every load takes this one
+//! path: a single file, a chain, a holder, a clone, a seed.
 //!
 //! A failure in steps 3 to 7 removes the store, every file step 5 wrote and every directory
 //! step 3 or 5 created, so the target is as it was. The removal runs while the load holds the
@@ -351,14 +353,14 @@ pub(crate) fn load_opened<R: Read>(
             None => break None,
         }
     };
-    let absent = check_target(project, &files)?;
+    let mut made = Made::default();
+    let absent = check_target_locked(project, &files, &mut made)?;
     let row = LoadedChainFile {
         file: source.display().to_string(),
         kind: header.chain.map_or(DumpKind::Full, |c| c.kind),
         base: header.chain.map_or(ORIGIN, |c| c.base),
         end: header.log_end,
     };
-    let mut made = Made::default();
     let out = (|| {
         let (batches, frames, holder) = ingest(
             file,
@@ -478,6 +480,30 @@ pub(crate) fn place(
         tags,
         views,
     })
+}
+
+/// Step 2 under the project's start lock (D-122E5): when the target's `.rdy` stands, the load
+/// takes the lock (`made` keeps it) before [`check_target`], and holds it through its placement.
+/// A daemon that drains an old store takes the same lock before its socket goes, so either it
+/// holds the lock and the load is `E_LOCKED`, or its socket still stands and the check finds it
+/// live. A `.rdy` the load makes is locked as it is made (step 3). A refused check gives the lock
+/// back and removes the run objects it made.
+pub(crate) fn check_target_locked(
+    project: &Path,
+    files: &[(String, Vec<u8>)],
+    made: &mut Made,
+) -> Result<Vec<String>, RdyError> {
+    let dot = project.join(".rdy");
+    let checked = (|| {
+        if std::fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
+            made.take_start(&dot)?;
+        }
+        check_target(project, files)
+    })();
+    if checked.is_err() {
+        std::mem::take(made).release();
+    }
+    checked
 }
 
 /// Step 2: refuses a target in a project's `.rdy`, a target with a store, with a load's store
@@ -703,7 +729,10 @@ fn ingest<R: Read>(
 pub(crate) fn create_store(project: &Path, made: &mut Made) -> Result<(Ingest, PathBuf), RdyError> {
     let dot = project.join(".rdy");
     made.create_dirs(&dot)?;
-    made.take_start(&dot)?;
+    // a `.rdy` that stood at the check is locked since then (`check_target_locked`)
+    if made.start.is_none() {
+        made.take_start(&dot)?;
+    }
     let loading = dot.join(LOADING_DIR);
     let ingest = match Ingest::create(&loading) {
         Ok(i) => i,
@@ -989,6 +1018,13 @@ impl Made {
         } else {
             self.undo();
         }
+    }
+
+    /// Ends a load whose target check refused it, before it made anything but run objects:
+    /// removes those while it holds the start lock, then lets the lock go.
+    fn release(mut self) {
+        self.remove_run_objects();
+        drop(self.start.take());
     }
 
     /// Removes the run objects this load created. Its lock stays held by the open handle, and a

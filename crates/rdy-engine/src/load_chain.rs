@@ -16,8 +16,8 @@ use crate::error::{
     E_BAD_INPUT, E_IO, RdyError, holder_load_redaction_limit, stopped_load_redaction_limit,
 };
 use crate::load::{
-    LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target, create_store, damaged,
-    holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
+    LoadSummary, LoadedChainFile, Made, ORIGIN, StoppedAt, check_target_locked, create_store,
+    damaged, holder_files, incomplete, next_step, open_dump, place, read_error, target_error,
 };
 use rdy_model::RepoId;
 use rdy_store::StoreError;
@@ -171,8 +171,8 @@ fn released_format(file: &Path) -> Option<u32> {
 /// transaction:
 ///
 /// 1. Read the project files of the input that owns them, at the places the pre-pass recorded
-///    and with the hashes it read, then check the target (`check_target`): nothing is created
-///    before both pass.
+///    and with the hashes it read, then check the target under its start lock
+///    (`check_target_locked`): nothing but run objects is created before both pass.
 /// 2. Create `.rdy/store.loading` (`create_store`), then read each input that contributes
 ///    retained batches, in argument order, through its end with the dump reader: each payload
 ///    is hashed, the batches after the stop included. Its retained batches go to the one ingest
@@ -201,8 +201,8 @@ pub(crate) fn load_verified(
     let paths = plan.files();
     let owner = scan.owner();
     let files = owner_files(&paths[owner], &scan.files()[owner].files)?;
-    let absent = check_target(project, &files)?;
     let mut made = Made::default();
+    let absent = check_target_locked(project, &files, &mut made)?;
     let out = (|| {
         let (mut ingest, loading) = create_store(project, &mut made)?;
         let (batches, frames) = ingest_inputs(plan, scan, &mut ingest, &loading)?;
