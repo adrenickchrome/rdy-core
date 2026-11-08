@@ -254,19 +254,20 @@ pub(crate) fn open(
             Err(e) => last = Some(e),
         }
     }
-    if bound.is_none() && fallback {
-        if let (Some(first), Some(end)) = (ports.first(), ports.last()) {
-            let os = listen(root, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-                .and_then(|l| l.local_addr().map(|a| (a.port(), l)));
-            match os {
-                Ok((port, l)) => {
-                    log(&format!(
-                        "site: ports {first}..{end} refused; using OS-assigned port {port}"
-                    ));
-                    bound = Some((port, l));
-                }
-                Err(e) => last = Some(e),
+    if bound.is_none()
+        && fallback
+        && let (Some(first), Some(end)) = (ports.first(), ports.last())
+    {
+        let os = listen(root, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .and_then(|l| l.local_addr().map(|a| (a.port(), l)));
+        match os {
+            Ok((port, l)) => {
+                log(&format!(
+                    "site: ports {first}..{end} refused; using OS-assigned port {port}"
+                ));
+                bound = Some((port, l));
             }
+            Err(e) => last = Some(e),
         }
     }
     let Some((port, v4)) = bound else {
