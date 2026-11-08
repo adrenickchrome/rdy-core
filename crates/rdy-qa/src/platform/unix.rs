@@ -972,11 +972,95 @@ pub fn tcp_listen_ports() -> BTreeSet<u16> {
     ports
 }
 
+/// The processes that hold a listening TCP socket bound to `port`, on any address: this
+/// process, its children and any other process the test can see. A connect cannot tell this
+/// after the last holder exits: macOS can still accept for a short time on a listener that no
+/// process holds any more (seen under gate load). Linux matches the LISTEN rows of
+/// `/proc/net/tcp` and `/proc/net/tcp6` against the socket links in `/proc/<pid>/fd`; elsewhere
+/// `lsof` lists them. Panics if the listing fails.
+#[cfg(target_os = "linux")]
+pub fn tcp_listener_pids(port: u16) -> BTreeSet<u32> {
+    let mut inodes = BTreeSet::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let text = match std::fs::read_to_string(table) {
+            Ok(text) => text,
+            // no tcp6 table: IPv6 is off
+            Err(e) if table.ends_with('6') && e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("read {table}: {e}"),
+        };
+        for line in text.lines().skip(1) {
+            // local address `ADDR:PORT` in hex, state (0A: LISTEN), inode
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (Some(local), Some(state), Some(inode)) = (f.get(1), f.get(3), f.get(9)) else {
+                panic!("a short row in {table}: {line:?}");
+            };
+            let at = local
+                .rsplit(':')
+                .next()
+                .and_then(|p| u16::from_str_radix(p, 16).ok())
+                .unwrap_or_else(|| panic!("no port in {table}: {line:?}"));
+            if *state == "0A" && at == port {
+                inodes.insert(format!("socket:[{inode}]"));
+            }
+        }
+    }
+    let mut pids = BTreeSet::new();
+    if inodes.is_empty() {
+        return pids;
+    }
+    for entry in std::fs::read_dir("/proc").expect("list /proc").flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        // a process that exits meanwhile, or another user's, lists nothing
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        if fds
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .any(|link| link.to_str().is_some_and(|l| inodes.contains(l)))
+        {
+            pids.insert(pid);
+        }
+    }
+    pids
+}
+
+/// The processes that hold a listening TCP socket bound to `port` (see the Linux version).
+#[cfg(not(target_os = "linux"))]
+pub fn tcp_listener_pids(port: u16) -> BTreeSet<u32> {
+    let out = Command::new("lsof")
+        .args(["-w", "-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fp"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run lsof: {e}"));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pids: BTreeSet<u32> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix('p'))
+        .map(|p| {
+            p.parse()
+                .unwrap_or_else(|_| panic!("no pid in lsof line {p:?}"))
+        })
+        .collect();
+    // lsof exits 1 when it lists nothing
+    assert!(
+        out.status.success() || (pids.is_empty() && out.status.code() == Some(1)),
+        "lsof failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    pids
+}
+
 /// A child of this process held between its fork and its exec. Until then it holds a copy of
 /// every descriptor this process had open at the fork, close-on-exec ones too: a listener
 /// this process closes in that time still accepts. [`HeldFork::release`] lets it exec `true`
 /// and waits for it; a drop does the same.
 pub struct HeldFork {
+    /// The child's process id, which it reports once held.
+    pid: u32,
     /// This process's end of the socket pair the child waits on.
     ctl: UnixStream,
     /// The thread that spawns and waits for the child: a spawn returns only after the exec.
@@ -989,12 +1073,12 @@ pub fn fork_held_before_exec() -> HeldFork {
     let (ctl, held) = UnixStream::pair().expect("a socket pair");
     let mut cmd = no_op_command();
     #[allow(unsafe_code)]
-    // SAFETY: the hook runs in the forked child before its exec. It only writes one byte and
-    // reads one byte on a socket the child inherited: plain system calls, with no allocation
-    // and no lock.
+    // SAFETY: the hook runs in the forked child before its exec. It only reads its process id,
+    // writes it and reads one byte on a socket the child inherited: plain system calls, with no
+    // allocation and no lock.
     unsafe {
         cmd.pre_exec(move || {
-            io::Write::write_all(&mut &held, b"f")?;
+            io::Write::write_all(&mut &held, &std::process::id().to_le_bytes())?;
             let mut go = [0u8; 1];
             (&held).read_exact(&mut go)
         });
@@ -1002,17 +1086,23 @@ pub fn fork_held_before_exec() -> HeldFork {
     let waiter = std::thread::spawn(move || cmd.status());
     ctl.set_read_timeout(Some(Duration::from_secs(10)))
         .expect("a read timeout");
-    let mut forked = [0u8; 1];
+    let mut forked = [0u8; 4];
     (&ctl)
         .read_exact(&mut forked)
         .expect("the child reports that it is held");
     HeldFork {
+        pid: u32::from_le_bytes(forked),
         ctl,
         waiter: Some(waiter),
     }
 }
 
 impl HeldFork {
+    /// The held child's process id.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Lets the child exec and exit; its exit status.
     pub fn release(mut self) -> ExitStatus {
         self.finish().expect("the held child ran")

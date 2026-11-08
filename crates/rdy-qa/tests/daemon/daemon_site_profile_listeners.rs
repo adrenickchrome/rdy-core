@@ -1931,11 +1931,12 @@ fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
-        assert!(
-            stdout.contains("test result: ok. 1 passed"),
-            "the child ran no test: {stdout}\n{stderr}"
-        );
+        if !out.status.success() || !stdout.contains("test result: ok. 1 passed") {
+            // the child's panic comes first and whole: the gate report keeps a failing test's
+            // first panic, and the child's own `failures:` lines would cut a panic message
+            eprintln!("child stderr:\n{stderr}\nchild stdout:\n{stdout}");
+            panic!("the child failed or ran no test ({})", out.status);
+        }
         return;
     }
     let mut w = world();
@@ -1959,11 +1960,21 @@ fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
         "{stages:?}"
     );
     assert!(sh.profile_sites.keys().is_empty());
+    // the held child's copy is the one listener left on the port
+    let held = child.pid();
+    assert_eq!(
+        platform::tcp_listener_pids(guide),
+        std::collections::BTreeSet::from([held]),
+        "only the held child {held} listens on port {guide}"
+    );
     assert!(child.release().success());
-    // the child has exited: nothing accepts any more
-    assert!(
-        TcpStream::connect(sock(guide)).is_err(),
-        "port {guide} still accepts"
+    // the child has exited: no process listens on the port any more. A refused connect cannot
+    // prove this on macOS, which still accepts for a short time on a listener that no process
+    // holds (seen under gate load)
+    assert_eq!(
+        platform::tcp_listener_pids(guide),
+        std::collections::BTreeSet::new(),
+        "a process still listens on port {guide}"
     );
 }
 
