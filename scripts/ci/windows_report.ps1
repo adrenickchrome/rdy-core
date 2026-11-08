@@ -26,6 +26,8 @@ foreach ($line in $lines) {
         $passed += [int]$Matches[1]; $failed += [int]$Matches[2]
         $ignored += [int]$Matches[3]; $skipped += [int]$Matches[4]
     }
+    # A failing build gate or area row names the step even when no test failed (fmt, clippy, layout).
+    if ($line -match '^\|.*\| FAIL \|') { Write-Output $line }
     if ($line -like 'Failing in *') { $printing = $true }
     if ($line -eq '## Perf') { $printing = $false }
     if ($printing) { Write-Output $line }

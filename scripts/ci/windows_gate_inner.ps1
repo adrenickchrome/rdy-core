@@ -22,6 +22,16 @@ $env:TEMP = Join-Path $PrivateHome 'temp'
 $env:TMP = $env:TEMP
 $env:APPDATA = Join-Path $PrivateHome 'appdata'
 $env:LOCALAPPDATA = Join-Path $PrivateHome 'localappdata'
+# The linker writes lnk*.tmp to TMP. Prove the account can create and delete a file there first.
+$probe = Join-Path $env:TMP ('rdy-probe-' + [guid]::NewGuid().ToString('N') + '.tmp')
+try {
+    New-Item -ItemType File -Path $probe -Force | Out-Null
+    Remove-Item -LiteralPath $probe -Force
+} catch {
+    Write-Output "The account cannot create and delete a file in TMP ($env:TMP): $_"
+    exit 1
+}
+Write-Output "TMP is writable: $env:TMP"
 $env:CARGO_HOME = $CargoHome
 $env:RUSTUP_HOME = $RustupHome
 $env:PATH = (Join-Path $CargoHome 'bin') + ';' + $NodeDir + ';' + $GitDir + ';' + $env:PATH

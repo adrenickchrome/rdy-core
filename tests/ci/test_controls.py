@@ -1252,6 +1252,36 @@ class WindowsPlatformMatrix(unittest.TestCase):
         # the paths are set before the first build command
         self.assertLess(inner.index('$env:LOCALAPPDATA'), inner.index('cargo fetch'))
 
+    def test_wx35_private_home_acl_order_keeps_the_folder_reachable(self):
+        # Run 4a2db5cf: inheritance was removed after the account took ownership, so the folder had an
+        # empty DACL and the administrator's grant failed ("C:\\rdy-ci\\home: Access is denied."); /C hid
+        # the failure and the linker hit LNK1104. Grant first, then drop inheritance, then hand over.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        lines = [l for l in gate.splitlines() if 'icacls' in l and '$home_' in l]
+        grant = next(i for i, l in enumerate(lines) if '/grant:r' in l)
+        strip = next(i for i, l in enumerate(lines) if '/inheritance:r' in l)
+        owner = next(i for i, l in enumerate(lines) if '/setowner' in l)
+        self.assertLess(grant, strip)
+        self.assertLess(strip, owner)
+        for sid in ('${account}:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'):
+            self.assertIn(sid, lines[grant])
+        for line in lines:
+            self.assertNotIn("'/C'", line)
+        # the account proves it can create and delete a file in its TEMP before the first build
+        inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
+        probe = inner.index('New-Item -ItemType File')
+        self.assertLess(inner.index('$env:TMP = '), probe)
+        self.assertLess(probe, inner.index('Remove-Item'))
+        self.assertLess(inner.index('Remove-Item'), inner.index('cargo fetch'))
+
+    def test_wx35_platform_runs_upload_the_qa_report(self):
+        text = (ROOT / '.github/workflows/platform.yml').read_text()
+        self.assertEqual(text.count('actions/upload-artifact@'), 2)
+        self.assertIn('path: target/qa/report.*', text)
+        self.assertIn('C:\\rdy-ci\\work\\target\\qa\\report.*', text)
+        self.assertIn('cat target/qa/report.md', text)
+        self.assertIn('| FAIL', (ROOT / 'scripts/ci/windows_report.ps1').read_text())
+
     def test_wx34_no_arm64_linux_job_is_restored(self):
         text = self.workflow()
         for word in ('ubuntu-26.04-arm', 'Linux ARM64', 'aarch64', 'linux-arm'):

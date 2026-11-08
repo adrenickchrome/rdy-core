@@ -66,10 +66,17 @@ foreach ($dir in @($work, $cargoHome, $rustupHome, $logs)) {
 
 # The account's own TEMP, TMP, APPDATA and LOCALAPPDATA live here, private to the account. Without
 # them the child inherits the runner account's paths, which the standard account cannot write
-# (the linker fails with LNK1104). Only the account and the administrators can open this folder.
-Invoke-Native 'icacls' @($home_, '/setowner', $account, '/T', '/C', '/Q')
-Invoke-Native 'icacls' @($home_, '/inheritance:r', '/C', '/Q')
-Invoke-Native 'icacls' @($home_, '/grant', "${account}:(OI)(CI)F", '/grant', '*S-1-5-32-544:(OI)(CI)F', '/T', '/C', '/Q')
+# (the linker fails with LNK1104). Only the account, the administrators and SYSTEM can open this
+# folder. The order matters: removing inheritance first leaves an empty DACL, and once the account
+# owns the folder the administrator can no longer change it ("Access is denied"). So the explicit,
+# inheritable grants come first, while the administrator still owns the folder; then the inherited
+# entries go; then the account takes ownership. No /C: icacls with /C exits 0 after a failure.
+Invoke-Native 'icacls' @($home_, '/grant:r', "${account}:(OI)(CI)F", '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '/T', '/Q')
+Invoke-Native 'icacls' @($home_, '/inheritance:r', '/Q')
+Invoke-Native 'icacls' @($home_, '/setowner', $account, '/T', '/Q')
+# The ACL in the log, so a later failure can be read without a rerun.
+Invoke-Native 'icacls' @($home_)
+Invoke-Native 'icacls' @((Join-Path $home_ 'temp'))
 
 # Tool directories the account needs on its PATH: Node from setup-node, and Git.
 $node = Split-Path -Parent (Get-Command node).Source
