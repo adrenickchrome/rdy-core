@@ -15,7 +15,8 @@ jobs:
   fast:
     name: Fast gate (Linux x86-64)
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    # the suite outgrew 60 minutes at 0cb13504 (rules from chat) and Windows added more
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -58,7 +59,7 @@ jobs:
     # Line and branch coverage of the workspace test suite (cargo-llvm-cov). Reported only:
     # it never blocks a merge. The summary goes to the run page; the HTML report is an artifact.
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     continue-on-error: true
     permissions:
       contents: read
