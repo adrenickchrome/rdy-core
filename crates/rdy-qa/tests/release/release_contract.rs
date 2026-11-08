@@ -7194,12 +7194,11 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     for (name, want) in PINNED_SECTIONS {
         assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
     }
-    for (name, want) in [(
-        "working_copy",
+    assert_eq!(
+        digest_of(&fixture["working_copy"]),
         "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
-    )] {
-        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
-    }
+        "section working_copy moved"
+    );
     // relc5 added `config.listing`; the section's earlier digest is of the rest
     let mut config = fixture["config"].clone();
     config

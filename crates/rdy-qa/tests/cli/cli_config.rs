@@ -717,8 +717,8 @@ fn relc5_check(rows: &[serde_json::Value], lines: &[String], show_origin: bool) 
         .map(|r| relc5_slot(r["key"].as_str().unwrap()))
         .collect();
     assert!(slots.windows(2).all(|w| w[0] <= w[1]), "{slots:?}");
-    for i in 0..KEY_LEVELS.len() {
-        assert!(slots.contains(&i), "{} is not listed", KEY_LEVELS[i].key);
+    for (i, rule) in KEY_LEVELS.iter().enumerate() {
+        assert!(slots.contains(&i), "{} is not listed", rule.key);
     }
     assert_eq!(rows.len(), lines.len(), "{rows:?}\n{lines:?}");
     for (r, l) in rows.iter().zip(lines) {
