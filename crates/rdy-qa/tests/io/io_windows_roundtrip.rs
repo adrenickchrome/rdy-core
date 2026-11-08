@@ -4,7 +4,8 @@
 //! fixtures hold the same bytes and hashes on Windows and Unix. Every released fixture, single
 //! file and chain, loads, passes fsck and reindexes to the state it was loaded in. The expected
 //! hashes are the file `fixtures/windows/dump-hashes.sha256`; `RDY_QA_BLESS=1` rewrites it, and
-//! a Windows run never does.
+//! a Windows run never does. A dump's pin is of its bytes with the writer's version text fixed
+//! (`version_free`), so a version bump does not move it.
 use super::io_load::{dumped, failed_check_undoes_while_locked, race, tree};
 use rdy_engine::load::{load, load_chain};
 use rdy_engine::{Rdy, RdyError};
@@ -288,6 +289,104 @@ fn pinned_rows() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The `rdy` text a pinned redump carries in place of the writing binary's version.
+const PINNED_RDY: &str = "0.0.0";
+
+/// `dump` (dump format 4, as `rdy_store::dump` documents it) as the same writer would give it
+/// with the header's `rdy` text set to [`PINNED_RDY`].
+///
+/// The header names the version of the rdy that wrote the dump (O17), so a pin of the raw bytes
+/// moves with every version bump. That text is for people only, never checked, and it is the
+/// only input of a dump that changes with the version; but three other places depend on it:
+/// the `HEADER` record's length and hash, and the `TRAILER`'s digest over every record's
+/// `kind || len || hash` (and with it the trailer record's hash). This rewrites exactly those:
+/// the text, the header record, and the trailer's digest and hash, from the records' own stored
+/// hashes. Every other byte is copied, so a Windows/Unix difference anywhere else in the dump
+/// still moves the pin. It checks the walk against the dump: the trailer's digest must be the
+/// one the records give before the rewrite, and the trailer must end the file.
+fn version_free(dump: &[u8]) -> Vec<u8> {
+    use rdy_model::Hash;
+    use rdy_store::dump::{DUMP_FORMAT, HEADER_FIXED, TRAILER_LEN, rec};
+    const PRELUDE: usize = 8 + 4;
+    const FRAME: usize = 4 + 1 + 32;
+    let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    // one record at `at`: its kind, stored hash and payload
+    let record = |at: usize| {
+        let len = u32_at(dump, at) as usize;
+        let hash: [u8; 32] = dump[at + 5..at + FRAME].try_into().unwrap();
+        (dump[at + 4], hash, &dump[at + FRAME..at + FRAME + len])
+    };
+    let put = |out: &mut Vec<u8>, kind: u8, payload: &[u8]| {
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.push(kind);
+        out.extend_from_slice(&Hash::of(payload).0);
+        out.extend_from_slice(payload);
+    };
+    let link = |chain: &mut Vec<u8>, kind: u8, len: usize, hash: &[u8; 32]| {
+        chain.push(kind);
+        chain.extend_from_slice(&(len as u64).to_le_bytes());
+        chain.extend_from_slice(hash);
+    };
+    assert_eq!(&dump[..8], b"RDYDUMP\n");
+    assert_eq!(
+        u32_at(dump, 8),
+        DUMP_FORMAT,
+        "the dump format the walk reads"
+    );
+    // the header: its manifest's length is at 1, and the `rdy` text ends the payload
+    let (kind, _, header) = record(PRELUDE);
+    assert_eq!(kind, rec::HEADER);
+    let rdy_at = HEADER_FIXED - 2 + u32_at(header, 1) as usize;
+    let rdy_len = u16::from_le_bytes(header[rdy_at..rdy_at + 2].try_into().unwrap()) as usize;
+    assert_eq!(
+        rdy_at + 2 + rdy_len,
+        header.len(),
+        "the rdy text ends the header"
+    );
+    let mut new_header = header[..rdy_at].to_vec();
+    new_header.extend_from_slice(&(PINNED_RDY.len() as u16).to_le_bytes());
+    new_header.extend_from_slice(PINNED_RDY.as_bytes());
+    let mut out = dump[..PRELUDE].to_vec();
+    put(&mut out, rec::HEADER, &new_header);
+    let (mut old_chain, mut new_chain) = (vec![], vec![]);
+    link(
+        &mut old_chain,
+        rec::HEADER,
+        header.len(),
+        &Hash::of(header).0,
+    );
+    link(
+        &mut new_chain,
+        rec::HEADER,
+        new_header.len(),
+        &Hash::of(&new_header).0,
+    );
+    // the records after the header (files, batches, their frames), copied as they are
+    let mut at = PRELUDE + FRAME + header.len();
+    loop {
+        let (kind, hash, payload) = record(at);
+        let next = at + FRAME + payload.len();
+        if kind == rec::TRAILER {
+            assert_eq!(payload.len(), TRAILER_LEN);
+            assert_eq!(next, dump.len(), "the trailer ends the dump");
+            let digest = TRAILER_LEN - 32;
+            assert_eq!(
+                payload[digest..],
+                Hash::of(&old_chain).0,
+                "the walk gives the trailer's digest"
+            );
+            let mut trailer = payload[..digest].to_vec();
+            trailer.extend_from_slice(&Hash::of(&new_chain).0);
+            put(&mut out, rec::TRAILER, &trailer);
+            return out;
+        }
+        link(&mut old_chain, kind, payload.len(), &hash);
+        link(&mut new_chain, kind, payload.len(), &hash);
+        out.extend_from_slice(&dump[at..next]);
+        at = next;
+    }
+}
+
 #[test]
 fn wx28b_windows_and_unix_dumps_have_identical_content_hashes() {
     let mut rows: Vec<(String, String)> = vec![];
@@ -328,8 +427,21 @@ fn wx28b_windows_and_unix_dumps_have_identical_content_hashes() {
             "{}: a dump of a loaded dump is the same bytes",
             f.name
         );
+        // the pin holds for every rdy version: it is of the dump with the version text fixed
+        // (`version_free`), and it still sees any other byte, as a flipped byte of the last
+        // record before the trailer shows
+        let pinned = version_free(&dumps[0]);
+        let mut flipped = dumps[0].clone();
+        let last = flipped.len() - (4 + 1 + 32 + rdy_store::dump::TRAILER_LEN) - 1;
+        flipped[last] ^= 1;
+        assert_ne!(
+            version_free(&flipped),
+            pinned,
+            "{}: a changed byte moves the pin",
+            f.name
+        );
         let pin = if dumps[0] == dumps[1] {
-            sha(&dumps[0])
+            sha(&pinned)
         } else {
             "-".to_string()
         };
