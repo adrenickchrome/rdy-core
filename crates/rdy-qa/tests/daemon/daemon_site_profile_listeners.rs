@@ -1025,36 +1025,40 @@ fn spv7_failed_open_allocates_no_profile_site() {
             "candidate {p} is occupied"
         );
     }
-    let e = ensure_profile_site(Arc::clone(&sh), "other").unwrap_err();
-    assert_error(
-        &e,
-        E_SITE,
-        "could not bind a loopback port for profile \"other\" after 16 attempts",
-        "free a port in 49152..65535, then ask for the profile site again",
-    );
-    assert!(sh.profile_sites.keys().is_empty());
-    let tried = rec.binds();
-    assert_eq!(tried.len(), 16, "{tried:?}");
-    assert!(tried.iter().all(|a| a.ip().is_loopback()), "{tried:?}");
+    // D-5GFFX: every candidate refused, so the profile site binds the OS-assigned port. A bind
+    // failure of that port too cannot be injected from here (the socket-option seam is private
+    // to the daemon crate; its unit tests cover it), so the failed-open cases above are the
+    // ones that allocate nothing.
+    let other = match ensure_profile_site(Arc::clone(&sh), "other") {
+        Ok(info) => info,
+        Err(e) => panic!("{e:?}"),
+    };
+    let candidates = profile_candidates(&root, "other");
+    let port = port_of(&url_of(&other));
     assert!(
-        !rec.logs().iter().any(|l| l.starts_with("site: profile ")),
+        !candidates.contains(&port),
+        "{port} is outside {candidates:?}"
+    );
+    assert_eq!(sh.profile_sites.keys(), vec!["other".to_string()]);
+    let tried = rec.binds();
+    // sixteen refused, the OS-assigned 127.0.0.1 port, then [::1] on that same port
+    assert_eq!(tried.len(), 18, "{tried:?}");
+    assert!(tried.iter().all(|a| a.ip().is_loopback()), "{tried:?}");
+    assert_eq!(
+        tried[16],
+        sock(0),
+        "the OS-assigned bind follows the sixteen"
+    );
+    assert_eq!(tried[17].port(), port, "{tried:?}");
+    assert!(
+        rec.logs()
+            .iter()
+            .any(|l| l.starts_with("site: profile other: ")),
         "{:?}",
         rec.logs()
     );
-    // the test releases its own sockets and retries; it cannot promise the ports are free
+    assert!(page(port, "secret.html").contains("SECRET-WORDS"));
     drop(held);
-    let other = match ensure_profile_site(Arc::clone(&sh), "other") {
-        Ok(info) => info,
-        Err(e) => {
-            // Probes run only after the failure; each socket closes at once.
-            let report = retry_failure(&e, &profile_candidates(&root, "other"), |at| {
-                TcpListener::bind(at).map(drop)
-            });
-            panic!("{report}");
-        }
-    };
-    assert_eq!(sh.profile_sites.keys(), vec!["other".to_string()]);
-    assert!(page(port_of(&url_of(&other)), "secret.html").contains("SECRET-WORDS"));
 
     // the source site stays usable
     let r = http::get(&format!("{}secret.html", w.url));
