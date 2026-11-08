@@ -118,7 +118,10 @@ def check_dispatch(ref, inputs):
 
 READS = ('repository', 'run_attempt', 'attempt_jobs', 'job', 'artifact', 'run_artifacts', 'artifact_member',
          'run_approvals', 'approval_responses', 'contents', 'ref', 'commit', 'tag', 'compare', 'releases',
-         'release_by_tag', 'open_code_scanning_alerts', 'workflow')
+         'release_by_tag', 'open_code_scanning_alerts', 'workflow', 'workflow_runs', 'artifact_path',
+         'download_artifact')
+WORKFLOW_RUNS_MAX = 1000         # runs of one workflow at one commit
+WORKFLOW_FILE_RE = r'\.github/workflows/([A-Za-z0-9_-]+\.ya?ml)'
 
 
 class ReadOnly(object):
@@ -143,12 +146,39 @@ def token():
     return value
 
 
+def _live_class():
+    """H's `sign.LiveFacts` plus one producer read, `workflow_runs`, built on its own paginated GET."""
+    import re
+    import urllib.parse
+    import sign
+    cand, _, gh, _ = _release()
+
+    class ProducerFacts(sign.LiveFacts):
+        def workflow_runs(self, path, head_sha):
+            """(run id, latest attempt) of every run of the workflow file `path` at commit `head_sha`."""
+            match = re.fullmatch(WORKFLOW_FILE_RE, path) if isinstance(path, str) else None
+            gh.need_commit(head_sha, 'head SHA')
+            if not match:
+                raise cand.ControllerError('the workflow path is malformed')
+            operation = 'workflow runs'
+            query = self.root + '/actions/workflows/' + urllib.parse.quote(match.group(1), safe='') \
+                + '/runs?head_sha=' + head_sha
+            runs = []
+            for row in self._pages(operation, query, 'workflow_runs', WORKFLOW_RUNS_MAX):
+                if row.get('path') != path or row.get('head_sha') != head_sha \
+                        or not cand.is_int(row.get('run_attempt'), 1):
+                    raise gh.Malformed(operation, 'a run is not this workflow at this commit')
+                runs.append((row['id'], row['run_attempt']))
+            return runs
+
+    return ProducerFacts
+
+
 def github(work):
     """The live read-only fact source: H's `sign.LiveFacts` (a `github.GitHub`) over the real transport.
-    Its trust verifier is never called; the ReadOnly wrapper refuses `release_trust`."""
+    Its trust verifier is never called; the ReadOnly wrapper refuses `release_trust` and every write."""
     _, _, gh, _ = _release()
-    import sign
-    return ReadOnly(sign.LiveFacts(gh.UrllibTransport(token()), work, os.devnull))
+    return ReadOnly(_live_class()(gh.UrllibTransport(token()), work, os.devnull))
 
 
 def run_identity():
@@ -165,11 +195,11 @@ def run_identity():
     return values[0], values[1]
 
 
-def write_record(folder, name, data):
+def write_record(folder, name, data, limit=OUTPUT_MAX):
     """Writes `data` as the one new file `name` in the new private folder `folder`."""
     cand = _release()[0]
-    if len(data) > OUTPUT_MAX:
-        raise refuse(name + ' is larger than ' + str(OUTPUT_MAX) + ' bytes')
+    if len(data) > limit:
+        raise refuse(name + ' is larger than ' + str(limit) + ' bytes')
     folder = Path(folder)
     try:
         folder.mkdir(mode=0o700)

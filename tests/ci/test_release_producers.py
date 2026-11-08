@@ -390,10 +390,11 @@ class Parser(WorkflowCase):
         for path in sorted((ROOT / 'scripts' / 'release').glob('*.py')):
             self.assertNotIn('release_producers', path.read_text(encoding='utf-8'), path.name)
         # H calls the disposable signer as one argv element: executable in git, with a fixed interpreter.
+        # Linux passes the whole shebang argument as one word, so the isolated flags are one argument (rprd3).
         signer = 'scripts/release_producers/rehearsal_test_signer.py'
         staged = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-s', signer], capture_output=True, text=True)
         self.assertTrue(staged.stdout.startswith('100755 '), staged.stdout)
-        self.assertEqual((ROOT / signer).read_text().splitlines()[0], '#!/usr/bin/python3 -I -B')
+        self.assertEqual((ROOT / signer).read_text().splitlines()[0], '#!/usr/bin/python3 -IB')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1447,6 +1448,1132 @@ class ApprovalProducer(Refusals):
         folder = tempfile.mkdtemp(prefix='rdy-rprd2-')
         self.addCleanup(__import__('shutil').rmtree, folder, True)
         return folder
+
+
+# ---------------------------------------------------------------------------------------------
+# The release evidence producer: E assembly and the native report binding (rprd3)
+# ---------------------------------------------------------------------------------------------
+
+import io  # noqa: E402
+import os  # noqa: E402
+import shutil  # noqa: E402
+import stat  # noqa: E402
+import tempfile  # noqa: E402
+import zipfile  # noqa: E402
+
+SIGNER_SHA = '2' * 40                # the policy's signer workflow commit
+E_RUN, CAND_RUN, CAND_ART = 888001, 777001, 55
+CI_RUN, SEC_RUN, RELEASE_RUN = 880001, 880002, 990201
+APPROVAL_RUN_E, APPROVAL_ART_E = 990301, 990303
+E_UPLOAD = 8901
+LANDING = 'L-test'
+ROLE_ARN = 'arn:aws:iam::' + ACCOUNT + ':role/rdy-test-signer'
+EVIDENCE_WF_BYTES = b'name: release-evidence\non: workflow_dispatch\n'
+CHECKS = [{'name': n, 'passed': True} for n in cand.CHECK_NAMES]
+SECURITY_RUN = {'CodeQL (actions)': SEC_RUN, 'CodeQL (rust)': SEC_RUN, 'Core CI': CI_RUN, 'Core security': SEC_RUN,
+                'Dependency, secret and workflow policy': SEC_RUN, 'Fast gate (Linux x86-64)': CI_RUN}
+SECURITY_PATH = {CI_RUN: '.github/workflows/ci.yml', SEC_RUN: '.github/workflows/security.yml'}
+SSH_KEYGEN = '/usr/bin/ssh-keygen'
+SIGNER_PATH = PRODUCERS / 'rehearsal_test_signer.py'
+
+
+def zip_bytes(members):
+    """A deterministic stored ZIP of `members` (name -> bytes), as the artifact service serves it."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as archive:
+        for name in sorted(members):
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2026, 11, 8, 0, 0, 0)), members[name])
+    return buffer.getvalue()
+
+
+def install_report(target, version=VERSION, commit=S):
+    """The native checker's original report: compact and unsorted on purpose (it is hashed as printed)."""
+    return json.dumps({'version': version, 'target': target, 'commit': commit, 'os': 'test-os', 'binary': 'rdy',
+                       'checks': CHECKS, 'skipped': 0}).encode('utf-8') + b'\n'
+
+
+class EvidenceWorld(object):
+    """One release candidate at S with every fact GitHub holds while the E sealer runs. Main is
+    HEAD -> S -> P -> SIGNER_SHA; the protected policy at S equals the policy at main's head. Every identity
+    is synthetic. `first_tag` v0.46.0 is the first machine preview (a key_change card is required)."""
+
+    def __init__(self, first_tag='v0.45.0', published=('0.41.0', '0.45.0')):
+        self.calls, self.blocked, self.errors = [], [], {}
+        self.files, self.runs, self.jobs, self.artifacts, self.members, self.zips = {}, {}, {}, {}, {}, {}
+        self.reviews, self.responses, self.listed = {}, {}, {}
+        self.tmp = tempfile.mkdtemp(prefix='rdy-rprd3-world-')
+        self.commits = {HEAD: (S,), S: (P,), P: (SIGNER_SHA,), SIGNER_SHA: ()}
+        self.compares = {(SIGNER_SHA, S): 'ahead'}
+        self.refs = {'heads/main': ('commit', HEAD), 'tags/candidate/v' + VERSION: ('commit', S)}
+        self.releases = [dict(release_id=100 + i, tag_name='v' + p, target_commitish=digest(200 + i)[:40],
+                              draft=False, prerelease=True, assets=()) for i, p in enumerate(published)]
+        self.alerts = [dict(number=1, state='open', tool='CodeQL', security_severity='low')]
+        self.attempt = 1
+
+        # Release sources at S.
+        self.notes = ('# rdy ' + VERSION + '\n\nRelease notes.\n').encode()
+        self.guide = canon({'schema': 1, 'edition': VERSION, 'design_landing': LANDING, 'rulesets': []})
+        self.source = {'schema': 1, 'version': VERSION, 'design_landing': LANDING, 'notes_sha256': sha(self.notes),
+                       'guide_sha256': sha(self.guide)}
+        self.put(S, 'Cargo.toml', ('[workspace]\nmembers = []\n\n[workspace.package]\nversion = "' + VERSION
+                                   + '"\n').encode())
+        self.put(S, 'release/notes.md', self.notes)
+        self.put(S, 'release/agent-guide.json', self.guide)
+        self.put(S, 'release/agent-guide.sha256', sha(self.guide).encode() + b'\n')
+        self.put(S, 'release/source.json', canon(self.source))
+        self.put(S, 'crates/rdy-cli/src/main.rs', b'mod wc;\n\nconst PREVIEW: bool = true;\n')
+        for commit in (S, P):
+            self.put(commit, EVIDENCE_WF, EVIDENCE_WF_BYTES)
+        for commit in (HEAD, P):
+            self.put(commit, APPROVAL_WF, APPROVAL_WF_BYTES)
+
+        # The protected policy at S and at main's head.
+        self.first_tag = first_tag
+        self.transition = canon({'scheme': 'rdy-release-signer-transition-v1', 'tag': first_tag})
+        self.records = ('transition-' + first_tag + '.json transition-' + first_tag + '.json.sig\n').encode()
+        self.channel = dict(channel(), workflow_file_sha256=sha(APPROVAL_WF_BYTES))
+        self.ep = {'schema': 1, 'repository_id': REPO_ID,
+                   'coordinators': [{'actor_id': a, 'app_id': None, 'installation_id': None}
+                                    for a in (COORDINATOR, SECOND_COORDINATOR)],
+                   'evidence_workflow': {'id': EVIDENCE_WF_ID, 'path': EVIDENCE_WF, 'sha': P},
+                   'release_workflow_path': '.github/workflows/release.yml', 'approval_channel': self.channel}
+        self.policy = {'schema': 1, 'repository': REPO, 'key_arn': KEY_ARN, 'role_arn': ROLE_ARN,
+                       'fingerprint': FINGERPRINT, 'first_machine_tag': first_tag, 'targets': [MAC, LINUX],
+                       'records_sha256': sha(self.records), 'evidence_policy_sha256': '',
+                       'signer_workflow_sha': SIGNER_SHA}
+        self.publish_policy(S)
+        self.publish_policy(HEAD)
+
+        # The candidate run, its jobs and its artifact with real archive bytes.
+        self.archive_bytes = {t: ('archive ' + t + '\n').encode() * 40 for t in cand.TARGETS}
+        self.archives = [{'name': cand.archive_name(VERSION, t), 'sha256': sha(self.archive_bytes[t]),
+                          'size': len(self.archive_bytes[t])} for t in cand.TARGETS]
+        self.manifest = sha(cand.manifest_bytes(self.archives))
+        self.run(CAND_RUN, 1, '.github/workflows/release-candidate.yml', 'push', 71)
+        self.job(CAND_RUN, 1, 7701, 'Candidate source and version')
+        self.native = {t: self.job(CAND_RUN, 1, 7702 + i, 'Native candidate (' + t + ')')
+                       for i, t in enumerate(cand.TARGETS)}
+        self.job(CAND_RUN, 1, 7704, 'Candidate manifest')
+        self.counts = {'passed': 900, 'failed': 0, 'ignored': 3, 'prerequisite_skipped': 0}
+        self.candidate = {
+            'schema': 1, 'repository': REPO, 'ref': 'refs/tags/candidate/v' + VERSION, 'version': VERSION, 'commit': S,
+            'run_id': CAND_RUN, 'run_attempt': 1, 'manifest_sha256': self.manifest,
+            'artifacts': [dict(f) for f in self.archives],
+            'builds': [{'target': t, 'artifact': {'id': 100 + i, 'name': 'rdy-candidate-' + t + '-a1',
+                                                  'digest': 'sha256:' + digest(60 + i), 'size': 2048},
+                        'receipt_sha256': digest(70 + i), 'fast_gate': dict(self.counts),
+                        'sources': [{'name': 'rdy-mpl-0.1.0.crate', 'sha256': digest(80), 'size': 10}]}
+                       for i, t in enumerate(cand.TARGETS)]}
+        self.pack_candidate()
+
+        # The security and CI runs on S.
+        self.run(CI_RUN, 1, SECURITY_PATH[CI_RUN], 'push', 91, branch='main')
+        self.run(SEC_RUN, 1, SECURITY_PATH[SEC_RUN], 'push', 92, branch='main')
+        for n, name in enumerate(sorted(SECURITY_RUN)):
+            self.job(SECURITY_RUN[name], 1, 9901 + n, name)
+        self.listed = {SECURITY_PATH[CI_RUN]: [(CI_RUN, 1)], SECURITY_PATH[SEC_RUN]: [(SEC_RUN, 1)]}
+
+        # The E run attempt that is sealing now, with both native receipts uploaded.
+        self.reports = {t: install_report(t) for t in cand.TARGETS}
+        self.e_attempt(1)
+
+    # -- building blocks ---------------------------------------------------------------------
+
+    def put(self, commit, path, data):
+        self.files[(path, commit)] = data
+
+    def publish_policy(self, commit):
+        ep = canon(self.ep)
+        self.policy['evidence_policy_sha256'] = sha(ep)
+        self.put(commit, 'release-keys/evidence-policy.json', ep)
+        self.put(commit, 'release-keys/policy.json', canon(self.policy))
+        self.put(commit, 'release-keys/records.txt', self.records)
+        self.put(commit, 'release-keys/transition-' + self.first_tag + '.json', self.transition)
+
+    def run(self, run_id, attempt, path, event, workflow_id, actor=COORDINATOR, trigger=None, head=S, branch=None,
+            status='completed', conclusion='success'):
+        self.runs[(run_id, attempt)] = dict(
+            run_id=run_id, run_attempt=attempt, workflow_id=workflow_id, path=path, head_sha=head,
+            head_branch=branch or 'candidate/v' + VERSION, event=event, status=status, conclusion=conclusion,
+            actor_id=actor, triggering_actor_id=trigger or actor, repository_id=REPO_ID, head_repository_id=REPO_ID,
+            html_url=ACTIONS + str(run_id), sha256=digest(run_id % 997 + 300))
+
+    def job(self, run_id, attempt, job_id, name, head=S, status='completed', conclusion='success'):
+        url = ACTIONS + str(run_id) + '/job/' + str(job_id)
+        self.jobs.setdefault((run_id, attempt), []).append(dict(
+            job_id=job_id, run_id=run_id, run_attempt=attempt, name=name, status=status, conclusion=conclusion,
+            html_url=url, head_sha=head))
+        return {'run_id': run_id, 'run_attempt': attempt, 'job_id': job_id, 'job_url': url, 'conclusion': 'success'}
+
+    def find_job(self, run_id, attempt, name):
+        return [j for j in self.jobs[(run_id, attempt)] if j['name'] == name][0]
+
+    def artifact(self, artifact_id, name, run_id, data, head=S, zipped=True):
+        """An Actions artifact: `data` is the ZIP the artifact service holds (or members, unzipped)."""
+        if zipped:
+            self.zips[artifact_id] = data
+        self.artifacts[artifact_id] = dict(artifact_id=artifact_id, name=name, size=len(data), digest=sha(data),
+                                           expired=False, run_id=run_id, repository_id=REPO_ID,
+                                           head_repository_id=REPO_ID, head_sha=head,
+                                           sha256=digest(artifact_id % 997 + 400))
+
+    def pack_candidate(self, archive_bytes=None, candidate=None):
+        members = {f['name']: (archive_bytes or self.archive_bytes)[t] for f, t in zip(self.archives, cand.TARGETS)}
+        members['SHA256SUMS'] = cand.manifest_bytes(self.archives)
+        members['candidate.json'] = canon(candidate or self.candidate)
+        self.artifact(CAND_ART, 'rdy-candidate-a1', CAND_RUN, zip_bytes(members))
+
+    def receipt(self, which, **changes):
+        """H's sanitized receipt of one native rehearsal: the original report digest, never the receipt's."""
+        entry = [f for f in self.archives if f['name'] == cand.archive_name(VERSION, which)][0]
+        value = {'schema': 1, 'version': VERSION, 'commit': S, 'target': which, 'manifest_sha256': self.manifest,
+                 'archive': dict(entry), 'install': {'report_sha256': sha(self.reports[which]),
+                                                     'checks': [dict(c) for c in CHECKS], 'skipped': 0},
+                 'session': None, 'cleanup': 'destroyed'}
+        value.update(changes)
+        return canon(value)
+
+    def e_attempt(self, attempt, trigger=COORDINATOR, receipts=True):
+        """E attempt `attempt`: authentication and both native jobs passed; the sealer is running."""
+        self.attempt = attempt
+        self.run(E_RUN, attempt, EVIDENCE_WF, 'workflow_dispatch', EVIDENCE_WF_ID, trigger=trigger,
+                 status='in_progress', conclusion=None)
+        base = 8800 + 10 * attempt
+        self.job(E_RUN, attempt, base, 'Authenticate release evidence')
+        self.install_jobs = {t: self.job(E_RUN, attempt, base + 1 + i, 'Native evidence install (' + t + ')')
+                             for i, t in enumerate(cand.TARGETS)}
+        self.job(E_RUN, attempt, base + 3, 'Seal release evidence', status='in_progress', conclusion=None)
+        if receipts:
+            for i, target in enumerate(cand.TARGETS):
+                self.upload_receipt(target, attempt, base + 5 + i)
+
+    def upload_receipt(self, target, attempt, artifact_id, data=None):
+        name = 'rehearsal-' + target + '.json'
+        self.artifact(artifact_id, 'rehearsal-' + target + '-a' + str(attempt), E_RUN,
+                      zip_bytes({name: data if data is not None else self.receipt(target)}))
+
+    def full_scope(self):
+        return {'repository': REPO, 'version': VERSION, 'commit': S, 'design_landing': LANDING,
+                'manifest_sha256': self.manifest, 'artifacts': [dict(f) for f in self.archives],
+                'key_arn': KEY_ARN, 'fingerprint': FINGERPRINT, 'first_machine_tag': self.first_tag,
+                'transition_sha256': sha(self.transition), 'targets': [MAC, LINUX]}
+
+    def add_approval(self, kind='key_change', run_id=APPROVAL_RUN_E, artifact_id=APPROVAL_ART_E):
+        """A completed founder approval run on main whose request the founder approved."""
+        full = self.full_scope()
+        keys = ev.SCOPE_KEYS[kind]
+        scope = {k: full[k] for k in keys} if kind != 'revocation' else {
+            'repository': REPO, 'key_arn': KEY_ARN, 'fingerprint': FINGERPRINT, 'revocation_sha256': digest(32),
+            'last_good_tag': None}
+        request = canon({'schema': 1, 'decision': 'D-PZKAP', 'policy_commit': S, 'kind': kind, 'scope': scope})
+        self.run(run_id, 1, APPROVAL_WF, 'workflow_dispatch', APPROVAL_WF_ID, actor=FOUNDER, head=HEAD, branch='main')
+        self.job(run_id, 1, run_id + 10, 'prepare-approval', head=HEAD)
+        self.job(run_id, 1, run_id + 11, 'accept-founder-approval', head=HEAD)
+        self.artifact(artifact_id, 'approval-request-' + str(run_id) + '-1', run_id, zip_bytes({'x': request}),
+                      head=HEAD, zipped=False)
+        self.members[(artifact_id, 'approval-request.json')] = request
+        self.reviews[run_id] = [dict(state='approved', comment='APPROVE sha256:' + sha(request), user_id=FOUNDER,
+                                     user_type='User', environments=((ENVIRONMENT_ID, 'release-exception-approval'),))]
+        art = self.artifacts[artifact_id]
+        ep = canon(self.ep)
+        known = {'protected_policy': (sha(ep), len(ep)), 'request_archive': (art['digest'], art['size']),
+                 'workflow_source': (sha(APPROVAL_WF_BYTES), len(APPROVAL_WF_BYTES)),
+                 'implementation_source': (sha(APPROVAL_WF_BYTES), len(APPROVAL_WF_BYTES))}
+        self.responses[run_id] = [{'kind': k, 'sha256': known.get(k, (digest(600 + i), 0))[0],
+                                   'bytes': known.get(k, (None, 700 + i))[1]} for i, k in enumerate(SOURCE_KINDS)]
+        return request
+
+    def document(self, **changes):
+        """The coordinator's original attestation for this candidate (not canonical on purpose)."""
+        tutorials = [{'target': t, 'agent': 'claude-code', 'model': 'claude-sonnet-test', 'effort': 'medium',
+                      'session': 'session-' + t, 'tutorial_revision': 'rev-1',
+                      'steps': [{'id': 'install', 'result': 'pass'}, {'id': 'first-use', 'result': 'pass'}],
+                      'archive_sha256': f['sha256'], 'manifest_sha256': self.manifest, 'result': 'pass'}
+                     for t, f in zip(cand.TARGETS, self.archives)]
+        value = dict(document_value(), tutorials=tutorials)
+        value.update(changes)
+        return json.dumps(value, indent=1, ensure_ascii=False).encode('utf-8')
+
+    def inputs(self, approval_runs=(), data=None, **changes):
+        """The raw event inputs of this E dispatch, as GitHub's event file holds them."""
+        data = self.document() if data is None else data
+        value = {'version': VERSION, 'candidate_run_id': str(CAND_RUN), 'candidate_run_attempt': '1',
+                 'candidate_artifact_id': str(CAND_ART), 'attestation_gzip_b64': b64(pack(data)),
+                 'attestation_sha256': sha(data),
+                 'approval_runs': json.dumps([dict(r) for r in approval_runs], sort_keys=True,
+                                             separators=(',', ':'))}
+        value.update(changes)
+        return value
+
+    # -- after sealing: GitHub's view of the completed run and the consumer's request --------------
+
+    def uploaded(self, record):
+        self.artifact(E_UPLOAD, 'release-evidence-' + str(E_RUN) + '-a' + str(self.attempt), E_RUN,
+                      zip_bytes({'x': record}), zipped=False)
+        self.members[(E_UPLOAD, 'release-record.json')] = record
+        self.runs[(E_RUN, self.attempt)].update(status='completed', conclusion='success')
+        self.find_job(E_RUN, self.attempt, 'Seal release evidence').update(status='completed', conclusion='success')
+        self.run(RELEASE_RUN, 1, '.github/workflows/release.yml', 'workflow_dispatch', 101, status='in_progress',
+                 conclusion=None)
+
+    def request(self, record, approvals=()):
+        return {'version': VERSION, 'candidate_run_id': CAND_RUN, 'candidate_run_attempt': 1,
+                'candidate_artifact_id': CAND_ART, 'evidence_run_id': E_RUN, 'evidence_run_attempt': self.attempt,
+                'evidence_artifact_id': E_UPLOAD, 'evidence_sha256': sha(record), 'dispatch_run_id': RELEASE_RUN,
+                'dispatch_run_attempt': 1, 'approvals': list(approvals)}
+
+
+class EvidenceFacts(object):
+    """The read-only fact source over an EvidenceWorld (GitHub reads only). `trust` permits the consumer's
+    release_trust read; the producers never reach it, and no write exists."""
+
+    def __init__(self, world, gh_module, trust=False):
+        self.w = world
+        self.gh = gh_module
+        self.trust = trust
+
+    def _hit(self, name, *args):
+        self.w.calls.append((name,) + args)
+        error = self.w.errors.get(name) or self.w.errors.get((name,) + args)
+        if error is not None:
+            raise error
+
+    def _absent(self, operation):
+        return self.gh.Absent(operation, 'not found', 404)
+
+    def repository(self):
+        self._hit('repository')
+        return self.gh.RepositoryFact(REPO_ID, REPO, digest(90))
+
+    def run_attempt(self, run_id, attempt):
+        self._hit('run_attempt', run_id, attempt)
+        if (run_id, attempt) not in self.w.runs:
+            raise self._absent('run attempt')
+        return self.gh.RunFact(**self.w.runs[(run_id, attempt)])
+
+    def attempt_jobs(self, run_id, attempt):
+        self._hit('attempt_jobs', run_id, attempt)
+        return [self.gh.JobFact(**j) for j in self.w.jobs.get((run_id, attempt), [])]
+
+    def artifact(self, artifact_id, run_id):
+        self._hit('artifact', artifact_id, run_id)
+        if artifact_id not in self.w.artifacts:
+            raise self._absent('artifact')
+        fact = self.gh.ArtifactFact(**self.w.artifacts[artifact_id])
+        if fact.run_id != run_id:
+            raise self.gh.Malformed('artifact', 'the artifact is not from run ' + str(run_id))
+        if fact.expired:
+            raise self.gh.ArtifactExpired('artifact', 'the artifact expired')
+        return fact
+
+    def run_artifacts(self, run_id):
+        self._hit('run_artifacts', run_id)
+        return [self.gh.ArtifactFact(**a) for _, a in sorted(self.w.artifacts.items()) if a['run_id'] == run_id]
+
+    def artifact_path(self, fact):
+        self._hit('artifact_path', fact.artifact_id)
+        path = Path(self.w.tmp) / ('artifact-' + str(fact.artifact_id) + '.zip')
+        if not path.exists():
+            path.write_bytes(self.w.zips[fact.artifact_id])
+        return path
+
+    def download_artifact(self, fact, out, limit):
+        self._hit('download_artifact', fact.artifact_id)
+        data = self.w.zips[fact.artifact_id]
+        if len(data) > limit:
+            raise self.gh.Malformed('artifact download', 'larger than ' + str(limit) + ' bytes')
+        cand.write_new(Path(out), data, 0o600)
+        if sha(data) != fact.digest:
+            os.unlink(str(out))
+            raise self.gh.Malformed('artifact download', 'the bytes do not match the artifact digest')
+        return self.gh.DownloadFact(fact.artifact_id, fact.run_id, str(out), sha(data), len(data))
+
+    def artifact_member(self, fact, name, limit):
+        self._hit('artifact_member', fact.artifact_id, name)
+        if fact.artifact_id in self.w.zips:
+            with zipfile.ZipFile(io.BytesIO(self.w.zips[fact.artifact_id])) as archive:
+                if name not in archive.namelist():
+                    raise self.gh.ControllerError('the artifact does not hold ' + name)
+                return cand.read_member(archive, name, limit)
+        data = self.w.members.get((fact.artifact_id, name))
+        if data is None:
+            raise self.gh.ControllerError('the artifact does not hold ' + name)
+        if len(data) > limit:
+            raise self.gh.ControllerError(name + ' is larger than ' + str(limit) + ' bytes')
+        return data
+
+    def workflow_runs(self, path, head_sha):
+        self._hit('workflow_runs', path, head_sha)
+        return [(r, a) for r, a in self.w.listed.get(path, []) if self.w.runs[(r, a)]['head_sha'] == head_sha]
+
+    def ref(self, name):
+        self._hit('ref', name)
+        if name not in self.w.refs:
+            raise self._absent('ref')
+        kind, target = self.w.refs[name]
+        return self.gh.RefFact('refs/' + name, kind, target, digest(91))
+
+    def commit(self, sha_):
+        self._hit('commit', sha_)
+        if sha_ not in self.w.commits:
+            raise self._absent('commit')
+        return self.gh.CommitFact(sha_, '8' * 40, tuple(self.w.commits[sha_]), digest(92))
+
+    def contents(self, path, ref_sha, limit=1048576):
+        self._hit('contents', path, ref_sha)
+        data = self.w.files.get((path, ref_sha))
+        if data is None:
+            raise self._absent('contents')
+        blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+        return self.gh.FileFact(path, ref_sha, blob, data, sha(data))
+
+    def compare(self, base, head):
+        self._hit('compare', base, head)
+        return self.gh.CompareFact(base, head, self.w.compares.get((base, head), 'diverged'), 1, 0, base, digest(93))
+
+    def releases(self):
+        self._hit('releases')
+        return [self.gh.ReleaseFact(**r) for r in self.w.releases]
+
+    def open_code_scanning_alerts(self, ref):
+        self._hit('open_code_scanning_alerts', ref)
+        return [self.gh.AlertFact(**a) for a in self.w.alerts]
+
+    def run_approvals(self, run_id):
+        self._hit('run_approvals', run_id)
+        return [self.gh.ApprovalFact(**r) for r in self.w.reviews.get(run_id, [])]
+
+    def approval_responses(self, run_id, artifact_id):
+        self._hit('approval_responses', run_id, artifact_id)
+        return [dict(r) for r in self.w.responses[run_id]]
+
+    def release_trust(self, version, policy_commit, signing):
+        if not self.trust:
+            self.w.blocked.append('release_trust')
+            raise AssertionError('a producer called release_trust')
+        return {'version': version, 'fingerprint': FINGERPRINT, 'policy_commit': policy_commit,
+                'signer_line': 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAtest',
+                'transition_sha256': sha(self.w.transition)}
+
+    def create_ref(self, *args):
+        self.w.blocked.append('create_ref')
+        raise AssertionError('a producer wrote a ref')
+
+
+class EvidenceCase(Refusals):
+    def setUp(self):
+        self.pev = producer('evidence')
+        self.inst = producer('install')
+        self.elig = self.pev.elig
+        self.gh = self.pev.gh
+
+    def world(self, **kwargs):
+        world = EvidenceWorld(**kwargs)
+        self.addCleanup(shutil.rmtree, world.tmp, True)
+        return world
+
+    def facts(self, world, trust=False):
+        return EvidenceFacts(world, self.gh, trust)
+
+    def seal(self, world, approval_runs=(), **changes):
+        record = self.pev.seal(self.facts(world), E_RUN, world.attempt, world.inputs(approval_runs, **changes))
+        self.assertEqual(world.blocked, [])
+        return record
+
+    def consumer(self, world, record, approvals=()):
+        """E through the unchanged consumer: the upload, then `qualify_new` on GitHub's completed facts."""
+        world.uploaded(record)
+        request = self.elig.parse_request(world.request(record, approvals))
+        return self.elig.qualify_new(request, self.facts(world, trust=True))
+
+    def scratch(self):
+        folder = tempfile.mkdtemp(prefix='rdy-rprd3-')
+        self.addCleanup(shutil.rmtree, folder, True)
+        return folder
+
+    def first_machine(self):
+        world = self.world(first_tag='v0.46.0', published=('0.41.0',))
+        world.add_approval('key_change')
+        return world, [{'artifact_id': APPROVAL_ART_E, 'run_id': APPROVAL_RUN_E}]
+
+
+class EvidenceProducer(EvidenceCase):
+    def test_rprd3_evidence_round_trip(self):
+        # A standing preview after key cutover: no card, no approval environment.
+        world = self.world()
+        record = self.seal(world)
+        e = ev.parse_release_record(record).value
+        self.assertEqual(record, cand.canonical(e))
+        self.assertEqual(sorted(e), sorted(ev.E_KEYS))
+        self.assertEqual((e['version'], e['commit'], e['design_landing']), (VERSION, S, LANDING))
+        self.assertEqual(e['approval_basis'], {'mode': 'standing_preview', 'decision': 'D-PZKAP', 'policy_commit': S,
+                                               'scope': world.full_scope(), 'cards': []})
+        self.assertEqual(e['source'], {'notes_sha256': sha(world.notes), 'guide_sha256': sha(world.guide),
+                                       'source_json_sha256': sha(canon(world.source)),
+                                       'export_receipt_sha256': sha(b'{"export":"receipt"}\n')})
+        self.assertEqual(e['candidate']['artifact'], {'id': CAND_ART, 'name': 'rdy-candidate-a1',
+                                                      'digest': 'sha256:' + world.artifacts[CAND_ART]['digest'],
+                                                      'size': world.artifacts[CAND_ART]['size']})
+        self.assertEqual(e['audit'], {'reference': 'audit/rdy-' + VERSION, 'sha256': sha(b'The audit dossier.\n')})
+        self.assertEqual(e['security']['advisory_fetch']['log_sha256'], sha(ADVISORY_LOG.encode()))
+        self.assertEqual([j['name'] for j in e['security']['jobs']], list(ev.SECURITY_JOBS))
+        self.assertEqual(e['security']['codeql_open_high_critical'], 0)
+        for key in TRANSPORT_ONLY:
+            self.assertNotIn(key.encode(), record)
+        result = self.consumer(world, record)
+        self.assertEqual((result.mode, result.approval_mode, result.cards), ('new', 'standing_preview', ()))
+        self.assertEqual(result.evidence_bytes, record)
+        self.assertEqual(world.blocked, [])
+        # No producer step reached a write, the trust tool, AWS or a key.
+        self.assertFalse(any(c[0].startswith('create') or c[0] == 'release_trust' for c in world.calls))
+
+        # The first machine preview: the founder's key_change receipt, rebuilt from the completed approval run.
+        world, runs = self.first_machine()
+        record = self.seal(world, runs)
+        e = ev.parse_release_record(record).value
+        basis = e['approval_basis']
+        self.assertEqual((basis['mode'], len(basis['cards'])), ('founder_card', 1))
+        card = basis['cards'][0]
+        self.assertEqual(sorted(card), sorted(ev.CARD_KEYS))
+        self.assertEqual(card['kind'], 'key_change')
+        self.assertEqual(card['reference'], self.pev.card_reference(world.channel, card['sha256']))
+        approval = producer('approval')
+        rebuilt = approval.receipt(self.facts(world), APPROVAL_RUN_E, APPROVAL_ART_E, 'key_change', S)
+        self.assertEqual(rebuilt.receipt_sha256, card['sha256'])
+        result = self.consumer(world, record, [rebuilt.locator])
+        self.assertEqual((result.approval_mode, [c.kind for c in result.cards]), ('founder_card', ['key_change']))
+        self.assertEqual(result.cards[0].receipt_bytes, rebuilt.receipt_bytes)
+        self.assertEqual(world.blocked, [])
+
+        # The same standing world with no card is refused by the consumer when the key changes: the producer
+        # refuses it first.
+        world = self.world(first_tag='v0.46.0', published=('0.41.0',))
+        self.refuses(self.seal, world, message='not authorized: the release needs a key_change card')
+
+    def test_rprd3_native_jobs_bind_reports(self):
+        world = self.world()
+        record = self.seal(world)
+        e = ev.parse_release_record(record).value
+        for entry in e['targets']:
+            target = entry['target']
+            with self.subTest(target=target):
+                install = entry['install']
+                # The original checker report's digest, unchanged through H's sanitized receipt and E.
+                self.assertEqual(install['report_sha256'], sha(world.reports[target]))
+                self.assertNotEqual(install['report_sha256'], sha(world.receipt(target)))
+                self.assertEqual((install['checks'], install['skipped']), (CHECKS, 0))
+                self.assertEqual(install['job'], world.install_jobs[target])
+                self.assertEqual(entry['build'], world.native[target])
+                self.assertEqual(entry['package'], world.native[target])
+                self.assertEqual(entry['fast_gate'], dict(world.counts, job=world.native[target]))
+                self.assertEqual(entry['archive'], [f for f in world.archives
+                                                    if f['name'] == cand.archive_name(VERSION, target)][0])
+        self.assertEqual(self.consumer(world, record).install,
+                         tuple((t, world.install_jobs[t]['job_id'], sha(world.reports[t])) for t in cand.TARGETS))
+
+        def refused(change, message=None):
+            w = self.world()
+            change(w)
+            return self.refuses(self.seal, w, message=message)
+
+        def receipt(which, **changes):
+            return lambda w: w.upload_receipt(which, 1, 8815 if which == MAC else 8816, w.receipt(which, **changes))
+
+        def job(target, **changes):
+            return lambda w: w.find_job(E_RUN, 1, 'Native evidence install (' + target + ')').update(changes)
+
+        skipped = {'report_sha256': digest(1), 'checks': [dict(c) for c in CHECKS], 'skipped': 1}
+        failed_check = {'report_sha256': digest(1), 'checks': [dict(c, passed=c['name'] != 'daemon') for c in CHECKS],
+                        'skipped': 0}
+        cases = (
+            # Lost, cancelled or failed native jobs never seal.
+            ('cancelled job', job(MAC, conclusion='cancelled')),
+            ('failed job', job(LINUX, conclusion='failure')),
+            ('running job', job(MAC, status='in_progress', conclusion=None)),
+            ('job on another commit', job(MAC, head_sha=HEAD)),
+            ('missing job', lambda w: w.jobs[(E_RUN, 1)].remove(
+                w.find_job(E_RUN, 1, 'Native evidence install (' + LINUX + ')'))),
+            ('lost receipt', lambda w: w.artifacts.pop(8815)),
+            ('expired receipt', lambda w: w.artifacts[8816].update(expired=True)),
+            ('receipt on another commit', lambda w: w.artifacts[8815].update(head_sha=HEAD)),
+            ('receipt without its file', lambda w: w.artifact(8815, 'rehearsal-' + MAC + '-a1', E_RUN,
+                                                              zip_bytes({'other.json': b'{}\n'}))),
+            ('receipt of another attempt', lambda w: w.artifacts[8815].update(name='rehearsal-' + MAC + '-a2')),
+            ('two receipts', lambda w: w.upload_receipt(MAC, 1, 8819)),
+            ('skipped checks', receipt(MAC, install=skipped)),
+            ('failed check', receipt(LINUX, install=failed_check)),
+            ('cleanup not destroyed', receipt(MAC, cleanup='pending')),
+            ('a session ran', receipt(MAC, session='passed')),
+            ('changed archive', receipt(MAC, archive=dict(world.archives[0], sha256=digest(3)))),
+            ('other manifest', receipt(LINUX, manifest_sha256=digest(4))),
+            ('other commit', receipt(MAC, commit=HEAD)),
+            ('other target', receipt(MAC, target=LINUX)),
+            ('not canonical', lambda w: w.upload_receipt(MAC, 1, 8815, w.receipt(MAC)[:-1] + b' \n')),
+            ('E already sealed', lambda w: w.artifact(8890, 'release-evidence-' + str(E_RUN) + '-a1', E_RUN,
+                                                      zip_bytes({'release-record.json': b'{}\n'}))),
+        )
+        for name, change in cases:
+            with self.subTest(case=name):
+                refused(change)
+        # The receipt parser returns the receipt's own install record, byte for byte: nothing is rehashed.
+        self.assertEqual(self.pev.parse_rehearsal_receipt(world.receipt(MAC), VERSION, S, MAC, world.manifest,
+                                                          world.archives[0]),
+                         {'report_sha256': sha(world.reports[MAC]), 'checks': CHECKS, 'skipped': 0})
+
+    def test_rprd3_dispatch_and_rerun_refusals(self):
+        def refused(change, message=None, runs=()):
+            w = self.world()
+            change(w)
+            return self.refuses(self.seal, w, runs, message=message)
+
+        def run(**changes):
+            return lambda w: w.runs[(E_RUN, 1)].update(changes)
+
+        def cand_run(**changes):
+            return lambda w: w.runs[(CAND_RUN, 1)].update(changes)
+
+        def stale_policy(w):
+            w.ep['coordinators'] = w.ep['coordinators'][:1]
+            w.publish_policy(HEAD)
+
+        def wrong_landing(w):
+            w.source['design_landing'] = 'L-other'
+            w.put(S, 'release/source.json', canon(w.source))
+
+        def changed_archive(w):
+            w.pack_candidate(archive_bytes=dict(w.archive_bytes, **{MAC: b'other bytes'}))
+
+        def changed_service_digest(w):
+            w.artifacts[CAND_ART]['digest'] = digest(66)
+
+        cases = (
+            ('ref', lambda w: w.refs.__setitem__('tags/candidate/v' + VERSION, ('commit', HEAD))),
+            ('annotated candidate ref', lambda w: w.refs.__setitem__('tags/candidate/v' + VERSION, ('tag', S))),
+            ('S off main', lambda w: w.commits.__setitem__(HEAD, (P,))),
+            ('run SHA', run(head_sha=HEAD)),
+            ('run branch', run(head_branch='main')),
+            ('fork', run(head_repository_id=FORK_ID)),
+            ('repository', run(repository_id=FORK_ID)),
+            ('workflow', run(workflow_id=EVIDENCE_WF_ID + 1)),
+            ('workflow path', run(path=APPROVAL_WF)),
+            ('workflow bytes at S', lambda w: w.put(S, EVIDENCE_WF, b'name: forged\n')),
+            ('event', run(event='push')),
+            ('actor', run(actor_id=STRANGER)),
+            ('triggering actor', run(triggering_actor_id=STRANGER)),
+            ('founder is not a coordinator', run(actor_id=FOUNDER, triggering_actor_id=FOUNDER)),
+            ('candidate run SHA', cand_run(head_sha=HEAD)),
+            ('candidate run workflow', cand_run(path='.github/workflows/ci.yml')),
+            ('candidate run failed', cand_run(conclusion='failure')),
+            ('candidate job missing', lambda w: w.jobs[(CAND_RUN, 1)].pop(0)),
+            ('candidate job renamed', lambda w: w.jobs[(CAND_RUN, 1)][3].update(name='Manifest')),
+            ('artifact id', lambda w: w.artifacts.__setitem__(56, dict(w.artifacts.pop(CAND_ART), artifact_id=56))),
+            ('artifact name', lambda w: w.artifacts[CAND_ART].update(name='rdy-candidate-a2')),
+            ('artifact head', lambda w: w.artifacts[CAND_ART].update(head_sha=HEAD)),
+            ('service digest', changed_service_digest),
+            ('file digest', changed_archive),
+            ('stale policy', stale_policy),
+            ('wrong L', wrong_landing),
+            ('wrong Cargo version', lambda w: w.put(S, 'Cargo.toml', b'[workspace.package]\nversion = "0.47.0"\n')),
+            ('signer not an ancestor', lambda w: w.compares.pop((SIGNER_SHA, S))),
+            ('not a preview', lambda w: w.put(S, 'crates/rdy-cli/src/main.rs', b'const PREVIEW: bool = false;\n')),
+            ('reserved', lambda w: w.refs.__setitem__('tags/reserve/v' + VERSION, ('tag', digest(5)[:40]))),
+            ('final tag', lambda w: w.refs.__setitem__('tags/v' + VERSION, ('commit', S))),
+            ('release exists', lambda w: w.releases.append(dict(release_id=99, tag_name='v' + VERSION,
+                                                                target_commitish=S, draft=True, prerelease=True,
+                                                                assets=()))),
+            ('newer published', lambda w: w.releases.append(dict(release_id=98, tag_name='v0.47.0',
+                                                                 target_commitish=S, draft=False, prerelease=True,
+                                                                 assets=()))),
+            ('security job missing', lambda w: w.jobs[(SEC_RUN, 1)].pop(0)),
+            ('security run failed', lambda w: w.runs[(SEC_RUN, 1)].update(conclusion='failure')),
+            ('security run stale', lambda w: w.listed.__setitem__(SECURITY_PATH[CI_RUN], [])),
+            ('security job skipped', lambda w: w.jobs[(CI_RUN, 1)][0].update(conclusion='skipped')),
+            ('blocking alert', lambda w: w.alerts.append(dict(number=2, state='open', tool='CodeQL',
+                                                              security_severity='high'))),
+        )
+        for name, change in cases:
+            with self.subTest(case=name):
+                refused(change)
+        # A failed API read is never replaced by an input assertion or by assumed absence.
+        for read in (('ref', 'tags/reserve/v' + VERSION), 'open_code_scanning_alerts', 'releases',
+                     ('contents', 'release/notes.md', S), 'workflow_runs', ('run_attempt', E_RUN, 1)):
+            with self.subTest(failed_read=read):
+                refused(lambda w: w.errors.__setitem__(read, self.gh.Uncertain('read', 'outcome unknown')))
+        # The attestation is decoded only after the dispatch authenticates.
+        w = self.world()
+        w.runs[(E_RUN, 1)].update(triggering_actor_id=STRANGER)
+        error = self.refuses(self.pev.seal, self.facts(w), E_RUN, 1, w.inputs(attestation_gzip_b64='AB=='))
+        self.assertIn('coordinator', str(error))
+        w = self.world()
+        self.refuses(self.pev.seal, self.facts(w), E_RUN, 1, w.inputs(attestation_gzip_b64='AB=='),
+                     message='attestation_gzip_b64 is not canonical padded standard base64')
+        # Attestation content: a failed tutorial, another archive, missing bodies.
+        bad = []
+        for change in ({'audit_body': 7}, {'advisory_log': 'another log\n'}):
+            bad.append(w.document(**change))
+        tutorials = json.loads(w.document())['tutorials']
+        bad.append(w.document(tutorials=[dict(tutorials[0], result='fail'), tutorials[1]]))
+        bad.append(w.document(tutorials=[dict(tutorials[0], archive_sha256=digest(9)), tutorials[1]]))
+        bad.append(w.document(tutorials=[tutorials[0]]))
+        for data in bad:
+            with self.subTest(attestation=data[:60]):
+                fresh = self.world()
+                self.refuses(self.pev.seal, self.facts(fresh), E_RUN, 1, fresh.inputs(data=data))
+        # Oversize input and an oversize record refuse before any read.
+        self.refuses(self.pev.seal, self.facts(w), E_RUN, 1, w.inputs(attestation_gzip_b64='A' * (BASE64_MAX + 4)),
+                     message='attestation_gzip_b64 is longer than 57344 characters')
+        self.refuses(self.pev.seal_bytes, {'pad': 'x' * (1048576 + 1)},
+                     message='the release record is larger than 1048576 bytes')
+        # Approvals: a needed card must come from a completed founder run; a revocation never grants eligibility.
+        world, runs = self.first_machine()
+        self.refuses(self.seal, world, message='not authorized: the release needs a key_change card')
+        world, runs = self.first_machine()
+        world.runs[(APPROVAL_RUN_E, 1)].update(status='in_progress', conclusion=None)
+        self.refuses(self.seal, world, runs)
+        world, runs = self.first_machine()
+        world.add_approval('revocation', run_id=APPROVAL_RUN_E + 100, artifact_id=APPROVAL_ART_E + 100)
+        self.refuses(self.seal, world, runs + [{'artifact_id': APPROVAL_ART_E + 100, 'run_id': APPROVAL_RUN_E + 100}],
+                     message='not authorized: a revocation approval never grants release eligibility')
+        world, runs = self.first_machine()
+        receipt = producer('approval').receipt(self.facts(world), APPROVAL_RUN_E, APPROVAL_ART_E, 'key_change', S)
+        world = self.world(first_tag='v0.46.0', published=('0.41.0',))
+        world.channel['revoked_receipts'] = [receipt.receipt_sha256]
+        world.publish_policy(S)
+        world.publish_policy(HEAD)
+        world.add_approval('key_change')
+        self.refuses(self.seal, world, runs, message='not authorized: the key_change card receipt is revoked')
+
+        # A rerun: every attempt authenticates both actors again with new attempt-specific receipts.
+        world = self.world()
+        world.e_attempt(2, trigger=SECOND_COORDINATOR)
+        record = self.seal(world)
+        e = ev.parse_release_record(record).value
+        self.assertEqual({t['install']['job']['run_attempt'] for t in e['targets']}, {2})
+        self.assertEqual(self.consumer(world, record).evidence_sha256, sha(record))
+        world = self.world()
+        world.e_attempt(2, trigger=STRANGER)
+        self.refuses(self.seal, world)
+        # A partial rerun that keeps attempt 1's native work refuses: rerun all jobs.
+        world = self.world()
+        world.e_attempt(2, receipts=False)
+        world.upload_receipt(LINUX, 2, 8836)
+        self.refuses(self.seal, world)
+        world = self.world()
+        world.e_attempt(2)
+        world.jobs[(E_RUN, 2)] = [j for j in world.jobs[(E_RUN, 2)] if j['name'] != 'Native evidence install (' + MAC
+                                  + ')']
+        self.refuses(self.seal, world)
+
+    def test_rprd3_attestation_transport(self):
+        world = self.world()
+        data = world.document(audit_body='Dossier: café\r\n\ttranscripts follow \U0001f600\n')
+        runs = []
+        prepared = self.pev.prepare_dispatch(data, 'public', VERSION, CAND_RUN, 1, CAND_ART, runs)
+        # The complete-request preflight measures every bound it enforces, and the codec round-trips exactly.
+        sizes = prepared['sizes']
+        self.assertEqual(sizes['document'], len(data))
+        self.assertLessEqual(sizes['dispatch'], DISPATCH_MAX)
+        self.assertEqual(sizes['base64'], len(prepared['inputs']['attestation_gzip_b64']))
+        self.assertEqual(self.pev.dispatch_inputs(prepared['inputs'])['candidate_artifact_id'], CAND_ART)
+        record = self.pev.seal(self.facts(world), E_RUN, 1, prepared['inputs'])
+        e = ev.parse_release_record(record).value
+        facts = self.pev.attestation_facts(data)
+        self.assertEqual(e['audit'], facts['audit'])
+        self.assertEqual(e['audit']['sha256'], sha('Dossier: café\r\n\ttranscripts follow \U0001f600\n'.encode()))
+        self.assertEqual(e['source']['export_receipt_sha256'], facts['export_receipt_sha256'])
+        self.assertEqual(e['security']['advisory_fetch'], facts['advisory_fetch'])
+        self.assertEqual(e['tutorials'], facts['tutorials'])
+        for key in TRANSPORT_ONLY + ('attestation_gzip_b64', 'attestation_sha256', 'approval_runs'):
+            self.assertNotIn(key.encode(), record)
+        # The exact bounds: 57344 characters decode, the 61440-byte request is checked before submission.
+        _, packed = exact_gzip(GZIP_MAX)
+        self.assertEqual(len(b64(packed)), BASE64_MAX)
+        self.assertEqual(self.pev.decode_base64(b64(packed)), packed)
+        # Classification: only reviewed public evidence is ever submitted, and refusals never echo it.
+        secret = 'token ghp_' + 'Z9y8' * 9
+        error = self.refuses(self.pev.prepare_dispatch, world.document(audit_body=secret), 'public', VERSION,
+                             CAND_RUN, 1, CAND_ART, [], message='the attestation holds a credential')
+        self.assertNotIn('Z9y8', str(error))
+        for body in ('key -----BEGIN RSA PRIVATE KEY-----', 'AKIA' + 'Q' * 16, 'ASIA' + 'Q' * 16,
+                     'gho_' + 'a' * 36):
+            self.refuses(self.pev.prepare_dispatch, world.document(audit_body=body), 'public', VERSION, CAND_RUN, 1,
+                         CAND_ART, [], message='the attestation holds a credential')
+        self.refuses(self.pev.prepare_dispatch, world.document(export_receipt_body='C:/Users/x or /Users/x'),
+                     'public', VERSION, CAND_RUN, 1, CAND_ART, [], message='the attestation holds a private path')
+        # A dossier that does not fit reports every measured size and is never truncated to fit.
+        large = world.document(audit_body=noise(80000, seed=11))
+        error = self.refuses(self.pev.prepare_dispatch, large, 'public', VERSION, CAND_RUN, 1, CAND_ART, [])
+        self.assertEqual(error.sizes['document'], len(large))
+        self.assertEqual(error.sizes['base64'], 4 * ((error.sizes['gzip'] + 2) // 3))
+        self.assertIn(str(error.sizes['gzip']), str(error))
+        # A request with the maximum approval list still meets the complete-request bound or refuses whole.
+        sixteen = [{'artifact_id': 10 ** 19 + n, 'run_id': 10 ** 19 + 100 + n} for n in range(16)]
+        prepared = self.pev.prepare_dispatch(world.document(), 'public', VERSION, CAND_RUN, 1, CAND_ART, sixteen)
+        self.assertEqual(len(self.pev.dispatch_inputs(prepared['inputs'])['approval_runs']), 16)
+        self.assertLessEqual(prepared['sizes']['dispatch'], DISPATCH_MAX)
+        # The CLI prints the complete dispatch request, built from a local file; no body reaches stderr.
+        folder = Path(self.scratch())
+        (folder / 'attestation.json').write_bytes(world.document())
+        done = subprocess.run([sys.executable, '-I', '-B', str(PRODUCERS / 'evidence.py'), '--trusted', str(ROOT),
+                               'dispatch', '--attestation', str(folder / 'attestation.json'), '--classification',
+                               'public', '--version', VERSION, '--candidate-run-id', str(CAND_RUN),
+                               '--candidate-run-attempt', '1', '--candidate-artifact-id', str(CAND_ART),
+                               '--approval-runs', '[]'], capture_output=True, env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        printed = json.loads(done.stdout)
+        self.assertEqual(sorted(printed), ['inputs', 'ref'])
+        self.assertEqual(self.pev.decode_attestation(printed['inputs']['attestation_gzip_b64'],
+                                                     printed['inputs']['attestation_sha256']), world.document())
+        (folder / 'secret.json').write_bytes(world.document(audit_body=secret))
+        done = subprocess.run([sys.executable, '-I', '-B', str(PRODUCERS / 'evidence.py'), '--trusted', str(ROOT),
+                               'dispatch', '--attestation', str(folder / 'secret.json'), '--classification',
+                               'public', '--version', VERSION, '--candidate-run-id', str(CAND_RUN),
+                               '--candidate-run-attempt', '1', '--candidate-artifact-id', str(CAND_ART),
+                               '--approval-runs', '[]'], capture_output=True, env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual((done.returncode, done.stdout), (1, b''))
+        self.assertEqual(done.stderr, b'release producer: the attestation holds a credential\n')
+
+    def test_rprd3_authority_lane_queue(self):
+        # A synthetic model of one GitHub concurrency group with cancel-in-progress false. Queue `single`
+        # (release.yml's default) cancels and replaces whatever is pending; queue `max` waits behind pending
+        # entries and, when the queue is full, GitHub cancels the arriving entry. This is not live qualification.
+        release = parse_yaml((WORKFLOWS / 'release.yml').read_text(encoding='utf-8')) if yaml else None
+        if release is None:
+            self.fail(YAML_MISSING)
+        self.assertEqual(release['concurrency'], {'group': LANE, 'cancel-in-progress': False})
+        release_queue = release['concurrency'].get('queue', 'single')
+        seal = self.pev.SEAL_CONCURRENCY
+        self.assertEqual(seal, {'group': LANE, 'cancel-in-progress': False, 'queue': 'max'})
+
+        class Lane(object):
+            def __init__(self, capacity):
+                self.capacity, self.running, self.pending, self.cancelled, self.sealed = capacity, None, [], [], []
+
+            def arrive(self, name, queue):
+                if self.running is None and not self.pending:
+                    self.running = name
+                elif queue == 'single':
+                    self.cancelled.extend(self.pending)
+                    self.pending = [name]
+                elif len(self.pending) >= self.capacity:
+                    self.cancelled.append(name)
+                else:
+                    self.pending.append(name)
+
+            def finish(self):
+                if self.running and self.running.startswith('E'):
+                    self.sealed.append(self.running)
+                self.running = self.pending.pop(0) if self.pending else None
+
+        def e_dispatch(lane, name, authenticated, natives=True):
+            """The E run: only an authenticated run whose native jobs passed reaches the sealer."""
+            if authenticated and natives:
+                lane.arrive(name, seal['queue'])
+
+        # A holds the lane, recovery B waits, E dispatch C arrives.
+        lane = Lane(capacity=2)
+        lane.arrive('A release', release_queue)
+        lane.arrive('B recovery', release_queue)
+        e_dispatch(lane, 'E C', authenticated=False)
+        self.assertEqual((lane.running, lane.pending, lane.cancelled), ('A release', ['B recovery'], []))
+        e_dispatch(lane, 'E C', authenticated=True, natives=False)
+        self.assertEqual((lane.running, lane.pending, lane.cancelled), ('A release', ['B recovery'], []))
+        e_dispatch(lane, 'E C', authenticated=True)
+        self.assertEqual((lane.running, lane.pending, lane.cancelled), ('A release', ['B recovery', 'E C'], []))
+        lane.finish()
+        lane.finish()
+        lane.finish()
+        self.assertEqual(lane.sealed, ['E C'])
+        # A full queue: GitHub cancels the arriving sealer; B stays and no E is produced.
+        lane = Lane(capacity=1)
+        lane.arrive('A release', release_queue)
+        lane.arrive('B recovery', release_queue)
+        e_dispatch(lane, 'E C', authenticated=True)
+        self.assertEqual((lane.running, lane.pending, lane.cancelled), ('A release', ['B recovery'], ['E C']))
+        lane.finish()
+        lane.finish()
+        self.assertEqual(lane.sealed, [])
+        # Correction C3: a release run that arrives while E's sealer waits cancels that sealer under release.yml's
+        # `single` queue. No E is produced; the coordinator dispatches again. The pending sealer is not protected.
+        lane = Lane(capacity=2)
+        lane.arrive('A release', release_queue)
+        e_dispatch(lane, 'E C', authenticated=True)
+        lane.arrive('D release', release_queue)
+        self.assertEqual((lane.pending, lane.cancelled), (['D release'], ['E C']))
+        lane.finish()
+        lane.finish()
+        self.assertEqual(lane.sealed, [])
+
+
+# ---------------------------------------------------------------------------------------------
+# The disposable test signer and the native boundary (rprd3)
+# ---------------------------------------------------------------------------------------------
+
+def checker_script(folder, mode):
+    """A stand-in for qa-release-install: it verifies the rehearsal signature with ssh-keygen against the
+    signer line H passes, then prints a passing report, fails, or cancels its parent rehearsal."""
+    path = Path(folder) / ('checker-' + mode)
+    path.write_text('#!' + sys.executable + ' -I\n' + '''import json, os, signal, subprocess, sys, time
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+mode = %r
+if mode == 'cancel':
+    os.kill(os.getppid(), signal.SIGTERM)
+    time.sleep(30)
+if mode == 'fail':
+    sys.exit(3)
+download = args['--download']
+os.makedirs(args['--unpack'])
+allowed = os.path.join(args['--unpack'], 'allowed_signers')
+with open(allowed, 'w') as handle:
+    handle.write(args['--signer-line'] + '\\n')
+with open(os.path.join(download, 'SHA256SUMS'), 'rb') as handle:
+    manifest = handle.read()
+done = subprocess.run(['/usr/bin/ssh-keygen', '-Y', 'verify', '-f', allowed, '-I', 'rdy-release', '-n',
+                       'rdy-release-v1', '-s', os.path.join(download, 'SHA256SUMS.sig')], input=manifest,
+                      capture_output=True)
+if done.returncode != 0:
+    sys.exit(4)
+checks = [{'name': n, 'passed': True} for n in ('signature', 'checksums', 'install', 'version', 'daemon', 'mcp')]
+sys.stdout.write(json.dumps({'version': args['--version'], 'target': args['--target'], 'commit': args['--commit'],
+                             'os': 'test-os', 'binary': 'rdy', 'checks': checks, 'skipped': 0}) + '\\n')
+''' % mode)
+    path.chmod(0o700)
+    return path
+
+
+def failing_destroy_signer(folder):
+    """The real test signer for `sign`, with a `destroy` that cannot confirm cleanup."""
+    path = Path(folder) / 'signer-no-destroy'
+    path.write_text('#!/bin/sh\nif [ "$1" = destroy ]; then exit 1; fi\nexec ' + str(SIGNER_PATH) + ' "$@"\n')
+    path.chmod(0o700)
+    return path
+
+
+class NativeBoundary(EvidenceCase):
+    def state(self):
+        folder = Path(self.scratch()) / 'state'
+        folder.mkdir(mode=0o700)
+        return folder
+
+    def signer(self, verb, state, stdin=b'', extra=(), env=None, cwd=None):
+        environment = {'PATH': '/usr/bin:/bin', 'HOME': str(state), 'TMPDIR': str(state),
+                       'RDY_REHEARSAL_STATE': str(state)}
+        environment.update(env or {})
+        return subprocess.run([str(SIGNER_PATH), verb] + list(extra), input=stdin, capture_output=True,
+                              env=environment, cwd=str(cwd or state))
+
+    def verify(self, answer, manifest):
+        folder = Path(self.scratch())
+        (folder / 'allowed').write_text(answer['signer_line'] + '\n')
+        (folder / 'sig').write_text(answer['signature'])
+        return subprocess.run([SSH_KEYGEN, '-Y', 'verify', '-f', str(folder / 'allowed'), '-I', 'rdy-release', '-n',
+                               'rdy-release-v1', '-s', str(folder / 'sig')], input=manifest,
+                              capture_output=True).returncode
+
+    def test_rprd3_disposable_signer(self):
+        manifest = cand.manifest_bytes(ARCHIVES)
+        state = self.state()
+        done = self.signer('sign', state, manifest)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, b'')
+        signature, line = rehearse.check_signer_answer(done.stdout)
+        answer = {'signature': signature, 'signer_line': line}
+        self.assertEqual(sorted(json.loads(done.stdout)), ['signature', 'signer_line'])
+        self.assertTrue(line.startswith('rdy-release namespaces="rdy-release-v1" ssh-ed25519 '))
+        # The signature covers exactly the manifest bytes, under rdy-release-v1 only.
+        self.assertEqual(self.verify(answer, manifest), 0)
+        self.assertNotEqual(self.verify(answer, manifest + b'\n'), 0)
+        self.assertNotEqual(self.verify(dict(answer, signer_line=line.replace('rdy-release-v1', 'other')), manifest), 0)
+        # Repeated signing in existing state refuses; destroy removes the key and its absence is checked.
+        again = self.signer('sign', state, manifest)
+        self.assertEqual((again.returncode, again.stdout), (1, b''))
+        self.assertNotIn(b'PRIVATE', again.stderr)
+        destroyed = self.signer('destroy', state, cwd=state.parent)
+        self.assertEqual((destroyed.returncode, destroyed.stdout, destroyed.stderr), (0, b'', b''))
+        self.assertEqual(os.listdir(str(state)), [])
+        # External or caller-selected keys refuse: arguments, an agent, a planted key, or another state.
+        for extra, env in ((('-f', '/tmp/key'), None), ((), {'SSH_AUTH_SOCK': '/tmp/agent'}),
+                           ((), {'RDY_REHEARSAL_STATE': str(self.state())})):
+            with self.subTest(extra=extra, env=env):
+                fresh = self.state()
+                done = self.signer('sign', fresh, manifest, extra, env)
+                self.assertEqual((done.returncode, done.stdout), (2 if extra else 1, b''))
+                self.assertEqual(os.listdir(str(fresh)), [])
+        planted = self.state()
+        (planted / 'id_ed25519').write_bytes(b'not ours\n')
+        self.assertEqual(self.signer('sign', planted, manifest).returncode, 1)
+        loose = self.state()
+        loose.chmod(0o755)
+        self.assertEqual(self.signer('sign', loose, manifest).returncode, 1)
+        # Only H's bounded, well-formed manifest is signed.
+        for stdin in (b'', b'x' * 1025, manifest[:-1], manifest + b'extra\n', b'not a manifest\n'):
+            with self.subTest(stdin=stdin[:20]):
+                fresh = self.state()
+                self.assertEqual(self.signer('sign', fresh, stdin).returncode, 1)
+                self.assertEqual(os.listdir(str(fresh)), [])
+        # Destroy fails when it cannot confirm absence.
+        dirty = self.state()
+        self.assertEqual(self.signer('sign', dirty, manifest).returncode, 0)
+        (dirty / 'unknown').write_bytes(b'x')
+        self.assertEqual(self.signer('destroy', dirty, cwd=dirty.parent).returncode, 1)
+        self.assertEqual(self.signer('verify', self.state()).returncode, 2)
+        # Linux passes everything after the interpreter as one argument: the shebang must still run there.
+        first = SIGNER_PATH.read_text().splitlines()[0]
+        interpreter, _, argument = first[2:].partition(' ')
+        fresh = self.state()
+        done = subprocess.run([interpreter, argument, str(SIGNER_PATH), 'sign'], input=manifest, capture_output=True,
+                              env={'PATH': '/usr/bin:/bin', 'HOME': str(fresh), 'RDY_REHEARSAL_STATE': str(fresh)},
+                              cwd=str(fresh))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # Through unchanged H: the signer and a checker meet; only the sanitized receipt leaves.
+        world = self.world()
+        folder = Path(self.scratch())
+        (folder / 'work').mkdir(mode=0o700)
+        artifact = folder / 'candidate.zip'
+        artifact.write_bytes(world.zips[CAND_ART])
+        report_out = rehearse.rehearse(artifact, world.artifacts[CAND_ART]['digest'], world.manifest, MAC,
+                                       [str(SIGNER_PATH)], folder / 'work', folder / 'receipt.json',
+                                       checker_script(folder, 'pass'), env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual(report_out['cleanup'], 'destroyed')
+        self.assertEqual(os.listdir(str(folder / 'work')), [])
+
+    def test_rprd3_native_boundary(self):
+        inst = self.inst
+        temp = Path(self.scratch()).resolve()
+        root = inst.job_root(str(temp), '888001', '2', MAC)
+        self.assertEqual(root, temp / 'rdy-release-rehearsal' / '888001-2' / MAC)
+        for args in (('0', '1', MAC), ('01', '1', MAC), ('1', '0', MAC), ('1', '-1', MAC), ('1', '1', 'x86_64-pc'),
+                     ('1', '1', '../' + MAC), ('9' * 21, '1', MAC)):
+            with self.subTest(args=args):
+                self.refuses(inst.job_root, str(temp), *args)
+        self.refuses(inst.job_root, 'relative/temp', '1', '1', MAC)
+        made = inst.make_job_root(str(temp), '888001', '2', MAC)
+        self.assertEqual(made, root)
+        self.assertEqual(sorted(os.listdir(str(made))), ['input', 'out', 'tools', 'work'])
+        for path in [made] + [made / n for n in ('input', 'out', 'tools', 'work')]:
+            self.assertEqual(stat.S_IMODE(os.lstat(str(path)).st_mode), 0o700, path)
+        # The job root is new and job-owned: an existing root or a symlink anywhere on the path refuses.
+        self.refuses(inst.make_job_root, str(temp), '888001', '2', MAC)
+        other = Path(self.scratch()).resolve()
+        (temp / 'rdy-release-rehearsal' / '888002-1').symlink_to(other)
+        self.refuses(inst.make_job_root, str(temp), '888002', '1', MAC)
+        self.assertEqual(os.listdir(str(other)), [])
+        linked = Path(self.scratch()).resolve() / 'temp'
+        linked.symlink_to(other)
+        self.refuses(inst.make_job_root, str(linked), '1', '1', MAC)
+        self.assertEqual(os.listdir(str(other)), [])
+
+        # Credentials never reach H: only the four passed variables survive, and empty values are not kept.
+        environ = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'TZ': 'UTC', 'GITHUB_TOKEN': '', 'GH_TOKEN': 'x',
+                   'AWS_REGION': 'us-east-2', 'AWS_ACCESS_KEY_ID': 'x', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'x',
+                   'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'x', 'RDY_RELEASE_KEY_ARN': 'x', 'RDY_RELEASE_ROLE_ARN': 'x',
+                   'ACTIONS_RUNTIME_TOKEN': 'x', 'HOME': '/Users/runner'}
+        self.assertEqual(inst.rehearsal_env(environ), {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'TZ': 'UTC'})
+        self.assertFalse(rehearse.forbidden(inst.rehearsal_env(environ)))
+
+        # The checker comes only from the fixed build path, and its measured digest is pinned and provenanced.
+        built = inst.build_path(str(temp), '888001', '2', MAC)
+        self.assertEqual(built, temp / 'rdy-release-checker' / '888001-2' / MAC / 'target' / MAC / 'release'
+                         / 'qa-release-install')
+        self.refuses(inst.install_checker, str(temp), '888001', '2', MAC, made)
+        built.parent.mkdir(parents=True)
+        built.write_bytes(b'#!/bin/sh\nexit 0\n')
+        measured = inst.install_checker(str(temp), '888001', '2', MAC, made)
+        self.assertEqual(measured, sha(b'#!/bin/sh\nexit 0\n'))
+        checker = made / 'tools' / 'qa-release-install'
+        self.assertEqual(stat.S_IMODE(os.lstat(str(checker)).st_mode), 0o700)
+        inst.verify_checker(made, measured)
+        trusted = Path(self.scratch())
+        (trusted / 'Cargo.lock').write_bytes(b'lock\n')
+        observed = {'git': H + '\n', 'rustc': 'rustc 1.99.0 (abc 2026-10-01)\nhost: ' + MAC + '\nrelease: 1.99.0\n',
+                    'ssh': 'OpenSSH_10.3p1, LibreSSL 3.3.6\n'}
+
+        def runner(argv):
+            return observed[{'/usr/bin/git': 'git', 'git': 'git', 'rustc': 'rustc', '/usr/bin/ssh': 'ssh'}[argv[0]]]
+
+        env = {'RUNNER_ARCH': 'ARM64', 'ImageOS': 'macos26', 'ImageVersion': '20261101.1', 'GITHUB_RUN_ID': '888001',
+               'GITHUB_RUN_ATTEMPT': '2', 'GITHUB_JOB': 'install-mac'}
+        record = inst.provenance(trusted, MAC, env, measured, runner=runner, machine='arm64',
+                                 lock_sha256=sha(b'lock\n'))
+        self.assertEqual(record['checker_sha256'], measured)
+        self.assertEqual((record['source'], record['recipe_sha256'], record['rust'], record['target']),
+                         (H, 'a5abc9b8e8689be5a7853ee48280f5017295f4d0e2380af89783829d2b909057', '1.99.0', MAC))
+        self.assertEqual((record['image_os'], record['image_version'], record['runner_arch'], record['machine']),
+                         ('macos26', '20261101.1', 'ARM64', 'arm64'))
+        self.assertEqual((record['run_id'], record['run_attempt'], record['job']), (888001, 2, 'install-mac'))
+        self.assertEqual(inst.RECIPE_SHA256, sha(inst.RECIPE.encode()))
+        self.assertEqual(inst.LOCK_SHA256, '126dfc4360e2630c9d9ccaec4118e78d7653891779306fbe8d46e182830415fc')
+        for name, kwargs in (('lockfile', dict(lock_sha256=digest(1))), ('machine', dict(machine='x86_64')),
+                             ('runner arch', dict(env=dict(env, RUNNER_ARCH='X64'))),
+                             ('source', dict(observed=dict(observed, git='9' * 40 + '\n'))),
+                             ('host', dict(observed=dict(observed, rustc=observed['rustc'].replace(MAC, LINUX)))),
+                             ('compiler', dict(observed=dict(observed, rustc=observed['rustc'].replace(
+                                 'release: 1.99.0', 'release: 1.98.0'))))):
+            with self.subTest(provenance=name):
+                seen = kwargs.pop('observed', observed)
+                self.refuses(inst.provenance, trusted, MAC, kwargs.pop('env', env), measured,
+                             runner=lambda argv, seen=seen: seen[{'/usr/bin/git': 'git', 'git': 'git', 'rustc': 'rustc',
+                                                                  '/usr/bin/ssh': 'ssh'}[argv[0]]],
+                             machine=kwargs.pop('machine', 'arm64'),
+                             lock_sha256=kwargs.pop('lock_sha256', sha(b'lock\n')))
+
+        # The pinned digest is verified immediately before invocation: a swapped checker never runs.
+        world = self.world()
+        (made / 'input' / 'candidate.zip').write_bytes(world.zips[CAND_ART])
+        archive = world.archives[0]
+        checker.chmod(0o700)
+        checker.write_bytes(b'#!/bin/sh\necho swapped\n')
+        self.refuses(inst.run_rehearsal, ROOT, made, MAC, world.artifacts[CAND_ART]['digest'], world.manifest,
+                     measured, {'PATH': '/usr/bin:/bin'}, VERSION, S, archive, python=sys.executable,
+                     message='the checker is not its measured digest')
+        self.assertEqual(os.listdir(str(made / 'work')), [])
+
+        def rehearsed(mode, signer=None):
+            temp_ = Path(self.scratch()).resolve()
+            job = inst.make_job_root(str(temp_), '888001', '1', MAC)
+            (job / 'input' / 'candidate.zip').write_bytes(world.zips[CAND_ART])
+            script = checker_script(self.scratch(), mode)
+            built_ = inst.build_path(str(temp_), '888001', '1', MAC)
+            built_.parent.mkdir(parents=True)
+            shutil.copyfile(str(script), str(built_))
+            digest_ = inst.install_checker(str(temp_), '888001', '1', MAC, job)
+            kwargs = {'python': sys.executable}
+            if signer is not None:
+                kwargs['signer'] = signer
+            return job, lambda: inst.run_rehearsal(
+                ROOT, job, MAC, world.artifacts[CAND_ART]['digest'], world.manifest, digest_,
+                dict(environ, PATH=os.environ.get('PATH', '/usr/bin:/bin')), VERSION, S, archive, **kwargs)
+
+        # Success: the real disposable signer and unchanged H; the original report digest survives.
+        job, call = rehearsed('pass')
+        install = call()
+        out = job / 'out' / ('rehearsal-' + MAC + '.json')
+        self.assertEqual(install, {'report_sha256': sha(install_report(MAC)), 'checks': CHECKS, 'skipped': 0})
+        self.assertEqual(self.pev.parse_rehearsal_receipt(out.read_bytes(), VERSION, S, MAC, world.manifest, archive),
+                         install)
+        self.assertEqual(os.listdir(str(job / 'work')), [])
+        # Refusal, handled cancellation and failed cleanup leave no receipt and no successful outcome.
+        for mode, signer in (('fail', None), ('cancel', None), ('pass', failing_destroy_signer(self.scratch()))):
+            with self.subTest(mode=mode, signer=signer):
+                job, call = rehearsed(mode, signer)
+                self.refuses(call, message='the ' + MAC + ' rehearsal failed')
+                self.assertFalse((job / 'out' / ('rehearsal-' + MAC + '.json')).exists())
+                self.assertEqual(os.listdir(str(job / 'work')), [])
+        # Unconditional cleanup removes every task-owned path; a symlinked root is reported, never followed.
+        temp_ = Path(self.scratch()).resolve()
+        job = inst.make_job_root(str(temp_), '888001', '1', LINUX)
+        (job / 'input' / 'candidate.zip').write_bytes(b'x')
+        inst.build_path(str(temp_), '888001', '1', LINUX).parent.mkdir(parents=True)
+        self.assertTrue(inst.cleanup(str(temp_), '888001', '1', LINUX))
+        self.assertFalse(job.exists())
+        self.assertFalse(inst.build_path(str(temp_), '888001', '1', LINUX).parent.exists())
+        self.assertTrue(inst.cleanup(str(temp_), '888001', '1', LINUX))
+        target = Path(self.scratch())
+        (target / 'keep').write_bytes(b'x')
+        job.parent.mkdir(parents=True, exist_ok=True)
+        job.symlink_to(target)
+        self.refuses(inst.cleanup, str(temp_), '888001', '1', LINUX, message='cleanup of the job root is uncertain')
+        self.assertTrue((target / 'keep').exists())
 
 
 if __name__ == '__main__':
