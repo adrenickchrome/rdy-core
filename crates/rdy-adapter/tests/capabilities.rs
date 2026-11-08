@@ -236,10 +236,10 @@ fn find_format(dir: &Path) -> Option<PathBuf> {
         if p.file_name().is_some_and(|n| n == "FORMAT") {
             return Some(p);
         }
-        if p.is_dir() {
-            if let Some(f) = find_format(&p) {
-                return Some(f);
-            }
+        if p.is_dir()
+            && let Some(f) = find_format(&p)
+        {
+            return Some(f);
         }
     }
     None
