@@ -50,6 +50,37 @@
 //!
 //! A batch check says only that: its framing and objects are valid. It never says that an upload
 //! is complete or that a removal is authorized; the take checks those over every file.
+//!
+//! # Stream format 3
+//!
+//! Format 3 has format 2's prelude, frames, header and trailer, and adds a second purpose,
+//! `link_delivery` (byte 1, D-DAPR8): one project's filtered view at a tag, which the cited side
+//! writes and the citing side takes (repo links). The reader reads formats 2 and 3
+//! ([`READ_FORMATS`]); format 2 knows only `tag_history`. A tag history is still written in
+//! format 2 ([`STREAM_FORMAT`]), so a reader of the released format takes it; a link delivery is
+//! written in format 3 ([`LINK_DELIVERY_FORMAT`]).
+//!
+//! - **Order (closed):** one `HEADER`; one `DELIVERY` (0xF4), a stream-only record; zero or more
+//!   object records, each a `BLOCK`'s raw frame or a `DROPPED` record of a `BLOCK` (a redacted
+//!   version travels as its residue); one `TRAILER`; the end of the file.
+//! - **`HEADER`:** as format 2's, with purpose 1 and no prerequisite. `tag` is the hash of the
+//!   cited tag's `TAG` object, for provenance only: the stream never carries that `TAG`, never
+//!   lists it as a prerequisite, and the root-`TAG` rule of a tag history does not apply.
+//! - **`DELIVERY` payload:** a [`DeliveryRecord`] in postcard: the publication `{tag, profile,
+//!   profile_version}`, the selection digest and each selected block's `ForeignVersion`, in
+//!   strict id order. The digest is the publication selection identity of the versions
+//!   (`rdy_model::foreign::selection_identity`). Its bounds are a typed record's
+//!   (`crate::bounded`): at most [`MAX_RECORD_BYTES`] bytes and [`MAX_DELIVERY_VERSIONS`]
+//!   versions.
+//! - **Objects:** exactly one per selected version, in the `DELIVERY`'s order: its key is the
+//!   version's `BLOCK` hash, its encoding the version's, and a present block's id the
+//!   version's id. No source parent, reference or blob is a dependency of the delivery, and no
+//!   transitive foreign content enters it.
+//! - **`TRAILER`:** as format 2's. Its record count and digest cover the `DELIVERY` and every
+//!   object record. The `DELIVERY` is record 1.
+//!
+//! [`check_delivery`] checks one delivery whole, before any intake; [`check_batch`] refuses a
+//! delivery, and [`check_delivery`] a tag history, with E_STREAM_PURPOSE.
 use crate::bounded::{CHUNK_BYTES, MAX_CHUNK_BYTES, MAX_RECORD_BYTES, RECORD_BYTES, RecordError};
 use crate::dump::{
     ENCODED_DROPPED_LEN, Frame, LINK_LEN, check_dropped, encoded_dropped_payload, link,
@@ -64,21 +95,32 @@ use crate::stream_error::{
     LIMIT_PENDING_DROPPED_BYTES, LIMIT_PENDING_DROPS, LIMIT_PREREQUISITES, LIMIT_TOTAL_BYTES,
     Reason, StreamError,
 };
-use rdy_model::{Hash, RepoId};
-use serde::{Serialize, Serializer};
+use rdy_model::foreign::{ForeignPublication, ForeignVersion, selection_identity};
+use rdy_model::{Block, Hash, RepoId};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
 
 /// The 8 bytes every sync batch starts with.
 pub const MAGIC: &[u8; 8] = b"RDYSYNC\n";
-/// The stream format this rdy writes and reads.
+/// The stream format a tag history is written in: the format Release 1 reads, so a reader of
+/// the released format takes every tag history this rdy writes. This rdy reads every format of
+/// [`READ_FORMATS`].
 pub const STREAM_FORMAT: u32 = 2;
+/// The stream format a link delivery is written in: the first that knows the purpose
+/// `link_delivery` and its `DELIVERY` record.
+pub const LINK_DELIVERY_FORMAT: u32 = 3;
+/// The stream formats this rdy reads: every format released from Release 1 on.
+pub const READ_FORMATS: [u32; 2] = [STREAM_FORMAT, LINK_DELIVERY_FORMAT];
 
 /// The frame kinds of the stream's own records. Object frames keep their store kinds.
 pub mod rec {
     pub const HEADER: u8 = 0xF0;
     /// A portable object whose payload an approved removal dropped.
     pub const DROPPED: u8 = 0xF3;
+    /// A link delivery's stream-only record: the publication, the selection digest and each
+    /// selected version ([`super::DeliveryRecord`]).
+    pub const DELIVERY: u8 = 0xF4;
     pub const TRAILER: u8 = 0xFF;
 }
 
@@ -114,6 +156,8 @@ pub const MAX_PENDING_DROPPED_BYTES: u64 = 1_073_741_824;
 pub const LIMIT_BATCH_FILES: &str = "1024 batch files";
 /// The limit label of the trailer's descriptor chain.
 pub const LIMIT_DIGEST_BYTES: &str = "41000041 digest bytes";
+/// The most versions one `DELIVERY` selects: a typed record's list bound.
+pub const MAX_DELIVERY_VERSIONS: usize = crate::bounded::MAX_ELEMENTS;
 
 /// The bytes of the prelude: the magic and the stream format.
 const PRELUDE: u64 = MAGIC.len() as u64 + 4;
@@ -152,12 +196,13 @@ pub fn is_sync_kind(kind: u8) -> bool {
     SYNC_KINDS.contains(&kind)
 }
 
-/// What a stream carries. One purpose exists: a tag's history, written `tag_history` and as the
-/// byte 0.
+/// What a stream carries: a tag's history, written `tag_history` and as the byte 0, or a link
+/// delivery, written `link_delivery` and as the byte 1 (stream format 3 on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPurpose {
     TagHistory,
+    LinkDelivery,
 }
 
 impl StreamPurpose {
@@ -165,13 +210,91 @@ impl StreamPurpose {
     pub fn byte(self) -> u8 {
         match self {
             StreamPurpose::TagHistory => 0,
+            StreamPurpose::LinkDelivery => 1,
         }
     }
 
     /// The purpose of header byte `b`, if it is one.
     pub fn of(b: u8) -> Option<StreamPurpose> {
-        (b == 0).then_some(StreamPurpose::TagHistory)
+        match b {
+            0 => Some(StreamPurpose::TagHistory),
+            1 => Some(StreamPurpose::LinkDelivery),
+            _ => None,
+        }
     }
+
+    /// The purpose's name, as JSON and the purpose refusal write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            StreamPurpose::TagHistory => "tag_history",
+            StreamPurpose::LinkDelivery => "link_delivery",
+        }
+    }
+
+    /// The first stream format that knows the purpose.
+    pub fn first_format(self) -> u32 {
+        match self {
+            StreamPurpose::TagHistory => STREAM_FORMAT,
+            StreamPurpose::LinkDelivery => LINK_DELIVERY_FORMAT,
+        }
+    }
+}
+
+/// The payload of a link delivery's `DELIVERY` record (D-DAPR8): the facts the citing side
+/// cannot compute. `publication` names the cited tag, the profile and its version; `versions`
+/// holds each selected block's version, content hash, encoding and derived facts, in strict id
+/// order; `selection` is their publication selection identity. JSON writes hashes as full
+/// lowercase hex. The field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryRecord {
+    pub publication: ForeignPublication,
+    #[serde(with = "rdy_model::foreign::hex_one")]
+    pub selection: Hash,
+    pub versions: Vec<ForeignVersion>,
+}
+
+impl DeliveryRecord {
+    /// The logical key of each selected version's `BLOCK`, in the delivery's order.
+    pub fn keys(&self) -> impl Iterator<Item = ObjectKey> + '_ {
+        self.versions.iter().map(|v| ObjectKey {
+            kind: kinds::BLOCK,
+            hash: v.version,
+        })
+    }
+}
+
+/// The rules of a `DELIVERY` record's own fields, shared by the writer and the reader: versions in
+/// strict id order, no version hash twice (a `BLOCK` hash names one block), each in an encoding
+/// a `BLOCK` has, and the selection digest their selection identity. The versions are within
+/// their bound already, so the sort buffer is too.
+fn delivery_rules(d: &DeliveryRecord) -> Result<(), Reason> {
+    if d.versions.windows(2).any(|w| w[0].id >= w[1].id) {
+        return Err(Reason::InvalidSelection);
+    }
+    let mut hashes: Vec<&Hash> = d.versions.iter().map(|v| &v.version).collect();
+    hashes.sort_unstable();
+    if hashes.windows(2).any(|w| w[0] == w[1]) {
+        return Err(Reason::InvalidSelection);
+    }
+    let encodings = crate::codec::first(kinds::BLOCK)..=crate::codec::newest(kinds::BLOCK);
+    if d.versions.iter().any(|v| !encodings.contains(&v.encoding)) {
+        return Err(Reason::UnknownEncodingVersion);
+    }
+    match selection_identity(d.versions.iter().map(|v| (&v.id, &v.version))) {
+        Some(s) if s == d.selection => Ok(()),
+        _ => Err(Reason::InvalidSelection),
+    }
+}
+
+/// Decodes a `DELIVERY` payload within a typed record's bounds (`crate::bounded`): exactly one
+/// record, in its canonical encoding.
+fn decode_delivery(p: &[u8]) -> Result<DeliveryRecord, RecordError> {
+    let d: DeliveryRecord = crate::bounded::decode(p)?;
+    if !crate::bounded::encodes_as(&d, p) {
+        return Err(RecordError::Decode);
+    }
+    Ok(d)
 }
 
 /// A batch's header: the stream format, the source store's features, the source repo, the
@@ -209,7 +332,22 @@ impl StreamHeader {
         }
     }
 
-    /// The upload's root: the TAG the header names.
+    /// The header of a link delivery (stream format 3), from a store of `features`, for the
+    /// cited repo `repo_id`, naming the cited TAG `tag` for provenance only. It has no
+    /// prerequisite.
+    pub fn link_delivery(features: StoreFeatures, repo_id: RepoId, tag: Hash) -> Self {
+        StreamHeader {
+            stream_format: LINK_DELIVERY_FORMAT,
+            features,
+            repo_id,
+            purpose: StreamPurpose::LinkDelivery,
+            tag,
+            prerequisites: Vec::new(),
+        }
+    }
+
+    /// The upload's root: the TAG the header names. Only a tag history has one; a link
+    /// delivery's tag is provenance.
     pub fn root(&self) -> ObjectKey {
         ObjectKey {
             kind: kinds::TAG,
@@ -391,17 +529,31 @@ fn header_payload(h: &StreamHeader) -> Vec<u8> {
     p
 }
 
+/// Whether an object record of logical kind `kind` may stand in a stream of `purpose`: a sync
+/// kind in a tag history, a `BLOCK` alone in a link delivery.
+fn purpose_kind(purpose: StreamPurpose, kind: u8) -> bool {
+    match purpose {
+        StreamPurpose::TagHistory => is_sync_kind(kind),
+        StreamPurpose::LinkDelivery => kind == kinds::BLOCK,
+    }
+}
+
 /// The bad header error: record 0, at the header frame.
 fn bad_header() -> StreamError {
     StreamError::bad_record(0, PRELUDE, Reason::InvalidHeader)
 }
 
-/// The rules of a header's fields, shared by the writer and the reader: a manifest this rdy
-/// reads (E_STORE_FORMAT otherwise), at most [`MAX_PREREQUISITES`] prerequisites, each of a sync
-/// kind, strictly ascending.
+/// The rules of a header's fields, shared by the writer and the reader: a stream format this rdy
+/// reads, a purpose that format knows (E_STREAM_PURPOSE otherwise: format 2 knows only
+/// `tag_history`), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
+/// [`MAX_PREREQUISITES`] prerequisites, each of a sync kind, strictly ascending, and none for a
+/// link delivery.
 fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
-    if h.stream_format != STREAM_FORMAT {
+    if !READ_FORMATS.contains(&h.stream_format) {
         return Err(bad_header());
+    }
+    if h.stream_format < h.purpose.first_format() {
+        return Err(StreamError::purpose(Some(0), PRELUDE, h.purpose.byte()));
     }
     check_features(&h.features).map_err(|e| StreamError::store_format(Some(0), PRELUDE, &e))?;
     if h.prerequisites.len() > MAX_PREREQUISITES {
@@ -409,14 +561,25 @@ fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
     }
     if h.prerequisites.iter().any(|k| !is_sync_kind(k.kind))
         || h.prerequisites.windows(2).any(|w| w[0] >= w[1])
+        || (h.purpose == StreamPurpose::LinkDelivery && !h.prerequisites.is_empty())
     {
         return Err(bad_header());
     }
     Ok(())
 }
 
-/// Parses a header payload (its length checked against [`MAX_HEADER_BYTES`] already).
-fn parse_header(p: &[u8]) -> Result<StreamHeader, StreamError> {
+/// The E_STREAM_PURPOSE refusal of a header of purpose byte `actual` where `expected` is read.
+fn wrong_purpose(actual: u8, expected: StreamPurpose) -> StreamError {
+    StreamError::purpose_for(Some(0), PRELUDE, actual, expected.name())
+}
+
+/// Parses a header payload of stream format `format` (its length checked against
+/// [`MAX_HEADER_BYTES`] already). An unknown purpose byte is refused as not `expected`.
+fn parse_header(
+    p: &[u8],
+    format: u32,
+    expected: StreamPurpose,
+) -> Result<StreamHeader, StreamError> {
     if p.len() < HEADER_FIXED {
         return Err(bad_header());
     }
@@ -448,7 +611,7 @@ fn parse_header(p: &[u8]) -> Result<StreamHeader, StreamError> {
     // the rest of the header, as it was before the manifest
     let p = &p[manifest_len..];
     let repo_id = RepoId(p[4..20].try_into().expect("16 bytes"));
-    let purpose = StreamPurpose::of(p[20]).ok_or(StreamError::purpose(Some(0), PRELUDE, p[20]))?;
+    let purpose = StreamPurpose::of(p[20]).ok_or_else(|| wrong_purpose(p[20], expected))?;
     let tag = Hash(p[21..53].try_into().expect("32 bytes"));
     let count = u32::from_le_bytes(p[53..57].try_into().expect("4 bytes")) as usize;
     if count > MAX_PREREQUISITES {
@@ -468,7 +631,7 @@ fn parse_header(p: &[u8]) -> Result<StreamHeader, StreamError> {
         });
     }
     let h = StreamHeader {
-        stream_format: STREAM_FORMAT,
+        stream_format: format,
         features,
         repo_id,
         purpose,
@@ -546,13 +709,16 @@ impl Pending {
     }
 }
 
-/// Writes one batch: the prelude and header on `new`, each object record on `record`, the
-/// trailer on `finish`. Every check runs before a record's first byte, so a refused record
-/// writes nothing. The writer checks the framing rules: kinds, hashes, dropped records, repeated
-/// keys and every count and byte bound. The caller supplies records in dependency order with the
-/// exact prerequisites ([`crate::closure`]); [`check_batch`] verifies both.
+/// Writes one batch: the prelude and header on `new` (with a link delivery's `DELIVERY` on
+/// `new_delivery`), each object record on `record`, the trailer on `finish`. Every check runs
+/// before a record's first byte, so a refused record writes nothing. The writer checks the
+/// framing rules: kinds, hashes, dropped records, repeated keys and every count and byte bound,
+/// and a `DELIVERY`'s own rules. The caller supplies records in dependency order with the exact
+/// prerequisites ([`crate::closure`]), or a delivery's selected versions in its order;
+/// [`check_batch`] and [`check_delivery`] verify them.
 pub struct StreamWriter<W: Write> {
     w: W,
+    purpose: StreamPurpose,
     offset: u64,
     records: u64,
     keys: BTreeSet<ObjectKey>,
@@ -561,13 +727,70 @@ pub struct StreamWriter<W: Write> {
 }
 
 impl<W: Write> StreamWriter<W> {
-    /// Writes the prelude and `header`. Refuses a header of another stream or store format, more
-    /// than [`MAX_PREREQUISITES`] prerequisites, or prerequisites of a kind that is not a sync
-    /// kind or not strictly ascending.
+    /// Writes the prelude and `header`, a tag history's, in its stream format. Refuses another
+    /// purpose (E_STREAM_PURPOSE: a link delivery starts with [`StreamWriter::new_delivery`]), a
+    /// header of a stream or store format this rdy does not read, more than
+    /// [`MAX_PREREQUISITES`] prerequisites, or prerequisites of a kind that is not a sync kind
+    /// or not strictly ascending.
     pub fn new(w: W, header: &StreamHeader) -> Result<Self, StreamError> {
+        if header.purpose != StreamPurpose::TagHistory {
+            return Err(wrong_purpose(
+                header.purpose.byte(),
+                StreamPurpose::TagHistory,
+            ));
+        }
         check_header(header)?;
+        Self::start(w, header)
+    }
+
+    /// Writes the prelude, `header` and the `DELIVERY` record `delivery` (record 1) of a link
+    /// delivery. Refuses another purpose (E_STREAM_PURPOSE), a header out of its rules (any
+    /// prerequisite included), and a `DELIVERY` over its bounds (E_LIMIT: more than
+    /// [`MAX_DELIVERY_VERSIONS`] versions, more than [`MAX_RECORD_BYTES`] bytes, or any other
+    /// typed-record bound) or out of its own rules: versions not in strict id order or a
+    /// selection digest that is not theirs (`invalid delivered selection`), or a version in an
+    /// encoding a `BLOCK` does not have. The object records follow on `record`, in the
+    /// delivery's order.
+    pub fn new_delivery(
+        w: W,
+        header: &StreamHeader,
+        delivery: &DeliveryRecord,
+    ) -> Result<Self, StreamError> {
+        if header.purpose != StreamPurpose::LinkDelivery {
+            return Err(wrong_purpose(
+                header.purpose.byte(),
+                StreamPurpose::LinkDelivery,
+            ));
+        }
+        check_header(header)?;
+        let at = PRELUDE + FRAME_HEADER + header_payload(header).len() as u64;
+        let refused = |e: &RecordError| StreamError::from_record(1, at, e);
+        if delivery.versions.len() > MAX_DELIVERY_VERSIONS {
+            return Err(refused(&RecordError::limit(
+                crate::bounded::COLLECTION_ELEMENTS,
+                MAX_DELIVERY_VERSIONS,
+            )));
+        }
+        crate::bounded::fits(delivery).map_err(|e| refused(&e))?;
+        let p = postcard::to_allocvec(delivery).map_err(|_| refused(&RecordError::Decode))?;
+        // the reader's own decode, so no bound the reader keeps is left to it
+        decode_delivery(&p).map_err(|e| refused(&e))?;
+        delivery_rules(delivery).map_err(|reason| StreamError::bad_record(1, at, reason))?;
+        let mut me = Self::start(w, header)?;
+        me.within(1, at, p.len() as u64)?;
+        let hash = Hash::of(&p);
+        me.chain.add(1, at, rec::DELIVERY, p.len() as u64, &hash)?;
+        me.frame(rec::DELIVERY, &hash, &p)?;
+        me.records = 1;
+        Ok(me)
+    }
+
+    /// Writes the prelude, in the header's stream format, and `header`, whose rules the caller
+    /// checked.
+    fn start(w: W, header: &StreamHeader) -> Result<Self, StreamError> {
         let mut me = StreamWriter {
             w,
+            purpose: header.purpose,
             offset: 0,
             records: 0,
             keys: BTreeSet::new(),
@@ -575,7 +798,7 @@ impl<W: Write> StreamWriter<W> {
             chain: Chain::default(),
         };
         me.raw(MAGIC)?;
-        me.raw(&STREAM_FORMAT.to_le_bytes())?;
+        me.raw(&header.stream_format.to_le_bytes())?;
         let p = header_payload(header);
         let hash = Hash::of(&p);
         me.chain
@@ -585,9 +808,9 @@ impl<W: Write> StreamWriter<W> {
     }
 
     /// Writes one object record: a present record as its own frame, a dropped one as its
-    /// `DROPPED` record. Refuses a kind that is not a sync kind, a payload over its bound or not
-    /// matching its key's hash, a dropped record that breaks its record rules, a key already
-    /// written, and any count or byte bound.
+    /// `DROPPED` record. Refuses a kind that is not a sync kind (in a link delivery, any kind
+    /// but `BLOCK`), a payload over its bound or not matching its key's hash, a dropped record
+    /// that breaks its record rules, a key already written, and any count or byte bound.
     pub fn record(&mut self, r: &StreamRecord) -> Result<(), StreamError> {
         let n = self.records + 1;
         let at = self.offset;
@@ -596,7 +819,7 @@ impl<W: Write> StreamWriter<W> {
         if n > MAX_RECORDS {
             return Err(StreamError::limit(Some(n), at, LIMIT_OBJECT_RECORDS));
         }
-        if !is_sync_kind(key.kind) {
+        if !purpose_kind(self.purpose, key.kind) {
             return Err(bad(Reason::UnknownKind));
         }
         if self.keys.contains(&key) {
@@ -703,6 +926,8 @@ impl<W: Write> StreamWriter<W> {
 /// error, and no read resumes after it.
 pub struct StreamReader<R: Read> {
     r: R,
+    purpose: StreamPurpose,
+    delivery: Option<DeliveryRecord>,
     offset: u64,
     records: u64,
     last: (u64, u64),
@@ -713,13 +938,38 @@ pub struct StreamReader<R: Read> {
 }
 
 impl<R: Read> StreamReader<R> {
-    /// Reads the prelude and the header. Refuses another magic or stream format and a header that
-    /// is not the first frame (`invalid header`), a header over [`MAX_HEADER_BYTES`], a store
-    /// format other than this rdy's (E_STORE_FORMAT), a purpose other than `tag_history`
-    /// (E_STREAM_PURPOSE), and prerequisites out of their rules.
+    /// Reads the prelude and the header, and a link delivery's `DELIVERY` record. Refuses
+    /// another magic or a stream format not in [`READ_FORMATS`] and a header that is not the
+    /// first frame (`invalid header`), stream format 1 (E_STORE_FORMAT), a header over
+    /// [`MAX_HEADER_BYTES`], a store format other than this rdy's (E_STORE_FORMAT), a purpose
+    /// byte its stream format does not know (E_STREAM_PURPOSE, as not `tag_history`), and
+    /// prerequisites out of their rules. A link delivery's `DELIVERY` must follow the header
+    /// (`delivery record out of order`), within its bounds and its own rules
+    /// ([`StreamWriter::new_delivery`]); [`StreamReader::delivery`] returns it.
     pub fn open(r: R) -> Result<(Self, StreamHeader), StreamError> {
+        Self::open_inner(r, None)
+    }
+
+    /// [`StreamReader::open`] for a stream that must be of `purpose`: another purpose is
+    /// E_STREAM_PURPOSE naming `purpose`, refused at the header before any later record is read.
+    pub fn open_for(r: R, purpose: StreamPurpose) -> Result<(Self, StreamHeader), StreamError> {
+        Self::open_inner(r, Some(purpose))
+    }
+
+    /// A link delivery's `DELIVERY` record, read and checked with the header; None for a tag
+    /// history.
+    pub fn delivery(&self) -> Option<&DeliveryRecord> {
+        self.delivery.as_ref()
+    }
+
+    fn open_inner(
+        r: R,
+        expected: Option<StreamPurpose>,
+    ) -> Result<(Self, StreamHeader), StreamError> {
         let mut me = StreamReader {
             r,
+            purpose: StreamPurpose::TagHistory,
+            delivery: None,
             offset: 0,
             records: 0,
             last: (0, PRELUDE),
@@ -738,16 +988,16 @@ impl<R: Read> StreamReader<R> {
         }
         let mut format = [0u8; 4];
         me.exact(&mut format, 0, MAGIC.len() as u64)?;
-        match u32::from_le_bytes(format) {
-            STREAM_FORMAT => {}
-            1 => return Err(StreamError::sync_format_one(MAGIC.len() as u64)),
-            _ => {
-                return Err(StreamError::bad_record(
-                    0,
-                    MAGIC.len() as u64,
-                    Reason::InvalidHeader,
-                ));
-            }
+        let format = u32::from_le_bytes(format);
+        if format == 1 {
+            return Err(StreamError::sync_format_one(MAGIC.len() as u64));
+        }
+        if !READ_FORMATS.contains(&format) {
+            return Err(StreamError::bad_record(
+                0,
+                MAGIC.len() as u64,
+                Reason::InvalidHeader,
+            ));
         }
         me.offset = PRELUDE;
         let (len, kind, hash) = me.head(0)?;
@@ -758,10 +1008,43 @@ impl<R: Read> StreamReader<R> {
             return Err(StreamError::limit(Some(0), PRELUDE, LIMIT_HEADER_BYTES));
         }
         let p = me.payload(0, PRELUDE, len, &hash)?;
-        let header = parse_header(&p)?;
+        let header = parse_header(&p, format, expected.unwrap_or(StreamPurpose::TagHistory))?;
+        if let Some(expected) = expected
+            && header.purpose != expected
+        {
+            return Err(wrong_purpose(header.purpose.byte(), expected));
+        }
         me.chain.add(0, PRELUDE, rec::HEADER, len, &hash)?;
         me.offset = PRELUDE + FRAME_HEADER + len;
+        me.purpose = header.purpose;
+        if header.purpose == StreamPurpose::LinkDelivery {
+            me.read_delivery()?;
+        }
         Ok((me, header))
+    }
+
+    /// Reads a link delivery's `DELIVERY`, record 1, right after the header: refused by its frame
+    /// header alone when it is another frame or over [`MAX_RECORD_BYTES`], then its hash, its
+    /// bounded canonical decode and its own rules.
+    fn read_delivery(&mut self) -> Result<(), StreamError> {
+        let at = self.offset;
+        let (len, kind, hash) = self.head(1)?;
+        if kind != rec::DELIVERY {
+            return Err(StreamError::bad_record(1, at, Reason::DeliveryOutOfOrder));
+        }
+        payload_bound(1, at, kind, len)?;
+        if at + FRAME_HEADER + len > MAX_STREAM_BYTES {
+            return Err(StreamError::limit(Some(1), at, LIMIT_TOTAL_BYTES));
+        }
+        let p = self.payload(1, at, len, &hash)?;
+        let delivery = decode_delivery(&p).map_err(|e| StreamError::from_record(1, at, &e))?;
+        delivery_rules(&delivery).map_err(|reason| StreamError::bad_record(1, at, reason))?;
+        self.chain.add(1, at, rec::DELIVERY, len, &hash)?;
+        self.records = 1;
+        self.last = (1, at);
+        self.offset = at + FRAME_HEADER + len;
+        self.delivery = Some(delivery);
+        Ok(())
     }
 
     /// The next object record; `None` after a verified trailer at the end of the file.
@@ -826,7 +1109,10 @@ impl<R: Read> StreamReader<R> {
             return Ok(None);
         }
         let bad = |reason| StreamError::bad_record(n, at, reason);
-        if kind != rec::DROPPED && !is_sync_kind(crate::codec::logical_kind(kind)) {
+        if kind == rec::DELIVERY && self.purpose == StreamPurpose::LinkDelivery {
+            return Err(bad(Reason::DeliveryOutOfOrder));
+        }
+        if kind != rec::DROPPED && !purpose_kind(self.purpose, crate::codec::logical_kind(kind)) {
             return Err(bad(Reason::UnknownKind));
         }
         if n > MAX_RECORDS {
@@ -855,11 +1141,14 @@ impl<R: Read> StreamReader<R> {
             else {
                 return Err(bad(Reason::InvalidDroppedRecord));
             };
-            // a removable kind (`parse_dropped`), so a sync kind
+            // a removable kind (`parse_dropped`), so a sync kind; a link delivery drops a BLOCK
             let key = ObjectKey {
                 kind: crate::codec::logical_kind(kind),
                 hash: original,
             };
+            if !purpose_kind(self.purpose, key.kind) {
+                return Err(bad(Reason::UnknownKind));
+            }
             self.pending
                 .add(n, at, original_len)
                 .map_err(|e| e.with_object(Some(key)))?;
@@ -1044,12 +1333,15 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
 /// record once its frame, its typed decode and its key pass, with the record's number and frame
 /// offset, before the next record is read. Either one's error ends the check, and no report is
 /// returned. The record buffer is still the reader's one buffer: `on_record` borrows the record.
+///
+/// A batch is a tag history: a link delivery is E_STREAM_PURPOSE at its header, before
+/// `on_header` runs ([`check_delivery`] checks it).
 pub fn check_batch_with<R: Read, E: From<StreamError>>(
     input: R,
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
     mut on_record: impl FnMut(u64, u64, &StreamRecord) -> Result<(), E>,
 ) -> Result<BatchReport, E> {
-    let (mut reader, header) = StreamReader::open(input)?;
+    let (mut reader, header) = StreamReader::open_for(input, StreamPurpose::TagHistory)?;
     on_header(&header)?;
     let mut keys: Vec<ObjectKey> = Vec::new();
     let mut at: Vec<u64> = Vec::new();
@@ -1172,6 +1464,98 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     }
     Ok(BatchReport {
         header,
+        keys,
+        records: totals.records,
+        bytes: totals.bytes,
+        digest: totals.digest,
+    })
+}
+
+/// What a valid link delivery holds: its header, its `DELIVERY`, the logical key of every object
+/// record in wire order (the selected versions' `BLOCK` keys, in the delivery's order), and its
+/// trailer's records (the `DELIVERY` and the object records), bytes and digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeliveryReport {
+    pub header: StreamHeader,
+    pub delivery: DeliveryRecord,
+    pub keys: Vec<ObjectKey>,
+    pub records: u64,
+    pub bytes: u64,
+    #[serde(serialize_with = "hex_hash")]
+    pub digest: Hash,
+}
+
+/// Checks one complete link delivery and returns its report, before any intake: the framing
+/// ([`StreamReader`]: the order, every hash, the bounds, the trailer and the end of the file),
+/// the `DELIVERY`'s bounds and own rules, and the complete selection. Each object record must be
+/// the next version the `DELIVERY` selects (else `object is outside the delivered selection`
+/// at the record): its `BLOCK` key and encoding, and for a present record the block id of its
+/// bounded typed decode. A dropped record keeps its record rules: its residue and a removable
+/// encoding. A selected version with no record is E_UNRESOLVED_REF (`stream record 1 needs
+/// <key>`) at the `DELIVERY`, for the first one. No reference of a block, no TAG and no
+/// prerequisite is resolved: the selection and the payload hashes make the delivery complete.
+/// A tag history is E_STREAM_PURPOSE at its header.
+pub fn check_delivery<R: Read>(input: R) -> Result<DeliveryReport, StreamError> {
+    check_delivery_with(input, |_, _, _| Ok(()))
+}
+
+/// [`check_delivery`] with a check of the caller's own in the same single pass: `on_record`
+/// runs on every object record once its frame and its selection checks pass, with the record's
+/// number and frame offset, before the next record is read. Its error ends the check, and no
+/// report is returned.
+pub fn check_delivery_with<R: Read, E: From<StreamError>>(
+    input: R,
+    mut on_record: impl FnMut(u64, u64, &StreamRecord) -> Result<(), E>,
+) -> Result<DeliveryReport, E> {
+    let (mut reader, header) = StreamReader::open_for(input, StreamPurpose::LinkDelivery)?;
+    let delivery = reader
+        .delivery
+        .take()
+        .expect("a link delivery reads its DELIVERY with its header");
+    let delivery_at = reader.position().1;
+    let mut keys: Vec<ObjectKey> = Vec::new();
+    keys.try_reserve_exact(delivery.versions.len())
+        .map_err(|_| StreamError::allocation(Some(1), delivery_at))?;
+    let mut next = delivery.versions.iter();
+    while let Some(r) = reader.next()? {
+        let (n, offset) = reader.position();
+        let key = r.key();
+        let outside =
+            || StreamError::bad_record(n, offset, Reason::OutsideSelection).with_object(Some(key));
+        let Some(v) = next.next() else {
+            return Err(outside().into());
+        };
+        let encoding = match &r {
+            StreamRecord::Present { encoding, .. } | StreamRecord::Dropped { encoding, .. } => {
+                *encoding
+            }
+        };
+        if key.hash != v.version || encoding != v.encoding {
+            return Err(outside().into());
+        }
+        if let Some(block) = r.typed::<Block>() {
+            let block = block
+                .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
+            if block.id != v.id {
+                return Err(outside().into());
+            }
+        }
+        on_record(n, offset, &r)?;
+        keys.push(key);
+    }
+    let totals = reader.finish()?;
+    if let Some(v) = next.next() {
+        let missing = ObjectKey {
+            kind: kinds::BLOCK,
+            hash: v.version,
+        };
+        return Err(StreamError::unresolved(1, delivery_at, missing)
+            .with_object(Some(missing))
+            .into());
+    }
+    Ok(DeliveryReport {
+        header,
+        delivery,
         keys,
         records: totals.records,
         bytes: totals.bytes,
