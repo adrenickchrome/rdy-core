@@ -249,7 +249,7 @@ fn wx6_directory_flush_is_real_or_io() {
             );
             let (r, synced) = fsutil::record_syncs(|| fsutil::sync_dir(&locked));
             r.unwrap();
-            assert_eq!(synced, [locked.clone()]);
+            assert_eq!(synced, std::slice::from_ref(&locked));
             drop(dir);
             allow_adding_entries(&locked);
             return;
