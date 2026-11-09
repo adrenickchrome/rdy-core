@@ -104,6 +104,18 @@ class relc1_Candidate(Release):
         self.assertEqual(CANDIDATE.load_release_candidate((out / 'candidate.json').read_bytes()), record)
         self.assertLess(len(manifest), CANDIDATE.MANIFEST_MAX)
 
+    def test_relc1_candidate_without_a_sample_folder_has_no_sample_entry(self):
+        shutil.rmtree(self.source / 'samples')
+        record, out = self.assemble()
+        names = [name_of(t) for t in (MAC, WIN, LINUX)]
+        manifest = ''.join(sha(self.archives[t]) + '  ' + name_of(t) + '\n' for t in (MAC, WIN, LINUX))
+        self.assertEqual((out / 'SHA256SUMS').read_bytes(), manifest.encode())
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(names + ['SHA256SUMS', 'candidate.json']))
+        self.assertEqual(record['schema'], 2)
+        self.assertNotIn('sample', record)
+        self.assertEqual([a['name'] for a in record['artifacts']], names)
+        self.assertEqual(CANDIDATE.load_release_candidate((out / 'candidate.json').read_bytes()), record)
+
     def test_relc1_candidate_bounds_are_one_checked_calculation(self):
         self.assertEqual(CANDIDATE.ARCHIVE_MAX, 536870912)
         self.assertEqual(CANDIDATE.SAMPLE_MAX, 16777216)
@@ -113,7 +125,7 @@ class relc1_Candidate(Release):
         self.assertEqual(CANDIDATE.ZIP_MAX, 3 * 536870912 + 16777216 + 2 * 65536 + 1048576)
 
     def test_relc1_candidate_refuses_a_missing_or_wrong_sample(self):
-        shutil.rmtree(self.source / 'samples')
+        (self.source / 'samples/tally/tally.rdydump').unlink()
         self.refused('the frozen sample samples/tally/tally.rdydump is missing at the commit')
         self.write_sample()
         (self.source / 'samples/tally/freeze.json').unlink()

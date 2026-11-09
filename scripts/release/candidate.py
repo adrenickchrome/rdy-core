@@ -199,9 +199,9 @@ def binary_name(target):
     return 'rdy.exe' if target == WINDOWS_TARGET else 'rdy'
 
 
-def release_files(version):
-    """The four manifest names of Release 1, in manifest order."""
-    return [release_archive_name(version, t) for t in RELEASE_TARGETS] + [SAMPLE_NAME]
+def release_files(version, sample=True):
+    """The manifest names of Release 1, in manifest order: three archives, then the sample if there is one."""
+    return [release_archive_name(version, t) for t in RELEASE_TARGETS] + ([SAMPLE_NAME] if sample else [])
 
 
 def manifest_bytes(files):
@@ -803,8 +803,13 @@ def targets_text(targets):
 def read_sample(source, commit):
     """The frozen sample dump of the source tree `source` at `commit` and its record. The sample is
     a regular file (never a link) of at most SAMPLE_MAX bytes, checked before it is read, and it
-    matches the SHA-256 and size of its freeze record. Returns (bytes, sample record)."""
+    matches the SHA-256 and size of its freeze record. Returns (bytes, sample record), or None when
+    the sample folder samples/tally/ is absent (the sample is optional for now)."""
     root = Path(source)
+    try:
+        os.lstat(str(root / os.path.dirname(SAMPLE_SOURCE)))
+    except OSError:
+        return None
     missing = ControllerError('the frozen sample ' + SAMPLE_SOURCE + ' is missing at the commit')
     path = root / SAMPLE_SOURCE
     try:
@@ -847,7 +852,8 @@ def assemble(inputs, version, commit, run_id, run_attempt, out, source=None):
 
     With `source` (the checkout at `commit`) this is a Release 1 candidate: the macOS, Windows and
     Linux archives with their plain names, the frozen sample from `source`, a four-line manifest and
-    a schema 2 record. Without it, a preview candidate: two archives, no sample, schema 1."""
+    a schema 2 record. Without it, a preview candidate: two archives, no sample, schema 1. When
+    `source` has no samples/tally/ folder, the Release 1 candidate has no sample entry."""
     check_arguments(version, commit, None, run_id, run_attempt)
     release = source is not None
     targets = RELEASE_TARGETS if release else TARGETS
@@ -865,15 +871,15 @@ def assemble(inputs, version, commit, run_id, run_attempt, out, source=None):
         raise ControllerError('the output directory already exists')
     out.mkdir(mode=0o700, parents=True)
     try:
-        return assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample)
+        return assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample, release)
     except BaseException:
         shutil.rmtree(str(out), ignore_errors=True)
         raise
 
 
-def assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample):
+def assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample, release=False):
     builds, files = [], []
-    name_for = release_archive_name if sample is not None else archive_name
+    name_for = release_archive_name if release else archive_name
     for target in targets:
         folder, ident, digest = inputs[target]
         name, receipt_name = name_for(version, target), 'build-' + target + '.json'
@@ -899,8 +905,9 @@ def assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sa
         data, facts = sample
         write_new(out / SAMPLE_NAME, data)
         files.append({'name': SAMPLE_NAME, 'sha256': facts['sha256'], 'size': facts['size']})
-        record['schema'] = 2
         record['sample'] = facts
+    if release:
+        record['schema'] = 2
     files.sort(key=lambda f: f['name'])
     manifest = manifest_bytes(files)
     write_new(out / 'SHA256SUMS', manifest)
@@ -939,13 +946,17 @@ def load_candidate(raw):
     return record
 
 
-RELEASE_CANDIDATE_KEYS = CANDIDATE_KEYS + ('sample',)
+RELEASE_CANDIDATE_KEYS = CANDIDATE_KEYS
+OPTIONAL_KEYS = ('sample',)
 SAMPLE_KEYS = ('name', 'source', 'commit', 'sha256', 'size', 'freeze_sha256')
 
 
 def load_release_candidate(raw):
     """Parses and checks a schema 2 (Release 1) candidate.json record."""
-    record = closed(loads(raw), RELEASE_CANDIDATE_KEYS, 'the candidate record')
+    raw_record = loads(raw)
+    with_sample = isinstance(raw_record, dict) and 'sample' in raw_record
+    record = closed(raw_record, RELEASE_CANDIDATE_KEYS + (OPTIONAL_KEYS if with_sample else ()),
+                    'the candidate record')
     version = record['version']
     check_arguments(version, record['commit'], None, record['run_id'], record['run_attempt'])
     malformed = ControllerError('the candidate record is malformed')
@@ -955,16 +966,17 @@ def load_release_candidate(raw):
         raise malformed
     files = record['artifacts']
     if not (isinstance(files, list) and [file_entry(f, 'a candidate artifact')['name'] for f in files]
-            == release_files(version)):
+            == release_files(version, with_sample)):
         raise malformed
     if hashlib.sha256(manifest_bytes(files)).hexdigest() != record['manifest_sha256']:
         raise malformed
-    sample = closed(record['sample'], SAMPLE_KEYS, 'the candidate sample')
-    if (sample['name'], sample['source'], sample['commit']) != (SAMPLE_NAME, SAMPLE_SOURCE, record['commit']):
-        raise malformed
-    if (sample['sha256'], sample['size']) != (files[-1]['sha256'], files[-1]['size']) or not (
-            isinstance(sample['freeze_sha256'], str) and SHA256_RE.fullmatch(sample['freeze_sha256'])):
-        raise malformed
+    if with_sample:
+        sample = closed(record['sample'], SAMPLE_KEYS, 'the candidate sample')
+        if (sample['name'], sample['source'], sample['commit']) != (SAMPLE_NAME, SAMPLE_SOURCE, record['commit']):
+            raise malformed
+        if (sample['sha256'], sample['size']) != (files[-1]['sha256'], files[-1]['size']) or not (
+                isinstance(sample['freeze_sha256'], str) and SHA256_RE.fullmatch(sample['freeze_sha256'])):
+            raise malformed
     builds = record['builds']
     if not (isinstance(builds, list) and [closed(b, BUILD_KEYS, 'a candidate build')['target'] for b in builds]
             == list(RELEASE_TARGETS)):

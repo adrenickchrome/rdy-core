@@ -2,8 +2,8 @@
 # (macOS arm64, Windows amd64, Linux amd64) runs the fast gate, builds from `git archive S` in a new
 # workspace with path remaps, packages with qa-release-package and refuses a binary that holds a host
 # path. The assembly job downloads each build by artifact id, checks its artifact digest, rehashes
-# every file, reads the frozen sample from S and writes SHA256SUMS over exactly the three archives
-# and the sample. Nothing here signs, needs a secret or OIDC, or writes to the repository. A reserved
+# every file, reads the frozen sample from S when samples/tally/ exists (it is optional for now) and writes
+# SHA256SUMS over exactly the three archives and that sample. Nothing here signs, needs a secret or OIDC, or writes to the repository. A reserved
 # or released version never builds again.
 name: release-candidate
 on:
@@ -285,7 +285,7 @@ jobs:
           path: ${{ runner.temp }}/in/x86_64-unknown-linux-gnu
           skip-decompress: true
           digest-mismatch: error
-      - name: Rehash and write SHA256SUMS over exactly the three archives and the frozen sample
+      - name: Rehash and write SHA256SUMS over exactly the three archives and the frozen sample, if any
         run: >-
           python3 -B scripts/release/candidate.py assemble --version "$VERSION" --commit "$COMMIT"
           --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
