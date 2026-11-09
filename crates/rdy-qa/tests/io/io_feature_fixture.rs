@@ -452,11 +452,37 @@ fn e1_encodings() -> Value {
     json!(m)
 }
 
-/// The manifest of a store that has used every registered feature.
+/// Registered first-use features whose first frozen fixture a later task of the same plan owes,
+/// each with the fixture that task adds. The repo links plan registers `foreign_copy` in Task 3
+/// and freezes its first-use fixture in Task 33 ("Freeze the released-format compatibility
+/// matrix": `fixtures/foreign-copy-v1/`), so no frozen set covers it before then. An entry
+/// holds only while the feature stays out of what a new store writes and its fixture is absent:
+/// the task that adds the fixture fails here until it drops the entry and covers the feature.
+const OWED: &[(&str, &str)] = &[("foreign_copy", "fixtures/foreign-copy-v1/manifest.json")];
+
+/// The manifest of a store that has used every registered feature, less the [`OWED`] ones.
 fn all_features() -> StoreFeatures {
+    let registered = registered_features();
+    for (name, path) in OWED {
+        assert!(
+            registered.iter().any(|f| f.name == *name),
+            "{name}: an owed feature is registered"
+        );
+        assert!(
+            !baseline_features().features.iter().any(|f| f.name == *name),
+            "{name}: a new store writes it, so a frozen set must cover it now"
+        );
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR")).join(path).exists(),
+            "{path} exists: cover {name} in a frozen set and drop its OWED entry"
+        );
+    }
     StoreFeatures {
         manifest_version: 1,
-        features: registered_features(),
+        features: registered
+            .into_iter()
+            .filter(|f| !OWED.iter().any(|(n, _)| *n == f.name))
+            .collect(),
     }
 }
 
