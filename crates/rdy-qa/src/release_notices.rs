@@ -83,6 +83,7 @@ pub const RELEASED: &[(&str, u32, u32)] = &[
     ("0.25.0", 3, 18),
     ("0.35.0", 4, 19),
     ("0.41.0", 4, 19),
+    ("0.46.0", 4, 19),
 ];
 /// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
 pub const CHANGES_GROUPS: [&str; 5] = [

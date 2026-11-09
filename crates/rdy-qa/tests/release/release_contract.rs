@@ -6616,10 +6616,12 @@ fn kfu6_release_contract_keeps_unrelated_bytes() {
 }
 
 /// The digests of the sections that the kungfu change leaves alone.
+/// Release 1 (TASK-1830) moves `store` once: `native_fixture` records the published, frozen
+/// `feature-1/expect.json`; the rest of the section keeps its bytes.
 const PINNED_SECTIONS: [(&str, &str); 6] = [
     (
         "store",
-        "9d2bc039564c6498bbb1b2e6bd66f7317babc1029d7db197b3ef575bdb78c99c",
+        "486b25913de3831beb7d8b30d3c738e5c70ff11b639d17fa2b361ecbd688f703",
     ),
     (
         "dump_load",

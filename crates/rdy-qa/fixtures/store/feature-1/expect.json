@@ -322,7 +322,7 @@
     }
   ],
   "producer_commit": "8d7d3f63fb18455096152d68b87e25878af9c057",
-  "published": false,
+  "published": true,
   "store": {
     "batches": 134,
     "encodings": {
