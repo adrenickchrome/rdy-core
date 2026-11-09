@@ -2655,6 +2655,9 @@ def git_blob_id(data):
     return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
 
 
+PYCACHE_RE = re.compile(r'^scripts/(?:release|release_producers)/__pycache__/[^/]+\.pyc$')
+
+
 def git_object_id(path):
     """The git id of a working-tree file (blob) or flat folder of regular files (tree); `__pycache__` is no
     source and is left out, any other entry that is not a regular file fails."""
@@ -2829,8 +2832,12 @@ class WiredWorkflows(WorkflowCase, Refusals):
                     self.assertEqual(git('merge-base', '--is-ancestor', commit, 'HEAD').returncode, 0)
                 else:
                     self.assertEqual(shallow, 'true', commit + ' is missing from a full clone')
-        self.assertEqual(git('ls-files', '--others', '--exclude-standard', 'scripts/release',
-                             'scripts/release_producers').stdout, '')
+        # No untracked source beside the closure. Bytecode that this test run writes into a closure
+        # folder's own `__pycache__` (a runner without PYTHONDONTWRITEBYTECODE) is no source: git_object_id
+        # leaves that same folder out, and only a `.pyc` directly in it is passed over here.
+        untracked = git('ls-files', '--others', '--exclude-standard', 'scripts/release',
+                        'scripts/release_producers').stdout.splitlines()
+        self.assertEqual([line for line in untracked if not PYCACHE_RE.match(line)], [])
         # Both workflows check out literal P for the helpers and literal H for the trusted parsers, nothing else.
         for path, flow in self.both().items():
             for job_id, job in flow['jobs'].items():
@@ -2996,16 +3003,32 @@ class Effects(object):
     def __enter__(self):
         self.stack = contextlib.ExitStack()
         enter, events, real = self.stack.enter_context, self.events, subprocess.Popen
+        real_spawn, starting = getattr(os, 'posix_spawn', None), []
 
         def popen(argv, *args, **kwargs):
             program = argv[0] if isinstance(argv, (list, tuple)) and argv else argv
             if program in self.allow:
                 self.started.append((list(argv), kwargs.get('env')))
-                return real(argv, *args, **kwargs)
+                starting.append(program)
+                try:
+                    return real(argv, *args, **kwargs)
+                finally:
+                    starting.pop()
             events.append(('spawn', str(program)))
             raise AssertionError('spy: a producer started ' + str(program))
         enter(mock.patch.object(subprocess, 'Popen', popen))
-        for owner, names in ((os, ('system', 'execv', 'execve', 'posix_spawn', 'fork')),
+
+        def posix_spawn(path, *args, **kwargs):
+            # The standard library's own start of an allowed program: subprocess.Popen uses posix_spawn
+            # where it can (Linux with glibc 2.34 or later, with close_fds) and fork_exec elsewhere (macOS).
+            # Only the program that the allowed Popen is starting, from inside that Popen, passes.
+            if starting and path == starting[-1]:
+                return real_spawn(path, *args, **kwargs)
+            events.append(('os.posix_spawn',))
+            raise AssertionError('spy: os.posix_spawn')
+        if real_spawn is not None:
+            enter(mock.patch.object(os, 'posix_spawn', posix_spawn))
+        for owner, names in ((os, ('system', 'execv', 'execve', 'fork')),
                              (socket.socket, ('connect', 'connect_ex')),
                              (socket, ('create_connection', 'getaddrinfo')),
                              (urllib.request, ('urlopen',)),
@@ -3388,7 +3411,9 @@ class Handoff(WorkflowCase):
             self.assertEqual(os.listdir(state), [])
             # The permission does not escape: another program, a socket and a producer all fail or start nothing.
             for escape in (lambda: subprocess.run(['/bin/echo', 'x']), lambda: subprocess.run(['/usr/bin/ssh', '-V']),
-                           lambda: socket.create_connection(('127.0.0.1', 9))):
+                           lambda: socket.create_connection(('127.0.0.1', 9)),
+                           lambda: os.posix_spawn('/bin/echo', ['/bin/echo', 'x'], {}),
+                           lambda: os.posix_spawn(SSH_KEYGEN, [SSH_KEYGEN, '-V'], {})):
                 with self.assertRaises(AssertionError):
                     escape()
             started = len(spies.started)
@@ -3400,8 +3425,11 @@ class Handoff(WorkflowCase):
             world.reviewed(request)
             self.approval.accept(facts, APPROVAL_RUN, 1, inputs)
             self.assertEqual(len(spies.started), started)
-        self.assertEqual([e for e in spies.events if e[0] not in ('spawn', 'socket.create_connection')], [])
+        self.assertEqual([e for e in spies.events
+                          if e[0] not in ('spawn', 'socket.create_connection', 'os.posix_spawn')], [])
         self.assertEqual({e[1] for e in spies.events if e[0] == 'spawn'}, {'/bin/echo', '/usr/bin/ssh'})
+        # Only the two direct probes above: no allowed start and no producer reached posix_spawn's refusal.
+        self.assertEqual(spies.events.count(('os.posix_spawn',)), 2)
 
     def test_rprd5_release_inputs_are_complete(self):
         # The final caller inputs come only from producer outputs, with synthetic identities.
