@@ -37,26 +37,35 @@ The installer verifies SHA-256, installs to `~/.local/bin`, and asks before chan
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.41.0-preview-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.41.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.41.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-preview-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.41.0-preview-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.41.0-preview-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.41.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.41.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
-If `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. Then check:
+**Windows (x86_64), in PowerShell:**
+
+```powershell
+Invoke-WebRequest -OutFile rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz
+New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
+Move-Item -Force rdy-0.41.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+```
+
+On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
 
 ```sh
 rdy --version
 ```
 
-It prints `rdy 0.41.0 (preview)`.
+It prints `rdy 0.41.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
@@ -337,17 +346,18 @@ You do not need this to use rdy. It shows how to check that an archive is the on
 |---|---|
 | macOS (arm64) | Supported. The fast gate (`cargo qa --skip-perf --require-all`) passes. |
 | Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64; aarch64 builds and runs its tests (one timing-bound test is being fixed). Perf baselines are Linux only. |
-| Windows | Not supported yet: `rdy-store` and the daemon use Unix-only APIs, so the workspace does not compile. `rdy-model`, `rdy-schema` and `rdy-graph` build. Windows support is planned after M3. |
+| Windows (x86_64) | Supported. Release 1 ships a native `x86_64-pc-windows-msvc` archive. |
 | Other Unix (the BSDs, illumos) | Untested. |
 
 ### Archives
 
-The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.
+Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.41.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.41.0-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-aarch64-apple-darwin.tar.gz) |
+| Windows amd64 | `x86_64-pc-windows-msvc` | [rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.41.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/rdy-0.41.0-x86_64-unknown-linux-gnu.tar.gz) |
 
 The release is [v0.41.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.41.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.41.0/SHA256SUMS.sig).
 

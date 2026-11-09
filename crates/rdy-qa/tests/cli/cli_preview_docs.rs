@@ -694,27 +694,46 @@ fn pre2_preview_readme_has_one_trust_state() {
             && parts[2].parse::<u64>().unwrap() <= build[2].parse::<u64>().unwrap(),
         "V {v} is newer than the build"
     );
-    // the links are the preview pair or the Release 1 triple with the plain names
-    let linked = |names: Vec<String>| {
-        names
-            .iter()
-            .all(|n| readme.contains(&format!("{RELEASES}/download/v{v}/{n}")))
-    };
-    let preview_pair = linked(
-        TARGETS
-            .iter()
-            .map(|t| format!("rdy-{v}-preview-{t}.tar.gz"))
-            .collect(),
-    );
-    let plain_triple = linked(
-        ALL_TARGETS
-            .iter()
-            .map(|t| format!("rdy-{v}-{t}.tar.gz"))
-            .collect(),
+    // the links are the Release 1 triple with the plain names, and no preview name is left
+    for t in ALL_TARGETS {
+        let name = format!("rdy-{v}-{t}.tar.gz");
+        assert!(
+            readme.contains(&format!("{RELEASES}/download/v{v}/{name}")),
+            "no link for {name}"
+        );
+    }
+    assert!(
+        !readme.contains("-preview-"),
+        "a preview archive name is left in the README"
     );
     assert!(
-        preview_pair || plain_triple,
-        "the archive links are neither the preview pair nor the Release 1 triple"
+        !readme.contains("(preview)"),
+        "the README expects a preview version output"
+    );
+    // the quick route: one download-and-extract command per platform, with the plain names
+    for t in ALL_TARGETS {
+        let url = format!("{RELEASES}/download/v{v}/rdy-{v}-{t}.tar.gz");
+        let fetches = readme
+            .lines()
+            .filter(|l| {
+                (l.starts_with("curl -LO ") || l.starts_with("Invoke-WebRequest "))
+                    && l.contains(&url)
+            })
+            .count();
+        assert_eq!(fetches, 1, "one download command for {t}");
+    }
+    let win = "rdy-{v}-x86_64-pc-windows-msvc".replace("{v}", &v);
+    assert!(
+        readme.contains("**Windows (x86_64), in PowerShell:**"),
+        "no Windows quick-install block"
+    );
+    assert!(
+        readme.contains(&format!("tar.exe -xzf {win}.tar.gz")),
+        "the Windows quick-install block does not extract the plain archive"
+    );
+    assert!(
+        readme.contains(&format!("{win}\\rdy.exe")),
+        "the Windows quick-install block does not place rdy.exe"
     );
     for name in ["SHA256SUMS", "SHA256SUMS.sig"] {
         assert!(
@@ -1723,27 +1742,14 @@ fn pre2_preview_readme_preserves_the_dump_route() {
     );
     let at = |s: &str| readme.find(s).unwrap_or_else(|| panic!("missing {s}"));
     assert!(at("See \"About this preview\"") < at("## Install"));
-    let preview_says = readme.contains(
-        "The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.",
-    );
-    let release_says = readme.contains(
-        "Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.",
-    );
     assert!(
-        preview_says || release_says,
+        readme.contains(
+            "Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
+        ),
         "the archive sentence is missing"
     );
-    for target in if release_says {
-        &ALL_TARGETS[..]
-    } else {
-        &TARGETS[..]
-    } {
-        let re = Regex::new(&format!(
-            r"rdy-[0-9.]+{}-{}\.tar\.gz",
-            if release_says { "" } else { "-preview" },
-            regex::escape(target)
-        ))
-        .unwrap();
+    for target in ALL_TARGETS {
+        let re = Regex::new(&format!(r"rdy-[0-9.]+-{}\.tar\.gz", regex::escape(target))).unwrap();
         assert!(re.is_match(&readme), "{target}");
     }
     assert!(
