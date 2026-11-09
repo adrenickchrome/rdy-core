@@ -6,7 +6,7 @@
 //! revoked source's included, and the log byte report counts every FOREIGN frame.
 use rdy_model::foreign::{
     ForeignDerived, ForeignEntry, ForeignEvent, ForeignId, ForeignParts, ForeignPin,
-    ForeignPublication, ForeignSource, ForeignVersion, selection_identity,
+    ForeignPublication, ForeignShell, ForeignSource, ForeignVersion, delivery_selection,
 };
 use rdy_model::*;
 use rdy_store::dump::{
@@ -97,6 +97,8 @@ struct Source {
     source: ForeignSource,
     head: Option<Hash>,
     sel: BTreeMap<BlockId, Hash>,
+    /// The shells the next delivery names (D-2CG1N): the complete list, not a delta.
+    shells: Vec<ForeignShell>,
 }
 
 impl Source {
@@ -106,6 +108,7 @@ impl Source {
             source,
             head: None,
             sel: BTreeMap::new(),
+            shells: vec![],
         }
     }
 
@@ -139,7 +142,8 @@ impl Source {
                 added: added.iter().map(|b| fv(b)).collect(),
                 changed: changed.iter().map(|b| fv(b)).collect(),
                 removed: removed.iter().map(|r| id(r)).collect(),
-                selection: selection_identity(self.sel.iter()).unwrap(),
+                shells: self.shells.clone(),
+                selection: delivery_selection(self.sel.iter(), &self.shells).unwrap(),
             },
         }
     }
@@ -362,6 +366,11 @@ fn history(dir: &Path, c: &Cited) -> Store {
         }]),
     )
     .unwrap();
+    // the second delivery keeps a planned doc as a shell: the entry carries it, no block travels
+    live.shells = vec![ForeignShell {
+        id: id("D-00010"),
+        version: Hash([5; 32]),
+    }];
     live.deliver(&mut s, &[&c.c1], &[&c.a2], &["D-00002"]);
     s.put(kinds::BLOCK, &pinning("C-00003", &c.a2)).unwrap();
     let mut gone = Source::new(cited_repo(), link("rl-00002"));
@@ -412,6 +421,18 @@ fn rpl11_dump_load_preserves_foreign_history() {
     }
     let gone = r.source_view("foreign/link/rl-00002").unwrap().unwrap();
     assert!(gone.revoked, "the revocation travels");
+    // the delivery's shells travel in its entry, and its selection still rebuilds with them
+    let live = r.source_view("foreign/link/rl-00001").unwrap().unwrap();
+    let ForeignEvent::Delivery { shells, .. } = r.foreign_entry(&live.head).unwrap().event else {
+        panic!("the live source's head is a delivery");
+    };
+    assert_eq!(
+        shells,
+        vec![ForeignShell {
+            id: id("D-00010"),
+            version: Hash([5; 32]),
+        }]
+    );
     assert_eq!(
         r.check_objects().unwrap().foreign,
         6,
