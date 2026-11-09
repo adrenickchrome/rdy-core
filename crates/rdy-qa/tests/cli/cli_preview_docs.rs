@@ -24,17 +24,28 @@ const ALL_TARGETS: [&str; 3] = [
     "x86_64-unknown-linux-gnu",
 ];
 
-/// The decision's seven sentences and the report sentence, contiguous, with the heading.
-const PREVIEW_NOTE: &str = "\
-This is a preview of rdy.
-It comes before Release 1, the first release with a compatibility promise.
+/// The "About Release 1" block of the README, after its summary line: the compatibility promise
+/// (D-TXFHR) and Release 1 below 1.0 (D-E30RA), with the dump route and the report sentence.
+const RELEASE_NOTE: &str = "\
+This is Release 1, the first release of rdy with a compatibility promise.
+rdy stays below 1.0 during the beta, and the promise holds anyway.
 
-Until Release 1, any command, flag, tool, code or file format may change in the next preview, with no deprecation period.
-One thing stays: every later rdy, Release 1 included, reads every dump that this rdy writes.
+From this release on, a change that breaks a contract surface ships with its upgrade path, in the same release. The contract surfaces are:
 
-To move a project to a newer preview, run `rdy dump --out <file>` with this rdy.
-Then run `rdy load <file> <dir>` with the new rdy, into a directory with no store.
-A project made with a preview moves to Release 1 the same way.
+- the store, dump, sync batch and working-copy formats, and signatures;
+- the CLI's commands, arguments, flags, exit codes and `--json` output;
+- the MCP tools: their names, parameters and result fields;
+- the `E_*` and `W_*` codes;
+- the config keys and the pack format;
+- the Markdown export layouts and the site's URLs.
+
+A renamed name keeps working, with a warning, for two minor releases and at least 30 days, whichever ends later.
+Text for people, such as messages, fix texts and help, can change in any release. Match a code, never its text.
+Content that the docs mark as planned is outside the promise.
+
+Every later rdy reads every dump that this rdy writes.
+If this rdy refuses the store of a project from a preview with `E_STORE_FORMAT`, move the project with dump and load.
+Run `rdy dump --out <file>` with the old rdy. Then run `rdy load <file> <dir>` with this rdy, into a directory with no store.
 
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
 ";
@@ -1732,16 +1743,17 @@ fn fp_of_signer(signer: &str) -> String {
 #[test]
 fn pre2_preview_readme_preserves_the_dump_route() {
     let readme = read("README.md");
-    // The note is the whole of the collapsed "About this preview" block at the bottom; a
-    // pointer to it comes before the install steps.
+    // Release 1: the note is the whole of the collapsed "About Release 1" block at the bottom;
+    // a pointer to it comes before the install steps. The preview note is gone.
     assert!(
         readme.contains(&format!(
-            "<details>\n<summary><b>About this preview</b></summary>\n\n{PREVIEW_NOTE}\n</details>\n"
+            "<details>\n<summary><b>About Release 1</b></summary>\n\n{RELEASE_NOTE}\n</details>\n"
         )),
-        "the preview note is not exact"
+        "the Release 1 note is not exact"
     );
+    assert!(!readme.contains("About this preview"), "no preview note");
     let at = |s: &str| readme.find(s).unwrap_or_else(|| panic!("missing {s}"));
-    assert!(at("See \"About this preview\"") < at("## Install"));
+    assert!(at("See \"About Release 1\"") < at("## Install"));
     assert!(
         readme.contains(
             "Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
@@ -1895,9 +1907,9 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
         .0;
     assert!(step.contains("```sh\n   rdy setup\n   ```\n"), "{step}");
     for said in [
-        "`rdy_instructions`",
-        "The guide ships inside rdy, so you download nothing.",
-        "To read the whole guide yourself, run rdy instructions --full.",
+        "`rdy_session`, then `rdy_instructions`",
+        "That call gives the agent rdy's guide, so you download nothing.",
+        "To read the whole guide yourself, run `rdy instructions --full`.",
         "The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.",
     ] {
         assert!(step.contains(said), "{said}: {step}");

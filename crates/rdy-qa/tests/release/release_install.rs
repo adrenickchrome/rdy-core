@@ -332,16 +332,14 @@ fn installed_binary_runs_cli_and_mcp() {
 
 #[test]
 fn pre3_preview_note_matches_readme_and_archive() {
+    // Release 1: the real build is plain, so the README has no preview note; the preview
+    // package's PREVIEW.txt stays pinned by the unit tests with explicit fake binaries.
     let readme = fs::read_to_string(root().join("README.md")).expect("README");
-    let section = readme
-        .split("<summary><b>About this preview</b></summary>\n")
-        .nth(1)
-        .expect("the About this preview block");
-    let section = section.split("</details>").next().expect("block");
     assert!(
-        section.contains(PREVIEW_NOTE),
-        "the README's block holds the note's exact bytes"
+        !readme.contains("<summary><b>About this preview</b></summary>"),
+        "a Release 1 README has no preview block"
     );
+    assert!(readme.contains("<summary><b>About Release 1</b></summary>\n"));
     assert!(
         PREVIEW_NOTE
             .ends_with("Report problems at https://github.com/adrenickchrome/rdy-core/issues.\n")
