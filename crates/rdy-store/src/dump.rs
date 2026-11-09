@@ -122,7 +122,12 @@
 //!   not valid, or that names an unknown incompatible feature, is refused.
 //! - **Frames:** the raw frames, byte for byte, of every kind of the latest store
 //!   ([`current_frame_kinds`]). A versioned frame keeps its raw kind (`logical | 0x80`) and its
-//!   version prefix (`crate::codec`); its version must be one its kind registers.
+//!   version prefix (`crate::codec`); its version must be one its kind registers. A dump whose
+//!   manifest names `foreign_copy` (repo links, D-FK58A) also carries the kind that feature adds
+//!   ([`FEATURE_FRAME_KINDS`]: FOREIGN, the foreign log's entries) and the optional encodings it
+//!   registers (`crate::codec::OPTIONAL`); any other dump refuses them as frames that cannot
+//!   stand. The foreign log so travels as the log does: its entries, its held versions and its
+//!   source refs, byte for byte, beside canon and never in it.
 //! - **`DROPPED` payload (104 bytes):** `logical_kind: u8 || encoding: u16 || original_hash ||
 //!   original_len: u32 || apply_hash || has_residue: u8 || residue_hash`: format 3's proof with
 //!   the frame's encoding after its logical kind. The `BATCH` record's digests use the frame's
@@ -1320,9 +1325,10 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
         .map(|(_, k)| *k)
 }
 
-/// The logical kinds of the latest store: every assigned kind but the batch marker, the kinds a
-/// dump-4 frame may have (a versioned frame's logical kind among them). Ascending: the kinds of
-/// store format 18 and the four carried kinds.
+/// The logical kinds of the latest store: every assigned kind but the batch marker and the
+/// kinds a feature adds ([`FEATURE_FRAME_KINDS`]), the kinds a dump-4 frame may have (a versioned
+/// frame's logical kind among them). Ascending: the kinds of store format 18 and the four carried
+/// kinds.
 pub const CURRENT_FRAME_KINDS: [u8; 26] = [
     kinds::BLOCK,
     kinds::CHANGE,
@@ -1357,12 +1363,21 @@ pub fn current_frame_kinds() -> &'static [u8] {
     &CURRENT_FRAME_KINDS
 }
 
+/// The kinds a store feature adds to a dump-4 batch's frames, each with its feature: a frame of
+/// one stands only in a dump whose manifest names the feature. Repo links (D-FK58A): FOREIGN,
+/// with `foreign_copy`, which also lets a frame take its kind's optional encoding
+/// (`crate::codec::OPTIONAL`).
+pub const FEATURE_FRAME_KINDS: [(&str, u8); 1] =
+    [(crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN)];
+
 /// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
-/// store's kinds, where a marked raw kind needs a kind that registers versioned encodings.
+/// store's kinds, where a marked raw kind needs a kind that registers versioned encodings. In a
+/// dump of the latest store whose manifest names `foreign_copy` (`foreign`), the kinds and the
+/// optional encodings that feature adds may stand too.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FrameKinds {
     Legacy(&'static [u8]),
-    Current,
+    Current { foreign: bool },
 }
 
 impl FrameKinds {
@@ -1373,8 +1388,15 @@ impl FrameKinds {
             DumpStore::Legacy(n) if READS.contains(&(format, *n)) => {
                 frame_kinds(format, *n).map(FrameKinds::Legacy)
             }
-            DumpStore::Features(_) if format == DUMP_FORMAT => Some(FrameKinds::Current),
+            DumpStore::Features(m) if format == DUMP_FORMAT => Some(FrameKinds::current(m)),
             _ => None,
+        }
+    }
+
+    /// The frame kinds of a dump of the latest store whose manifest is `m`.
+    pub(crate) fn current(m: &crate::format::StoreFeatures) -> FrameKinds {
+        FrameKinds::Current {
+            foreign: m.has(crate::format::FEATURE_FOREIGN_COPY),
         }
     }
 
@@ -1382,10 +1404,13 @@ impl FrameKinds {
     pub(crate) fn allows(self, raw: u8) -> bool {
         match self {
             FrameKinds::Legacy(k) => k.contains(&raw),
-            FrameKinds::Current => {
+            FrameKinds::Current { foreign } => {
                 let kind = crate::codec::logical_kind(raw);
-                current_frame_kinds().contains(&kind)
-                    && (raw == kind || crate::codec::latest(kind) > 0)
+                let featured = FEATURE_FRAME_KINDS.iter().any(|(_, k)| *k == kind);
+                let known = current_frame_kinds().contains(&kind) || (foreign && featured);
+                let versioned = crate::codec::latest(kind) > 0
+                    || (foreign && crate::codec::optional(kind).is_some());
+                known && (raw == kind || versioned)
             }
         }
     }
@@ -1395,7 +1420,7 @@ impl FrameKinds {
     pub(crate) fn check_payload(self, raw: u8, payload: &[u8]) -> Result<(), String> {
         match self {
             FrameKinds::Legacy(_) => Ok(()),
-            FrameKinds::Current => crate::codec::split(raw, payload)
+            FrameKinds::Current { .. } => crate::codec::split(raw, payload)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
         }
@@ -1727,7 +1752,7 @@ impl<W: Write> DumpWriter<W> {
             }
         };
         crate::format::check_features(features)?;
-        let kinds = FrameKinds::Current;
+        let kinds = FrameKinds::current(features);
         let mut me = DumpWriter {
             w,
             phase: Phase::Files,

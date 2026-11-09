@@ -344,6 +344,12 @@ pub(crate) fn fold_delta(
     Ok(())
 }
 
+/// `a + b`, or the refusal of a count past `u64::MAX`.
+fn add_bytes(a: u64, b: u64) -> Result<u64, StoreError> {
+    a.checked_add(b)
+        .ok_or_else(|| refused(format!("the foreign byte count exceeds {} bytes", u64::MAX)))
+}
+
 fn show(h: &Option<Hash>) -> String {
     h.map_or_else(|| "none".to_string(), |h| h.to_string())
 }
@@ -499,6 +505,50 @@ impl StoreReader {
             }
         }
         Ok(out)
+    }
+
+    /// The bytes the foreign log holds of `repo`: each FOREIGN entry of `repo` and each BLOCK
+    /// version that one of its deliveries names, each counted once at its stored frame (the
+    /// 37-byte frame header and the payload). Every source counts, live or revoked, and so does
+    /// every version a later delivery replaced or removed: each stays held. A version that local
+    /// content shares counts too, so a guard over these bytes never undercounts. Another repo's
+    /// entries and versions are its own. The set of counted versions grows fallibly: a refused
+    /// growth is `StoreError::Refused`.
+    pub fn foreign_bytes(&self, repo: &RepoId) -> Result<u64, StoreError> {
+        let mut total = 0u64;
+        let mut counted: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            let e = self.foreign_entry(&h)?;
+            if e.repo != *repo {
+                return Ok(());
+            }
+            total = add_bytes(total, self.frame_bytes(kinds::FOREIGN, &h)?)?;
+            if let ForeignEvent::Delivery { added, changed, .. } = &e.event {
+                for v in added.iter().chain(changed) {
+                    counted.try_reserve(1).map_err(|_| {
+                        refused("the foreign byte count could not grow its version set".into())
+                    })?;
+                    if counted.insert(v.version) {
+                        total = add_bytes(total, self.frame_bytes(kinds::BLOCK, &v.version)?)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(total)
+    }
+
+    /// The bytes of the stored frame of the object `h` of `kind`: its header and its payload.
+    fn frame_bytes(&self, kind: u8, h: &Hash) -> Result<u64, StoreError> {
+        let at = self
+            .index()
+            .typed(kind, h)?
+            .ok_or_else(|| damaged(format!("foreign object {h} has no place in the log")))?;
+        let (len, _, _) = self
+            .segments()
+            .header(at)?
+            .ok_or_else(|| damaged(format!("foreign object {h} has no frame in the log")))?;
+        Ok(crate::segment::HEADER + u64::from(len))
     }
 
     /// The block of a held pin: version `version` of `target`, when an entry of `target`'s repo
