@@ -6844,16 +6844,29 @@ fn rtc7_release_guide_keeps_source_and_generated_suffix_separate() {
 
     // development source: the edition says so and cannot equal the package version, which is
     // the check that production eligibility makes against the release it ships
+    // A release commit S holds the public bundle from the frozen landing L instead: its edition
+    // is the package version and it names L (checklist step 3).
     let edition = bundle["edition"].as_str().expect("an edition");
-    assert!(edition.ends_with("-dev"), "{edition}");
-    assert_ne!(edition, env!("CARGO_PKG_VERSION"));
-    assert!(
-        edition
-            .trim_end_matches("-dev")
-            .split('.')
-            .all(|n| n.parse::<u64>().is_ok()),
-        "{edition}"
-    );
+    if edition.ends_with("-dev") {
+        assert_ne!(edition, env!("CARGO_PKG_VERSION"));
+        assert!(
+            edition
+                .trim_end_matches("-dev")
+                .split('.')
+                .all(|n| n.parse::<u64>().is_ok()),
+            "{edition}"
+        );
+    } else {
+        assert_eq!(edition, env!("CARGO_PKG_VERSION"), "a release bundle");
+        let landing = bundle["design_landing"].as_str().expect("a landing");
+        assert!(
+            landing.len() == 64
+                && landing
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{landing}"
+        );
+    }
     // the source holds no generated line and no digest of its own
     let mut sources = vec![];
     for set in bundle["rulesets"].as_array().expect("rulesets") {
