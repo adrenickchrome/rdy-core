@@ -356,6 +356,9 @@ fn delivery() -> ForeignEntry {
     }
 }
 
+/// A named foreign shape: its frame and the encoding it takes.
+type Shape = (&'static str, (u8, Vec<u8>), u16);
+
 fn postcard_of<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).unwrap()
 }
@@ -696,7 +699,7 @@ fn rpl3_feature_first_use_is_atomic() {
     // and the open puts FORMAT back to the log's manifest
     let dir = d.path().join("torn");
     drop(Store::create(&dir).unwrap());
-    let ahead = baseline_features().merged(&[foreign.clone()]);
+    let ahead = baseline_features().merged(std::slice::from_ref(foreign));
     format::write_format_file(&dir, &ahead).unwrap();
     carried_fixture::append_raw(&dir, &[entry], false);
     let s = Store::open(&dir).unwrap();
@@ -739,7 +742,7 @@ fn rpl3_new_shapes_refuse_without_feature() {
         why: why(Cause::Delivered, Some(h(66))),
     });
     // each foreign shape: its frame, its encoding, its feature
-    let shapes: Vec<(&str, (u8, Vec<u8>), u16)> = vec![
+    let shapes: Vec<Shape> = vec![
         (
             "FOREIGN entry",
             codec::item_new(kinds::FOREIGN, &delivery()),
