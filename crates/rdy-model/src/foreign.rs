@@ -193,7 +193,7 @@ pub enum ForeignSource {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ForeignEvent {
     Delivery {
-        #[serde(with = "hex_opt")]
+        #[serde(default, with = "hex_opt")]
         prev: Option<Hash>,
         publication: ForeignPublication,
         set: Option<ForeignSet>,
@@ -211,6 +211,7 @@ pub enum ForeignEvent {
     Removal {
         #[serde(with = "hex_one")]
         proof: Hash,
+        #[serde(with = "hex_versions")]
         versions: Vec<(BlockId, Hash)>,
     },
 }
@@ -219,6 +220,7 @@ pub enum ForeignEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForeignEntry {
+    #[serde(with = "hex_repo")]
     pub repo: RepoId,
     pub source: ForeignSource,
     pub event: ForeignEvent,
@@ -318,6 +320,60 @@ mod hex_opt {
                 .transpose()
         } else {
             Option::<Hash>::deserialize(d)
+        }
+    }
+}
+
+mod hex_versions {
+    use crate::{BlockId, Hash};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[(BlockId, Hash)], s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            v.iter()
+                .map(|(id, h)| (id, h.to_string()))
+                .collect::<Vec<_>>()
+                .serialize(s)
+        } else {
+            v.serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(BlockId, Hash)>, D::Error> {
+        if d.is_human_readable() {
+            Vec::<(BlockId, String)>::deserialize(d)?
+                .into_iter()
+                .map(|(id, t)| {
+                    t.parse()
+                        .map(|h| (id, h))
+                        .map_err(|_| serde::de::Error::custom(format!("bad hash {t:?}")))
+                })
+                .collect()
+        } else {
+            Vec::<(BlockId, Hash)>::deserialize(d)
+        }
+    }
+}
+
+mod hex_repo {
+    use crate::RepoId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(r: &RepoId, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.serialize_str(&r.to_string())
+        } else {
+            r.serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RepoId, D::Error> {
+        if d.is_human_readable() {
+            let text = String::deserialize(d)?;
+            text.parse()
+                .map_err(|_| serde::de::Error::custom(format!("bad repo id {text:?}")))
+        } else {
+            RepoId::deserialize(d)
         }
     }
 }

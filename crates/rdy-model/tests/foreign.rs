@@ -140,6 +140,21 @@ fn rpl1_sources_and_events_have_closed_shapes() {
     let entry =
         r#"{"repo":"x","source":{"link":{"link":"a","site":"b","at_ms":1,"extra":1}},"event":{}}"#;
     assert!(from_json::<ForeignEntry>(entry).is_err());
+    // nested: every other value is valid, so only the unknown key fails
+    let nested = format!(
+        r#"{{"repo":"{}","source":{{"link":{{"link":"a","site":"b","at_ms":1,"extra":1}}}},"event":{{"revoked":{{"prev":"{}"}}}}}}"#,
+        repo(7),
+        Hash::of(b"p")
+    );
+    assert!(matches!(
+        from_json::<ForeignEntry>(&nested).unwrap_err(),
+        ForeignInputError::UnknownKey { ref key, .. } | ForeignInputError::UnknownKeyDidYouMean { ref key, .. } if key == "extra"
+    ));
+    let fixed = nested.replace(r#","extra":1"#, "");
+    assert!(
+        from_json::<ForeignEntry>(&fixed).is_ok(),
+        "the base input is valid"
+    );
 }
 
 #[test]
@@ -178,4 +193,50 @@ fn rpl1_publication_profile_version_is_a_hash_or_absent() {
         let pc = postcard::to_allocvec(&p).unwrap();
         assert_eq!(postcard::from_bytes::<ForeignPublication>(&pc).unwrap(), p);
     }
+}
+
+#[test]
+fn rpl1_removal_versions_are_hex_in_json() {
+    let h = Hash::of(b"v");
+    let removal = ForeignEvent::Removal {
+        proof: Hash::of(b"q"),
+        versions: vec![(bid("D-00001"), h)],
+    };
+    let json = serde_json::to_string(&removal).unwrap();
+    assert!(json.contains(&format!("[\"D-00001\",\"{h}\"]")), "{json}");
+    assert_eq!(from_json::<ForeignEvent>(&json).unwrap(), removal);
+    let pc = postcard::to_allocvec(&removal).unwrap();
+    assert_eq!(postcard::from_bytes::<ForeignEvent>(&pc).unwrap(), removal);
+}
+
+#[test]
+fn rpl1_delivery_prev_may_be_omitted() {
+    let json = format!(
+        r#"{{"delivery":{{"publication":{{"tag":"t","profile":"p","profile_version":null}},"set":null,"added":[],"changed":[],"removed":[],"selection":"{}"}}}}"#,
+        Hash::of(b"s")
+    );
+    match from_json::<ForeignEvent>(&json).unwrap() {
+        ForeignEvent::Delivery { prev, .. } => assert_eq!(prev, None),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn rpl1_entry_repo_is_hex_in_json() {
+    let entry = ForeignEntry {
+        repo: repo(7),
+        source: ForeignSource::Adr {
+            source: "adrs".into(),
+            revision: "r".into(),
+        },
+        event: ForeignEvent::Revoked {
+            prev: Hash::of(b"p"),
+        },
+    };
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(
+        json.contains(&format!("\"repo\":\"{}\"", repo(7))),
+        "{json}"
+    );
+    assert_eq!(from_json::<ForeignEntry>(&json).unwrap(), entry);
 }
