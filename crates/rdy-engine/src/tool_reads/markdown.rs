@@ -1,6 +1,6 @@
 //! `rdy_read` markdown (md1): every block's primary content and its id. Folders are path
 //! headings; section headings count from their doc (doc `#`, its sections `##`).
-use rdy_engine::{Materialized, field_json};
+use crate::{Materialized, field_json};
 use rdy_model::{Block, FieldValue, decision, tree};
 
 /// How far below its doc `b` sits (the doc itself is 0), or None outside a doc.

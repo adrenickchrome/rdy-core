@@ -122,6 +122,7 @@ pub mod suggest;
 pub mod suspect_reply;
 pub mod tensions;
 pub mod testkit;
+pub mod tool_reads;
 pub mod trace;
 pub mod transitions;
 mod tree_io;

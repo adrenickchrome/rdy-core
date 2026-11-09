@@ -1,16 +1,11 @@
 //! rpag1, rpat1: the parts of `rdy_read` that page whole blocks with a cursor and keep only the
 //! blocks a pattern matches.
-use rdy_engine::{E_BAD_INPUT, RdyError};
 use serde::Serialize;
 use std::collections::VecDeque;
 
 /// The most cut reads one MCP session keeps a cursor for; the oldest is dropped first.
 pub const READ_REGISTRY_CAP: usize = 32;
-/// The longest pattern `rdy_read` accepts, in characters.
-pub const MAX_PATTERN: usize = 1024;
-/// The most text, in bytes, a `/regex/` read matches against. Every page call runs the pattern
-/// over the whole read while it holds the session lock, so the text is capped.
-pub(crate) const READ_REGEX_HAYSTACK_MAX: usize = 4 * 1024 * 1024;
+pub use rdy_engine::tool_reads::{MAX_PATTERN, Pattern};
 
 /// A read as its first call gave it (`format` defaulted to `compact`). Its JSON is part of the
 /// page token, and a page call reads with it again.
@@ -46,59 +41,6 @@ impl ReadRegistry {
             .iter()
             .find(|(t, _)| t == token)
             .map(|(_, q)| q.clone())
-    }
-}
-
-/// What a read keeps: a substring (any case), or a `/regex/`.
-pub enum Pattern {
-    /// Lowercased.
-    Substring(String),
-    Regex(regex::Regex),
-}
-
-impl Pattern {
-    pub fn parse(text: &str) -> Result<Pattern, RdyError> {
-        if text.is_empty() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "pattern is empty",
-                "pass a substring, or /regex/",
-            ));
-        }
-        if text.chars().count() > MAX_PATTERN {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("pattern is longer than {MAX_PATTERN} characters"),
-                "use a shorter pattern",
-            ));
-        }
-        if text.len() >= 2 && text.starts_with('/') && text.ends_with('/') {
-            let inner = &text[1..text.len() - 1];
-            return rdy_engine::search::bounded_regex(inner, false)
-                .map(Pattern::Regex)
-                .map_err(|e| {
-                    if e.code != E_BAD_INPUT {
-                        return e;
-                    }
-                    let detail = e
-                        .message
-                        .strip_prefix("query is not a valid pattern: ")
-                        .unwrap_or(&e.message);
-                    RdyError::new(
-                        E_BAD_INPUT,
-                        format!("pattern is not a valid regex: {detail}"),
-                        "write /regex/ in Rust regex syntax, or a plain substring",
-                    )
-                });
-        }
-        Ok(Pattern::Substring(text.to_lowercase()))
-    }
-
-    pub fn matches(&self, line: &str) -> bool {
-        match self {
-            Pattern::Substring(s) => line.to_lowercase().contains(s.as_str()),
-            Pattern::Regex(r) => r.is_match(line),
-        }
     }
 }
 
@@ -146,6 +88,7 @@ pub fn page_entries(entries: &[String], from: usize, sep: &str, budget_bytes: us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdy_engine::E_BAD_INPUT;
 
     fn q(id: &str) -> ReadQuery {
         ReadQuery {

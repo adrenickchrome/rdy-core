@@ -15,6 +15,7 @@ pub mod history;
 pub mod maintenance;
 pub mod publication;
 pub mod publication_take;
+pub mod reads;
 pub mod rendering;
 pub mod signatures;
 mod store;
@@ -33,12 +34,14 @@ pub use publication_take::{
 };
 pub use rdy_engine::follower::FollowReport;
 pub use rdy_engine::identity::{MAX_ACTOR_BYTES, is_actor};
+pub use rdy_engine::search::SearchFilters;
 pub use rdy_engine::{
     CarriedTargetIssue, CarriedWarning, CompactReport, KindBytes, RdyError, core_error_code,
 };
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;
+pub use reads::{ReadRequest, SearchRequest};
 pub use store::{Identity, Snapshot, StoreHandle};
 pub use take::{StorePosition, TakeOutcome, UploadTarget};
 pub use value::{encode_block, hash_bytes};
