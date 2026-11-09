@@ -18,6 +18,8 @@
 //! read with the tags' objects too: a twin's tag kept beside the version that names the same
 //! landing. There is no pack validation: a holder has no pack.
 //!
+//! A holder holds no FOREIGN entry (repo links, D-FK58A): a foreign log belongs to a project.
+//!
 //! Every walk is iterative and bounded: [`MAX_LANDING_DEPTH`] landings in one chain,
 //! [`MAX_OBJECTS`] objects and [`MAX_EDGES`] object links. Past a bound the check refuses with
 //! `holder check exceeds {limit}` ([`holder_check_limit`] reads the limit back).
@@ -459,6 +461,8 @@ impl StoreReader {
         }
         // the holder rule first: the mode's history and the closed ref families
         self.check_meta()?;
+        // a holder keeps tag histories, never a foreign log (D-FK58A)
+        self.check_no_foreign()?;
         let relayed_tags = self.check_answer_tags()?;
         let tags = self.holder_tags()?;
         let mut closure = Closure::new(self, limits);
@@ -514,7 +518,21 @@ impl StoreReader {
             inboxes: 0,
             transitions: 0,
             answers,
+            foreign: 0,
         })
+    }
+
+    /// A holder holds no FOREIGN entry: `holder holds foreign entry {hash}` otherwise.
+    fn check_no_foreign(&self) -> Result<(), StoreError> {
+        let mut found = None;
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            found.get_or_insert(h);
+            Ok(())
+        })?;
+        match found {
+            Some(h) => Err(bad(format!("holder holds foreign entry {h}"))),
+            None => Ok(()),
+        }
     }
 
     /// O11 (ruling task-13): each `answer/tag-object:<hash>` ref names, by 64 lowercase hex

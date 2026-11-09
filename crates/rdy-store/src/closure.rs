@@ -27,6 +27,9 @@
 //! - every CHECK_REQUEST whose subject names a closure change or proposal version, and every
 //!   REVIEW whose subject is a closure check request.
 //!
+//! A foreign entry (kind FOREIGN, repo links) is never in a closure: a link that names one is
+//! refused with `object is outside the tag closure`, naming the entry (D-FK58A).
+//!
 //! Each attachment's own links join the walk (an apply's request and its human landing, with
 //! that landing's history), and attachments are taken again until no new key appears: a key is
 //! taken once, so the walk ends. No other ref is followed.
@@ -423,6 +426,12 @@ pub(crate) fn store_error(e: StoreError, object: Option<ObjectKey>) -> StreamErr
     }
 }
 
+/// The refusal of a closure that reaches the foreign entry `k`: `object is outside the tag
+/// closure`, naming it. A foreign entry belongs to the project's foreign log, never to a tag.
+fn outside_closure(k: ObjectKey) -> StreamError {
+    StreamError::bad_record(0, 0, Reason::OutsideTagClosure).with_object(Some(k))
+}
+
 /// The walk of one closure.
 struct Walk<'a> {
     source: StoreSource<'a>,
@@ -482,6 +491,10 @@ impl Walk<'_> {
         }
         if let Some(carried) = self.carried.get(&k) {
             return Err(self.carried_refusal(*carried).with_object(Some(k)));
+        }
+        // a foreign entry is never a tag's history (D-FK58A)
+        if k.kind == kinds::FOREIGN {
+            return Err(outside_closure(k));
         }
         let Some(record) = self.source.record(k)? else {
             if known.contains(&k) {
@@ -553,6 +566,13 @@ impl Walk<'_> {
                 }
                 found = Some(ObjectKey { kind, hash: r.hash });
             }
+        }
+        // a link of any kind that names a foreign entry: never a tag's history (D-FK58A)
+        if found.is_none() && self.source.holds(kinds::FOREIGN, &r.hash)? {
+            return Err(outside_closure(ObjectKey {
+                kind: kinds::FOREIGN,
+                hash: r.hash,
+            }));
         }
         // kind 0: no stored object of any kind has the hash
         Ok(found.unwrap_or(ObjectKey {

@@ -9,7 +9,8 @@
 //!
 //! A FOREIGN entry (kind 29, repo links) is registered but not portable yet: `refs_of` refuses it
 //! as `Kind`. The records that may name one (a TRANSITION's `delivered` cause and foreign side, an
-//! ASSESSMENT's foreign tension side) give a FOREIGN edge.
+//! ASSESSMENT's foreign tension side) give a FOREIGN edge. [`MAY_NAME_FOREIGN`] is the closed list
+//! of kinds that may name foreign content; fsck refuses such an edge in any other record.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
     self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
@@ -67,6 +68,25 @@ pub const PORTABLE_KINDS: [u8; 24] = [
 /// Whether `kind` is an assigned portable object kind.
 pub fn is_portable(kind: u8) -> bool {
     PORTABLE_KINDS.contains(&kind)
+}
+
+/// The closed list of kinds whose records may name a FOREIGN entry or a BLOCK version that only a
+/// foreign entry holds (D-FK58A). No record of another portable kind names one: not a landing
+/// (nor its state snapshot), change, proposal, view op, signature or tag. A ref, a block link and
+/// a foreign pin are no object edge, so they may name foreign content.
+pub const MAY_NAME_FOREIGN: [u8; 6] = [
+    kinds::TRANSITION,
+    kinds::TENSION,
+    kinds::REVIEW,
+    kinds::ANSWER,
+    kinds::ASSESSMENT,
+    kinds::REDACTION,
+];
+
+/// Whether a record of logical kind `kind` may name a FOREIGN entry or a foreign-only BLOCK
+/// version ([`MAY_NAME_FOREIGN`]).
+pub fn may_name_foreign(kind: u8) -> bool {
+    MAY_NAME_FOREIGN.contains(&kind)
 }
 
 /// One stored object: its kind and hash, ordered by kind then hash. JSON (and any other

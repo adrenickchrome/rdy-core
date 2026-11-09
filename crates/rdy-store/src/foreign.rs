@@ -269,7 +269,7 @@ impl Store {
 
 /// Applies a delivery's delta to `sel`: an added id is new, a changed or removed id is a member,
 /// and no id is listed twice.
-fn fold_delta(
+pub(crate) fn fold_delta(
     sel: &mut BTreeMap<BlockId, Hash>,
     added: &[ForeignVersion],
     changed: &[ForeignVersion],
