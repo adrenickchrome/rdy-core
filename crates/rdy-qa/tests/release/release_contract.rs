@@ -265,8 +265,52 @@ fn normalize(text: &str, paths: &[&Path]) -> String {
     out = out
         .replace("<path>\\\\", "<path>/")
         .replace("<path>\\", "<path>/");
+    let out = slash_tails(&out);
     let port = Regex::new(r"127\.0\.0\.1:[0-9]+").unwrap();
     port.replace_all(&out, "127.0.0.1:<port>").into_owned()
+}
+
+/// A file deeper below a normalized path keeps its native separators on Windows
+/// (`<path>/rdy\config.yaml`, or `<path>/rdy\\config.yaml` in JSON text). The fixture spells
+/// every separator `/`, as on Unix. In JSON text only a doubled backslash is a separator, so a
+/// string escape such as `\n` after a path stays as it is.
+fn slash_tails(text: &str) -> String {
+    let (re, sep) = if serde_json::from_str::<Value>(text).is_ok() {
+        (r"<path>/[A-Za-z0-9._-]+(?:\\\\[A-Za-z0-9._-]+)+", "\\\\")
+    } else {
+        (r"<path>/[A-Za-z0-9._-]+(?:\\[A-Za-z0-9._-]+)+", "\\")
+    };
+    Regex::new(re)
+        .unwrap()
+        .replace_all(text, |c: &regex::Captures| c[0].replace(sep, "/"))
+        .into_owned()
+}
+
+#[test]
+fn ok14_normalize_spells_windows_file_tails_with_slashes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_string_lossy().to_string();
+    // plain text, as `rdy config --show-origin` prints it on Windows
+    let text = format!("actor = human:qa  # {root}\\rdy\\config.yaml  # set at: local, user\n");
+    assert_eq!(
+        normalize(&text, &[dir.path()]),
+        "actor = human:qa  # <path>/rdy/config.yaml  # set at: local, user\n"
+    );
+    // JSON text: the separators are doubled, and an escape after the path is kept
+    let json_root = root.replace('\\', "\\\\");
+    let text = format!(
+        "{{\"file\": \"{json_root}\\\\.rdy\\\\local.yaml\", \"m\": \"in {json_root}\\\\a.yaml\\nnext\"}}"
+    );
+    assert_eq!(
+        normalize(&text, &[dir.path()]),
+        "{\"file\": \"<path>/.rdy/local.yaml\", \"m\": \"in <path>/a.yaml\\nnext\"}"
+    );
+    // a Unix tail is unchanged
+    let text = format!("# {root}/.rdy/local.yaml\n");
+    assert_eq!(
+        normalize(&text, &[dir.path()]),
+        "# <path>/.rdy/local.yaml\n"
+    );
 }
 
 // ---- source scanning ----
