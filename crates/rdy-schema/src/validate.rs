@@ -1,6 +1,8 @@
 use crate::glob::Glob;
 use crate::instruction;
-use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
+use crate::pack::{
+    BodyRule, DEVIATES_FROM, DEVIATION_ON_FIX, FieldKind, Pack, TypeClass, deviation_on_message,
+};
 use crate::policy;
 use crate::publication;
 use crate::repo_link;
@@ -362,7 +364,25 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         )),
         _ => {}
     }
-    for name in block.links.keys() {
+    // repo links: a foreign link's kind follows the pack as a local one's does; deviates_from is
+    // the engine's own foreign link kind, on a decision only (D-8VJAZ)
+    let foreign_kinds = block.foreign.links.keys().filter(|k| {
+        if k.as_str() != DEVIATES_FROM {
+            return true;
+        }
+        if block.block_type != decision::DECISION {
+            out.push(err(
+                block,
+                "E_LINK_TYPE",
+                deviation_on_message(&block.block_type),
+                DEVIATION_ON_FIX.to_string(),
+            ));
+        }
+        false
+    });
+    let kinds: std::collections::BTreeSet<&String> =
+        block.links.keys().chain(foreign_kinds).collect();
+    for name in kinds {
         if !pack.link_types.contains(name) {
             out.push(err(
                 block,

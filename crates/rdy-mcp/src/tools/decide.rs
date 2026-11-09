@@ -108,6 +108,8 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         conditional_on: p.conditional_on.unwrap_or_default(),
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
+        // repo links: rdy_decide takes no deviates_from parameter yet
+        deviates_from: vec![],
         no_inherit,
         brief: p.brief,
         fields: p

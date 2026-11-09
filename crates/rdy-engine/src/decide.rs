@@ -51,6 +51,10 @@ pub struct DecisionInput {
     pub refines: Vec<String>,
     #[serde(default)]
     pub answers: Vec<String>,
+    /// Repo links (D-8VJAZ): the cited decisions, cited instructions or external decisions this
+    /// decision departs from, as `alias:id`, `alias:KEY` or the stored `<repo>:<id>`.
+    #[serde(default)]
+    pub deviates_from: Vec<String>,
     /// sup1: link kinds rdy_supersede must not copy from the old decision.
     #[serde(default)]
     pub no_inherit: Vec<String>,
@@ -92,6 +96,7 @@ fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
         (decision::CONDITIONAL_ON, &d.conditional_on),
         (decision::REFINES, &d.refines),
         (decision::ANSWERS, &d.answers),
+        (rdy_schema::DEVIATES_FROM, &d.deviates_from),
     ] {
         if !ids.is_empty() {
             links.insert(
@@ -348,6 +353,12 @@ impl Rdy {
     }
 
     fn require_decision(&mut self, view: &str, id: &str) -> Result<BlockId, RdyError> {
+        // repo links (D-8VJAZ): a cited decision or an external one is read-only here
+        {
+            let st = self.read();
+            let m = st.materialized(&Scope::View(view.into()))?;
+            crate::foreign_guard::Guard::new(&st, &m).check(id)?;
+        }
         let bid = BlockId::parse(id).map_err(|e| {
             RdyError::new(
                 E_BAD_INPUT,

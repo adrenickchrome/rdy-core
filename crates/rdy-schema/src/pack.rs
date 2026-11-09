@@ -140,6 +140,21 @@ pub struct AreaDef {
     pub paths: Vec<String>,
 }
 
+/// The engine link kind of a decision that departs from a cited decision, a cited instruction or
+/// an external decision (repo links, D-8VJAZ). No pack declares it, and it is never among a pack's
+/// `link_types`: it is a foreign link, on a decision only.
+pub const DEVIATES_FROM: &str = "deviates_from";
+
+/// The issue message of a `deviates_from` link on a block of type `block_type`, not a decision.
+pub fn deviation_on_message(block_type: &str) -> String {
+    format!(
+        "type {block_type} cannot carry {DEVIATES_FROM}: only a decision departs from a cited block"
+    )
+}
+
+/// The fix of a `deviates_from` link on a block that is not a decision.
+pub const DEVIATION_ON_FIX: &str = "remove deviates_from; record the departure as a decision: rdy_decide with deviates_from / a decision with deviates_from in rdy edit";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pack {

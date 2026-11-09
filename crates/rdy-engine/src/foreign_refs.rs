@@ -201,6 +201,11 @@ impl<'a> ForeignCite<'a> {
         self.links.get_or_init(|| RepoLinks::of_view(self.base))
     }
 
+    /// The read state the write starts from.
+    pub(crate) fn state(&self) -> &'a ReadState {
+        self.st
+    }
+
     /// This project's repo id.
     pub(crate) fn own_repo(&self) -> Result<RepoId, RdyError> {
         self.st.repo_id()
@@ -246,7 +251,8 @@ impl<'a> ForeignCite<'a> {
 
     /// The pin a new citation of `target` takes: the one its alias resolved in this write, else
     /// (a citation written in the stored form) the current delivery of the first live alias of
-    /// its repo, in sorted order, whose profile selection holds it.
+    /// its repo, in sorted order, whose profile selection holds it, else, for an external
+    /// decision, the current delivery of its ADR sources.
     pub(crate) fn new_pin(&self, target: &ForeignId) -> Result<ForeignPin, RdyError> {
         if let Some(pin) = self.fresh.borrow().get(target) {
             return Ok(pin.clone());
@@ -264,10 +270,20 @@ impl<'a> ForeignCite<'a> {
                 });
             }
         }
-        Err(match first {
-            Some(alias) => not_delivered(alias, target.id.as_str()),
-            None => unknown_alias(&links.shown(&target.repo)),
-        })
+        if let Some(alias) = first {
+            return Err(not_delivered(alias, target.id.as_str()));
+        }
+        // rpl13: an external decision is pinned to what its ADR sources deliver now
+        if let Some((name, _)) = crate::foreign_guard::adr_source(foreign, &target.repo) {
+            return match foreign.current_version(target) {
+                Some(held) => Ok(ForeignPin {
+                    content: held.version.content,
+                    encoding: held.version.encoding,
+                }),
+                None => Err(not_delivered(name, target.id.as_str())),
+            };
+        }
+        Err(unknown_alias(&links.shown(&target.repo)))
     }
 
     /// `text` with every `{{alias:id}}` and `{{alias:KEY}}` reference (as `mode` reads them)

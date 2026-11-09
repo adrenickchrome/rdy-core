@@ -38,6 +38,7 @@ pub mod factsheet;
 pub mod filter;
 pub mod follower;
 pub mod foreign;
+mod foreign_guard;
 mod foreign_refs;
 pub mod formats;
 mod fsck;
@@ -152,6 +153,7 @@ pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use foreign::ForeignState;
+pub use foreign_guard::Deviation;
 pub use gate::{
     LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow, ProposalInfo, ProposalRef,
     RebasedInfo, RelayedByRow, run_land,

@@ -2857,6 +2857,8 @@ fn build_ops(
             }
             block.pins = pins;
             block.foreign.pins = foreign_pins;
+            // a deviation departs from a cited decision or instruction, or an external decision
+            crate::foreign_guard::check_deviation_targets(foreign.state(), foreign.links(), block)?;
         }
     }
     // repo links: every foreign pin the write leaves names a held version, before any append
@@ -3575,6 +3577,8 @@ impl Rdy {
         let conflicts = st.conflicts(&scope)?;
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
+        // repo links (D-8VJAZ): a cited block is read-only, refused before any op's ids resolve
+        crate::foreign_guard::Guard::new(&st, &m).check_ops(&req.ops)?;
         check_implements(&st, &scope, &m, req.justification.as_ref())?;
         // D-Z8P09, D-X3136: a decision, a finding or a source created with no parent goes to the
         // decision home, or the project root; done before the briefing check, so the home is one

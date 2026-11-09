@@ -89,7 +89,7 @@ fn second_use_of(yaml: &str, key: &str, line: usize, col: usize) -> Option<(usiz
 }
 
 /// The engine link kind and field of a decision that departs from a cited decision (reserved).
-const RESERVED_DEVIATES_FROM: &str = "deviates_from";
+const RESERVED_DEVIATES_FROM: &str = DEVIATES_FROM;
 /// The engine field of a decision an upstream adoption supersedes (reserved).
 const RESERVED_ADOPTED_AS: &str = "adopted_as";
 
