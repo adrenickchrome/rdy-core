@@ -12,7 +12,7 @@
 //! - A publish re-reads the sources whose newest entry moved and carries the rest. A project
 //!   without the `foreign_copy` feature has no foreign state and pays nothing.
 use crate::{Rdy, RdyError, ReadState};
-use rdy_model::foreign::{ForeignEvent, ForeignId};
+use rdy_model::foreign::{ForeignEvent, ForeignId, ForeignPin};
 use rdy_model::{Block, BlockId, Hash, RepoId};
 use rdy_store::foreign::{HeldVersion, SourceView};
 use rdy_store::format::FEATURE_FOREIGN_COPY;
@@ -21,8 +21,13 @@ use rdy_store::{StoreReader, kinds};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
-/// The (repo, block, version) triples that entries before a watermark delivered.
-type HeldIndex = BTreeSet<(RepoId, BlockId, Hash)>;
+/// What entries before a watermark delivered: the (repo, block, version) triples, and per
+/// (repo, block, content, content encoding) the version that carried it.
+#[derive(Debug, Default)]
+struct HeldIndex {
+    versions: BTreeSet<(RepoId, BlockId, Hash)>,
+    contents: BTreeMap<(RepoId, BlockId, Hash, u16), Hash>,
+}
 
 /// The foreign side of one read state.
 #[derive(Debug)]
@@ -196,7 +201,7 @@ impl ForeignState {
     fn held_index(&self, reader: &StoreReader) -> Result<Arc<HeldIndex>, RdyError> {
         self.held
             .get_or_init(|| {
-                let mut index = HeldIndex::new();
+                let mut index = HeldIndex::default();
                 reader.for_each_object_of(kinds::FOREIGN, |h| {
                     if !reader.has_kind_before(kinds::FOREIGN, &h, self.watermark)? {
                         return Ok(());
@@ -204,7 +209,10 @@ impl ForeignState {
                     let e = reader.foreign_entry(&h)?;
                     if let ForeignEvent::Delivery { added, changed, .. } = e.event {
                         for v in added.into_iter().chain(changed) {
-                            index.insert((e.repo, v.id, v.version));
+                            index
+                                .contents
+                                .insert((e.repo, v.id.clone(), v.content, v.encoding), v.version);
+                            index.versions.insert((e.repo, v.id, v.version));
                         }
                     }
                     Ok(())
@@ -234,11 +242,30 @@ impl ReadState {
     ) -> Result<Option<Block>, RdyError> {
         let foreign = self.foreign()?;
         let index = foreign.held_index(&self.reader)?;
-        if !index.contains(&(target.repo, target.id.clone(), *version)) {
+        if !index
+            .versions
+            .contains(&(target.repo, target.id.clone(), *version))
+        {
             return Ok(None);
         }
         let block = self.reader.get_block(version)?;
         Ok((block.id == target.id).then_some(block))
+    }
+
+    /// The version that carried the content a foreign pin records for `target`, when an entry
+    /// before this state's watermark delivered it, whatever its source's state now. `None` when
+    /// no such entry exists: the pin's version is not held here (repo links, D-FK58A).
+    pub fn foreign_held_pin(
+        &self,
+        target: &ForeignId,
+        pin: &ForeignPin,
+    ) -> Result<Option<Hash>, RdyError> {
+        let foreign = self.foreign()?;
+        let index = foreign.held_index(&self.reader)?;
+        Ok(index
+            .contents
+            .get(&(target.repo, target.id.clone(), pin.content, pin.encoding))
+            .copied())
     }
 }
 

@@ -73,6 +73,56 @@ impl Target {
     }
 }
 
+/// The most characters of a repo link alias (repo links).
+pub const MAX_ALIAS_CHARS: usize = 24;
+
+/// A foreign reference token (repo links, D-DAPR8): `alias:id` or `alias:KEY` as an author
+/// writes it, or `<repo>:<id>` as the store keeps it (32 lowercase hex digits, a colon, a block
+/// id). Read from the token of a `{{…}}` reference or from a link target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForeignRef<'a> {
+    /// An alias and the id or key it names in the alias's delivered content.
+    Alias { alias: &'a str, target: &'a str },
+    /// The stored form: the cited repo and the block id there.
+    Stored {
+        repo: crate::RepoId,
+        id: crate::BlockId,
+    },
+}
+
+/// Whether `s` is a repo link alias: `[a-z][a-z0-9-]{0,23}`.
+pub fn is_alias(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=MAX_ALIAS_CHARS).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// The foreign reference `token` holds, if any: `<32 lowercase hex>:<block id>` is the stored
+/// form; `<alias>:<id or key>` is the author's form. Any other token, a local id or key
+/// included, is `None` (a key or id never holds a colon).
+pub fn foreign_ref(token: &str) -> Option<ForeignRef<'_>> {
+    let (left, right) = token.split_once(':')?;
+    if left.len() == 32 && left.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        return Some(ForeignRef::Stored {
+            repo: left.parse().ok()?,
+            id: crate::BlockId::parse(right).ok()?,
+        });
+    }
+    let target_ok = crate::BlockId::is_valid(right) || crate::key::problem(right).is_none();
+    (is_alias(left) && target_ok).then_some(ForeignRef::Alias {
+        alias: left,
+        target: right,
+    })
+}
+
+/// The stored token of a foreign reference: `<repo>:<id>`.
+pub fn foreign_token(repo: &crate::RepoId, id: &crate::BlockId) -> String {
+    format!("{repo}:{id}")
+}
+
 /// The snippet of a ref: whitespace collapsed, a straight `"` turned into `'`, cut at the last
 /// space before `max` characters with `…` appended; one token longer than `max` is cut
 /// mid-token.
@@ -181,6 +231,55 @@ mod tests {
                 .starts_with("a ref is [id] or [id@version]")
         );
         assert!(parse_target("[]").is_err() && parse_target("@v1").is_err());
+    }
+    #[test]
+    fn rpl12_foreign_ref_reads_alias_and_stored_forms() {
+        let repo = "07".repeat(16);
+        assert_eq!(
+            foreign_ref(&format!("{repo}:d-FRGNX")),
+            Some(ForeignRef::Stored {
+                repo: crate::RepoId([7; 16]),
+                id: crate::BlockId::parse("d-FRGNX").unwrap()
+            })
+        );
+        assert_eq!(
+            foreign_ref("core:d-FRGNX"),
+            Some(ForeignRef::Alias {
+                alias: "core",
+                target: "d-FRGNX"
+            })
+        );
+        assert_eq!(
+            foreign_ref("core-2:CORE-RULE"),
+            Some(ForeignRef::Alias {
+                alias: "core-2",
+                target: "CORE-RULE"
+            })
+        );
+        // not foreign: no colon, a bad alias, a bad target, an upper-case or short repo
+        let upper = format!("{}:d-FRGNX", "AB".repeat(16));
+        let bad_id = format!("{repo}:not an id");
+        let long = format!("{}:d-FRGNX", "a".repeat(25));
+        for t in [
+            "d-FRGNX",
+            "KEY",
+            "Core:d-FRGNX",
+            "core:",
+            "core:a b",
+            upper.as_str(),
+            "0707:d-FRGNX",
+            bad_id.as_str(),
+            long.as_str(),
+        ] {
+            assert_eq!(foreign_ref(t), None, "{t}");
+        }
+        assert_eq!(
+            foreign_token(
+                &crate::RepoId([7; 16]),
+                &crate::BlockId::parse("d-FRGNX").unwrap()
+            ),
+            format!("{repo}:d-FRGNX")
+        );
     }
     #[test]
     fn refv1_snippet_and_head_follow_the_grammar() {

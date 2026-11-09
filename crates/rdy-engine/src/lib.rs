@@ -38,6 +38,7 @@ pub mod factsheet;
 pub mod filter;
 pub mod follower;
 pub mod foreign;
+mod foreign_refs;
 pub mod formats;
 mod fsck;
 mod gate;

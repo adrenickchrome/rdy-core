@@ -8,8 +8,10 @@
 //! a stable doc, an insert with no `implements` or `editorial` also gets `unjustified_change` on
 //! a re-keyed sibling the agent never named.
 use crate::error::*;
+use crate::foreign_refs::ForeignCite;
 use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
+use rdy_model::foreign::{ForeignId, ForeignLink, ForeignParts};
 use rdy_model::tree;
 use rdy_model::{
     AltChoice, Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op,
@@ -607,6 +609,29 @@ impl<'a> Overlay<'a> {
     }
 }
 
+/// Repo links: the ids of the live repo links once this write's ops apply (the overlay's base
+/// less the blocks the write changed or deleted, plus the repo links it leaves).
+fn live_repo_links(ov: &Overlay) -> Vec<BlockId> {
+    let prefix = rdy_schema::repo_link::REPO_LINK_PREFIX;
+    let base = ov
+        .base
+        .ids()
+        .filter(|id| id.prefix() == prefix && !ov.pending.contains_key(*id))
+        .cloned();
+    let pending = ov.pending.iter().filter_map(|(id, b)| {
+        b.as_ref()
+            .filter(|b| b.block_type == rdy_schema::repo_link::REPO_LINK)
+            .map(|_| id.clone())
+    });
+    base.chain(pending).collect()
+}
+
+/// A write's links of each kind given: the local links and the foreign links (repo links).
+type SplitLinks = (
+    BTreeMap<String, Vec<Link>>,
+    BTreeMap<String, Vec<ForeignLink>>,
+);
+
 struct Resolver<'a> {
     placeholders: BTreeMap<String, BlockId>,
     base: &'a Materialized,
@@ -619,6 +644,9 @@ struct Resolver<'a> {
     set_by: BTreeMap<BlockId, String>,
     /// Blocks this write changed or deleted: their key in `base` no longer counts.
     rekeyed: BTreeSet<BlockId>,
+    /// Repo links: how a write's `alias:id` references and link targets resolve. Without it,
+    /// such a reference stays as written and is refused as a local one.
+    foreign: Option<&'a ForeignCite<'a>>,
 }
 
 impl Resolver<'_> {
@@ -630,6 +658,7 @@ impl Resolver<'_> {
             set_keys: BTreeMap::new(),
             set_by: BTreeMap::new(),
             rekeyed: BTreeSet::new(),
+            foreign: None,
         }
     }
 
@@ -747,6 +776,10 @@ impl Resolver<'_> {
             }
         }
         out.push_str(&s[last..]);
+        let out = match self.foreign {
+            Some(f) => f.rewrite(&out, mode)?,
+            None => out,
+        };
         keys::rewrite(&out, mode, &|t| self.key_target(t))
     }
 
@@ -768,26 +801,30 @@ impl Resolver<'_> {
         })
     }
 
-    fn links(
-        &self,
-        links: BTreeMap<String, Vec<LinkInput>>,
-    ) -> Result<BTreeMap<String, Vec<Link>>, RdyError> {
-        links
-            .into_iter()
-            .map(|(k, v)| {
-                Ok((
-                    k,
-                    v.into_iter()
-                        .map(|l| {
-                            Ok(Link {
-                                target: self.id(&l.target)?,
-                                part: l.part,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, RdyError>>()?,
-                ))
-            })
-            .collect()
+    /// The links of each kind given, local and foreign (repo links: an `alias:id` target). A
+    /// kind keeps its entry in both maps, empty where it has no target of that side.
+    fn links(&self, links: BTreeMap<String, Vec<LinkInput>>) -> Result<SplitLinks, RdyError> {
+        let mut local = BTreeMap::new();
+        let mut foreign = BTreeMap::new();
+        for (k, v) in links {
+            let mut here = vec![];
+            let mut there = vec![];
+            for l in v {
+                match self.foreign.and_then(|f| f.link_target(&l.target)) {
+                    Some(target) => there.push(ForeignLink {
+                        target: target?,
+                        part: l.part,
+                    }),
+                    None => here.push(Link {
+                        target: self.id(&l.target)?,
+                        part: l.part,
+                    }),
+                }
+            }
+            local.insert(k.clone(), here);
+            foreign.insert(k, there);
+        }
+        Ok((local, foreign))
     }
 
     fn fields(
@@ -1901,10 +1938,12 @@ fn build_ops(
     rdy_keys: &BTreeSet<BlockId>,
     selection: &crate::reaffirm::Selection,
     reflects: Option<&ReflectsInput>,
+    foreign: &ForeignCite<'_>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
     let mut res = Resolver::new(base);
+    res.foreign = Some(foreign);
     let mut ops = vec![];
     let mut created = BTreeMap::new();
     let mut names = BTreeMap::new();
@@ -2053,6 +2092,9 @@ fn build_ops(
                 if links.contains_key(supporting::REFLECTS_LINK) {
                     explicit_reflects.insert(new_id.clone());
                 }
+                let (mut local, mut foreign_links) = res.links(links)?;
+                local.retain(|_, v| !v.is_empty());
+                foreign_links.retain(|_, v| !v.is_empty());
                 let mut block = Block {
                     id: new_id.clone(),
                     block_type,
@@ -2060,9 +2102,12 @@ fn build_ops(
                     order,
                     fields: res.fields(fields)?,
                     body,
-                    links: res.links(links)?,
+                    links: local,
                     pins: BTreeMap::new(),
-                    foreign: Default::default(),
+                    foreign: ForeignParts {
+                        links: foreign_links,
+                        pins: BTreeMap::new(),
+                    },
                     read_identity: None,
                 };
                 // D-WJ0SJ: a new decision starts planned, or `none` when it needs no content;
@@ -2163,11 +2208,20 @@ fn build_ops(
                 }
                 if let Some(links) = links {
                     // link1: an update replaces only the link kinds it names; "<kind>": [] removes one
-                    for (kind, targets) in res.links(links)? {
+                    // (repo links: a kind's local and foreign targets both)
+                    let (local, foreign_links) = res.links(links)?;
+                    for (kind, targets) in local {
                         if targets.is_empty() {
                             block.links.remove(&kind);
                         } else {
                             block.links.insert(kind, targets);
+                        }
+                    }
+                    for (kind, targets) in foreign_links {
+                        if targets.is_empty() {
+                            block.foreign.links.remove(&kind);
+                        } else {
+                            block.foreign.links.insert(kind, targets);
                         }
                     }
                 }
@@ -2647,6 +2701,8 @@ fn build_ops(
     // block of this write at its final content (content does not depend on pins), so a target
     // in this write, a reference cycle included, is pinned to its final content here (lpin1)
     let mut issues = vec![];
+    // repo links: the live repo links the write leaves, read once a written block is one
+    let repo_links: OnceCell<Vec<BlockId>> = OnceCell::new();
     for (op, (is_move, old_pins)) in ops.iter_mut().zip(prior) {
         let block = match op {
             Op::Create { block } | Op::Update { block, .. } => block,
@@ -2662,12 +2718,24 @@ fn build_ops(
             }
             keep
         };
+        // repo links: the foreign targets the block cites, by reference or link
+        let mut foreign_targets: BTreeSet<ForeignId> = block
+            .foreign
+            .links
+            .values()
+            .flatten()
+            .map(|l| l.target.clone())
+            .collect();
         for tok in block.ref_tokens() {
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(
                     format!("placeholder ${name} is used before it is created"),
                     "create the block earlier in the same batch, or use a real id",
                 ));
+            }
+            if let Some(target) = foreign.link_target(&tok) {
+                foreign_targets.insert(target?);
+                continue;
             }
             let target = BlockId::parse(&tok).map_err(|_| {
                 RdyError::new(
@@ -2734,6 +2802,14 @@ fn build_ops(
                 "write status: proposed; the decision is accepted when its proposal lands",
             ));
         }
+        if block.block_type == rdy_schema::repo_link::REPO_LINK {
+            let live = repo_links.get_or_init(|| live_repo_links(&ov));
+            crate::foreign_refs::check_link(
+                block,
+                Some(foreign.own_repo()?),
+                live.iter().filter_map(|id| ov.get(id)),
+            )?;
+        }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         let mut found = validate_block(pack, block, parent);
         instruction_reason_targets(&ov, block, &mut found);
@@ -2751,9 +2827,23 @@ fn build_ops(
                 let h = old_pins.get(&target).copied().unwrap_or(current);
                 pins.insert(target, h);
             }
+            // repo links: a citation the block holds keeps its foreign pin; a new one pins the
+            // content its alias's current selection delivers. Repin, plan repin and reaffirm
+            // are moves here: they never reach this
+            let mut foreign_pins = BTreeMap::new();
+            for target in foreign_targets {
+                let pin = match block.foreign.pins.get(&target) {
+                    Some(held) => held.clone(),
+                    None => foreign.new_pin(&target)?,
+                };
+                foreign_pins.insert(target, pin);
+            }
             // msw7: a tracking edit of a frozen decision keeps the set of targets it pins; a new
             // or dropped {{id}} in a tracking field would repin it, which the ruling forbids
-            if tracking_edits.contains(&block.id) && !pins.keys().eq(old_pins.keys()) {
+            if tracking_edits.contains(&block.id)
+                && (!pins.keys().eq(old_pins.keys())
+                    || !foreign_pins.keys().eq(block.foreign.pins.keys()))
+            {
                 let id = &block.id;
                 return Err(RdyError::new(
                     E_FROZEN,
@@ -2766,8 +2856,14 @@ fn build_ops(
                 ));
             }
             block.pins = pins;
+            block.foreign.pins = foreign_pins;
         }
     }
+    // repo links: every foreign pin the write leaves names a held version, before any append
+    foreign.check_held(ops.iter().filter_map(|op| match op {
+        Op::Create { block } | Op::Update { block, .. } => Some(block),
+        Op::Delete { .. } => None,
+    }))?;
     if let Some(e) = crate::error::nesting_refusal(&issues) {
         return Err(e);
     }
@@ -3525,6 +3621,7 @@ impl Rdy {
                 rdy_keys,
                 &selection,
                 reflects.as_ref(),
+                &ForeignCite::new(&st, &m),
             )?;
         let no_code = BTreeSet::new();
         // D-01QX5: the code state of each reflects block this write creates, re-globs or
