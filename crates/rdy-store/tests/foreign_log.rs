@@ -280,7 +280,7 @@ fn rpl5_sources_overlap_in_log_order() {
     a.take(&mut s, &ea, &[v1.clone(), other.clone()]);
     // a second profile of the same repo, under another link, delivers a newer version
     let eb = b.delivery(link("rl-0000b"), "internal", &[&v2], &[], &[]);
-    b.take(&mut s, &eb, &[v2.clone()]);
+    b.take(&mut s, &eb, std::slice::from_ref(&v2));
     let view = s.repo_view(&cited_repo()).unwrap();
     assert_eq!(view[&id("D-00001")].version.version, version_of(&v2));
     assert_eq!(view[&id("D-00002")].version.version, version_of(&other));
@@ -302,7 +302,7 @@ fn rpl5_sources_overlap_in_log_order() {
 
     // the first source changes the block later in the log: its version is current
     let ea2 = a.delivery(link("rl-0000a"), "public", &[], &[&v3], &[]);
-    a.take(&mut s, &ea2, &[v3.clone()]);
+    a.take(&mut s, &ea2, std::slice::from_ref(&v3));
     let view = s.repo_view(&cited_repo()).unwrap();
     assert_eq!(view[&id("D-00001")].version.version, version_of(&v3));
     // the version v3 is held twice (two repos), and stays one object
