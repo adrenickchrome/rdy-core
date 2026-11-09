@@ -562,6 +562,47 @@ class agi6_Candidate(Fixture):
         return CANDIDATE.build(repo, commit, V, target, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT,
                                env=env)
 
+    def test_relc1_windows_guide_example_path_is_not_a_host_path(self):
+        # The agent guide (release/agent-guide.json, built into rdy.exe) names the example path
+        # `C:\Users\ana\...` in prose and JSON-escaped. Candidate run 42692772403 at 36b8ad7b refused
+        # the Windows build with "3 host paths" for exactly these three spellings.
+        path = self.tmp / CANDIDATE.release_archive_name(V, WINDOWS)
+        extra = ['C:\\Users\\runneradmin', 'D:\\a\\_temp\\rdy-candidate']
+        guide = (b'A path on disk is native, such as `C:\\Users\\ana\\shop.rdydump` for a dump\'s `out`. '
+                 b'In JSON, write each backslash twice: `"C:\\\\Users\\\\ana\\\\shop.rdydump"`.\n'
+                 b'with a native path, such as `C:\\Users\\ana\\shop`. Messages show plain drive paths\n')
+        filler = b'\0' * (CANDIDATE.SCAN_CHUNK - 20)
+        for binary in (guide, 'C:\\Users\\ana\\shop`'.encode('utf-16-le'), b'C:/Users/ana/shop ',
+                       filler + b'`C:\\Users\\ana\\shop.rdydump`', b'C:\\Users\\ana\\shop'):
+            path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + binary, preview=False))
+            self.assertEqual(CANDIDATE.inspect_archive(path, V, WINDOWS, extra=extra), 0, binary[-60:])
+        # Every other user path still refuses, next to the example too, and so does the example
+        # user's home with more than one plain name under it.
+        for binary in (guide + b'C:\\Users\\nick\\Repo', b'C:\\Users\\anabel\\x', b'C:\\Users\\Ana\\x',
+                       b'\\Users\\ana\\x', guide + 'C:\\Users\\runneradmin\\.cargo'.encode('utf-16-le'),
+                       b'C:\\Users\\ana\\..\\runneradmin\\x', b'C:\\Users\\ana\\.cargo\\registry\\src',
+                       'C:\\Users\\ana\\.rustup\\toolchains'.encode('utf-16-le'), b'C:/Users/ana/src/main.rs',
+                       filler + b'C:\\Users\\ana\\shop\\src\\lib.rs'):
+            path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + binary, preview=False))
+            with self.assertRaises(ControllerError) as caught:
+                CANDIDATE.inspect_archive(path, V, WINDOWS, extra=extra)
+            self.assertEqual(str(caught.exception), 'the ' + WINDOWS + ' binary holds 1 host path', binary[-60:])
+        # the example is no exception on a machine whose own home is the example's
+        path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + guide, preview=False))
+        with self.assertRaises(ControllerError) as caught:
+            CANDIDATE.inspect_archive(path, V, WINDOWS, extra=['C:\\Users\\ana'])
+        self.assertEqual(str(caught.exception), 'the ' + WINDOWS + ' binary holds 3 host paths')
+        # a scan stopped at the hit cap read only part of the binary, so it drops no example
+        path.write_bytes(release_archive(WINDOWS, b'MZ ' + b'`C:\\Users\\ana\\shop` ' * CANDIDATE.SCAN_HITS_MAX,
+                                         preview=False))
+        with self.assertRaises(ControllerError):
+            CANDIDATE.inspect_archive(path, V, WINDOWS, extra=extra)
+        # Linux and macOS have no example exception.
+        path = self.tmp / CANDIDATE.release_archive_name(V, LINUX)
+        path.write_bytes(release_archive(LINUX, b'/Users/ana/shop', preview=False))
+        with self.assertRaises(ControllerError):
+            CANDIDATE.inspect_archive(path, V, LINUX)
+
     def test_relc1_native_windows_build_uses_exe_and_remaps_paths(self):
         raw = guide_tests.valid_bundle(V)
         reply = guide_tests.reply_of(json.loads(raw))

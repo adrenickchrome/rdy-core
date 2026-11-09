@@ -77,6 +77,11 @@ HOSTED_HOMES = ('/Users/runner', '/home/runner')
 # The Windows hosted runner's homes, and the prefixes that mark any Windows user path.
 WINDOWS_HOSTED_HOMES = ('C:\\Users\\runneradmin', 'C:\\Users\\runner')
 WINDOWS_HOST_PREFIXES = ('C:\\Users\\', 'C:/Users/', '\\Users\\')
+# The example user of the docs and of the agent guide that rdy.exe holds ("such as
+# `C:\Users\ana\shop`"). Only the exact example home with one plain name under it, ended by a
+# character that is not part of a path, is an example; any deeper path under it is a host path.
+WINDOWS_EXAMPLE_HOME = 'C:\\Users\\ana'
+EXAMPLE_NAME_MAX = 64
 
 
 class ControllerError(Exception):
@@ -476,16 +481,49 @@ def host_patterns(target, extra=()):
     return spelled
 
 
+def example_patterns(target, extra=()):
+    """For the Windows target, the byte patterns of the documented example path: the example home,
+    its slashes either way or doubled as in JSON, then one plain name (a letter or digit first) and
+    no path character after it, in UTF-8 and UTF-16 (little endian). None when the build's own home
+    or another `extra` path lies at or under the example home, and for every other target."""
+    home = WINDOWS_EXAMPLE_HOME.lower() + '\\'
+    if target != WINDOWS_TARGET or any(
+            p and (p.replace('/', '\\').lower().rstrip('\\') + '\\').startswith(home) for p in extra):
+        return []
+    patterns = []
+    for separator in ('\\', '\\\\', '/'):
+        prefix = separator.join(WINDOWS_EXAMPLE_HOME.split('\\')) + separator
+        for width in (1, 2):
+            char = (lambda c: c) if width == 1 else (lambda c: c + b'\x00')
+            encoded = prefix.encode('ascii' if width == 1 else 'utf-16-le')
+            first, name, path = char(b'[A-Za-z0-9]'), char(b'[A-Za-z0-9_.-]'), char(b'[A-Za-z0-9_.\\\\/:-]')
+            patterns.append(re.compile(re.escape(encoded) + first + b'(?:' + name + b'){0,'
+                                       + str(EXAMPLE_NAME_MAX - 1).encode() + b'}(?!' + path + b')'))
+    return patterns
+
+
 def inspect_archive(path, version, target, extra=()):
     """Checks that `path` is one packaged release (every member under its plain stem, no link, one
     regular `rdy`, or `rdy.exe` for Windows), then scans that binary for host paths: any `/Users/` or
     `/home/` and each prefix in `extra`, and for Windows the user prefixes, each in UTF-8 and UTF-16.
+    For Windows, a hit inside the documented example path (`example_patterns`) is not counted.
     Returns 0, or refuses with the number of host paths found."""
     stem = archive_stem(version, target)
     bad = ControllerError('the ' + target + ' archive is not one packaged release')
     patterns = host_patterns(target, extra)
+    examples = example_patterns(target, extra)
     longest = max(len(p) for p in patterns)
-    hits = set()
+    if examples:
+        # an example ends one character (two bytes in UTF-16) before the window does, or at the end
+        longest = max(longest, 2 * (len(WINDOWS_EXAMPLE_HOME) + 4 + EXAMPLE_NAME_MAX + 1) + 1)
+    hits, spans, capped = set(), set(), False
+
+    def find_examples(window, start, end):
+        for example in examples:
+            for match in example.finditer(window):
+                if end or match.end() + 2 <= len(window):
+                    spans.add((start + match.start(), start + match.end()))
+
     try:
         with tarfile.open(str(path), mode='r:gz') as archive:
             binary = None
@@ -501,9 +539,13 @@ def inspect_archive(path, version, target, extra=()):
                 binary = member
                 stream = archive.extractfile(member)
                 tail, base = b'', 0
-                while len(hits) < SCAN_HITS_MAX:
+                while True:
+                    if len(hits) >= SCAN_HITS_MAX:
+                        capped = True
+                        break
                     chunk = stream.read(SCAN_CHUNK)
                     if not chunk:
+                        find_examples(tail, base - len(tail), True)
                         break
                     window, start = tail + chunk, base - len(tail)
                     for pattern in patterns:
@@ -511,12 +553,18 @@ def inspect_archive(path, version, target, extra=()):
                         while at >= 0:
                             hits.add((start + at, start + at + len(pattern)))
                             at = window.find(pattern, at + 1)
+                    find_examples(window, start, False)
                     base += len(chunk)
                     tail = window[-(longest - 1):]
             if binary is None:
                 raise bad
     except (tarfile.TarError, OSError, EOFError):
         raise bad
+    if not capped:
+        # a hit that lies wholly in a documented example path is not a host path; a scan that
+        # stopped at the hit cap drops nothing, since the rest of the binary went unread
+        hits = {(first, last) for first, last in hits
+                if not any(begin <= first and last <= end for begin, end in spans)}
     merged = []
     for first, last in sorted(hits):
         # one path found by two patterns (a drive prefix and its tail) is one host path
