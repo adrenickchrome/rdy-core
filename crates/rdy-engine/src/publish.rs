@@ -8,7 +8,7 @@ use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, Rdy, RdyError, ReadState, events, transitions};
 use rdy_model::{Hash, Op, Tag, Verdict};
 use rdy_store::segment::Location;
-use rdy_store::transition::{Cause, Transitions};
+use rdy_store::transition::{Cause, TransitionsV1};
 use rdy_store::{StoreError, StoreReader};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
@@ -173,7 +173,7 @@ impl Rdy {
         next: &ReadState,
         frames: &[(u8, Hash)],
         cause: Option<Cause>,
-    ) -> Result<Transitions, RdyError> {
+    ) -> Result<TransitionsV1, RdyError> {
         let logged = self.logged.as_deref();
         let computed = catch_unwind(AssertUnwindSafe(|| match logged {
             Some(base) => transitions::moves(base, next, frames, cause),
@@ -1020,7 +1020,7 @@ impl Rdy {
         prev: &ReadState,
         requests: &[Hash],
         recheck: Option<Cause>,
-    ) -> Result<Option<Transitions>, RdyError> {
+    ) -> Result<Option<TransitionsV1>, RdyError> {
         let preview = self.redaction_preview(requests)?;
         let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
         let Some(cause) = self.batch_cause(&frames, recheck) else {

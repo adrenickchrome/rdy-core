@@ -145,6 +145,18 @@ pub fn suspect_key(block: &BlockId, target: &BlockId, reason: &str) -> Hash {
     Hash::of(format!("rdy-suspect-1\0{block}\0{target}\0{reason}").as_bytes())
 }
 
+/// `Hash::of` of `rdy-suspect-foreign-1\0{block}\0{repo}\0{id}\0{reason}`: the identity of a
+/// suspect on a cited block (repo links, D-Y49PX). A local suspect keeps [`suspect_key`].
+pub fn foreign_suspect_key(block: &BlockId, target: &ForeignId, reason: &str) -> Hash {
+    Hash::of(
+        format!(
+            "rdy-suspect-foreign-1\0{block}\0{}\0{}\0{reason}",
+            target.repo, target.id
+        )
+        .as_bytes(),
+    )
+}
+
 /// Whether `keys` is strictly ascending: sorted and distinct.
 fn ascending<T: Ord>(keys: impl IntoIterator<Item = T>) -> bool {
     let mut prev: Option<T> = None;
@@ -173,52 +185,9 @@ impl Transitions {
     }
 
     /// The rule this record breaks, if any (one list, used by fsck and by Task 15's debug
-    /// check before it writes a record).
+    /// check before it writes a record): the rules of [`TransitionsV1::invalid`] on its layout.
     pub fn invalid(&self) -> Option<String> {
-        const UNSORTED: &str = "its lists are not sorted and distinct";
-        let tensions_sorted = |l: &[TensionMove]| ascending(l.iter().map(|t| t.tension));
-        let suspects_sorted = |l: &[SuspectMove]| ascending(l.iter().map(SuspectMove::key));
-        if !tensions_sorted(&self.resolved)
-            || !tensions_sorted(&self.opened)
-            || !suspects_sorted(&self.gone)
-            || !suspects_sorted(&self.new)
-        {
-            return Some(UNSORTED.into());
-        }
-        let side_ok = |s: &Side| match s.change {
-            Some(_) => s.actor.is_some() && s.landing.is_none(),
-            None => s.actor.is_none() && s.run.is_none(),
-        };
-        if !self
-            .resolved
-            .iter()
-            .chain(&self.opened)
-            .all(|t| t.sides.iter().all(side_ok))
-        {
-            return Some("a side is neither a change with its author nor canon".into());
-        }
-        if let Some(w) = self.whys().find(|w| w.id.is_some() != w.cause.has_id()) {
-            return Some(format!("cause {} and its id do not agree", w.cause));
-        }
-        let dismissed = |w: &Why| w.cause == Cause::Dismissed;
-        if let Some(w) = self
-            .whys()
-            .find(|w| w.actor.is_some() != dismissed(w) || (w.run.is_some() && w.actor.is_none()))
-        {
-            return Some(format!("cause {} and its actor do not agree", w.cause));
-        }
-        if !self
-            .gone
-            .iter()
-            .chain(&self.new)
-            .all(|s| ascending(s.writers.iter()))
-        {
-            return Some(UNSORTED.into());
-        }
-        if self.is_empty() {
-            return Some("it holds no move".into());
-        }
-        None
+        TransitionsV1::of(self).invalid()
     }
 
     /// Whether a move has cause [`Cause::Delivered`]: the one foreign shape the runtime record
@@ -284,6 +253,31 @@ pub struct SuspectMoveV1 {
     pub why: Why,
 }
 
+impl SuspectMoveV1 {
+    /// This suspect's identity: [`suspect_key`] for a local target, unchanged, and
+    /// [`foreign_suspect_key`] for a cited one.
+    pub fn key(&self) -> Hash {
+        match &self.target {
+            SuspectTarget::Local(t) => suspect_key(&self.block, t, &self.reason),
+            SuspectTarget::Foreign(t) => foreign_suspect_key(&self.block, t, &self.reason),
+        }
+    }
+
+    /// The runtime move, when its target is local.
+    pub fn as_local(&self) -> Option<SuspectMove> {
+        match &self.target {
+            SuspectTarget::Local(t) => Some(SuspectMove {
+                block: self.block.clone(),
+                target: t.clone(),
+                reason: self.reason.clone(),
+                writers: self.writers.clone(),
+                why: self.why.clone(),
+            }),
+            SuspectTarget::Foreign(_) => None,
+        }
+    }
+}
+
 /// One batch's moves in TRANSITION encoding 1: [`Transitions`]' fields in their order, with
 /// [`TensionMoveV1`] and [`SuspectMoveV1`] moves. A TRANSITION takes it only when it holds a
 /// foreign shape: a delivered cause, a foreign side or a foreign target.
@@ -297,6 +291,80 @@ pub struct TransitionsV1 {
 }
 
 impl TransitionsV1 {
+    /// No move at all.
+    pub fn is_empty(&self) -> bool {
+        self.resolved.is_empty()
+            && self.opened.is_empty()
+            && self.gone.is_empty()
+            && self.new.is_empty()
+    }
+
+    /// The number of moves.
+    pub fn count(&self) -> usize {
+        self.resolved.len() + self.opened.len() + self.gone.len() + self.new.len()
+    }
+
+    /// The rule this record breaks, if any (one list, used by fsck and by the writer's debug
+    /// check before it writes a record). Each list is sorted by id (suspects by
+    /// [`SuspectMoveV1::key`]) and distinct; a local side is a change with its author or canon;
+    /// each cause and its id and actor agree; writers are sorted and distinct; some move exists.
+    pub fn invalid(&self) -> Option<String> {
+        const UNSORTED: &str = "its lists are not sorted and distinct";
+        let tensions_sorted = |l: &[TensionMoveV1]| ascending(l.iter().map(|t| t.tension));
+        let suspects_sorted = |l: &[SuspectMoveV1]| ascending(l.iter().map(SuspectMoveV1::key));
+        if !tensions_sorted(&self.resolved)
+            || !tensions_sorted(&self.opened)
+            || !suspects_sorted(&self.gone)
+            || !suspects_sorted(&self.new)
+        {
+            return Some(UNSORTED.into());
+        }
+        let side_ok = |s: &SideV1| match s {
+            SideV1::Local(s) => match s.change {
+                Some(_) => s.actor.is_some() && s.landing.is_none(),
+                None => s.actor.is_none() && s.run.is_none(),
+            },
+            SideV1::Foreign { .. } => true,
+        };
+        if !self
+            .resolved
+            .iter()
+            .chain(&self.opened)
+            .all(|t| t.sides.iter().all(side_ok))
+        {
+            return Some("a side is neither a change with its author nor canon".into());
+        }
+        if let Some(w) = self.whys().find(|w| w.id.is_some() != w.cause.has_id()) {
+            return Some(format!("cause {} and its id do not agree", w.cause));
+        }
+        let dismissed = |w: &Why| w.cause == Cause::Dismissed;
+        if let Some(w) = self
+            .whys()
+            .find(|w| w.actor.is_some() != dismissed(w) || (w.run.is_some() && w.actor.is_none()))
+        {
+            return Some(format!("cause {} and its actor do not agree", w.cause));
+        }
+        if !self
+            .gone
+            .iter()
+            .chain(&self.new)
+            .all(|s| ascending(s.writers.iter()))
+        {
+            return Some(UNSORTED.into());
+        }
+        if self.is_empty() {
+            return Some("it holds no move".into());
+        }
+        None
+    }
+
+    /// The frame a batch appends: its raw kind and payload, in the encoding the codec chooses
+    /// for it (`crate::codec`): encoding 1 when it holds a foreign shape, else the released
+    /// encoding 0 with the released bytes of [`Transitions`].
+    pub fn frame(&self) -> (u8, Vec<u8>) {
+        crate::codec::item_new(kinds::TRANSITION, self)
+    }
+
     /// The layout of `t`, every side and target local.
     pub fn of(t: &Transitions) -> TransitionsV1 {
         let tension = |m: &TensionMove| TensionMoveV1 {

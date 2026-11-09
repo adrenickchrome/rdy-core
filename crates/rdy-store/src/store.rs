@@ -11,7 +11,7 @@ use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
     CrashPoint, HEADER, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
-use crate::transition::Transitions;
+use crate::transition::{Transitions, TransitionsV1};
 use crate::view::ViewOp;
 use rdy_model::{
     Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, RepoId, StateSnapshot, Tracking,
@@ -795,8 +795,9 @@ fn frame_entries(
         kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
-            // through the codec: a delivered move takes encoding 1 (`crate::codec`)
-            let rec: Transitions = crate::codec::decode_split(&o)?;
+            // through the codec's wire type, which reads every encoding: a delivered move or a
+            // cited target takes encoding 1 (`crate::codec`)
+            let rec: TransitionsV1 = crate::codec::decode_split(&o)?;
             out.extend(
                 rec.resolved
                     .iter()

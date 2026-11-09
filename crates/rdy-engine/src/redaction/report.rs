@@ -33,7 +33,7 @@ use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
 use rdy_store::redaction_carried::decode_carried;
 use rdy_store::segment::Location;
-use rdy_store::transition::Transitions;
+use rdy_store::transition::TransitionsV1;
 use rdy_store::{StoreError, StoreReader, ViewOp, ViewOpKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1183,8 +1183,13 @@ pub(crate) fn compute_excluding(
                 quotes.scan(audit, &rec, false, &s)?;
             }
             kinds::TRANSITION => {
-                let t: Transitions = reader.get_typed(kinds::TRANSITION, &h)?;
-                quotes.scan(audit, &rec, false, &t)?;
+                // the wire type reads a record of any encoding (repo links); a record with no
+                // cited target or side is scanned in its runtime shape, as before
+                let t: TransitionsV1 = reader.get_typed(kinds::TRANSITION, &h)?;
+                match t.clone().into_local() {
+                    Some(local) => quotes.scan(audit, &rec, false, &local)?,
+                    None => quotes.scan(audit, &rec, false, &t)?,
+                }
             }
             kinds::REDACTION => {
                 let r: Redaction = reader.get_typed(kinds::REDACTION, &h)?;

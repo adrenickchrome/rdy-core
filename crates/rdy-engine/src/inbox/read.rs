@@ -4,9 +4,9 @@
 use super::Entry;
 use super::inflight::RunInFlight;
 use super::matcher::batch_items;
-use super::moves::{MoveRef, transition_entries};
+use super::moves::{MoveRef, transition_entries_shown};
 use crate::events::{events_for_batch, frame_kind};
-use crate::{E_BAD_INPUT, Event, EventKind, RdyError, ReadState};
+use crate::{E_BAD_INPUT, Event, EventKind, RdyError, ReadState, Scope, SuspectMoved};
 use rdy_model::Hash;
 use rdy_store::StoreError;
 use rdy_store::inbox::{InboxCursor, InboxSub};
@@ -87,8 +87,10 @@ fn as_move(e: &Event) -> Option<MoveRef<'_>> {
     match &e.kind {
         EventKind::TensionResolved(m) => Some(MoveRef::Resolved(m)),
         EventKind::TensionOpened(m) => Some(MoveRef::Opened(m)),
-        EventKind::SuspectGone(m) => Some(MoveRef::Gone(m)),
-        EventKind::SuspectNew(m) => Some(MoveRef::New(m)),
+        EventKind::SuspectGone(SuspectMoved::Local(m)) => Some(MoveRef::Gone(m)),
+        EventKind::SuspectNew(SuspectMoved::Local(m)) => Some(MoveRef::New(m)),
+        EventKind::SuspectGone(SuspectMoved::Foreign(m)) => Some(MoveRef::GoneForeign(m)),
+        EventKind::SuspectNew(SuspectMoved::Foreign(m)) => Some(MoveRef::NewForeign(m)),
         _ => None,
     }
 }
@@ -133,8 +135,16 @@ fn batch_walk(
     }
     let moves: Vec<MoveRef<'_>> = events.iter().filter_map(as_move).collect();
     if !moves.is_empty() {
+        // a cited target shows by its repo's first live alias in canon (repo links)
+        let cites = moves
+            .iter()
+            .any(|m| matches!(m, MoveRef::NewForeign(_) | MoveRef::GoneForeign(_)));
+        let links = match cites {
+            true => crate::foreign_refs::RepoLinks::of_view(&*st.materialized(&Scope::Canon)?),
+            false => Default::default(),
+        };
         out.extend(
-            transition_entries(sub, infl, &moves, others.len(), seq)
+            transition_entries_shown(sub, infl, &moves, others.len(), seq, &|r| links.shown(r))
                 .into_iter()
                 .filter(|(i, _)| *i >= skip),
         );

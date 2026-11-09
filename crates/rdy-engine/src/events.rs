@@ -4,7 +4,10 @@ use crate::RdyError;
 use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
-use rdy_store::transition::{SuspectMove, TensionMove};
+use rdy_store::transition::{
+    Author, SideV1, SuspectMove, SuspectMoveV1, SuspectTarget, TensionMove, TensionMoveV1,
+    TransitionsV1, Why,
+};
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -118,9 +121,79 @@ pub enum EventKind {
     /// A tension that this batch resolved (or dismissed), from the batch's record.
     TensionResolved(TensionMove),
     /// A suspect that this batch made new, from the batch's record.
-    SuspectNew(SuspectMove),
+    SuspectNew(SuspectMoved),
     /// A suspect that this batch made gone, from the batch's record.
-    SuspectGone(SuspectMove),
+    SuspectGone(SuspectMoved),
+}
+
+/// One logged suspect move: on a local target, with the fields the released record holds, or on
+/// a block cited from a linked project (repo links, D-Y49PX). In JSON a cited target is its
+/// stored reference form, `<repo hex>:<id>`; a local move reads as it always has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuspectMoved {
+    Local(SuspectMove),
+    Foreign(SuspectMoveV1),
+}
+
+impl SuspectMoved {
+    /// The move of `m`: local when its target is.
+    pub fn of(m: SuspectMoveV1) -> SuspectMoved {
+        match m.as_local() {
+            Some(local) => SuspectMoved::Local(local),
+            None => SuspectMoved::Foreign(m),
+        }
+    }
+}
+
+/// A move on a cited target as its event's JSON writes it.
+#[derive(serde::Serialize)]
+struct ForeignMoveJson<'a> {
+    block: &'a rdy_model::BlockId,
+    target: String,
+    reason: &'a str,
+    writers: &'a [Author],
+    why: &'a Why,
+}
+
+impl serde::Serialize for SuspectMoved {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SuspectMoved::Local(m) => m.serialize(s),
+            SuspectMoved::Foreign(m) => ForeignMoveJson {
+                block: &m.block,
+                target: match &m.target {
+                    SuspectTarget::Local(t) => t.to_string(),
+                    SuspectTarget::Foreign(t) => {
+                        rdy_model::reference::foreign_token(&t.repo, &t.id)
+                    }
+                },
+                reason: &m.reason,
+                writers: &m.writers,
+                why: &m.why,
+            }
+            .serialize(s),
+        }
+    }
+}
+
+/// The runtime form of tension move `m`. A foreign side has no runtime form before the five
+/// kinds across projects give one; no record holds one yet, and it is left out.
+fn tension_move(m: TensionMoveV1) -> TensionMove {
+    TensionMove {
+        tension: m.tension,
+        kind: m.kind,
+        severity: m.severity,
+        sides: m
+            .sides
+            .into_iter()
+            .filter_map(|s| match s {
+                SideV1::Local(s) => Some(s),
+                SideV1::Foreign { .. } => None,
+            })
+            .collect(),
+        rekey: m.rekey,
+        why: m.why,
+    }
 }
 
 /// Hashes in an event's JSON as lowercase hex strings.
@@ -333,15 +406,28 @@ pub fn events_for_batch(
                 });
             }
             kinds::TRANSITION => {
-                let rec = reader.transitions(&hash)?;
+                // the wire type reads a record of any encoding (repo links)
+                let rec: TransitionsV1 = reader.get_typed(kinds::TRANSITION, &hash)?;
                 let at_ms = rec.at_ms;
                 let moves = rec
                     .resolved
                     .into_iter()
-                    .map(EventKind::TensionResolved)
-                    .chain(rec.opened.into_iter().map(EventKind::TensionOpened))
-                    .chain(rec.gone.into_iter().map(EventKind::SuspectGone))
-                    .chain(rec.new.into_iter().map(EventKind::SuspectNew));
+                    .map(|m| EventKind::TensionResolved(tension_move(m)))
+                    .chain(
+                        rec.opened
+                            .into_iter()
+                            .map(|m| EventKind::TensionOpened(tension_move(m))),
+                    )
+                    .chain(
+                        rec.gone
+                            .into_iter()
+                            .map(|m| EventKind::SuspectGone(SuspectMoved::of(m))),
+                    )
+                    .chain(
+                        rec.new
+                            .into_iter()
+                            .map(|m| EventKind::SuspectNew(SuspectMoved::of(m))),
+                    );
                 out.extend(moves.map(|kind| Event { seq, at_ms, kind }));
             }
             _ => {}

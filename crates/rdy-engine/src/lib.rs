@@ -41,6 +41,7 @@ pub mod foreign;
 pub mod foreign_delivery;
 mod foreign_guard;
 mod foreign_refs;
+mod foreign_signals;
 pub mod formats;
 mod fsck;
 mod gate;
@@ -153,7 +154,7 @@ pub use diff::{Diff, DiffChange, DiffEntry, LinkChange, StatusChange};
 pub use diff_request::{DiffReply, DiffRequest, LandingShow, ScopeLabel};
 pub use dump::DumpSummary;
 pub use error::*;
-pub use events::{Event, EventKind, Events};
+pub use events::{Event, EventKind, Events, SuspectMoved};
 pub use foreign::ForeignState;
 pub use foreign_guard::Deviation;
 pub use gate::{

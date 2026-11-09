@@ -52,7 +52,7 @@ use crate::kinds;
 use crate::redaction::StoredFrame;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
 use crate::store::{Frames, StoreReader};
-use crate::transition::Transitions;
+use crate::transition::{SuspectMoveV1, SuspectTarget, TransitionsV1};
 use rdy_model::engine_fields::MAX_REASON_CHARS;
 use rdy_model::plan::{
     MAX_PLAN_ANSWERS, MAX_PLAN_BYTES, MAX_SEALED_ITEMS, Plan, PlanAct, PlanKind, PlanOutcome,
@@ -693,11 +693,21 @@ pub(crate) fn entries(
         kinds::PLAN => plan_entries(hash, loc, payload, r),
         kinds::ANSWER => answer_entries(hash, loc, payload, r),
         kinds::TRANSITION => Ok(
-            match crate::codec::decode_record::<Transitions>(kinds::TRANSITION, payload) {
+            match crate::codec::decode_record::<TransitionsV1>(kinds::TRANSITION, payload) {
                 Ok(t) => transition_entries(&t, loc),
                 Err(_) => vec![],
             },
         ),
+        // a marked frame (a record in an optional encoding): its logical kind and its body
+        raw if crate::codec::logical_kind(raw) != raw => match crate::codec::split(raw, payload) {
+            Ok(o) if o.kind == kinds::TRANSITION => {
+                Ok(match crate::codec::decode_split::<TransitionsV1>(&o) {
+                    Ok(t) => transition_entries(&t, loc),
+                    Err(_) => vec![],
+                })
+            }
+            _ => Ok(vec![]),
+        },
         _ => Ok(vec![]),
     }
 }
@@ -798,12 +808,19 @@ pub(crate) fn answer_entries(
 
 /// A TRANSITION's entries: a clear of each (block, target) pair its suspect moves make gone and
 /// do not make new again. A reason-only replacement (gone and new on one pair) clears nothing.
-pub(crate) fn transition_entries(t: &Transitions, loc: Location) -> Vec<IndexEntry> {
-    let new: BTreeSet<(&BlockId, &BlockId)> = t.new.iter().map(|m| (&m.block, &m.target)).collect();
+/// Only a local target names a deferral pair: a move on a cited target clears none.
+pub(crate) fn transition_entries(t: &TransitionsV1, loc: Location) -> Vec<IndexEntry> {
+    fn local(m: &SuspectMoveV1) -> Option<(&BlockId, &BlockId)> {
+        match &m.target {
+            SuspectTarget::Local(target) => Some((&m.block, target)),
+            SuspectTarget::Foreign(_) => None,
+        }
+    }
+    let new: BTreeSet<(&BlockId, &BlockId)> = t.new.iter().filter_map(local).collect();
     let gone: BTreeSet<(&BlockId, &BlockId)> = t
         .gone
         .iter()
-        .map(|m| (&m.block, &m.target))
+        .filter_map(local)
         .filter(|p| !new.contains(p))
         .collect();
     gone.into_iter()
@@ -1313,6 +1330,7 @@ impl StoreReader {
             }
             // a frame whose encoding does not split is the frame checks' to report; a PLAN's is
             // its damage
+            let stored = payload;
             let payload = match payload.map(|p| crate::codec::split(raw, p)) {
                 Some(Ok(o)) => Some(o.body),
                 Some(Err(_)) if kind == kinds::PLAN => {
@@ -1322,7 +1340,12 @@ impl StoreReader {
             };
             if let Some(payload) = payload {
                 if matches!(kind, kinds::PLAN | kinds::ANSWER | kinds::TRANSITION) {
-                    let es = match entries(kind, hash, at, payload, &r) {
+                    // a TRANSITION by its stored frame, so its encoding is read (repo links)
+                    let es = match (kind, stored) {
+                        (kinds::TRANSITION, Some(p)) => entries(raw, hash, at, p, &r),
+                        _ => entries(kind, hash, at, payload, &r),
+                    };
+                    let es = match es {
                         Ok(es) => es,
                         // an answer or transition that does not decode is their checks' to
                         // report

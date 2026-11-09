@@ -14,7 +14,7 @@ use crate::kinds;
 use crate::redaction::StoredFrame;
 use crate::review::{DISMISS_REF, MENTION_REF, PAIR_REF, SEMANTIC_REF, mention_key};
 use crate::segment::Location;
-use crate::transition::Transitions;
+use crate::transition::TransitionsV1;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::foreign::ForeignEvent;
 use rdy_model::{
@@ -286,7 +286,7 @@ impl StoreReader {
 
     /// Folds every TRANSITION record, in log order from the origin to the end of what the index
     /// holds, into the open tensions and the open suspects (plan M2e2, D-Z0EMP): each record
-    /// decodes, keeps the record rules (`Transitions::invalid`) and moves only what it may (a
+    /// decodes, keeps the record rules (`TransitionsV1::invalid`) and moves only what it may (a
     /// tension opens only while it is shut, and so on). The fold must equal the index's
     /// open-tension and open-suspect tables. Returns how many records there are.
     fn check_transitions(&self) -> Result<usize, StoreError> {
@@ -299,21 +299,23 @@ impl StoreReader {
         let mut suspects: BTreeMap<Hash, Hash> = BTreeMap::new();
         let mut n = 0;
         self.for_each_record_from(origin, upto, |at, frame, _| {
-            let (hash, payload) = match frame {
+            // by the logical kind: a record of any encoding (`crate::codec`; a cited target or a
+            // delivered move takes encoding 1)
+            let is_transition = |raw: u8| crate::codec::logical_kind(raw) == kinds::TRANSITION;
+            let (raw, hash, payload) = match frame {
                 StoredFrame::Present {
-                    kind: kinds::TRANSITION,
+                    kind,
                     hash,
                     payload,
-                } => (hash, payload),
+                } if is_transition(kind) => (kind, hash, payload),
                 // a transition record is never removable: a dropped one is damage
-                StoredFrame::Dropped {
-                    kind: kinds::TRANSITION,
-                    ..
-                } => return Err(StoreError::corrupt_at(at)),
+                StoredFrame::Dropped { kind, .. } if is_transition(kind) => {
+                    return Err(StoreError::corrupt_at(at));
+                }
                 _ => return Ok(()),
             };
             let damage = |what: String| bad(format!("transition record {hash}: {what}"));
-            let rec: Transitions = crate::codec::decode_record(kinds::TRANSITION, payload)
+            let rec: TransitionsV1 = crate::codec::decode_record(raw, payload)
                 .map_err(|_| damage("its value does not decode".into()))?;
             if let Some(what) = rec.invalid() {
                 return Err(damage(what));

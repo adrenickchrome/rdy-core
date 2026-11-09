@@ -4,10 +4,12 @@
 //! no seen set, no cap.
 use super::Entry;
 use super::inflight::RunInFlight;
-use rdy_model::Hash;
+use rdy_model::{BlockId, Hash, RepoId};
 use rdy_store::inbox::InboxSub;
 use rdy_store::segment::Location;
-use rdy_store::transition::{Author, Cause, SuspectMove, TensionMove, Why};
+use rdy_store::transition::{
+    Author, Cause, SuspectMove, SuspectMoveV1, SuspectTarget, TensionMove, Why,
+};
 use std::collections::BTreeMap;
 
 /// One logged move of a batch, as Task 6 reads it from the batch's events.
@@ -17,6 +19,9 @@ pub enum MoveRef<'a> {
     Resolved(&'a TensionMove),
     New(&'a SuspectMove),
     Gone(&'a SuspectMove),
+    /// A suspect on a block cited from a linked project (repo links, D-Y49PX).
+    NewForeign(&'a SuspectMoveV1),
+    GoneForeign(&'a SuspectMoveV1),
 }
 
 /// What made a move, as an entry line says it (one arm per cause, closed).
@@ -55,11 +60,33 @@ pub fn transition_entries(
     first: usize,
     seq: Location,
 ) -> Vec<(usize, Entry)> {
+    transition_entries_shown(sub, infl, moves, first, seq, &short_repo)
+}
+
+/// The first 12 hex digits of `repo`: how a cited repo shows with no live alias at hand.
+fn short_repo(repo: &RepoId) -> String {
+    repo.to_string()[..12].to_string()
+}
+
+/// [`transition_entries`], with `shown` naming each cited repo in a line (its first live alias,
+/// else its first 12 hex digits). A suspect on a cited block lists its block and the stored
+/// reference `<repo hex>:<id>` as ids, and shows its target as `<shown>:<id>`.
+pub fn transition_entries_shown(
+    sub: &InboxSub,
+    infl: &RunInFlight,
+    moves: &[MoveRef<'_>],
+    first: usize,
+    seq: Location,
+    shown: &dyn Fn(&RepoId) -> String,
+) -> Vec<(usize, Entry)> {
     let mine: Vec<Vec<Hash>> = moves
         .iter()
         .map(|mv| match mv {
             MoveRef::Opened(m) | MoveRef::Resolved(m) => own_changes(sub, m),
-            MoveRef::New(_) | MoveRef::Gone(_) => vec![],
+            MoveRef::New(_)
+            | MoveRef::Gone(_)
+            | MoveRef::NewForeign(_)
+            | MoveRef::GoneForeign(_) => vec![],
         })
         .collect();
     let fold = folds(moves, &mine);
@@ -101,6 +128,32 @@ pub fn transition_entries(
                     why_text(&m.why)
                 ),
             )),
+            (MoveRef::GoneForeign(m), _) if concerns(&me, infl, &m.block, &m.writers) => {
+                let (id, text) = cited(m, shown);
+                Some((
+                    "suspect_gone",
+                    vec![m.block.to_string(), id],
+                    format!(
+                        "{} is no longer suspect: {text} {}: {}",
+                        m.block,
+                        m.reason,
+                        why_text(&m.why)
+                    ),
+                ))
+            }
+            (MoveRef::NewForeign(m), _) if concerns(&me, infl, &m.block, &m.writers) => {
+                let (id, text) = cited(m, shown);
+                Some((
+                    "suspect_new",
+                    vec![m.block.to_string(), id],
+                    format!(
+                        "{} is suspect: {text} {}: {}",
+                        m.block,
+                        m.reason,
+                        why_text(&m.why)
+                    ),
+                ))
+            }
             _ => None,
         };
         if let Some((event, ids, line)) = made {
@@ -140,7 +193,24 @@ fn own_changes(sub: &InboxSub, m: &TensionMove) -> Vec<Hash> {
 /// when the session's in-flight changes write or cite its block now (D-TPZ0W "the blocks they
 /// write or cite"; ruling task-15).
 fn suspect_concerns(me: &Author, infl: &RunInFlight, m: &SuspectMove) -> bool {
-    m.writers.contains(me) || infl.blocks.contains(&m.block) || infl.cited.contains(&m.block)
+    concerns(me, infl, &m.block, &m.writers)
+}
+
+/// The rule of [`suspect_concerns`] for a move on `block` with `writers`, whatever its target.
+fn concerns(me: &Author, infl: &RunInFlight, block: &BlockId, writers: &[Author]) -> bool {
+    writers.contains(me) || infl.blocks.contains(block) || infl.cited.contains(block)
+}
+
+/// The id and the shown text of the target of `m`: for a cited block, the stored reference
+/// `<repo hex>:<id>` and `<shown>:<id>`.
+fn cited(m: &SuspectMoveV1, shown: &dyn Fn(&RepoId) -> String) -> (String, String) {
+    match &m.target {
+        SuspectTarget::Local(t) => (t.to_string(), t.to_string()),
+        SuspectTarget::Foreign(t) => (
+            rdy_model::reference::foreign_token(&t.repo, &t.id),
+            format!("{}:{}", shown(&t.repo), t.id),
+        ),
+    }
 }
 
 /// For each move, the index of its fold partner: a resolution (not a dismissal) and an opening of

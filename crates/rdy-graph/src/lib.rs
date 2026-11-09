@@ -1,4 +1,5 @@
 pub mod coord;
+pub mod foreign;
 #[cfg(test)]
 mod relink_tests;
 
@@ -204,7 +205,7 @@ pub fn same_content(a: &Block, b: &Block) -> bool {
 }
 
 /// How strong a suspect's reason is: revoked, then superseded, then deleted, then changed.
-fn rank(reason: &str) -> u8 {
+pub(crate) fn rank(reason: &str) -> u8 {
     match reason {
         "revoked" => 4,
         "superseded" => 3,
