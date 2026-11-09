@@ -37,6 +37,7 @@ pub mod events;
 pub mod factsheet;
 pub mod filter;
 pub mod follower;
+pub mod foreign;
 pub mod formats;
 mod fsck;
 mod gate;
@@ -149,6 +150,7 @@ pub use diff_request::{DiffReply, DiffRequest, LandingShow, ScopeLabel};
 pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
+pub use foreign::ForeignState;
 pub use gate::{
     LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow, ProposalInfo, ProposalRef,
     RebasedInfo, RelayedByRow, run_land,

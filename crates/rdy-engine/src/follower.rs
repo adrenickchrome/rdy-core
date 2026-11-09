@@ -303,6 +303,8 @@ impl FollowerCore {
                 r.renew_epoch_caches();
                 let out = match r.reload_pack() {
                     Ok(ReloadOutcome::Invalid { error, .. }) => Err(*error),
+                    // a full publish also reads the foreign log, so an increment that holds
+                    // only foreign entries shows though canon's tip did not move
                     Ok(_) => r.publish(Delta::Full),
                     Err(e) => Err(e),
                 }

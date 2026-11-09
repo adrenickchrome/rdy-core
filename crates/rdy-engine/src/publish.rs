@@ -90,6 +90,7 @@ impl Rdy {
                     canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
+                    foreign: Arc::clone(&prev.foreign),
                     plan_heads: prev.plan_heads.clone(),
                     retirement_origins: Arc::clone(&prev.retirement_origins),
                     coord: OnceLock::new(),
@@ -329,6 +330,12 @@ impl Rdy {
             Arc::new(self.coord_heads(&prev.coord_heads)?)
         } else {
             Arc::clone(&prev.coord_heads)
+        };
+        // the foreign state: re-read for the sources whose newest entry moved, else carried
+        let foreign = if self.has_foreign_feature() {
+            crate::foreign::ForeignState::after(&prev.foreign, &self.store.reader(), seq)?
+        } else {
+            Arc::clone(&prev.foreign)
         };
         // the plan refs: only the plan writers move them, each beside its PLAN frame, so a
         // publish whose batch holds no PLAN carries them, and one that does re-reads only the
@@ -594,6 +601,7 @@ impl Rdy {
             canon_step_cache: Arc::clone(&self.canon_step_cache),
             inflight_cell,
             coord_heads,
+            foreign,
             plan_heads,
             retirement_origins: Arc::clone(&prev.retirement_origins),
             coord: OnceLock::new(),
@@ -857,6 +865,11 @@ impl Rdy {
             reader.intent_heads()?.into_iter().collect(),
             reader.alt_heads()?.into_iter().collect(),
         )?);
+        let foreign = Arc::new(if self.has_foreign_feature() {
+            crate::foreign::ForeignState::read(&reader, seq, None)?
+        } else {
+            crate::foreign::ForeignState::empty(seq)
+        });
         let plan_heads = crate::plan::api::plan_heads_in(&reader)?;
         let semantic = Arc::new(SemanticState::read(&reader)?);
         let dismissals = Arc::new(reader.dismissals()?.into_iter().collect());
@@ -903,6 +916,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads,
+            foreign,
             plan_heads,
             retirement_origins: Arc::default(),
             coord: OnceLock::new(),
@@ -1049,6 +1063,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            foreign: Arc::default(),
             plan_heads: Default::default(),
             retirement_origins: Arc::default(),
             coord: OnceLock::new(),

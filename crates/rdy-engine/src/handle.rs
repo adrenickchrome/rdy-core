@@ -438,6 +438,7 @@ impl Rdy {
             canon_step_cache: Arc::clone(&canon_step_cache),
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            foreign: Arc::default(),
             plan_heads: Default::default(),
             retirement_origins: Arc::default(),
             coord: OnceLock::new(),
