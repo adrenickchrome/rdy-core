@@ -205,8 +205,9 @@ fn doc_and_folder_are_injected_into_every_pack() {
     assert!(folder.fields["name"].required && !folder.fields["title"].required);
     let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
     // a doc holds every content type directly, section first (the same list a section holds,
-    // which ends with the instruction), then the publication profile and the authority policy
+    // which ends with the instruction), then the repo link, the publication profile and the authority policy
     let mut want = std.block_types["section"].children.clone();
+    want.push("repo_link".to_string());
     want.push("publication_profile".to_string());
     want.push("authority_policy".to_string());
     assert_eq!(std.block_types["doc"].children, want);
