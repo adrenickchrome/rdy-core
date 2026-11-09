@@ -12,6 +12,7 @@ pub mod dispute;
 pub mod encoding;
 pub mod engine_fields;
 pub mod entity;
+pub mod foreign;
 mod hash;
 mod id;
 pub mod key;
