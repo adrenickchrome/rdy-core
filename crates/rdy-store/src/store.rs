@@ -2877,6 +2877,23 @@ impl Store {
         self.write_checked(items, RefWrite::Public)
     }
 
+    /// `write` as one sealed batch of its own, held batches on or off (the foreign log,
+    /// `crate::foreign`): a held batch that is open refuses it, and nothing is written.
+    pub(crate) fn write_sealed(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        if self.open.is_some() {
+            return Err(StoreError::Refused(
+                "a held batch is open: seal it before this write, which seals its own batch".into(),
+            ));
+        }
+        let held = std::mem::replace(&mut self.held, false);
+        let result = self.write(items);
+        self.held = held;
+        result
+    }
+
     /// `write_guarded` with the ref rules `how` names.
     fn write_checked(
         &mut self,
@@ -3381,7 +3398,8 @@ impl Store {
     /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2). An
     /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
     /// (plan Decision intake). A `meta/` ref is refused: only the store writes one (plan Export
-    /// and clone, `crate::meta`).
+    /// and clone, `crate::meta`). A `foreign/` ref is refused: only `put_foreign` writes one,
+    /// with its entry (repo links, `crate::foreign`).
     ///
     /// The mode and holder ref rules (`crate::holder`) come before those refusals, so their exact
     /// errors are the same here as through `write` and the seals: `meta/store_mode` is `store
@@ -3447,6 +3465,14 @@ impl Store {
         {
             return Err(StoreError::Decode(format!(
                 "ref {name:?} is project metadata: only the store writes meta/ refs"
+            )));
+        }
+        if let Some((name, _)) = refs
+            .iter()
+            .find(|(name, _)| name.starts_with(crate::foreign::FOREIGN_REF_PREFIX))
+        {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is a foreign source: only put_foreign writes one, with its entry"
             )));
         }
         self.write(items)?;
