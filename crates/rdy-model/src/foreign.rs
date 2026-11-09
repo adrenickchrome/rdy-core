@@ -247,6 +247,8 @@ pub enum ForeignSource {
 /// What an entry records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+// a delivery is the common entry; boxing it would change every constructor and match for no gain
+#[allow(clippy::large_enum_variant)]
 pub enum ForeignEvent {
     Delivery {
         #[serde(default, with = "hex_opt")]
