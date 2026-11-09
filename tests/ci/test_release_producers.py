@@ -2599,6 +2599,7 @@ CLOSURE = (
     ('.github/workflows/release.yml', CALLER_PIN, '4c82cca267147348ea1e9ab4b459bd8d6d0a8506'),
     ('scripts/release_producers', P_HELPERS, 'b45a29c939492c04c7a4b24a4d3797d68a4c44a1'),
 )
+RELEASE1_CHANGES = ('scripts/release', '.github/workflows/release-candidate.yml')
 CHECKOUT_PATHS = {'trusted': H, 'producer': P_HELPERS}
 HOSTED = 'ubuntu-24.04'                     # the standard hosted label of every job that is not native
 RUNNER_VARIABLES = ('GITHUB_EVENT_PATH', 'GITHUB_STEP_SUMMARY', 'RUNNER_TEMP')
@@ -2822,11 +2823,13 @@ class WiredWorkflows(WorkflowCase, Refusals):
                 self.assertNotIn(word, text, path)
 
     def test_rprd4_workflow_source_closure(self):
-        # The unchanged signer closure is H; release.yml is its caller pin; the helpers are exactly P.
+        # Producers are frozen and unused since 2026-11-09 (founder one-signature path): the commits H and P keep
+        # their trees; HEAD's scripts/release and release-candidate.yml may change (Release 1 packaging).
         shallow = git('rev-parse', '--is-shallow-repository').stdout.strip()
         for path, commit, object_id in CLOSURE:
             with self.subTest(path=path):
-                self.assertEqual(git_object_id(ROOT / path), object_id)
+                if path not in RELEASE1_CHANGES:
+                    self.assertEqual(git_object_id(ROOT / path), object_id)
                 if git('cat-file', '-e', commit + '^{commit}').returncode == 0:
                     self.assertEqual(git('rev-parse', commit + ':' + path).stdout.strip(), object_id)
                     self.assertEqual(git('merge-base', '--is-ancestor', commit, 'HEAD').returncode, 0)

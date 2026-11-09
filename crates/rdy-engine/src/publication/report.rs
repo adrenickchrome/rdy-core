@@ -6,6 +6,7 @@
 //! candidate may be a view or a proposal version (D-CWC91); its baseline stays stable.
 
 use super::diff::{DisclosureDiff, disclosure_diff};
+use super::hidden::HiddenList;
 use super::references::{CheckStatus, ReferenceReport};
 use super::release;
 use super::select::{Resolved, bad_inspection_scope, resolve, resolve_inspection};
@@ -161,6 +162,21 @@ fn doc_row(x: &super::DocEntry) -> Value {
     })
 }
 
+fn hidden_json(h: &HiddenList) -> Value {
+    json!({
+        "docs": h.docs,
+        "blocks": h.blocks,
+        "rows": h.rows.iter().map(|r| json!({
+            "doc": r.doc.to_string(),
+            "title": r.title,
+            "redacted": r.redacted,
+            "hidden_blocks": r.hidden_blocks,
+            "doc_hidden": r.doc_hidden,
+        })).collect::<Vec<_>>(),
+        "omitted_rows": h.omitted_rows,
+    })
+}
+
 fn disclosure_json(d: &DisclosureDiff) -> Value {
     let mut omitted = serde_json::Map::new();
     let mut put = |name: &str, (rows, left): (Value, usize)| {
@@ -262,6 +278,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
         "new_references": new_references,
         "new_reference_count": d.new_reference_count,
         "redactions": redactions,
+        "newly_hidden_planned": hidden_json(&d.newly_hidden_planned),
         "omitted": omitted,
     })
 }
@@ -313,6 +330,7 @@ fn report_json(
         },
         "references": reference_summary(&r.references),
         "release": release.map(|(_, v)| v),
+        "hidden_planned": hidden_json(&r.hidden_planned.full()),
         "disclosure": against.map(|(_, d)| disclosure_json(d)),
         "warnings": warnings,
     })

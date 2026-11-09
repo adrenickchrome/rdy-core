@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build and assemble one immutable rdy preview candidate.
+"""Build and assemble one immutable rdy candidate.
 
-The candidate is the unsigned bytes of one release: one native archive per release target and a
-SHA256SUMS manifest over exactly those archives. It is built from `git archive S` in a new
+The candidate is the unsigned bytes of one release: one native archive per release target, the
+frozen sample dump of the commit and a SHA256SUMS manifest over exactly those files (Release 1:
+the macOS, Windows and Linux archives, then tally.rdydump). A preview candidate (macOS and Linux
+archives, no sample) assembles through `assemble`, which the retained signer tools still read. It is built from `git archive S` in a new
 workspace, packaged with the existing native tool, inspected for host paths, and run once to compare
 its built-in rows with the guide bundle at the commit. Every upload is
 addressed by run, run attempt, artifact id, artifact digest and target, and is downloaded and
@@ -14,6 +16,7 @@ invalid arguments exit 2):
   gate-counts  the native fast gate's exact test counts from its report
   build        build, package and inspect one target in an isolated workspace
   assemble     verify the downloaded build artifacts and write SHA256SUMS and candidate.json
+               (`--source` adds the frozen sample and makes a Release 1 candidate)
 """
 import argparse
 import difflib
@@ -23,6 +26,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -30,8 +34,15 @@ import threading
 import zipfile
 
 REPOSITORY = 'adrenickchrome/rdy-core'
-# The release target set at this base. A new platform needs its card and a qualified adapter.
+# The preview target set, which the retained signer tools still read.
 TARGETS = ('aarch64-apple-darwin', 'x86_64-unknown-linux-gnu')
+WINDOWS_TARGET = 'x86_64-pc-windows-msvc'
+# The Release 1 target set, in manifest order (the sorted archive names).
+RELEASE_TARGETS = ('aarch64-apple-darwin', WINDOWS_TARGET, 'x86_64-unknown-linux-gnu')
+# The frozen sample dump: its name in the manifest, and its place and freeze record at S.
+SAMPLE_NAME = 'tally.rdydump'
+SAMPLE_SOURCE = 'samples/tally/tally.rdydump'
+SAMPLE_FREEZE = 'samples/tally/freeze.json'
 GUIDE_TOOL = Path(__file__).resolve().parent / 'guide.py'
 KUNGFU_TABLE = 'crates/rdy-engine/kungfu-tools.json'
 # The packaged checker's six checks, in order (`CHECK_NAMES` in rdy-qa's release_install.rs).
@@ -42,12 +53,17 @@ MIB = 1024 * KIB
 RECORD_MAX = 64 * KIB          # a receipt, policy or tuple JSON
 ARCHIVE_MAX = 512 * MIB        # one release archive
 MANIFEST_MAX = 1024            # the adapter's manifest limit
+SAMPLE_MAX = 16 * MIB          # the sample dump, checked before it is read
+ZIP_OVERHEAD = 1 * MIB         # ZIP headers of the assembled candidate artifact
 OUTPUT_MAX = 4 * MIB           # a child's output
 REPORT_MAX = 16 * MIB          # the native fast gate's report.json
 ASSET_MAX = 32                 # files in one artifact
 HELPER_DEADLINE = 120          # seconds for one helper child
 SCAN_CHUNK = 1 * MIB           # host-path scan window
 SCAN_HITS_MAX = 1000
+# The assembled candidate artifact: three archives, the sample, two small records (SHA256SUMS and
+# candidate.json) and the ZIP overhead. 1,628,569,600 bytes.
+ZIP_MAX = len(RELEASE_TARGETS) * ARCHIVE_MAX + SAMPLE_MAX + 2 * RECORD_MAX + ZIP_OVERHEAD
 
 VERSION_RE = re.compile(r'0\.[1-9][0-9]*\.0')
 CANDIDATE_REF_RE = re.compile(r'refs/tags/candidate/v(0\.[1-9][0-9]*\.0)')
@@ -58,6 +74,9 @@ SOURCE_NAME_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.+-]{0,127}\.crate')
 # Home prefixes of every hosted runner and every local build machine.
 HOST_PATTERNS = (b'/Users/', b'/home/')
 HOSTED_HOMES = ('/Users/runner', '/home/runner')
+# The Windows hosted runner's homes, and the prefixes that mark any Windows user path.
+WINDOWS_HOSTED_HOMES = ('C:\\Users\\runneradmin', 'C:\\Users\\runner')
+WINDOWS_HOST_PREFIXES = ('C:\\Users\\', 'C:/Users/', '\\Users\\')
 
 
 class ControllerError(Exception):
@@ -161,8 +180,28 @@ def file_entry(value, where):
 
 
 def archive_name(version, target):
-    """The preview archive's file name (`archive_name` in rdy-qa's release_install.rs)."""
+    """The preview archive's file name. Release 1 uses `release_archive_name`."""
     return 'rdy-' + version + '-preview-' + target + '.tar.gz'
+
+
+def archive_stem(version, target):
+    """The Release 1 archive's folder (`archive_stem` in rdy-qa's release_install.rs)."""
+    return 'rdy-' + version + '-' + target
+
+
+def release_archive_name(version, target):
+    """The Release 1 archive's file name (`archive_name` in rdy-qa's release_install.rs)."""
+    return archive_stem(version, target) + '.tar.gz'
+
+
+def binary_name(target):
+    """The executable's name in the archive of `target`."""
+    return 'rdy.exe' if target == WINDOWS_TARGET else 'rdy'
+
+
+def release_files(version, sample=True):
+    """The manifest names of Release 1, in manifest order: three archives, then the sample if there is one."""
+    return [release_archive_name(version, t) for t in RELEASE_TARGETS] + ([SAMPLE_NAME] if sample else [])
 
 
 def manifest_bytes(files):
@@ -316,14 +355,15 @@ def check_ref(repo, ref, sha, main_ref):
     if status == 0:
         status, out = git(repo, 'show', sha + ':release-keys/policy.json', cap=RECORD_MAX)
         policy = loads(out) if status == 0 else None
-        if not (isinstance(policy, dict) and policy.get('targets') == list(TARGETS)):
-            raise ControllerError('the target policy at the commit is not exactly ' + ' and '.join(TARGETS))
+        if not (isinstance(policy, dict) and policy.get('targets') in (list(TARGETS), list(RELEASE_TARGETS))):
+            raise ControllerError('the target policy at the commit is not exactly ' + ' and '.join(TARGETS)
+                                  + ' or ' + ', '.join(RELEASE_TARGETS))
     for taken in ('refs/tags/reserve/v' + version, 'refs/tags/v' + version):
         status, _ = git(repo, 'show-ref', '--verify', '--quiet', taken)
         if status == 0:
             raise ControllerError('v' + version + ' is already reserved or released; a retry reuses its '
                                   'reserved candidate and never rebuilds')
-    return {'ref': ref, 'version': version, 'commit': sha, 'targets': list(TARGETS)}
+    return {'ref': ref, 'version': version, 'commit': sha, 'targets': list(RELEASE_TARGETS)}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -390,29 +430,60 @@ def check_fast_gate(value, target):
 # build
 # ---------------------------------------------------------------------------------------------
 
-def remap_flags(home, cargo_home, rustup_home, source, target_dir):
+WINDOWS_PATH_RE = re.compile(r'[A-Za-z]:[\\/][^\s=\x00-\x1f]+')
+
+
+def remap_flags(home, cargo_home, rustup_home, source, target_dir, windows=False):
     """rustc path remaps for a release build. The hosted runner homes come first; rustc applies the
-    last matching remap, so each more specific prefix follows the home it lies in."""
-    pairs = [(HOSTED_HOMES[0], '/build'), (HOSTED_HOMES[1], '/build'), (home, '/build'),
+    last matching remap, so each more specific prefix follows the home it lies in. A Windows build
+    takes Windows paths (a drive and a backslash or slash, then named components) and the hosted
+    Windows homes."""
+    hosted = WINDOWS_HOSTED_HOMES if windows else HOSTED_HOMES
+    pairs = [(hosted[0], '/build'), (hosted[1], '/build'), (home, '/build'),
              (cargo_home, '/cargo'), (rustup_home, '/rustup'), (source, '/rdy'), (target_dir, '/target')]
     flags = []
     for prefix, to in pairs:
-        if not (isinstance(prefix, str) and prefix.startswith('/') and len(prefix) > 1
-                and not re.search(r'[\s=\x00-\x1f]', prefix)):
+        if windows:
+            plain = isinstance(prefix, str) and WINDOWS_PATH_RE.fullmatch(prefix) is not None
+        else:
+            plain = (isinstance(prefix, str) and prefix.startswith('/') and len(prefix) > 1
+                     and not re.search(r'[\s=\x00-\x1f]', prefix))
+        if not plain:
             raise ControllerError('a build path is not a plain absolute path')
-        flag = '--remap-path-prefix=' + prefix.rstrip('/') + '=' + to
+        flag = '--remap-path-prefix=' + prefix.rstrip('\\/') + '=' + to
         if flag not in flags:
             flags.append(flag)
     return flags
 
 
+def host_patterns(target, extra=()):
+    """The byte patterns that mark a host path in a binary: every Unix home prefix and each `extra`
+    path; for the Windows target also the Windows user prefixes, and each pattern with its slashes
+    both ways, in UTF-8 and in UTF-16 (little endian), which is how a Windows binary holds a path."""
+    texts = [p.decode() for p in HOST_PATTERNS] + [p for p in extra if p]
+    if target == WINDOWS_TARGET:
+        texts += list(WINDOWS_HOST_PREFIXES)
+    spelled = []
+    for text in texts:
+        forms = [text]
+        if target == WINDOWS_TARGET:
+            forms += [text.replace('\\', '/'), text.replace('/', '\\')]
+        for form in forms:
+            for encoded in ((form.encode(), form.encode('utf-16-le')) if target == WINDOWS_TARGET
+                            else (form.encode(),)):
+                if encoded not in spelled:
+                    spelled.append(encoded)
+    return spelled
+
+
 def inspect_archive(path, version, target, extra=()):
-    """Checks that `path` is one packaged release (every member under its preview stem, no link,
-    one regular `rdy`), then scans that binary for host paths: any `/Users/` or `/home/` and each
-    prefix in `extra`. Returns 0, or refuses with the number of host paths found."""
-    stem = 'rdy-' + version + '-preview-' + target
+    """Checks that `path` is one packaged release (every member under its plain stem, no link, one
+    regular `rdy`, or `rdy.exe` for Windows), then scans that binary for host paths: any `/Users/` or
+    `/home/` and each prefix in `extra`, and for Windows the user prefixes, each in UTF-8 and UTF-16.
+    Returns 0, or refuses with the number of host paths found."""
+    stem = archive_stem(version, target)
     bad = ControllerError('the ' + target + ' archive is not one packaged release')
-    patterns = list(HOST_PATTERNS) + [p.encode() for p in extra if p]
+    patterns = host_patterns(target, extra)
     longest = max(len(p) for p in patterns)
     hits = set()
     try:
@@ -423,7 +494,7 @@ def inspect_archive(path, version, target, extra=()):
                 if (member.name.startswith('/') or '..' in parts or parts[0] != stem
                         or not (member.isfile() or member.isdir())):
                     raise bad
-                if member.name != stem + '/rdy':
+                if member.name != stem + '/' + binary_name(target):
                     continue
                 if binary is not None or not member.isfile() or not 0 < member.size <= ARCHIVE_MAX:
                     raise bad
@@ -438,7 +509,7 @@ def inspect_archive(path, version, target, extra=()):
                     for pattern in patterns:
                         at = window.find(pattern)
                         while at >= 0:
-                            hits.add(start + at)
+                            hits.add((start + at, start + at + len(pattern)))
                             at = window.find(pattern, at + 1)
                     base += len(chunk)
                     tail = window[-(longest - 1):]
@@ -446,8 +517,15 @@ def inspect_archive(path, version, target, extra=()):
                 raise bad
     except (tarfile.TarError, OSError, EOFError):
         raise bad
-    if hits:
-        count = len(hits)
+    merged = []
+    for first, last in sorted(hits):
+        # one path found by two patterns (a drive prefix and its tail) is one host path
+        if merged and first < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], last)
+        else:
+            merged.append([first, last])
+    if merged:
+        count = len(merged)
         raise ControllerError('the ' + target + ' binary holds ' + str(count) + ' host path'
                               + ('' if count == 1 else 's'))
     return 0
@@ -458,11 +536,11 @@ def check_packaged_guide(path, version, target, source, work, env):
     the guide bundle and tool table of the source archive. Refuses with the checker's own line."""
     folder = Path(work) / 'guide-check'
     folder.mkdir(mode=0o700)
-    binary = folder / 'rdy'
+    binary = folder / binary_name(target)
     bad = ControllerError('the ' + target + ' archive is not one packaged release')
     try:
         with tarfile.open(str(path), mode='r:gz') as archive:
-            stream = archive.extractfile('rdy-' + version + '-preview-' + target + '/rdy')
+            stream = archive.extractfile(archive_stem(version, target) + '/' + binary_name(target))
             fd = os.open(str(binary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
             with os.fdopen(fd, 'wb') as handle:
                 shutil.copyfileobj(stream, handle, MIB)
@@ -496,7 +574,7 @@ def check_arguments(version, commit, target, run_id, run_attempt):
         raise ControllerError('the version is not a 0.<minor>.0 preview')
     if not (isinstance(commit, str) and COMMIT_RE.fullmatch(commit)):
         raise ControllerError('the commit is not a full 40-hex SHA')
-    if target is not None and target not in TARGETS:
+    if target is not None and target not in RELEASE_TARGETS:
         raise ControllerError('the target is not a release target')
     if not (is_int(run_id, 1) and is_int(run_attempt, 1)):
         raise ControllerError('the run id and attempt are not positive integers')
@@ -512,13 +590,28 @@ def build_step(argv, cwd, env):
         raise ControllerError(' '.join(str(a) for a in argv[:2]) + ' failed')
 
 
+def native_join(target, base, *names):
+    """`base` and `names` joined with the separator of `target`'s system."""
+    separator = '\\' if target == WINDOWS_TARGET else '/'
+    return separator.join([base.rstrip('\\/')] + list(names))
+
+
+def tar_program(target):
+    """The system's own tar: on Windows the one in System32, never one that PATH finds first."""
+    if target == WINDOWS_TARGET and os.name == 'nt':
+        return os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'System32', 'tar.exe')
+    return 'tar'
+
+
 def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_attempt, env=None):
     """Builds `target` from `git archive <commit>` in the new workspace `work`, stages the MPL source
     crates with qa-release-sources (which checks release/notes.md first), packages with
     qa-release-package, inspects the packaged binary, and writes the archive and its build receipt
-    to the new directory `out`."""
+    to the new directory `out`. The Windows target builds natively: its helpers are `.exe` files, its
+    homes are Windows paths, and the packaged binary is scanned for Windows paths too."""
     env = dict(os.environ if env is None else env)
     check_arguments(version, commit, target, run_id, run_attempt)
+    windows = target == WINDOWS_TARGET
     fast_gate = check_fast_gate(loads(Path(fast_gate_path).read_bytes()[:RECORD_MAX + 1]), target)
     work, out = Path(work), Path(out)
     if not (work.is_absolute() and out.is_absolute()):
@@ -531,7 +624,7 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
     status, _, _ = run_bounded(['git', '-C', repo, 'archive', '--format=tar', '-o', work / 'source.tar', commit])
     if status != 0:
         raise ControllerError('git archive of the commit failed')
-    status, _, _ = run_bounded(['tar', '-x', '-f', work / 'source.tar', '-C', source])
+    status, _, _ = run_bounded([tar_program(target), '-x', '-f', work / 'source.tar', '-C', source])
     if status != 0:
         raise ControllerError('the source archive did not extract')
     (work / 'source.tar').unlink()
@@ -539,10 +632,10 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
     if notes.is_symlink() or not notes.is_file():
         raise ControllerError('release/notes.md is missing at the commit')
 
-    home = env.get('HOME', '')
-    cargo_home = env.get('CARGO_HOME') or home + '/.cargo'
-    rustup_home = env.get('RUSTUP_HOME') or home + '/.rustup'
-    flags = remap_flags(home, cargo_home, rustup_home, str(source), str(target_dir))
+    home = env.get('USERPROFILE', '') if windows else env.get('HOME', '')
+    cargo_home = env.get('CARGO_HOME') or native_join(target, home, '.cargo')
+    rustup_home = env.get('RUSTUP_HOME') or native_join(target, home, '.rustup')
+    flags = remap_flags(home, cargo_home, rustup_home, str(source), str(target_dir), windows=windows)
     env.pop('RUSTFLAGS', None)
     env.update({'CARGO_ENCODED_RUSTFLAGS': '\x1f'.join(flags), 'CARGO_TARGET_DIR': str(target_dir),
                 'CARGO_INCREMENTAL': '0'})
@@ -551,11 +644,13 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
     build_step(['cargo', 'build', '--release', '--locked', '-p', 'rdy-cli', '-p', 'rdy-qa'], source, env)
 
     release = target_dir / 'release'
-    status, said, _ = run_bounded([release / 'rdy', '--version'], env=env)
-    if status != 0 or said != ('rdy ' + version + ' (preview)\n').encode():
-        raise ControllerError('the built rdy does not print rdy ' + version + ' (preview)')
-    status, _, _ = run_bounded([release / 'qa-release-sources', '--version', version, '--out', work / 'sources',
-                                '--check-notes', notes], env=env)
+    exe = binary_name(target)
+    helper = (lambda name: name + '.exe') if windows else (lambda name: name)
+    status, said, _ = run_bounded([release / exe, '--version'], env=env)
+    if status != 0 or said != ('rdy ' + version + '\n').encode():
+        raise ControllerError('the built rdy does not print rdy ' + version)
+    status, _, _ = run_bounded([release / helper('qa-release-sources'), '--version', version, '--out',
+                                work / 'sources', '--check-notes', notes], env=env)
     if status != 0:
         raise ControllerError('qa-release-sources refused the release sources or notes')
     entries = sorted((work / 'sources').iterdir())
@@ -567,9 +662,9 @@ def build(repo, commit, version, target, work, out, fast_gate_path, run_id, run_
             raise ControllerError('qa-release-sources staged an unexpected file')
         digest, size = sha256_file(entry, ARCHIVE_MAX)
         sources.append({'name': entry.name, 'sha256': digest, 'size': size})
-    name = archive_name(version, target)
-    status, said, _ = run_bounded([release / 'qa-release-package', '--binary', release / 'rdy', '--version', version,
-                                   '--target', target, '--out', work / 'package'], env=env)
+    name = release_archive_name(version, target)
+    status, said, _ = run_bounded([release / helper('qa-release-package'), '--binary', release / exe,
+                                   '--version', version, '--target', target, '--out', work / 'package'], env=env)
     if status != 0 or said != (str(work / 'package' / name) + '\n').encode():
         raise ControllerError('qa-release-package did not package the ' + target + ' archive')
     packaged = work / 'package' / name
@@ -673,7 +768,7 @@ def extract_member(archive, name, dest, limit, mode=0o644):
     return digest.hexdigest(), size
 
 
-def check_build_receipt(receipt, target, version, commit, run_id, run_attempt):
+def check_build_receipt(receipt, target, version, commit, run_id, run_attempt, name_of=None):
     """A downloaded build receipt names exactly this run, attempt, commit, version and target."""
     keys = ('schema', 'repository', 'version', 'commit', 'target', 'run_id', 'run_attempt', 'archive',
             'fast_gate', 'host_paths', 'sources')
@@ -684,7 +779,7 @@ def check_build_receipt(receipt, target, version, commit, run_id, run_attempt):
         if receipt[key] != want[key] or type(receipt[key]) is not type(want[key]):
             raise ControllerError('the ' + target + ' build receipt does not match ' + key)
     file_entry(receipt['archive'], 'the ' + target + ' build receipt archive')
-    if receipt['archive']['name'] != archive_name(version, target):
+    if receipt['archive']['name'] != (name_of or archive_name)(version, target):
         raise ControllerError('the ' + target + ' archive does not match its build receipt')
     check_fast_gate(receipt['fast_gate'], target)
     sources = receipt['sources']
@@ -700,42 +795,101 @@ def check_build_receipt(receipt, target, version, commit, run_id, run_attempt):
     return receipt
 
 
-def assemble(inputs, version, commit, run_id, run_attempt, out):
+def targets_text(targets):
+    """`a and b`, or `a, b and c`."""
+    return ', '.join(targets[:-1]) + ' and ' + targets[-1] if len(targets) > 2 else ' and '.join(targets)
+
+
+def read_sample(source, commit):
+    """The frozen sample dump of the source tree `source` at `commit` and its record. The sample is
+    a regular file (never a link) of at most SAMPLE_MAX bytes, checked before it is read, and it
+    matches the SHA-256 and size of its freeze record. Returns (bytes, sample record), or None when
+    the sample folder samples/tally/ is absent (the sample is optional for now)."""
+    root = Path(source)
+    try:
+        os.lstat(str(root / os.path.dirname(SAMPLE_SOURCE)))
+    except OSError:
+        return None
+    missing = ControllerError('the frozen sample ' + SAMPLE_SOURCE + ' is missing at the commit')
+    path = root / SAMPLE_SOURCE
+    try:
+        info = os.lstat(str(path))
+    except OSError:
+        raise missing
+    if not stat.S_ISREG(info.st_mode):
+        raise missing
+    if info.st_size > SAMPLE_MAX:
+        raise ControllerError('the frozen sample is larger than ' + str(SAMPLE_MAX) + ' bytes')
+    freeze_path = root / SAMPLE_FREEZE
+    try:
+        freeze_info = os.lstat(str(freeze_path))
+    except OSError:
+        freeze_info = None
+    if freeze_info is None or not stat.S_ISREG(freeze_info.st_mode):
+        raise ControllerError('the sample freeze record ' + SAMPLE_FREEZE + ' is missing at the commit')
+    if freeze_info.st_size > RECORD_MAX:
+        raise ControllerError('the sample freeze record is larger than ' + str(RECORD_MAX) + ' bytes')
+    freeze_raw = freeze_path.read_bytes()
+    freeze = loads(freeze_raw)
+    if not (isinstance(freeze, dict) and isinstance(freeze.get('sha256'), str)
+            and SHA256_RE.fullmatch(freeze['sha256']) and is_int(freeze.get('size'), 1)):
+        raise ControllerError('the sample freeze record is malformed')
+    with open(str(path), 'rb') as handle:
+        data = handle.read(SAMPLE_MAX + 1)
+    if len(data) > SAMPLE_MAX:
+        raise ControllerError('the frozen sample is larger than ' + str(SAMPLE_MAX) + ' bytes')
+    digest = hashlib.sha256(data).hexdigest()
+    if (digest, len(data)) != (freeze['sha256'], freeze['size']):
+        raise ControllerError('the sample does not match its freeze record')
+    return data, {'name': SAMPLE_NAME, 'source': SAMPLE_SOURCE, 'commit': commit, 'sha256': digest,
+                  'size': len(data), 'freeze_sha256': hashlib.sha256(freeze_raw).hexdigest()}
+
+
+def assemble(inputs, version, commit, run_id, run_attempt, out, source=None):
     """Verifies each target's downloaded build artifact (`inputs`: target -> (download directory,
-    artifact id, artifact digest)) and writes the two archives, SHA256SUMS over exactly those
-    archives, and candidate.json to the new directory `out`. Returns the candidate record."""
+    artifact id, artifact digest)) and writes the archives, SHA256SUMS over exactly the files, and
+    candidate.json to the new directory `out`. Returns the candidate record.
+
+    With `source` (the checkout at `commit`) this is a Release 1 candidate: the macOS, Windows and
+    Linux archives with their plain names, the frozen sample from `source`, a four-line manifest and
+    a schema 2 record. Without it, a preview candidate: two archives, no sample, schema 1. When
+    `source` has no samples/tally/ folder, the Release 1 candidate has no sample entry."""
     check_arguments(version, commit, None, run_id, run_attempt)
-    if sorted(inputs) != sorted(TARGETS):
-        raise ControllerError('the candidate needs exactly the ' + ' and '.join(TARGETS) + ' builds')
-    for target in TARGETS:
+    release = source is not None
+    targets = RELEASE_TARGETS if release else TARGETS
+    if sorted(inputs) != sorted(targets):
+        raise ControllerError('the candidate needs exactly the ' + targets_text(targets) + ' builds')
+    for target in targets:
         if not is_int(inputs[target][1], 1):
             raise ControllerError('the ' + target + ' artifact id is not a positive integer')
         digest_value(inputs[target][2], target)
-    if len({inputs[t][1] for t in TARGETS}) != len(TARGETS):
+    if len({inputs[t][1] for t in targets}) != len(targets):
         raise ControllerError('two builds share one artifact id')
+    sample = read_sample(source, commit) if release else None
     out = Path(out)
     if out.exists() or out.is_symlink():
         raise ControllerError('the output directory already exists')
     out.mkdir(mode=0o700, parents=True)
     try:
-        return assemble_into(inputs, version, commit, run_id, run_attempt, out)
+        return assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample, release)
     except BaseException:
         shutil.rmtree(str(out), ignore_errors=True)
         raise
 
 
-def assemble_into(inputs, version, commit, run_id, run_attempt, out):
+def assemble_into(inputs, version, commit, run_id, run_attempt, out, targets, sample, release=False):
     builds, files = [], []
-    for target in TARGETS:
+    name_for = release_archive_name if release else archive_name
+    for target in targets:
         folder, ident, digest = inputs[target]
-        name, receipt_name = archive_name(version, target), 'build-' + target + '.json'
+        name, receipt_name = name_for(version, target), 'build-' + target + '.json'
         path = downloaded_zip(folder, target)
         artifact_digest, artifact_size, archive = open_artifact(
             path, digest, {name: ARCHIVE_MAX, receipt_name: RECORD_MAX}, target, 'its archive and build receipt',
             ARCHIVE_MAX + RECORD_MAX + MIB)
         with archive:
             raw = read_member(archive, receipt_name, RECORD_MAX)
-            receipt = check_build_receipt(loads(raw), target, version, commit, run_id, run_attempt)
+            receipt = check_build_receipt(loads(raw), target, version, commit, run_id, run_attempt, name_for)
             actual = extract_member(archive, name, out / name, ARCHIVE_MAX)
         if actual != (receipt['archive']['sha256'], receipt['archive']['size']):
             raise ControllerError('the ' + target + ' archive does not match its build receipt')
@@ -745,12 +899,19 @@ def assemble_into(inputs, version, commit, run_id, run_attempt, out):
                                     'digest': artifact_digest, 'size': artifact_size},
                        'receipt_sha256': hashlib.sha256(raw).hexdigest(),
                        'fast_gate': receipt['fast_gate'], 'sources': receipt['sources']})
+    record = {'schema': 1, 'repository': REPOSITORY, 'ref': 'refs/tags/candidate/v' + version, 'version': version,
+              'commit': commit, 'run_id': run_id, 'run_attempt': run_attempt}
+    if sample is not None:
+        data, facts = sample
+        write_new(out / SAMPLE_NAME, data)
+        files.append({'name': SAMPLE_NAME, 'sha256': facts['sha256'], 'size': facts['size']})
+        record['sample'] = facts
+    if release:
+        record['schema'] = 2
     files.sort(key=lambda f: f['name'])
     manifest = manifest_bytes(files)
     write_new(out / 'SHA256SUMS', manifest)
-    record = {'schema': 1, 'repository': REPOSITORY, 'ref': 'refs/tags/candidate/v' + version, 'version': version,
-              'commit': commit, 'run_id': run_id, 'run_attempt': run_attempt,
-              'manifest_sha256': hashlib.sha256(manifest).hexdigest(), 'artifacts': files, 'builds': builds}
+    record.update({'manifest_sha256': hashlib.sha256(manifest).hexdigest(), 'artifacts': files, 'builds': builds})
     write_new(out / 'candidate.json', canonical(record))
     return record
 
@@ -785,6 +946,46 @@ def load_candidate(raw):
     return record
 
 
+RELEASE_CANDIDATE_KEYS = CANDIDATE_KEYS
+OPTIONAL_KEYS = ('sample',)
+SAMPLE_KEYS = ('name', 'source', 'commit', 'sha256', 'size', 'freeze_sha256')
+
+
+def load_release_candidate(raw):
+    """Parses and checks a schema 2 (Release 1) candidate.json record."""
+    raw_record = loads(raw)
+    with_sample = isinstance(raw_record, dict) and 'sample' in raw_record
+    record = closed(raw_record, RELEASE_CANDIDATE_KEYS + (OPTIONAL_KEYS if with_sample else ()),
+                    'the candidate record')
+    version = record['version']
+    check_arguments(version, record['commit'], None, record['run_id'], record['run_attempt'])
+    malformed = ControllerError('the candidate record is malformed')
+    if record['schema'] != 2 or record['repository'] != REPOSITORY or record['ref'] != 'refs/tags/candidate/v' + version:
+        raise malformed
+    if not (isinstance(record['manifest_sha256'], str) and SHA256_RE.fullmatch(record['manifest_sha256'])):
+        raise malformed
+    files = record['artifacts']
+    if not (isinstance(files, list) and [file_entry(f, 'a candidate artifact')['name'] for f in files]
+            == release_files(version, with_sample)):
+        raise malformed
+    if hashlib.sha256(manifest_bytes(files)).hexdigest() != record['manifest_sha256']:
+        raise malformed
+    if with_sample:
+        sample = closed(record['sample'], SAMPLE_KEYS, 'the candidate sample')
+        if (sample['name'], sample['source'], sample['commit']) != (SAMPLE_NAME, SAMPLE_SOURCE, record['commit']):
+            raise malformed
+        if (sample['sha256'], sample['size']) != (files[-1]['sha256'], files[-1]['size']) or not (
+                isinstance(sample['freeze_sha256'], str) and SHA256_RE.fullmatch(sample['freeze_sha256'])):
+            raise malformed
+    builds = record['builds']
+    if not (isinstance(builds, list) and [closed(b, BUILD_KEYS, 'a candidate build')['target'] for b in builds]
+            == list(RELEASE_TARGETS)):
+        raise malformed
+    for entry in builds:
+        check_fast_gate(entry['fast_gate'], entry['target'])
+    return record
+
+
 # ---------------------------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------------------------
@@ -798,7 +999,7 @@ def parse_input(value):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog='candidate.py', description='Build and assemble one rdy preview candidate.')
+    parser = argparse.ArgumentParser(prog='candidate.py', description='Build and assemble one rdy candidate.')
     sub = parser.add_subparsers(dest='command')
     sub.required = True
     p = sub.add_parser('check-ref')
@@ -816,7 +1017,7 @@ def main(argv=None):
         p.add_argument(name, type=Path, required=True)
     p.add_argument('--commit', required=True)
     p.add_argument('--version', required=True)
-    p.add_argument('--target', required=True, choices=TARGETS)
+    p.add_argument('--target', required=True, choices=RELEASE_TARGETS)
     p.add_argument('--run-id', type=int, required=True)
     p.add_argument('--run-attempt', type=int, required=True)
     p = sub.add_parser('assemble')
@@ -825,6 +1026,7 @@ def main(argv=None):
     p.add_argument('--run-id', type=int, required=True)
     p.add_argument('--run-attempt', type=int, required=True)
     p.add_argument('--input', type=parse_input, action='append', required=True)
+    p.add_argument('--source', type=Path)
     p.add_argument('--out', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -846,8 +1048,10 @@ def main(argv=None):
         else:
             inputs = dict(args.input)
             if len(inputs) != len(args.input):
-                raise ControllerError('the candidate needs exactly the ' + ' and '.join(TARGETS) + ' builds')
-            record = assemble(inputs, args.version, args.commit, args.run_id, args.run_attempt, args.out)
+                raise ControllerError('the candidate needs exactly the ' + targets_text(
+                    RELEASE_TARGETS if args.source else TARGETS) + ' builds')
+            record = assemble(inputs, args.version, args.commit, args.run_id, args.run_attempt, args.out,
+                              source=args.source)
             sys.stdout.buffer.write(canonical(record))
     except ControllerError as error:
         sys.stderr.write('release controller: ' + str(error) + '\n')

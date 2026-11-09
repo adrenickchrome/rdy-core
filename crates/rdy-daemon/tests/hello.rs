@@ -317,7 +317,7 @@ async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
         format!(
             "the daemon on {} serves another project ({}, process {})",
             d.run.socket().display(),
-            root.display(),
+            rdy_store::pio::display_path(&root),
             std::process::id()
         )
     );

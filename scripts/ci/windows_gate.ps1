@@ -89,6 +89,8 @@ $inner = Join-Path $work 'scripts\ci\windows_gate_inner.ps1'
 $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $inner),
     '-Work', (Quote-Arg $work), '-PrivateHome', (Quote-Arg $home_), '-CargoHome', (Quote-Arg $cargoHome), '-RustupHome', (Quote-Arg $rustupHome),
     '-NodeDir', (Quote-Arg $node), '-GitDir', (Quote-Arg $git))
+# The account starts with a fresh environment: pass the hosted-runner mark on explicitly.
+if ($env:RDY_QA_HOSTED_CI -eq '1') { $arguments += '-HostedCi' }
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `
     -Wait -PassThru

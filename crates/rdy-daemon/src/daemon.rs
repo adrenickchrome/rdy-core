@@ -10,6 +10,7 @@ use crate::socket;
 use crate::sys;
 use rdy_store::fileid::FileId;
 use rdy_store::layout::STORE_DIR;
+use rdy_store::start_lock::StartGuard;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -32,6 +33,9 @@ pub const PROJECT_TICK: Duration = crate::writer::CHECKPOINT_TICK;
 
 /// Read past a final reply at most this much before closing (see `close_after_reply`).
 pub(crate) const DRAIN_AFTER_REPLY_BYTES: usize = 64 * 1024;
+
+/// The pause between two tries at the start lock of a project that is gone (D-122E5).
+const START_LOCK_RETRY: Duration = Duration::from_millis(2);
 
 /// One daemon log line on stderr: `<unix ms> rdy serve: <text>`. A failed write (a full disk
 /// under `daemon.log`, a closed stderr) loses the line, never the daemon.
@@ -131,6 +135,9 @@ pub struct DaemonConfig {
     /// Test hook: the peer account to accept instead of our own.
     #[doc(hidden)]
     pub expected_account: Option<sys::Account>,
+    /// How long a daemon whose project is gone waits for the project's start lock before its
+    /// socket goes (`serve.start_timeout`, D-122E5); `new` takes the default.
+    pub start_timeout: Duration,
 }
 
 impl DaemonConfig {
@@ -141,6 +148,7 @@ impl DaemonConfig {
             build: crate::BUILD.to_string(),
             idle_timeout: None,
             expected_account: None,
+            start_timeout: crate::client::DEFAULT_START_TIMEOUT,
         }
     }
 }
@@ -338,11 +346,25 @@ impl DaemonHandle {
     }
 
     /// The project check (D-A6ZZA) that a hello runs: when the project's `.rdy` or another of its
-    /// parts (`project_parts`) is gone or replaced, removes this daemon's run files that still
-    /// name it and stops the daemon with `ProjectGone`. True when the project is gone. False before
-    /// the bind.
+    /// parts (`project_parts`) is gone or replaced, removes this daemon's socket record and socket
+    /// that still name it and stops the daemon with `ProjectGone`; `daemon.pid` stays until
+    /// [`Self::drained`]. True when the project is gone. False before the bind.
     pub fn check_project(&self) -> bool {
         self.check.check()
+    }
+
+    /// The host's word that the daemon's last write has ended. A daemon that the project check
+    /// stops leaves some run state in place when `run` returns, because a host may still finish
+    /// writes on the blocking pool (D-122E5): `daemon.pid` (p-3MJBQ), and the project's start lock
+    /// or, when the check could not take it, the listener, the socket and its record. This
+    /// removes each file while it is still this daemon's, closes the listener, and then lets the
+    /// start lock go. Every other stop has removed its files already, and then this does nothing.
+    pub fn drained(&self) {
+        let mut files = self.files.lock();
+        let start = files.drained(&self.run);
+        drop(files);
+        // last: no load or successor acts before every file of this daemon is gone
+        drop(start);
     }
 }
 
@@ -392,6 +414,8 @@ impl Daemon {
             run: config.run.clone(),
             files: files.clone(),
             stop: Arc::clone(&info.stop),
+            start_timeout: config.start_timeout,
+            leaving: Mutex::new(false),
         });
         Daemon {
             config,
@@ -439,7 +463,10 @@ impl Daemon {
     /// Serves connections until stopped, idle for `idle_timeout`, or replaced by another
     /// version. Then, in order: stops accepting and drops the listener, removes the socket and
     /// the pid file (unless `DaemonHandle::stop` already did), tells every connection to finish,
-    /// and waits for them up to `STOP_GRACE`.
+    /// and waits for them up to `STOP_GRACE`. After `ProjectGone` the pid file stays, with the
+    /// start lock the project check took or, when it took none, with the listener, the socket and
+    /// its record (D-122E5): the host ends them with `DaemonHandle::drained` once its last write
+    /// has ended.
     pub async fn run(mut self) -> io::Result<ExitReason> {
         let (mut listener, project) = self
             .listener
@@ -537,10 +564,16 @@ impl Daemon {
             }
         }
         let reason = self.reason.get().copied().unwrap_or(ExitReason::Stopped);
-        // (1) stop accepting
-        drop(listener);
-        // (2) the socket and the pid file, unless `DaemonHandle::stop` already removed them
-        self.files.remove(&self.config.run);
+        // (1) stop accepting. A daemon that keeps its socket through its drain keeps the
+        // listener open with it, so a load still finds a live peer there (D-122E5)
+        self.files.close_listener(listener);
+        // (2) the socket and the pid file, unless `DaemonHandle::stop` already removed them. A
+        // daemon whose project is gone keeps its pid file for the host (`DaemonHandle::drained`)
+        if reason == ExitReason::ProjectGone {
+            self.files.remove_endpoint(&self.config.run);
+        } else {
+            self.files.remove(&self.config.run);
+        }
         // (3) every connection task sees `info.stop` and finishes
         while tasks.try_join_next().is_some() {}
         if reason != ExitReason::Idle {
@@ -585,13 +618,73 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
 /// across the removal, so every caller returns only once the files are gone. The endpoint is the
 /// one `bind` bound, so a project renamed or deleted while the daemon runs still has its socket
 /// removed. Before a bind nothing is this daemon's.
+///
+/// The record and the endpoint can go before the pid file (`remove_endpoint`): a daemon that the
+/// project check stops takes no new client, and keeps `daemon.pid` until its writes in flight have
+/// drained, since a client keeps waiting while that file names a live process (p-3MJBQ).
+///
+/// D-122E5: that check takes the project's start lock before the record and the endpoint go, and
+/// it is held here until the drain ends ([`DaemonHandle::drained`]), so no load places a store and
+/// no successor opens one while this daemon's writes drain. A check that cannot take the lock
+/// keeps the record, the endpoint, the listener and the pid file until then instead, so a load
+/// finds a live peer and is refused.
 #[derive(Clone, Default)]
 struct RunFiles(Arc<Mutex<Files>>);
 
 #[derive(Default)]
 struct Files {
-    removed: bool,
+    /// The record and the endpoint are removed, or were not this daemon's when the first
+    /// removal came.
+    endpoint_removed: bool,
+    /// The same for the pid file.
+    pid_removed: bool,
     bound: Option<Bound>,
+    /// The project's start lock, taken by the project check before the endpoint went.
+    start: Option<StartGuard>,
+    /// The project check could not take the start lock: every file stays until the drain ends.
+    kept: bool,
+    /// The listener, open while `kept`.
+    listener: Option<sys::Listener>,
+}
+
+impl Files {
+    fn remove_endpoint(&mut self, run: &RunDir) {
+        if self.kept || std::mem::replace(&mut self.endpoint_removed, true) {
+            return;
+        }
+        let Some(bound) = &self.bound else {
+            return;
+        };
+        // the record first: no client follows it to a socket that is going away
+        if run.record_names(&bound.socket, bound.project) {
+            remove_if_present(&run.socket_record());
+        }
+        if bound.socket_id.is_some() && sys::endpoint_identity(&bound.socket) == bound.socket_id {
+            remove_if_present(&bound.socket);
+        }
+    }
+
+    fn remove_pid(&mut self, run: &RunDir) {
+        if self.kept || std::mem::replace(&mut self.pid_removed, true) || self.bound.is_none() {
+            return;
+        }
+        let own = sys::own_pid_record().ok();
+        let own = own.as_deref().and_then(sys::parse_pid_record);
+        if own.is_some() && run.pid_record() == own {
+            remove_if_present(&run.pid_file());
+        }
+    }
+
+    /// The end of the drain: closes a kept listener, removes every file still to go, and hands
+    /// back the start lock for the caller to let go once this lock is released.
+    fn drained(&mut self, run: &RunDir) -> Option<StartGuard> {
+        // closed first: a client that connects now finds no live peer, and goes to the lock
+        drop(self.listener.take());
+        self.kept = false;
+        self.remove_endpoint(run);
+        self.remove_pid(run);
+        self.start.take()
+    }
 }
 
 /// What a bind made.
@@ -622,25 +715,36 @@ impl RunFiles {
             .map_or_else(|| run.socket(), |b| b.socket.clone())
     }
 
+    /// The record, the endpoint and the pid file, whichever are still to go.
     fn remove(&self, run: &RunDir) {
         let mut files = self.lock();
-        if std::mem::replace(&mut files.removed, true) {
-            return;
-        }
-        let Some(bound) = &files.bound else {
-            return;
-        };
-        // the record first: no client follows it to a socket that is going away
-        if run.record_names(&bound.socket, bound.project) {
-            remove_if_present(&run.socket_record());
-        }
-        if bound.socket_id.is_some() && sys::endpoint_identity(&bound.socket) == bound.socket_id {
-            remove_if_present(&bound.socket);
-        }
-        let own = sys::own_pid_record().ok();
-        let own = own.as_deref().and_then(sys::parse_pid_record);
-        if own.is_some() && run.pid_record() == own {
-            remove_if_present(&run.pid_file());
+        files.remove_endpoint(run);
+        files.remove_pid(run);
+    }
+
+    /// The record and the endpoint only; the pid file stays (see the type).
+    fn remove_endpoint(&self, run: &RunDir) {
+        self.lock().remove_endpoint(run);
+    }
+
+    /// The project check took the start lock: the record and the endpoint go now, under it, and
+    /// it is held until the drain ends.
+    fn remove_endpoint_under(&self, start: StartGuard, run: &RunDir) {
+        let mut files = self.lock();
+        files.start = Some(start);
+        files.remove_endpoint(run);
+    }
+
+    /// The project check could not take the start lock: every file stays until the drain ends.
+    fn keep_until_drained(&self) {
+        self.lock().kept = true;
+    }
+
+    /// Closes the listener, or keeps it open until the drain ends while the files are kept.
+    fn close_listener(&self, listener: sys::Listener) {
+        let mut files = self.lock();
+        if files.kept {
+            files.listener = Some(listener);
         }
     }
 }
@@ -697,6 +801,11 @@ struct ProjectCheck {
     run: RunDir,
     files: RunFiles,
     stop: Arc<watch::Sender<bool>>,
+    /// How long it waits for the start lock (`DaemonConfig::start_timeout`).
+    start_timeout: Duration,
+    /// Set once the project is found gone. Every other caller waits here while the first one
+    /// takes the start lock, and then has the same answer.
+    leaving: Mutex<bool>,
 }
 
 impl ProjectCheck {
@@ -715,26 +824,63 @@ impl ProjectCheck {
                 .is_some_and(|parts| parts.iter().any(|(path, id)| changed(path, *id)))
     }
 
-    /// When the project is gone, removes this daemon's run files that still name it
-    /// (`RunFiles::remove`), then stops with `ProjectGone`. True when the project is
-    /// gone; false before the bind.
+    /// When the project is gone, takes the project's start lock (D-122E5), removes this daemon's
+    /// socket record and endpoint while they still name it (`RunFiles::remove_endpoint_under`),
+    /// then stops with `ProjectGone`. The lock and `daemon.pid` stay until the host's writes in
+    /// flight have drained (`DaemonHandle::drained`). When the lock cannot be had within the start
+    /// timeout, every file stays until then (`RunFiles::keep_until_drained`). True when the
+    /// project is gone; false before the bind.
     fn check(&self) -> bool {
         let Some(project) = self.project.get().copied() else {
             return false;
         };
+        let mut leaving = self.leaving.lock().unwrap_or_else(|e| e.into_inner());
+        if *leaving {
+            return true;
+        }
         if !self.gone(project) {
             return false;
         }
+        *leaving = true;
         if self.reason.set(ExitReason::ProjectGone).is_ok() {
             log(&format!(
                 "the project's .rdy at {} is gone or replaced; exiting",
                 self.root.display()
             ));
         }
-        // before any reply: a client's retry may start a successor at once
-        self.files.remove(&self.run);
+        // before any reply: a client's retry may start a successor at once, and waits at the lock
+        match self.take_start() {
+            Ok(start) => self.files.remove_endpoint_under(start, &self.run),
+            Err(why) => {
+                log(&format!(
+                    "could not lock {} ({why}); the socket stays until the writes in flight end",
+                    self.run.start_lock().display()
+                ));
+                self.files.keep_until_drained();
+            }
+        }
         self.stop.send_replace(true);
         true
+    }
+
+    /// The start lock of the `.rdy` that stands at the project's root now, which a load or a
+    /// successor would take, tried until the start timeout. Why not, when another holder keeps it
+    /// that long or it cannot be taken at all (no `.rdy` stands).
+    fn take_start(&self) -> Result<StartGuard, String> {
+        let until = Instant::now() + self.start_timeout;
+        loop {
+            match StartGuard::try_take(self.run.rdy_dir()) {
+                Ok(Some(start)) => return Ok(start),
+                Ok(None) if Instant::now() < until => std::thread::sleep(START_LOCK_RETRY),
+                Ok(None) => {
+                    return Err(format!(
+                        "held for {} s by another process",
+                        self.start_timeout.as_secs()
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
     }
 }
 
@@ -744,10 +890,11 @@ impl ProjectCheck {
 /// `stopping: true`, and the client retries once, which starts the project's own daemon.
 /// Otherwise the client's own daemon is not running.
 fn another_project(socket: &Path, root: &Path, pid: u32, stopping: bool) -> ErrorReply {
+    // D-EDS38: the root as a person reads it; identity and I/O keep the canonical path
     let message = format!(
         "the daemon on {} serves another project ({}, process {pid})",
         socket.display(),
-        root.display()
+        rdy_store::pio::display_path(root)
     );
     if !stopping {
         return ErrorReply::new(
@@ -1134,6 +1281,7 @@ mod tests {
     use crate::ctl::CtlRequest;
     use crate::hello::{Hello, PROTO_VERSION};
     use rdy_engine::signing_crypto::SigningAgent;
+    use rdy_store::start_lock::StartGuard;
     use serde_json::Value;
     use std::fs;
 
@@ -1201,7 +1349,7 @@ mod tests {
             format!(
                 "the daemon on {} serves another project ({}, process {})",
                 endpoint.display(),
-                run.root().display(),
+                rdy_store::pio::display_path(&run.root()),
                 std::process::id()
             )
         );
@@ -1288,6 +1436,518 @@ mod tests {
         assert!(!run.pid_file().exists());
         drop(alone);
         assert_eq!(sys::endpoint_liveness(&endpoint).await, sys::Liveness::Gone);
+    }
+
+    /// Blocks each request in `ctl` until the test lets it go: a write in flight.
+    struct Holding {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl Handler for Holding {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn SigningAgent>,
+        ) -> Result<Value, ErrorReply> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.blocking_recv();
+            }
+            Ok(Value::Null)
+        }
+    }
+
+    /// p-3MJBQ on a project check (D-A6ZZA, D-6JZ5V): a client keeps waiting while `daemon.pid`
+    /// names a live process, so a daemon that the check stops keeps that file until its writes in
+    /// flight have drained. The socket record goes at once, so no new client reaches it.
+    #[tokio::test]
+    async fn s2_run_files_stay_until_in_flight_writes_drain() {
+        let (d, run) = project();
+        let store = d.path().join(".rdy").join(STORE_DIR);
+        fs::create_dir(&store).unwrap();
+        fs::write(store.join("lock"), b"").unwrap();
+        let (entered, in_flight) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let handler = Arc::new(Holding {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(Some(released)),
+        });
+        let mut daemon = Daemon::new(DaemonConfig::new(run.clone(), VERSION.to_string()), handler);
+        daemon.bind().await.unwrap();
+        let handle = daemon.handle();
+        daemon.readiness().ready();
+        let serving = tokio::spawn(daemon.run());
+        let project = run.project_id().unwrap();
+
+        let Attempt::Ready(mut writer) = connect(&run, &hello(project)).await else {
+            panic!("the writer gets a session");
+        };
+        let write = tokio::spawn(async move { writer.ctl("write", Value::Null).await });
+        in_flight.await.unwrap();
+
+        // the store moved under the live writer; the next hello's project check sees it
+        fs::rename(&store, d.path().join("store-aside")).unwrap();
+        let Attempt::Refused(e) = connect(&run, &hello(project)).await else {
+            panic!("a hello after the move is refused");
+        };
+        assert_eq!(e.extra.get("stopping"), Some(&Value::Bool(true)));
+        assert!(!run.socket_record().exists(), "no new client reaches it");
+        assert_eq!(
+            run.pid_named(),
+            Some(std::process::id()),
+            "daemon.pid stays while the write is in flight"
+        );
+
+        release.send(()).unwrap();
+        assert_eq!(write.await.unwrap().unwrap(), Value::Null);
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        assert_eq!(
+            run.pid_named(),
+            Some(std::process::id()),
+            "daemon.pid stays until the host's last write has ended"
+        );
+        handle.drained();
+        assert!(!run.pid_file().exists());
+    }
+
+    /// The file an old writer opens by its store's path once its write is let go: what a segment
+    /// roll does (`SegmentLog::roll`), into whatever store stands at that path then.
+    const OLD_SEGMENT: &str = "old-writer.seg";
+
+    /// The old writer of a store that moved: it holds a write in flight until the test lets it
+    /// go, then opens [`OLD_SEGMENT`] in the directory its store had, and keeps whether it could.
+    struct OldWriter {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        store: PathBuf,
+        rolled: Mutex<Option<bool>>,
+    }
+
+    type Release = tokio::sync::oneshot::Sender<()>;
+    type InFlight = tokio::sync::oneshot::Receiver<()>;
+
+    impl OldWriter {
+        fn new(store: &Path) -> (Arc<OldWriter>, InFlight, Release) {
+            let (entered, in_flight) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let writer = Arc::new(OldWriter {
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(Some(released)),
+                store: store.to_path_buf(),
+                rolled: Mutex::new(None),
+            });
+            (writer, in_flight, release)
+        }
+
+        /// Whether its roll opened a file; `None` before the write was let go.
+        fn rolled(&self) -> Option<bool> {
+            *self.rolled.lock().unwrap()
+        }
+    }
+
+    impl Handler for OldWriter {
+        fn ctl(
+            &self,
+            _: &SessionInfo,
+            _: CtlRequest,
+            _: Arc<dyn SigningAgent>,
+        ) -> Result<Value, ErrorReply> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let Some(release) = self.release.lock().unwrap().take() else {
+                return Ok(Value::Null);
+            };
+            let _ = release.blocking_recv();
+            let opened = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.store.join(OLD_SEGMENT));
+            *self.rolled.lock().unwrap() = Some(opened.is_ok());
+            Ok(Value::Null)
+        }
+    }
+
+    /// A store directory with its lock file, in the project at `root`: what the project check
+    /// watches (`project_parts`).
+    fn fake_store(root: &Path) -> PathBuf {
+        let store = root.join(".rdy").join(STORE_DIR);
+        fs::create_dir(&store).unwrap();
+        fs::write(store.join("lock"), b"").unwrap();
+        store
+    }
+
+    /// A daemon of `run` with `handler` and `start_timeout`, bound, ready and running.
+    async fn serving(
+        run: &RunDir,
+        handler: Arc<dyn Handler>,
+        start_timeout: Duration,
+    ) -> (
+        DaemonHandle,
+        tokio::task::JoinHandle<io::Result<ExitReason>>,
+    ) {
+        let mut config = DaemonConfig::new(run.clone(), VERSION.to_string());
+        config.start_timeout = start_timeout;
+        let mut daemon = Daemon::new(config, handler);
+        daemon.bind().await.unwrap();
+        let handle = daemon.handle();
+        daemon.readiness().ready();
+        (handle, tokio::spawn(daemon.run()))
+    }
+
+    /// A write in flight on `run`'s daemon, then `store` moved aside under it, then a hello whose
+    /// project check sees the move: the daemon is draining. Returns the write's task.
+    async fn drain_with_a_write_in_flight(
+        run: &RunDir,
+        store: &Path,
+        in_flight: InFlight,
+    ) -> tokio::task::JoinHandle<Result<Value, ErrorReply>> {
+        let project = run.project_id().unwrap();
+        let Attempt::Ready(mut writer) = connect(run, &hello(project)).await else {
+            panic!("the writer gets a session");
+        };
+        let write = tokio::spawn(async move { writer.ctl("write", Value::Null).await });
+        in_flight.await.unwrap();
+        fs::rename(store, store.with_file_name("store-aside")).unwrap();
+        let Attempt::Refused(e) = connect(run, &hello(project)).await else {
+            panic!("a hello after the move is refused");
+        };
+        assert_eq!(e.extra.get("stopping"), Some(&Value::Bool(true)));
+        write
+    }
+
+    /// A dump of a new project, written in `dir`.
+    fn dump_of_a_new_project(dir: &Path) -> PathBuf {
+        let source = dir.join("source");
+        fs::create_dir(&source).unwrap();
+        let r = rdy_engine::Rdy::init(&source, "rdy-standard").unwrap();
+        let file = dir.join("p.rdydump");
+        r.read().dump(&file).unwrap();
+        r.close().unwrap();
+        file
+    }
+
+    /// What a test runs inside a load's daemon probe of its project, once.
+    type ProbeHook = Box<dyn FnOnce() + Send>;
+
+    static PROBE_HOOKS: Mutex<Vec<(PathBuf, ProbeHook)>> = Mutex::new(Vec::new());
+
+    /// The probe `rdy` sets in `main` (`client::live_daemon`), after the hook a test set for the
+    /// project, if any.
+    fn probe(project: &Path) -> Option<u32> {
+        let hook = {
+            let mut hooks = PROBE_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+            hooks
+                .iter()
+                .position(|(p, _)| p == project)
+                .map(|i| hooks.swap_remove(i).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+        crate::client::live_daemon(project)
+    }
+
+    /// `rdy_engine::load::load` on a blocking thread, with the probe set.
+    async fn load(
+        file: &Path,
+        project: &Path,
+    ) -> Result<rdy_engine::load::LoadSummary, rdy_engine::RdyError> {
+        rdy_engine::load::set_daemon_probe(probe);
+        let (file, project) = (file.to_path_buf(), project.to_path_buf());
+        tokio::task::spawn_blocking(move || rdy_engine::load::load(&file, &project))
+            .await
+            .unwrap()
+    }
+
+    /// The error of `out`, which must have failed for the reason `what` names. The success types
+    /// here have no `Debug`, so `expect_err` does not apply.
+    fn failed<T, E>(out: Result<T, E>, what: &str) -> E {
+        match out {
+            Err(e) => e,
+            Ok(_) => panic!("{what}"),
+        }
+    }
+
+    /// D-122E5 on KNOWN-ISSUES 1539: a daemon whose store moved under a write in flight takes the
+    /// start lock before its socket and record go, and holds it until its drain ends. A fast load
+    /// then places no store, so the old writer's segment roll finds none at its path. Once the
+    /// drain has ended the load goes ahead, and its store holds nothing of the old writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_a_load_waits_for_a_draining_daemon() {
+        let (d, run) = project();
+        let scratch = tempfile::tempdir().unwrap();
+        let dump = dump_of_a_new_project(scratch.path());
+        let store = fake_store(d.path());
+        let (old, in_flight, release) = OldWriter::new(&store);
+        let (handle, serving) = serving(
+            &run,
+            Arc::clone(&old) as Arc<dyn Handler>,
+            crate::client::DEFAULT_START_TIMEOUT,
+        )
+        .await;
+        let write = drain_with_a_write_in_flight(&run, &store, in_flight).await;
+
+        let e = failed(load(&dump, d.path()).await, "the load waits");
+        assert_eq!(e.code, rdy_engine::E_LOCKED, "{e:?}");
+        assert!(
+            !store.exists(),
+            "no store is placed while the old writer drains"
+        );
+
+        release.send(()).unwrap();
+        let _ = write.await;
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        assert_eq!(
+            old.rolled(),
+            Some(false),
+            "the roll finds no store at its path"
+        );
+        handle.drained();
+
+        load(&dump, d.path()).await.unwrap();
+        assert!(store.is_dir(), "the loaded store");
+        assert!(!store.join(OLD_SEGMENT).exists());
+    }
+
+    /// D-122E5 item 4: the client's retry after a `stopping` refusal waits at the start lock the
+    /// draining daemon holds, so it starts no successor on the new store until the drain ends. A
+    /// start timeout of zero makes the wait one try.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_a_successor_waits_for_the_draining_daemon() {
+        let (d, run) = project();
+        let store = fake_store(d.path());
+        let (old, in_flight, release) = OldWriter::new(&store);
+        let (handle, serving) = serving(&run, old, crate::client::DEFAULT_START_TIMEOUT).await;
+        let write = drain_with_a_write_in_flight(&run, &store, in_flight).await;
+
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let start = |spawns: &Arc<AtomicUsize>| {
+            let spawns = Arc::clone(spawns);
+            let mut o = crate::client::StartOptions::new(
+                VERSION.to_string(),
+                Proto::Ctl,
+                d.path().to_path_buf(),
+                Box::new(move |_: &RunDir| {
+                    spawns.fetch_add(1, Ordering::SeqCst);
+                    Err(io::Error::other("no daemon in this test"))
+                }),
+            );
+            o.start_timeout = Duration::ZERO;
+            o
+        };
+        let e = failed(
+            crate::client::connect_or_start(&run, start(&spawns)).await,
+            "no successor while the old writer drains",
+        );
+        assert_eq!(e.code, E_DAEMON_START, "{e:?}");
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        assert!(
+            StartGuard::try_take(run.rdy_dir()).unwrap().is_none(),
+            "a successor's own start waits at the same lock"
+        );
+
+        release.send(()).unwrap();
+        let _ = write.await;
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        handle.drained();
+
+        let e = failed(
+            crate::client::connect_or_start(&run, start(&spawns)).await,
+            "this test's spawn fails",
+        );
+        assert_eq!(
+            e.message,
+            "could not start the daemon: no daemon in this test"
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "the drain has ended");
+    }
+
+    /// D-122E5 item 3: a daemon that cannot take the start lock within its start timeout keeps its
+    /// socket, its record and its pid file, drains and exits, so a load finds a live peer. They go
+    /// when the host's drain ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_a_held_start_lock_keeps_the_socket_until_exit() {
+        let (d, run) = project();
+        let store = fake_store(d.path());
+        let (old, in_flight, release) = OldWriter::new(&store);
+        let (handle, serving) = serving(&run, old, Duration::ZERO).await;
+        let socket = handle.socket();
+        let pid = std::process::id();
+        // another holder of the start lock: a load at its target check
+        let held = StartGuard::try_take(run.rdy_dir()).unwrap().unwrap();
+        let write = drain_with_a_write_in_flight(&run, &store, in_flight).await;
+
+        assert_eq!(run.recorded_socket(), Some(socket.clone()));
+        assert_eq!(run.pid_named(), Some(pid));
+        assert_eq!(
+            crate::client::live_daemon(d.path()),
+            Some(pid),
+            "a load finds a live peer"
+        );
+
+        release.send(()).unwrap();
+        let _ = write.await;
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        assert_eq!(
+            run.recorded_socket(),
+            Some(socket.clone()),
+            "until the host's drain ends"
+        );
+        assert_eq!(run.pid_named(), Some(pid));
+        handle.drained();
+        assert!(!run.socket_record().exists());
+        assert!(!run.pid_file().exists());
+        assert_eq!(sys::endpoint_liveness(&socket).await, sys::Liveness::Gone);
+        assert!(held.guards(run.rdy_dir()), "the holder's lock is untouched");
+    }
+
+    /// D-122E5 item 2: a load holds the start lock from its target check. A daemon whose project
+    /// check comes while the load checks cannot take the lock, so it keeps its socket, and the
+    /// load's probe finds it live and refuses the load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_a_load_holds_the_start_lock_from_its_target_check() {
+        let (d, run) = project();
+        let scratch = tempfile::tempdir().unwrap();
+        let dump = dump_of_a_new_project(scratch.path());
+        let store = fake_store(d.path());
+        let (handle, serving) = serving(&run, Arc::new(Quiet), Duration::ZERO).await;
+        // an open connection: the daemon runs no idle project check of its own
+        let Attempt::Ready(held) = connect(&run, &hello(run.project_id().unwrap())).await else {
+            panic!("a session");
+        };
+        fs::rename(&store, d.path().join("store-aside")).unwrap();
+        let check = handle.clone();
+        PROBE_HOOKS.lock().unwrap().push((
+            d.path().to_path_buf(),
+            Box::new(move || assert!(check.check_project())),
+        ));
+
+        let e = failed(load(&dump, d.path()).await, "the load is refused");
+        assert_eq!(e.code, rdy_engine::E_LOCKED, "{e:?}");
+        assert!(e.message.starts_with("a daemon still runs for "), "{e:?}");
+        assert!(!store.exists());
+        drop(held);
+        assert_eq!(serving.await.unwrap().unwrap(), ExitReason::ProjectGone);
+        handle.drained();
+        load(&dump, d.path()).await.unwrap();
+    }
+
+    /// The child of [`s3_a_killed_draining_daemon_frees_the_lock`]: the project it drains.
+    const S3_CHILD_PROJECT: &str = "RDY_S3_CHILD_PROJECT";
+    /// The file the child writes once it drains with the start lock held.
+    const S3_CHILD_AT: &str = "RDY_S3_CHILD_AT";
+
+    /// A long bound for what a barrier waits on: a failure message, never a measure.
+    const BARRIER: Duration = Duration::from_secs(120);
+
+    /// Waits until `f` holds, or panics naming `what` once [`BARRIER`] has passed.
+    fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+        let until = Instant::now() + BARRIER;
+        while !f() {
+            assert!(Instant::now() < until, "never happened: {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Kills the child on every way out of the test.
+    struct Child(std::process::Child);
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Not a test on its own: the process [`s3_a_killed_draining_daemon_frees_the_lock`] starts.
+    /// It drains a write that never ends, with the start lock held, until it is killed.
+    #[test]
+    fn s3_child_drains_with_the_start_lock() {
+        let (Some(root), Some(at)) = (
+            std::env::var_os(S3_CHILD_PROJECT),
+            std::env::var_os(S3_CHILD_AT),
+        ) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let run = RunDir::of_project(&root);
+            let store = root.join(".rdy").join(STORE_DIR);
+            let (old, in_flight, _release) = OldWriter::new(&store);
+            let (_handle, _serving) =
+                serving(&run, old, crate::client::DEFAULT_START_TIMEOUT).await;
+            let _write = drain_with_a_write_in_flight(&run, &store, in_flight).await;
+            fs::write(&at, std::process::id().to_string()).unwrap();
+            std::future::pending::<()>().await;
+        });
+    }
+
+    /// D-122E5 item 1: the system frees the start lock of a draining daemon that is killed, so the
+    /// next start or load is not stuck behind it.
+    #[test]
+    fn s3_a_killed_draining_daemon_frees_the_lock() {
+        let (d, run) = project();
+        fake_store(d.path());
+        let at = d.path().join("draining");
+        let mut child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::s3_child_drains_with_the_start_lock",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(S3_CHILD_PROJECT, d.path())
+                .env(S3_CHILD_AT, &at)
+                .spawn()
+                .unwrap(),
+        );
+        wait_for("the child drains", || {
+            at.exists() || child.0.try_wait().unwrap().is_some()
+        });
+        assert!(at.exists(), "the child ended before it drained");
+        assert!(
+            StartGuard::try_take(run.rdy_dir()).unwrap().is_none(),
+            "the draining daemon holds the start lock"
+        );
+
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        // the system frees a dead process's locks, on Windows a moment after its end
+        wait_for("the start lock is free", || {
+            StartGuard::try_take(run.rdy_dir()).unwrap().is_some()
+        });
+    }
+
+    /// D-EDS38: a message shows a plain drive path, never the `\\?\` prefix of a canonical root.
+    #[test]
+    fn s2_another_project_message_shows_a_plain_drive_path() {
+        let (root, shown) = if cfg!(windows) {
+            (Path::new(r"\\?\C:\w\orig"), r"C:\w\orig")
+        } else {
+            (Path::new("/w/orig"), "/w/orig")
+        };
+        let socket = Path::new("/tmp/rdy-501/abc.sock");
+        for stopping in [false, true] {
+            let e = another_project(socket, root, 4242, stopping);
+            assert_eq!(
+                e.message,
+                format!(
+                    "the daemon on {} serves another project ({shown}, process 4242)",
+                    socket.display()
+                )
+            );
+        }
     }
 
     /// df3 fix round 2 (ruling task-3-round1): the refusal of a hello from another project. The

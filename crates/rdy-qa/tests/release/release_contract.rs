@@ -1954,7 +1954,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
-    ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
     (
         "reaffirm",
@@ -1994,6 +1993,98 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "working copy: the working_copy row records its replies",
     ),
 ];
+
+/// relc4: a project for the publication check probes. The public profile `plan` selects four
+/// docs: `guide` (shown prose and one planned note), the planned doc `ghost` with one prose, the
+/// empty planned doc `nothing`, and `late`. The public profile `quiet` selects `calm`, which
+/// hides nothing. `v1.0.0` is tagged; a later landing plans one more note in `guide` and marks
+/// `late` planned, so `plan` hides more than at the tag. Closed again.
+fn publication_project() -> tempfile::TempDir {
+    use rdy_qa::fixtures::{approver, land, write};
+    let (dir, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$ghost", "fields": {"name": "ghost", "title": "Ghost", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$nothing", "fields": {"name": "nothing", "title": "Nothing", "doc_type": "page", "planned": true}},
+            {"op": "create", "type": "doc", "id": "$late", "fields": {"name": "late", "title": "Late", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$calm", "fields": {"name": "calm", "title": "Calm", "doc_type": "page"}}
+        ]),
+    )
+    .expect("the documents");
+    let id = |k: &str| w.created[k].clone();
+    let (admin, guide, ghost, nothing, late, calm) = (
+        id("$admin"),
+        id("$guide"),
+        id("$ghost"),
+        id("$nothing"),
+        id("$late"),
+        id("$calm"),
+    );
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "prose", "parent": guide, "body": "Shown words."},
+            {"op": "create", "type": "note", "parent": guide, "body": "Planned note.", "fields": {"planned": true}},
+            {"op": "create", "type": "prose", "parent": ghost, "body": "Ghost words."},
+            {"op": "create", "type": "prose", "parent": late, "body": "Late words."},
+            {"op": "create", "type": "prose", "parent": calm, "body": "Calm words."},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "plan", "title": "Plan", "audience": "public", "select": [guide, ghost, nothing, late]}},
+            {"op": "create", "type": "publication_profile", "parent": admin,
+             "fields": {"key": "quiet", "title": "Quiet", "audience": "public", "select": [calm]}}
+        ]),
+    )
+    .expect("the profiles");
+    land(&mut r, "work").expect("the first landing");
+    r.tag(&approver(), "v1.0.0", None, None).expect("the tag");
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
+            {"op": "update", "id": late, "fields": {"planned": true}}
+        ]),
+    )
+    .expect("the second change");
+    land(&mut r, "work").expect("the second landing");
+    r.close().expect("close");
+    dir
+}
+
+/// The publication check over the command line: a first publication and a comparison, each for
+/// a profile that hides planned blocks and for one that hides none, so a hidden list is seen
+/// both empty and with rows.
+fn cli_publication_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let dir = publication_project();
+    for profile in ["plan", "quiet"] {
+        cli_probe(
+            seen,
+            dir.path(),
+            env,
+            "publication check first",
+            &["publication", "check", "--profile", profile],
+        );
+        cli_probe(
+            seen,
+            dir.path(),
+            env,
+            "publication check against",
+            &[
+                "publication",
+                "check",
+                "--profile",
+                profile,
+                "--against",
+                "tag:v1.0.0",
+            ],
+        );
+    }
+}
 
 /// The facts of the release binary: exit values and the merged JSON field sets of read, write,
 /// answer and review commands run against the seeded project.
@@ -2176,6 +2267,7 @@ fn cli_runtime() -> Value {
     setup_env.push(("USERPROFILE".to_string(), setup_text));
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     cli_rule_probes(&mut seen);
+    cli_publication_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2462,7 +2554,6 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
         "rdy_policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
-    ("rdy_publication_check", "needs a publication profile"),
     ("rdy_publish", "uploads a site to a host"),
     ("rdy_redact", "destroys content; no dry run is probed"),
     ("rdy_remote", "edits the remotes of the project"),
@@ -3646,11 +3737,39 @@ fn kungfu_counts_row() -> Value {
     })
 }
 
+/// The publication check over the chat tool, as the CLI probes run it.
+fn mcp_publication_probes(seen: &mut Seen) {
+    let dir = publication_project();
+    let mut c = isolated_mcp(dir.path());
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:pub", "run": "pub", "role": "reader"}),
+    );
+    assert!(opened.is_ok(), "the reader session opens");
+    for profile in ["plan", "quiet"] {
+        mcp_probe(
+            seen,
+            &mut c,
+            "rdy_publication_check",
+            "rdy_publication_check first",
+            json!({"profile": profile}),
+        );
+        mcp_probe(
+            seen,
+            &mut c,
+            "rdy_publication_check",
+            "rdy_publication_check against",
+            json!({"profile": profile, "against": "tag:v1.0.0"}),
+        );
+    }
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
+    mcp_publication_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -3854,6 +3973,51 @@ fn errors_row() -> Value {
 
 // ---- config ----
 
+/// relc5: `rdy config` lists every key of the table. One project with nothing set but the
+/// defaults, and one with values at each level and a populated `remotes` group, each run as
+/// text and as JSON, with and without `--show-origin`. The paths are normalized.
+fn config_listing() -> Value {
+    let run = |dir: &Path, env: &[(String, String)], paths: &[&Path], args: &[&str]| -> Value {
+        let (code, out, err) = rdy_in(dir, env, args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        let text = normalize(&out, paths);
+        if args.contains(&"--json") {
+            serde_json::from_str(&text).expect("json rows")
+        } else {
+            json!(text)
+        }
+    };
+    let capture = |dir: &Path, env: &[(String, String)], paths: &[&Path]| -> Value {
+        json!({
+            "text": run(dir, env, paths, &["config"]),
+            "text_show_origin": run(dir, env, paths, &["config", "--show-origin"]),
+            "json": run(dir, env, paths, &["--json", "config"]),
+            "json_show_origin": run(dir, env, paths, &["--json", "config", "--show-origin"]),
+        })
+    };
+    let (d, r) = project();
+    drop(r);
+    let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+    let paths = [d.path(), cfg.path()];
+    let defaults = capture(d.path(), &env, &paths);
+    let append = |path: PathBuf, text: &str| {
+        let mut t = std::fs::read_to_string(&path).unwrap_or_default();
+        t.push_str(text);
+        std::fs::write(path, t).expect("write config");
+    };
+    append(d.path().join(".rdy.yaml"), "propose:\n  changes: 7\n");
+    append(
+        config_levels::local_path(d.path()),
+        "signing:\n  sign: always\nremotes:\n  origin: {url: \"https://hub.example.com/team\", mode: share}\n",
+    );
+    append(
+        cfg.path().join("rdy/config.yaml"),
+        "views:\n  idle_days: 4\n",
+    );
+    let configured = capture(d.path(), &env, &paths);
+    json!({"defaults": defaults, "configured": configured})
+}
+
 fn config_row() -> Value {
     let keys: Vec<Value> = config_levels::KEY_LEVELS
         .iter()
@@ -3918,6 +4082,7 @@ fn config_row() -> Value {
         "project_file": config_levels::PROJECT_FILE,
         "local_file": config_levels::LOCAL_FILE,
         "keys": keys,
+        "listing": config_listing(),
         "propose_cadences": config_levels::PROPOSE_CADENCES,
         "sign_modes": config_levels::SIGN_MODES,
         "unknown_key_warning": warnings,
@@ -5501,6 +5666,21 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/plan/items",
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
+    "cli/publication check against/stdout/disclosure/added_attachments",
+    "cli/publication check against/stdout/disclosure/added_docs",
+    "cli/publication check against/stdout/disclosure/changed_attachments",
+    "cli/publication check against/stdout/disclosure/changed_docs",
+    "cli/publication check against/stdout/disclosure/changed_folders",
+    "cli/publication check against/stdout/disclosure/changed_outside_docs",
+    "cli/publication check against/stdout/disclosure/new_references",
+    "cli/publication check against/stdout/disclosure/redactions",
+    "cli/publication check against/stdout/disclosure/removed_attachments",
+    "cli/publication check against/stdout/references/links_outside/rows",
+    "cli/publication check against/stdout/references/rows",
+    "cli/publication check against/stdout/warnings",
+    "cli/publication check first/stdout/references/links_outside/rows",
+    "cli/publication check first/stdout/references/rows",
+    "cli/publication check first/stdout/warnings",
     "cli/remote list/stdout/remotes",
     "cli/remote list/stdout/warnings",
     "cli/review request/stdout/case/code",
@@ -5614,6 +5794,21 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
+    "mcp/rdy_publication_check against/ok/disclosure/added_attachments",
+    "mcp/rdy_publication_check against/ok/disclosure/added_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_attachments",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/new_references",
+    "mcp/rdy_publication_check against/ok/disclosure/redactions",
+    "mcp/rdy_publication_check against/ok/disclosure/removed_attachments",
+    "mcp/rdy_publication_check against/ok/references/links_outside/rows",
+    "mcp/rdy_publication_check against/ok/references/rows",
+    "mcp/rdy_publication_check against/ok/warnings",
+    "mcp/rdy_publication_check first/ok/references/links_outside/rows",
+    "mcp/rdy_publication_check first/ok/references/rows",
+    "mcp/rdy_publication_check first/ok/warnings",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",
     "mcp/rdy_review run/ok/case/code",
@@ -7012,18 +7207,23 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     for (name, want) in PINNED_SECTIONS {
         assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
     }
-    for (name, want) in [
-        (
-            "working_copy",
-            "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
-        ),
-        (
-            "config",
-            "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
-        ),
-    ] {
-        assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");
-    }
+    assert_eq!(
+        digest_of(&fixture["working_copy"]),
+        "d9d194b59f3670ba311f7b60e9a28550add6f14b8095e948158d17bea3f09a6a",
+        "section working_copy moved"
+    );
+    // relc5 added `config.listing`; the section's earlier digest is of the rest
+    let mut config = fixture["config"].clone();
+    config
+        .as_object_mut()
+        .expect("config")
+        .remove("listing")
+        .expect("relc5 added the listing");
+    assert_eq!(
+        digest_of(&config),
+        "783d69c310443d48ebc9c8a943f04fabac67166adf18f5e5f7caa36e5f2f0d9d",
+        "section config moved"
+    );
     // the tools: every tool but the rule's, the names but its own, the results but its own
     // (and `rdy_schema`, which only the kungfu change moved)
     let mcp = fixture["mcp"].as_object().expect("mcp");
@@ -7053,7 +7253,9 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     );
     assert_eq!(
         digest_of(&without(&mcp["result_fields"], &|k| {
-            !k.starts_with("rdy_rule") && k != "rdy_schema"
+            !k.starts_with("rdy_rule")
+                && k != "rdy_schema"
+                && !k.starts_with("rdy_publication_check")
         })),
         "854e7292a55cd4ab9ed0bda185267e218ce9aecb77e2c27223592cd974a2b565"
     );
@@ -7100,12 +7302,225 @@ fn rtc7_contract_diff_is_limited_to_rules() {
         digest_of(&json!(others)),
         "91020aeffb2e3b0d48b86c76abba05c5348f95be31f69f3ce699abee373668e6"
     );
+    // relc5 gave the config probe its `levels` and unset rows; the historical digest is of the
+    // probe before them
+    let mut probes = without(&cli["runtime"]["probes"], &|k| {
+        !k.starts_with("rule ") && !k.starts_with("publication check")
+    });
+    probes["config"] = json!({
+        "exits": [0],
+        "stdout": [{
+            "file": "null|string",
+            "key": "string",
+            "level": "string",
+            "value": "bool|number|string"
+        }]
+    });
     assert_eq!(
-        digest_of(&without(&cli["runtime"]["probes"], &|k| !k.starts_with("rule "))),
+        digest_of(&probes),
         "31041518cd31060f84815d85a99fa6193f25b0d807d8d53fd0a1651c842a9c85"
     );
+    // relc4 probes `publication check`, so its exclusion row left `not_probed_commands`; the
+    // historical digest is of the runtime with that one row back
+    let mut runtime = without(&cli["runtime"], &|k| k != "probes");
+    runtime["not_probed_commands"]["publication"] = json!("needs a publication profile");
+    // relc1 (Release 1) made the human version text plain, `$.cli.runtime.version_text.text`; the
+    // historical digest is of the runtime with that one value in its preview form
     assert_eq!(
-        digest_of(&without(&cli["runtime"], &|k| k != "probes")),
+        runtime["version_text"]["text"],
+        json!("rdy <version>"),
+        "the one changed value"
+    );
+    runtime["version_text"]["text"] = json!("rdy <version> (preview)");
+    assert_eq!(
+        digest_of(&runtime),
         "8d518aab09e1206edfb24fd47a7dca339e54af78df76cf6d029e5626435f59be"
     );
+}
+
+/// relc4 (D-B2AC3): the contract probes the publication check, once as a first publication and
+/// once against a baseline, for a profile that hides planned blocks and one that hides none. The
+/// shapes hold the hidden lists with their row members, on both surfaces, and the exclusions
+/// that said the check could not be probed are gone.
+#[test]
+fn relc4_contract_probes_populate_hidden_reports() {
+    let fixture = read_fixture();
+    let row = ["doc", "doc_hidden", "hidden_blocks", "redacted", "title"];
+    let list = ["blocks", "docs", "omitted_rows", "rows"];
+    let cli = &fixture["cli"]["runtime"]["probes"];
+    let mcp = &fixture["mcp"]["result_fields"];
+    for (reply, newly) in [
+        (&cli["publication check first"]["stdout"], None),
+        (
+            &cli["publication check against"]["stdout"],
+            Some(&cli["publication check against"]["stdout"]["disclosure"]),
+        ),
+        (&mcp["rdy_publication_check first"]["ok"], None),
+        (
+            &mcp["rdy_publication_check against"]["ok"],
+            Some(&mcp["rdy_publication_check against"]["ok"]["disclosure"]),
+        ),
+    ] {
+        assert_eq!(shape_keys(&reply["hidden_planned"]), list, "{reply}");
+        assert_eq!(
+            shape_keys(&reply["hidden_planned"]["rows"][0]),
+            row,
+            "a populated row"
+        );
+        if let Some(d) = newly {
+            let n = &d["newly_hidden_planned"];
+            assert_eq!(shape_keys(n), list, "{d}");
+            assert_eq!(shape_keys(&n["rows"][0]), row, "a populated row");
+        }
+    }
+    // the first publication has no comparison, and the comparison is an object
+    assert_eq!(
+        cli["publication check first"]["stdout"]["disclosure"],
+        json!("null")
+    );
+    assert!(cli["publication check against"]["stdout"]["disclosure"].is_object());
+    // both surfaces answer with one shape
+    assert_eq!(
+        cli["publication check first"]["stdout"],
+        mcp["rdy_publication_check first"]["ok"]
+    );
+    assert_eq!(
+        cli["publication check against"]["stdout"],
+        mcp["rdy_publication_check against"]["ok"]
+    );
+    // the check is probed, so neither exclusion list holds it
+    assert!(
+        fixture["cli"]["runtime"]["not_probed_commands"]
+            .get("publication")
+            .is_none()
+    );
+    assert!(
+        fixture["mcp"]["result_fields_not_captured"]
+            .get("rdy_publication_check")
+            .is_none()
+    );
+    // the tools, the tool names and the unprobed operations did not move
+    assert!(
+        fixture["mcp"]["tool_names"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rdy_publication_check"))
+    );
+}
+
+/// relc5 (D-C5955): the contract captures the complete config listing. The config probe holds
+/// the allowed levels, and nullable `level`, `file` and `value` from populated and unset rows.
+/// The listing holds the defaults and a configured project as text and JSON, with and without
+/// origins, with an empty and a populated per-entry group.
+#[test]
+fn relc5_contract_captures_complete_config_listing() {
+    let fixture = read_fixture();
+    // $.cli.runtime.probes.config.stdout
+    let probe = &fixture["cli"]["runtime"]["probes"]["config"]["stdout"];
+    let row = &probe[0];
+    assert_eq!(
+        shape_keys(row),
+        ["file", "key", "level", "levels", "value"],
+        "{row}"
+    );
+    for member in ["file", "level", "value"] {
+        let shape = row[member].as_str().unwrap();
+        assert!(shape.split('|').any(|s| s == "null"), "{member}: {shape}");
+        assert!(shape.split('|').any(|s| s != "null"), "{member}: {shape}");
+    }
+    assert_eq!(row["levels"], json!(["string"]));
+    // $.config.listing
+    let listing = &fixture["config"]["listing"];
+    let table: Vec<&str> = fixture["config"]["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap())
+        .collect();
+    for (scenario, entries) in [("defaults", false), ("configured", true)] {
+        let cap = &listing[scenario];
+        for member in ["text", "text_show_origin", "json", "json_show_origin"] {
+            assert!(!cap[member].is_null(), "{scenario}.{member}");
+        }
+        // the origin flag changes the text and not the rows
+        assert_eq!(cap["json"], cap["json_show_origin"], "{scenario}");
+        let rows = cap["json"].as_array().unwrap();
+        // every table key has a row, in table order; an entry row sits in its group's slot
+        let slot = |key: &str| {
+            table
+                .iter()
+                .position(|t| {
+                    key == *t
+                        || (["code_paths", "remotes", "hub.installs"].contains(t)
+                            && key.starts_with(&format!("{t}.")))
+                })
+                .unwrap_or_else(|| panic!("{key}"))
+        };
+        let slots: Vec<usize> = rows
+            .iter()
+            .map(|r| slot(r["key"].as_str().unwrap()))
+            .collect();
+        assert!(
+            slots.windows(2).all(|w| w[0] <= w[1]),
+            "{scenario}: {slots:?}"
+        );
+        assert!((0..table.len()).all(|i| slots.contains(&i)), "{scenario}");
+        for r in rows {
+            let want =
+                fixture["config"]["keys"][slot(r["key"].as_str().unwrap())]["levels"].clone();
+            assert_eq!(r["levels"], want, "{r}");
+        }
+        // an unset row has null value, level and file; a populated one has a level
+        let unset = rows.iter().filter(|r| r["level"].is_null()).count();
+        assert!(unset > 0, "{scenario} has unset rows");
+        assert!(
+            rows.iter()
+                .any(|r| r["level"] == "default" && r["file"].is_null()),
+            "{scenario} has default rows"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["level"] == "project" && r["file"].is_string()),
+            "{scenario} has configured rows"
+        );
+        for r in rows.iter().filter(|r| r["level"].is_null()) {
+            assert!(r["value"].is_null() && r["file"].is_null(), "{r}");
+        }
+        let group = |k: &str| {
+            rows.iter()
+                .filter(|r| r["key"].as_str().unwrap().starts_with(k))
+                .count()
+        };
+        assert_eq!(group("hub.installs"), 1, "an empty group is one unset row");
+        assert_eq!(group("code_paths"), 1, "an empty group is one unset row");
+        let origin_text = cap["text_show_origin"].as_str().unwrap();
+        let text = cap["text"].as_str().unwrap();
+        assert!(
+            text.contains("hub.installs = unset  # set at: local, user"),
+            "{text}"
+        );
+        assert!(
+            origin_text.contains("hub.installs = unset  # unset  # set at: local, user"),
+            "{origin_text}"
+        );
+        assert_eq!(text.lines().count(), rows.len(), "{scenario}");
+        // a populated group lists its entry beside no aggregate row
+        let remotes = group("remotes");
+        if entries {
+            assert_eq!(remotes, 1, "one remote");
+            assert!(
+                rows.iter().any(|r| r["key"] == "remotes.origin"),
+                "{rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r["key"] == "remotes"),
+                "no aggregate row"
+            );
+        } else {
+            assert!(
+                rows.iter()
+                    .any(|r| r["key"] == "remotes" && r["level"].is_null())
+            );
+        }
+    }
 }

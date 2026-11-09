@@ -464,9 +464,9 @@ fn ps5_config_lists_each_code_path_with_its_own_level() {
         rows,
         vec![
             &serde_json::json!({"key": "code_paths.app", "value": "checkouts/app",
-                "level": "local", "file": local_file}),
+                "level": "local", "file": local_file, "levels": ["local", "user"]}),
             &serde_json::json!({"key": "code_paths.lib", "value": lib.path(),
-                "level": "user", "file": uf}),
+                "level": "user", "file": uf, "levels": ["local", "user"]}),
         ],
         "{v}"
     );
@@ -474,9 +474,12 @@ fn ps5_config_lists_each_code_path_with_its_own_level() {
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     assert!(o.status.success(), "{out}");
     let want = [
-        format!("code_paths.app = checkouts/app  # {}", local_file.display()),
         format!(
-            "code_paths.lib = {}  # {}",
+            "code_paths.app = checkouts/app  # {}  # set at: local, user",
+            local_file.display()
+        ),
+        format!(
+            "code_paths.lib = {}  # {}  # set at: local, user",
             lib.path().display(),
             uf.display()
         ),

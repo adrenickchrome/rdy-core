@@ -52,10 +52,10 @@ mod upgrade_cmd;
 mod view_cmd;
 mod wc;
 
-/// True until Release 1: the human version output carries the preview mark. This is the
-/// only switch. Machine-read versions (the daemon hello, MCP serverInfo, dump headers, format
+/// True for a preview build: the human version output carries the preview mark. Release 1 sets
+/// it false. This is the only switch. Machine-read versions (the daemon hello, MCP serverInfo, dump headers, format
 /// facts and the PDF producer) stay `env!("CARGO_PKG_VERSION")`.
-const PREVIEW: bool = true;
+const PREVIEW: bool = false;
 
 /// The text of `rdy --version`, `-V` and `--json --version`.
 const VERSION_TEXT: &str = if PREVIEW {

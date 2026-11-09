@@ -14,8 +14,8 @@ use rdy_schema::publication::PROFILE_TYPE;
 
 pub use rdy_engine::RdyError;
 pub use rdy_engine::publication::{
-    AttachmentEntry, Audience, CheckStatus, DisclosureDiff, ProfileFacts, ReferenceReport,
-    SelectionEntry, profile_facts,
+    AttachmentEntry, Audience, CheckStatus, DisclosureDiff, HiddenList, HiddenRow, ProfileFacts,
+    ReferenceReport, SelectionEntry, profile_facts,
 };
 
 /// One publication profile as a tag holds it. `selector` is the value to pass back to
@@ -61,13 +61,16 @@ pub struct PreviousPublication {
 /// The check of one candidate publication: its profile, its reference check, and what it
 /// discloses beyond the previous publication. `comparison` is None when there is no previous
 /// publication; that is not an empty diff. Then `first_attachments` lists every attachment of
-/// the candidate (the complete docs are `profile.docs`); with a previous publication it is None.
+/// the candidate (the complete docs are `profile.docs`) and `first_hidden_planned` lists the docs
+/// with planned blocks the profile hides; with a previous publication both are None and the
+/// comparison holds `newly_hidden_planned` instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationCheck {
     pub profile: ProfileSummary,
     pub references: ReferenceReport,
     pub comparison: Option<DisclosureDiff>,
     pub first_attachments: Option<Vec<AttachmentEntry>>,
+    pub first_hidden_planned: Option<HiddenList>,
 }
 
 /// Publications' refusal when the baseline holds no such profile (`diff.rs`); the baseline cannot
@@ -199,11 +202,15 @@ impl Snapshot {
             }
         };
         let first_attachments = comparison.is_none().then(|| candidate.attachments.clone());
+        let first_hidden_planned = comparison
+            .is_none()
+            .then(|| candidate.hidden_planned.full());
         Ok(PublicationCheck {
             profile: summarize(&candidate)?,
             references: candidate.references,
             comparison,
             first_attachments,
+            first_hidden_planned,
         })
     }
 }

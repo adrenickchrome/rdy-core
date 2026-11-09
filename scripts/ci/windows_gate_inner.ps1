@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RustupHome,
     [Parameter(Mandatory = $true)][string]$NodeDir,
     [Parameter(Mandatory = $true)][string]$GitDir,
-    [Parameter(Mandatory = $true)][string]$PrivateHome
+    [Parameter(Mandatory = $true)][string]$PrivateHome,
+    [switch]$HostedCi
 )
 $ErrorActionPreference = 'Stop'
 
@@ -38,6 +39,11 @@ $env:PATH = (Join-Path $CargoHome 'bin') + ';' + $NodeDir + ';' + $GitDir + ';' 
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_TEST_DEBUG = '0'
 $env:CARGO_INCREMENTAL = '0'
+if ($HostedCi) { $env:RDY_QA_HOSTED_CI = '1' }
+# Windows PowerShell 5.1 children must not inherit the module paths of pwsh 7.
+$env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+Write-Output "PSModulePath: $($env:PSModulePath)"
+netsh int ipv4 show excludedportrange protocol=tcp
 Set-Location -LiteralPath $Work
 
 cargo fetch --locked

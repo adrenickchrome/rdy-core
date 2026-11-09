@@ -375,6 +375,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
         [
             "against",
             "disclosure",
+            "hidden_planned",
             "profile",
             "references",
             "release",

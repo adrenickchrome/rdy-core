@@ -233,11 +233,14 @@ fn now_secs() -> i64 {
 /// effort), then the LAN address of `cfg` on that port when `serve.site_lan` is on; never a
 /// wildcard or public address. `lan_override` stands in for `addr::lan_address()` (a test hook).
 /// Runs inside a Tokio runtime (it registers the listeners); it never waits. With no loopback
-/// port, it is the last bind error, and every socket it opened is closed.
+/// port, it is the last bind error, and every socket it opened is closed. With `fallback` (the
+/// derived candidates, not a pinned `serve.site_port`), when every port of `ports` refuses, it
+/// binds `127.0.0.1:0` and uses the port the operating system assigns (D-5GFFX).
 pub(crate) fn open(
     root: &Path,
     cfg: &ServeConfig,
     ports: &[u16],
+    fallback: bool,
     lan_override: Option<LanOverride>,
 ) -> Result<Opened, String> {
     let mut last = None;
@@ -247,6 +250,22 @@ pub(crate) fn open(
             Ok(l) => {
                 bound = Some((port, l));
                 break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    if bound.is_none()
+        && fallback
+        && let (Some(first), Some(end)) = (ports.first(), ports.last())
+    {
+        let os = listen(root, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .and_then(|l| l.local_addr().map(|a| (a.port(), l)));
+        match os {
+            Ok((port, l)) => {
+                log(&format!(
+                    "site: ports {first}..{end} refused; using OS-assigned port {port}"
+                ));
+                bound = Some((port, l));
             }
             Err(e) => last = Some(e),
         }
@@ -343,6 +362,7 @@ impl SiteServer {
             root,
             &cfg,
             &addr::candidates(cfg.site_port, root),
+            cfg.site_port.is_none(),
             lan_override,
         ) {
             Ok(o) => {
@@ -1136,7 +1156,7 @@ mod tests {
         // the full site: 127.0.0.1, [::1] and the LAN address, each configured, then bound
         let o = {
             let _rt = rt.enter();
-            open(&root, &cfg, &addr::candidates(None, &root), None).unwrap()
+            open(&root, &cfg, &addr::candidates(None, &root), true, None).unwrap()
         };
         let steps = seam::take(&root);
         configured_before_bind(&steps);
@@ -1176,15 +1196,22 @@ mod tests {
         assert!(bound(&steps).is_empty(), "{steps:?}");
         assert_eq!(
             steps.len(),
-            usize::from(addr::TRIES),
-            "one refused option call per port"
+            usize::from(addr::TRIES) + 1,
+            "one refused option call per port, then one for the OS-assigned port"
         );
         // the profile listener's own bind (`ensure` opens it with exactly this call); called
         // directly, so no profile-listener log line reaches another test's log capture
         seam::fail(&root, &[]);
         let p = {
             let _rt = rt.enter();
-            open(&root, &cfg, &addr::profile_candidates(&root, "guide"), None).unwrap()
+            open(
+                &root,
+                &cfg,
+                &addr::profile_candidates(&root, "guide"),
+                true,
+                None,
+            )
+            .unwrap()
         };
         let steps = seam::take(&root);
         configured_before_bind(&steps);
@@ -1211,7 +1238,7 @@ mod tests {
         seam::fail(&root, &[Ipv6Addr::LOCALHOST.into(), lan_ip.into()]);
         let o = {
             let _rt = rt.enter();
-            open(&root, &cfg, &addr::candidates(None, &root), None).unwrap()
+            open(&root, &cfg, &addr::candidates(None, &root), true, None).unwrap()
         };
         let steps = seam::take(&root);
         configured_before_bind(&steps);
@@ -1234,7 +1261,7 @@ mod tests {
         seam::fail(&root, &[Ipv4Addr::LOCALHOST.into()]);
         let failed = {
             let _rt = rt.enter();
-            open(&root, &cfg, &addr::candidates(None, &root), None)
+            open(&root, &cfg, &addr::candidates(None, &root), true, None)
         };
         assert_eq!(failed.err(), Some(seam::FAILURE.to_string()));
         assert!(bound(&seam::take(&root)).is_empty());
@@ -1258,7 +1285,14 @@ mod tests {
             .unwrap();
         let _rt = rt.enter();
         let cfg = serve_config(&root);
-        let p = open(&root, &cfg, &addr::profile_candidates(&root, "guide"), None).unwrap();
+        let p = open(
+            &root,
+            &cfg,
+            &addr::profile_candidates(&root, "guide"),
+            true,
+            None,
+        )
+        .unwrap();
         for at in &p.info.addrs {
             for reuse in [false, true] {
                 let socket = if at.is_ipv4() {
@@ -1276,6 +1310,133 @@ mod tests {
                         .is_err(),
                     "{at} (reuseaddr {reuse})"
                 );
+            }
+        }
+    }
+
+    /// A project dir under a temp dir, its canonical root, and the 16 candidates held by
+    /// listeners of this test. A candidate taken by another process first gives a new dir.
+    fn occupied(
+        key: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Vec<std::net::TcpListener>,
+    ) {
+        loop {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(".rdy")).unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let ports = match key {
+                None => addr::candidates(None, &root),
+                Some(k) => addr::profile_candidates(&root, k),
+            };
+            let held: Result<Vec<_>, _> = ports
+                .iter()
+                .map(|p| std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, *p)))
+                .collect();
+            if let Ok(held) = held {
+                return (dir, root, held);
+            }
+        }
+    }
+
+    fn current_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn s4_all_candidates_refused_binds_an_os_port() {
+        let (_dir, root, _held) = occupied(None);
+        let ports = addr::candidates(None, &root);
+        let (first, last) = (ports[0], ports[15]);
+        let mine = format!("site: ports {first}..{last} refused");
+        let log = crate::daemon::capture_log_for_tests(&[mine.as_str()]);
+        let rt = current_thread();
+        let (server, info) = rt.block_on(SiteServer::bind(&root, Some(LanOverride::NoneFound)));
+        assert!(server.is_some(), "{:?}", info.url);
+        let port: u16 = info
+            .url
+            .as_ref()
+            .unwrap()
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches('/')
+            .parse()
+            .unwrap();
+        assert!(!ports.contains(&port), "{port} is outside {ports:?}");
+        assert!(
+            info.addrs.iter().all(|a| a.port() == port),
+            "{:?}",
+            info.addrs
+        );
+        assert_eq!(
+            log.lines(),
+            vec![format!(
+                "site: ports {first}..{last} refused; using OS-assigned port {port}"
+            )]
+        );
+    }
+
+    #[test]
+    fn s4_pinned_site_port_has_no_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".rdy")).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        std::fs::write(
+            root.join(".rdy/local.yaml"),
+            format!("serve:\n  site_port: {port}\n"),
+        )
+        .unwrap();
+        let rt = current_thread();
+        let (server, info) = rt.block_on(SiteServer::bind(&root, Some(LanOverride::NoneFound)));
+        assert!(server.is_none());
+        assert!(info.url.is_err(), "{:?}", info.url);
+        assert!(info.addrs.is_empty());
+    }
+
+    #[test]
+    fn s4_profile_site_falls_back_too() {
+        let (_dir, root, _held) = occupied(Some("guide"));
+        let ports = addr::profile_candidates(&root, "guide");
+        let mine = format!("site: ports {}..{} refused", ports[0], ports[15]);
+        let log = crate::daemon::capture_log_for_tests(&[mine.as_str()]);
+        let rt = current_thread();
+        let _rt = rt.enter();
+        let cfg = serve_config(&root);
+        let o = open(&root, &cfg, &ports, true, None).unwrap();
+        assert!(!ports.contains(&o.port), "{} is outside {ports:?}", o.port);
+        assert_eq!(o.info.url, Ok(addr::url("127.0.0.1", o.port)));
+        assert_eq!(
+            log.lines(),
+            vec![format!(
+                "site: ports {}..{} refused; using OS-assigned port {}",
+                ports[0], ports[15], o.port
+            )]
+        );
+    }
+
+    #[test]
+    fn s4_derived_port_still_first() {
+        let rt = current_thread();
+        let _rt = rt.enter();
+        loop {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(".rdy")).unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let cfg = serve_config(&root);
+            let ports = addr::candidates(None, &root);
+            // another process may hold the derived port: try a new project
+            if let Ok(o) = open(&root, &cfg, &ports, true, None) {
+                if o.port == ports[0] {
+                    return;
+                }
+                let held = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, ports[0]));
+                assert!(held.is_err(), "the derived port was free but unused");
             }
         }
     }

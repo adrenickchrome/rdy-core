@@ -17,6 +17,12 @@ const ABOUT: &str = "rdy stores what you intend and decided, and gives it to who
 const RELEASES: &str = "https://github.com/adrenickchrome/rdy-core/releases";
 const ISSUES: &str = "https://github.com/adrenickchrome/rdy-core/issues";
 const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
+/// The Release 1 archives, in manifest order: macOS, Windows, Linux.
+const ALL_TARGETS: [&str; 3] = [
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+];
 
 /// The decision's seven sentences and the report sentence, contiguous, with the heading.
 const PREVIEW_NOTE: &str = "\
@@ -296,7 +302,7 @@ fn parse_statements<'a>(
 /// whether or not its key is valid, so a placeholder or malformed line cannot hide from the pin.
 /// A candidate outside every `sh` fence declares a key. The selected key and each trust list row
 /// declare exactly one line, and every declared line is the key of its row. A candidate inside
-/// an `sh` fence uses a key: the generated install blocks pass the selected key to printf, and
+/// an `sh` fence uses a key: the generated install blocks pass the selected key to printf (or, in PowerShell, to the signer file write), and
 /// every use is that line, byte for byte, as one quoted token. A root command for a machine
 /// statement names the pinned root key in a statement namespace, and is not a release key.
 fn trust_state_error(readme: &str) -> Result<(), String> {
@@ -320,7 +326,7 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
     for l in lines.iter().copied() {
         if let Some(label) = l.trim().strip_prefix("```") {
             kind = match (fenced, label) {
-                (false, "sh") => Fence::Sh,
+                (false, "sh" | "powershell") => Fence::Sh,
                 (false, "json") => Fence::Json,
                 (false, _) => Fence::Other,
                 (true, _) => Fence::Outside,
@@ -626,7 +632,8 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
 
 #[test]
 fn pre2_cli_version_marks_only_human_output() {
-    let want = format!("rdy {} (preview)\n", env!("CARGO_PKG_VERSION"));
+    // Release 1 prints the plain version; machine-read versions are numeric
+    let want = format!("rdy {}\n", env!("CARGO_PKG_VERSION"));
     for args in [
         &["--version"][..],
         &["-V"][..],
@@ -667,7 +674,7 @@ fn pre2_preview_readme_has_one_trust_state() {
 
     // every V in names and links is one plain version, not newer than this build
     let v_re = Regex::new(&format!(
-        r"rdy-([^/\s)]+?)-preview-({})\.tar\.gz|releases/(?:tag|download)/v([^/\s)]+)",
+        r"rdy-([^/\s)]+?)(?:-preview)?-({})\.tar\.gz|releases/(?:tag|download)/v([^/\s)]+)",
         TARGETS.map(regex::escape).join("|")
     ))
     .unwrap();
@@ -687,13 +694,47 @@ fn pre2_preview_readme_has_one_trust_state() {
             && parts[2].parse::<u64>().unwrap() <= build[2].parse::<u64>().unwrap(),
         "V {v} is newer than the build"
     );
-    for target in TARGETS {
-        let name = format!("rdy-{v}-preview-{target}.tar.gz");
+    // the links are the Release 1 triple with the plain names, and no preview name is left
+    for t in ALL_TARGETS {
+        let name = format!("rdy-{v}-{t}.tar.gz");
         assert!(
             readme.contains(&format!("{RELEASES}/download/v{v}/{name}")),
-            "{name}"
+            "no link for {name}"
         );
     }
+    assert!(
+        !readme.contains("-preview-"),
+        "a preview archive name is left in the README"
+    );
+    assert!(
+        !readme.contains("(preview)"),
+        "the README expects a preview version output"
+    );
+    // the quick route: one download-and-extract command per platform, with the plain names
+    for t in ALL_TARGETS {
+        let url = format!("{RELEASES}/download/v{v}/rdy-{v}-{t}.tar.gz");
+        let fetches = readme
+            .lines()
+            .filter(|l| {
+                (l.starts_with("curl -LO ") || l.starts_with("Invoke-WebRequest "))
+                    && l.contains(&url)
+            })
+            .count();
+        assert_eq!(fetches, 1, "one download command for {t}");
+    }
+    let win = "rdy-{v}-x86_64-pc-windows-msvc".replace("{v}", &v);
+    assert!(
+        readme.contains("**Windows (x86_64), in PowerShell:**"),
+        "no Windows quick-install block"
+    );
+    assert!(
+        readme.contains(&format!("tar.exe -xzf {win}.tar.gz")),
+        "the Windows quick-install block does not extract the plain archive"
+    );
+    assert!(
+        readme.contains(&format!("{win}\\rdy.exe")),
+        "the Windows quick-install block does not place rdy.exe"
+    );
     for name in ["SHA256SUMS", "SHA256SUMS.sig"] {
         assert!(
             readme.contains(&format!("{RELEASES}/download/v{v}/{name})")),
@@ -940,7 +981,7 @@ fn rsig3_readme_lists_epochs_and_uses_the_selected_key() {
         // the install blocks use the selected key only
         for line in [&root_line, &key7, &key8] {
             let uses = readme.matches(&format!("'{line}'")).count();
-            assert_eq!(uses, if line == want { 3 } else { 0 }, "{v}: {line}");
+            assert_eq!(uses, if line == want { 4 } else { 0 }, "{v}: {line}");
         }
         let this = lists(&readme);
         assert_eq!(*list.get_or_insert_with(|| this.clone()), this, "{v}");
@@ -1390,8 +1431,8 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
     let combined = ready_with_install(&ready_block(&fenced, &fp), &signer);
     assert_eq!(
         combined.matches(signer.as_str()).count(),
-        5,
-        "two declarations and three uses"
+        6,
+        "two declarations and four uses"
     );
     assert_eq!(
         trust_state_error(&combined),
@@ -1701,15 +1742,14 @@ fn pre2_preview_readme_preserves_the_dump_route() {
     );
     let at = |s: &str| readme.find(s).unwrap_or_else(|| panic!("missing {s}"));
     assert!(at("See \"About this preview\"") < at("## Install"));
-    assert!(readme.contains(
-        "The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
-    ));
-    for target in TARGETS {
-        let re = Regex::new(&format!(
-            r"rdy-[0-9.]+-preview-{}\.tar\.gz",
-            regex::escape(target)
-        ))
-        .unwrap();
+    assert!(
+        readme.contains(
+            "Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
+        ),
+        "the archive sentence is missing"
+    );
+    for target in ALL_TARGETS {
+        let re = Regex::new(&format!(r"rdy-[0-9.]+-{}\.tar\.gz", regex::escape(target))).unwrap();
         assert!(re.is_match(&readme), "{target}");
     }
     assert!(

@@ -54,9 +54,13 @@ fn ain2_a_relative_person_path_warns_and_is_ignored() {
                 && l.contains("must be an absolute path; rdy ignores it")),
         "{out}"
     );
-    assert!(
-        !out.lines()
-            .any(|l| l.contains("instructions.person") && !l.starts_with("warning")),
-        "{out}"
-    );
+    // since every key is listed (TASK-1688), the key has one row: it reads unset, and the
+    // ignored relative path is never shown as its value
+    let rows: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("instructions.person") && !l.starts_with("warning"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{out}");
+    assert!(rows[0].contains("unset"), "{out}");
+    assert!(!rows[0].contains("relative/meta"), "{out}");
 }

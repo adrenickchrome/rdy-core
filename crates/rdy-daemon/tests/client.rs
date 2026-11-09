@@ -544,7 +544,7 @@ async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
             format!(
                 "the daemon on {} serves another project ({}, process {})",
                 d.run.socket().display(),
-                root.display(),
+                rdy_store::pio::display_path(&root),
                 std::process::id()
             )
         );

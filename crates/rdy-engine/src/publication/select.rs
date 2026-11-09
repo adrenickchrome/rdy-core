@@ -2,6 +2,7 @@
 //! whole docs and folders, their ancestor folders' own records, the selected state and induced
 //! graph, the digests, the attachments and the reference check. Nothing here is stored.
 
+use super::hidden::HiddenPlanned;
 use super::references::{self, CheckStatus, ReferenceReport};
 use super::source::{PublicationSource, ReadPublicationSource};
 use crate::as_built::{Resolver, Status};
@@ -246,6 +247,8 @@ pub struct Resolved {
     pub removed_outside_docs: Vec<SelectionEntry>,
     pub shells: BTreeSet<BlockId>,
     pub as_built: BTreeMap<BlockId, ShownStatus>,
+    /// The planned blocks the profile hid, for the report alone (D-B2AC3). Nothing else reads it.
+    pub hidden_planned: HiddenPlanned,
 }
 
 impl Resolved {
@@ -1329,6 +1332,7 @@ fn resolve_in(
         shells,
         shown,
     } = filter(pack, m, &keep, &profile);
+    let hidden_planned = HiddenPlanned::capture(m, &hidden, l)?;
     let keep: BTreeSet<BlockId> = keep.difference(&hidden).cloned().collect();
 
     // the removed versions outside a doc that the selection leaves out, for the comparison
@@ -1462,6 +1466,7 @@ fn resolve_in(
         removed_outside_docs,
         shells,
         as_built: shown,
+        hidden_planned,
     })
 }
 

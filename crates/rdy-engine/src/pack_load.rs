@@ -119,10 +119,10 @@ pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     let mut contents = Vec::with_capacity(paths.len());
     let mut buf = Vec::new();
     for path in paths {
-        let mut file = std::fs::File::open(&path).map_err(io)?;
+        let mut file = std::fs::File::open(&path).map_err(|e| io_on("open", &path, e))?;
         let stamp = FileStamp::of_open(&file, &path).map_err(io)?;
         let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut bytes).map_err(io)?;
+        std::io::Read::read_to_end(&mut file, &mut bytes).map_err(|e| io_on("read", &path, e))?;
         buf.extend_from_slice(path.as_os_str().as_encoded_bytes());
         buf.push(0);
         buf.extend_from_slice(&bytes);
@@ -147,6 +147,16 @@ pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
         local,
         packs: contents.collect(),
     })
+}
+
+/// An `E_IO` error of a pack-defining file: `could not {op} {path}: {error}`, with the path as a
+/// person reads it (`display_path`) and the system's own error.
+fn io_on(op: &str, path: &Path, e: std::io::Error) -> RdyError {
+    RdyError::new(
+        crate::E_IO,
+        format!("could not {op} {}: {e}", rdy_store::pio::display_path(path)),
+        "check file permissions and disk space",
+    )
 }
 
 /// What `Rdy::reload_pack` did.

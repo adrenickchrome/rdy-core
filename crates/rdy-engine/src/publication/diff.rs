@@ -13,6 +13,7 @@
 //! version did not move. A doc's digest also holds its shells and the shown status of its
 //! content, so a shell that becomes whole, or a changed status, changes the doc.
 
+use super::hidden::HiddenList;
 use super::references::{Classification, ReferenceRow};
 use super::select::{
     AttachmentEntry, DocEntry, RequestSet, Resolved, SelectionEntry, invalid_tree, name_replaced,
@@ -105,6 +106,8 @@ pub struct DisclosureDiff {
     pub changed_attachments: Vec<ChangedAttachment>,
     pub new_references: Vec<ReferenceRow>,
     pub new_reference_count: u64,
+    /// The planned blocks this side hides that the baseline did not hide, by id (D-B2AC3).
+    pub newly_hidden_planned: HiddenList,
 }
 
 /// The removed versions either side holds, each with the request that removed it.
@@ -418,5 +421,6 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         changed_attachments,
         new_references,
         new_reference_count,
+        newly_hidden_planned: after.hidden_planned.newly(&before.hidden_planned),
     })
 }

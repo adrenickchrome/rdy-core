@@ -15,6 +15,10 @@
 //! `E_LOCKED` and an outstanding reader `E_HELD_BY_READER`. Maintenance stops no host worker
 //! and chooses no holder generation: the host owns both (hub `operations/upgrades`).
 
+pub use crate::capabilities::{
+    Access, DumpFeaturePair, DumpReads, FormatCapabilities, StoreReads, UnknownFeatureAccess,
+    format_capabilities,
+};
 use rdy_engine::RdyError;
 pub use rdy_engine::dump_stop::DumpStop;
 pub use rdy_engine::formats::{DumpFormatFacts, DumpPair, FormatFacts};

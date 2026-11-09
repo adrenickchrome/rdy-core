@@ -2,7 +2,8 @@
 //! binary, both license files, the third-party notices (`THIRD-PARTY-NOTICES.txt`) and, for a
 //! preview build, the preview note as `PREVIEW.txt`. The
 //! binary's own `--version` output decides whether it is a preview, so the archive's name and
-//! note follow the build, with no second switch. Packaging stops at the unsigned archive: the
+//! note follow the build, with no second switch. Release 1 prints a plain version, so its
+//! archives carry the plain names and no note; the install check requires that plain layout. Packaging stops at the unsigned archive: the
 //! signed `SHA256SUMS` is made later, offline.
 //!
 //! `qa-release-package` is the command; [`package`] does the work.
@@ -30,8 +31,8 @@ A project made with a preview moves to Release 1 the same way.
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
 ";
 
-/// The two Unix release targets: macOS arm64 and Linux amd64. Their archive lines are the whole
-/// signed manifest; the Windows target joins the manifest with its install checker.
+/// The two Unix release targets: macOS arm64 and Linux amd64. The signed manifest lists their
+/// archives, the Windows archive between them and the sample dump after them.
 pub const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"];
 /// The Windows release target: its archive holds `rdy.exe` where the others hold `rdy`.
 pub const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -595,6 +596,10 @@ pub const SIGNATURE_FILE: &str = "SHA256SUMS.sig";
 pub const SIGNERS_FILE: &str = "release-allowed-signers";
 /// The largest manifest accepted.
 pub const MANIFEST_MAX: u64 = 1024;
+/// The sample dump beside the archives: its name in the download directory and in the manifest.
+pub const SAMPLE_FILE: &str = "tally.rdydump";
+/// The largest sample accepted: 16 MiB.
+pub const SAMPLE_MAX: u64 = 16_777_216;
 /// The largest signature accepted.
 pub const SIGNATURE_MAX: u64 = 16_384;
 /// The longest signer line accepted, in bytes.
@@ -751,10 +756,10 @@ impl GuideCommand {
     }
 }
 
-/// The stem of the archive for `version` and `target`: the preview family, the only one PRE's
-/// manifest lists.
+/// The stem of the archive for `version` and `target`: `rdy-<version>-<target>`, the only
+/// family the manifest lists.
 fn archive_stem(version: &str, target: &str) -> String {
-    format!("rdy-{version}-preview-{target}")
+    format!("rdy-{version}-{target}")
 }
 
 /// The archive's file name for `version` and `target`.
@@ -762,16 +767,20 @@ pub fn archive_name(version: &str, target: &str) -> String {
     format!("{}.tar.gz", archive_stem(version, target))
 }
 
-/// The exact `--version` output of a binary from an archive with `stem`: `rdy V (preview)` for
-/// a preview stem, `rdy V` for a plain one; `None` for any other stem.
+/// The exact `--version` output of a binary from an archive with `stem`: `rdy V` for the plain
+/// stem; `None` for any other stem.
 fn version_text_of(stem: &str, version: &str, target: &str) -> Option<String> {
-    if stem == format!("rdy-{version}-preview-{target}") {
-        Some(format!("rdy {version} (preview)\n"))
-    } else if stem == format!("rdy-{version}-{target}") {
-        Some(format!("rdy {version}\n"))
-    } else {
-        None
-    }
+    (stem == archive_stem(version, target)).then(|| format!("rdy {version}\n"))
+}
+
+/// The file names a signed manifest lists for `version`, in manifest order: the macOS,
+/// Windows and Linux archives, then the sample dump.
+fn manifest_names(version: &str) -> Vec<String> {
+    MANIFEST_TARGETS
+        .iter()
+        .map(|t| archive_name(version, t))
+        .chain([SAMPLE_FILE.to_string()])
+        .collect()
 }
 
 /// Whether `line` is exactly `rdy-release namespaces="rdy-release-v1" <key-type> <base64>`: at
@@ -1383,8 +1392,18 @@ pub fn readme_install_section(version: &str, signer_line: &str) -> Result<String
             render_commands(&commands(&input(target, browser))?)?
         ))
     };
+    let windows = render_guide(&InstallInput {
+        download: PathBuf::from(r"C:\path\to\download"),
+        signer_line: signer_line.to_string(),
+        version: version.to_string(),
+        commit: "0".repeat(40),
+        target: WINDOWS_TARGET.to_string(),
+        unpack: PathBuf::from(r"C:\path\to\unpack"),
+        prefix: PathBuf::from(format!(r"C:\path\to\rdy-{version}")),
+        browser: false,
+    })?;
     Ok(format!(
-        "### Install\n\nOn macOS arm64, for an archive downloaded with curl:\n\n{}\nOn Linux amd64:\n\n{}\nOn macOS arm64, for an archive downloaded with a web browser:\n\n{}\nAdd the version's bin directory to PATH in this shell.\nReplace `<version-prefix>` with the version prefix, such as `/path/to/rdy-{version}`:\n\n```sh\nexport PATH=\"<version-prefix>/bin:$PATH\"\n```\n",
+        "### Install\n\nOn macOS arm64, for an archive downloaded with curl:\n\n{}\nOn Linux amd64:\n\n{}\nOn Windows amd64, in PowerShell:\n\n```powershell\n{windows}\n```\n\nOn macOS arm64, for an archive downloaded with a web browser:\n\n{}\nAdd the version's bin directory to PATH in this shell.\nReplace `<version-prefix>` with the version prefix, such as `/path/to/rdy-{version}`:\n\n```sh\nexport PATH=\"<version-prefix>/bin:$PATH\"\n```\n",
         block(TARGETS[0], false)?,
         block(TARGETS[1], false)?,
         block(TARGETS[0], true)?,
@@ -1927,6 +1946,11 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
         let file = open_regular_at(&dir, &name, ARCHIVE_MAX).ok_or(Input)?;
         archives.push((name, file));
     }
+    // the sample is optional; one that is there is hashed with the archives
+    if !absent_at(&dir, OsStr::new(SAMPLE_FILE)) {
+        let file = open_regular_at(&dir, SAMPLE_FILE, SAMPLE_MAX).ok_or(Input)?;
+        archives.push((SAMPLE_FILE.to_string(), file));
+    }
     let signers = platform::create_new_at(&dir, OsStr::new(SIGNERS_FILE)).map_err(|_| Input)?;
     let owned = Owned {
         download: dir.try_clone().map_err(|_| Input)?,
@@ -1948,26 +1972,25 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     ))
 }
 
-/// Checks the verified manifest: exactly the archive lines for `version`, sorted by name: the
-/// macOS and Linux lines, or those two and the Windows line between them. Each line is 64
-/// lowercase hexadecimal digits, two spaces, the file name and LF. The Windows `target` needs
-/// the three-line manifest, as its own archive's hash must be in it.
-fn check_manifest(bytes: &[u8], version: &str, target: &str) -> Result<(), InstallFailure> {
+/// Checks the verified manifest: exactly the four lines for `version`, in this order: the
+/// macOS, Windows and Linux archives, then the sample. Each line is 64 lowercase hexadecimal
+/// digits, two spaces, the file name and LF. A missing, extra, repeated or reordered line, a
+/// path, a CR and a preview name are all refused.
+fn check_manifest(bytes: &[u8], version: &str) -> Result<(), InstallFailure> {
     let bad = InstallFailure::Checksums;
     let text = std::str::from_utf8(bytes).map_err(|_| bad)?;
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let listed: &[&str] = match lines.len() {
-        2 if target != WINDOWS_TARGET => &TARGETS,
-        3 => &MANIFEST_TARGETS,
-        _ => return Err(bad),
-    };
-    for (line, target) in lines.iter().zip(listed) {
+    let names = manifest_names(version);
+    if lines.len() != names.len() {
+        return Err(bad);
+    }
+    for (line, name) in lines.iter().zip(&names) {
         let body = line.strip_suffix('\n').ok_or(bad)?;
         let (hash, rest) = body.split_at_checked(64).ok_or(bad)?;
         let hex = hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        if !hex || rest != format!("  {}", archive_name(version, target)) {
+        if !hex || rest != format!("  {name}") {
             return Err(bad);
         }
     }
@@ -2106,7 +2129,7 @@ fn install_stages(
     }
 
     // Checksums: the manifest's grammar, then the native tool, one OK line per present archive.
-    check_manifest(&dl.manifest.bytes, &input.version, &input.target)?;
+    check_manifest(&dl.manifest.bytes, &input.version)?;
     let out = run_guide(
         setup,
         input,
@@ -3400,47 +3423,153 @@ mod tests {
     }
 
     #[test]
+    fn relc1_plain_version_and_three_native_packages() {
+        // a plain-printing binary gets the plain stem and no note, for each of the three
+        // targets; the package holds its own executable, both licenses and the notices
+        if !tar_or_skip(&crate::test_name!(
+            "relc1_plain_version_and_three_native_packages"
+        )) {
+            return;
+        }
+        for target in [TARGETS[0], WINDOWS_TARGET, TARGETS[1]] {
+            let f = Fixture::new();
+            let probe = printing("rdy 0.14.0\\n");
+            let archive = package_with(&f.binary, V, target, &f.out(), &setup(&f, &probe))
+                .map_err(Failure::message)
+                .unwrap_or_else(|e| panic!("{target}: {e}"));
+            let stem = format!("rdy-0.14.0-{target}");
+            assert_eq!(archive, f.out().join(format!("{stem}.tar.gz")), "{target}");
+            assert_eq!(archive_stem("0.14.0", target), stem, "{target}");
+            let exe = binary_name(target);
+            let mut want = vec![
+                format!("{stem}/"),
+                format!("{stem}/{MIT_FILE}"),
+                format!("{stem}/{APACHE_FILE}"),
+                format!("{stem}/{NOTICES_FILE}"),
+                format!("{stem}/{exe}"),
+            ];
+            want.sort();
+            assert_eq!(listing(&archive), want, "{target}: no PREVIEW.txt");
+            assert_eq!(
+                version_text_of(&stem, "0.14.0", target).as_deref(),
+                Some("rdy 0.14.0\n")
+            );
+            // the preview stem is not the current checker's
+            assert_eq!(
+                version_text_of(&format!("rdy-0.14.0-preview-{target}"), "0.14.0", target),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn relc1_four_entry_manifest_names_are_exact() {
+        let names = manifest_names("0.14.0");
+        assert_eq!(
+            names,
+            [
+                "rdy-0.14.0-aarch64-apple-darwin.tar.gz",
+                "rdy-0.14.0-x86_64-pc-windows-msvc.tar.gz",
+                "rdy-0.14.0-x86_64-unknown-linux-gnu.tar.gz",
+                "tally.rdydump",
+            ]
+        );
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "the manifest order is the sorted order");
+        let hash = "0123456789abcdef".repeat(4);
+        let text =
+            |ns: &[&str]| -> String { ns.iter().map(|n| format!("{hash}  {n}\n")).collect() };
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let good = text(&refs);
+        assert!(good.len() < MANIFEST_MAX as usize);
+        assert_eq!(check_manifest(good.as_bytes(), "0.14.0"), Ok(()));
+        let bad = InstallFailure::Checksums;
+        let refused = |what: &str, t: String| {
+            assert_eq!(check_manifest(t.as_bytes(), "0.14.0"), Err(bad), "{what}");
+        };
+        refused("the sample omitted", text(&refs[..3]));
+        refused("an archive omitted", text(&[refs[0], refs[2], refs[3]]));
+        refused(
+            "a line repeated",
+            text(&[refs[0], refs[1], refs[2], refs[2], refs[3]]),
+        );
+        refused(
+            "the sample first",
+            text(&[refs[3], refs[0], refs[1], refs[2]]),
+        );
+        refused(
+            "reordered archives",
+            text(&[refs[0], refs[2], refs[1], refs[3]]),
+        );
+        refused(
+            "an extra file",
+            text(&[refs[0], refs[1], refs[2], refs[3], "extra.txt"]),
+        );
+        refused(
+            "a path",
+            text(&[refs[0], refs[1], refs[2], "samples/tally.rdydump"]),
+        );
+        refused("CRLF", good.replace('\n', "\r\n"));
+        refused("no final LF", good.trim_end_matches('\n').to_string());
+        refused(
+            "uppercase hash",
+            good.replacen(&hash, &hash.to_uppercase(), 1),
+        );
+        refused("one space", good.replacen("  ", " ", 1));
+        let preview: Vec<String> = TARGETS
+            .iter()
+            .chain([&WINDOWS_TARGET])
+            .map(|t| format!("rdy-0.14.0-preview-{t}.tar.gz"))
+            .collect();
+        refused(
+            "preview names",
+            text(&[&preview[0], &preview[2], &preview[1], SAMPLE_FILE]),
+        );
+        refused("another version", good.replace("0.14.0", "0.15.0"));
+    }
+
+    #[test]
     fn wx35a_archive_bytes_and_manifest_names_are_stable() {
-        // the archive names of all three targets, byte for byte
+        // the archive names of all three targets, byte for byte: the plain Release 1 names
         assert_eq!(
             [TARGETS[0], TARGETS[1], WINDOWS_TARGET].map(|t| archive_name("0.14.0", t)),
             [
-                "rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz",
-                "rdy-0.14.0-preview-x86_64-unknown-linux-gnu.tar.gz",
-                "rdy-0.14.0-preview-x86_64-pc-windows-msvc.tar.gz",
+                "rdy-0.14.0-aarch64-apple-darwin.tar.gz",
+                "rdy-0.14.0-x86_64-unknown-linux-gnu.tar.gz",
+                "rdy-0.14.0-x86_64-pc-windows-msvc.tar.gz",
             ]
         );
-        // the two Unix archive lines of the manifest stay; the Windows line joins them in name
-        // order (Task 36a: the checker takes the three-line manifest, and a Windows install
-        // needs it); no zip, MSI or installer name exists
+        // the manifest lists the macOS, Windows and Linux archives, then the sample; no zip,
+        // MSI or installer name exists
         assert_eq!(
             TARGETS,
             ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
         );
-        let line = |t: &str| format!("{}  {}\n", "a".repeat(64), archive_name("0.14.0", t));
-        let manifest = format!("{}{}", line(TARGETS[0]), line(TARGETS[1]));
-        for target in TARGETS {
-            assert_eq!(
-                check_manifest(manifest.as_bytes(), "0.14.0", target),
-                Ok(())
-            );
-        }
+        let line = |n: &str| format!("{}  {n}\n", "a".repeat(64));
+        let target_line = |t: &str| line(&archive_name("0.14.0", t));
+        let full = format!(
+            "{}{}{}{}",
+            target_line(TARGETS[0]),
+            target_line(WINDOWS_TARGET),
+            target_line(TARGETS[1]),
+            line(SAMPLE_FILE)
+        );
+        assert_eq!(check_manifest(full.as_bytes(), "0.14.0"), Ok(()));
+        // the historical two-line and three-line manifests are not accepted
+        let two = format!("{}{}", target_line(TARGETS[0]), target_line(TARGETS[1]));
         assert_eq!(
-            check_manifest(manifest.as_bytes(), "0.14.0", WINDOWS_TARGET),
-            Err(InstallFailure::Checksums),
-            "the Windows archive's hash must be in the manifest"
+            check_manifest(two.as_bytes(), "0.14.0"),
+            Err(InstallFailure::Checksums)
         );
-        let sorted = format!(
-            "{}{}{}",
-            line(TARGETS[0]),
-            line(WINDOWS_TARGET),
-            line(TARGETS[1])
+        let unsorted = format!(
+            "{}{}{}{}",
+            target_line(TARGETS[0]),
+            target_line(TARGETS[1]),
+            target_line(WINDOWS_TARGET),
+            line(SAMPLE_FILE)
         );
-        for target in [TARGETS[0], TARGETS[1], WINDOWS_TARGET] {
-            assert_eq!(check_manifest(sorted.as_bytes(), "0.14.0", target), Ok(()));
-        }
-        let unsorted = format!("{manifest}{}", line(WINDOWS_TARGET));
-        assert!(check_manifest(unsorted.as_bytes(), "0.14.0", WINDOWS_TARGET).is_err());
+        assert!(check_manifest(unsorted.as_bytes(), "0.14.0").is_err());
         assert!(!archive_name("0.14.0", WINDOWS_TARGET).ends_with(".zip"));
         if !tar_or_skip(&crate::test_name!(
             "wx35a_archive_bytes_and_manifest_names_are_stable"
@@ -3688,15 +3817,10 @@ mod tests {
         parent.join(name)
     }
 
-    /// The manifest of `target`'s kit: the two Unix lines, or all three for Windows, with the
-    /// real hash for `target`'s archive and a placeholder for the others.
+    /// The manifest of `target`'s kit: the four lines of the Release 1 manifest, with the real
+    /// hash for `target`'s archive and a placeholder for the others.
     fn manifest_of(target: &str, archive: &[u8]) -> String {
-        let listed: &[&str] = if target == WINDOWS_TARGET {
-            &MANIFEST_TARGETS
-        } else {
-            &TARGETS
-        };
-        listed
+        MANIFEST_TARGETS
             .iter()
             .map(|t| {
                 let hash = if *t == target {
@@ -3706,6 +3830,7 @@ mod tests {
                 };
                 format!("{hash}  {}\n", archive_name(IV, t))
             })
+            .chain([format!("{}  {SAMPLE_FILE}\n", "ab".repeat(32))])
             .collect()
     }
 
@@ -3943,7 +4068,7 @@ mod tests {
         assert!(lines[6].starts_with("$n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\\Users\\person\\down load\\SHA256SUMS'))"));
         assert_eq!(
             lines[8],
-            r"& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\Users\person\down load\rdy-0.14.0-preview-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\Users\person\un pack'"
+            r"& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\Users\person\down load\rdy-0.14.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\Users\person\un pack'"
         );
         assert!(!block.contains("&&"), "PowerShell 5.1 has no &&");
         assert!(!block.contains("printf") && !block.contains("sha256sum"));

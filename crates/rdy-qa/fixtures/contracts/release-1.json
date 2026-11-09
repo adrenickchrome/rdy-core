@@ -38,7 +38,6 @@
         "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
         "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
-        "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
         "redact": "destroys content; no dry run is probed",
@@ -335,8 +334,11 @@
             {
               "file": "null|string",
               "key": "string",
-              "level": "string",
-              "value": "bool|number|string"
+              "level": "null|string",
+              "levels": [
+                "string"
+              ],
+              "value": "bool|null|number|string"
             }
           ]
         },
@@ -1041,6 +1043,197 @@
             "tensions": [],
             "title": "string",
             "version": "number",
+            "warnings": []
+          }
+        },
+        "publication check against": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "against": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "disclosure": {
+              "added_attachments": [],
+              "added_docs": [],
+              "after_profile_version": "string",
+              "after_selection_hash": "string",
+              "after_selection_identity": "string",
+              "audience": "string",
+              "before_profile_version": "string",
+              "before_selection_hash": "string",
+              "before_selection_identity": "string",
+              "changed_attachments": [],
+              "changed_docs": [],
+              "changed_folders": [],
+              "changed_outside_docs": [],
+              "new_reference_count": "number",
+              "new_references": [],
+              "newly_hidden_planned": {
+                "blocks": "number",
+                "docs": "number",
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "doc": "string",
+                    "doc_hidden": "bool",
+                    "hidden_blocks": "number",
+                    "redacted": "bool",
+                    "title": "string"
+                  }
+                ]
+              },
+              "omitted": {
+                "added_attachments": "number",
+                "added_docs": "number",
+                "changed_attachments": "number",
+                "changed_docs": "number",
+                "changed_folders": "number",
+                "changed_outside_docs": "number",
+                "new_references": "number",
+                "redactions": "number",
+                "removed_attachments": "number",
+                "removed_docs": "number"
+              },
+              "profile_changed": "bool",
+              "profile_id": "string",
+              "redactions": [],
+              "removed_attachments": [],
+              "removed_docs": [
+                {
+                  "digest": "string",
+                  "id": "string",
+                  "path": "string",
+                  "redacted": "bool"
+                }
+              ]
+            },
+            "hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "profile": {
+              "audience": "string",
+              "id": "string",
+              "key": "string",
+              "title": "string",
+              "trail": "bool",
+              "version": "string"
+            },
+            "references": {
+              "excluded": "number",
+              "links_outside": {
+                "count": "number",
+                "omitted_rows": "number",
+                "rows": []
+              },
+              "missing": "number",
+              "omitted_rows": "number",
+              "rows": [],
+              "status": "string",
+              "total": "number"
+            },
+            "release": "null",
+            "scope": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "selection": {
+              "attachments": "number",
+              "blocks": "number",
+              "docs": "number",
+              "entries": [
+                {
+                  "id": "string",
+                  "redaction": "null",
+                  "version": "string"
+                }
+              ],
+              "folders": "number",
+              "hash": "string",
+              "identity": "string",
+              "omitted_entries": "number"
+            },
+            "status": "string",
+            "warnings": []
+          }
+        },
+        "publication check first": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "against": "null",
+            "disclosure": "null",
+            "hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "profile": {
+              "audience": "string",
+              "id": "string",
+              "key": "string",
+              "title": "string",
+              "trail": "bool",
+              "version": "string"
+            },
+            "references": {
+              "excluded": "number",
+              "links_outside": {
+                "count": "number",
+                "omitted_rows": "number",
+                "rows": []
+              },
+              "missing": "number",
+              "omitted_rows": "number",
+              "rows": [],
+              "status": "string",
+              "total": "number"
+            },
+            "release": "null",
+            "scope": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "selection": {
+              "attachments": "number",
+              "blocks": "number",
+              "docs": "number",
+              "entries": [
+                {
+                  "id": "string",
+                  "redaction": "null",
+                  "version": "string"
+                }
+              ],
+              "folders": "number",
+              "hash": "string",
+              "identity": "string",
+              "omitted_entries": "number"
+            },
+            "status": "string",
             "warnings": []
           }
         },
@@ -2474,7 +2667,7 @@
       },
       "version_text": {
         "exit": 0,
-        "text": "rdy <version> (preview)"
+        "text": "rdy <version>"
       }
     },
     "tree": {
@@ -15284,6 +15477,1138 @@
         "type": "Any"
       }
     ],
+    "listing": {
+      "configured": {
+        "json": [
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "pack",
+            "level": "project",
+            "levels": [
+              "project"
+            ],
+            "value": "rdy-standard"
+          },
+          {
+            "file": null,
+            "key": "name",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "description",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "site.base_path",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "/"
+          },
+          {
+            "file": null,
+            "key": "reviews.require_up_to_date",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "reviews.lease_ttl",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 10
+          },
+          {
+            "file": null,
+            "key": "decisions.home",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_repos",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_paths",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "coverage.target",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 80
+          },
+          {
+            "file": null,
+            "key": "coverage.gate",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "off"
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "views.idle_days",
+            "level": "user",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 4
+          },
+          {
+            "file": null,
+            "key": "serve.start_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 30
+          },
+          {
+            "file": null,
+            "key": "serve.idle_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 600
+          },
+          {
+            "file": null,
+            "key": "serve.site_port",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan_address",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.ui",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": true
+          },
+          {
+            "file": null,
+            "key": "propose.cadence",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": "break"
+          },
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "propose.changes",
+            "level": "project",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 7
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "actor",
+            "level": "user",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "human:qa"
+          },
+          {
+            "file": null,
+            "key": "signing.key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.agent_key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": "<path>/.rdy/local.yaml",
+            "key": "signing.sign",
+            "level": "local",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "always"
+          },
+          {
+            "file": null,
+            "key": "signing.allowed_signers",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": "<path>/.rdy/local.yaml",
+            "key": "remotes.origin",
+            "level": "local",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": {
+              "mode": "share",
+              "url": "https://hub.example.com/team"
+            }
+          },
+          {
+            "file": null,
+            "key": "hub.installs",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "instructions.person",
+            "level": null,
+            "levels": [
+              "user"
+            ],
+            "value": null
+          }
+        ],
+        "json_show_origin": [
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "pack",
+            "level": "project",
+            "levels": [
+              "project"
+            ],
+            "value": "rdy-standard"
+          },
+          {
+            "file": null,
+            "key": "name",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "description",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "site.base_path",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "/"
+          },
+          {
+            "file": null,
+            "key": "reviews.require_up_to_date",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "reviews.lease_ttl",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 10
+          },
+          {
+            "file": null,
+            "key": "decisions.home",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_repos",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_paths",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "coverage.target",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 80
+          },
+          {
+            "file": null,
+            "key": "coverage.gate",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "off"
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "views.idle_days",
+            "level": "user",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 4
+          },
+          {
+            "file": null,
+            "key": "serve.start_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 30
+          },
+          {
+            "file": null,
+            "key": "serve.idle_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 600
+          },
+          {
+            "file": null,
+            "key": "serve.site_port",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan_address",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.ui",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": true
+          },
+          {
+            "file": null,
+            "key": "propose.cadence",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": "break"
+          },
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "propose.changes",
+            "level": "project",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 7
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "actor",
+            "level": "user",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "human:qa"
+          },
+          {
+            "file": null,
+            "key": "signing.key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.agent_key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": "<path>/.rdy/local.yaml",
+            "key": "signing.sign",
+            "level": "local",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "always"
+          },
+          {
+            "file": null,
+            "key": "signing.allowed_signers",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": "<path>/.rdy/local.yaml",
+            "key": "remotes.origin",
+            "level": "local",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": {
+              "mode": "share",
+              "url": "https://hub.example.com/team"
+            }
+          },
+          {
+            "file": null,
+            "key": "hub.installs",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "instructions.person",
+            "level": null,
+            "levels": [
+              "user"
+            ],
+            "value": null
+          }
+        ],
+        "text": "pack = rdy-standard  # set at: project\nname = unset  # set at: project\ndescription = unset  # set at: project\nsite.base_path = /  # set at: project\nreviews.require_up_to_date = false  # set at: project\nreviews.lease_ttl = 10  # set at: project\ndecisions.home = unset  # set at: project\ncode_repos = unset  # set at: project\ncode_paths = unset  # set at: local, user\ncoverage.target = 80  # set at: project\ncoverage.gate = off  # set at: project\nviews.idle_days = 4  # set at: local, project, user\nserve.start_timeout = 30  # set at: local, project, user\nserve.idle_timeout = 600  # set at: local, project, user\nserve.site_port = unset  # set at: local, project, user\nserve.site_lan = false  # set at: local, project, user\nserve.site_lan_address = unset  # set at: local, user\nserve.ui = true  # set at: local, user\npropose.cadence = break  # set at: local, project, user\npropose.changes = 7  # set at: local, project, user\nactor = human:qa  # set at: local, user\nsigning.key = unset  # set at: local, user\nsigning.agent_key = unset  # set at: local, user\nsigning.sign = always  # set at: local, user\nsigning.allowed_signers = unset  # set at: local, user\nremotes.origin = {url: https://hub.example.com/team, mode: share}  # set at: local, project, user\nhub.installs = unset  # set at: local, user\ninstructions.person = unset  # set at: user\n",
+        "text_show_origin": "pack = rdy-standard  # <path>/.rdy.yaml  # set at: project\nname = unset  # unset  # set at: project\ndescription = unset  # unset  # set at: project\nsite.base_path = /  # default  # set at: project\nreviews.require_up_to_date = false  # default  # set at: project\nreviews.lease_ttl = 10  # default  # set at: project\ndecisions.home = unset  # unset  # set at: project\ncode_repos = unset  # unset  # set at: project\ncode_paths = unset  # unset  # set at: local, user\ncoverage.target = 80  # default  # set at: project\ncoverage.gate = off  # default  # set at: project\nviews.idle_days = 4  # <path>/rdy/config.yaml  # set at: local, project, user\nserve.start_timeout = 30  # default  # set at: local, project, user\nserve.idle_timeout = 600  # default  # set at: local, project, user\nserve.site_port = unset  # unset  # set at: local, project, user\nserve.site_lan = false  # default  # set at: local, project, user\nserve.site_lan_address = unset  # unset  # set at: local, user\nserve.ui = true  # default  # set at: local, user\npropose.cadence = break  # default  # set at: local, project, user\npropose.changes = 7  # <path>/.rdy.yaml  # set at: local, project, user\nactor = human:qa  # <path>/rdy/config.yaml  # set at: local, user\nsigning.key = unset  # unset  # set at: local, user\nsigning.agent_key = unset  # unset  # set at: local, user\nsigning.sign = always  # <path>/.rdy/local.yaml  # set at: local, user\nsigning.allowed_signers = unset  # unset  # set at: local, user\nremotes.origin = {url: https://hub.example.com/team, mode: share}  # <path>/.rdy/local.yaml  # set at: local, project, user\nhub.installs = unset  # unset  # set at: local, user\ninstructions.person = unset  # unset  # set at: user\n"
+      },
+      "defaults": {
+        "json": [
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "pack",
+            "level": "project",
+            "levels": [
+              "project"
+            ],
+            "value": "rdy-standard"
+          },
+          {
+            "file": null,
+            "key": "name",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "description",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "site.base_path",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "/"
+          },
+          {
+            "file": null,
+            "key": "reviews.require_up_to_date",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "reviews.lease_ttl",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 10
+          },
+          {
+            "file": null,
+            "key": "decisions.home",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_repos",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_paths",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "coverage.target",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 80
+          },
+          {
+            "file": null,
+            "key": "coverage.gate",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "off"
+          },
+          {
+            "file": null,
+            "key": "views.idle_days",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 14
+          },
+          {
+            "file": null,
+            "key": "serve.start_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 30
+          },
+          {
+            "file": null,
+            "key": "serve.idle_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 600
+          },
+          {
+            "file": null,
+            "key": "serve.site_port",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan_address",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.ui",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": true
+          },
+          {
+            "file": null,
+            "key": "propose.cadence",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": "break"
+          },
+          {
+            "file": null,
+            "key": "propose.changes",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 10
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "actor",
+            "level": "user",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "human:qa"
+          },
+          {
+            "file": null,
+            "key": "signing.key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.agent_key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.sign",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "auto"
+          },
+          {
+            "file": null,
+            "key": "signing.allowed_signers",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "remotes",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "hub.installs",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "instructions.person",
+            "level": null,
+            "levels": [
+              "user"
+            ],
+            "value": null
+          }
+        ],
+        "json_show_origin": [
+          {
+            "file": "<path>/.rdy.yaml",
+            "key": "pack",
+            "level": "project",
+            "levels": [
+              "project"
+            ],
+            "value": "rdy-standard"
+          },
+          {
+            "file": null,
+            "key": "name",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "description",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "site.base_path",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "/"
+          },
+          {
+            "file": null,
+            "key": "reviews.require_up_to_date",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "reviews.lease_ttl",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 10
+          },
+          {
+            "file": null,
+            "key": "decisions.home",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_repos",
+            "level": null,
+            "levels": [
+              "project"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "code_paths",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "coverage.target",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": 80
+          },
+          {
+            "file": null,
+            "key": "coverage.gate",
+            "level": "default",
+            "levels": [
+              "project"
+            ],
+            "value": "off"
+          },
+          {
+            "file": null,
+            "key": "views.idle_days",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 14
+          },
+          {
+            "file": null,
+            "key": "serve.start_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 30
+          },
+          {
+            "file": null,
+            "key": "serve.idle_timeout",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 600
+          },
+          {
+            "file": null,
+            "key": "serve.site_port",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": false
+          },
+          {
+            "file": null,
+            "key": "serve.site_lan_address",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "serve.ui",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": true
+          },
+          {
+            "file": null,
+            "key": "propose.cadence",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": "break"
+          },
+          {
+            "file": null,
+            "key": "propose.changes",
+            "level": "default",
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": 10
+          },
+          {
+            "file": "<path>/rdy/config.yaml",
+            "key": "actor",
+            "level": "user",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "human:qa"
+          },
+          {
+            "file": null,
+            "key": "signing.key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.agent_key",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "signing.sign",
+            "level": "default",
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": "auto"
+          },
+          {
+            "file": null,
+            "key": "signing.allowed_signers",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "remotes",
+            "level": null,
+            "levels": [
+              "local",
+              "project",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "hub.installs",
+            "level": null,
+            "levels": [
+              "local",
+              "user"
+            ],
+            "value": null
+          },
+          {
+            "file": null,
+            "key": "instructions.person",
+            "level": null,
+            "levels": [
+              "user"
+            ],
+            "value": null
+          }
+        ],
+        "text": "pack = rdy-standard  # set at: project\nname = unset  # set at: project\ndescription = unset  # set at: project\nsite.base_path = /  # set at: project\nreviews.require_up_to_date = false  # set at: project\nreviews.lease_ttl = 10  # set at: project\ndecisions.home = unset  # set at: project\ncode_repos = unset  # set at: project\ncode_paths = unset  # set at: local, user\ncoverage.target = 80  # set at: project\ncoverage.gate = off  # set at: project\nviews.idle_days = 14  # set at: local, project, user\nserve.start_timeout = 30  # set at: local, project, user\nserve.idle_timeout = 600  # set at: local, project, user\nserve.site_port = unset  # set at: local, project, user\nserve.site_lan = false  # set at: local, project, user\nserve.site_lan_address = unset  # set at: local, user\nserve.ui = true  # set at: local, user\npropose.cadence = break  # set at: local, project, user\npropose.changes = 10  # set at: local, project, user\nactor = human:qa  # set at: local, user\nsigning.key = unset  # set at: local, user\nsigning.agent_key = unset  # set at: local, user\nsigning.sign = auto  # set at: local, user\nsigning.allowed_signers = unset  # set at: local, user\nremotes = unset  # set at: local, project, user\nhub.installs = unset  # set at: local, user\ninstructions.person = unset  # set at: user\n",
+        "text_show_origin": "pack = rdy-standard  # <path>/.rdy.yaml  # set at: project\nname = unset  # unset  # set at: project\ndescription = unset  # unset  # set at: project\nsite.base_path = /  # default  # set at: project\nreviews.require_up_to_date = false  # default  # set at: project\nreviews.lease_ttl = 10  # default  # set at: project\ndecisions.home = unset  # unset  # set at: project\ncode_repos = unset  # unset  # set at: project\ncode_paths = unset  # unset  # set at: local, user\ncoverage.target = 80  # default  # set at: project\ncoverage.gate = off  # default  # set at: project\nviews.idle_days = 14  # default  # set at: local, project, user\nserve.start_timeout = 30  # default  # set at: local, project, user\nserve.idle_timeout = 600  # default  # set at: local, project, user\nserve.site_port = unset  # unset  # set at: local, project, user\nserve.site_lan = false  # default  # set at: local, project, user\nserve.site_lan_address = unset  # unset  # set at: local, user\nserve.ui = true  # default  # set at: local, user\npropose.cadence = break  # default  # set at: local, project, user\npropose.changes = 10  # default  # set at: local, project, user\nactor = human:qa  # <path>/rdy/config.yaml  # set at: local, user\nsigning.key = unset  # unset  # set at: local, user\nsigning.agent_key = unset  # unset  # set at: local, user\nsigning.sign = auto  # default  # set at: local, user\nsigning.allowed_signers = unset  # unset  # set at: local, user\nremotes = unset  # unset  # set at: local, project, user\nhub.installs = unset  # unset  # set at: local, user\ninstructions.person = unset  # unset  # set at: user\n"
+      }
+    },
     "local_file": ".rdy/local.yaml",
     "project_file": ".rdy.yaml",
     "propose_cadences": [
@@ -18571,6 +19896,191 @@
           ]
         }
       },
+      "rdy_publication_check against": {
+        "ok": {
+          "against": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "disclosure": {
+            "added_attachments": [],
+            "added_docs": [],
+            "after_profile_version": "string",
+            "after_selection_hash": "string",
+            "after_selection_identity": "string",
+            "audience": "string",
+            "before_profile_version": "string",
+            "before_selection_hash": "string",
+            "before_selection_identity": "string",
+            "changed_attachments": [],
+            "changed_docs": [],
+            "changed_folders": [],
+            "changed_outside_docs": [],
+            "new_reference_count": "number",
+            "new_references": [],
+            "newly_hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "omitted": {
+              "added_attachments": "number",
+              "added_docs": "number",
+              "changed_attachments": "number",
+              "changed_docs": "number",
+              "changed_folders": "number",
+              "changed_outside_docs": "number",
+              "new_references": "number",
+              "redactions": "number",
+              "removed_attachments": "number",
+              "removed_docs": "number"
+            },
+            "profile_changed": "bool",
+            "profile_id": "string",
+            "redactions": [],
+            "removed_attachments": [],
+            "removed_docs": [
+              {
+                "digest": "string",
+                "id": "string",
+                "path": "string",
+                "redacted": "bool"
+              }
+            ]
+          },
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          },
+          "profile": {
+            "audience": "string",
+            "id": "string",
+            "key": "string",
+            "title": "string",
+            "trail": "bool",
+            "version": "string"
+          },
+          "references": {
+            "excluded": "number",
+            "links_outside": {
+              "count": "number",
+              "omitted_rows": "number",
+              "rows": []
+            },
+            "missing": "number",
+            "omitted_rows": "number",
+            "rows": [],
+            "status": "string",
+            "total": "number"
+          },
+          "release": "null",
+          "scope": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "selection": {
+            "attachments": "number",
+            "blocks": "number",
+            "docs": "number",
+            "entries": [
+              {
+                "id": "string",
+                "redaction": "null",
+                "version": "string"
+              }
+            ],
+            "folders": "number",
+            "hash": "string",
+            "identity": "string",
+            "omitted_entries": "number"
+          },
+          "status": "string",
+          "warnings": []
+        }
+      },
+      "rdy_publication_check first": {
+        "ok": {
+          "against": "null",
+          "disclosure": "null",
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          },
+          "profile": {
+            "audience": "string",
+            "id": "string",
+            "key": "string",
+            "title": "string",
+            "trail": "bool",
+            "version": "string"
+          },
+          "references": {
+            "excluded": "number",
+            "links_outside": {
+              "count": "number",
+              "omitted_rows": "number",
+              "rows": []
+            },
+            "missing": "number",
+            "omitted_rows": "number",
+            "rows": [],
+            "status": "string",
+            "total": "number"
+          },
+          "release": "null",
+          "scope": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "selection": {
+            "attachments": "number",
+            "blocks": "number",
+            "docs": "number",
+            "entries": [
+              {
+                "id": "string",
+                "redaction": "null",
+                "version": "string"
+              }
+            ],
+            "folders": "number",
+            "hash": "string",
+            "identity": "string",
+            "omitted_entries": "number"
+          },
+          "status": "string",
+          "warnings": []
+        }
+      },
       "rdy_query": {
         "ok": {
           "matches": [
@@ -20651,7 +22161,6 @@
       "rdy_land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
-      "rdy_publication_check": "needs a publication profile",
       "rdy_publish": "uploads a site to a host",
       "rdy_redact": "destroys content; no dry run is probed",
       "rdy_remote": "edits the remotes of the project",

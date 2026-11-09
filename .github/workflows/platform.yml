@@ -83,6 +83,9 @@ jobs:
         # ACL tests do not see an administrator token. The script exits with the gate's own status.
         if: runner.os == 'Windows'
         shell: pwsh
+        # The hosted runner has no second account for the ACL test (the native gate has `rdyother`).
+        env:
+          RDY_QA_HOSTED_CI: "1"
         run: ./scripts/ci/windows_gate.ps1
       - name: Qa report, failing tests and counts
         if: always() && runner.os == 'Windows'

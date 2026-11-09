@@ -239,7 +239,13 @@ impl ProfileSites {
         let opened = {
             let _rt = runtime.enter();
             let cfg = serve_config(&root);
-            server::open(&root, &cfg, &addr::profile_candidates(&root, &key), lan)
+            server::open(
+                &root,
+                &cfg,
+                &addr::profile_candidates(&root, &key),
+                true,
+                lan,
+            )
         };
         let Ok(o) = opened else {
             return Err(exhausted(&key));
