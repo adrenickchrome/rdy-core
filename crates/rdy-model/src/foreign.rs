@@ -13,8 +13,8 @@ use std::fmt;
 /// The domain prefix of an ADR source id.
 pub const ADR_SOURCE_DOMAIN: &[u8] = b"rdy-adr-source-1\0";
 
-/// The domain prefix of a delivery's selection hash.
-pub const SELECTION_DOMAIN: &[u8] = b"rdy-foreign-selection-1\0";
+/// The domain prefix of the publication selection identity, the NUL included.
+pub const SELECTION_IDENTITY_DOMAIN: &[u8] = b"rdy-publication-selection-identity\0";
 
 /// The id of an ADR source: the first 16 bytes of the BLAKE3 hash of the domain and the source
 /// name. A renamed source is a new source.
@@ -28,20 +28,32 @@ pub fn adr_source_id(name: &str) -> RepoId {
     RepoId(out)
 }
 
-/// The hash of a complete selection: the domain, the count, then each (id, version) pair in id
-/// order. The order of `versions` does not change the hash.
-pub fn selection_hash(versions: &[(BlockId, Hash)]) -> Hash {
-    let mut sorted: Vec<&(BlockId, Hash)> = versions.iter().collect();
-    sorted.sort();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(SELECTION_DOMAIN);
-    hasher.update(&(sorted.len() as u64).to_le_bytes());
-    for (id, version) in sorted {
-        hasher.update(&(id.as_str().len() as u64).to_le_bytes());
-        hasher.update(id.as_str().as_bytes());
-        hasher.update(&version.0);
+/// The publication selection identity (D-075QD, D-C94DV) of `entries`, the (id, version) pairs
+/// of a complete selection in id order: [`SELECTION_IDENTITY_DOMAIN`], u32 LE 1, u32 LE entry
+/// count, then per entry its u32 LE id length, its UTF-8 id bytes and its 32 raw version bytes.
+/// Nothing else enters. A delivery's `selection` is this identity. From repo links on it is a
+/// stored, frozen format: its domain, field widths and order never change.
+///
+/// `None` when the count or an id length does not fit a u32; the caller reports its own limit.
+pub fn selection_identity<'a, I>(entries: I) -> Option<Hash>
+where
+    I: IntoIterator<Item = (&'a BlockId, &'a Hash)>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let entries = entries.into_iter();
+    let count = u32::try_from(entries.len()).ok()?;
+    let mut h = blake3::Hasher::new();
+    h.update(SELECTION_IDENTITY_DOMAIN);
+    h.update(&1u32.to_le_bytes());
+    h.update(&count.to_le_bytes());
+    for (id, version) in entries {
+        let id = id.as_str().as_bytes();
+        let len = u32::try_from(id.len()).ok()?;
+        h.update(&len.to_le_bytes());
+        h.update(id);
+        h.update(&version.0);
     }
-    Hash(*hasher.finalize().as_bytes())
+    Some(Hash(*h.finalize().as_bytes()))
 }
 
 /// A block in another repo: that repo's id and the block's id there.
@@ -200,6 +212,8 @@ pub enum ForeignEvent {
         added: Vec<ForeignVersion>,
         changed: Vec<ForeignVersion>,
         removed: Vec<BlockId>,
+        /// The publication selection identity of the complete selection after this delivery
+        /// ([`selection_identity`]).
         #[serde(with = "hex_one")]
         selection: Hash,
     },

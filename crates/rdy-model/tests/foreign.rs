@@ -167,12 +167,19 @@ fn rpl1_adr_source_id_is_domain_separated() {
     assert_eq!(a.0[..], h.finalize().as_bytes()[..16]);
     let plain = blake3::hash(b"docs");
     assert_ne!(a.0[..], plain.as_bytes()[..16], "the domain changes the id");
-    // the selection hash does not depend on the order
-    let x = (bid("D-00001"), Hash::of(b"1"));
-    let y = (bid("D-00002"), Hash::of(b"2"));
+    // the selection identity is domain-separated and takes the pairs in the order given (id order)
+    let (x, xv) = (bid("D-00001"), Hash::of(b"1"));
+    let (y, yv) = (bid("D-00002"), Hash::of(b"2"));
+    let xy = selection_identity([(&x, &xv), (&y, &yv)]).unwrap();
+    assert_eq!(xy, selection_identity([(&x, &xv), (&y, &yv)]).unwrap());
+    assert_ne!(xy, selection_identity([(&y, &yv), (&x, &xv)]).unwrap());
+    let mut h = blake3::Hasher::new();
+    h.update(SELECTION_IDENTITY_DOMAIN);
+    h.update(&1u32.to_le_bytes());
+    h.update(&0u32.to_le_bytes());
     assert_eq!(
-        selection_hash(&[x.clone(), y.clone()]),
-        selection_hash(&[y, x])
+        selection_identity(std::iter::empty()).unwrap().0,
+        *h.finalize().as_bytes()
     );
 }
 

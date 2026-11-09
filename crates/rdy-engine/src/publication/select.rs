@@ -328,26 +328,13 @@ impl RequestSet {
     }
 }
 
-/// The selection identity of `entries` (D-075QD), which are in id order: ASCII
-/// `rdy-publication-selection-identity`, one NUL, u32 LE 1, u32 LE entry count, then per entry
-/// its u32 LE id length, its UTF-8 id bytes and its 32 raw version bytes. Nothing else enters:
-/// no attachment row, removal mark, availability, title, path, selector or audience. A transient
-/// read identity, not a stored format.
+/// The selection identity of `entries` (D-075QD), which are in id order: the one encoding
+/// [`rdy_model::foreign::selection_identity`] (D-C94DV) of each entry's id and version. Nothing
+/// else enters: no attachment row, removal mark, availability, title, path, selector or audience.
+/// A count or id length past a u32 is the selection limit.
 fn selection_identity(entries: &[SelectionEntry], l: &Limits) -> Result<Hash, RdyError> {
-    let over = || limit("selection", l.selection, "blocks");
-    let count = u32::try_from(entries.len()).map_err(|_| over())?;
-    let mut h = blake3::Hasher::new();
-    h.update(b"rdy-publication-selection-identity\0");
-    h.update(&1u32.to_le_bytes());
-    h.update(&count.to_le_bytes());
-    for e in entries {
-        let id = e.id.as_str().as_bytes();
-        let len = u32::try_from(id.len()).map_err(|_| over())?;
-        h.update(&len.to_le_bytes());
-        h.update(id);
-        h.update(&e.version.0);
-    }
-    Ok(Hash(*h.finalize().as_bytes()))
+    rdy_model::foreign::selection_identity(entries.iter().map(|e| (&e.id, &e.version)))
+        .ok_or_else(|| limit("selection", l.selection, "blocks"))
 }
 
 /// Whether a removal replaced the name of the doc or folder `id`, or of a folder above it, in
@@ -1650,4 +1637,46 @@ pub fn check_snapshot_limits_for_tests<'a>(
     manifest: impl FnMut(&Hash) -> Result<Option<BlobManifest>, RdyError>,
 ) -> Result<(), RdyError> {
     check_snapshot_limits(blocks, manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, seed: &[u8], redaction: Option<Hash>) -> SelectionEntry {
+        SelectionEntry {
+            id: BlockId::parse(id).unwrap(),
+            version: Hash::of(seed),
+            redaction,
+        }
+    }
+
+    /// D-C94DV: `Delivery.selection` is the publication selection identity. The one encoding
+    /// lives in rdy-model; the engine's identity equals it for every entry list, and a fixed
+    /// vector pins its bytes.
+    #[test]
+    fn rpl2_delivery_selection_is_the_publication_selection_identity() {
+        let lists = [
+            vec![],
+            vec![entry("D-00001", b"1", None)],
+            vec![
+                entry("D-00001", b"1", None),
+                entry("d-00002", b"2", Some(Hash::of(b"request"))),
+                entry("s-1DENT", b"3", None),
+            ],
+            vec![entry("t-MEDGR", b"only", Some(Hash::of(b"r")))],
+        ];
+        let l = Limits::default();
+        for entries in &lists {
+            let model =
+                rdy_model::foreign::selection_identity(entries.iter().map(|e| (&e.id, &e.version)))
+                    .unwrap();
+            assert_eq!(selection_identity(entries, &l).unwrap(), model);
+        }
+        let fixed = &lists[2];
+        assert_eq!(
+            selection_identity(fixed, &l).unwrap().to_string(),
+            "90cb277b71b183434bcdee864c9cad5aca5be38b562ff9d94365251c55cb0660"
+        );
+    }
 }
