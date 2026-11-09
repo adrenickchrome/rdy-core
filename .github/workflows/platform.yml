@@ -19,12 +19,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Minutes. macOS runs the full gate in 70 to 80. On f17ab534 the Windows gate was still in
+          # the rdy-qa areas when a 90-minute limit cancelled it.
           - runner: macos-26
             label: macOS ARM64
+            timeout: 120
           - runner: windows-2025
             label: Windows Server 2025
+            timeout: 240
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout }}
     continue-on-error: true
     permissions:
       contents: read
@@ -56,9 +60,21 @@ jobs:
       - name: Failing tests
         if: failure() && runner.os != 'Windows'
         run: |
-          # print the qa report's failing tests and their panic excerpts, so the log names the cause
-          test -f target/qa/report.md || exit 0
+          # print the qa report's failing gates and tests, then the whole report, so the log names the cause
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
           sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+          echo "::group::target/qa/report.md"
+          cat target/qa/report.md
+          echo "::endgroup::"
+      - name: Upload the qa report
+        if: always() && runner.os != 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-${{ runner.os }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
       - name: No tracked file changed
         if: runner.os != 'Windows'
         run: git diff --exit-code
@@ -75,6 +91,16 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/ci/windows_report.ps1 -Report 'C:\rdy-ci\work\target\qa\report.md'
+      - name: Upload the qa report and gate logs
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-${{ runner.os }}
+          path: |
+            C:\rdy-ci\work\target\qa\report.*
+            C:\rdy-ci\logs\gate.*
+          if-no-files-found: warn
+          retention-days: 14
       - name: No tracked file changed
         if: runner.os == 'Windows'
         shell: pwsh

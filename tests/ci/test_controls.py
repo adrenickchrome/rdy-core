@@ -776,6 +776,75 @@ class ToolArchive(unittest.TestCase):
                 self.extract(entries)
 
 
+class ToolDownload(unittest.TestCase):
+    # Runs f17ab534 and 6f62675a: GitHub timed out unauthenticated requests (incident 2026-11-08
+    # 10:36Z to 12:32Z), urlopen raised, and the refusal named neither the tool nor the cause.
+    URL = 'https://github.com/owner/tool/releases/download/v1/tool.tar.gz'
+
+    class Body(io.BytesIO):
+        def geturl(self):
+            return ToolDownload.URL
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    def run_download(self, outcomes):
+        calls, sleeps = [], []
+        outcomes = iter(outcomes)
+
+        def urlopen(request, timeout):
+            calls.append((request.full_url, timeout))
+            outcome = next(outcomes)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return self.Body(outcome)
+        return TOOLS.download(self.URL, urlopen=urlopen, sleep=sleeps.append), calls, sleeps
+
+    def test_transient_network_errors_are_retried_then_the_body_is_returned(self):
+        body, calls, sleeps = self.run_download([
+            TimeoutError('timed out'),
+            urllib.error.URLError(ConnectionResetError()),
+            urllib.error.HTTPError(self.URL, 503, 'unavailable', {}, None),
+            b'archive'])
+        self.assertEqual(body, b'archive')
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sleeps, list(TOOLS.RETRY_DELAYS))
+
+    def test_retries_are_bounded(self):
+        with self.assertRaises(TimeoutError):
+            self.run_download([TimeoutError('timed out')] * (len(TOOLS.RETRY_DELAYS) + 1))
+
+    def test_a_client_error_is_not_retried(self):
+        with self.assertRaises(urllib.error.HTTPError):
+            self.run_download([urllib.error.HTTPError(self.URL, 404, 'not found', {}, None), b'x'])
+
+    def test_a_retried_download_is_still_verified(self):
+        payload = ToolArchive.archive([('tool', 'file')])
+        manifest = {'tools': {'tool': {'version': '1', 'platforms': {'K': {
+            'url': self.URL, 'sha256': '0' * 64, 'binary': 'tool'}}}}}
+        with tempfile.TemporaryDirectory() as out, \
+                mock.patch.object(TOOLS, 'download', return_value=payload) as download:
+            with self.assertRaises(SystemExit) as refused:
+                TOOLS.install(manifest, 'K', Path(out), ['tool'])
+            self.assertEqual(os.listdir(out), [])
+        download.assert_called_once()
+        self.assertIn('tool: tool archive digest/size mismatch', str(refused.exception))
+        self.assertIn('no unverified executable was run', str(refused.exception))
+
+    def test_the_refusal_names_the_tool_and_the_network_cause(self):
+        manifest = {'tools': {'gitleaks': {'version': '1', 'platforms': {'K': {
+            'url': self.URL, 'sha256': '0' * 64, 'binary': 'gitleaks'}}}}}
+        error = urllib.error.URLError(TimeoutError('timed out'))
+        with tempfile.TemporaryDirectory() as out, \
+                mock.patch.object(TOOLS, 'download', side_effect=error):
+            with self.assertRaises(SystemExit) as refused:
+                TOOLS.install(manifest, 'K', Path(out), ['gitleaks'])
+        self.assertIn('gitleaks: download failed (TimeoutError)', str(refused.exception))
+
+
 
 CI_WORKFLOW = (ROOT / '.github/workflows/ci.yml').read_text()
 PROFILE_ROOT = 'target/llvm-cov-target'
@@ -1251,6 +1320,48 @@ class WindowsPlatformMatrix(unittest.TestCase):
         self.assertIn("'/setowner', $account", gate)
         # the paths are set before the first build command
         self.assertLess(inner.index('$env:LOCALAPPDATA'), inner.index('cargo fetch'))
+
+    def test_wx35_private_home_acl_order_keeps_the_folder_reachable(self):
+        # Run 4a2db5cf: inheritance was removed after the account took ownership, so the folder had an
+        # empty DACL and the administrator's grant failed ("C:\\rdy-ci\\home: Access is denied."); /C hid
+        # the failure and the linker hit LNK1104. Grant first, then drop inheritance, then hand over.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        lines = [l for l in gate.splitlines() if 'icacls' in l and '$home_' in l]
+        grant = next(i for i, l in enumerate(lines) if '/grant:r' in l)
+        strip = next(i for i, l in enumerate(lines) if '/inheritance:r' in l)
+        owner = next(i for i, l in enumerate(lines) if '/setowner' in l)
+        self.assertLess(grant, strip)
+        self.assertLess(strip, owner)
+        for sid in ('${account}:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'):
+            self.assertIn(sid, lines[grant])
+        for line in lines:
+            self.assertNotIn("'/C'", line)
+        # the account proves it can create and delete a file in its TEMP before the first build
+        inner = (ROOT / 'scripts/ci/windows_gate_inner.ps1').read_text()
+        probe = inner.index('New-Item -ItemType File')
+        self.assertLess(inner.index('$env:TMP = '), probe)
+        self.assertLess(probe, inner.index('Remove-Item'))
+        self.assertLess(inner.index('Remove-Item'), inner.index('cargo fetch'))
+
+    def test_wx35_platform_runs_upload_the_qa_report(self):
+        text = (ROOT / '.github/workflows/platform.yml').read_text()
+        self.assertEqual(text.count('actions/upload-artifact@'), 2)
+        self.assertIn('path: target/qa/report.*', text)
+        self.assertIn('C:\\rdy-ci\\work\\target\\qa\\report.*', text)
+        self.assertIn('cat target/qa/report.md', text)
+        self.assertIn('| FAIL', (ROOT / 'scripts/ci/windows_report.ps1').read_text())
+
+    def test_platform_time_limits_fit_the_full_gate(self):
+        # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit
+        # cancelled it; macOS needs 70 to 80 minutes. Both jobs stay advisory.
+        text = self.workflow()
+        self.assertIn('    continue-on-error: true\n', text)
+        self.assertIn('    timeout-minutes: ${{ matrix.timeout }}\n', text)
+        limits = dict(re.findall(r'label: (.+)\n\s+timeout: (\d+)', text))
+        self.assertEqual(set(limits), {'macOS ARM64', 'Windows Server 2025'})
+        self.assertGreaterEqual(int(limits['macOS ARM64']), 120)
+        self.assertGreaterEqual(int(limits['Windows Server 2025']), 240)
+        self.assertLessEqual(max(map(int, limits.values())), 360)
 
     def test_wx34_no_arm64_linux_job_is_restored(self):
         text = self.workflow()

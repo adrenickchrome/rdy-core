@@ -4,3 +4,9 @@
 self-hosted-runner:
   labels:
     - ubuntu-26.04
+# actionlint 1.7.12 does not know the concurrency key `queue`. The evidence sealer's job-level `queue: max`
+# is the one exception (orchestrator ruling C1, 2026-11-08): this one path, this one message. A test pins it.
+paths:
+  .github/workflows/release-evidence.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

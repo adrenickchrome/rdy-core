@@ -134,8 +134,15 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+      - name: Test parser
+        # The workflow tests parse YAML with PyYAML, hash-pinned and test-only, in a fresh environment.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-tests"
+          "$RUNNER_TEMP/ci-tests/bin/python" -m pip install --require-hashes -r tests/ci/requirements-release-producers.txt
       - name: CI control tests
-        run: python3 -m unittest discover -s tests/ci -v
+        run: |
+          . "$RUNNER_TEMP/ci-tests/bin/activate"
+          python3 -m unittest discover -s tests/ci -v
   required:
     # One result for the fast gate and the control tests together. It is not a required check.
     name: Core CI

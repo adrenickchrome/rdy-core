@@ -638,8 +638,16 @@ fn wx4_inheritance_and_foreign_owner_are_refused() {
         assert_eq!(s.dacl.map(|a| a.len()), Some(1));
     }
     // a directory and a file of another account are never made private, and stay as they are
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let (theirs_dir, theirs_file) = (PathBuf::from("/"), PathBuf::from("/etc/hosts"));
+    // On macOS "/" is the sealed, read-only system volume: chmod there may fail with EROFS before
+    // the owner check (the hosted macos-26 runner did). /private/tmp is root's, on the writable
+    // data volume, so only the owner check can refuse it.
+    #[cfg(target_os = "macos")]
+    let (theirs_dir, theirs_file) = (
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/etc/hosts"),
+    );
     #[cfg(windows)]
     let (theirs_dir, theirs_file) = {
         let root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"));

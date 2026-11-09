@@ -372,13 +372,54 @@ Each version has exactly one release key. A signature by any other key is refuse
 | Versions | Key type | Fingerprint | State |
 | --- | --- | --- | --- |
 | v0.17.0 to v0.41.0 | `sk-ssh-ed25519@openssh.com` | `SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc` | historical key, retired for new releases |
+| v0.46.0 and later | `ssh-ed25519` | `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M` | machine key, current |
 
-No other version has a release key. The machine release key is pending: no version after v0.41.0 has a release key yet.
+No other version has a release key.
 
 The allowed-signers line for v0.17.0 to v0.41.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==
+```
+
+The allowed-signers line for v0.46.0 and later:
+
+```text
+rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
+```
+
+#### transition-v0.46.0.json
+
+The historical root key signed this transition in namespace `rdy-release-signer-transition-v1`. Its exact bytes:
+
+```json
+{
+  "fingerprint": "SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M",
+  "first_machine_tag": "v0.46.0",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8",
+  "repository": "adrenickchrome/rdy-core",
+  "scheme": "rdy-release-signer-transition-v1"
+}
+```
+
+Its signature, `transition-v0.46.0.json.sig`:
+
+```text
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAAFUAAAAac2stc3NoLWVkMjU1MTlAb3BlbnNzaC5jb20AAAAgOKJDS8
+7d28bYC1slgPCyyEmXvmS9tudEM4JR2yN+sNEAAAAPc3NoOnJkeS1yZWxlYXNlAAAAIHJk
+eS1yZWxlYXNlLXNpZ25lci10cmFuc2l0aW9uLXYxAAAAAAAAAAZzaGE1MTIAAABnAAAAGn
+NrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAQAAMJ6vc+kjRRGIqsc/eNBCVeMVBwQbV
+rE1wK+eqPHThAHWqcVvepXDtUU25Myumq05ptb7Iddo4+sJR0a2r0A4FAAAAFQ==
+-----END SSH SIGNATURE-----
+```
+
+Verify it offline with the root key:
+
+```sh
+cd '/path/to/release-keys' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-signer-transition-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/release-keys/root-transition-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'root-transition-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-signer-transition-v1' '-s' 'transition-v0.46.0.json.sig' < '/path/to/release-keys/transition-v0.46.0.json'
 ```
 
 ### Install
