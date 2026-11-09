@@ -9,18 +9,19 @@
 //! stored later is not in it. It writes no foreign copy and no `TAG` object, and holds only the
 //! `BLOCK` objects of the selection, one at a time: the stream goes to `out` as it is read.
 //!
-//! - A planned block that a hiding profile keeps only as a shell is not delivered: the shell is a
-//!   presentation stub, and its `BLOCK` object holds the content the profile hides. The delivery's
-//!   `selection` is the publication selection identity (`rdy_model::foreign::selection_identity`)
-//!   of the versions it delivers, so it equals the profile's own identity when the profile keeps
-//!   no shell.
+//! - A planned block that a hiding profile keeps only as a shell has no `BLOCK` object in the
+//!   delivery: the shell is a presentation stub, and its object holds the content the profile
+//!   hides. The delivery lists it in `shells` (id and full source version hash, in id order, and
+//!   nothing else), and its `selection` is the publication selection identity of the delivered
+//!   versions plus the shells (`rdy_model::foreign::delivery_selection`, D-2CG1N). It always
+//!   equals the profile's own `selection_identity` at the tag, so a consumer compares the two
+//!   directly.
 //! - A version that an approved removal dropped travels as its residue (a `DROPPED` record), with
 //!   the content identity the removal recorded and no derived fact.
 //! - `superseded_by` lists only selected blocks, so no id outside the selection is disclosed.
 //!
 //! [`tag_uses`] lists the foreign pins of the blocks a tag holds, each with the version this
-//! state holds for it and, while a source still selects that version, the delivery that carried
-//! it.
+//! state holds for it and the delivery that carried it, from the retained delivery history.
 use crate::Scope;
 use crate::error::{E_INTERNAL, E_LIMIT, RdyError};
 use crate::publication::{profile_facts, resolve};
@@ -28,7 +29,8 @@ use crate::read_state::ReadState;
 use crate::stream_error::to_rdy;
 use rdy_model::decision::SUPERSEDES;
 use rdy_model::foreign::{
-    ForeignDerived, ForeignId, ForeignPin, ForeignPublication, ForeignVersion, selection_identity,
+    ForeignDerived, ForeignId, ForeignPin, ForeignPublication, ForeignShell, ForeignVersion,
+    delivery_selection,
 };
 use rdy_model::{BlockId, Hash};
 use rdy_store::closure::StoreSource;
@@ -160,9 +162,19 @@ pub fn write(
         };
         versions.push(version);
     }
-    let Some(selection) = selection_identity(versions.iter().map(|v| (&v.id, &v.version))) else {
-        return Err(internal("a delivery selection does not fit its identity"));
-    };
+    // the shells: kept by the profile, delivered as a stub of id and version only (D-2CG1N)
+    let mut shells: Vec<ForeignShell> = resolved
+        .entries
+        .iter()
+        .filter(|e| resolved.shells.contains(&e.id))
+        .map(|e| ForeignShell {
+            id: e.id.clone(),
+            version: e.version,
+        })
+        .collect();
+    shells.sort_by(|a, b| a.id.cmp(&b.id));
+    let selection = delivery_selection(versions.iter().map(|v| (&v.id, &v.version)), &shells)
+        .map_err(|_| internal("a delivery selection does not fit its identity"))?;
     let delivery = DeliveryRecord {
         publication: ForeignPublication {
             tag: tag_name.to_string(),
@@ -171,6 +183,7 @@ pub fn write(
         },
         selection,
         versions,
+        shells,
     };
     let header = StreamHeader::link_delivery(reader.store_features()?, repo_id, tag_hash);
     let mut w = StreamWriter::new_delivery(out, &header, &delivery).map_err(to_rdy)?;
@@ -195,8 +208,10 @@ pub fn write(
 }
 
 /// One foreign pin a tag holds: the local block that keeps it, the cited block, the pin, the
-/// version this state holds for the pin (none when no delivery holds it) and, while a source
-/// still selects that version, that source's ref name and the entry that delivered it.
+/// version this state holds for the pin (none when no delivery holds it) and the delivery that
+/// carried that version: the ref name of its source and its entry. A source that still selects
+/// the version names it; once a later delivery replaced or removed the version, the first
+/// delivery in the retained log that carried it does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagUse {
     pub citing: BlockId,
@@ -225,13 +240,21 @@ pub fn tag_uses(read: &ReadState, landing: Hash) -> Result<Vec<TagUse>, RdyError
                 ));
             }
             let held = read.foreign_held_pin(target, pin)?;
-            let carrier = held.and_then(|version| {
-                foreign.sources().find_map(|(name, view)| {
-                    let m = view.members.get(&target.id)?;
-                    (view.repo == target.repo && m.version.version == version)
-                        .then(|| (name.to_string(), m.entry))
-                })
-            });
+            // a source that still selects the version names it; else the delivery history does
+            let carrier = match held {
+                None => None,
+                Some(version) => {
+                    let current = foreign.sources().find_map(|(name, view)| {
+                        let m = view.members.get(&target.id)?;
+                        (view.repo == target.repo && m.version.version == version)
+                            .then(|| (name.to_string(), m.entry))
+                    });
+                    match current {
+                        Some(c) => Some(c),
+                        None => read.foreign_carrier(target, &version)?,
+                    }
+                }
+            };
             out.push(TagUse {
                 citing: b.id.clone(),
                 target: target.clone(),

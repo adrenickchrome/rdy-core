@@ -56,6 +56,42 @@ where
     Some(Hash(*h.finalize().as_bytes()))
 }
 
+/// A shell of a delivery (D-2CG1N): a planned doc or section the profile keeps only as a stub.
+/// It is a selection entry (its id and full source version hash count in the selection identity,
+/// as they do in the publication's) and nothing else: no `BLOCK` object travels for it, and no
+/// pin, ref or read resolves to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignShell {
+    pub id: BlockId,
+    #[serde(with = "hex_one")]
+    pub version: Hash,
+}
+
+/// The selection identity of a delivery: the delivered versions plus its `shells`, in id order.
+/// This is the publication selection identity of the profile at the tag (D-2CG1N).
+///
+/// `shells` must be in strict id order and share no id with `delivered`. Errors name the broken
+/// rule; `Err("limit")` is a count or an id length that does not fit a u32.
+pub fn delivery_selection<'a, I>(
+    delivered: I,
+    shells: &'a [ForeignShell],
+) -> Result<Hash, &'static str>
+where
+    I: IntoIterator<Item = (&'a BlockId, &'a Hash)>,
+{
+    if shells.windows(2).any(|w| w[0].id >= w[1].id) {
+        return Err("shells are not in strict id order");
+    }
+    let mut all: Vec<(&BlockId, &Hash)> = delivered.into_iter().collect();
+    all.extend(shells.iter().map(|s| (&s.id, &s.version)));
+    all.sort_by(|a, b| a.0.cmp(b.0));
+    if all.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Err("a shell shares its id with a delivered version");
+    }
+    selection_identity(all).ok_or("limit")
+}
+
 /// A block in another repo: that repo's id and the block's id there.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ForeignId {
@@ -220,8 +256,12 @@ pub enum ForeignEvent {
         added: Vec<ForeignVersion>,
         changed: Vec<ForeignVersion>,
         removed: Vec<BlockId>,
-        /// The publication selection identity of the complete selection after this delivery
-        /// ([`selection_identity`]).
+        /// Every shell of this delivery, in id order; empty when the profile shows every
+        /// container. Not a delta: the complete list as of this delivery.
+        #[serde(default)]
+        shells: Vec<ForeignShell>,
+        /// The publication selection identity of the complete selection after this delivery:
+        /// the delivered versions plus `shells` ([`delivery_selection`]).
         #[serde(with = "hex_one")]
         selection: Hash,
     },

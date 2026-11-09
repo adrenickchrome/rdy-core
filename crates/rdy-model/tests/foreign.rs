@@ -90,6 +90,7 @@ fn rpl1_sources_and_events_have_closed_shapes() {
         added: vec![version("D-00001")],
         changed: vec![],
         removed: vec![bid("D-00003")],
+        shells: vec![],
         selection: Hash::of(b"s"),
     };
     let revoked = ForeignEvent::Revoked {

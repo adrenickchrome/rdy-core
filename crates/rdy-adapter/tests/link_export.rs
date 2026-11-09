@@ -352,6 +352,13 @@ fn cited_block(id: &str, body: &str) -> Block {
 /// A project that cites a delivered block of another repo from a claim, tagged. Returns the
 /// directory, the cited block, the claim, and the source ref the delivery came from.
 fn citing() -> (tempfile::TempDir, Block, BlockId, String) {
+    let (dir, cited, claim, src, _) = citing_then(false);
+    (dir, cited, claim, src)
+}
+
+/// As [`citing`], and with `advance`, a second delivery of the same source after the tag that
+/// removes the cited block from its selection. Also returns the first delivery's entry.
+fn citing_then(advance: bool) -> (tempfile::TempDir, Block, BlockId, String, Hash) {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let w = write(
@@ -393,10 +400,12 @@ fn citing() -> (tempfile::TempDir, Block, BlockId, String) {
             added: vec![v],
             changed: vec![],
             removed: vec![],
+            shells: vec![],
             selection: selection_identity(sel.iter()).unwrap(),
         },
     };
-    r.store_mut()
+    let first = r
+        .store_mut()
         .put_foreign(&entry, std::slice::from_ref(&cited))
         .unwrap();
     r.publish_after_foreign_for_tests().unwrap();
@@ -408,8 +417,26 @@ fn citing() -> (tempfile::TempDir, Block, BlockId, String) {
     let claim = bid(&w, "$c");
     land(&mut r);
     tag(&mut r, "v1.0.0");
+    if advance {
+        let mut next = entry.clone();
+        if let ForeignEvent::Delivery {
+            prev,
+            added,
+            removed,
+            selection,
+            ..
+        } = &mut next.event
+        {
+            *prev = Some(first);
+            *added = vec![];
+            *removed = vec![cited.id.clone()];
+            *selection = selection_identity(std::iter::empty()).unwrap();
+        }
+        r.store_mut().put_foreign(&next, &[]).unwrap();
+        r.publish_after_foreign_for_tests().unwrap();
+    }
     r.close().unwrap();
-    (dir, cited, claim, format!("foreign/link/{link}"))
+    (dir, cited, claim, format!("foreign/link/{link}"), first)
 }
 
 #[test]
@@ -526,8 +553,32 @@ fn rpl9_export_omits_a_shell_the_profile_hides() {
     assert!(ids.contains(&&guide) && !ids.contains(&&ghost), "{ids:?}");
     let want: Vec<&BlockId> = kept.iter().copied().filter(|id| **id != ghost).collect();
     assert_eq!(ids, want, "the selection less its shell");
-    // the delivery's identity is the delivered versions' own
-    assert_ne!(report.delivery.selection, site.selection_identity);
+    // the delivery names the shell by id and version alone, and its identity is the
+    // publication's own (D-2CG1N): a consumer compares the two directly
+    assert!(!ids.contains(&&ghost));
+    let shell = site.selection.iter().find(|e| e.id == ghost).unwrap();
+    assert_eq!(report.delivery.shells.len(), 1);
+    assert_eq!(report.delivery.shells[0].id, ghost);
+    assert_eq!(report.delivery.shells[0].version, shell.version);
+    assert!(report.keys.iter().all(|k| k.hash != shell.version));
+    assert_eq!(report.delivery.selection, site.selection_identity);
     check_delivery(&bytes[..]).unwrap();
+    handle.close().unwrap();
+}
+
+#[test]
+fn rpl9_tag_deliveries_keep_provenance_after_the_source_advances() {
+    let (dir, cited, claim, src, first) = citing_then(true);
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let uses = snap.tag_deliveries("v1.0.0").unwrap();
+    assert_eq!(uses.len(), 1, "{uses:?}");
+    let u = &uses[0];
+    assert_eq!(u.citing, claim);
+    // the source no longer selects the version, yet the pin is held and its delivery is listed
+    let version = Hash::of(&codec::item_new(kinds::BLOCK, &cited).1);
+    assert_eq!(u.held, Some(version));
+    assert_eq!(u.source.as_deref(), Some(src.as_str()));
+    assert_eq!(u.entry, Some(first));
     handle.close().unwrap();
 }

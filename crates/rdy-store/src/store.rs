@@ -3838,6 +3838,11 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
     }
 
+    /// The place in the log of the object of `kind` with hash `h`, from the index alone.
+    pub fn kind_location(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+        self.index().typed(kind, h)
+    }
+
     /// Log frames read so far by `visit_carried`.
     #[doc(hidden)]
     pub fn carried_frames_read(&self) -> u64 {

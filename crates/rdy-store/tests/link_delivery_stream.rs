@@ -88,6 +88,7 @@ fn delivery_of(versions: Vec<ForeignVersion>) -> DeliveryRecord {
         },
         selection,
         versions,
+        shells: vec![],
     }
 }
 

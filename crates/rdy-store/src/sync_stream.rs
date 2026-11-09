@@ -68,8 +68,9 @@
 //!   lists it as a prerequisite, and the root-`TAG` rule of a tag history does not apply.
 //! - **`DELIVERY` payload:** a [`DeliveryRecord`] in postcard: the publication `{tag, profile,
 //!   profile_version}`, the selection digest and each selected block's `ForeignVersion`, in
-//!   strict id order. The digest is the publication selection identity of the versions
-//!   (`rdy_model::foreign::selection_identity`). Its bounds are a typed record's
+//!   strict id order, and the delivery's shells (D-2CG1N: id and version only, no object). The
+//!   digest is the publication selection identity of the versions and the shells
+//!   (`rdy_model::foreign::delivery_selection`). Its bounds are a typed record's
 //!   (`crate::bounded`): at most [`MAX_RECORD_BYTES`] bytes and [`MAX_DELIVERY_VERSIONS`]
 //!   versions.
 //! - **Objects:** exactly one per selected version, in the `DELIVERY`'s order: its key is the
@@ -95,7 +96,7 @@ use crate::stream_error::{
     LIMIT_PENDING_DROPPED_BYTES, LIMIT_PENDING_DROPS, LIMIT_PREREQUISITES, LIMIT_TOTAL_BYTES,
     Reason, StreamError,
 };
-use rdy_model::foreign::{ForeignPublication, ForeignVersion, selection_identity};
+use rdy_model::foreign::{ForeignPublication, ForeignVersion};
 use rdy_model::{Block, Hash, RepoId};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeSet, HashMap};
@@ -252,6 +253,8 @@ pub struct DeliveryRecord {
     #[serde(with = "rdy_model::foreign::hex_one")]
     pub selection: Hash,
     pub versions: Vec<ForeignVersion>,
+    /// Every shell of the delivery, in id order (D-2CG1N): no `BLOCK` record follows for one.
+    pub shells: Vec<rdy_model::foreign::ForeignShell>,
 }
 
 impl DeliveryRecord {
@@ -281,8 +284,11 @@ fn delivery_rules(d: &DeliveryRecord) -> Result<(), Reason> {
     if d.versions.iter().any(|v| !encodings.contains(&v.encoding)) {
         return Err(Reason::UnknownEncodingVersion);
     }
-    match selection_identity(d.versions.iter().map(|v| (&v.id, &v.version))) {
-        Some(s) if s == d.selection => Ok(()),
+    match rdy_model::foreign::delivery_selection(
+        d.versions.iter().map(|v| (&v.id, &v.version)),
+        &d.shells,
+    ) {
+        Ok(s) if s == d.selection => Ok(()),
         _ => Err(Reason::InvalidSelection),
     }
 }

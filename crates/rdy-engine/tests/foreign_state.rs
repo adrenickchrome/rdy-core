@@ -6,8 +6,8 @@ mod common;
 
 use rdy_engine::*;
 use rdy_model::foreign::{
-    ForeignDerived, ForeignEntry, ForeignEvent, ForeignId, ForeignPublication, ForeignSource,
-    ForeignVersion, selection_identity,
+    ForeignDerived, ForeignEntry, ForeignEvent, ForeignId, ForeignPin, ForeignPublication,
+    ForeignShell, ForeignSource, ForeignVersion, delivery_selection, selection_identity,
 };
 use rdy_model::*;
 use rdy_store::{codec, kinds};
@@ -114,6 +114,18 @@ impl Source {
     /// Writes a delivery of `added`, `changed` and `removed` straight to the store and publishes
     /// the state after it.
     fn deliver(&mut self, r: &mut Rdy, added: &[&Block], changed: &[&Block], removed: &[&str]) {
+        self.deliver_shelled(r, added, changed, removed, vec![]);
+    }
+
+    /// As [`Source::deliver`], with the delivery's `shells` counted in its selection.
+    fn deliver_shelled(
+        &mut self,
+        r: &mut Rdy,
+        added: &[&Block],
+        changed: &[&Block],
+        removed: &[&str],
+        shells: Vec<ForeignShell>,
+    ) {
         for b in added.iter().chain(changed) {
             self.sel.insert(b.id.clone(), version_of(b));
         }
@@ -134,7 +146,8 @@ impl Source {
                 added: added.iter().map(|b| fv(b)).collect(),
                 changed: changed.iter().map(|b| fv(b)).collect(),
                 removed: removed.iter().map(|x| id(x)).collect(),
-                selection: selection_identity(self.sel.iter()).unwrap(),
+                selection: delivery_selection(self.sel.iter(), &shells).unwrap(),
+                shells,
             },
         };
         let blocks: Vec<Block> = added.iter().chain(changed).map(|b| (*b).clone()).collect();
@@ -398,4 +411,44 @@ fn rpl8_full_publish_reads_the_foreign_log_beside_an_unmoved_canon() {
     assert_eq!(held.version.version, version);
     assert!(st.foreign().unwrap().link_source(&id("rl-00001")).is_some());
     r.close().unwrap();
+}
+
+#[test]
+fn rpl9_a_shell_is_not_a_delivered_version() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = project(d.path());
+    let dec = block("d-FRGN1", "decision", &[("title", "Cited rule")], "Use it.");
+    let shell = ForeignShell {
+        id: id("d-FRGN9"),
+        version: Hash([9; 32]),
+    };
+    let mut s = Source::new("rl-00001", "agents");
+    s.deliver_shelled(&mut r, &[&dec], &[], &[], vec![shell.clone()]);
+
+    let state = r.read();
+    let f = state.foreign().unwrap();
+    let ghost = ForeignId::new(cited(), shell.id.clone());
+    // the source's selection identity counts the shell, but no member, current view, held
+    // lookup, pin or read resolves to it
+    let view = f.sources().next().expect("the source").1;
+    assert_eq!(
+        view.selection,
+        delivery_selection(s.sel.iter(), std::slice::from_ref(&shell)).unwrap()
+    );
+    assert_ne!(view.selection, selection_identity(s.sel.iter()).unwrap());
+    assert!(!view.members.contains_key(&shell.id));
+    assert!(f.current_version(&ghost).is_none());
+    assert!(
+        state
+            .foreign_held(&ghost, &shell.version)
+            .unwrap()
+            .is_none()
+    );
+    let pin = ForeignPin {
+        content: shell.version,
+        encoding: 0,
+    };
+    assert!(state.foreign_held_pin(&ghost, &pin).unwrap().is_none());
+    // the delivered block still resolves
+    assert!(f.current_version(&target(&dec)).is_some());
 }

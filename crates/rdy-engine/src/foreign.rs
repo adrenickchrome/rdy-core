@@ -27,6 +27,9 @@ use std::sync::{Arc, OnceLock};
 struct HeldIndex {
     versions: BTreeSet<(RepoId, BlockId, Hash)>,
     contents: BTreeMap<(RepoId, BlockId, Hash, u16), Hash>,
+    /// Per delivered (repo, block, version), the first entry in log order that carried it and
+    /// that entry's source ref name: delivery provenance that outlives the source's selection.
+    carriers: BTreeMap<(RepoId, BlockId, Hash), (Location, String, Hash)>,
 }
 
 /// The foreign side of one read state.
@@ -207,11 +210,22 @@ impl ForeignState {
                         return Ok(());
                     }
                     let e = reader.foreign_entry(&h)?;
+                    let at = reader.kind_location(kinds::FOREIGN, &h)?;
+                    let source = rdy_store::foreign::source_ref(&e.source);
                     if let ForeignEvent::Delivery { added, changed, .. } = e.event {
                         for v in added.into_iter().chain(changed) {
                             index
                                 .contents
                                 .insert((e.repo, v.id.clone(), v.content, v.encoding), v.version);
+                            if let Some(at) = at {
+                                let key = (e.repo, v.id.clone(), v.version);
+                                match index.carriers.get(&key) {
+                                    Some((have, ..)) if *have <= at => {}
+                                    _ => {
+                                        index.carriers.insert(key, (at, source.clone(), h));
+                                    }
+                                }
+                            }
                             index.versions.insert((e.repo, v.id, v.version));
                         }
                     }
@@ -250,6 +264,22 @@ impl ReadState {
         }
         let block = self.reader.get_block(version)?;
         Ok((block.id == target.id).then_some(block))
+    }
+
+    /// The source ref name and the entry of the first delivery (in log order, before this
+    /// state's watermark) that carried version `version` of `target`, whatever its source's
+    /// state now. `None` when no such entry exists.
+    pub fn foreign_carrier(
+        &self,
+        target: &ForeignId,
+        version: &Hash,
+    ) -> Result<Option<(String, Hash)>, RdyError> {
+        let foreign = self.foreign()?;
+        let index = foreign.held_index(&self.reader)?;
+        Ok(index
+            .carriers
+            .get(&(target.repo, target.id.clone(), *version))
+            .map(|(_, source, entry)| (source.clone(), *entry)))
     }
 
     /// The version that carried the content a foreign pin records for `target`, when an entry

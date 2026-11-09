@@ -113,6 +113,7 @@ impl Source {
                 added: added.iter().map(|b| fv(b)).collect(),
                 changed: changed.iter().map(|b| fv(b)).collect(),
                 removed: removed.iter().map(|r| id(r)).collect(),
+                shells: vec![],
                 selection: identity(&self.sel),
             },
         }

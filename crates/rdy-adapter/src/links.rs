@@ -57,9 +57,10 @@ impl Snapshot {
     }
 
     /// The foreign pins of the blocks the captured tag `tag` holds, sorted by citing block and
-    /// cited block. Each row names the delivered version this snapshot holds for the pin, and
-    /// while a source still selects that version, the source and the entry that delivered it. A
-    /// pin whose version no delivery holds has none. A tag with no foreign pin lists none.
+    /// cited block. Each row names the delivered version this snapshot holds for the pin, and the
+    /// source and the entry that delivered it, from the delivery history this snapshot captured,
+    /// also after a later delivery replaced or removed that version. A pin whose version no
+    /// delivery holds has none. A tag with no foreign pin lists none.
     pub fn tag_deliveries(&self, tag: &str) -> Result<Vec<TagUse>, RdyError> {
         let (_, captured) = self.delivery_scope(tag)?;
         link_export::tag_uses(self.read_state(), captured.landing)

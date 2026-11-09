@@ -13,7 +13,8 @@ use carried_fixture::{
 };
 use rdy_model::foreign::{
     ForeignDerived, ForeignEntry, ForeignEvent, ForeignId, ForeignParts, ForeignPin,
-    ForeignPublication, ForeignSource, ForeignVersion, selection_identity,
+    ForeignPublication, ForeignShell, ForeignSource, ForeignVersion, delivery_selection,
+    selection_identity,
 };
 use rdy_model::redaction::RedactTarget;
 use rdy_model::*;
@@ -103,6 +104,7 @@ fn delivery(
             added: added.iter().map(|b| fv(b)).collect(),
             changed: changed.iter().map(|b| fv(b)).collect(),
             removed: removed.iter().map(|r| id(r)).collect(),
+            shells: vec![],
             selection: selection_identity(sel.iter()).unwrap(),
         },
     }
@@ -633,4 +635,56 @@ fn rpl7_unapproved_zeroes_are_corruption() {
     carried_zeros(&path, &b1);
     let mut s = Store::open(&path).unwrap();
     clean(&mut s, 2);
+}
+
+/// A delivery with the shell `shell` (D-2CG1N): the selection is the delivered versions plus it.
+fn shelled(prev: Option<Hash>, a: &Block, shell: &ForeignShell) -> ForeignEntry {
+    let sel: BTreeMap<BlockId, Hash> = [(a.id.clone(), version_of(a))].into();
+    ForeignEntry {
+        repo: cited_repo(),
+        source: link("rl-00001"),
+        event: ForeignEvent::Delivery {
+            prev,
+            publication: publication(),
+            set: None,
+            added: vec![fv(a)],
+            changed: vec![],
+            removed: vec![],
+            shells: vec![shell.clone()],
+            selection: delivery_selection(sel.iter(), std::slice::from_ref(shell)).unwrap(),
+        },
+    }
+}
+
+#[test]
+fn rpl9_fsck_rebuilds_the_selection_from_versions_and_shells() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = block("D-00001", "shown");
+    let shell = ForeignShell {
+        id: id("D-00005"),
+        version: Hash([5; 32]),
+    };
+    // a delivery whose selection counts its shell is clean, and the shell holds no version
+    let mut s = Store::create(&dir.path().join("ok")).unwrap();
+    let e = shelled(None, &a, &shell);
+    s.put_foreign(&e, std::slice::from_ref(&a)).unwrap();
+    clean(&mut s, 1);
+
+    // the same delivery with its shell dropped from the entry no longer rebuilds its selection
+    let mut x = Store::create(&dir.path().join("dropped")).unwrap();
+    let mut bad = shelled(None, &a, &shell);
+    if let ForeignEvent::Delivery { shells, .. } = &mut bad.event {
+        shells.clear();
+    }
+    forge(&mut x, &bad);
+    refused(&mut x, "is not the digest");
+
+    // a shell with the id of a delivered version is refused
+    let mut y = Store::create(&dir.path().join("overlap")).unwrap();
+    let mut bad = shelled(None, &a, &shell);
+    if let ForeignEvent::Delivery { shells, .. } = &mut bad.event {
+        shells[0].id = a.id.clone();
+    }
+    forge(&mut y, &bad);
+    refused(&mut y, "no selection digest");
 }

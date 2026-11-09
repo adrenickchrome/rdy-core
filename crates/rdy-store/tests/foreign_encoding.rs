@@ -351,6 +351,7 @@ fn delivery() -> ForeignEntry {
             }],
             changed: vec![],
             removed: vec![],
+            shells: vec![],
             selection: selection_identity([(&id("D-00001"), &h(62))]).unwrap(),
         },
     }

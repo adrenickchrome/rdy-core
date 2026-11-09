@@ -1135,6 +1135,7 @@ impl StoreReader {
                     added,
                     changed,
                     removed,
+                    shells,
                     selection,
                     ..
                 } = self.foreign_entry(&cur)?.event
@@ -1147,8 +1148,10 @@ impl StoreReader {
                             crate::foreign::MAX_LIST
                         )));
                     }
-                    let rebuilt = rdy_model::foreign::selection_identity(sel.iter())
-                        .ok_or_else(|| bad(format!("foreign entry {cur}: no selection digest")))?;
+                    let rebuilt = rdy_model::foreign::delivery_selection(sel.iter(), &shells)
+                        .map_err(|why| {
+                            bad(format!("foreign entry {cur}: no selection digest: {why}"))
+                        })?;
                     if rebuilt != selection {
                         return Err(bad(format!(
                             "foreign entry {cur}: selection {selection} is not the digest {rebuilt} its source's entries rebuild"

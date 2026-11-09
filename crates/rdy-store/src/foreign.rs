@@ -23,7 +23,7 @@ use crate::segment::Location;
 use crate::{Store, StoreReader, codec, kinds};
 use rdy_model::foreign::{
     ForeignEntry, ForeignEvent, ForeignId, ForeignPublication, ForeignSet, ForeignSource,
-    ForeignVersion, selection_identity,
+    ForeignVersion, delivery_selection,
 };
 use rdy_model::{Block, BlockId, Hash, RepoId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -170,6 +170,7 @@ impl Store {
                 added,
                 changed,
                 removed,
+                shells,
                 selection,
                 ..
             } => {
@@ -202,8 +203,9 @@ impl Store {
                         "a selection holds at most {MAX_LIST} blocks"
                     )));
                 }
-                let rebuilt = selection_identity(sel.iter())
-                    .ok_or_else(|| refused("the selection does not fit its digest".into()))?;
+                let rebuilt = delivery_selection(sel.iter(), shells).map_err(|why| {
+                    refused(format!("the selection does not fit its digest: {why}"))
+                })?;
                 if rebuilt != *selection {
                     return Err(refused(format!(
                         "the delivery's selection {selection} is not the digest {rebuilt} its delta rebuilds"

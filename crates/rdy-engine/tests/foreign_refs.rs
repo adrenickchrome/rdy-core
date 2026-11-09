@@ -153,6 +153,7 @@ impl Source {
                 added: added.iter().map(|b| fv(b)).collect(),
                 changed: changed.iter().map(|b| fv(b)).collect(),
                 removed: removed.iter().map(|x| id(x)).collect(),
+                shells: vec![],
                 selection: selection_identity(self.sel.iter()).unwrap(),
             },
         };
