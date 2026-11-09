@@ -209,6 +209,7 @@ fn rf1_children_and_optional_extensions_are_closed() {
             "chapter",
             "memo",
             "instruction",
+            "repo_link",
             "publication_profile",
             "authority_policy"
         ],

@@ -178,11 +178,12 @@ fn doc_and_folder_are_injected_into_every_pack() {
     let p = set.resolve(&name).unwrap();
     let doc = &p.block_types["doc"];
     assert_eq!(doc.prefix, "d");
-    // a bare doc holds only the engine's instruction, publication profile and authority policy
+    // a bare doc holds only the engine's instruction, repo link, publication profile and authority policy
     assert_eq!(
         doc.children,
         vec![
             "instruction".to_string(),
+            "repo_link".to_string(),
             "publication_profile".to_string(),
             "authority_policy".to_string()
         ]
@@ -238,6 +239,7 @@ fn a_pack_keeps_its_doc_children_and_extra_fields_but_not_the_core() {
             "section".to_string(),
             "note".to_string(),
             "instruction".to_string(),
+            "repo_link".to_string(),
             "publication_profile".to_string(),
             "authority_policy".to_string()
         ]
