@@ -41,7 +41,8 @@ pub const RULING_FIELDS: [&str; 3] = ["statement", "options", "status"];
 
 /// trk1 (D-DZC1J): `new` differs from `old` in at least one tracking field of `old`'s type and in
 /// nothing else: the same id, type, parent, order, body and links, and every non-tracking field
-/// equal. Pins are compared.
+/// equal. Pins are compared, and so is the whole foreign part: no tracking edit moves a foreign
+/// link or pin.
 ///
 /// A redacted block's removed fields are unknown, so a write over one is never tracking-only.
 pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
@@ -58,6 +59,7 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
         || old.body != new.body
         || old.links != new.links
         || old.pins != new.pins
+        || old.foreign != new.foreign
     {
         return false;
     }
@@ -71,8 +73,9 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
 
 /// D-EJBPD (p-QMGB4, p-HF5W0): `new` re-affirms `old`. It differs from `old` only in the
 /// store-only `reaffirmed` field and in the hashes of pins `old` already holds: the same id,
-/// type, parent, order, body, links, pinned targets and every other field. A re-affirmation
-/// changes no content, so a frozen decision may take one.
+/// type, parent, order, body, links, pinned targets, foreign part (links and pins alike: a
+/// re-affirmation never moves a foreign pin) and every other field. A re-affirmation changes no
+/// content, so a frozen decision may take one.
 ///
 /// A redacted block's removed fields are unknown, so a write over one is never a re-affirmation.
 pub fn only_reaffirmation_changed(old: &Block, new: &Block) -> bool {
@@ -94,6 +97,7 @@ pub fn only_reaffirmation_changed(old: &Block, new: &Block) -> bool {
         && old.body == new.body
         && old.links == new.links
         && old.pins.keys().eq(new.pins.keys())
+        && old.foreign == new.foreign
         && rest(old) == rest(new)
         && new.fields.contains_key(REAFFIRMED)
 }

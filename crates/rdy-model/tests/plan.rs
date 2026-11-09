@@ -303,6 +303,7 @@ fn golden_block() -> Block {
             }],
         )]),
         pins: BTreeMap::from([(id("t-MEDGR"), Hash::of(b"pinned"))]),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

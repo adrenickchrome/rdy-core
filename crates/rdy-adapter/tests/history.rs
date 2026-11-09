@@ -97,6 +97,7 @@ fn fixture() -> Fixture {
         body: "nobody points here".into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let orphan = r.store_mut().put(kinds::BLOCK, &orphan).unwrap();

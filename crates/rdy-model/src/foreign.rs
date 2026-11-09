@@ -145,6 +145,14 @@ pub struct ForeignParts {
     pub pins: BTreeMap<ForeignId, ForeignPin>,
 }
 
+impl ForeignParts {
+    /// No foreign link list and no pin: the part of every local block, which keeps the block's
+    /// encoding-0 layout and its content-2 hash.
+    pub fn is_empty(&self) -> bool {
+        self.links.is_empty() && self.pins.is_empty()
+    }
+}
+
 /// The status and lifecycle a delivery derived for a version, and the ids that supersede it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

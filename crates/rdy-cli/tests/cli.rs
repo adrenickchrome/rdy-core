@@ -222,6 +222,7 @@ fn status_warns_about_legacy_colon_views() {
             body: String::new(),
             links: Default::default(),
             pins: Default::default(),
+            foreign: Default::default(),
             read_identity: None,
         };
         let prov = Provenance {

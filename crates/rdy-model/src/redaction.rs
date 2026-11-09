@@ -166,7 +166,9 @@ pub struct BlockResidue {
     #[serde(with = "hex::one")]
     pub content_hash: Hash,
     pub frozen: bool,
-    /// The encoding of the removed BLOCK frame: always 0 in this registry.
+    /// The encoding of the removed BLOCK frame: 0 for a local block,
+    /// [`crate::encoding::BLOCK_FOREIGN_ENCODING`] for a block with a foreign part, whose
+    /// content hash is the foreign content hash.
     pub source_encoding: u16,
 }
 
@@ -359,7 +361,7 @@ pub struct RedactedBlockIdentity {
 
 impl Block {
     /// The read projection of a removed block version: its id, type, parent and order, body
-    /// [`CONTENT_REMOVED`], no fields, links or pins, and its recorded identity.
+    /// [`CONTENT_REMOVED`], no fields, links, pins or foreign part, and its recorded identity.
     pub fn redacted(
         id: BlockId,
         block_type: String,
@@ -376,6 +378,7 @@ impl Block {
             body: CONTENT_REMOVED.to_string(),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
+            foreign: Default::default(),
             read_identity: Some(identity),
         }
     }
@@ -402,7 +405,7 @@ impl BlockResidue {
             order: block.order.clone(),
             content_hash: block.content_hash(),
             frozen: is_frozen(block),
-            source_encoding: 0,
+            source_encoding: block.encoding(),
         }
     }
 

@@ -57,6 +57,7 @@ fn block() -> Block {
         body: "A body.".to_string(),
         links,
         pins,
+        foreign: Default::default(),
         read_identity: None,
     }
 }

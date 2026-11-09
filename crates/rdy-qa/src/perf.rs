@@ -1076,6 +1076,7 @@ fn claim_op(section: &BlockId) -> Op {
             body: "Incremental.".into(),
             links: Default::default(),
             pins: Default::default(),
+            foreign: Default::default(),
             read_identity: None,
         },
     }

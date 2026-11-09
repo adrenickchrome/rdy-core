@@ -42,6 +42,7 @@ fn claim() -> Block {
         body: "The claim reflects its source.".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

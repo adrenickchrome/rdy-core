@@ -2062,6 +2062,7 @@ fn build_ops(
                     body,
                     links: res.links(links)?,
                     pins: BTreeMap::new(),
+                    foreign: Default::default(),
                     read_identity: None,
                 };
                 // D-WJ0SJ: a new decision starts planned, or `none` when it needs no content;

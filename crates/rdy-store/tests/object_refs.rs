@@ -131,6 +131,7 @@ fn block(of: &str, ty: &str, fields: BTreeMap<String, FieldValue>) -> Block {
         )]),
         // a pin names a content hash: an identity, not an edge
         pins: BTreeMap::from([(id("d-00003"), h(250))]),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

@@ -731,6 +731,7 @@ pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<(Block, Vec<KeyedLink>), 
             .into_iter()
             .map(|(k, v)| Ok((k, v.parse::<Hash>().map_err(|e| bad(e.to_string()))?)))
             .collect::<Result<_, RdyError>>()?,
+        foreign: Default::default(),
         read_identity: None,
     };
     Ok((block, keyed))

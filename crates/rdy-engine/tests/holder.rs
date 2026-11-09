@@ -525,6 +525,7 @@ fn ha7_holder_accepts_unknown_source_block_types() {
         body: "a widget no pack knows".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let s = h.store_mut();
@@ -1062,6 +1063,7 @@ fn ha7_holder_fsck_refuses_a_snapshot_version_of_another_block() {
         body: "text".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let s = h.store_mut();
