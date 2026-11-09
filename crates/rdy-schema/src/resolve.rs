@@ -3,6 +3,7 @@ use crate::instruction;
 use crate::pack::*;
 use crate::policy;
 use crate::publication;
+use crate::repo_link;
 use crate::supporting;
 use rdy_model::assessment::MAX_PACK_BYTES;
 use rdy_model::decision as d;
@@ -87,8 +88,49 @@ fn second_use_of(yaml: &str, key: &str, line: usize, col: usize) -> Option<(usiz
     None
 }
 
+/// The engine link kind and field of a decision that departs from a cited decision (reserved).
+const RESERVED_DEVIATES_FROM: &str = "deviates_from";
+/// The engine field of a decision an upstream adoption supersedes (reserved).
+const RESERVED_ADOPTED_AS: &str = "adopted_as";
+
+/// A warning a pack raises when it loads: the pack still resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackWarning {
+    pub code: &'static str,
+    pub message: String,
+    pub fix: String,
+}
+
+/// The fix of an unknown `tensions_across` key.
+fn across_fix() -> String {
+    let names: Vec<&str> = CROSS_PROJECT_KINDS.iter().map(|k| k.name()).collect();
+    format!("use one of: {}", names.join(", "))
+}
+
+/// The `W_CONFIG_UNKNOWN` warnings of a pack file's `tensions_across` keys that name none of the
+/// five cross-project kinds (semantic and the local kinds included), in key order.
+fn across_warnings(name: &str, doc: &serde_yaml_ng::Value) -> Vec<PackWarning> {
+    let Some(serde_yaml_ng::Value::Mapping(m)) = doc.get("tensions_across") else {
+        return vec![];
+    };
+    let mut keys: Vec<String> = m
+        .keys()
+        .filter_map(|k| k.as_str().map(str::to_string))
+        .filter(|k| !CROSS_PROJECT_KINDS.iter().any(|c| c.name() == k))
+        .collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|k| PackWarning {
+            code: "W_CONFIG_UNKNOWN",
+            message: format!("pack {name}: tensions_across has no kind {k:?}; rdy ignores it"),
+            fix: across_fix(),
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PackSet {
+    warnings: BTreeMap<String, Vec<PackWarning>>,
     raw: BTreeMap<String, Pack>,
     /// Where each pack came from (a file path, or the built-in), for error messages.
     sources: BTreeMap<String, String>,
@@ -111,7 +153,7 @@ impl PackSet {
     pub fn add_yaml_from(&mut self, yaml: &str, source: &str) -> Result<String, SchemaError> {
         // pkdup1: a repeated map key anywhere in the file is refused (the typed parse would keep
         // the last value silently). serde_yaml_ng's `Value` mapping refuses it and names the key.
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml)
+        let doc = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml)
             .map_err(|e| SchemaError::Yaml(with_duplicate_line(&e, yaml)))?;
         let pack: Pack =
             serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
@@ -136,8 +178,19 @@ impl PackSet {
             });
         }
         self.sources.insert(name.clone(), source.to_string());
+        self.warnings
+            .insert(name.clone(), across_warnings(&name, &doc));
         self.raw.insert(name.clone(), pack);
         Ok(name)
+    }
+
+    /// The load warnings of `name` and every pack it extends, nearest first.
+    pub fn warnings(&self, name: &str) -> Result<Vec<PackWarning>, SchemaError> {
+        Ok(self
+            .lineage(name)?
+            .iter()
+            .flat_map(|n| self.warnings.get(n).cloned().unwrap_or_default())
+            .collect())
     }
 
     pub fn resolve(&self, name: &str) -> Result<Pack, SchemaError> {
@@ -156,6 +209,18 @@ impl PackSet {
             return Err(SchemaError::Invalid(format!(
                 "{} is an engine type and cannot be declared by a pack",
                 publication::PROFILE_TYPE
+            )));
+        }
+        if pack.block_types.contains_key(repo_link::REPO_LINK) {
+            return Err(SchemaError::Invalid(format!(
+                "{} is an engine type and cannot be declared by a pack",
+                repo_link::REPO_LINK
+            )));
+        }
+        // rpl4: deviation links are the engine's, declared by no pack
+        if pack.link_types.contains(RESERVED_DEVIATES_FROM) {
+            return Err(SchemaError::Invalid(format!(
+                "{RESERVED_DEVIATES_FROM} is an engine link kind and cannot be declared by a pack"
             )));
         }
         if pack.block_types.contains_key(policy::POLICY_TYPE) {
@@ -232,6 +297,7 @@ impl PackSet {
         }
         out.doc_types.extend(child.doc_types);
         out.tensions.extend(child.tensions);
+        out.tensions_across.extend(child.tensions_across);
         if child.duplicate_text_min_words.is_some() {
             out.duplicate_text_min_words = child.duplicate_text_min_words;
         }
@@ -316,6 +382,16 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
     // doc's profile and policy
     instruction::inject(pack);
     // A publication profile (D-KDFZ3): one closed definition, a direct child of a doc only.
+    // rpl4: the repo link, a direct child of a doc only, placed before the profile
+    pack.block_types
+        .insert(repo_link::REPO_LINK.to_string(), repo_link::type_def());
+    let doc_children = &mut pack
+        .block_types
+        .get_mut(tree::DOC)
+        .expect("forced above")
+        .children;
+    doc_children.retain(|c| c != repo_link::REPO_LINK);
+    doc_children.push(repo_link::REPO_LINK.to_string());
     pack.block_types.insert(
         publication::PROFILE_TYPE.to_string(),
         publication::type_def(),
@@ -709,6 +785,14 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
         if t.fields.contains_key(crate::validate::REFLECTS_FIELD) {
             return Err(SchemaError::Invalid(format!(
                 "type {name}: field reflects is reserved for the engine on content types"
+            )));
+        }
+        if let Some(f) = [RESERVED_ADOPTED_AS, RESERVED_DEVIATES_FROM]
+            .iter()
+            .find(|f| t.fields.contains_key(**f))
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {f} is reserved for the engine"
             )));
         }
         if let Some(f) = rdy_model::engine_fields::ENGINE_FIELDS

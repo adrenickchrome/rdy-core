@@ -3,6 +3,7 @@ use crate::instruction;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use crate::policy;
 use crate::publication;
+use crate::repo_link;
 use crate::supporting;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use rdy_model::{decision, engine_fields, tree};
@@ -190,6 +191,19 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             if block.block_type == instruction::INSTRUCTION {
                 continue;
             }
+            // rpl4: a repo link has no key; the message is the unknown-field template
+            if block.block_type == repo_link::REPO_LINK {
+                out.push(err(
+                    block,
+                    "E_FIELD_UNKNOWN",
+                    format!("type {} has no field {name:?}", block.block_type),
+                    format!(
+                        "remove it, or use one of: {}",
+                        def.fields.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+                continue;
+            }
             match v.as_str() {
                 None => out.push(err(
                     block,
@@ -373,7 +387,8 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     // authority policy (D-ZWP7Q)
     let profile = block.block_type == publication::PROFILE_TYPE;
     let is_policy = block.block_type == policy::POLICY_TYPE;
-    let doc_only = profile || is_policy;
+    let is_link = block.block_type == repo_link::REPO_LINK;
+    let doc_only = profile || is_policy || is_link;
     match (parent, &block.parent) {
         (Some(p), Some(_)) => {
             // docs and folders have paths: they sit only in folders, whatever a pack lists
@@ -488,6 +503,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         policy::check_values(pack, block, &mut out);
     }
     instruction::check_values(block, projection, &mut out);
+    if !projection {
+        repo_link::check_values(block, &mut out);
+    }
     out
 }
 
