@@ -73,6 +73,7 @@ pub mod kungfu;
 pub mod kungfu_counts;
 pub mod landing_order;
 pub mod lexicon;
+pub mod link_export;
 mod lint;
 pub mod load;
 pub mod load_chain;

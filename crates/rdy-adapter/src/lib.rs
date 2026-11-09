@@ -13,6 +13,7 @@ pub mod capabilities;
 mod follower;
 pub mod history;
 pub mod link_take;
+pub mod links;
 pub mod maintenance;
 pub mod publication;
 pub mod publication_take;
