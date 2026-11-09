@@ -21,16 +21,32 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     }
     for e in walk(dir) {
         let rel = e.strip_prefix(dir).unwrap().to_path_buf();
-        out.insert(
-            rel,
-            if e.is_dir() {
-                None
-            } else {
-                Some(std::fs::read(&e).unwrap())
-            },
-        );
+        out.insert(rel, if e.is_dir() { None } else { Some(bytes(&e)) });
     }
     out
+}
+
+/// The bytes of the file `path`, for [`tree`]. On Windows a file that another handle of an open
+/// store locks (the store's `lock`, its live index) cannot be read: byte-range locks there are
+/// mandatory (ERROR_LOCK_VIOLATION, 33). Such a file is recorded by its length, its identity and
+/// its last write time instead of its bytes, so a change to any of them still changes the record;
+/// every other file keeps its bytes, and any other failure fails the test.
+fn bytes(path: &Path) -> Vec<u8> {
+    match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(33) => {
+            let meta = std::fs::metadata(path).unwrap();
+            format!(
+                "locked: {} bytes, {}, written {:?}",
+                meta.len(),
+                rdy_store::fileid::FileId::lstat(path).unwrap(),
+                meta.modified().unwrap()
+            )
+            .into_bytes()
+        }
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
