@@ -29,6 +29,7 @@ use rdy_store::format::{
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds;
 use rdy_store::object_refs::{ObjectRef, refs_of};
+use rdy_store::redaction_carried;
 use rdy_store::transition::{
     Author, Cause, SideV1, SuspectMove, SuspectTarget, Transitions, TransitionsV1, Why,
 };
@@ -545,6 +546,26 @@ fn rpl3_old_objects_keep_identity() {
     drop(s);
     let s = Store::open(&d.path().join("s")).unwrap();
     assert_eq!(log_manifest(&s), baseline_features());
+    // the appended variants keep their ordinals after the released ones
+    assert_eq!(postcard_of(&AnswerAct::AcceptVerdict), [16]);
+    assert_eq!(postcard_of(&AnswerAct::Adopt), [17]);
+    assert_eq!(postcard_of(&AnswerAct::KeepPin), [18]);
+    assert_eq!(
+        (AnswerAct::Adopt.as_str(), AnswerAct::KeepPin.as_str()),
+        ("adopt", "keep_pin")
+    );
+    assert_eq!(postcard_of(&Cause::Recheck), [9]);
+    assert_eq!(postcard_of(&Cause::Delivered), [10]);
+    assert_eq!(Cause::Delivered.name(), "delivered");
+    assert_eq!(postcard_of(&foreign_target())[0], 3);
+    assert_eq!(
+        serde_json::to_value(foreign_target()).unwrap(),
+        serde_json::json!({"foreign_version": {
+            "repo": repo(7).to_string(),
+            "id": "D-00001",
+            "version": h(61).to_string(),
+        }})
+    );
     // D-C94DV: the selection identity a delivery stores keeps the vector Repo links freeze
     let fixed = [
         (id("D-00001"), Hash::of(b"1")),
@@ -832,6 +853,13 @@ fn rpl3_new_shapes_refuse_without_feature() {
     );
     let a: Answer = codec::decode_record(shapes[8].1.0, &shapes[8].1.1).unwrap();
     assert_eq!(a.act, AnswerAct::Adopt);
+    // an answer's id is its frame's hash, in either encoding
+    assert_eq!(a.id(), Hash::of(&shapes[8].1.1));
+    let local = answer(AnswerAct::Confirm);
+    assert_eq!(
+        local.id(),
+        Hash::of(&codec::item_new(kinds::ANSWER, &local).1)
+    );
     let side = read(&shapes[4].1);
     assert!(codec::decode_record::<Transitions>(side.0, &side.1).is_err());
     assert_eq!(
@@ -919,6 +947,36 @@ fn rpl3_new_shapes_refuse_without_feature() {
         assert!(refused, "{name}: a released encoding cannot hold it");
         assert_eq!(refs_of(r, &p), Err(RecordError::Decode), "{name}");
     }
+    // the frozen carried-proof decoder keeps the released targets: a carried record that names
+    // a cited version does not decode, whole or in place
+    let carried = |targets: Vec<RedactTarget>| RedactionCarried {
+        request: h(67),
+        apply: h(68),
+        landing: h(69),
+        approved_by: prov("human:alice", Role::Approver),
+        reason_class: ReasonClass::Secret,
+        targets,
+        spans: vec![CarriedSpan {
+            place: FramePlace {
+                segment: 0,
+                offset: 0,
+            },
+            kind: kinds::BLOCK,
+            hash: h(71),
+            len: 40,
+            residue: None,
+            held: false,
+        }],
+    };
+    let old = postcard_of(&carried(vec![RedactTarget::AllVersions(id("c-00001"))]));
+    assert!(redaction_carried::decode_carried(&old).is_ok());
+    assert_eq!(redaction_carried::check_record(&old), Ok(()));
+    let cited_target = postcard_of(&carried(vec![foreign_target()]));
+    assert!(redaction_carried::decode_carried(&cited_target).is_err());
+    assert_eq!(
+        redaction_carried::check_record(&cited_target),
+        Err(RecordError::Decode)
+    );
     // an optional encoding never carries a value without a foreign shape
     let local_c = change_of(vec![Op::Create {
         block: local_block(),

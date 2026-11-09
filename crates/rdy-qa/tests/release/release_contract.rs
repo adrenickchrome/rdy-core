@@ -4608,6 +4608,14 @@ fn generate() -> BTreeMap<&'static str, Value> {
     rows
 }
 
+/// The released baseline, `release-1.json`, frozen at the Release 1 tag. The guards that pin
+/// the bytes of released sections read it; every live comparison reads [`read_fixture`].
+fn read_released() -> Value {
+    let path = qa_root().join("fixtures/contracts/release-1.json");
+    let text = std::fs::read_to_string(&path).expect("the released contract baseline");
+    serde_json::from_str(&text).expect("the released contract baseline is JSON")
+}
+
 fn read_fixture() -> Value {
     if capture_mode() {
         // the generation writes the baseline once, before any test reads it
@@ -6652,7 +6660,8 @@ fn kfu6_positive_count_rows_are_in_the_contract() {
 /// are pinned here from the baseline before this change.
 #[test]
 fn kfu6_release_contract_keeps_unrelated_bytes() {
-    let fixture = read_fixture();
+    // the released sections' bytes: the frozen baseline, not the current fixture
+    let fixture = read_released();
     let digest = |v: &Value| -> String {
         Sha256::digest(serde_json::to_vec(v).expect("encode"))
             .iter()
@@ -7257,7 +7266,8 @@ fn rtc7_release_guide_keeps_source_and_generated_suffix_separate() {
 /// error rows and the schema reply).
 #[test]
 fn rtc7_contract_diff_is_limited_to_rules() {
-    let fixture = read_fixture();
+    // the released sections' bytes: the frozen baseline, not the current fixture
+    let fixture = read_released();
     // the frozen sections
     for (name, want) in PINNED_SECTIONS {
         assert_eq!(digest_of(&fixture[name]), want, "section {name} moved");

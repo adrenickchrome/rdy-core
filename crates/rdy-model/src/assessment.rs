@@ -629,17 +629,17 @@ impl AssessmentV2 {
     /// The layout of `a`, with an empty foreign part.
     pub fn of(a: &Assessment) -> AssessmentV2 {
         AssessmentV2 {
-            proposal: a.proposal.clone(),
-            base: a.base.clone(),
-            method: a.method.clone(),
+            proposal: a.proposal,
+            base: a.base,
+            method: a.method,
             pack: a.pack.clone(),
-            config: a.config.clone(),
+            config: a.config,
             policy: a.policy.clone(),
             facts: a.facts.clone(),
             tensions: a.tensions.clone(),
-            tensions_omitted: a.tensions_omitted.clone(),
+            tensions_omitted: a.tensions_omitted,
             suspects: a.suspects.clone(),
-            suspects_omitted: a.suspects_omitted.clone(),
+            suspects_omitted: a.suspects_omitted,
             coverage: a.coverage.clone(),
             confidence: a.confidence.clone(),
             reach: a.reach.clone(),

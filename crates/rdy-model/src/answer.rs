@@ -122,10 +122,18 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// `Hash::of` over the answer's encoding-0 body. The store's identity of an answer in
-    /// [`crate::encoding::ANSWER_FOREIGN_ENCODING`] is its frame's hash, version included.
+    /// The answer's identity: the hash of its stored frame in the encoding it is written in
+    /// ([`Answer::encoding`]). For an answer of encoding 0 that is `Hash::of` over its body, as
+    /// before encodings; an Adopt or KeepPin answer's hash covers the version prefix too.
     pub fn id(&self) -> Hash {
-        hash_of(self)
+        match self.encoding() {
+            0 => hash_of(self),
+            v => crate::encoding::encoded_hash(
+                v,
+                &postcard::to_allocvec(self)
+                    .expect("postcard encoding of an in-memory value cannot fail"),
+            ),
+        }
     }
 
     /// The encoding the answer is written in: [`crate::encoding::ANSWER_FOREIGN_ENCODING`] for a
