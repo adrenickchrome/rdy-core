@@ -12,6 +12,7 @@
 pub mod capabilities;
 mod follower;
 pub mod history;
+pub mod link_take;
 pub mod maintenance;
 pub mod publication;
 pub mod publication_take;
@@ -24,6 +25,7 @@ pub mod take;
 mod value;
 
 pub use follower::Follower;
+pub use link_take::{DeliverySource, DeliveryTaken, LinkRevoked, LinkSource};
 pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
     UpgradeReport, UpgradeStep,
@@ -38,6 +40,7 @@ pub use rdy_engine::search::SearchFilters;
 pub use rdy_engine::{
     CarriedTargetIssue, CarriedWarning, CompactReport, KindBytes, RdyError, core_error_code,
 };
+pub use rdy_model::foreign::ForeignSet;
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;

@@ -4,7 +4,8 @@
 //! - A Delivery or a Revoked entry is one sealed batch of its own: its new held versions, the
 //!   entry and its source's ref. The first one turns `foreign_copy` on in that batch
 //!   (`crate::format`). No landing, change, proposal, view op, signature or TAG joins it, and
-//!   canon never moves.
+//!   canon never moves. Through [`Store::append_foreign`] the batch stays open for its writer,
+//!   which seals it with the moves it makes (a TRANSITION as its last frame).
 //! - The ref `foreign/link/<id>` (a Link source) or `foreign/adr/<name>` (an ADR source) names
 //!   the newest entry of its source. Each entry names the one before it (`prev`), so a source is
 //!   a chain, and a reindex rebuilds the refs from the log as it rebuilds every ref.
@@ -106,6 +107,29 @@ impl Store {
         Ok(id)
     }
 
+    /// [`Store::put_foreign`] for a writer that seals the batch itself: the same checks, then
+    /// the same items start a held batch of their own, which the caller seals (the engine's
+    /// delivery take, with the moves the batch makes). With held batches off the items are a
+    /// sealed batch at once, as `put_foreign` writes them. A held batch that is open already
+    /// refuses it, so nothing else joins the entry's batch before it, and a refusal writes
+    /// nothing.
+    pub fn append_foreign(
+        &mut self,
+        entry: &ForeignEntry,
+        blocks: &[Block],
+    ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
+        if self.open_batch().is_some() {
+            return Err(refused(
+                "a held batch is open: seal it before a foreign entry, which starts its own batch"
+                    .into(),
+            ));
+        }
+        let (id, items) = self.prepare_foreign(entry, blocks)?;
+        self.write_guarded(items)?;
+        Ok(id)
+    }
+
     /// The checks of [`Store::put_foreign`], and its batch: the new held versions, the entry and
     /// the source's ref. Returns the entry's hash and the items.
     fn prepare_foreign(
@@ -122,15 +146,7 @@ impl Store {
                 entry.repo
             )));
         }
-        let key = match &entry.source {
-            ForeignSource::Link { link, .. } => link,
-            ForeignSource::Adr { source, .. } => source,
-        };
-        if key.is_empty() || key.len() > MAX_SOURCE_KEY || key.contains('/') {
-            return Err(refused(format!(
-                "foreign source {key:?} is not a source key: 1 to {MAX_SOURCE_KEY} bytes, no `/`"
-            )));
-        }
+        check_source_key(&entry.source)?;
         let name = source_ref(&entry.source);
         let held = self.source_view(&name)?;
         if let Some(view) = &held {
@@ -213,6 +229,13 @@ impl Store {
             }
         }
         let item = codec::item_new(kinds::FOREIGN, entry);
+        // the entry keeps the bounds every reader of a typed record keeps (`crate::bounded`), so
+        // no acknowledged entry is one a bounded reader refuses
+        if let Err(e) = codec::decode_bounded::<ForeignEntry>(item.0, &item.1) {
+            return Err(refused(format!(
+                "the foreign entry exceeds a record bound: {e}"
+            )));
+        }
         let id = Hash::of(&item.1);
         items.push(item);
         items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
@@ -265,6 +288,21 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+/// Checks that `source` has a source key: its link's block id or its ADR source's name, 1 to 256
+/// bytes with no `/`. A refusal is `StoreError::Refused`.
+pub fn check_source_key(source: &ForeignSource) -> Result<(), StoreError> {
+    let key = match source {
+        ForeignSource::Link { link, .. } => link,
+        ForeignSource::Adr { source, .. } => source,
+    };
+    if key.is_empty() || key.len() > MAX_SOURCE_KEY || key.contains('/') {
+        return Err(refused(format!(
+            "foreign source {key:?} is not a source key: 1 to {MAX_SOURCE_KEY} bytes, no `/`"
+        )));
+    }
+    Ok(())
 }
 
 /// Applies a delivery's delta to `sel`: an added id is new, a changed or removed id is a member,
@@ -514,5 +552,79 @@ mod tests {
         };
         assert_eq!(source_ref(&link), "foreign/link/rl-00001");
         assert_eq!(source_ref(&adr), "foreign/adr/adrs");
+    }
+
+    /// A first, empty delivery from link `rl-00001` whose source names `site`.
+    fn empty_delivery(site: String) -> ForeignEntry {
+        ForeignEntry {
+            repo: RepoId([7; 16]),
+            source: ForeignSource::Link {
+                link: "rl-00001".into(),
+                site,
+                at_ms: 1,
+            },
+            event: ForeignEvent::Delivery {
+                prev: None,
+                publication: ForeignPublication {
+                    tag: "v1".into(),
+                    profile: "pp-00001".into(),
+                    profile_version: None,
+                },
+                set: None,
+                added: vec![],
+                changed: vec![],
+                removed: vec![],
+                selection: selection_identity(std::iter::empty::<(&BlockId, &Hash)>()).unwrap(),
+            },
+        }
+    }
+
+    /// An entry a bounded reader would refuse (a text over 1,048,576 bytes) is refused before
+    /// anything is written, so no acknowledged entry breaks its source's chain.
+    #[test]
+    fn rpl10_an_entry_past_a_record_bound_writes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::create(&d.path().join("s")).unwrap();
+        let end = s.log_end();
+        let big = empty_delivery("s".repeat(crate::bounded::MAX_TEXT_BYTES + 1));
+        let e = s.put_foreign(&big, &[]).unwrap_err();
+        assert!(
+            matches!(&e, StoreError::Refused(m) if m.starts_with("the foreign entry exceeds a record bound")),
+            "{e:?}"
+        );
+        assert_eq!(s.log_end(), end);
+        // at the bound it is taken
+        let at = empty_delivery("s".repeat(crate::bounded::MAX_TEXT_BYTES));
+        s.put_foreign(&at, &[]).unwrap();
+    }
+
+    /// `append_foreign` starts a held batch that its writer seals; an open held batch refuses
+    /// it, and nothing is appended.
+    #[test]
+    fn rpl10_append_foreign_leaves_its_batch_for_the_writer() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Store::create(&d.path().join("s")).unwrap();
+        s.set_held(true).unwrap();
+        s.write(vec![(kinds::INTENT, vec![1])]).unwrap();
+        let end = s.log_end();
+        let e = s
+            .append_foreign(&empty_delivery("s".into()), &[])
+            .unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "{e:?}");
+        assert_eq!(s.log_end(), end);
+        s.seal(vec![]).unwrap();
+        let h = s.append_foreign(&empty_delivery("s".into()), &[]).unwrap();
+        let open: Vec<u8> = s.open_batch().unwrap().iter().map(|(k, _)| *k).collect();
+        assert!(open.contains(&kinds::FOREIGN), "{open:?}");
+        s.seal(vec![]).unwrap();
+        assert!(s.open_batch().is_none());
+        assert_eq!(
+            s.reader()
+                .source_view("foreign/link/rl-00001")
+                .unwrap()
+                .unwrap()
+                .head,
+            h
+        );
     }
 }

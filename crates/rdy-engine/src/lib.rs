@@ -38,6 +38,7 @@ pub mod factsheet;
 pub mod filter;
 pub mod follower;
 pub mod foreign;
+pub mod foreign_delivery;
 mod foreign_guard;
 mod foreign_refs;
 pub mod formats;
