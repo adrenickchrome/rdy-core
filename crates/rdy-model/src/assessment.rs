@@ -10,7 +10,8 @@
 //! suspects, coverage, confidence, reach, card, scope, issues. For each list it checks the size
 //! limit, then the sort order and distinctness, then each row's fields in their declared order.
 
-use crate::{BlockId, Hash};
+use crate::foreign::ForeignId;
+use crate::{BlockId, Hash, RepoId};
 use serde::{Deserialize, Serialize};
 
 /// The most rows any stored list holds.
@@ -558,5 +559,125 @@ impl Assessment {
         }
         let corpus = &self.coverage.corpus;
         scores_valid(&[&corpus.before, &corpus.after])
+    }
+}
+
+/// One cited block a version's reach pins, with the held BLOCK version the pin resolved to when
+/// the version was assessed (repo links). Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeignReach {
+    pub target: ForeignId,
+    pub version: Hash,
+}
+
+/// One foreign side of a tension in a version's reach: the tension and the side's cited repo
+/// and FOREIGN entry (`SideRef::Foreign {repo, entry}`, D-Y49PX). Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeignTension {
+    pub tension: Hash,
+    #[serde(with = "crate::foreign::hex_repo")]
+    pub repo: RepoId,
+    pub entry: Hash,
+}
+
+/// What an assessment records across a repo link: the foreign reach and the foreign tension
+/// evidence that freshness compares (D-Y49PX). Field order is format.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeign {
+    pub reach: Vec<AssessmentForeignReach>,
+    pub tensions: Vec<AssessmentForeignTension>,
+}
+
+impl AssessmentForeign {
+    /// No foreign reach and no foreign tension: the part of every local assessment.
+    pub fn is_empty(&self) -> bool {
+        self.reach.is_empty() && self.tensions.is_empty()
+    }
+}
+
+/// An assessment in ASSESSMENT encoding 2 ([`crate::encoding::ASSESSMENT_FOREIGN_ENCODING`], repo
+/// links): the fields of [`Assessment`] in their order, then its foreign part. An ASSESSMENT takes
+/// it only when the foreign part is not empty; encoding 1 stays the local layout. A registered
+/// wire shape: no consumer reads it yet. Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentV2 {
+    pub proposal: Hash,
+    pub base: Option<Hash>,
+    pub method: u32,
+    pub pack: AssessmentPack,
+    pub config: Hash,
+    pub policy: Option<AssessedPolicy>,
+    pub facts: AssessmentFacts,
+    pub tensions: Vec<AssessmentTension>,
+    pub tensions_omitted: u64,
+    pub suspects: Vec<AssessmentSuspect>,
+    pub suspects_omitted: u64,
+    pub coverage: AssessmentCoverage,
+    pub confidence: AssessmentConfidence,
+    pub reach: Vec<BlockId>,
+    pub card: AssessmentCard,
+    pub scope: AssessmentScope,
+    pub issues: Vec<AssessmentIssue>,
+    pub foreign: AssessmentForeign,
+}
+
+impl AssessmentV2 {
+    /// The layout of `a`, with an empty foreign part.
+    pub fn of(a: &Assessment) -> AssessmentV2 {
+        AssessmentV2 {
+            proposal: a.proposal.clone(),
+            base: a.base.clone(),
+            method: a.method.clone(),
+            pack: a.pack.clone(),
+            config: a.config.clone(),
+            policy: a.policy.clone(),
+            facts: a.facts.clone(),
+            tensions: a.tensions.clone(),
+            tensions_omitted: a.tensions_omitted.clone(),
+            suspects: a.suspects.clone(),
+            suspects_omitted: a.suspects_omitted.clone(),
+            coverage: a.coverage.clone(),
+            confidence: a.confidence.clone(),
+            reach: a.reach.clone(),
+            card: a.card.clone(),
+            scope: a.scope.clone(),
+            issues: a.issues.clone(),
+            foreign: AssessmentForeign::default(),
+        }
+    }
+
+    /// Whether the foreign part is not empty: the one case that takes encoding 2.
+    pub fn has_foreign(&self) -> bool {
+        !self.foreign.is_empty()
+    }
+
+    /// The runtime assessment, when the foreign part is empty.
+    pub fn into_local(self) -> Option<Assessment> {
+        if self.has_foreign() {
+            return None;
+        }
+        Some(Assessment {
+            proposal: self.proposal,
+            base: self.base,
+            method: self.method,
+            pack: self.pack,
+            config: self.config,
+            policy: self.policy,
+            facts: self.facts,
+            tensions: self.tensions,
+            tensions_omitted: self.tensions_omitted,
+            suspects: self.suspects,
+            suspects_omitted: self.suspects_omitted,
+            coverage: self.coverage,
+            confidence: self.confidence,
+            reach: self.reach,
+            card: self.card,
+            scope: self.scope,
+            issues: self.issues,
+        })
     }
 }

@@ -292,7 +292,8 @@ fn carried_selects(
             let target = r.targets.iter().any(|t| match t {
                 RedactTarget::AllVersions(i) => i == id,
                 RedactTarget::Version { id: i, version } => i == id && *version == ident.version,
-                RedactTarget::Blob(_) => false,
+                // a cited version never selects a local block
+                RedactTarget::Blob(_) | RedactTarget::ForeignVersion { .. } => false,
             });
             found |= r.request == ident.request && span && target;
             Ok(())

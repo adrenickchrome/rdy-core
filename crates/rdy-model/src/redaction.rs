@@ -10,7 +10,7 @@
 //! sets the identity to `None`.
 use crate::change::ChangeReadIdentity;
 use crate::decision::is_frozen;
-use crate::{Block, BlockId, Change, ChangeLinks, Hash, Justification, Op, Provenance};
+use crate::{Block, BlockId, Change, ChangeLinks, Hash, Justification, Op, Provenance, RepoId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -53,6 +53,26 @@ pub enum RedactTarget {
     },
     /// A blob, by its manifest hash.
     Blob(#[serde(with = "hex::one")] Hash),
+    /// One delivered version of a cited block (repo links, appended: index 3): the cited repo,
+    /// the block's id there and the held BLOCK version. JSON writes `foreign_version`. A request
+    /// with one takes REDACTION encoding 1 ([`crate::encoding::REDACTION_FOREIGN_ENCODING`]),
+    /// which encoding 0 has no form for; its scope is the foreign copy's occurrences only.
+    /// Registered only: no writer takes one yet.
+    ForeignVersion {
+        #[serde(with = "crate::foreign::hex_repo")]
+        repo: RepoId,
+        id: BlockId,
+        #[serde(with = "hex::one")]
+        version: Hash,
+    },
+}
+
+impl RedactTarget {
+    /// Whether the target names a cited block's version (repo links): outside local coverage
+    /// and local erasure.
+    pub fn is_foreign(&self) -> bool {
+        matches!(self, RedactTarget::ForeignVersion { .. })
+    }
 }
 
 /// Why content is removed.
@@ -91,6 +111,18 @@ pub struct Redaction {
     pub reason_class: ReasonClass,
     pub reason: String,
     pub manifest: RedactionManifest,
+}
+
+impl Redaction {
+    /// The encoding the request is written in: [`crate::encoding::REDACTION_FOREIGN_ENCODING`]
+    /// when a target names a cited block's version, else 0.
+    pub fn encoding(&self) -> u16 {
+        if self.targets.iter().any(RedactTarget::is_foreign) {
+            crate::encoding::REDACTION_FOREIGN_ENCODING
+        } else {
+            0
+        }
+    }
 }
 
 /// The record that activates a request (kind REDACTION_APPLY): the request, the human landing it
@@ -466,7 +498,7 @@ impl ChangeResidue {
             links: change.links.clone(),
             source_encoding: change
                 .stored_identity()
-                .map_or(crate::encoding::CHANGE_ENCODING, |i| i.version),
+                .map_or_else(|| change.encoding(), |i| i.version),
         }
     }
 

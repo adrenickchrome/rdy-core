@@ -14,7 +14,7 @@ use crate::error::{
     redaction_target,
 };
 use rdy_model::redaction::{ReasonClass, RedactTarget};
-use rdy_model::{BlockId, Hash};
+use rdy_model::{BlockId, Hash, RepoId};
 use rdy_store::redaction::{MAX_TARGET_BYTES, MAX_TARGETS, limit};
 use std::cmp::Ordering;
 
@@ -66,23 +66,30 @@ pub fn parse_selector(text: &str) -> Result<RedactTarget, RdyError> {
         .map_err(|_| invalid())
 }
 
-/// The selector of `t` in the input grammar, with full hashes.
+/// The selector of `t` in the input grammar, with full hashes. A cited block's version (repo
+/// links) shows its repo's 32 hex digits where the input names the link's alias.
 pub fn selector_text(t: &RedactTarget) -> String {
     match t {
         RedactTarget::AllVersions(id) => id.to_string(),
         RedactTarget::Version { id, version } => format!("{id}@{version}"),
         RedactTarget::Blob(h) => format!("blob:{h}"),
+        RedactTarget::ForeignVersion { repo, id, version } => format!("{repo}:{id}@{version}"),
     }
 }
 
-/// The canonical order of normalized selectors: all-versions, then versions, then blobs; then
-/// id bytes; then hash bytes.
+/// The canonical order of normalized selectors: all-versions, then versions, then blobs, then
+/// cited versions; then repo bytes; then id bytes; then hash bytes.
 pub fn target_order(a: &RedactTarget, b: &RedactTarget) -> Ordering {
-    fn key(t: &RedactTarget) -> (u8, &[u8], Option<&Hash>) {
+    fn key(t: &RedactTarget) -> (u8, Option<&RepoId>, &[u8], Option<&Hash>) {
         match t {
-            RedactTarget::AllVersions(id) => (0, id.as_str().as_bytes(), None),
-            RedactTarget::Version { id, version } => (1, id.as_str().as_bytes(), Some(version)),
-            RedactTarget::Blob(h) => (2, &[], Some(h)),
+            RedactTarget::AllVersions(id) => (0, None, id.as_str().as_bytes(), None),
+            RedactTarget::Version { id, version } => {
+                (1, None, id.as_str().as_bytes(), Some(version))
+            }
+            RedactTarget::Blob(h) => (2, None, &[], Some(h)),
+            RedactTarget::ForeignVersion { repo, id, version } => {
+                (3, Some(repo), id.as_str().as_bytes(), Some(version))
+            }
         }
     }
     key(a).cmp(&key(b))

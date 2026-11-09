@@ -1737,7 +1737,8 @@ fn ok4_merge_version_equals_feature_required_rdy() {
 
 #[test]
 fn ok4_features_activate_in_their_first_use_batch() {
-    // every registered feature is incompatible and needs the release that carries them
+    // every registered feature is incompatible and needs the release that carries it: the seven
+    // of O11 need FEATURE_REQUIRED_RDY; repo links' foreign_copy has its own minimum
     let registered = registered_features();
     assert_eq!(
         registered
@@ -1749,6 +1750,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "check_request",
             "content_hash_v2",
             "dispute",
+            "foreign_copy",
             "object_encoding",
             "plan_tension",
             "view_replay"
@@ -1757,7 +1759,11 @@ fn ok4_features_activate_in_their_first_use_batch() {
     assert_eq!(FEATURE_REQUIRED_RDY, "0.26.0");
     for f in &registered {
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
-        assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);
+        let want = match f.name.as_str() {
+            "foreign_copy" => format::FOREIGN_COPY_REQUIRED_RDY,
+            _ => FEATURE_REQUIRED_RDY,
+        };
+        assert_eq!(f.required_rdy, want, "{}", f.name);
     }
     // a new store's manifest is exactly the baseline
     let d = tempfile::tempdir().unwrap();

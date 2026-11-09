@@ -1401,7 +1401,7 @@ fn ck6_unavailable_code_keeps_an_unanswered_request_open() {
     assert_eq!(status(&w.e), "open");
     // store damage stays an error: a request record that does not decode
     let damaged = rdy_engine::engine::with_writer_result(&w.e, |r| {
-        let item = rdy_store::codec::item_new(rdy_store::kinds::CHECK_REQUEST, "not a request");
+        let item = rdy_store::codec::item_new(rdy_store::kinds::CHECK_REQUEST, &"not a request");
         let ids = r.store_mut().write(vec![item]).map_err(RdyError::from)?;
         r.invalidate();
         Ok(ids)

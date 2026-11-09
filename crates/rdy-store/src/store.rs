@@ -795,7 +795,8 @@ fn frame_entries(
         kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
-            let rec: Transitions = decode(payload)?;
+            // through the codec: a delivered move takes encoding 1 (`crate::codec`)
+            let rec: Transitions = crate::codec::decode_split(&o)?;
             out.extend(
                 rec.resolved
                     .iter()

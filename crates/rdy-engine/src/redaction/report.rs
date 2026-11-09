@@ -474,12 +474,20 @@ fn view_op_changes(op: &ViewOp) -> Vec<Hash> {
 }
 
 /// Checks each normalized target that the index can check alone: a version must be a stored
-/// block version of its id; a blob must be a stored blob manifest.
+/// block version of its id; a blob must be a stored blob manifest. A cited block's version
+/// (repo links) has no request path yet: it is an invalid selector here, outside local coverage
+/// and erasure.
 fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), RdyError> {
     for t in targets {
         let name = selector_text(t);
         match t {
             RedactTarget::AllVersions(_) => {}
+            RedactTarget::ForeignVersion { .. } => {
+                return Err(redaction_target(
+                    &name,
+                    crate::error::REDACTION_CAUSE_INVALID,
+                ));
+            }
             RedactTarget::Version { id, version } => {
                 if !reader.has_kind(kinds::BLOCK, version)? {
                     return Err(redaction_target(&name, REDACTION_CAUSE_UNKNOWN));
@@ -566,7 +574,8 @@ fn check_expansion(
         .sum();
     for t in targets {
         let live = match t {
-            RedactTarget::AllVersions(_) => continue,
+            // a cited version selects no local object (`check_known` refuses it first)
+            RedactTarget::AllVersions(_) | RedactTarget::ForeignVersion { .. } => continue,
             RedactTarget::Version { id, version } => {
                 !live_ids.contains(id) && !removed(kinds::BLOCK, version)?
             }
@@ -795,6 +804,13 @@ pub(crate) fn compute_excluding(
             },
             RedactTarget::Version { id, version } => vec![(id.clone(), *version)],
             RedactTarget::Blob(_) => vec![],
+            // outside local coverage and erasure (`check_known` refuses it first)
+            RedactTarget::ForeignVersion { .. } => {
+                return Err(redaction_target(
+                    &selector_text(t),
+                    crate::error::REDACTION_CAUSE_INVALID,
+                ));
+            }
         };
         expanded.push((t.clone(), versions));
     }

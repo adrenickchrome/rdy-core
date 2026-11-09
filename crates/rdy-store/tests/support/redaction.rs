@@ -330,6 +330,8 @@ pub fn build_request(store: &Store, spec: &RequestSpec) -> Draft {
             RedactTarget::Blob(h) => {
                 blobs.insert(*h);
             }
+            // a cited version is outside the local selection
+            RedactTarget::ForeignVersion { .. } => {}
         }
     }
     let version_set: BTreeSet<Hash> = versions.iter().map(|(_, v)| *v).collect();

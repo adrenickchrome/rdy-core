@@ -297,7 +297,8 @@ fn unknown_field(msg: &str) -> Option<(String, Vec<String>)> {
     Some((key.to_string(), known))
 }
 
-mod hex_one {
+/// Hex text in JSON, raw bytes in postcard (shared with the records that name foreign values).
+pub mod hex_one {
     use crate::Hash;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -320,7 +321,8 @@ mod hex_one {
     }
 }
 
-mod hex_opt {
+/// Hex text in JSON, raw bytes in postcard (shared with the records that name foreign values).
+pub mod hex_opt {
     use crate::Hash;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -377,7 +379,8 @@ mod hex_versions {
     }
 }
 
-mod hex_repo {
+/// Hex text in JSON, raw bytes in postcard (shared with the records that name foreign values).
+pub mod hex_repo {
     use crate::RepoId;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

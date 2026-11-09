@@ -225,14 +225,22 @@ fn refused(m: String) -> StoreError {
     StoreError::Refused(m)
 }
 
-/// The UTF-8 length of a target's selector in the input grammar (`id`, `id@hash`, `blob:hash`).
+/// The UTF-8 length of a target's selector in the input grammar (`id`, `id@hash`, `blob:hash`,
+/// `alias:id@hash`). A foreign version's repo stands for its alias: its 32 hex digits bound the
+/// alias's at most 24 characters from above.
 pub(crate) fn selector_len(t: &RedactTarget) -> usize {
     match t {
         RedactTarget::AllVersions(id) => id.as_str().len(),
         RedactTarget::Version { id, .. } => id.as_str().len() + 1 + 64,
         RedactTarget::Blob(_) => "blob:".len() + 64,
+        RedactTarget::ForeignVersion { id, .. } => 32 + 1 + id.as_str().len() + 1 + 64,
     }
 }
+
+/// The refusal of a request that names a cited block's version: repo links register the
+/// `foreign_version` target, and no request path takes one yet.
+pub const FOREIGN_TARGET_CLOSED: &str =
+    "a foreign_version target cannot be redacted yet: no request path takes one";
 
 /// The index entry of a `REDACTION` frame with hash `hash`: its carrier, every object it removes
 /// or names (with the residue of its first span) and every span.
@@ -788,6 +796,10 @@ pub(crate) fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
             "a redaction request names at least one target".into(),
         ));
     }
+    // foreign targets stay outside local coverage and erasure: their path is closed
+    if request.targets.iter().any(RedactTarget::is_foreign) {
+        return Err(refused(FOREIGN_TARGET_CLOSED.into()));
+    }
     if request.targets.len() > MAX_TARGETS {
         return Err(StoreError::RedactionLimit {
             limit: limit::TARGETS,
@@ -950,6 +962,8 @@ pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
                 m.versions.binary_search(&(id.clone(), *version)).is_ok()
             }
             RedactTarget::Blob(h) => m.blobs.binary_search(h).is_ok(),
+            // a cited version is outside the local manifest: it selects nothing here
+            RedactTarget::ForeignVersion { .. } => false,
         };
         if !found {
             return Err(format!(
@@ -961,7 +975,7 @@ pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
         let covered = request.targets.iter().any(|t| match t {
             RedactTarget::AllVersions(i) => i == id,
             RedactTarget::Version { id: i, version } => i == id && version == v,
-            RedactTarget::Blob(_) => false,
+            RedactTarget::Blob(_) | RedactTarget::ForeignVersion { .. } => false,
         });
         if !covered {
             return Err(format!(

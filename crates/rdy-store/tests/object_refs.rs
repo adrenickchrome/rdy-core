@@ -1431,17 +1431,14 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     let answer_edges = vec![any(36), any(37)];
     let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
         Dismiss, Tag, ViewOwn, CloseStale, Propose, KeepSuspect, AcceptDeferrals, RefuseDeferrals,
-        RejectReaffirm, Dispute, ResolveDispute, AcceptVerdict);
+        RejectReaffirm, Dispute, ResolveDispute, AcceptVerdict, Adopt, KeepPin);
     let roles = every!(Role: Reader, Writer, Reviewer, Approver);
     let evidence = every!(EvidenceKind: Elicited, Card, Text);
-    assert_eq!((acts.len(), roles.len(), evidence.len()), (17, 4, 3));
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (19, 4, 3));
     for act in &acts {
         let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
-        assert_eq!(
-            refs_of(ANSWER, &enc(&a)),
-            Ok(answer_edges.clone()),
-            "{act:?}"
-        );
+        // each act in the encoding its answer is written in (Adopt and KeepPin: encoding 1)
+        assert_eq!(frame_refs(ANSWER, &a), Ok(answer_edges.clone()), "{act:?}");
     }
     // ok4: an AcceptVerdict answer's item `verdict:<hex>` names its REVIEW, one more edge; an
     // item of any other form names none

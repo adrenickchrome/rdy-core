@@ -6,25 +6,30 @@
 //! Local records (REF_UPDATE, BATCH_COMMIT, and REDACTION_CARRIED, a carried removal that is
 //! never a sync proof and never travels) are not portable objects and are refused as `Kind`, as
 //! is every unassigned kind. A carried record's source request, apply and landing are no edge.
+//!
+//! A FOREIGN entry (kind 29, repo links) is registered but not portable yet: `refs_of` refuses it
+//! as `Kind`. The records that may name one (a TRANSITION's `delivered` cause and foreign side, an
+//! ASSESSMENT's foreign tension side) give a FOREIGN edge.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
     self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
-    CHECK_REQUEST, DISPUTE, DISPUTE_RESOLUTION, INTENT, LANDING, PLAN, PROPOSAL, REDACTION,
-    REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, TAG, TENSION, TRANSITION,
-    VIEW_OP,
+    CHECK_REQUEST, DISPUTE, DISPUTE_RESOLUTION, FOREIGN, INTENT, LANDING, PLAN, PROPOSAL,
+    REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, TAG, TENSION,
+    TRANSITION, VIEW_OP,
 };
-use crate::transition::{Cause, Side, Transitions, Why};
+use crate::transition::{Cause, Side, SideV1, TransitionsV1, Why};
 use crate::view::{ViewOp, ViewOpKind};
-use rdy_model::assessment::Assessment;
+use rdy_model::assessment::AssessmentV2;
 use rdy_model::check_request::CheckRequest;
 use rdy_model::dispute::{Dispute, DisputeResolution};
 use rdy_model::plan::Plan;
 use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply, RedactionResidue, ResidualOp};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::signature::Signature;
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Answer, AnswerAct, Block, Change, ChangeLinks, FieldValue, Hash,
-    Intent, LandingRecord, Op, Proposal, Review, ReviewSubject, SemanticTension, StateSnapshot,
-    Tag,
+    Intent, LandingRecord, Op, Proposal, StateSnapshot, Tag,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -104,7 +109,7 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
     let (kind, payload) = (split.kind, split.body);
     let mut e = Edges(Vec::new());
     match kind {
-        BLOCK => e.block(&bounded::decode::<Block>(payload)?)?,
+        BLOCK => e.block(&crate::codec::decode_bounded_split::<Block>(&split)?)?,
         CHANGE => e.change(&crate::codec::decode_bounded_split::<Change>(&split)?)?,
         PROPOSAL => e.proposal(&bounded::decode::<Proposal>(payload)?),
         LANDING => e.landing(&crate::codec::decode_bounded_split::<LandingRecord>(
@@ -124,7 +129,7 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
             e.all(BLOB_CHUNK, &m.chunks);
         }
         TAG => e.one(LANDING, bounded::decode::<Tag>(payload)?.landing),
-        ANSWER => e.answer(&bounded::decode::<Answer>(payload)?),
+        ANSWER => e.answer(&crate::codec::decode_bounded_split::<Answer>(&split)?),
         SIGNATURE => e.any(bounded::decode::<Signature>(payload)?.subject),
         VIEW_OP => e.view_op(&bounded::decode::<ViewOp>(payload)?),
         INTENT => {
@@ -133,18 +138,23 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
             e.opt(INTENT, i.prev);
         }
         ALT_SET => e.alt_set(&bounded::decode::<AltSet>(payload)?),
+        // the registered wire types read every encoding of their kind (`crate::codec`)
         REVIEW => {
-            if let ReviewSubject::Check { request } = bounded::decode::<Review>(payload)?.subject {
+            if let ReviewSubjectV1::Check { request } =
+                crate::codec::decode_bounded_split::<ReviewV1>(&split)?.subject
+            {
                 e.one(CHECK_REQUEST, request);
             }
         }
         TENSION => {
-            let t = bounded::decode::<SemanticTension>(payload)?;
+            let t = crate::codec::decode_bounded_split::<SemanticTensionV1>(&split)?;
             e.one(REVIEW, t.review);
             e.opt(TENSION, t.prev);
         }
-        TRANSITION => e.transitions(&bounded::decode::<Transitions>(payload)?),
-        REDACTION => e.redaction(&bounded::decode::<Redaction>(payload)?)?,
+        TRANSITION => e.transitions(&crate::codec::decode_bounded_split::<TransitionsV1>(
+            &split,
+        )?),
+        REDACTION => e.redaction(&crate::codec::decode_bounded_split::<Redaction>(&split)?)?,
         REDACTION_RESIDUE => e.residue(&crate::codec::decode_bounded_split::<RedactionResidue>(
             &split,
         )?),
@@ -154,7 +164,7 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
             e.one(LANDING, a.landing);
         }
         PLAN => e.plan(&crate::plan::decode_plan(payload)?),
-        ASSESSMENT => e.assessment(&crate::codec::decode_bounded_split::<Assessment>(&split)?),
+        ASSESSMENT => e.assessment(&crate::codec::decode_bounded_split::<AssessmentV2>(&split)?),
         DISPUTE => {
             let d = crate::codec::decode_bounded_split::<Dispute>(&split)?;
             e.one(LANDING, d.landing);
@@ -232,9 +242,17 @@ impl Edges {
     }
 
     /// An assessment's proposal (its scope names the same one), its base landing, its policy
-    /// block version, the plans its tension answers name, and the reviews its dismissals name.
-    /// Pack, config, card and tension hashes are content identities: no edge.
-    fn assessment(&mut self, a: &Assessment) {
+    /// block version, the plans its tension answers name, and the reviews its dismissals name;
+    /// in encoding 2, the held BLOCK version of each foreign reach row and the FOREIGN entry of
+    /// each foreign tension side. Pack, config, card and tension hashes are content identities:
+    /// no edge.
+    fn assessment(&mut self, a: &AssessmentV2) {
+        for r in &a.foreign.reach {
+            self.one(BLOCK, r.version);
+        }
+        for t in &a.foreign.tensions {
+            self.one(FOREIGN, t.entry);
+        }
         self.one(PROPOSAL, a.proposal);
         self.one(PROPOSAL, a.scope.proposal);
         self.opt(LANDING, a.base);
@@ -374,10 +392,15 @@ impl Edges {
         }
     }
 
-    fn transitions(&mut self, t: &Transitions) {
+    /// A transition's sides and causes, in any encoding: a foreign side names its FOREIGN entry;
+    /// a suspect's target, local or cited, is a block id and adds no edge.
+    fn transitions(&mut self, t: &TransitionsV1) {
         for m in t.resolved.iter().chain(&t.opened) {
             for s in &m.sides {
-                self.side(s);
+                match s {
+                    SideV1::Local(s) => self.side(s),
+                    SideV1::Foreign { entry, .. } => self.one(FOREIGN, *entry),
+                }
             }
             self.why(&m.why);
         }
@@ -399,6 +422,7 @@ impl Edges {
             Cause::Dismissed | Cause::Reviewed => REVIEW,
             Cause::ViewChanged => VIEW_OP,
             Cause::AltSet => ALT_SET,
+            Cause::Delivered => FOREIGN,
             Cause::Written | Cause::PackReload | Cause::Reopened | Cause::Recheck => return,
         };
         self.opt(kind, w.id);
@@ -412,6 +436,8 @@ impl Edges {
                 RedactTarget::AllVersions(_) => {}
                 RedactTarget::Version { version, .. } => self.one(BLOCK, *version),
                 RedactTarget::Blob(h) => self.one(BLOB_MANIFEST, *h),
+                // the held version is a BLOCK object of the foreign copy
+                RedactTarget::ForeignVersion { version, .. } => self.one(BLOCK, *version),
             }
         }
         let m = &r.manifest;

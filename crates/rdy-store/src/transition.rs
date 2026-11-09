@@ -2,7 +2,8 @@
 //! moved the open tension set and the suspect set, so the inbox reads them from the log and
 //! reindex reproduces them. No read surface lists past moves (D-KTW43, D-WDKWQ).
 use crate::kinds;
-use rdy_model::{BlockId, Hash};
+use rdy_model::foreign::ForeignId;
+use rdy_model::{BlockId, Hash, RepoId};
 use serde::{Deserialize, Serialize};
 
 /// One batch's moves of the open tension set and of the suspect set (kind TRANSITION; plan
@@ -68,7 +69,8 @@ pub struct Author {
 }
 
 /// What made a move. `id`: the change (committed), landing (landed), review (dismissed,
-/// reviewed), view op (view_changed) or alternative-set version (alt_set); none for the rest.
+/// reviewed), view op (view_changed), alternative-set version (alt_set) or FOREIGN entry
+/// (delivered); none for the rest.
 /// `actor` and `run`: the dismisser, for dismissed only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Why {
@@ -93,6 +95,10 @@ pub enum Cause {
     PackReload,
     Reopened,
     Recheck,
+    /// A delivery from a repo link (repo links, appended: index 10): `Why::id` names the
+    /// FOREIGN entry. A record with a move of this cause takes TRANSITION encoding 1
+    /// ([`rdy_model::encoding::TRANSITION_FOREIGN_ENCODING`]).
+    Delivered,
 }
 
 impl Cause {
@@ -109,6 +115,7 @@ impl Cause {
             Cause::PackReload => "pack_reload",
             Cause::Reopened => "reopened",
             Cause::Recheck => "recheck",
+            Cause::Delivered => "delivered",
         }
     }
 
@@ -122,6 +129,7 @@ impl Cause {
                 | Cause::ViewChanged
                 | Cause::Reviewed
                 | Cause::AltSet
+                | Cause::Delivered
         )
     }
 }
@@ -213,10 +221,177 @@ impl Transitions {
         None
     }
 
-    /// The frame a batch appends: its raw kind and payload, in the TRANSITION kind's latest
-    /// encoding (`crate::codec`).
+    /// Whether a move has cause [`Cause::Delivered`]: the one foreign shape the runtime record
+    /// holds, which takes TRANSITION encoding 1.
+    pub fn has_foreign(&self) -> bool {
+        self.whys().any(|w| w.cause == Cause::Delivered)
+    }
+
+    /// The frame a batch appends: its raw kind and payload, in the encoding the codec chooses
+    /// for it (`crate::codec`): encoding 1 when a move was delivered, else the released one.
     pub fn frame(&self) -> (u8, Vec<u8>) {
         crate::codec::item_new(kinds::TRANSITION, self)
+    }
+}
+
+/// One side of a tension move in TRANSITION encoding 1
+/// ([`rdy_model::encoding::TRANSITION_FOREIGN_ENCODING`], repo links): a local side, as [`Side`]
+/// holds it, or a foreign side, the cited repo and the FOREIGN entry that holds it
+/// (`SideRef::Foreign {repo, entry}`, D-Y49PX). Variant order is format. A registered wire shape:
+/// the runtime side stays [`Side`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SideV1 {
+    Local(Side),
+    Foreign {
+        #[serde(with = "rdy_model::foreign::hex_repo")]
+        repo: RepoId,
+        #[serde(with = "hex::one")]
+        entry: Hash,
+    },
+}
+
+/// A tension move in TRANSITION encoding 1: [`TensionMove`]'s fields in their order, its sides as
+/// [`SideV1`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TensionMoveV1 {
+    #[serde(with = "hex::one")]
+    pub tension: Hash,
+    pub kind: String,
+    pub severity: String,
+    pub sides: Vec<SideV1>,
+    #[serde(with = "hex::opt")]
+    pub rekey: Option<Hash>,
+    pub why: Why,
+}
+
+/// The target of a suspect move in TRANSITION encoding 1: a local block, as [`SuspectMove`]
+/// holds it, or a cited block. Variant order is format. A registered wire shape: the runtime
+/// target stays a [`BlockId`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SuspectTarget {
+    Local(BlockId),
+    Foreign(ForeignId),
+}
+
+/// A suspect move in TRANSITION encoding 1: [`SuspectMove`]'s fields in their order, its target
+/// as [`SuspectTarget`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspectMoveV1 {
+    pub block: BlockId,
+    pub target: SuspectTarget,
+    pub reason: String,
+    pub writers: Vec<Author>,
+    pub why: Why,
+}
+
+/// One batch's moves in TRANSITION encoding 1: [`Transitions`]' fields in their order, with
+/// [`TensionMoveV1`] and [`SuspectMoveV1`] moves. A TRANSITION takes it only when it holds a
+/// foreign shape: a delivered cause, a foreign side or a foreign target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionsV1 {
+    pub at_ms: i64,
+    pub resolved: Vec<TensionMoveV1>,
+    pub opened: Vec<TensionMoveV1>,
+    pub gone: Vec<SuspectMoveV1>,
+    pub new: Vec<SuspectMoveV1>,
+}
+
+impl TransitionsV1 {
+    /// The layout of `t`, every side and target local.
+    pub fn of(t: &Transitions) -> TransitionsV1 {
+        let tension = |m: &TensionMove| TensionMoveV1 {
+            tension: m.tension,
+            kind: m.kind.clone(),
+            severity: m.severity.clone(),
+            sides: m.sides.iter().cloned().map(SideV1::Local).collect(),
+            rekey: m.rekey,
+            why: m.why.clone(),
+        };
+        let suspect = |m: &SuspectMove| SuspectMoveV1 {
+            block: m.block.clone(),
+            target: SuspectTarget::Local(m.target.clone()),
+            reason: m.reason.clone(),
+            writers: m.writers.clone(),
+            why: m.why.clone(),
+        };
+        TransitionsV1 {
+            at_ms: t.at_ms,
+            resolved: t.resolved.iter().map(tension).collect(),
+            opened: t.opened.iter().map(tension).collect(),
+            gone: t.gone.iter().map(suspect).collect(),
+            new: t.new.iter().map(suspect).collect(),
+        }
+    }
+
+    /// Every move's `why`, in record order.
+    pub fn whys(&self) -> impl Iterator<Item = &Why> {
+        let tensions = self.resolved.iter().chain(&self.opened).map(|t| &t.why);
+        tensions.chain(self.gone.iter().chain(&self.new).map(|s| &s.why))
+    }
+
+    /// Whether the record holds a foreign shape: the one case that takes encoding 1.
+    pub fn has_foreign(&self) -> bool {
+        self.whys().any(|w| w.cause == Cause::Delivered)
+            || self
+                .resolved
+                .iter()
+                .chain(&self.opened)
+                .flat_map(|m| &m.sides)
+                .any(|s| matches!(s, SideV1::Foreign { .. }))
+            || self
+                .gone
+                .iter()
+                .chain(&self.new)
+                .any(|m| matches!(m.target, SuspectTarget::Foreign(_)))
+    }
+
+    /// The runtime record, when every side and target is local (a delivered cause has its
+    /// runtime form).
+    pub fn into_local(self) -> Option<Transitions> {
+        let tension = |m: TensionMoveV1| -> Option<TensionMove> {
+            Some(TensionMove {
+                tension: m.tension,
+                kind: m.kind,
+                severity: m.severity,
+                sides: m
+                    .sides
+                    .into_iter()
+                    .map(|s| match s {
+                        SideV1::Local(s) => Some(s),
+                        SideV1::Foreign { .. } => None,
+                    })
+                    .collect::<Option<_>>()?,
+                rekey: m.rekey,
+                why: m.why,
+            })
+        };
+        let suspect = |m: SuspectMoveV1| -> Option<SuspectMove> {
+            Some(SuspectMove {
+                block: m.block,
+                target: match m.target {
+                    SuspectTarget::Local(b) => b,
+                    SuspectTarget::Foreign(_) => return None,
+                },
+                reason: m.reason,
+                writers: m.writers,
+                why: m.why,
+            })
+        };
+        Some(Transitions {
+            at_ms: self.at_ms,
+            resolved: self
+                .resolved
+                .into_iter()
+                .map(tension)
+                .collect::<Option<_>>()?,
+            opened: self
+                .opened
+                .into_iter()
+                .map(tension)
+                .collect::<Option<_>>()?,
+            gone: self.gone.into_iter().map(suspect).collect::<Option<_>>()?,
+            new: self.new.into_iter().map(suspect).collect::<Option<_>>()?,
+        })
     }
 }
 

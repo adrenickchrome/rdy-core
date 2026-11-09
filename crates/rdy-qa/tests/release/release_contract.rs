@@ -1,7 +1,8 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
-//! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture,
-//! `fixtures/contracts/release-1.json`, holds thirteen rows, one for each surface the decision
-//! lists. Every row is generated from the code that owns the surface (its registry, parser, schema
+//! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
+//! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/repo-links-v1.json`,
+//! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
 //! reader, are typed here, and cannot fail on their own; the digests, sizes and probes of their
@@ -96,8 +97,10 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
+/// The current contract fixture: the released baseline (`release-1.json`, frozen) with the
+/// additions since. A capture writes this file, never the baseline.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/release-1.json")
+    qa_root().join("fixtures/contracts/repo-links-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -783,14 +786,15 @@ fn store_row() -> Value {
         ("DISPUTE", kinds::DISPUTE),
         ("DISPUTE_RESOLUTION", kinds::DISPUTE_RESOLUTION),
         ("CHECK_REQUEST", kinds::CHECK_REQUEST),
+        ("FOREIGN", kinds::FOREIGN),
     ]
     .into_iter()
     .map(|(n, k)| (n.to_string(), k))
     .collect();
     assert_eq!(
         kind_ids.values().max(),
-        Some(&kinds::CHECK_REQUEST),
-        "the kind ids end at CHECK_REQUEST"
+        Some(&kinds::FOREIGN),
+        "the kind ids end at FOREIGN"
     );
     let latest: BTreeMap<String, u16> = kind_ids
         .iter()
@@ -854,6 +858,8 @@ fn store_row() -> Value {
         ("Dispute", AnswerAct::Dispute),
         ("ResolveDispute", AnswerAct::ResolveDispute),
         ("AcceptVerdict", AnswerAct::AcceptVerdict),
+        ("Adopt", AnswerAct::Adopt),
+        ("KeepPin", AnswerAct::KeepPin),
     ];
     let answer_acts: Map<String, Value> = acts
         .iter()
@@ -970,6 +976,7 @@ fn store_row() -> Value {
             "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
             "content_hash_v2": "baseline: every store this rdy writes",
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
+            "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "view_replay": "a CHANGE whose links.replayed_from is set",
@@ -978,6 +985,7 @@ fn store_row() -> Value {
             "frame_header_bytes": 37,
             "versioned_flag": codec::VERSIONED,
             "registered": codec::REGISTERED.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+            "optional": codec::OPTIONAL.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             "latest": latest,
             "first": first,
         },

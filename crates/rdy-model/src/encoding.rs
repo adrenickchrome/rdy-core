@@ -20,7 +20,14 @@
 //! blocks every CHANGE of encoding 0 or 1 embeds keep their bytes; neither has a form for a block
 //! with a foreign part. Such a block has its own explicit layouts: [`ForeignBlockV1`]
 //! ([`BLOCK_FOREIGN_ENCODING`]) and, embedded, [`ForeignChangeV2`] ([`CHANGE_FOREIGN_ENCODING`]).
-//! The store registers them; until then no writer chooses them.
+//!
+//! Repo links register optional encodings beside the released ones (D-FK58A, store feature
+//! `foreign_copy`). A value takes its kind's optional encoding only when it holds a shape the
+//! released encoding has no form for, and the released encoding otherwise, so every local value
+//! keeps its bytes and its hash: BLOCK 1 and CHANGE 2 above, [`TRANSITION_FOREIGN_ENCODING`],
+//! [`PAIR_FOREIGN_ENCODING`] (REVIEW and TENSION), [`ANSWER_FOREIGN_ENCODING`],
+//! [`ASSESSMENT_FOREIGN_ENCODING`] and [`REDACTION_FOREIGN_ENCODING`]. A FOREIGN entry starts at
+//! [`FOREIGN_ENCODING`].
 use crate::change::ChangeReadIdentity;
 use crate::foreign::ForeignParts;
 use crate::redaction::{BlockResidue, ChangeResidue, RedactionResidue, ResidualOp};
@@ -45,6 +52,26 @@ pub const BLOCK_FOREIGN_ENCODING: u16 = 1;
 /// The encoding of a CHANGE that embeds a block with a foreign part: [`ForeignChangeV2`].
 /// Encodings 0 and 1 embed the frozen [`LegacyBlockV0`] layout and have no form for such a block.
 pub const CHANGE_FOREIGN_ENCODING: u16 = 2;
+/// The first and only encoding of a FOREIGN entry (`crate::foreign::ForeignEntry`, kind 29): the
+/// kind has no encoding 0.
+pub const FOREIGN_ENCODING: u16 = 1;
+/// The encoding of a TRANSITION that holds a foreign shape: a move of cause `Delivered`, a
+/// foreign tension side or a foreign suspect target (the store's `TransitionsV1`). Encoding 0
+/// has no form for any of them.
+pub const TRANSITION_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of a REVIEW or a TENSION with a foreign pair side
+/// ([`crate::review::ReviewV1`], [`crate::semantic::SemanticTensionV1`]). Encoding 0 keeps the
+/// released `PairItem` layout and every local pair key.
+pub const PAIR_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of an ANSWER whose act is [`crate::AnswerAct::Adopt`] or
+/// [`crate::AnswerAct::KeepPin`]: the encoding-0 body, whose act may then be one of those two.
+pub const ANSWER_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of an ASSESSMENT with foreign reach or foreign tension evidence
+/// ([`crate::assessment::AssessmentV2`]). Encoding 1 stays the local layout.
+pub const ASSESSMENT_FOREIGN_ENCODING: u16 = 2;
+/// The encoding of a REDACTION with a `foreign_version` target: the encoding-0 body, whose
+/// target list may then hold one.
+pub const REDACTION_FOREIGN_ENCODING: u16 = 1;
 
 /// The identity of a stored object: the hash of its stored payload and its encoding version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -2,6 +2,7 @@
 //! `Dismiss` of a tension, named by the tension's vkey, or of a mention, named by its block and
 //! entity; a mention's latest review wins. A verdict is a review with verdict `Tension` or
 //! `NoTension` of a pair; ref `pair/<key>` names the one that settles it.
+use crate::semantic::{PairSide, has_foreign_side, into_local_items, local_sides};
 use crate::{BlockId, Hash, PairItem, Provenance};
 use serde::{Deserialize, Serialize};
 
@@ -79,4 +80,123 @@ pub enum Verdict {
 pub struct Citation {
     pub block: BlockId,
     pub note: String,
+}
+
+/// The subject of a review in REVIEW encoding 1 ([`crate::encoding::PAIR_FOREIGN_ENCODING`], repo
+/// links): [`ReviewSubject`]'s variants in their order, a pair's items as [`PairSide`]s. Field
+/// and variant order is format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewSubjectV1 {
+    Tension {
+        id: Hash,
+        vkey: Hash,
+        kind: String,
+        severity: String,
+        sides: Vec<String>,
+        blocks: Vec<BlockId>,
+    },
+    Mention {
+        block: BlockId,
+        entity: BlockId,
+    },
+    Pair {
+        key: Hash,
+        items: Vec<PairSide>,
+    },
+    Check {
+        request: Hash,
+    },
+}
+
+/// A review in REVIEW encoding 1: the fields of [`Review`] in their order, its subject as
+/// [`ReviewSubjectV1`]. A REVIEW takes it only when its pair has a foreign side. A registered
+/// wire shape: no consumer reads it yet. Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewV1 {
+    pub subject: ReviewSubjectV1,
+    pub case_hash: Option<Hash>,
+    pub verdict: Verdict,
+    pub reason: String,
+    pub citations: Vec<Citation>,
+    pub provenance: Provenance,
+}
+
+impl ReviewV1 {
+    /// The layout of `r`, every pair side local.
+    pub fn of(r: &Review) -> ReviewV1 {
+        let subject = match &r.subject {
+            ReviewSubject::Tension {
+                id,
+                vkey,
+                kind,
+                severity,
+                sides,
+                blocks,
+            } => ReviewSubjectV1::Tension {
+                id: *id,
+                vkey: *vkey,
+                kind: kind.clone(),
+                severity: severity.clone(),
+                sides: sides.clone(),
+                blocks: blocks.clone(),
+            },
+            ReviewSubject::Mention { block, entity } => ReviewSubjectV1::Mention {
+                block: block.clone(),
+                entity: entity.clone(),
+            },
+            ReviewSubject::Pair { key, items } => ReviewSubjectV1::Pair {
+                key: *key,
+                items: local_sides(items),
+            },
+            ReviewSubject::Check { request } => ReviewSubjectV1::Check { request: *request },
+        };
+        ReviewV1 {
+            subject,
+            case_hash: r.case_hash,
+            verdict: r.verdict,
+            reason: r.reason.clone(),
+            citations: r.citations.clone(),
+            provenance: r.provenance.clone(),
+        }
+    }
+
+    /// Whether its pair has a foreign side: the one case that takes encoding 1.
+    pub fn has_foreign(&self) -> bool {
+        matches!(&self.subject, ReviewSubjectV1::Pair { items, .. } if has_foreign_side(items))
+    }
+
+    /// The runtime review, when every pair side is local.
+    pub fn into_local(self) -> Option<Review> {
+        let subject = match self.subject {
+            ReviewSubjectV1::Tension {
+                id,
+                vkey,
+                kind,
+                severity,
+                sides,
+                blocks,
+            } => ReviewSubject::Tension {
+                id,
+                vkey,
+                kind,
+                severity,
+                sides,
+                blocks,
+            },
+            ReviewSubjectV1::Mention { block, entity } => ReviewSubject::Mention { block, entity },
+            ReviewSubjectV1::Pair { key, items } => ReviewSubject::Pair {
+                key,
+                items: into_local_items(items)?,
+            },
+            ReviewSubjectV1::Check { request } => ReviewSubject::Check { request },
+        };
+        Some(Review {
+            subject,
+            case_hash: self.case_hash,
+            verdict: self.verdict,
+            reason: self.reason,
+            citations: self.citations,
+            provenance: self.provenance,
+        })
+    }
 }

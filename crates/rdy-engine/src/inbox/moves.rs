@@ -33,6 +33,7 @@ pub fn why_text(w: &Why) -> String {
         Cause::PackReload => "the pack was reloaded".to_string(),
         Cause::Reopened => "the pack or rdy changed while the project was closed".to_string(),
         Cause::Recheck => "a clean republish found it".to_string(),
+        Cause::Delivered => format!("a delivery (entry {})", id12()),
     }
 }
 
