@@ -74,7 +74,7 @@ fn rpl4_repo_link_is_supporting_and_closed() {
     );
     let fields: Vec<&str> = def.fields.keys().map(String::as_str).collect();
     assert_eq!(fields, ["alias", "profile", "repo", "title"]);
-    assert!(def.fields["title"].required == false);
+    assert!(!def.fields["title"].required);
     assert!(def.fields["alias"].required && def.fields["repo"].required);
 
     // a valid link, with and without a title
