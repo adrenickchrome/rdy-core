@@ -7,5 +7,6 @@ mod release_install_unix;
 mod release_keys;
 mod release_notices;
 mod release_notices_unix;
+mod release_one;
 mod release_package;
 mod release_package_unix;

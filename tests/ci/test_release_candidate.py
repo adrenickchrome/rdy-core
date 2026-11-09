@@ -34,6 +34,7 @@ WORKFLOW = (ROOT / '.github/workflows/release-candidate.yml').read_text()
 
 MAC = 'aarch64-apple-darwin'
 LINUX = 'x86_64-unknown-linux-gnu'
+WINDOWS = 'x86_64-pc-windows-msvc'
 V = '0.42.0'
 S = 'a' * 40
 RUN_ID = 9001
@@ -83,13 +84,17 @@ def tar_gz(members):
     return buffer.getvalue()
 
 
-def release_archive(target, binary=b'\x7fELF rdy release binary /rdy/crates/rdy-cli/src/main.rs\n'):
-    stem = 'rdy-' + V + '-preview-' + target
-    return tar_gz([(stem, None, 'dir'), (stem + '/rdy', binary, 'file'),
-                   (stem + '/LICENSE-MIT', b'MIT\n', 'file'),
-                   (stem + '/LICENSE-APACHE', b'Apache\n', 'file'),
-                   (stem + '/THIRD-PARTY-NOTICES.txt', b'notices\n', 'file'),
-                   (stem + '/PREVIEW.txt', b'preview\n', 'file')])
+def release_archive(target, binary=b'\x7fELF rdy release binary /rdy/crates/rdy-cli/src/main.rs\n', preview=True):
+    """A packaged archive: the preview family (the retained signer tools' fixtures), or the plain one."""
+    stem = 'rdy-' + V + ('-preview-' if preview else '-') + target
+    exe = 'rdy.exe' if target == WINDOWS else 'rdy'
+    members = [(stem, None, 'dir'), (stem + '/' + exe, binary, 'file'),
+               (stem + '/LICENSE-MIT', b'MIT\n', 'file'),
+               (stem + '/LICENSE-APACHE', b'Apache\n', 'file'),
+               (stem + '/THIRD-PARTY-NOTICES.txt', b'notices\n', 'file')]
+    if preview:
+        members.append((stem + '/PREVIEW.txt', b'preview\n', 'file'))
+    return tar_gz(members)
 
 
 def gate_report(**change):
@@ -190,7 +195,7 @@ class rsig4_Candidate(Fixture):
 
         facts = CANDIDATE.check_ref(repo, 'refs/tags/candidate/v' + V, good, 'refs/heads/main')
         self.assertEqual(facts, {'ref': 'refs/tags/candidate/v' + V, 'version': V, 'commit': good,
-                                 'targets': [MAC, LINUX]})
+                                 'targets': [MAC, WINDOWS, LINUX]})
 
         def refused(ref, sha_, reason):
             with self.assertRaises(ControllerError) as caught:
@@ -221,16 +226,25 @@ class rsig4_Candidate(Fixture):
                 'v0.42.0 is already reserved or released; a retry reuses its reserved candidate and never rebuilds')
         git(repo, 'tag', '-d', 'v' + V)
 
-        # the target policy at S is exactly the two release targets
+        # the target policy at S is exactly the historical pair or the Release 1 triple, in manifest order
         (repo / 'release-keys').mkdir()
-        (repo / 'release-keys/policy.json').write_text(json.dumps({'targets': [MAC, LINUX, 'x86_64-pc-windows-msvc']}))
-        git(repo, 'add', 'release-keys/policy.json')
-        git(repo, 'commit', '-q', '-m', 'wider policy')
-        commit_version(repo, '0.47.0', 'bump')
-        wide = git(repo, 'rev-parse', 'HEAD')
-        git(repo, 'tag', 'candidate/v0.47.0', wide)
-        refused('refs/tags/candidate/v0.47.0', wide,
-                'the target policy at the commit is not exactly aarch64-apple-darwin and x86_64-unknown-linux-gnu')
+        refusal = ('the target policy at the commit is not exactly aarch64-apple-darwin and '
+                   'x86_64-unknown-linux-gnu or aarch64-apple-darwin, x86_64-pc-windows-msvc, '
+                   'x86_64-unknown-linux-gnu')
+        for minor, targets, accepted in [(47, [MAC, LINUX, WINDOWS], False), (48, [MAC, LINUX], True),
+                                         (49, [MAC, WINDOWS, LINUX], True), (50, [LINUX, MAC], False),
+                                         (51, [MAC, WINDOWS], False), (52, [MAC, WINDOWS, LINUX, 'x86_64-unknown-freebsd'], False)]:
+            (repo / 'release-keys/policy.json').write_text(json.dumps({'targets': targets}))
+            git(repo, 'add', 'release-keys/policy.json')
+            git(repo, 'commit', '-q', '-m', 'policy')
+            version = '0.' + str(minor) + '.0'
+            commit_version(repo, version, 'bump')
+            wide = git(repo, 'rev-parse', 'HEAD')
+            git(repo, 'tag', 'candidate/v' + version, wide)
+            if accepted:
+                CANDIDATE.check_ref(repo, 'refs/tags/candidate/v' + version, wide, 'refs/heads/main')
+            else:
+                refused('refs/tags/candidate/v' + version, wide, refusal)
 
         # the build receipt keeps S
         archive = self.archives[LINUX]
@@ -352,7 +366,7 @@ class rsig4_Candidate(Fixture):
         self.assertEqual(str(caught.exception), "duplicate field 'pass'")
 
         jobs = workflow_jobs(WORKFLOW)
-        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'check'])
+        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'build-windows', 'check'])
         self.assertIn('\npermissions: {}\n', WORKFLOW)
         self.assertNotIn('continue-on-error', WORKFLOW)
         self.assertNotIn('id-token', WORKFLOW)
@@ -383,14 +397,44 @@ class rsig4_Candidate(Fixture):
             self.assertIn('if-no-files-found: error', job)
             self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', job)
             self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', job)
+        # the Windows job builds natively on the hosted Windows runner: the existing gate scripts,
+        # literal Python and Rust setup, PowerShell steps, no POSIX path or interpreter
+        windows = jobs['build-windows']
+        self.assertIn('    runs-on: windows-2025\n', windows)
+        self.assertIn('    timeout-minutes: 240\n', windows)
+        self.assertIn('    needs: check\n', windows)
+        self.assertIn('    permissions:\n      contents: read\n    outputs:', windows)
+        self.assertIn('./scripts/ci/windows_gate.ps1', windows)
+        self.assertIn('RDY_QA_HOSTED_CI: "1"', windows)
+        self.assertIn('actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0', windows)
+        self.assertIn('python-version: "3.13"', windows)
+        self.assertIn('rustup toolchain install 1.99.0 --profile minimal', windows)
+        for word in ('/usr/bin/python3', 'python3', 'bash', ' sh ', '/tmp', '$RUNNER_TEMP', '$GITHUB_', '&&'):
+            self.assertNotIn(word, windows, word)
+        self.assertEqual(windows.count('shell: pwsh'), windows.count('        run:'))
+        self.assertLess(windows.index('candidate.py check-ref'), windows.index('windows_gate.ps1'))
+        self.assertLess(windows.index('windows_gate.ps1'), windows.index('candidate.py gate-counts'))
+        self.assertLess(windows.index('candidate.py gate-counts'), windows.index('candidate.py build'))
+        self.assertIn('--target x86_64-pc-windows-msvc', windows)
+        self.assertIn('candidate.py gate-counts --report C:\\rdy-ci\\work\\target\\qa\\report.json', windows)
+        self.assertIn('--fast-gate', windows)
+        self.assertIn('persist-credentials: false', windows)
+        self.assertIn('fetch-depth: 0', windows)
+        self.assertIn('name: rdy-candidate-x86_64-pc-windows-msvc-a${{ github.run_attempt }}', windows)
+        self.assertIn('if-no-files-found: error', windows)
+        self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', windows)
+        self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', windows)
         assemble = jobs['assemble']
-        self.assertIn('    needs: [check, build-mac, build-linux]\n', assemble)
+        self.assertIn('    needs: [check, build-mac, build-windows, build-linux]\n', assemble)
         self.assertIn('    permissions:\n      contents: read\n', assemble)
-        self.assertEqual(assemble.count('skip-decompress: true'), 2)
-        self.assertEqual(assemble.count('digest-mismatch: error'), 2)
+        self.assertEqual(assemble.count('skip-decompress: true'), 3)
+        self.assertEqual(assemble.count('digest-mismatch: error'), 3)
         self.assertIn('artifact-ids: ${{ needs.build-mac.outputs.artifact_id }}', assemble)
+        self.assertIn('artifact-ids: ${{ needs.build-windows.outputs.artifact_id }}', assemble)
         self.assertIn('artifact-ids: ${{ needs.build-linux.outputs.artifact_id }}', assemble)
         self.assertIn('candidate.py assemble', assemble)
+        self.assertIn('--source "$GITHUB_WORKSPACE"', assemble)
+        self.assertIn('--input "x86_64-pc-windows-msvc=', assemble)
         self.assertIn('name: rdy-candidate-a${{ github.run_attempt }}', assemble)
         self.assertIn('    permissions:\n      contents: read\n', jobs['check'])
         self.assertIn('candidate.py check-ref', jobs['check'])
@@ -414,28 +458,28 @@ class rsig4_Candidate(Fixture):
             CANDIDATE.remap_flags(home='/home/a b', cargo_home='/c', rustup_home='/r', source='/s', target_dir='/t')
         self.assertEqual(str(caught.exception), 'a build path is not a plain absolute path')
 
-        path = self.tmp / CANDIDATE.archive_name(V, LINUX)
-        path.write_bytes(self.archives[LINUX])
+        path = self.tmp / CANDIDATE.release_archive_name(V, LINUX)
+        path.write_bytes(release_archive(LINUX, preview=False))
         self.assertEqual(CANDIDATE.inspect_archive(path, V, LINUX, extra=['/tmp/w']), 0)
         filler = b'\0' * (CANDIDATE.SCAN_CHUNK - 3)
         for binary in [b'panic at /home/runner/work/rdy-core/src/main.rs', b'/Users/runner/.cargo/registry/x',
                        b'/Users/nick/Repo/rdy', b'/home/ubuntu/.rustup/toolchains', filler + b'/home/runner/split',
                        b'built in /tmp/w/src/crates']:
-            path.write_bytes(release_archive(LINUX, binary))
+            path.write_bytes(release_archive(LINUX, binary, preview=False))
             with self.assertRaises(ControllerError) as caught:
                 CANDIDATE.inspect_archive(path, V, LINUX, extra=['/tmp/w'])
             self.assertEqual(str(caught.exception), 'the x86_64-unknown-linux-gnu binary holds 1 host path')
             self.assertNotIn('runner', str(caught.exception))
-        path.write_bytes(release_archive(LINUX, b'/home/a and /Users/b'))
+        path.write_bytes(release_archive(LINUX, b'/home/a and /Users/b', preview=False))
         with self.assertRaises(ControllerError) as caught:
             CANDIDATE.inspect_archive(path, V, LINUX, extra=[])
         self.assertEqual(str(caught.exception), 'the x86_64-unknown-linux-gnu binary holds 2 host paths')
-        stem = 'rdy-' + V + '-preview-' + LINUX
+        stem = 'rdy-' + V + '-' + LINUX
         for members in ([(stem + '/LICENSE-MIT', b'x', 'file')],
                         [(stem + '/rdy', b'a', 'file'), (stem + '/rdy', b'b', 'file')],
                         [(stem + '/rdy', '/etc/passwd', 'link')],
                         [(stem + '/rdy', b'a', 'file'), ('../escape', b'x', 'file')],
-                        [('rdy-' + V + '-' + LINUX + '/rdy', b'a', 'file')]):
+                        [('rdy-' + V + '-preview-' + LINUX + '/rdy', b'a', 'file')]):
             path.write_bytes(tar_gz(members))
             with self.assertRaises(ControllerError) as caught:
                 CANDIDATE.inspect_archive(path, V, LINUX, extra=[])
@@ -464,34 +508,36 @@ class agi6_Candidate(Fixture):
         git(repo, 'add', 'release')
         return repo, commit_version(repo, V, 'source')
 
-    def toolchain(self, built, packaged):
-        """A cargo that `builds` rdy (reply `built`) and tools that package rdy (reply `packaged`)."""
+    def toolchain(self, built, packaged, target=LINUX):
+        """A cargo that `builds` rdy (reply `built`) and tools that package rdy (reply `packaged`). For
+        the Windows target the executables and tools are `.exe` files (scripts, on this host)."""
+        exe = '.exe' if target == WINDOWS else ''
         tools = self.tmp / 'tools'
         tools.mkdir()
         version = ('if sys.argv[1:] == ["--version"]:\n'
-                   '    print("rdy ' + V + ' (preview)")\n'
+                   '    print("rdy ' + V + '")\n'
                    '    sys.exit(0)\n')
         guide_tests.write_executable(tools / 'built-rdy', guide_tests.binary_source(built, version))
         guide_tests.write_executable(tools / 'packaged-rdy', guide_tests.binary_source(packaged, version))
         log = self.tmp / 'steps.log'
-        guide_tests.write_executable(tools / 'qa-release-sources', (
+        guide_tests.write_executable(tools / ('qa-release-sources' + exe), (
             '#!/usr/bin/env python3\n'
             'import os, sys\n'
             'out = sys.argv[sys.argv.index("--out") + 1]\n'
             'os.mkdir(out)\n'
             'open(os.path.join(out, "imbl-7.0.2.crate"), "wb").write(b"crate")\n'))
-        guide_tests.write_executable(tools / 'qa-release-package', (
+        guide_tests.write_executable(tools / ('qa-release-package' + exe), (
             '#!/usr/bin/env python3\n'
             'import os, sys, tarfile\n'
             'value = lambda name: sys.argv[sys.argv.index(name) + 1]\n'
             'out, version, target = value("--out"), value("--version"), value("--target")\n'
             'os.mkdir(out)\n'
-            'stem = "rdy-" + version + "-preview-" + target\n'
+            'stem = "rdy-" + version + "-" + target\n'
             'path = os.path.join(out, stem + ".tar.gz")\n'
             'with tarfile.open(path, "w:gz") as archive:\n'
-            '    archive.add(%r, arcname=stem + "/rdy")\n'
+            '    archive.add(%r, arcname=stem + "/rdy%s")\n'
             'open(%r, "a").write("package\\n")\n'
-            'print(path)\n' % (str(tools / 'packaged-rdy'), str(log))))
+            'print(path)\n' % (str(tools / 'packaged-rdy'), exe, str(log))))
         bin_dir = self.tmp / 'bin'
         bin_dir.mkdir()
         guide_tests.write_executable(bin_dir / 'cargo', (
@@ -500,19 +546,70 @@ class agi6_Candidate(Fixture):
             'if sys.argv[1] == "build":\n'
             '    release = os.path.join(os.environ["CARGO_TARGET_DIR"], "release")\n'
             '    os.makedirs(release)\n'
-            '    shutil.copy(%r, os.path.join(release, "rdy"))\n'
-            '    for tool in ("qa-release-sources", "qa-release-package"):\n'
-            '        shutil.copy(os.path.join(%r, tool), release)\n' % (str(tools / 'built-rdy'), str(tools))))
+            '    shutil.copy(%r, os.path.join(release, "rdy%s"))\n'
+            '    for tool in ("qa-release-sources%s", "qa-release-package%s"):\n'
+            '        shutil.copy(os.path.join(%r, tool), release)\n' % (str(tools / 'built-rdy'), exe, exe, exe, str(tools))))
         gate = self.tmp / 'fast-gate.json'
         gate.write_bytes(plain_json(FAST_GATE))
         return bin_dir, gate, log
 
-    def build(self, repo, commit, bin_dir, gate):
+    def build(self, repo, commit, bin_dir, gate, target=LINUX):
         home = self.tmp / 'build-home'
         home.mkdir(exist_ok=True)
-        env = dict(os.environ, HOME=str(home), PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                    CARGO_HOME=str(home / 'cargo'), RUSTUP_HOME=str(home / 'rustup'))
-        return CANDIDATE.build(repo, commit, V, LINUX, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT, env=env)
+        env['USERPROFILE' if target == WINDOWS else 'HOME'] = str(home)
+        return CANDIDATE.build(repo, commit, V, target, self.tmp / 'work', self.tmp / 'out', gate, RUN_ID, ATTEMPT,
+                               env=env)
+
+    def test_relc1_native_windows_build_uses_exe_and_remaps_paths(self):
+        raw = guide_tests.valid_bundle(V)
+        reply = guide_tests.reply_of(json.loads(raw))
+        repo, commit = self.source_commit(raw)
+        bin_dir, gate, log = self.toolchain(reply, reply, WINDOWS)
+        # This host's paths are POSIX paths; the Windows runner's are Windows paths, which the
+        # remap check admits by their drive. Here the check admits this host's paths as well.
+        flags = []
+        real = CANDIDATE.remap_flags
+
+        def remember(*args, **kw):
+            self.assertTrue(kw['windows'], 'a Windows build remaps Windows paths')
+            flags.append(args)
+            return real(*args, **kw)
+        import unittest.mock as mock
+        with mock.patch.object(CANDIDATE, 'WINDOWS_PATH_RE', re.compile(r'(?:[A-Za-z]:[\\/]|/)[^\s=\x00-\x1f]+')), \
+                mock.patch.object(CANDIDATE, 'remap_flags', remember):
+            receipt = self.build(repo, commit, bin_dir, gate, WINDOWS)
+        name = CANDIDATE.release_archive_name(V, WINDOWS)
+        self.assertEqual(name, 'rdy-' + V + '-x86_64-pc-windows-msvc.tar.gz')
+        self.assertEqual(log.read_text(), 'package\n')
+        self.assertEqual(receipt['archive']['name'], name)
+        self.assertEqual(sorted(p.name for p in (self.tmp / 'out').iterdir()), sorted([name, 'build-' + WINDOWS + '.json']))
+        with tarfile.open(str(self.tmp / 'out' / name)) as archive:
+            self.assertEqual(archive.getnames(), ['rdy-' + V + '-' + WINDOWS + '/rdy.exe'])
+        # the home is the profile of this Windows build, and the cargo and rustup homes are the build's own
+        home = str(self.tmp / 'build-home')
+        self.assertEqual(flags[0][0], home)
+        self.assertEqual(flags[0][1:3], (home + '/cargo', home + '/rustup'))
+        # a host path in the packaged executable refuses the candidate, in UTF-8 and in UTF-16
+        shutil.rmtree(str(self.tmp / 'out'))
+        shutil.rmtree(str(self.tmp / 'work'))
+        for leak in (b'C:\\Users\\runner\\x', 'C:\\Users\\runner\\x'.encode('utf-16-le')):
+            marked = guide_tests.reply_of(json.loads(raw))
+            for stale in ('tools', 'bin'):
+                shutil.rmtree(str(self.tmp / stale), True)
+            for stale in ('fast-gate.json', 'steps.log'):
+                (self.tmp / stale).unlink()
+            with mock.patch.object(CANDIDATE, 'WINDOWS_PATH_RE', re.compile(r'(?:[A-Za-z]:[\\/]|/)[^\s=\x00-\x1f]+')), \
+                    mock.patch.object(CANDIDATE, 'check_packaged_guide', lambda *a, **k: None):
+                bin_dir, gate, log = self.toolchain(reply, marked, WINDOWS)
+                packaged = self.tmp / 'tools' / 'packaged-rdy'
+                packaged.write_bytes(packaged.read_bytes() + b'\n# ' + leak)
+                with self.assertRaises(ControllerError) as caught:
+                    self.build(repo, commit, bin_dir, gate, WINDOWS)
+            self.assertEqual(str(caught.exception), 'the ' + WINDOWS + ' binary holds 1 host path')
+            shutil.rmtree(str(self.tmp / 'work'), True)
+            shutil.rmtree(str(self.tmp / 'out'), True)
 
     def refused(self, repo, commit, bin_dir, gate, text):
         with self.assertRaises(ControllerError) as caught:
@@ -537,7 +634,7 @@ class agi6_Candidate(Fixture):
         receipt = self.build(repo, commit, bin_dir, gate)
         # The guide of S passed, then the receipt names S and the checked archive by its digest.
         self.assertEqual(log.read_text(), 'package\n')
-        name = CANDIDATE.archive_name(V, LINUX)
+        name = CANDIDATE.release_archive_name(V, LINUX)
         self.assertEqual(receipt['commit'], commit)
         self.assertEqual(git(repo, 'show', commit + ':release/agent-guide.sha256'), sha(raw))
         self.assertEqual(receipt['archive']['sha256'], sha((self.tmp / 'out' / name).read_bytes()))

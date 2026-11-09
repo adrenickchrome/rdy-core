@@ -63,7 +63,7 @@ esac
 }
 
 /// A download kit: a private DOWNLOAD holding a test archive for `target` with a fake
-/// `rdy`, its two-line manifest and the manifest's signature by a disposable key.
+/// `rdy`, its four-line manifest and the manifest's signature by a disposable key.
 struct Kit {
     dir: tempfile::TempDir,
     download: PathBuf,
@@ -76,7 +76,7 @@ struct Kit {
 
 impl Kit {
     fn new(target: &'static str) -> Kit {
-        Kit::with_rdy(target, "rdy 0.14.0 (preview)", 0)
+        Kit::with_rdy(target, "rdy 0.14.0", 0)
     }
 
     fn with_rdy(target: &'static str, version: &str, stop: i32) -> Kit {
@@ -114,7 +114,7 @@ impl Kit {
         self.download.join(archive_name(IV, target))
     }
 
-    /// Writes the archive for `target` holding `rdy` and the other three files.
+    /// Writes the archive for `target` holding `rdy` and the other three files of a plain package.
     fn build_archive(&self, target: &str, rdy: &str) {
         let stem = archive_stem(IV, target);
         let src = self.dir.path().join(format!("src-{target}"));
@@ -124,7 +124,6 @@ impl Kit {
         platform::set_mode(&root.join("rdy"), 0o755).expect("chmod");
         fs::write(root.join(MIT_FILE), MIT).expect("mit");
         fs::write(root.join(APACHE_FILE), APACHE).expect("apache");
-        fs::write(root.join(NOTE_FILE), PREVIEW_NOTE).expect("note");
         self.retar(target);
     }
 
@@ -155,20 +154,37 @@ impl Kit {
         }
     }
 
-    /// The two manifest lines: each present archive's hash, else a stand-in hash.
+    /// The four manifest lines, in manifest order (macOS, Windows, Linux, sample): each
+    /// present file's hash, else a stand-in hash.
     fn lines(&self) -> Vec<String> {
-        TARGETS
+        let line = |name: String| {
+            let file = self.download.join(&name);
+            let hash = if file.exists() {
+                sha256(&file)
+            } else {
+                "ab".repeat(32)
+            };
+            format!("{hash}  {name}\n")
+        };
+        MANIFEST_TARGETS
             .iter()
-            .map(|t| {
-                let a = self.archive(t);
-                let hash = if a.exists() {
-                    sha256(&a)
-                } else {
-                    "ab".repeat(32)
-                };
-                format!("{hash}  {}\n", archive_name(IV, t))
-            })
+            .map(|t| line(archive_name(IV, t)))
+            .chain([line(SAMPLE_FILE.to_string())])
             .collect()
+    }
+
+    /// The index of `target`'s line in [`Kit::lines`].
+    fn at(target: &str) -> usize {
+        MANIFEST_TARGETS
+            .iter()
+            .position(|t| *t == target)
+            .expect("a manifest target")
+    }
+
+    /// Writes the sample dump `bytes` into DOWNLOAD and re-signs the manifest over it.
+    fn add_sample(&self, bytes: &[u8]) {
+        fs::write(self.download.join(SAMPLE_FILE), bytes).expect("sample");
+        self.write_manifest(self.lines().concat().as_bytes());
     }
 
     /// Writes `bytes` as the manifest and signs it with the kit's key.
@@ -492,7 +508,7 @@ fn pre3_openssh_accepts_only_the_trusted_manifest() {
     // sha512, and the release installs.
     let kit = Kit::new(host_target());
     let input = kit.input();
-    assert_eq!(kit.lines().len(), 2);
+    assert_eq!(kit.lines().len(), 4);
     let before = kit.download_state();
     check_plain(&kit, &input).expect("the trusted manifest");
     assert_eq!(kit.download_state(), before, "the download is unchanged");
@@ -628,8 +644,10 @@ fn pre3_hash_failures_never_extract_or_execute() {
         (
             "the selected line omitted",
             |kit, sel| {
-                let lines = kit.lines();
-                kit.write_manifest(lines[1 - sel].as_bytes());
+                let mut lines = kit.lines();
+                lines.remove(Kit::at(kit.target));
+                let _ = sel;
+                kit.write_manifest(lines.concat().as_bytes());
             },
             InstallFailure::Checksums,
         ),
@@ -637,20 +655,24 @@ fn pre3_hash_failures_never_extract_or_execute() {
             "a line duplicated",
             |kit, sel| {
                 let lines = kit.lines();
-                kit.write_manifest(format!("{0}{0}", lines[sel]).as_bytes());
+                let _ = sel;
+                kit.write_manifest(
+                    format!("{}{}", lines.concat(), lines[Kit::at(kit.target)]).as_bytes(),
+                );
             },
             InstallFailure::Checksums,
         ),
         (
             "the lines reordered",
             |kit, _| {
-                let lines = kit.lines();
-                kit.write_manifest(format!("{}{}", lines[1], lines[0]).as_bytes());
+                let mut lines = kit.lines();
+                lines.swap(0, 2);
+                kit.write_manifest(lines.concat().as_bytes());
             },
             InstallFailure::Checksums,
         ),
         (
-            "a third line",
+            "a fifth line",
             |kit, _| {
                 let mut text = kit.lines().concat();
                 text.push_str(&format!("{}  extra.tar.gz\n", "cd".repeat(32)));
@@ -808,27 +830,16 @@ fn rsig3_generated_install_blocks_stay_exact() {
     // the version wrapper adds nothing to the lower-level renderer
     let section = readme_version_section(&keys, RV).expect("section");
     assert_eq!(section, readme_install_section(RV, &line).expect("section"));
-    // three native blocks, byte for byte what the renderer prints for the example paths
+    // four blocks, byte for byte what the renderer prints for the example paths: macOS and
+    // Linux in sh, Windows in PowerShell, then the macOS browser block
     assert_eq!(
         section.matches("```sh\n").count(),
         4,
         "three installs and the PATH line"
     );
-    let mut want = String::new();
-    for (label, target, browser) in [
-        (
-            "On macOS arm64, for an archive downloaded with curl:",
-            TARGETS[0],
-            false,
-        ),
-        ("On Linux amd64:", TARGETS[1], false),
-        (
-            "On macOS arm64, for an archive downloaded with a web browser:",
-            TARGETS[0],
-            true,
-        ),
-    ] {
-        let block = render_commands(
+    assert_eq!(section.matches("```powershell\n").count(), 1);
+    let unix = |target: &str, browser: bool| {
+        render_commands(
             &commands(&InstallInput {
                 download: "/path/to/download".into(),
                 signer_line: line.clone(),
@@ -841,15 +852,53 @@ fn rsig3_generated_install_blocks_stay_exact() {
             })
             .expect("commands"),
         )
-        .expect("render");
-        want.push_str(&format!("{label}\n\n```sh\n{block}\n```\n\n"));
+        .expect("render")
+    };
+    let windows = render_guide(&InstallInput {
+        download: r"C:\path\to\download".into(),
+        signer_line: line.clone(),
+        version: RV.into(),
+        commit: "0".repeat(40),
+        target: WINDOWS_TARGET.into(),
+        unpack: r"C:\path\to\unpack".into(),
+        prefix: format!(r"C:\path\to\rdy-{RV}").into(),
+        browser: false,
+    })
+    .expect("Windows guide");
+    let mut want = String::new();
+    for (label, fence, block) in [
+        (
+            "On macOS arm64, for an archive downloaded with curl:",
+            "sh",
+            unix(TARGETS[0], false),
+        ),
+        ("On Linux amd64:", "sh", unix(TARGETS[1], false)),
+        ("On Windows amd64, in PowerShell:", "powershell", windows),
+        (
+            "On macOS arm64, for an archive downloaded with a web browser:",
+            "sh",
+            unix(TARGETS[0], true),
+        ),
+    ] {
+        want.push_str(&format!("{label}\n\n```{fence}\n{block}\n```\n\n"));
     }
     assert!(section.starts_with("### Install\n\n"));
     let body = &section["### Install\n\n".len()..];
     assert!(body.starts_with(want.trim_end_matches('\n')), "{body}");
+    // the plain names, three targets, and no preview name
+    for t in [TARGETS[0], WINDOWS_TARGET, TARGETS[1]] {
+        assert!(section.contains(&format!("rdy-{RV}-{t}.tar.gz")), "{t}");
+    }
+    assert!(!section.contains("-preview-"));
     // each block passes the one selected line as one quoted token, in the manifest namespace
-    assert_eq!(section.matches(&format!("'{line}'")).count(), 3);
+    assert_eq!(section.matches(&format!("'{line}'")).count(), 4);
     assert_eq!(section.matches("'-n' 'rdy-release-v1'").count(), 3);
+    assert_eq!(
+        section
+            .matches("-n rdy-release-v1 -s SHA256SUMS.sig")
+            .count(),
+        1
+    );
     // the ready section holds the same install blocks after the trust list
     let ready = readme_ready_section(&keys, RV, "https://example.invalid/notes").expect("ready");
     assert!(ready.ends_with(&section));
@@ -879,7 +928,7 @@ fn pre3_guide_commands_match_execution() {
         browser,
     };
     let dl = "/nowhere/dl dir/it's";
-    let stem = |t: &str| format!("rdy-0.14.0-preview-{t}");
+    let stem = |t: &str| format!("rdy-0.14.0-{t}");
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let want = |target: &str, browser: bool| -> Vec<Shown> {
         let archive = format!("{dl}/{}.tar.gz", stem(target));
@@ -966,9 +1015,9 @@ fn pre3_guide_commands_match_execution() {
              'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '{qd}/SHA256SUMS' &&\n\
              'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&\n\
              'mkdir' '/nowhere/ü unpack' '/nowhere/p p/rdy-0.14.0' &&\n\
-             'tar' '-xzf' '{qd}/rdy-0.14.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/nowhere/ü unpack' &&\n\
+             'tar' '-xzf' '{qd}/rdy-0.14.0-aarch64-apple-darwin.tar.gz' '-C' '/nowhere/ü unpack' &&\n\
              'mkdir' '-p' '/nowhere/p p/rdy-0.14.0/bin' &&\n\
-             'install' '-m' '755' '/nowhere/ü unpack/rdy-0.14.0-preview-aarch64-apple-darwin/rdy' '/nowhere/p p/rdy-0.14.0/bin/rdy' &&\n\
+             'install' '-m' '755' '/nowhere/ü unpack/rdy-0.14.0-aarch64-apple-darwin/rdy' '/nowhere/p p/rdy-0.14.0/bin/rdy' &&\n\
              '/nowhere/p p/rdy-0.14.0/bin/rdy' '--version'"
         )
     );
@@ -1599,10 +1648,7 @@ fn pre3_bounds_and_owned_cleanup() {
     for (len, want) in [(BINARY_MAX, Version), (BINARY_MAX + 1, Install)] {
         let kit = Kit::new(target);
         let rdy = kit.source(target).join("rdy");
-        let script = format!(
-            "{}exit 0\n",
-            fake_rdy(&kit.marker, "rdy 0.15.0 (preview)", 0)
-        );
+        let script = format!("{}exit 0\n", fake_rdy(&kit.marker, "rdy 0.15.0", 0));
         fs::write(&rdy, script).expect("rdy");
         File::options()
             .write(true)
@@ -1645,7 +1691,7 @@ fn pre3_bounds_and_owned_cleanup() {
             dir.join("unpack alias"),
             dir.join("prefix alias"),
         );
-        fake_rdy(marker, "rdy 0.15.0 (preview)", 0).replacen(
+        fake_rdy(marker, "rdy 0.15.0", 0).replacen(
             "#!/bin/sh\n",
             &format!(
                 "#!/bin/sh\nif [ \"$1\" = --version ]; then ln -sfn '{e}' '{u}'; ln -sfn '{e}' '{p}'; fi\n",
@@ -1887,7 +1933,7 @@ fn pre3_bounds_and_owned_cleanup() {
     }
 
     // A failure after the install removes what this run made, and nothing else.
-    let kit = Kit::with_rdy(target, "rdy 0.15.0 (preview)", 0);
+    let kit = Kit::with_rdy(target, "rdy 0.15.0", 0);
     let input = kit.input();
     fs::write(kit.dir.path().join("pre fix").join("keep"), b"sentinel\n").expect("sentinel");
     assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Version));
@@ -1905,7 +1951,7 @@ fn pre3_bounds_and_owned_cleanup() {
     assert!(names(&kit.scratch).is_empty());
 
     // A failed daemon stop: the scratch project and PREFIX stay for a later stop.
-    let kit = Kit::with_rdy(target, "rdy 0.14.0 (preview)", 1);
+    let kit = Kit::with_rdy(target, "rdy 0.14.0", 1);
     let input = kit.input();
     assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Cleanup));
     let kept = names(&kit.scratch);
@@ -2000,7 +2046,7 @@ fn pre3_check_installs_and_runs_the_smoke_path() {
     );
     assert_eq!(
         fs::read(input.prefix.join("bin").join("rdy")).expect("installed"),
-        fake_rdy(&kit.marker, "rdy 0.14.0 (preview)", 0).into_bytes()
+        fake_rdy(&kit.marker, "rdy 0.14.0", 0).into_bytes()
     );
     assert_eq!(
         mode_of(&input.prefix.join("bin").join("rdy")).expect("mode"),
@@ -2030,7 +2076,7 @@ fn pre3_check_installs_and_runs_the_smoke_path() {
     // the mcp stage once the daemon is stopped.
     for (what, end) in [("exit 17", "exit 17"), ("a signal", "kill -9 $$")] {
         let kit = Kit::with_fake(host_target(), &|marker| {
-            fake_rdy_with(marker, "rdy 0.14.0 (preview)", 0, end)
+            fake_rdy_with(marker, "rdy 0.14.0", 0, end)
         });
         let input = kit.input();
         assert_eq!(
@@ -2046,4 +2092,142 @@ fn pre3_check_installs_and_runs_the_smoke_path() {
         assert!(absent(&input.unpack) && absent(&input.prefix), "{what}");
         assert!(names(&kit.scratch).is_empty(), "{what}: no scratch project");
     }
+}
+
+#[test]
+fn relc1_four_entry_manifest_verifies_before_extract() {
+    if !install_tools_or_skip(&crate::test_name!(
+        "relc1_four_entry_manifest_verifies_before_extract"
+    )) {
+        return;
+    }
+    let target = host_target();
+    // the four-line manifest of the plain names installs
+    let kit = Kit::new(target);
+    assert_eq!(
+        kit.lines()
+            .iter()
+            .map(|l| l.split("  ").nth(1).expect("name").trim_end().to_string())
+            .collect::<Vec<_>>(),
+        manifest_names(IV)
+    );
+    check_plain(&kit, &kit.input()).expect("the four-line manifest");
+
+    // A manifest that OpenSSH accepts but whose grammar is wrong stops the run as `checksums`,
+    // after the signature and before any extraction, install or run.
+    type Spoil = fn(&Kit);
+    let cases: [(&str, Spoil); 7] = [
+        ("the historical two-line manifest", |kit| {
+            let lines = kit.lines();
+            kit.write_manifest(format!("{}{}", lines[0], lines[2]).as_bytes());
+        }),
+        ("the historical three-line manifest", |kit| {
+            let lines = kit.lines();
+            kit.write_manifest(lines[..3].concat().as_bytes());
+        }),
+        ("the sample line before the archives", |kit| {
+            let mut lines = kit.lines();
+            lines.rotate_right(1);
+            kit.write_manifest(lines.concat().as_bytes());
+        }),
+        ("a preview archive name", |kit| {
+            let text = kit.lines().concat();
+            let name = archive_name(IV, kit.target);
+            let preview = format!("rdy-{IV}-preview-{}.tar.gz", kit.target);
+            kit.write_manifest(text.replace(&name, &preview).as_bytes());
+        }),
+        ("a path in the sample line", |kit| {
+            let text = kit.lines().concat();
+            kit.write_manifest(
+                text.replace(SAMPLE_FILE, "samples/tally.rdydump")
+                    .as_bytes(),
+            );
+        }),
+        ("an extra file", |kit| {
+            let mut text = kit.lines().concat();
+            text.push_str(&format!("{}  notes.txt\n", "cd".repeat(32)));
+            kit.write_manifest(text.as_bytes());
+        }),
+        ("CRLF line ends", |kit| {
+            kit.write_manifest(kit.lines().concat().replace('\n', "\r\n").as_bytes());
+        }),
+    ];
+    for (what, spoil) in cases {
+        let kit = Kit::new(target);
+        let input = kit.input();
+        spoil(&kit);
+        let before = kit.download_state();
+        let log = Log::new();
+        assert_eq!(
+            check_logged(&kit, &input, &log).map(|_| ()),
+            Err(InstallFailure::Checksums),
+            "{what}"
+        );
+        assert!(!log.touched_the_archive(), "{what}: {:?}", log.all());
+        kit.assert_untouched(&input, what);
+        assert_eq!(kit.download_state(), before, "{what}: DOWNLOAD unchanged");
+    }
+}
+
+#[test]
+fn relc1_sample_hash_is_separate_from_six_install_checks() {
+    if !install_tools_or_skip(&crate::test_name!(
+        "relc1_sample_hash_is_separate_from_six_install_checks"
+    )) {
+        return;
+    }
+    let target = host_target();
+    let names = |r: &InstalledRelease| {
+        r.checks
+            .iter()
+            .map(|c| (c.name.clone(), c.passed))
+            .collect::<Vec<_>>()
+    };
+    let six: Vec<(String, bool)> = CHECK_NAMES.iter().map(|n| (n.to_string(), true)).collect();
+
+    // no sample beside the archive: the six checks, no seventh
+    let kit = Kit::new(target);
+    let report = check_plain(&kit, &kit.input()).expect("no sample");
+    assert_eq!((names(&report), report.skipped), (six.clone(), 0));
+
+    // a sample that matches the manifest is hashed by the checksum tool and adds no check
+    let kit = Kit::new(target);
+    kit.add_sample(b"a stand-in for the frozen sample dump\n");
+    let log = Log::new();
+    let report = check_logged(&kit, &kit.input(), &log).expect("a good sample");
+    assert_eq!((names(&report), report.skipped), (six, 0));
+    assert!(log.ran("tar"), "{:?}", log.all());
+
+    // a sample that does not match its manifest line stops the run at `checksums`, before any
+    // extraction, install or run
+    let kit = Kit::new(target);
+    kit.add_sample(b"a stand-in for the frozen sample dump\n");
+    fs::write(kit.download.join(SAMPLE_FILE), b"another dump\n").expect("write");
+    let input = kit.input();
+    let before = kit.download_state();
+    let log = Log::new();
+    assert_eq!(
+        check_logged(&kit, &input, &log).map(|_| ()),
+        Err(InstallFailure::Checksums)
+    );
+    assert!(!log.touched_the_archive(), "{:?}", log.all());
+    kit.assert_untouched(&input, "a changed sample");
+    assert_eq!(kit.download_state(), before);
+
+    // a sample over its bound, or one that is not a regular file, is refused as input
+    let kit = Kit::new(target);
+    let big = fs::File::create(kit.download.join(SAMPLE_FILE)).expect("sample");
+    big.set_len(SAMPLE_MAX + 1).expect("sparse");
+    drop(big);
+    let input = kit.input();
+    assert_eq!(
+        check_plain(&kit, &input).map(|_| ()),
+        Err(InstallFailure::Input)
+    );
+    fs::remove_file(kit.download.join(SAMPLE_FILE)).expect("rm");
+    fs::create_dir(kit.download.join(SAMPLE_FILE)).expect("mkdir");
+    assert_eq!(
+        check_plain(&kit, &input).map(|_| ()),
+        Err(InstallFailure::Input)
+    );
 }

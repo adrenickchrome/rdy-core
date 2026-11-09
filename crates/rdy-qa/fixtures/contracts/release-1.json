@@ -2667,7 +2667,7 @@
       },
       "version_text": {
         "exit": 0,
-        "text": "rdy <version> (preview)"
+        "text": "rdy <version>"
       }
     },
     "tree": {

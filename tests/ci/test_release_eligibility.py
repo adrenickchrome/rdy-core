@@ -1495,8 +1495,9 @@ class ReleaseKind(Base):
         self.assertEqual([(c.kind, c.receipt_sha256, c.source) for c in q.cards], [('key_change', receipt, 'archive')])
         # After the key's first release, a later preview needs no card at all.
         self.qualifies(World())
-        # This checkpoint keeps the product a preview: the real declaration reads as one literal true.
-        self.assertIs(ELIGIBILITY.preview_declared((ROOT / PREVIEW_SOURCE).read_bytes()), True)
+        # Release 1 completes the packaging: the real declaration reads as one literal false. (The
+        # worlds above are the preview checkpoint's; a Release 1 world declares false the same way.)
+        self.assertIs(ELIGIBILITY.preview_declared((ROOT / PREVIEW_SOURCE).read_bytes()), False)
 
     def test_relc1_release_one_and_platform_cards_accumulate(self):
         def policy(targets):

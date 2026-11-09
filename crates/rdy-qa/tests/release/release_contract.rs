@@ -7311,6 +7311,14 @@ fn rtc7_contract_diff_is_limited_to_rules() {
     // historical digest is of the runtime with that one row back
     let mut runtime = without(&cli["runtime"], &|k| k != "probes");
     runtime["not_probed_commands"]["publication"] = json!("needs a publication profile");
+    // relc1 (Release 1) made the human version text plain, `$.cli.runtime.version_text.text`; the
+    // historical digest is of the runtime with that one value in its preview form
+    assert_eq!(
+        runtime["version_text"]["text"],
+        json!("rdy <version>"),
+        "the one changed value"
+    );
+    runtime["version_text"]["text"] = json!("rdy <version> (preview)");
     assert_eq!(
         digest_of(&runtime),
         "8d518aab09e1206edfb24fd47a7dca339e54af78df76cf6d029e5626435f59be"

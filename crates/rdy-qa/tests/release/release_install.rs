@@ -117,18 +117,13 @@ fn sha256_hex(file: &Path) -> String {
         .collect()
 }
 
-/// The archives a manifest lists for `target`, in name order: the two Unix archives, and for
-/// the Windows target all three.
-fn listed(target: &str) -> Vec<&'static str> {
-    if target == WINDOWS_TARGET {
-        vec![TARGETS[0], WINDOWS_TARGET, TARGETS[1]]
-    } else {
-        TARGETS.to_vec()
-    }
+/// The archives a manifest lists, in name order: macOS, Windows, Linux.
+fn listed() -> Vec<&'static str> {
+    vec![TARGETS[0], WINDOWS_TARGET, TARGETS[1]]
 }
 
 #[test]
-#[ignore = "requires a native preview archive target"]
+#[ignore = "requires a native release archive target"]
 fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
     installed_binary_runs_cli_and_mcp();
 }
@@ -142,7 +137,7 @@ fn wx36a_installed_cli_and_stdio_mcp_use_the_verified_exe() {
 
 fn installed_binary_runs_cli_and_mcp() {
     // Native release qualification: no skip path. A missing tool or target fails the test.
-    let target = platform::release_target().expect("a native preview archive target");
+    let target = platform::release_target().expect("a native release archive target");
     assert!(
         release_install::install_tools_available(target),
         "{}",
@@ -160,9 +155,9 @@ fn installed_binary_runs_cli_and_mcp() {
     let name = release_install::archive_name(V, target);
     fs::copy(&archive, download.join(&name)).expect("copy the archive");
 
-    // Two manifest lines (only the native archive is present), signed by a disposable test key.
-    // This key is never a release key.
-    let lines: String = listed(target)
+    // The four manifest lines (only the native archive is present, and no sample), signed by a
+    // disposable test key. This key is never a release key.
+    let lines: String = listed()
         .iter()
         .map(|t| {
             let file = download.join(release_install::archive_name(V, t));
@@ -173,6 +168,11 @@ fn installed_binary_runs_cli_and_mcp() {
             };
             format!("{hash}  {}\n", release_install::archive_name(V, t))
         })
+        .chain([format!(
+            "{}  {}\n",
+            "ab".repeat(32),
+            release_install::SAMPLE_FILE
+        )])
         .collect();
     let manifest = download.join(release_install::MANIFEST_FILE);
     fs::write(&manifest, &lines).expect("manifest");
@@ -268,7 +268,7 @@ fn installed_binary_runs_cli_and_mcp() {
         )
     );
 
-    // The installed product is bin/rdy alone, the verified archive's bytes, marked as a preview.
+    // The installed product is bin/rdy alone, the verified archive's bytes, plain (no preview note).
     assert_eq!(
         entries(&input.prefix),
         [
@@ -306,7 +306,7 @@ fn installed_binary_runs_cli_and_mcp() {
         RELEASE_CHILD_DEADLINE,
     )
     .expect("--version");
-    assert_eq!(version.stdout, format!("rdy {V} (preview)\n").into_bytes());
+    assert_eq!(version.stdout, format!("rdy {V}\n").into_bytes());
 
     // UNPACK and the signer file are gone, the download is unchanged, and no smoke daemon runs
     // (a hang guard while a stopped daemon leaves the process table, not a speed check).
@@ -383,12 +383,16 @@ fn pre3_preview_note_matches_readme_and_archive() {
             into.as_os_str(),
         ],
     );
-    let note = fs::read(
-        into.join(format!("rdy-{V}-preview-{target}"))
-            .join("PREVIEW.txt"),
-    )
-    .expect("PREVIEW.txt");
-    assert!(note == PREVIEW_NOTE.as_bytes(), "PREVIEW.txt is the note");
+    // the real build prints the plain version: its package has the plain stem and no note
+    // (the preview package, with PREVIEW.txt, is pinned by the unit tests with explicit fake
+    // binaries)
+    let root = into.join(format!("rdy-{V}-{target}"));
+    assert!(root.is_dir(), "the plain stem");
+    assert!(
+        !root.join("PREVIEW.txt").exists(),
+        "a plain build has no note"
+    );
+    assert!(!into.join(format!("rdy-{V}-preview-{target}")).exists());
 }
 
 #[test]
@@ -431,6 +435,48 @@ fn pre3_cli_prints_the_guide_and_refuses_bad_arguments() {
         Vec::<String>::new(),
         "print mode makes nothing"
     );
+    // the printed guide names the plain archive and its plain stem
+    assert!(
+        block.contains("rdy-0.14.0-x86_64-unknown-linux-gnu.tar.gz"),
+        "{block}"
+    );
+    assert!(
+        block.contains("/rdy-0.14.0-x86_64-unknown-linux-gnu/rdy"),
+        "{block}"
+    );
+    assert!(!block.contains("-preview-"), "{block}");
+
+    // the Windows guide is PowerShell with the plain archive path, on every host
+    let windows = InstallInput {
+        download: r"C:\Users\person\down load".into(),
+        target: WINDOWS_TARGET.into(),
+        unpack: r"C:\Users\person\un pack".into(),
+        prefix: r"C:\Users\person\rdy-0.14.0".into(),
+        ..input.clone()
+    };
+    let mut args = flags(&windows);
+    args.push("--print-commands".into());
+    let out = install(&args);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let guide = String::from_utf8(out.stdout).expect("utf-8");
+    assert_eq!(
+        guide,
+        format!(
+            "{}\n",
+            release_install::render_guide(&windows).expect("guide")
+        )
+    );
+    assert!(
+        guide.contains(
+            r"'C:\Users\person\down load\rdy-0.14.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\Users\person\un pack'"
+        ),
+        "{guide}"
+    );
+    assert!(
+        guide.contains(r"\rdy-0.14.0-x86_64-pc-windows-msvc\rdy.exe"),
+        "{guide}"
+    );
+    assert!(!guide.contains("-preview-"), "{guide}");
 
     // --help exits 0 with usage.
     let out = install(&["--help"]);

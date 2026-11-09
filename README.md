@@ -432,9 +432,9 @@ cd '/path/to/download' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
 'mkdir' '/path/to/unpack' '/path/to/rdy-0.41.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'tar' '-xzf' '/path/to/download/rdy-0.41.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
 'mkdir' '-p' '/path/to/rdy-0.41.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
 '/path/to/rdy-0.41.0/bin/rdy' '--version'
 ```
 
@@ -446,10 +446,34 @@ cd '/path/to/download' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
 'mkdir' '/path/to/unpack' '/path/to/rdy-0.41.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.41.0-preview-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'tar' '-xzf' '/path/to/download/rdy-0.41.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
 'mkdir' '-p' '/path/to/rdy-0.41.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-preview-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
 '/path/to/rdy-0.41.0/bin/rdy' '--version'
+```
+
+On Windows amd64, in PowerShell:
+
+```powershell
+& {
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath 'C:\path\to\download'
+$s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]'ReadWrite, Delete'); $s.SetLength(0); $b = [Text.Encoding]::UTF8.GetBytes('rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' + [char]10); $s.Write($b, 0, $b.Length); $s.Close()
+& 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
+if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
+$n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.41.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.41.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.41.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.41.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.41.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.41.0\bin\rdy.exe' '--version'
+if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
+}
+# Add the version's bin directory to PATH in this session:
+# $env:Path = 'C:\path\to\rdy-0.41.0\bin;' + $env:Path
+# rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
+# $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
 
 On macOS arm64, for an archive downloaded with a web browser:
@@ -461,11 +485,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz' &&
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.41.0-aarch64-apple-darwin.tar.gz' &&
 'mkdir' '/path/to/unpack' '/path/to/rdy-0.41.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.41.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'tar' '-xzf' '/path/to/download/rdy-0.41.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
 'mkdir' '-p' '/path/to/rdy-0.41.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.41.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.41.0/bin/rdy' &&
 '/path/to/rdy-0.41.0/bin/rdy' '--version'
 ```
 
