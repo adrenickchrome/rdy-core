@@ -38,6 +38,9 @@ pub const ADR_REF_PREFIX: &str = "foreign/adr/";
 pub const MAX_CHAIN: usize = 100_000;
 /// The most members of one selection, or of one delta list, or held versions in one entry.
 pub const MAX_LIST: usize = 100_000;
+/// The `(raw kind, payload)` items of one batch.
+type Items = Vec<(u8, Vec<u8>)>;
+
 /// The longest source key (a link's block id or an ADR source's name), in bytes.
 const MAX_SOURCE_KEY: usize = 256;
 
@@ -109,7 +112,7 @@ impl Store {
         &self,
         entry: &ForeignEntry,
         blocks: &[Block],
-    ) -> Result<(Hash, Vec<(u8, Vec<u8>)>), StoreError> {
+    ) -> Result<(Hash, Items), StoreError> {
         if self.mode()? != StoreMode::Project {
             return Err(refused("a holder store holds no foreign entry".into()));
         }
@@ -223,7 +226,7 @@ impl Store {
         &self,
         versions: impl Iterator<Item = &'a ForeignVersion>,
         blocks: &[Block],
-    ) -> Result<Vec<(u8, Vec<u8>)>, StoreError> {
+    ) -> Result<Items, StoreError> {
         let mut given: BTreeMap<Hash, (&Block, (u8, Vec<u8>))> = BTreeMap::new();
         for b in blocks {
             let item = codec::item_new(kinds::BLOCK, b);
