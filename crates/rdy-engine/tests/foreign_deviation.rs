@@ -134,6 +134,7 @@ fn deliver(r: &mut Rdy, repo: RepoId, source: ForeignSource, profile: &str, bloc
             added: blocks.iter().map(|b| fv(b)).collect(),
             changed: vec![],
             removed: vec![],
+            shells: vec![],
             selection: selection_identity(sel.iter()).unwrap(),
         },
     };

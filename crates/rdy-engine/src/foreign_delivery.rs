@@ -427,6 +427,9 @@ pub fn take_delivery(
             added,
             changed,
             removed,
+            // the delivery's shells travel with it: the store rebuilds `selection` from the
+            // delivered versions plus these (D-2CG1N)
+            shells: d.shells.clone(),
             selection: d.selection,
         },
     };

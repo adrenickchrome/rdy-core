@@ -540,6 +540,7 @@ impl StoreReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdy_model::foreign::selection_identity;
 
     #[test]
     fn source_refs_by_variant() {
@@ -576,6 +577,7 @@ mod tests {
                 added: vec![],
                 changed: vec![],
                 removed: vec![],
+                shells: vec![],
                 selection: selection_identity(std::iter::empty::<(&BlockId, &Hash)>()).unwrap(),
             },
         }

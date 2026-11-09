@@ -8,7 +8,10 @@ use rdy_adapter::{
     BlockId, DeliverySource, ForeignSet, Hash, LinkSource, RdyError, RepoId, StoreHandle,
 };
 use rdy_model::Block;
-use rdy_model::foreign::{ForeignDerived, ForeignPublication, ForeignVersion, selection_identity};
+use rdy_model::foreign::{
+    ForeignDerived, ForeignEvent, ForeignPublication, ForeignShell, ForeignVersion,
+    delivery_selection, selection_identity,
+};
 use rdy_store::codec;
 use rdy_store::format::baseline_features;
 use rdy_store::kinds;
@@ -95,6 +98,8 @@ struct Stream<'a> {
     selected: Vec<(&'a Block, ForeignDerived)>,
     /// The ids whose record the stream leaves out.
     missing: Vec<&'a str>,
+    /// The delivery's shells (D-2CG1N), in id order: no record follows for one.
+    shells: Vec<ForeignShell>,
 }
 
 impl<'a> Stream<'a> {
@@ -106,6 +111,7 @@ impl<'a> Stream<'a> {
             profile_version: Some(Hash([3; 32])),
             selected: selected.iter().map(|(b, s)| (*b, derived(s))).collect(),
             missing: vec![],
+            shells: vec![],
         }
     }
 
@@ -117,7 +123,8 @@ impl<'a> Stream<'a> {
             .iter()
             .map(|(b, d)| version(b, d.clone()))
             .collect();
-        let selection = selection_identity(versions.iter().map(|v| (&v.id, &v.version))).unwrap();
+        let selection =
+            delivery_selection(versions.iter().map(|v| (&v.id, &v.version)), &self.shells).unwrap();
         let delivery = DeliveryRecord {
             publication: ForeignPublication {
                 tag: self.tag.into(),
@@ -126,6 +133,7 @@ impl<'a> Stream<'a> {
             },
             selection,
             versions,
+            shells: self.shells.clone(),
         };
         let header = StreamHeader::link_delivery(
             baseline_features(),
@@ -462,6 +470,7 @@ fn rpl10_take_refuses_self_holder_revoked_and_missing() {
             },
             selection,
             versions,
+            shells: vec![],
         };
         let header = StreamHeader::link_delivery(baseline_features(), CITED, Hash([1; 32]));
         let mut w = StreamWriter::new_delivery(Vec::new(), &header, &delivery).unwrap();
@@ -661,4 +670,84 @@ fn rpl10_take_checks_input_bounds_first() {
     assert!(!taken.unchanged);
     assert_eq!((taken.added, taken.blocks_taken), (1, 1));
     handle.close().unwrap();
+}
+
+/// Integration of rpl9 and rpl10 (D-2CG1N): a take keeps the delivery's shells in its FOREIGN
+/// entry, so the store's selection check (delivered versions plus shells) holds. The same stream
+/// again is a no-op; a delivery that drops the shell changes the selection and writes an entry.
+#[test]
+fn rpl10_take_keeps_the_delivery_shells() {
+    let dir = project();
+    let files = tempfile::tempdir().unwrap();
+    let a = block("d-00001", "A");
+    let shell = ForeignShell {
+        id: id("d-00009"),
+        version: Hash([9; 32]),
+    };
+    let mut shelled = Stream::of(&[(&a, "accepted")]);
+    shelled.shells = vec![shell.clone()];
+    let mut rdy = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let src = rdy_model::foreign::ForeignSource::Link {
+        link: "rl-00001".into(),
+        site: "hub.example".into(),
+        at_ms: 1,
+    };
+    let taken = rdy_engine::foreign_delivery::take_delivery(
+        &mut rdy,
+        &shelled.write(files.path(), "1"),
+        &src,
+        None,
+    )
+    .unwrap();
+    assert!(!taken.unchanged);
+    assert_eq!((taken.added, taken.blocks_taken), (1, 1));
+    let entry = rdy.store().reader().foreign_entry(&taken.entry).unwrap();
+    let ForeignEvent::Delivery {
+        shells, selection, ..
+    } = entry.event
+    else {
+        panic!("a take writes a delivery");
+    };
+    assert_eq!(shells, vec![shell]);
+    assert_eq!(selection, taken.selection);
+    {
+        let state = rdy.read();
+        let seen = state
+            .foreign()
+            .unwrap()
+            .link_source(&id("rl-00001"))
+            .unwrap();
+        assert_eq!(
+            seen.members.keys().cloned().collect::<Vec<_>>(),
+            [id("d-00001")],
+            "a shell is no member"
+        );
+    }
+    let again = rdy_engine::foreign_delivery::take_delivery(
+        &mut rdy,
+        &shelled.write(files.path(), "2"),
+        &src,
+        None,
+    )
+    .unwrap();
+    assert!(again.unchanged);
+    assert_eq!(again.entry, taken.entry);
+    let plain = rdy_engine::foreign_delivery::take_delivery(
+        &mut rdy,
+        &Stream::of(&[(&a, "accepted")]).write(files.path(), "3"),
+        &src,
+        None,
+    )
+    .unwrap();
+    assert!(!plain.unchanged, "dropping a shell changes the selection");
+    assert_eq!(
+        (
+            plain.added,
+            plain.changed,
+            plain.removed,
+            plain.blocks_taken
+        ),
+        (0, 0, 0, 0)
+    );
+    rdy.close().unwrap();
 }
