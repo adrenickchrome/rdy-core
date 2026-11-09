@@ -141,6 +141,7 @@ Compare this line and fingerprint with the ones in the README at v0.47.0. Use th
 ### Fixes
 
 - **The old daemon cannot write to a replaced store.** Before, when a project's store was replaced while its daemon still wrote, the daemon's last write could reach the new store. Now `rdy load` and a new daemon wait until the old daemon's last write ends.
+- **The live site starts on Windows when ports are reserved.** Hyper-V, WSL or Docker can reserve the site's candidate ports, and the site then did not start. Now it takes a port that the operating system assigns.
 
 ### Project and build
 
@@ -168,6 +169,7 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 - In a project with very many keys in one doc, a key change can land without a new assessment.
 - A rule that you remove twice and then state a third time, with the same text, selectors, ruleset and reason, stops as not ready. Give it a different reason.
 - The tool schemas show example ids, such as `D-W2HXR`, `FW-E3` and `M2c3`, that look like real ids. They are only examples. Earlier releases showed them too.
+- On Windows, the checksum step of the install guide, `Get-FileHash`, fails with "not recognized" when another program starts Windows PowerShell 5.1 from PowerShell 7. Run the step in a normal PowerShell 5.1 or 7 window.
 - Your meta project has its own daemon. `rdy serve --stop` in a project does not stop it.
 
 ## Third-party source (MPL-2.0)
