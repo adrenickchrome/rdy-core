@@ -27681,8 +27681,32 @@
   },
   "store": {
     "activation": {
+      "kind 1 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
+      ],
+      "kind 10 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
+      ],
+      "kind 17 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
+      ],
+      "kind 18 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
+      ],
+      "kind 19 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
+      ],
       "kind 2 encoding 1": [
         "object_encoding"
+      ],
+      "kind 20 encoding 1": [
+        "object_encoding",
+        "foreign_copy"
       ],
       "kind 21 encoding 1": [
         "object_encoding"
@@ -27770,6 +27794,7 @@
         "CHECK_REQUEST": 1,
         "DISPUTE": 1,
         "DISPUTE_RESOLUTION": 1,
+        "FOREIGN": 1,
         "INTENT": 0,
         "LANDING": 0,
         "PLAN": 0,
@@ -27800,6 +27825,7 @@
         "CHECK_REQUEST": 1,
         "DISPUTE": 1,
         "DISPUTE_RESOLUTION": 1,
+        "FOREIGN": 1,
         "INTENT": 0,
         "LANDING": 1,
         "PLAN": 0,
@@ -27817,6 +27843,40 @@
         "TRANSITION": 0,
         "VIEW_OP": 0
       },
+      "optional": [
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          17,
+          1
+        ],
+        [
+          18,
+          1
+        ],
+        [
+          19,
+          1
+        ],
+        [
+          10,
+          1
+        ],
+        [
+          20,
+          1
+        ],
+        [
+          25,
+          2
+        ]
+      ],
       "registered": [
         [
           2,
@@ -27845,6 +27905,10 @@
         [
           28,
           1
+        ],
+        [
+          29,
+          1
         ]
       ],
       "versioned_flag": 128
@@ -27854,6 +27918,7 @@
       "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
       "content_hash_v2": "baseline: every store this rdy writes",
       "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
+      "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
       "object_encoding": "any frame of encoding 1 or more",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
       "view_replay": "a CHANGE whose links.replayed_from is set"
@@ -27878,6 +27943,11 @@
         "class": "incompatible",
         "name": "dispute",
         "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "foreign_copy",
+        "required_rdy": "0.48.0"
       },
       {
         "class": "incompatible",
@@ -27907,6 +27977,7 @@
       "CHECK_REQUEST": 28,
       "DISPUTE": 26,
       "DISPUTE_RESOLUTION": 27,
+      "FOREIGN": 29,
       "INTENT": 15,
       "LANDING": 4,
       "PLAN": 24,
@@ -28101,11 +28172,13 @@
       "AnswerAct": {
         "AcceptDeferrals": 11,
         "AcceptVerdict": 16,
+        "Adopt": 17,
         "AnswerQuestion": 4,
         "CloseStale": 8,
         "Confirm": 2,
         "Dismiss": 5,
         "Dispute": 14,
+        "KeepPin": 18,
         "KeepSuspect": 10,
         "Later": 1,
         "Propose": 9,
@@ -28191,6 +28264,7 @@
       "check_request",
       "content_hash_v2",
       "dispute",
+      "foreign_copy",
       "object_encoding",
       "plan_tension",
       "view_replay"
