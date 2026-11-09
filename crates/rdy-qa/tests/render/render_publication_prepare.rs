@@ -288,6 +288,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// Re-taken when main's instruction type (0.40.0) met the as-built fields: the combined pack's
 /// digest moves the version's hash once more. Only the proposal scope moved; the site digests
 /// and the other three scopes kept their bytes.
+/// Re-taken for the repo_link block type (rpl4): it joins every resolved pack, so the pack's
+/// digest and the version's hash move. Only the proposal scope moved; the site digests and the
+/// other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -322,11 +325,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "f3e7fdfb256a24bbc6360f878143ad16a767d182f18ba4c547aac9b64318cb7d",
-            "bdfd3db4478741a503842ae27945f6633fd53b95a6ad42fdb27726825aab366f",
-            "57d5a7fa9e5da6e6996ee7f3ee6285377eb3fb71aaec6d04137d5c3cc77002f0",
-            "d669bc8cb497d01a531b3daaa37fa1b161e8a70d4e2bd8bb80441f4297aea897",
-            "2b4ef2b81e3969de5c333b077690f58cbce87fe4465b083e31e25cce31120d3d",
+            "0bacff087b306a8ab2399aadd67be48b97255574928c6a1a806146eb158d105d",
+            "a5834533b3ccf57a77e82e2a7df4ef22343035727c5b1648fa41a72468fef813",
+            "e09a6a7c5bd1fc9d5d9563b9e2cee277b4a17ebc225e00e9b5773145b71a9b3f",
+            "7a70b3bdb38b7fad99aaeeb7e1f494b944c6ea28e0b49d8c611c2588368a829f",
+            "587c3ac40bd831c023f5ecc4058594664db0a5906475b0238c0fa4320c7680d9",
         ],
     ),
 ];

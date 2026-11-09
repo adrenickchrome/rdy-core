@@ -16671,9 +16671,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "b06e64c985dd2c937116dcaba7b1625deb46c9f1766fb20c959c5bd01f0cdcd1"
+              "c96683a563f1b3f935e71a8f7fef6a1e5d85fb47b900f4ce88bb8f633c6baca8"
             ],
-            "line": "P-b06e64c985dd@1 waits for an answer; read rdy_pending"
+            "line": "P-c96683a563f1@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -16693,46 +16693,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "1e87603f85c053c8e49a932daa36460c18b42cfaa158e95b2ed79a67e2e904bb"
+              "3b365e317f5275f5a04c0fbe4f63d0575f0243824f4d03e3332fc74d6599836d"
             ],
-            "line": "P-1e87603f85c0@1 waits for an answer; read rdy_pending"
+            "line": "P-3b365e317f52@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "b1bfef94acb8663396899e76e108b3f0b38e4da1682210251d67e13ae292709b",
-              "1e87603f85c053c8e49a932daa36460c18b42cfaa158e95b2ed79a67e2e904bb"
+              "88c34fbff364e18d49de2ab53157b5ff504613ed1d4f1ce8b92100c95aa130ff",
+              "3b365e317f5275f5a04c0fbe4f63d0575f0243824f4d03e3332fc74d6599836d"
             ],
-            "line": "landing b1bfef94acb8 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 88c34fbff364 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "b1bfef94acb8663396899e76e108b3f0b38e4da1682210251d67e13ae292709b",
+              "88c34fbff364e18d49de2ab53157b5ff504613ed1d4f1ce8b92100c95aa130ff",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing b1bfef94acb8 with 1 conflicts"
+            "line": "your view a rebased onto landing 88c34fbff364 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "4cfebfe48e4d8dbdfc9357ea8baed7346781142c2f47ed0f9ba6b8dcf73a1f03",
+              "bc2501dbc52aa18711bdc2f49c352859425a492c3ecb58a60dd67d2711b04221",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 4cfebfe48e4d replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing b1bfef94acb8"
+            "line": "tension bc2501dbc52a replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 88c34fbff364"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
         "tn-26128692ed56",
-        "tn-4cfebfe48e4d",
-        "tn-91ff37c35dde"
+        "tn-b193a13b5413",
+        "tn-bc2501dbc52a"
       ],
       "tensions": {
         "tn-26128692ed56": "open",
-        "tn-4cfebfe48e4d": "open",
-        "tn-91ff37c35dde": "open"
+        "tn-b193a13b5413": "open",
+        "tn-bc2501dbc52a": "open"
       },
       "transitions": 3
     },
@@ -17233,6 +17233,7 @@
       "E_ELICITATION_UNAVAILABLE": "\"E_ELICITATION_UNAVAILABLE\"",
       "E_EXCEPTION_OPEN": "\"E_EXCEPTION_OPEN\"",
       "E_FILE_FORMAT": "\"E_FILE_FORMAT\"",
+      "E_FOREIGN_VERSION": "\"E_FOREIGN_VERSION\"",
       "E_FROZEN": "\"E_FROZEN\"",
       "E_HAS_CHILDREN": "\"E_HAS_CHILDREN\"",
       "E_HAS_DEPENDENTS": "\"E_HAS_DEPENDENTS\"",
@@ -26526,6 +26527,7 @@
             "finding",
             "source",
             "instruction",
+            "repo_link",
             "publication_profile",
             "authority_policy"
           ],
@@ -26985,6 +26987,36 @@
           "traits": [
             "informative"
           ]
+        },
+        "repo_link": {
+          "body": "forbidden",
+          "children": [],
+          "class": "supporting",
+          "fields": {
+            "alias": {
+              "kind": "str",
+              "required": true,
+              "values": []
+            },
+            "profile": {
+              "kind": "str",
+              "required": true,
+              "values": []
+            },
+            "repo": {
+              "kind": "str",
+              "required": true,
+              "values": []
+            },
+            "title": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            }
+          },
+          "prefix": "rl",
+          "tracking": [],
+          "traits": []
         },
         "requirement": {
           "body": "required",
@@ -27472,7 +27504,7 @@
         "reads": "land"
       },
       "unknown_field_kind": "pack YAML is invalid: block_types.t.fields.f.kind: unknown variant `nope`, expected one of `str`, `int`, `bool`, `list`, `map`, `enum` at line 8 column 15",
-      "unknown_pack_key": "pack YAML is invalid: unknown field `bogus`, expected one of `name`, `version`, `extends`, `link_types`, `block_types`, `doc_types`, `default_doc_type`, `tensions`, `duplicate_text_min_words`, `areas`, `coverage`, `rules` at line 3 column 1"
+      "unknown_pack_key": "pack YAML is invalid: unknown field `bogus`, expected one of `name`, `version`, `extends`, `link_types`, `block_types`, `doc_types`, `default_doc_type`, `tensions`, `tensions_across`, `duplicate_text_min_words`, `areas`, `coverage`, `rules` at line 3 column 1"
     }
   },
   "signatures": {
@@ -28384,6 +28416,10 @@
       [
         0,
         "tag_history"
+      ],
+      [
+        1,
+        "link_delivery"
       ]
     ],
     "record_kinds": {
