@@ -225,6 +225,35 @@ fn wx6_directory_flush_is_real_or_io() {
         let locked = d.join("locked");
         fs::create_dir(&locked).unwrap();
         deny_adding_entries(&locked);
+        if let Some(why) = adding_allowed(&locked) {
+            // The deny entry is not in force for this account (a privilege or an ACL of the
+            // host overrides it), so the precondition of the failure path does not hold. A
+            // flush is then the other half of "real or io": the real call, made and recorded.
+            eprintln!("wx6: the deny entry is not in force ({why}); the flush must be real");
+            let ((), seen) = watched(|| pio::sync_dir(&locked).unwrap());
+            assert_eq!(
+                seen,
+                [
+                    (flush(&locked), Boundary::Before),
+                    (flush(&locked), Boundary::After)
+                ]
+            );
+            let dir = pio::open_dir(&locked).unwrap();
+            let ((), seen) = watched(|| pio::sync_open_dir(&dir, &locked).unwrap());
+            assert_eq!(
+                seen,
+                [
+                    (flush(&locked), Boundary::Before),
+                    (flush(&locked), Boundary::After)
+                ]
+            );
+            let (r, synced) = fsutil::record_syncs(|| fsutil::sync_dir(&locked));
+            r.unwrap();
+            assert_eq!(synced, [locked.clone()]);
+            drop(dir);
+            allow_adding_entries(&locked);
+            return;
+        }
         let e = pio::sync_dir(&locked).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
         assert!(e.to_string().ends_with("(os error 5)"), "{e}");
@@ -255,9 +284,50 @@ fn allow_adding_entries(dir: &Path) {
     icacls(dir, &["/remove:d", &user()]);
 }
 
+/// Probes whether this account can still add an entry to `dir`: it tries to create a file and a
+/// directory in it. `None` when both are refused with access denied (the deny entry is in force);
+/// otherwise the reason, and any entry the probe made is removed again.
+#[cfg(windows)]
+fn adding_allowed(dir: &Path) -> Option<String> {
+    let file = dir.join("probe-file");
+    let sub = dir.join("probe-dir");
+    let made_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map(drop);
+    let made_dir = fs::create_dir(&sub);
+    let denied =
+        |r: &io::Result<()>| matches!(r, Err(e) if e.raw_os_error() == Some(ACCESS_DENIED));
+    if denied(&made_file) && denied(&made_dir) {
+        return None;
+    }
+    if made_file.is_ok() {
+        fs::remove_file(&file).unwrap();
+    }
+    if made_dir.is_ok() {
+        fs::remove_dir(&sub).unwrap();
+    }
+    Some(format!(
+        "as {}, creating a file gave {made_file:?} and a directory {made_dir:?}",
+        user()
+    ))
+}
+
+/// This process's account, as its token's SID (`*S-1-5-...`, which icacls takes): the account the
+/// deny entry must name. `USERNAME` is not used: a process started for another account can inherit
+/// it from its parent, and a deny entry for the parent's account does not stop this one.
 #[cfg(windows)]
 fn user() -> String {
-    std::env::var("USERNAME").unwrap()
+    let out = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "whoami: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sid = text.trim().rsplit(',').next().unwrap().trim_matches('"');
+    assert!(sid.starts_with("S-1-"), "whoami: {text}");
+    format!("*{sid}")
 }
 
 #[cfg(windows)]
