@@ -84,7 +84,7 @@ fn rpl1_sources_and_events_have_closed_shapes() {
         publication: ForeignPublication {
             tag: "t".into(),
             profile: "p".into(),
-            profile_version: 1,
+            profile_version: Some(Hash::of(b"profile")),
         },
         set: Some(ForeignSet::Team("core".into())),
         added: vec![version("D-00001")],
@@ -159,4 +159,23 @@ fn rpl1_adr_source_id_is_domain_separated() {
         selection_hash(&[x.clone(), y.clone()]),
         selection_hash(&[y, x])
     );
+}
+
+#[test]
+fn rpl1_publication_profile_version_is_a_hash_or_absent() {
+    for profile_version in [Some(Hash::of(b"a profile")), None] {
+        let p = ForeignPublication {
+            tag: "t".into(),
+            profile: "p".into(),
+            profile_version,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        match profile_version {
+            Some(h) => assert!(json.contains(&format!("\"profile_version\":\"{h}\""))),
+            None => assert!(json.contains("\"profile_version\":null")),
+        }
+        assert_eq!(from_json::<ForeignPublication>(&json).unwrap(), p);
+        let pc = postcard::to_allocvec(&p).unwrap();
+        assert_eq!(postcard::from_bytes::<ForeignPublication>(&pc).unwrap(), p);
+    }
 }

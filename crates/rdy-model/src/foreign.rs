@@ -161,7 +161,8 @@ pub struct ForeignVersion {
 pub struct ForeignPublication {
     pub tag: String,
     pub profile: String,
-    pub profile_version: u32,
+    #[serde(with = "hex_opt")]
+    pub profile_version: Option<Hash>,
 }
 
 /// The set a delivery serves. An absent set is `None` at the delivery.
