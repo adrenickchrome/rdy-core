@@ -4,6 +4,10 @@
 //! propose batch writes a plan version, an item-ful landing a sealed one): the fixtures' proposes
 //! and landings write PLAN frames, so the log ends later. Every entry kept its bytes, as in the
 //! two MCP inbox goldens.
+//! The agent page's proposal, landing and replacing-tension ids were re-taken when repo links
+//! injected the engine type repo_link into every resolved pack (repo links plan, Task 4): the
+//! pack digest each assessment records moved, so each landing id and every later `canon_at`
+//! moved with it. Every line kept its text.
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::{Local, Session, pin_clock};
