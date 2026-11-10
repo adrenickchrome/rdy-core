@@ -751,3 +751,88 @@ fn rpl24_bad_proof_and_wrong_repo_write_nothing() {
     assert!(erased(&x.path, &c.v1));
     clean(&mut x.store, 4);
 }
+
+/// Fix round 1 (review F1): one landing approves two requests; the citing project takes their
+/// applies one after the other on one handle. The first take stores the second request with no
+/// objects (its landing approves it beside the applied one); the second take, whose batch
+/// already holds that request, must give it the versions it erases before its apply is
+/// indexed, or the index refuses the apply and poisons the handle.
+#[test]
+fn rpl24_two_requests_of_one_landing_taken_in_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cited");
+    let a = block("D-00001", "a leaked key in the first decision");
+    let b = block("D-00002", "a leaked key in the second decision");
+    let repo = {
+        let mut s = Store::create(&path).unwrap();
+        s.commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![
+                    Op::Create { block: a.clone() },
+                    Op::Create { block: b.clone() },
+                ],
+            ),
+        )
+        .unwrap();
+        s.repo_id().unwrap().unwrap()
+    };
+    let target = |x: &Block| RedactTarget::Version {
+        id: x.id.clone(),
+        version: version_of(x),
+    };
+    let fixture = authorized_batch_fixture(
+        &path,
+        &[
+            RequestSpec::new("work", vec![target(&a)]).at(60),
+            RequestSpec::new("work", vec![target(&b)]).at(61),
+        ],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    assert_eq!(fixture.applies.len(), 2);
+    let cited = Store::open(&path).unwrap();
+    let reader = cited.reader();
+    let source = || StoreSource {
+        reader: &reader,
+        end: END_OF_LOG,
+    };
+
+    let cdir = tempfile::tempdir().unwrap();
+    let cpath = cdir.path().join("citing");
+    let mut s = Store::create(&cpath).unwrap();
+    let mut live = Source::new(repo, link("rl-00001"));
+    live.deliver(&mut s, &[&a, &b]);
+
+    // each apply erases the version its own request names, on the same handle
+    let mut erased_by = vec![];
+    for (apply, _) in &fixture.applies {
+        let taken = take(&mut s, repo, repo, *apply, &mut source()).unwrap();
+        assert!(taken.entry.is_some());
+        assert_eq!(taken.erased.len(), 1, "{taken:?}");
+        erased_by.extend(taken.erased);
+    }
+    erased_by.sort();
+    assert_eq!(erased_by, vec![pair(&a), pair(&b)]);
+    for x in [&a, &b] {
+        assert!(erased(&cpath, x), "{}", x.id);
+        assert!(removed(&s, x), "{}", x.id);
+    }
+    // the handle still writes, and fsck passes on its index and on a rebuilt one
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create {
+                block: block("C-00001", "a local claim"),
+            }],
+        ),
+    )
+    .unwrap();
+    // 3 entries: the delivery and the two removals
+    clean(&mut s, 3);
+    s.close().unwrap();
+    let mut s = Store::open(&cpath).unwrap();
+    assert!(removed(&s, &a) && removed(&s, &b));
+    clean(&mut s, 3);
+}

@@ -121,6 +121,15 @@ impl ForeignAuthority {
             .is_ok()
     }
 
+    /// The request the verified foreign removal whose apply frame is at `loc` applies, if one
+    /// is.
+    pub(crate) fn request_of_apply(&self, loc: Location) -> Option<Hash> {
+        self.proofs
+            .binary_search_by_key(&loc, |p| p.apply_loc)
+            .ok()
+            .map(|i| self.proofs[i].request)
+    }
+
     /// The index entry of a request frame whose own entry is `native`, when a foreign removal
     /// reads it: the request a proof applies keeps the versions the entry erases and the spans
     /// this log derives, never the cited log's places; a request the landing approves beside it

@@ -2532,7 +2532,10 @@ impl Store {
 
     /// [`Store::placed_entries`] for a batch that `auth` (its validated authorization) reads:
     /// a request's entry is the one `auth` gives it, and a foreign removal's proof record is an
-    /// object only (`crate::foreign_removal`).
+    /// object only (`crate::foreign_removal`). A foreign removal whose request an earlier batch
+    /// stored (an earlier take of another request of the same landing gave it no objects) gets
+    /// that request's entry again from `auth`, before its apply, so the apply activates the
+    /// versions it erases.
     fn placed_entries_under(
         &self,
         frames: &[(u8, Vec<u8>)],
@@ -2543,6 +2546,15 @@ impl Store {
         let mut r = Resolver::new(&reader);
         let mut out = vec![];
         for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
+            if crate::codec::logical_kind(*kind) == kinds::REDACTION_APPLY
+                && let Some(request) = auth.foreign.request_of_apply(*at)
+                && !frames.iter().any(|(k, p)| {
+                    crate::codec::logical_kind(*k) == kinds::REDACTION && Hash::of(p) == request
+                })
+            {
+                let (_, stored) = reader.get_kind_raw(kinds::REDACTION, &request)?;
+                out.push(auth.request_entry(request, &stored)?);
+            }
             if let Some(e) = auth.foreign.frame_entries(*kind, *hash, *at) {
                 r.note(crate::codec::logical_kind(*kind), *hash, *at)?;
                 out.extend(e);
