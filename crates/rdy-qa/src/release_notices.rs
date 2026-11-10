@@ -993,7 +993,7 @@ pub fn release_format_move_line(version: &str) -> Result<Option<String>, String>
 /// feature-move line; a feature not listed is "first uses it".
 const FEATURE_FIRST_USE: &[(&str, &str)] = &[(
     rdy_store::format::FEATURE_FOREIGN_COPY,
-    "takes its first repo link delivery",
+    "first writes a repo link (in any view, even before a delivery)",
 )];
 
 /// The sync stream formats added after Release 1, each with the first rdy that writes it and
@@ -2683,7 +2683,7 @@ mod tests {
         assert_eq!(FOREIGN_COPY_REQUIRED_RDY, "0.48.0");
         let features = registered_features();
         let want = [
-            "- **Breaking for older rdy: rdy 0.48.0 adds the store feature `foreign_copy` (class incompatible, minimum rdy 0.48.0); store format 19 and dump format 4 stay.** A store starts to use `foreign_copy` only when its project takes its first repo link delivery, and only a store or dump that uses it needs rdy 0.48.0: rdy 0.47.0 refuses one with `E_STORE_FORMAT` and names rdy 0.48.0. rdy 0.48.0 opens a store made by rdy 0.47.0 as it is, and loads every earlier dump.",
+            "- **Breaking for older rdy: rdy 0.48.0 adds the store feature `foreign_copy` (class incompatible, minimum rdy 0.48.0); store format 19 and dump format 4 stay.** A store starts to use `foreign_copy` only when its project first writes a repo link (in any view, even before a delivery), and only a store or dump that uses it needs rdy 0.48.0: rdy 0.47.0 refuses one with `E_STORE_FORMAT` and names rdy 0.48.0. rdy 0.48.0 opens a store made by rdy 0.47.0 as it is, and loads every earlier dump.",
             "- **Breaking for older rdy: rdy 0.48.0 adds sync stream format 3 (purpose `link_delivery`); a tag history stays sync stream format 2.** rdy 0.48.0 reads sync stream formats 2 and 3. rdy 0.47.0 reads sync stream format 2 only and refuses a format 3 file.",
         ];
         let got = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
