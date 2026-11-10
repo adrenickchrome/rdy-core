@@ -449,6 +449,10 @@ fn plb1_schema_explains_the_decision_parent() {
     // re-taken once more when its move text named every top-level block, as ruling final-round1
     // item 2 gives it word for word: "a move without parent goes to the top level (docs, folders,
     // decisions, questions, findings and sources)".
+    // rdy_decide's and rdy_supersede's are re-taken once more for repo links (rpl30, rpl34): rdy_decide
+    // gained the optional `deviates_from`; rdy_supersede gained the optional `adopted_as`, `brief` and
+    // `view` of the adopted branch, and its `decision` is optional (`anyOf` with null) and no longer
+    // required, with the two branches named in its text. Nothing else moved; rdy_write and rdy_revoke stay.
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
@@ -456,11 +460,11 @@ fn plb1_schema_explains_the_decision_parent() {
         ),
         (
             "rdy_decide",
-            "0b3befbb6412d1b97e7388dea302c8206bb1f65a8b28514ae2051968a427911b",
+            "c98d92a34d4c59cf78eba13b0a6640ad69b033bede73b820511d1956ec9f5a15",
         ),
         (
             "rdy_supersede",
-            "4892eba948ff86127fc2e909375e328ccffd14b54bfbc340ae7247d85450bd57",
+            "b1e13fa284040c7e15a0a74949ff7a336e8bdb8c79aa16a4d18327883a937c51",
         ),
         (
             "rdy_revoke",

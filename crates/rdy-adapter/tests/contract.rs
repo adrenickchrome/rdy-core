@@ -274,3 +274,119 @@ fn ha3_wide_values_encode_as_core_encodes_them() {
     assert_eq!(encode_block(&b).unwrap_err().code, "E_LIMIT");
     dismantle(b.fields.remove("deep").unwrap());
 }
+
+/// rpl34: the adapter surface of repo links, by its exact names. This function is never called:
+/// it compiles only while each method has the name, the receiver and the arguments the contract
+/// lists, so a removed or reshaped method fails the build of this test file. The names are the
+/// seventeen of the adapter table (`link_adoption` came after the sixteen the plan counted).
+#[allow(dead_code)]
+fn rpl34_the_exact_adapter_names(
+    snap: &Snapshot,
+    handle: &StoreHandle,
+    stream: &std::fs::File,
+    link: &BlockId,
+    repo: &RepoId,
+    landing: &Hash,
+) {
+    use rdy_adapter::{DeliverySource, LinkSource, ReadRequest, SearchRequest};
+    // Snapshot (every read takes one captured snapshot)
+    let _ = snap.link_export("v1.0.0", "profile", Vec::<u8>::new());
+    let _ = snap.tag_deliveries("v1.0.0");
+    let _ = snap.foreign_refs();
+    let _ = snap.selection_changes(link, None);
+    let _ = snap.foreign_blast_radius(repo, &[]);
+    let _ = snap.foreign_signals();
+    let _ = snap.foreign_tension_gate(landing);
+    let _ = snap.lock_facts(landing);
+    let _ = snap.lock_changes(landing);
+    let _ = snap.unadopted_locked();
+    let _ = snap.link_adoption();
+    let _ = snap.foreign_bytes(repo);
+    let _ = snap.read(ReadRequest::default());
+    let _ = snap.search(SearchRequest::default());
+    // StoreHandle (every write takes &self)
+    let _ = handle.take_delivery(
+        stream,
+        DeliverySource {
+            link: link.clone(),
+            site: String::new(),
+            at_ms: 0,
+            set: None,
+        },
+    );
+    let _ = handle.revoke_link(LinkSource {
+        link: link.clone(),
+        site: String::new(),
+        at_ms: 0,
+    });
+    let _ = handle.take_foreign_removal(stream, *repo);
+}
+
+/// rpl34: the surface runs on an empty project (its reads answer with no rows, never with an
+/// error that names a missing method), its writes enter the store's one writer lane through a
+/// shared handle, and the build's format capabilities name `foreign_copy` with its minimum rdy.
+#[test]
+fn rpl34_adapter_surface_is_complete() {
+    use rdy_adapter::{ReadRequest, SearchRequest};
+    let dir = project();
+    let handle = open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let landing = Hash::of(b"no such landing");
+    let repo = RepoId([9; 16]);
+    // the reads of an empty project
+    assert!(snap.foreign_refs().unwrap().is_empty());
+    assert!(snap.unadopted_locked().unwrap().is_empty());
+    assert!(snap.link_adoption().unwrap().is_empty());
+    assert_eq!(snap.foreign_bytes(&repo).unwrap(), 0);
+    assert!(snap.foreign_blast_radius(&repo, &[]).unwrap().is_empty());
+    let signals = snap.foreign_signals().unwrap();
+    assert!(format!("{signals:?}").contains("suspects"), "{signals:?}");
+    assert!(
+        snap.tag_deliveries("v9").is_err(),
+        "a tag it lacks is refused"
+    );
+    assert!(
+        snap.link_export("v9", "agents", Vec::<u8>::new()).is_err(),
+        "a tag it lacks is refused"
+    );
+    // a landing the snapshot lacks is a refusal, not a silent empty answer
+    for refusal in [
+        snap.foreign_tension_gate(&landing).err(),
+        snap.lock_facts(&landing).err(),
+        snap.lock_changes(&landing).err(),
+    ] {
+        assert!(refusal.is_some(), "an unknown landing is refused");
+    }
+    // the tool reads of Task 38 serve the same snapshot
+    let request = ReadRequest {
+        id: "c-NOSUCH".into(),
+        ..ReadRequest::default()
+    };
+    assert!(snap.read(request).is_err(), "an unknown block is refused");
+    let found = snap
+        .search(SearchRequest {
+            query: "nothing here".into(),
+            ..SearchRequest::default()
+        })
+        .unwrap();
+    assert!(found.is_object(), "{found}");
+    // the capabilities the hub reads at build time
+    let caps = rdy_adapter::capabilities::format_capabilities();
+    let foreign = caps
+        .store_reads
+        .known_features
+        .iter()
+        .find(|f| f.name == "foreign_copy")
+        .expect("foreign_copy is a registered feature");
+    assert_eq!(
+        foreign.required_rdy,
+        rdy_store::format::FOREIGN_COPY_REQUIRED_RDY
+    );
+    // the capabilities write the base stream; a link delivery is the third format, which this
+    // build reads (the value has no member of its own in the capabilities)
+    assert_eq!(caps.written.stream, rdy_store::sync_stream::STREAM_FORMAT);
+    assert_eq!(rdy_store::sync_stream::LINK_DELIVERY_FORMAT, 3);
+    assert!(rdy_store::sync_stream::READ_FORMATS.contains(&3));
+    drop(snap);
+    handle.close().unwrap();
+}

@@ -1941,6 +1941,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "working copy: the working_copy row records its replies",
     ),
     (
+        "adopt-upstream",
+        "needs a delivered cited decision and its local copy; cli_repo_links pins its replies",
+    ),
+    (
         "alt",
         "needs two open views and a question; its MCP twin is listed too",
     ),
@@ -1993,6 +1997,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("pack", "checks a pack file; the schema_packs row covers it"),
     ("plan confirm", "needs an open plan item"),
     ("new finding", "needs a finding pack"),
+    (
+        "new repo-link",
+        "writes a repo_link block; cli_repo_links pins its replies",
+    ),
     (
         "new instruction",
         "writes an instruction; cli_instructions pins its replies",
@@ -2135,6 +2143,45 @@ fn cli_publication_probes(seen: &mut Seen, env: &[(String, String)]) {
                 "tag:v1.0.0",
             ],
         );
+    }
+}
+
+/// rpl34: a citing project that holds every state `rdy links` reports: the live link `core` with
+/// two deliveries (its adopted cited claim, its pins, a changed cited claim), the revoked link
+/// `old`, and, after both links leave canon, the delivered repo that no live link names. It is
+/// the world of the foreign-copy fixtures, built through the engine and then changed through
+/// the writer lane: the first copy of the project keeps `core`, the second drops both links.
+/// The reads need no daemon.
+fn links_project(keep_links: bool) -> (rdy_qa::foreign_fixture::ForeignWorld, PathBuf) {
+    let world = rdy_qa::foreign_fixture::build();
+    let root = world.citing_root.clone();
+    if !keep_links {
+        let mut r = rdy_engine::Rdy::open(&root).expect("open the citing project");
+        rdy_qa::fixtures::write(
+            &mut r,
+            "unlink",
+            json!([
+                {"op": "delete", "id": world.live.to_string()},
+                {"op": "delete", "id": world.revoked.to_string()}
+            ]),
+        )
+        .expect("drop both links");
+        rdy_qa::fixtures::land(&mut r, "unlink").expect("land it");
+        r.close().expect("close");
+    }
+    (world, root)
+}
+
+/// The repo-link commands over the command line: the list with and without delivered links, one
+/// link's delivery, and the pins to cited content.
+fn cli_links_probes(seen: &mut Seen, env: &[(String, String)]) {
+    for keep in [true, false] {
+        let (_world, dir) = links_project(keep);
+        cli_probe(seen, &dir, env, "links", &["links"]);
+        if keep {
+            cli_probe(seen, &dir, env, "links show", &["links", "show", "core"]);
+        }
+        cli_probe(seen, &dir, env, "links refs", &["links", "refs"]);
     }
 }
 
@@ -2320,6 +2367,7 @@ fn cli_runtime() -> Value {
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
+    cli_links_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -3817,12 +3865,44 @@ fn mcp_publication_probes(seen: &mut Seen) {
     }
 }
 
+/// The `rdy_links` reads over a project that holds a live link, a revoked one and a repo no link
+/// names (see [`links_project`]): each reply of the list, the show and the refs has its rows.
+fn mcp_links_probes(seen: &mut Seen) {
+    for keep in [true, false] {
+        let (_world, dir) = links_project(keep);
+        let mut c = isolated_mcp(&dir);
+        let opened = c.call(
+            "rdy_session",
+            json!({"actor": "agent:links", "run": "links", "role": "reader"}),
+        );
+        assert!(opened.is_ok(), "the reader session opens");
+        mcp_probe(seen, &mut c, "rdy_links", "rdy_links", json!({}));
+        if keep {
+            mcp_probe(
+                seen,
+                &mut c,
+                "rdy_links",
+                "rdy_links show",
+                json!({"op": "show", "alias": "core"}),
+            );
+        }
+        mcp_probe(
+            seen,
+            &mut c,
+            "rdy_links",
+            "rdy_links refs",
+            json!({"op": "refs"}),
+        );
+    }
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
     mcp_publication_probes(&mut seen);
+    mcp_links_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -3943,13 +4023,54 @@ fn follower_refusal() -> Value {
 
 /// Every `E_` and `W_` code constant in the sources, and every `_FIX` and `_MESSAGE` template
 /// constant, by scanning the crates' source text.
-fn errors_row() -> Value {
-    let consts = Regex::new(
+/// The pattern of a string constant: its name and its quoted text.
+pub(super) fn template_regex() -> Regex {
+    Regex::new(
         r#"(?s)const\s+([A-Z][A-Z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*("(?:[^"\\]|\\.)*")\s*;"#,
     )
-    .unwrap();
+    .expect("a valid pattern")
+}
+
+/// The template constants that two product files already name with different text when the
+/// Release 1 contract was captured. The released row `errors_warnings.templates` holds the text of
+/// the file that sorts last, so these pairs stay as they are; a constant of any other name that two
+/// files share with different text is refused (rpl34): the later file would shadow the earlier text
+/// in the contract and hide a change to it.
+pub(super) const RELEASED_SHARED_TEMPLATES: [&str; 2] = ["LIMIT_FIX", "WALK_FIX"];
+
+/// The template constants (`*_FIX`, `*_MESSAGE`) of the product files `sources` (path, product
+/// text; in path order), by name. A name that two files share with the same text is one entry; a
+/// name they share with different text is an error that names both files, unless
+/// [`RELEASED_SHARED_TEMPLATES`] lists it, and then the last file's text stands as released.
+pub(super) fn collect_templates(
+    sources: &[(String, String)],
+    consts: &Regex,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut out: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (file, product) in sources {
+        for m in consts.captures_iter(product) {
+            let (name, value) = (m[1].to_string(), m[2].to_string());
+            if !(name.ends_with("_FIX") || name.ends_with("_MESSAGE")) {
+                continue;
+            }
+            if let Some((was, text)) = out.get(&name)
+                && *text != value
+                && !RELEASED_SHARED_TEMPLATES.contains(&name.as_str())
+            {
+                return Err(format!(
+                    "the template {name} is a constant of {was} and of {file} with different text: rename one, so the contract keeps both"
+                ));
+            }
+            out.insert(name, (file.clone(), value));
+        }
+    }
+    Ok(out.into_iter().map(|(n, (_, v))| (n, v)).collect())
+}
+
+fn errors_row() -> Value {
+    let consts = template_regex();
     let mut codes: BTreeMap<String, String> = BTreeMap::new();
-    let mut templates: BTreeMap<String, String> = BTreeMap::new();
+    let templates: BTreeMap<String, String>;
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).expect("read the sources") {
             let p = e.expect("entry").path();
@@ -3968,19 +4089,25 @@ fn errors_row() -> Value {
         }
     }
     files.sort();
+    let mut sources: Vec<(String, String)> = vec![];
     for f in files {
         // test modules and the QA crate are not product text
         if f.components().any(|c| c.as_os_str() == "rdy-qa") {
             continue;
         }
         let text = std::fs::read_to_string(&f).expect("read a source file");
-        let product = product_text(&text);
-        for m in consts.captures_iter(&product) {
+        let rel = f
+            .strip_prefix(workspace_root())
+            .unwrap_or(&f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        sources.push((rel, product_text(&text)));
+    }
+    templates = collect_templates(&sources, &consts).unwrap_or_else(|e| panic!("{e}"));
+    for (_, product) in &sources {
+        for m in consts.captures_iter(product) {
             let (name, value) = (m[1].to_string(), m[2].to_string());
             let template = name.ends_with("_FIX") || name.ends_with("_MESSAGE");
-            if template {
-                templates.insert(name.clone(), value.clone());
-            }
             if (name.starts_with("E_") || name.starts_with("W_")) && !template {
                 codes.insert(name, value);
             }
@@ -4609,8 +4736,11 @@ fn generate() -> BTreeMap<&'static str, Value> {
     rows
 }
 
-/// The released baseline, `release-1.json`, frozen at the Release 1 tag. The guards that pin
-/// the bytes of released sections read it; every live comparison reads [`read_fixture`].
+/// The released baseline, `release-1.json`, frozen at the Release 1 tag. The guards that pin the
+/// bytes of released sections, and the counts and lists of the Release 1 surface (`mh7`, `ck9`,
+/// `rtc7`'s rule stops: 60 tools, the command order of that release), read it; every live
+/// comparison reads [`read_fixture`], the current fixture. `rpl34_release_one_contract_remains_compatible`
+/// holds the current fixture to the baseline.
 fn read_released() -> Value {
     let path = qa_root().join("fixtures/contracts/release-1.json");
     let text = std::fs::read_to_string(&path).expect("the released contract baseline");
@@ -5113,7 +5243,7 @@ fn shape_keys(v: &Value) -> Vec<String> {
 /// and the queue row that the accepted verdict makes. Every earlier command and reply key stays.
 #[test]
 fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
-    let fixture = read_fixture();
+    let fixture = read_released();
     let tree = &fixture["cli"]["tree"];
     let top: Vec<&str> = tree["subcommands"]
         .as_array()
@@ -6130,7 +6260,7 @@ fn ok14_probe_shapes_merge_every_array_element() {
 /// alone, since this fixture has no daemon op member.
 #[test]
 fn mh7_new_surfaces_preserve_the_release_contract() {
-    let fixture = read_fixture();
+    let fixture = read_released();
     let mcp = &fixture["mcp"];
     // 57 tools before; one more (and ain4's rdy_instructions and rtc5's rdy_rule), and the earlier ones stay
     let names: Vec<&str> = mcp["tool_names"]
@@ -6724,7 +6854,7 @@ fn digest_of(v: &Value) -> String {
 /// no stop is pinned by an empty array alone.
 #[test]
 fn rtc7_release_contract_covers_every_rule_stop() {
-    let fixture = read_fixture();
+    let fixture = read_released();
     let mcp = &fixture["mcp"];
 
     // the tool list and the input: eleven keys, one closed object, `scope` alone required
@@ -6981,15 +7111,17 @@ fn rtc7_release_contract_covers_every_rule_stop() {
     );
     assert!(probes["rule answer"]["stdout"]["remaining_cards?"][0]["ref"].is_string());
 
-    // the probes run again give the same shapes
+    // the probes run again give the same shapes: the live generation against the current
+    // fixture (the stops above are read from the released baseline)
     let live = rows();
+    let current = read_fixture();
     assert_eq!(
         live["mcp"]["result_fields"],
-        fixture["mcp"]["result_fields"]
+        current["mcp"]["result_fields"]
     );
     assert_eq!(
         live["cli"]["runtime"]["probes"],
-        fixture["cli"]["runtime"]["probes"]
+        current["cli"]["runtime"]["probes"]
     );
 }
 

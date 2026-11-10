@@ -12,7 +12,7 @@ use serde_json::Value;
 pub const LINKS_OPS: &str = "list, show, refs";
 
 /// The fix of an `op` this tool does not have.
-const OP_FIX: &str = "use op list, show or refs";
+const LINKS_OP_FIX: &str = "use op list, show or refs";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +56,7 @@ pub fn rdy_links(st: &mut McpState, p: LinksParams) -> Result<Value, RdyError> {
         ("refs", alias) => json(st_.link_refs(alias)?),
         (other, _) => Err(bad(
             format!("unknown op {other:?}"),
-            format!("{OP_FIX}: {LINKS_OPS}"),
+            format!("{LINKS_OP_FIX}: {LINKS_OPS}"),
         )),
     }
 }
