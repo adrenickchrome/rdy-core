@@ -11,6 +11,12 @@
 //! as `Kind`. The records that may name one (a TRANSITION's `delivered` cause and foreign side, an
 //! ASSESSMENT's foreign tension side) give a FOREIGN edge. [`MAY_NAME_FOREIGN`] is the closed list
 //! of kinds that may name foreign content; fsck refuses such an edge in any other record.
+//!
+//! A tag's history never holds foreign content (D-FK58A), so the transport reads a record's
+//! portable edges ([`portable_refs_of`]): every edge less an assessment's foreign part (the held
+//! BLOCK version of each foreign reach row and the FOREIGN entry of each foreign tension side).
+//! The source store's own checks (a write's held objects, fsck) read every edge ([`refs_of`]).
+//! The record's bytes and identity are the same either way.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
     self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
@@ -122,12 +128,29 @@ pub struct ObjectRef {
 /// is not an assigned portable kind; `Decode` or `Limit` for bytes that are not exactly one
 /// bounded record of the kind; an encoding version refusal of the codec's own.
 pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
+    edges_of(kind, payload, true)
+}
+
+/// The objects a receiver needs before the record: [`refs_of`] less its foreign-only edges, an
+/// assessment's foreign part (the held BLOCK version of each foreign reach row and the FOREIGN
+/// entry of each foreign tension side). A tag's closure, a sync batch's dependency check, a
+/// take's completeness check and a holder's check read these: foreign content is never a tag's
+/// history (D-FK58A). The same refusals as [`refs_of`].
+pub fn portable_refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
+    edges_of(kind, payload, false)
+}
+
+/// The edges of one record; `foreign` keeps the foreign-only ones.
+fn edges_of(kind: u8, payload: &[u8], foreign: bool) -> Result<Vec<ObjectRef>, RecordError> {
     if !is_portable(crate::codec::logical_kind(kind)) {
         return Err(RecordError::Kind);
     }
     let split = crate::codec::split(kind, payload)?;
     let (kind, payload) = (split.kind, split.body);
-    let mut e = Edges(Vec::new());
+    let mut e = Edges {
+        out: Vec::new(),
+        foreign,
+    };
     match kind {
         BLOCK => e.block(&crate::codec::decode_bounded_split::<Block>(&split)?)?,
         CHANGE => e.change(&crate::codec::decode_bounded_split::<Change>(&split)?)?,
@@ -201,18 +224,21 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
         }
         _ => return Err(RecordError::Kind),
     }
-    let mut out = e.0;
+    let mut out = e.out;
     out.sort_unstable();
     out.dedup();
     Ok(out)
 }
 
-/// The edges found so far, unsorted.
-struct Edges(Vec<ObjectRef>);
+/// The edges found so far, unsorted, and whether the foreign-only ones count.
+struct Edges {
+    out: Vec<ObjectRef>,
+    foreign: bool,
+}
 
 impl Edges {
     fn one(&mut self, kind: u8, hash: Hash) {
-        self.0.push(ObjectRef {
+        self.out.push(ObjectRef {
             kind: Some(kind),
             hash,
         });
@@ -232,7 +258,7 @@ impl Edges {
 
     /// An edge whose kind the field does not fix.
     fn any(&mut self, hash: Hash) {
-        self.0.push(ObjectRef { kind: None, hash });
+        self.out.push(ObjectRef { kind: None, hash });
     }
 
     fn alt(&mut self, choice: &Option<AltChoice>) {
@@ -264,14 +290,16 @@ impl Edges {
     /// An assessment's proposal (its scope names the same one), its base landing, its policy
     /// block version, the plans its tension answers name, and the reviews its dismissals name;
     /// in encoding 2, the held BLOCK version of each foreign reach row and the FOREIGN entry of
-    /// each foreign tension side. Pack, config, card and tension hashes are content identities:
-    /// no edge.
+    /// each foreign tension side, which are foreign-only: [`portable_refs_of`] leaves them out.
+    /// Pack, config, card and tension hashes are content identities: no edge.
     fn assessment(&mut self, a: &AssessmentV2) {
-        for r in &a.foreign.reach {
-            self.one(BLOCK, r.version);
-        }
-        for t in &a.foreign.tensions {
-            self.one(FOREIGN, t.entry);
+        if self.foreign {
+            for r in &a.foreign.reach {
+                self.one(BLOCK, r.version);
+            }
+            for t in &a.foreign.tensions {
+                self.one(FOREIGN, t.entry);
+            }
         }
         self.one(PROPOSAL, a.proposal);
         self.one(PROPOSAL, a.scope.proposal);

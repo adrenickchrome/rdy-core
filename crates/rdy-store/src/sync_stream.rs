@@ -40,8 +40,8 @@
 //! # A valid batch
 //!
 //! Beyond the framing: every object frame's typed record decodes within its bounds
-//! (`crate::bounded`); no logical key repeats; every object a record needs (`refs_of`, and a
-//! dropped object's residue) is an earlier record of the batch or a prerequisite; the
+//! (`crate::bounded`); no logical key repeats; every object a record needs (`portable_refs_of`,
+//! and a dropped object's residue) is an earlier record of the batch or a prerequisite; the
 //! prerequisites are exactly the keys the records need that the batch does not hold, plus the
 //! root TAG when the batch does not hold it. A kind-None link resolves to exactly one key of the
 //! batch or of its prerequisites. A dropped object's apply is a reference but no forward
@@ -89,7 +89,7 @@ use crate::dump::{
 };
 use crate::format::{MAX_MANIFEST_BYTES, StoreFeatures, check_features};
 use crate::kinds;
-use crate::object_refs::{ObjectKey, ObjectRef, refs_of};
+use crate::object_refs::{ObjectKey, ObjectRef, portable_refs_of};
 use crate::segment::HEADER as FRAME_HEADER;
 use crate::stream_error::{
     LIMIT_GRAPH_EDGES, LIMIT_HEADER_BYTES, LIMIT_HISTORY_DEPTH, LIMIT_OBJECT_RECORDS,
@@ -438,12 +438,13 @@ impl StreamRecord {
         }
     }
 
-    /// The objects the record needs before it, as `refs_of` gives them: a present record's
+    /// The objects the record needs before it, as `portable_refs_of` gives them (no
+    /// foreign-only edge: foreign content is never a tag's history, D-FK58A): a present record's
     /// references, a dropped record's residue (its apply is a later proof, see
     /// [`StreamRecord::proof`]). Sorted, no repeats.
     pub fn refs(&self) -> Result<Vec<ObjectRef>, RecordError> {
         match self {
-            StreamRecord::Present { payload, .. } => refs_of(self.raw_kind(), payload),
+            StreamRecord::Present { payload, .. } => portable_refs_of(self.raw_kind(), payload),
             StreamRecord::Dropped { residue, .. } => Ok(residue
                 .iter()
                 .map(|r| ObjectRef {
@@ -1312,8 +1313,8 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
 }
 
 /// Checks one complete batch and returns its report: the framing ([`StreamReader`]), each
-/// object record's bounded typed decode (`refs_of`) and its kind's record rules (an ANSWER's
-/// relay and evidence rules), no repeated logical key, at most
+/// object record's bounded typed decode (`portable_refs_of`) and its kind's record rules (an
+/// ANSWER's relay and evidence rules), no repeated logical key, at most
 /// [`MAX_EDGES`] edges, and the batch's dependency rules. Only when every check passes are its
 /// keys returned.
 ///

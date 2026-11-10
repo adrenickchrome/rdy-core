@@ -3,8 +3,8 @@
 //!
 //! # What the closure holds
 //!
-//! The walk starts at the root TAG and follows each record's object links (`refs_of`; a
-//! dropped object's link is its residue). Identity hashes (pins, card and report hashes,
+//! The walk starts at the root TAG and follows each record's object links (`portable_refs_of`;
+//! a dropped object's link is its residue). Identity hashes (pins, card and report hashes,
 //! residue identities, pair and content keys) are no links. A kind-None link resolves to the one
 //! stored object of that hash; two are `ambiguous object kind`.
 //!
@@ -28,7 +28,9 @@
 //!   REVIEW whose subject is a closure check request.
 //!
 //! A foreign entry (kind FOREIGN, repo links) is never in a closure: a link that names one is
-//! refused with `object is outside the tag closure`, naming the entry (D-FK58A).
+//! refused with `object is outside the tag closure`, naming the entry (D-FK58A). An assessment's
+//! foreign part (its foreign reach versions and the entries of its foreign tension sides) is no
+//! portable link, so an approved foreign tension does not take the foreign log into a tag.
 //!
 //! Each attachment's own links join the walk (an apply's request and its human landing, with
 //! that landing's history), and attachments are taken again until no new key appears: a key is

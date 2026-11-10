@@ -28,7 +28,7 @@ use rdy_store::format::{
 };
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds;
-use rdy_store::object_refs::{ObjectRef, refs_of};
+use rdy_store::object_refs::{ObjectRef, portable_refs_of, refs_of};
 use rdy_store::redaction_carried;
 use rdy_store::transition::{
     Author, Cause, SideV1, SuspectMove, SuspectTarget, Transitions, TransitionsV1, Why,
@@ -1292,5 +1292,39 @@ fn rpl18_a_deviation_exception_takes_the_foreign_assessment_encoding() {
             kinds::ASSESSMENT | VERSIONED,
             payload(1, &postcard_of(&local))
         )
+    );
+}
+
+/// rpl32 fix round 1 (D-FK58A): an assessment's foreign part is no portable edge. Its portable
+/// edges are its local part's, so a tag whose landing holds an approved foreign tension carries
+/// no FOREIGN entry and no delivered version; every edge, the foreign part's included, stays in
+/// `refs_of` for the source store's own checks. The record's bytes do not change.
+#[test]
+fn rpl32_portable_refs_leave_out_an_assessments_foreign_part() {
+    let some = |kind: u8, hash: Hash| ObjectRef {
+        kind: Some(kind),
+        hash,
+    };
+    let foreign = codec::item_new(kinds::ASSESSMENT, &foreign_assessment());
+    let local = codec::item_new(kinds::ASSESSMENT, &AssessmentV2::of(&assessment()));
+    let all = refs_of(foreign.0, &foreign.1).unwrap();
+    let portable = portable_refs_of(foreign.0, &foreign.1).unwrap();
+    assert_eq!(portable, refs_of(local.0, &local.1).unwrap());
+    assert!(!portable.contains(&some(kinds::BLOCK, h(54))));
+    assert!(!portable.contains(&some(kinds::FOREIGN, h(56))));
+    let mut back = portable.clone();
+    back.extend([some(kinds::BLOCK, h(54)), some(kinds::FOREIGN, h(56))]);
+    back.sort();
+    assert_eq!(all, back);
+    // a record without a foreign part has the same edges both ways, and a FOREIGN entry is
+    // refused as a kind both ways
+    assert_eq!(
+        portable_refs_of(local.0, &local.1).unwrap(),
+        refs_of(local.0, &local.1).unwrap()
+    );
+    let entry = codec::item_new(kinds::FOREIGN, &delivery());
+    assert_eq!(
+        portable_refs_of(entry.0, &entry.1).unwrap_err(),
+        RecordError::Kind
     );
 }

@@ -574,7 +574,8 @@ fn rpl32_pull_carries_delivery_revocation_and_removal() {
 }
 
 /// A citing project's tag history carries the change that cites and its pin, and no FOREIGN
-/// entry: a holder that takes it holds no delivery and counts no foreign bytes. The same change
+/// entry and no delivered copy: a holder that takes it holds no delivery and counts no foreign
+/// bytes. The same change
 /// carried into another project that links the same profile, but took only a later delivery,
 /// replays there only once that project takes the delivery that holds the pinned version itself;
 /// the refused replay takes nothing.
@@ -638,6 +639,10 @@ fn rpl32_carried_change_does_not_smuggle_delivery() {
     let snap = holder.snapshot().unwrap();
     let got = snap.has_objects(&[block_key(claim_version)]).unwrap();
     assert!(got[0].present, "the claim travels");
+    // the landing's assessment names the held version of the pin, a foreign-only edge that no
+    // tag history follows: the delivered copy stays out of the holder
+    let got = snap.has_objects(&[block_key(c.v1)]).unwrap();
+    assert!(!got[0].present, "no delivered copy travels: {got:?}");
     assert_eq!(snap.foreign_bytes(&c.repo).unwrap(), 0);
     drop(snap);
     holder.close().unwrap();

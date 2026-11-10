@@ -3,7 +3,7 @@
 //! landing starts a chain that the landings' `prev` links follow. The tags' divergent histories
 //! are checked one chain at a time, never against canon or the global change -> landing index.
 //!
-//! The check reads every object a tag reaches through its object links (`object_refs::refs_of`),
+//! The check reads every object a tag reaches through its object links (`portable_refs_of`),
 //! once per `ObjectKey`: snapshot versions, change dependencies, proposal, approval and relay
 //! links, blob manifests and chunks. Each object it reads is checked by its own rules too: every
 //! landing it reaches, by any link, keeps the relay and evidence rules (the project's own rule);
@@ -31,7 +31,7 @@ use crate::holder::{
 };
 use crate::index::hash_from;
 use crate::kinds;
-use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
+use crate::object_refs::{ObjectKey, PORTABLE_KINDS, portable_refs_of};
 use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -150,7 +150,8 @@ impl<'a> Closure<'a> {
                 Err(StoreError::Redacted { .. }) => continue,
                 Err(e) => return Err(e),
             };
-            let refs = refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
+            let refs =
+                portable_refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
             let mut children = Vec::with_capacity(refs.len());
             for r in refs {
                 self.edges += 1;

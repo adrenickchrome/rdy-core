@@ -637,3 +637,133 @@ fn rpl32_pull_replay_preserves_signature_statement() {
     c.close().unwrap();
     w.r.close().unwrap();
 }
+
+/// rpl32 fix round 1 (D-FK58A): a tag whose history holds an approved foreign tension exports
+/// and a holder takes it. The landing's assessment names the FOREIGN entry that delivered the
+/// tension's cited side and the held version of each pin; those are foreign-only edges, which
+/// the source store's own checks keep and the portable closure leaves out. The batch carries the
+/// assessment byte for byte and nothing of the foreign log: no FOREIGN entry and no delivered
+/// BLOCK version. The holder then passes its check, and the source still passes fsck.
+#[test]
+fn rpl32_tag_with_approved_foreign_tension_exports_and_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(&dir.path().join("p"), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "repo_link", "id": "$a", "parent": "$d",
+             "fields": {"alias": "core", "repo": cited().to_string(), "profile": AGENTS}}
+        ]),
+    );
+    land(&mut r, "seed");
+    // one delivery: X, deprecated where it comes from
+    let x = block("d-FRGNX", "X", X1_TEXT);
+    let mut v = fv(&x);
+    v.derived.lifecycle = Some("deprecated".into());
+    let entry = ForeignEntry {
+        repo: cited(),
+        source: ForeignSource::Link {
+            link: w.created["$a"].clone(),
+            site: "hub.example".into(),
+            at_ms: 1_760_000_000_000,
+        },
+        event: ForeignEvent::Delivery {
+            prev: None,
+            publication: ForeignPublication {
+                tag: "v1".into(),
+                profile: AGENTS.into(),
+                profile_version: None,
+            },
+            set: None,
+            added: vec![v],
+            changed: vec![],
+            removed: vec![],
+            shells: vec![],
+            selection: selection_identity([(&x.id, &version_of(&x))].into_iter()).unwrap(),
+        },
+    };
+    let delivered = r
+        .store_mut()
+        .put_foreign(&entry, std::slice::from_ref(&x))
+        .unwrap();
+    r.publish_after_foreign_for_tests().unwrap();
+    // a claim that follows the deprecated X: its foreign tension is answered and the view lands
+    write(
+        &mut r,
+        "p",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": w.created["$s"],
+                "body": "Follow {{core:d-FRGNX}}."}]),
+    );
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "p");
+    let landing = land(&mut r, "p");
+    let assessment = r
+        .store()
+        .reader()
+        .landing(&landing)
+        .unwrap()
+        .assessment
+        .expect("the landing has an assessment");
+    let wire = r.store().reader().assessment_wire(&assessment).unwrap();
+    assert_eq!(wire.foreign.tensions.len(), 1, "{:#?}", wire.foreign);
+    assert_eq!(wire.foreign.tensions[0].entry, delivered);
+    let held: Vec<Hash> = wire.foreign.reach.iter().map(|r| r.version).collect();
+    assert!(held.contains(&version_of(&x)), "{:#?}", wire.foreign);
+    let tag: Hash = r
+        .tag(&approver(), "v1.0.0", None, None)
+        .unwrap()
+        .tag
+        .parse()
+        .unwrap();
+    let repo = r.read().repo_id().unwrap();
+
+    // the export: the assessment travels, the foreign log does not
+    let mut out = Vec::new();
+    let report = rdy_engine::stream_export::write(
+        &r.read(),
+        tag,
+        &std::collections::BTreeSet::new(),
+        &mut out,
+    )
+    .unwrap_or_else(|e| panic!("export v1.0.0: {e:?}"));
+    let key = |kind: u8, hash: Hash| rdy_store::object_refs::ObjectKey { kind, hash };
+    assert!(report.keys.contains(&key(kinds::ASSESSMENT, assessment)));
+    assert!(
+        report.keys.iter().all(|k| k.kind != kinds::FOREIGN),
+        "no FOREIGN entry travels: {:?}",
+        report.keys
+    );
+    for v in &held {
+        assert!(
+            !report.keys.contains(&key(kinds::BLOCK, *v)),
+            "no delivered version travels: {v}"
+        );
+    }
+
+    // a holder takes it: the assessment keeps its identity, and no foreign record arrives
+    let path = dir.path().join("history.rdysync");
+    std::fs::write(&path, &out).unwrap();
+    let mut h = Rdy::create_holder(&dir.path().join("h"), repo).unwrap();
+    rdy_engine::stream_take::take(
+        &mut h,
+        &[std::fs::File::open(&path).unwrap()],
+        rdy_store::take_batch::UploadTarget {
+            tag: "v1.0.0".into(),
+            landing,
+        },
+    )
+    .unwrap_or_else(|e| panic!("take v1.0.0: {e:?}"));
+    let hr = h.store().reader();
+    assert_eq!(hr.assessment_wire(&assessment).unwrap(), wire);
+    assert!(!hr.has_kind(kinds::FOREIGN, &delivered).unwrap());
+    for v in &held {
+        assert!(!hr.has_kind(kinds::BLOCK, v).unwrap(), "{v}");
+    }
+    drop(hr);
+    h.fsck().unwrap();
+    r.fsck().unwrap();
+    h.close().unwrap();
+    r.close().unwrap();
+}
