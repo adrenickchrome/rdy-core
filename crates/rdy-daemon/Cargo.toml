@@ -17,6 +17,8 @@ rdy-model.workspace = true
 rdy-store.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
 
 [build-dependencies]
 blake3.workspace = true

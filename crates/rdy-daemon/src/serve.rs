@@ -5,6 +5,7 @@ use crate::daemon::{Daemon, DaemonConfig, DaemonHandle, ExitReason, Readiness, S
 use crate::error::{E_BAD_INPUT, E_NO_SESSION, ErrorReply};
 use crate::handler::Handler;
 use crate::layout::RunDir;
+use crate::mcp_token;
 use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
@@ -159,6 +160,9 @@ pub struct ServeRun {
     handle: DaemonHandle,
     readiness: Readiness,
     shared: Arc<Shared>,
+    /// The project's MCP token, made or read under the start lock before the site bound, or why
+    /// there is none: MCP over HTTP is then unavailable.
+    mcp_token: Arc<mcp_token::Prepared>,
     thread: JoinHandle<Result<ExitReason, ServeError>>,
     /// A foreground profile-only start's hold on readiness: `ready` is answered only once the
     /// warm-up is done and this sends (see [`serve_with_profile`]). Dropped unsent, the daemon
@@ -173,6 +177,11 @@ impl ServeRun {
 
     pub fn readiness(&self) -> Readiness {
         self.readiness.clone()
+    }
+
+    /// The project's MCP token for the HTTP transport, or the redacted reason it has none.
+    pub fn mcp_token(&self) -> Arc<mcp_token::Prepared> {
+        Arc::clone(&self.mcp_token)
     }
 
     /// Test hook: what every connection shares.
@@ -276,6 +285,12 @@ fn start_checked(
         r.index_rebuilt,
         r.unclean_shutdown
     ));
+    // (3a) the MCP token, under the start lock and before any port: made durably on the first
+    // start, read and kept after. Without it only MCP over HTTP is unavailable
+    let mcp_token = Arc::new(mcp_token::prepare(&RunDir::of_project(&opts.project)));
+    if let Err(e) = &*mcp_token {
+        log(&format!("mcp http: unavailable: {e}"));
+    }
     // (3b) the initial profile of a foreground profile-only start, in canon, before any port
     if let Some(name) = profile
         && let Err(e) = profile_at(&shared.state.load_full(), &Scope::Canon, name)
@@ -381,6 +396,7 @@ fn start_checked(
         handle,
         readiness,
         shared,
+        mcp_token,
         thread,
         gate,
     })

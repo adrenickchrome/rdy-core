@@ -10,6 +10,7 @@ mod daemon_crash;
 mod daemon_crash_m2;
 mod daemon_followups;
 mod daemon_instructions;
+mod daemon_mcp_token;
 mod daemon_notify;
 mod daemon_pack_reads;
 mod daemon_redaction_reads;

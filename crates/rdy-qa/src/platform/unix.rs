@@ -174,6 +174,34 @@ pub fn mode_of(path: &Path) -> io::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
 }
 
+/// Makes the file `path` readable by every account (mode 0o644): a file that is no longer
+/// private.
+pub fn open_to_everyone(path: &Path) -> io::Result<()> {
+    set_mode(path, 0o644)
+}
+
+/// What [`another_account_can_read`] proves on this platform. Unix has no second-account
+/// fixture, so it reads only the mode and the owner of the opened handle: no process of another
+/// account tries the read.
+pub const ANOTHER_ACCOUNT_PROOF: &str =
+    "the mode and the owner of the opened handle (this platform has no second-account fixture)";
+
+/// Lets another account read and list the directory `dir` (mode 0o755): the control that shows
+/// [`another_account_can_read`] can say yes.
+pub fn share_with_another_account(dir: &Path) -> io::Result<()> {
+    set_mode(dir, 0o755)
+}
+
+/// Whether an account other than this one may read `path`, judged from the handle that opens it
+/// without following a link: a read bit for its group or for others, or an owner that is not
+/// this account (an owner can change the mode). See [`ANOTHER_ACCOUNT_PROOF`].
+pub fn another_account_can_read(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let f = rdy_store::pio::open_no_follow(OpenOptions::new().read(true), path)?;
+    let meta = f.metadata()?;
+    Ok(meta.mode() & 0o044 != 0 || meta.uid() != rdy_store::pio::own_uid())
+}
+
 /// A directory that no normal user can write in while this value lives (FW-XP1 Phase 4, the
 /// filesystem fixtures). Unix: the mode drops to 0o555, and the old mode returns when the value
 /// is dropped. Root ignores modes, so a test that expects a refused write skips that part for

@@ -78,6 +78,12 @@ toml = { version = "=0.9.8", default-features = false, features = ["parse", "ser
 spdx = { version = "=0.13.6", default-features = false }
 # QA release notices: the SHA-256 of retained source archives.
 sha2 = "=0.10.9"
+# MCP over HTTP: the project bearer's 32 random bytes, from the operating system's source. The
+# version rand already locks.
+getrandom = { version = "=0.4.3", default-features = false }
+# MCP over HTTP: the constant-time comparison of a presented bearer. The version the lock already
+# holds.
+subtle = { version = "=2.6.1", default-features = false }
 # Test-only: the local TLS fixture.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Test-only: the local TLS fixture's generated certificates.

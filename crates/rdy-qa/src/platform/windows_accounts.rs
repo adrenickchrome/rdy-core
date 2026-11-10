@@ -233,6 +233,25 @@ pub fn share_with(dir: &Path, account: &Sid) -> io::Result<()> {
     )
 }
 
+/// What [`another_account_can_read`] proves on this platform: the system's own access check
+/// for the second account. No process of that account runs.
+pub const ANOTHER_ACCOUNT_PROOF: &str =
+    "the system's access check (Authz) for the second account; no process of it runs";
+
+/// Gives the second account the right to read and list the directory `dir` ([`share_with`]):
+/// the control that shows [`another_account_can_read`] can say yes. A missing second account is
+/// an error.
+pub fn share_with_another_account(dir: &Path) -> io::Result<()> {
+    share_with(dir, &second_account()?.sid)
+}
+
+/// Whether the second account may read `path` (or list it, for a directory), as the system's
+/// access check grants it ([`granted_access`]). A missing second account is an error, never a
+/// no. See [`ANOTHER_ACCOUNT_PROOF`].
+pub fn another_account_can_read(path: &Path) -> io::Result<bool> {
+    Ok(granted_access(&second_account()?.sid, path)? & FILE_READ_BIT != 0)
+}
+
 /// True when this process runs elevated (an administrator's full token).
 #[allow(unsafe_code)]
 pub fn is_elevated() -> io::Result<bool> {
