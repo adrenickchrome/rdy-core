@@ -117,7 +117,10 @@ impl RepoLinks {
     }
 
     /// The live aliases of `repo`, in sorted order.
-    fn aliases_of<'a>(&'a self, repo: &'a RepoId) -> impl Iterator<Item = (&'a str, &'a LinkRow)> {
+    pub(crate) fn aliases_of<'a>(
+        &'a self,
+        repo: &'a RepoId,
+    ) -> impl Iterator<Item = (&'a str, &'a LinkRow)> {
         self.by_alias
             .iter()
             .filter(move |(_, r)| r.repo == *repo)
@@ -230,7 +233,7 @@ impl<'a> ForeignCite<'a> {
 
     /// The target `alias:target` names in the alias's current profile selection, and whether
     /// `target` was a key. Records the pin a new citation of it takes.
-    fn resolve(&self, alias: &str, target: &str) -> Result<(ForeignId, bool), RdyError> {
+    pub(crate) fn resolve(&self, alias: &str, target: &str) -> Result<(ForeignId, bool), RdyError> {
         let row = self
             .links()
             .get(alias)

@@ -427,7 +427,7 @@ pub(crate) fn adopted_set(
 /// The instructions in force for a link: the versions its `repo_link` block pins (D-MEMMQ). An
 /// adopt answer settles a delivery, but it is no evidence that every instruction in it was
 /// adopted, so the pins alone say what is in force.
-fn adopted_instructions(
+pub(crate) fn adopted_instructions(
     st: &ReadState,
     m: &crate::Materialized,
     link: &BlockId,
@@ -449,7 +449,7 @@ fn adopted_instructions(
 }
 
 /// The instruction rows of a source against its adopted baseline.
-fn instruction_rows(
+pub(crate) fn instruction_rows(
     members: &BTreeMap<BlockId, HeldVersion>,
     baseline: &BTreeMap<BlockId, Hash>,
 ) -> Vec<AdoptInstruction> {

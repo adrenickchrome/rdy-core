@@ -645,6 +645,58 @@ pub struct Governs {
     /// every route is direct.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub through: Vec<Through>,
+    /// Repo links: for a decision cited from a linked project, where the version in force came
+    /// from and what the project delivers now. Absent for a local decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cited: Option<Cited>,
+    /// Repo links: the live deviations from a cited decision, by decision id. Absent for a local
+    /// decision and for a cited one nobody departs from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deviations: Vec<DeviationRow>,
+}
+
+/// Repo links (D-DAPR8): a cited decision's `governs` row. `in_force` is the version the covered
+/// blocks pin and `delivered` the version the repo's view holds now (none when no delivery
+/// selects the block); `newer` says the delivered content differs from the pin. `tag` and
+/// `delivered_at` are those of the delivery that carried the delivered version. The row's
+/// statement is the in-force one; `delivered_statement` adds the delivered one when `newer`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Cited {
+    pub alias: String,
+    pub repo: String,
+    pub in_force: String,
+    pub delivered: Option<String>,
+    pub newer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_statement: Option<String>,
+}
+
+/// Repo links: one live deviation from a cited decision, and why (the deviating decision's
+/// statement).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeviationRow {
+    pub id: String,
+    pub reason: String,
+}
+
+/// Repo links: the foreign basis of a briefing, one row for each repo the covered blocks cite,
+/// with the state `rdy_links` gives.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BriefLink {
+    pub alias: String,
+    pub repo: String,
+    pub state: crate::links::LinkState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<String>,
+    pub pins_behind: usize,
 }
 
 /// rf6: a covered block and the entity through which a decision governs it.
@@ -838,6 +890,12 @@ pub struct Briefing {
     pub reaches: Vec<Reach>,
     #[serde(skip_serializing_if = "is_zero")]
     pub reaches_omitted: usize,
+    /// Repo links: one row for each repo the covered blocks cite, at most `BRIEF_LINKS_CAP`.
+    /// Not paged or cut, and not in the digest: a delivery changes these rows and stales nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<BriefLink>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub links_omitted: usize,
     pub base: Base,
     /// ab2 (D-YAY1G): the as-built override warnings of the blocks `base.blocks` shows on this
     /// page, at most `MAX_AS_BUILT_WARNINGS`.
@@ -1719,9 +1777,15 @@ impl ReadState {
                     statement,
                     blocks,
                     through,
+                    cited: None,
+                    deviations: vec![],
                 }
             })
             .collect();
+        // repo links: the cited decisions that govern covered blocks follow the local rows
+        let mut governs = governs;
+        governs.extend(crate::links::cited_governs(self, scope, &m, ids)?);
+        let (links, links_omitted) = crate::links::brief_links(self, &m, ids)?;
 
         // keyed by (on, block, kind): deduplicated and in order
         let mut dependents: BTreeMap<(BlockId, BlockId, String), ()> = BTreeMap::new();
@@ -1959,8 +2023,32 @@ impl ReadState {
         };
         // inflight is advice and not vouched for: a listed view's next write moves its
         // last_write, and a page must not go stale over that
+        // a cited row vouches for the version in force and the deviations, not for what a
+        // delivery changes: a delivery never stales a page cursor either
+        let digest_governs: Vec<Governs> = if governs.iter().any(|g| g.cited.is_some()) {
+            governs
+                .iter()
+                .cloned()
+                .map(|mut g| {
+                    if let Some(c) = &mut g.cited {
+                        c.delivered = None;
+                        c.newer = false;
+                        c.tag = None;
+                        c.delivered_at = None;
+                        c.delivered_statement = None;
+                    }
+                    g
+                })
+                .collect()
+        } else {
+            vec![]
+        };
         let mut digested = serde_json::to_vec(&(
-            &governs,
+            if digest_governs.is_empty() {
+                &governs
+            } else {
+                &digest_governs
+            },
             &dependents,
             &lineage,
             &will_go_stale,
@@ -2003,6 +2091,8 @@ impl ReadState {
             finding_counts,
             reaches,
             reaches_omitted,
+            links,
+            links_omitted,
             warnings: base
                 .blocks
                 .iter()

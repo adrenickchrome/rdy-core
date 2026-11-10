@@ -334,6 +334,10 @@ pub fn read_entries(
     pattern: Option<&str>,
 ) -> Result<ReadEntries, RdyError> {
     let pattern = pattern.map(Pattern::parse).transpose()?;
+    // repo links: `<alias>:<id>` reads a block cited from a linked project, read-only
+    if let Some(cited) = rdy_model::reference::foreign_ref(id.trim()) {
+        return crate::links::read_cited(st_, &cited, view, scope, format, pattern.as_ref());
+    }
     let (target, slug) = crate::section::split_address(id)?;
     let (scope, id) = read_target(view, st_, target, scope)?;
     let suspects: std::collections::BTreeSet<BlockId> = st_
