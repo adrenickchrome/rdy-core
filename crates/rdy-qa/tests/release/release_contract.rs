@@ -4070,7 +4070,6 @@ pub(super) fn collect_templates(
 fn errors_row() -> Value {
     let consts = template_regex();
     let mut codes: BTreeMap<String, String> = BTreeMap::new();
-    let templates: BTreeMap<String, String>;
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in std::fs::read_dir(dir).expect("read the sources") {
             let p = e.expect("entry").path();
@@ -4103,7 +4102,7 @@ fn errors_row() -> Value {
             .replace('\\', "/");
         sources.push((rel, product_text(&text)));
     }
-    templates = collect_templates(&sources, &consts).unwrap_or_else(|e| panic!("{e}"));
+    let templates = collect_templates(&sources, &consts).unwrap_or_else(|e| panic!("{e}"));
     for (_, product) in &sources {
         for m in consts.captures_iter(product) {
             let (name, value) = (m[1].to_string(), m[2].to_string());
