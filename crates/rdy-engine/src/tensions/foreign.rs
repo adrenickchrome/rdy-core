@@ -443,12 +443,13 @@ struct Earlier {
     set: Vec<u64>,
 }
 
+/// The retained earlier texts drift reads, with each shingle's holders among them.
+type EarlierTexts = (Vec<Earlier>, BTreeMap<u64, Vec<usize>>);
+
 /// Every earlier delivered text of the current delivered view that drift reads: per current
 /// cited block of a restating type, each other held version of a restating type and drift's
 /// length, with an inverted index from each shingle to the earlier texts that hold it.
-fn earlier_texts(
-    ax: &Across<'_, '_>,
-) -> Result<(Vec<Earlier>, BTreeMap<u64, Vec<usize>>), RdyError> {
+fn earlier_texts(ax: &Across<'_, '_>) -> Result<EarlierTexts, RdyError> {
     let cx = ax.cx;
     let pack = cx.st.pack();
     let reader = cx.st.reader();
@@ -492,7 +493,7 @@ pub(crate) fn drift(
     let cx = ax.cx;
     let pack = cx.st.pack();
     let threshold = pack.drift_threshold();
-    let mut earlier: Option<(Vec<Earlier>, BTreeMap<u64, Vec<usize>>)> = None;
+    let mut earlier: Option<EarlierTexts> = None;
     let summary = |now: &Cited, l: &Local| {
         format!(
             "{} (delivered) changed text that {} restates",
