@@ -23,9 +23,10 @@
 //!   facts moves no pin and offers only the rebind; or
 //! - touches an instruction of the link or changes the delivery's set, and the link's
 //!   instructions or set differ from the adopted baseline (an instruction row for each
-//!   instruction that is added, changed or removed, and the set). The baseline is the link's
-//!   instructions and set at the entry of its last `adopt` answer, and none when it has none
-//!   (D-MEMMQ: a keep on a first delivery leaves none of the rules in force).
+//!   instruction that is added, changed or removed, and the set). The baseline instructions
+//!   are the versions the link block pins, and none when it pins none; the baseline set is the
+//!   set at the entry of the last `adopt` answer (D-MEMMQ: a keep leaves none of the rules in
+//!   force, and an adopt answer does not put every delivered instruction in force).
 //!
 //! # The card
 //!
@@ -177,9 +178,8 @@ struct Walk {
     after: Vec<Visit>,
     /// The entry of the last `adopt` or `keep_pin` answer, and its set.
     answered: Option<(Hash, Option<ForeignSet>)>,
-    /// The entry of the last `adopt` answer, with the set and the instructions it served.
+    /// The entry of the last `adopt` answer, with the set it served.
     baseline: Option<(Hash, Option<ForeignSet>)>,
-    instructions: BTreeMap<BlockId, Hash>,
 }
 
 fn is_instruction(id: &BlockId) -> bool {
@@ -206,11 +206,10 @@ fn settled(st: &ReadState, repo: &RepoId, entry: &Hash) -> Result<Option<AnswerA
 }
 
 /// Walks the chain of the source whose newest entry is `head`, newest first: the deliveries
-/// after the last answer, then the last answer, and the instructions and set of the last adopt.
+/// after the last answer, then the last answer, and the set of the last adopt.
 fn walk(st: &ReadState, repo: &RepoId, head: Hash) -> Result<Walk, RdyError> {
     let reader = st.reader();
     let mut w = Walk::default();
-    let mut decided: BTreeSet<BlockId> = BTreeSet::new();
     let mut next = Some(head);
     let mut steps = 0usize;
     while let Some(h) = next {
@@ -249,17 +248,6 @@ fn walk(st: &ReadState, repo: &RepoId, head: Hash) -> Result<Walk, RdyError> {
             }
             if act == Some(AnswerAct::Adopt) {
                 w.baseline = Some((h, set.clone()));
-            }
-        }
-        // the instructions an adopt served: the newest entry at or before it that names one
-        if w.baseline.is_some() {
-            for v in added.iter().chain(&changed) {
-                if is_instruction(&v.id) && decided.insert(v.id.clone()) {
-                    w.instructions.insert(v.id.clone(), v.version);
-                }
-            }
-            for id in removed.iter().filter(|id| is_instruction(id)) {
-                decided.insert(id.clone());
             }
         }
     }
@@ -419,6 +407,30 @@ fn pin_rows(
     Ok(rows)
 }
 
+/// The instructions in force for a link: the versions its `repo_link` block pins (D-MEMMQ). An
+/// adopt answer settles a delivery, but it is no evidence that every instruction in it was
+/// adopted, so the pins alone say what is in force.
+fn adopted_instructions(
+    st: &ReadState,
+    m: &crate::Materialized,
+    link: &BlockId,
+    repo: &RepoId,
+) -> Result<BTreeMap<BlockId, Hash>, RdyError> {
+    let mut out = BTreeMap::new();
+    let Some(b) = m.get(link) else {
+        return Ok(out);
+    };
+    for (target, pin) in &b.foreign.pins {
+        if target.repo == *repo
+            && is_instruction(&target.id)
+            && let Some(v) = st.foreign_held_pin(target, pin)?
+        {
+            out.insert(target.id.clone(), v);
+        }
+    }
+    Ok(out)
+}
+
 /// The instruction rows of a source against its adopted baseline.
 fn instruction_rows(
     members: &BTreeMap<BlockId, HeldVersion>,
@@ -515,7 +527,8 @@ pub(crate) fn adopt_items(st: &ReadState, now: i64) -> Result<Vec<Item>, RdyErro
         rebinds.sort();
         rebinds.dedup();
         let baseline_set = w.baseline.as_ref().and_then(|(_, s)| s.clone());
-        let rows = instruction_rows(&view.members, &w.instructions);
+        let in_force = adopted_instructions(st, &m, &row.link, &row.repo)?;
+        let rows = instruction_rows(&view.members, &in_force);
         let set = AdoptSet {
             from: baseline_set,
             to: view.set.clone(),

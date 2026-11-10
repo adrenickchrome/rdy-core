@@ -554,6 +554,128 @@ fn rpl19_first_instruction_delivery_raises_adopt_without_citation() {
 }
 
 #[test]
+fn rpl19_instruction_baseline_is_not_every_delivered_instruction_of_an_adopt_answer() {
+    // keep an instruction delivery, adopt an unrelated cited-claim change, then change the
+    // instruction: the adopt answer never put the kept instruction in force
+    let (_d, files, mut r, link, _x) = citing();
+    let rule = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the present tense.",
+    );
+    let org = Some(ForeignSet::Organization);
+    let c1 = claim_c("Every service logs in UTC.");
+    let e1 = claim_e("Queues hold at most ten thousand jobs.");
+    let v2 = deliver_in(
+        &mut r,
+        files.path(),
+        "v2",
+        &link,
+        org.clone(),
+        plain(&[&c1, &e1, &rule]),
+    );
+    let k = self::cards(&r, None);
+    assert_eq!(k.len(), 1, "{k:#?}");
+    assert_eq!(k[0].r#ref, adopt_ref(&v2.entry));
+    answer_item(
+        &mut r,
+        &k[0].r#ref,
+        AnswerAct::KeepPin,
+        &k[0].card_hash,
+        None,
+    );
+    assert!(self::cards(&r, None).is_empty());
+    // an unrelated cited claim changes and the person adopts that card
+    let c2 = claim_c("Every service logs in local time.");
+    let v3 = deliver_in(
+        &mut r,
+        files.path(),
+        "v3",
+        &link,
+        org.clone(),
+        plain(&[&c2, &e1, &rule]),
+    );
+    let a = self::cards(&r, None);
+    assert_eq!(a.len(), 1, "{a:#?}");
+    assert_eq!(a[0].r#ref, adopt_ref(&v3.entry));
+    answer_item(&mut r, &a[0].r#ref, AnswerAct::Adopt, &a[0].card_hash, None);
+    // the instruction changes: the link still pins none, so the baseline holds none
+    let rule2 = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the past tense.",
+    );
+    let v4 = deliver_in(
+        &mut r,
+        files.path(),
+        "v4",
+        &link,
+        org,
+        plain(&[&c2, &e1, &rule2]),
+    );
+    let n = self::cards(&r, None);
+    assert_eq!(n.len(), 1, "{n:#?}");
+    assert_eq!(n[0].r#ref, adopt_ref(&v4.entry));
+    let Some(PlanCardBinding::Adopt { instructions, .. }) = &n[0].plan_binding else {
+        panic!("{:#?}", n[0].plan_binding)
+    };
+    assert_eq!(instructions.len(), 1, "{instructions:#?}");
+    assert_eq!(instructions[0].old, None, "the link pins no instruction");
+    assert_eq!(instructions[0].new, Some(rule2.version_hash()));
+}
+
+#[test]
+fn rpl19_instruction_baseline_is_the_version_the_link_pins() {
+    let (_d, files, mut r, link, _x) = citing();
+    let rule = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the present tense.",
+    );
+    let org = Some(ForeignSet::Organization);
+    let c1 = claim_c("Every service logs in UTC.");
+    let e1 = claim_e("Queues hold at most ten thousand jobs.");
+    deliver_in(
+        &mut r,
+        files.path(),
+        "v2",
+        &link,
+        org.clone(),
+        plain(&[&c1, &e1, &rule]),
+    );
+    // the link holds the rule at its delivered version, as an adoption leaves it
+    put(
+        &mut r,
+        "pin",
+        json!([{"op": "update", "id": link.to_string(), "fields": {"title": "In force: {{core:ai-RGMT1}}."}}]),
+    );
+    land(&mut r, "pin").unwrap();
+    assert_eq!(pins_of(&r, &link).len(), 1);
+    let rule2 = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the past tense.",
+    );
+    let v3 = deliver_in(
+        &mut r,
+        files.path(),
+        "v3",
+        &link,
+        org,
+        plain(&[&c1, &e1, &rule2]),
+    );
+    let n = self::cards(&r, None);
+    assert_eq!(n.len(), 1, "{n:#?}");
+    assert_eq!(n[0].r#ref, adopt_ref(&v3.entry));
+    let Some(PlanCardBinding::Adopt { instructions, .. }) = &n[0].plan_binding else {
+        panic!("{:#?}", n[0].plan_binding)
+    };
+    assert_eq!(instructions.len(), 1, "{instructions:#?}");
+    assert_eq!(instructions[0].old, Some(rule.version_hash()));
+    assert_eq!(instructions[0].new, Some(rule2.version_hash()));
+}
+
+#[test]
 fn rpl19_status_only_delivery_offers_only_rebind() {
     let (_d, files, mut r, link, x) = citing();
     let before = pins_of(&r, &x);
