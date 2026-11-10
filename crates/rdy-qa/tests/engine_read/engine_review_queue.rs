@@ -33,8 +33,8 @@ fn se6_the_queue_runs_oldest_change_first() {
     let c2 = change_of(&put(&mut r, "b", upd(&s.a, "A changed.")));
     let q = r.read().review_requests().unwrap();
     let changes: Vec<_> = q.iter().map(|x| x.change).collect();
-    assert_eq!(changes.first(), Some(&c1));
-    assert!(changes.contains(&c2));
+    assert_eq!(changes.first(), Some(&Some(c1)));
+    assert!(changes.contains(&Some(c2)));
     let mut keys: Vec<_> = q.iter().map(|x| x.key).collect();
     let n = keys.len();
     keys.sort();
