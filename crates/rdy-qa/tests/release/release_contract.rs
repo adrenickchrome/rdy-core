@@ -2684,6 +2684,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_schema", json!({})),
         ("rdy_schema", json!({"block_type": "claim"})),
         ("rdy_tags", json!({})),
+        ("rdy_links", json!({})),
         ("rdy_suspects", json!({})),
         ("rdy_tensions", json!({"view": "batch"})),
         ("rdy_pending", json!({})),
