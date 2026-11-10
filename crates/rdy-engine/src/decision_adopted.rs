@@ -64,15 +64,14 @@ impl Rdy {
                     ));
                 }
             }
-            match st.graph(&scope)?.status(&old_id) {
-                Some(s @ (DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })) => {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("{old_id} is {} already", s.tag()),
-                        "adopt a decision that is in force",
-                    ));
-                }
-                _ => {}
+            if let Some(s @ (DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })) =
+                st.graph(&scope)?.status(&old_id)
+            {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{old_id} is {} already", s.tag()),
+                    "adopt a decision that is in force",
+                ));
             }
             let m = st.materialized(&scope)?;
             let cite = ForeignCite::new(&st, &m);
