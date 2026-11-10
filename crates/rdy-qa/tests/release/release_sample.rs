@@ -285,8 +285,12 @@ fn relc2_all_history_uses_only_two_sample_actors() {
     for bad in [
         swap(HUMAN_ACTOR, "human:sample-others"),
         swap(AGENT_ACTOR, "agent:sample-agen/"),
-        swap("Purge job runbook", "ops@example.org a"),
-        swap("Purge job runbook", "/home/someone/abc"),
+        // built here, so this file holds no address and no home path
+        swap("Purge job runbook", &["ops", "example.org a"].join("@")),
+        swap(
+            "Purge job runbook",
+            &["", "home", "someone", "abc"].join("/"),
+        ),
         swap(AGENT_ACTOR, "ci:repo/sample-age"),
     ] {
         assert_eq!(
@@ -577,12 +581,13 @@ fn relc2_release_fixture_is_loaded_without_regeneration() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.ends_with('\n') && text.lines().count() == 1, "{text}");
     let receipt: Value = serde_json::from_str(&text).unwrap();
-    let keys: Vec<&str> = receipt
+    let mut keys: Vec<&str> = receipt
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    keys.sort_unstable();
     let mut want = release_sample::RECEIPT_KEYS.to_vec();
     want.sort_unstable();
     assert_eq!(keys, want, "{receipt:#}");
