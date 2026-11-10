@@ -28,6 +28,7 @@ mod mcp_export;
 mod mcp_golden;
 mod mcp_grounded;
 mod mcp_history;
+mod mcp_http_claims;
 mod mcp_hub_auth;
 mod mcp_hub_keys;
 mod mcp_import;

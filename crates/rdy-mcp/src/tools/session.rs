@@ -82,6 +82,17 @@ pub(crate) fn checked_session(
     bound: Option<&crate::claims::Key>,
     stated: Option<&crate::claims::Asked>,
 ) -> Result<(Session, Role, String), RdyError> {
+    checked_session_with(p, bound, stated, crate::claims::mismatch)
+}
+
+/// [`checked_session`] whose claim disagreement is `mismatch`: an HTTP request binds no
+/// connection, so its refusal is [`crate::claims::http_mismatch`].
+pub(crate) fn checked_session_with(
+    p: &SessionParams,
+    bound: Option<&crate::claims::Key>,
+    stated: Option<&crate::claims::Asked>,
+    mismatch: fn() -> RdyError,
+) -> Result<(Session, Role, String), RdyError> {
     let role = crate::claims::parse_role(&p.role)?;
     // D-CQMA4: the views of re-affirmation and adopt cards' landings are private
     if let Some(v) = p
@@ -102,7 +113,7 @@ pub(crate) fn checked_session(
     let session = crate::claims::agent_session(p.actor.clone(), p.run.clone(), role)?;
     // D-4PHYQ: the arguments are a claim; the call's `_meta` claim and the connection's agree
     let key = (session.actor.clone(), session.run.clone());
-    crate::claims::check_claim(bound, stated, &key)?;
+    crate::claims::check_claim(bound, stated, &key).map_err(|_| mismatch())?;
     let view = p.view.clone().unwrap_or_else(|| session.default_view());
     // ses1: a reader may read canon by default; a session that writes needs a view of its own
     if view == "canon" && role != Role::Reader {
@@ -121,7 +132,13 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     if p.actor == "__rdy_test_panic__" {
         panic!("test hook: deliberate panic")
     }
-    let (session, role, view) = checked_session(&p, st.bound.as_ref(), st.claim.as_ref())?;
+    let mismatch = if st.http {
+        crate::claims::http_mismatch
+    } else {
+        crate::claims::mismatch
+    };
+    let (session, role, view) =
+        checked_session_with(&p, st.bound.as_ref(), st.claim.as_ref(), mismatch)?;
     let key = (session.actor.clone(), session.run.clone());
     // the configured person is resolved before anything changes: a refusal (an unreadable config,
     // an actor outside the form) leaves the earlier session, view and subscription as they were
