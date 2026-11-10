@@ -986,9 +986,11 @@ impl StoreReader {
     /// - each Delivery's `selection` is the digest of the selection its source's chain rebuilds,
     ///   and its delta fits that selection;
     /// - each delivered version names a stored BLOCK of its id and encoding. One that reads as
-    ///   removed is corruption unless it is also local content or an authorized Removal names it
+    ///   removed is corruption unless it is also local content, an authorized Removal names it
     ///   (one whose proof's apply is stored, whose proof checks again over the store's records
-    ///   and approves that version of that id); a stored proof that fails is corruption;
+    ///   and approves that version of that id), or the applied request that removed it is this
+    ///   project's own request with a cited version target of that version (D-CN4QJ); a stored
+    ///   proof that fails is corruption;
     /// - no record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN
     ///   entry or a BLOCK version that only a foreign entry holds (a verified proof's records
     ///   are the cited project's, and are not read);
@@ -1285,7 +1287,10 @@ impl StoreReader {
                     }
                 }
                 Err(StoreError::Redacted { .. }) => {
-                    if !local.contains(v) && !authorities.removal_authorizes(repo, id, v) {
+                    if !local.contains(v)
+                        && !authorities.removal_authorizes(repo, id, v)
+                        && !self.cited_request_removed(repo, id, v)?
+                    {
                         return Err(bad(format!(
                             "{}: its BLOCK reads as removed, and no authorized Removal names it",
                             what()
@@ -1299,6 +1304,29 @@ impl StoreReader {
             }
         }
         Ok(())
+    }
+
+    /// Whether the applied request that removed BLOCK version `version` is a citing project's
+    /// own request (D-CN4QJ) whose cited version target names that version of `id` in `repo`.
+    fn cited_request_removed(
+        &self,
+        repo: &RepoId,
+        id: &BlockId,
+        version: &Hash,
+    ) -> Result<bool, StoreError> {
+        // a mask whose request is not stored names no request of this project
+        let Some(request) = self.redaction_of(kinds::BLOCK, version)? else {
+            return Ok(false);
+        };
+        if !self.has_kind(kinds::REDACTION, &request)? {
+            return Ok(false);
+        }
+        let target = rdy_model::redaction::RedactTarget::ForeignVersion {
+            repo: *repo,
+            id: id.clone(),
+            version: *version,
+        };
+        Ok(self.redaction_request(&request)?.targets.contains(&target))
     }
 
     /// No record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN

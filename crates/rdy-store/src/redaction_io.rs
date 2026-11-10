@@ -349,10 +349,15 @@ impl Authorization {
         upto: Location,
     ) -> Result<Vec<IndexEntry>, StoreError> {
         let mut at: Vec<(Location, IndexEntry)> = vec![];
+        let memory = BTreeMap::new();
+        let mut access = LogAccess {
+            readers,
+            memory: &memory,
+        };
         for (loc, hash) in self.requests.iter().filter(|(l, _)| *l < upto) {
-            let payload = read_record(readers, &BTreeMap::new(), *loc, kinds::REDACTION, hash)?
+            let (raw, payload) = read_versioned(&mut access, *loc, kinds::REDACTION, hash)?
                 .ok_or_else(|| StoreError::corrupt_at(*loc))?;
-            at.push((*loc, self.request_entry(*hash, &payload)?));
+            at.push((*loc, self.request_entry(raw, *hash, &payload)?));
         }
         for a in self.applies.iter().filter(|a| a.loc < upto) {
             at.push((
@@ -388,10 +393,11 @@ impl Authorization {
     /// that no validated apply approves has no span.
     pub(crate) fn request_entry(
         &self,
+        raw: u8,
         hash: Hash,
         payload: &[u8],
     ) -> Result<IndexEntry, StoreError> {
-        let entry = crate::redaction::request_entry(hash, payload)?;
+        let entry = crate::redaction::request_entry(raw, hash, payload)?;
         if let Some(e) = self.foreign.request_entry(&entry) {
             return Ok(e);
         }
@@ -864,7 +870,7 @@ pub(crate) fn read_record(
 }
 
 /// The record of logical kind `kind` with hash `hash` at `loc`, of any encoding its kind
-/// registers, read and hash-checked through `access`: its raw kind and payload. None when the
+/// registers (its optional one included), read and hash-checked through `access`: its raw kind and payload. None when the
 /// frame there is no such record.
 pub(crate) fn read_versioned(
     access: &mut dyn RecordAccess,
@@ -872,7 +878,9 @@ pub(crate) fn read_versioned(
     kind: u8,
     hash: &Hash,
 ) -> Result<Option<(u8, Vec<u8>)>, StoreError> {
-    for version in crate::codec::first(kind)..=crate::codec::latest(kind) {
+    // through the kind's newest encoding: a request with a cited version target has its
+    // optional one
+    for version in crate::codec::first(kind)..=crate::codec::newest(kind) {
         let raw = crate::codec::raw_kind(kind, version);
         if let Some(payload) = access.record(loc, raw, hash)? {
             return Ok(Some((raw, payload)));
@@ -1051,14 +1059,14 @@ fn request_of(
     let Some(loc) = c.request_at.get(&record.request).filter(|l| **l < a.loc) else {
         return Ok(None);
     };
-    let Some(payload) = access.record(*loc, kinds::REDACTION, &record.request)? else {
+    // a request of any encoding its kind registers (a cited version target has its own)
+    let Some((raw, payload)) = read_versioned(access, *loc, kinds::REDACTION, &record.request)?
+    else {
         return Ok(None);
     };
-    Ok(
-        crate::codec::decode_record::<Redaction>(kinds::REDACTION, &payload)
-            .ok()
-            .map(|r| (*loc, r)),
-    )
+    Ok(crate::codec::decode_record::<Redaction>(raw, &payload)
+        .ok()
+        .map(|r| (*loc, r)))
 }
 
 /// The holes `applies` would authorize, by their requests' spans alone, unchecked: what the scan

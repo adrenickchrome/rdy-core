@@ -7,7 +7,7 @@
 //! content, and every record that quotes a complete source string of a selected version. Quoted
 //! text is returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
-use super::scan::{Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
+use super::scan::{BlockText, Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
 use super::targets::{Checked, check_input, selector_text};
 use super::{Limits, RedactInput, limits};
 use crate::ReadState;
@@ -19,6 +19,7 @@ use crate::error::{
     W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE,
     redaction_limit, redaction_target, sig_invalid,
 };
+use rdy_model::foreign::ForeignEvent;
 use rdy_model::redaction::{
     AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
     FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
@@ -26,7 +27,8 @@ use rdy_model::redaction::{
 };
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
+    Redaction, RedactionCarried, RepoId, Review, ReviewSubject, SemanticTension, StateSnapshot,
+    Tag,
 };
 use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
@@ -473,23 +475,98 @@ fn view_op_changes(op: &ViewOp) -> Vec<Hash> {
     }
 }
 
+/// What the foreign log delivered (repo links, D-FK58A): for each delivered BLOCK version, the
+/// `(repo, id)` pairs a delivery held it under (any source, live or revoked), and the versions
+/// only the foreign copy holds (no local change produces them). A local selector never reaches
+/// a version only the foreign copy holds; a `foreign_version` target reaches nothing else.
+#[derive(Default)]
+struct Delivered {
+    held: HashMap<Hash, Vec<(RepoId, BlockId)>>,
+    only: HashSet<Hash>,
+}
+
+impl Delivered {
+    /// The delivered versions `reader` holds. A store with no FOREIGN entry has none.
+    fn read(reader: &StoreReader) -> Result<Delivered, RdyError> {
+        let mut held: HashMap<Hash, Vec<(RepoId, BlockId)>> = HashMap::new();
+        let mut entries: Vec<Hash> = vec![];
+        reader.for_each_object_of(kinds::FOREIGN, |h| {
+            entries
+                .try_reserve(1)
+                .map_err(|_| StoreError::RedactionLimit {
+                    limit: limit::RECORD,
+                })?;
+            entries.push(h);
+            Ok(())
+        })?;
+        for h in entries {
+            let e = reader.foreign_entry(&h)?;
+            let ForeignEvent::Delivery { added, changed, .. } = e.event else {
+                continue;
+            };
+            for v in added.into_iter().chain(changed) {
+                let pairs = held.entry(v.version).or_default();
+                if !pairs.iter().any(|(r, i)| *r == e.repo && *i == v.id) {
+                    pairs.push((e.repo, v.id));
+                }
+            }
+        }
+        let mut only = HashSet::new();
+        for v in held.keys() {
+            if reader.producers(v)?.is_empty() {
+                only.insert(*v);
+            }
+        }
+        Ok(Delivered { held, only })
+    }
+
+    /// Whether `version` of `id` is only in the foreign copy, delivered from `repo`.
+    fn holds(&self, repo: &RepoId, id: &BlockId, version: &Hash) -> bool {
+        self.only.contains(version)
+            && self
+                .held
+                .get(version)
+                .is_some_and(|p| p.iter().any(|(r, i)| r == repo && i == id))
+    }
+
+    /// Whether `version` is only in the foreign copy, delivered from `repo` under another id.
+    fn holds_other(&self, repo: &RepoId, version: &Hash) -> bool {
+        self.only.contains(version)
+            && self
+                .held
+                .get(version)
+                .is_some_and(|p| p.iter().any(|(r, _)| r == repo))
+    }
+}
+
 /// Checks each normalized target that the index can check alone: a version must be a stored
-/// block version of its id; a blob must be a stored blob manifest. A cited block's version
-/// (repo links) has no request path yet: it is an invalid selector here, outside local coverage
-/// and erasure.
-fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), RdyError> {
+/// block version of its id that a local change wrote; a blob must be a stored blob manifest. A
+/// cited block's version (repo links) must be one a delivery of its repo held under its id and
+/// that only the foreign copy holds: a version of another delivered block is `version belongs to
+/// another block`, any other `unknown target`. A local version selector that names a version
+/// only the foreign copy holds is `unknown target`.
+fn check_known(
+    reader: &StoreReader,
+    targets: &[RedactTarget],
+    delivered: &Delivered,
+) -> Result<(), RdyError> {
     for t in targets {
         let name = selector_text(t);
         match t {
             RedactTarget::AllVersions(_) => {}
-            RedactTarget::ForeignVersion { .. } => {
-                return Err(redaction_target(
-                    &name,
-                    crate::error::REDACTION_CAUSE_INVALID,
-                ));
+            RedactTarget::ForeignVersion { repo, id, version } => {
+                if delivered.holds(repo, id, version) {
+                    continue;
+                }
+                let cause = if delivered.holds_other(repo, version) {
+                    REDACTION_CAUSE_OTHER_BLOCK
+                } else {
+                    REDACTION_CAUSE_UNKNOWN
+                };
+                return Err(redaction_target(&name, cause));
             }
             RedactTarget::Version { id, version } => {
-                if !reader.has_kind(kinds::BLOCK, version)? {
+                if !reader.has_kind(kinds::BLOCK, version)? || delivered.only.contains(version) {
                     return Err(redaction_target(&name, REDACTION_CAUSE_UNKNOWN));
                 }
                 if reader.get_block(version)?.id != *id {
@@ -531,6 +608,7 @@ fn check_expansion(
     reader: &StoreReader,
     targets: &[RedactTarget],
     limits: &Limits,
+    delivered: &Delivered,
 ) -> Result<(), RdyError> {
     let removed = |kind: u8, h: &Hash| -> Result<bool, RdyError> {
         Ok(reader.redaction_of(kind, h)?.is_some())
@@ -545,6 +623,10 @@ fn check_expansion(
         .collect();
     if !ids.is_empty() {
         reader.for_each_object_of(kinds::BLOCK, |v| {
+            // a version only the foreign copy holds is no version of a local id
+            if delivered.only.contains(&v) {
+                return Ok(());
+            }
             let b = reader.get_block(&v)?;
             if let Some((n, all)) = ids.get_mut(&b.id) {
                 *n += 1;
@@ -574,8 +656,9 @@ fn check_expansion(
         .sum();
     for t in targets {
         let live = match t {
-            // a cited version selects no local object (`check_known` refuses it first)
-            RedactTarget::AllVersions(_) | RedactTarget::ForeignVersion { .. } => continue,
+            RedactTarget::AllVersions(_) => continue,
+            // a cited version selects its one held version, in the foreign copy only
+            RedactTarget::ForeignVersion { version, .. } => !removed(kinds::BLOCK, version)?,
             RedactTarget::Version { id, version } => {
                 !live_ids.contains(id) && !removed(kinds::BLOCK, version)?
             }
@@ -693,6 +776,23 @@ impl OwnBatches {
     }
 }
 
+/// The repo of a repo link alias, by the live repo links of canon (`foreign_refs::RepoLinks`,
+/// read once on first use): an alias no live link holds is the write path's `E_UNKNOWN_REF`.
+fn repo_of(state: &ReadState) -> impl FnMut(&str) -> Result<RepoId, RdyError> + '_ {
+    let mut links: Option<crate::foreign_refs::RepoLinks> = None;
+    move |alias: &str| {
+        if links.is_none() {
+            let m = state.materialized(&crate::Scope::Canon)?;
+            links = Some(crate::foreign_refs::RepoLinks::of_view(&m));
+        }
+        links
+            .as_ref()
+            .and_then(|l| l.get(alias))
+            .map(|row| row.repo)
+            .ok_or_else(|| crate::foreign_refs::unknown_alias(alias))
+    }
+}
+
 /// The report, the manifest it hashes, the residues a request records and the request's own
 /// targets. `quarantine` is sorted and deduplicated here.
 pub(crate) fn compute(
@@ -727,14 +827,15 @@ pub(crate) fn compute_excluding(
         targets,
         class,
         reason,
-    } = check_input(input)?;
+    } = check_input(input, &mut repo_of(state))?;
     let limits = limits();
     let reader = state.reader();
     let mut quarantine = quarantine.to_vec();
     quarantine.sort();
     quarantine.dedup();
-    check_known(reader, &targets)?;
-    check_expansion(reader, &targets, &limits)?;
+    let delivered = Delivered::read(reader)?;
+    check_known(reader, &targets, &delivered)?;
+    check_expansion(reader, &targets, &limits, &delivered)?;
 
     // the walk, under the frame and byte bounds
     let frames = walk(reader, state.seq(), &limits)?;
@@ -750,6 +851,9 @@ pub(crate) fn compute_excluding(
     let mut manifests: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
     for f in &frames {
         match f.kind {
+            // a version only the foreign copy holds is no version of a local id, and its blob
+            // field names no local blob
+            kinds::BLOCK if delivered.only.contains(&f.hash) => {}
             kinds::BLOCK if !block_ids.contains_key(&f.hash) => {
                 let b = reader.get_block(&f.hash)?;
                 if let Some(h) = b
@@ -804,13 +908,9 @@ pub(crate) fn compute_excluding(
             },
             RedactTarget::Version { id, version } => vec![(id.clone(), *version)],
             RedactTarget::Blob(_) => vec![],
-            // outside local coverage and erasure (`check_known` refuses it first)
-            RedactTarget::ForeignVersion { .. } => {
-                return Err(redaction_target(
-                    &selector_text(t),
-                    crate::error::REDACTION_CAUSE_INVALID,
-                ));
-            }
+            // the one held version, whose frames are the foreign copy's occurrences only
+            // (`check_known`: no local change produces it)
+            RedactTarget::ForeignVersion { id, version, .. } => vec![(id.clone(), *version)],
         };
         expanded.push((t.clone(), versions));
     }
@@ -925,7 +1025,22 @@ pub(crate) fn compute_excluding(
         .copied()
         .chain(referencing.iter().map(|(_, v)| *v))
         .collect();
-    let affected_ids: HashSet<&BlockId> = selected
+    // a cited version's id is an id of the cited project: no local record references it by id,
+    // so the local reference rows read the local selection only (D-CN4QJ: the foreign copy's
+    // occurrences only)
+    let cited: HashSet<Hash> = request_targets
+        .iter()
+        .filter_map(|t| match t {
+            RedactTarget::ForeignVersion { version, .. } => Some(*version),
+            _ => None,
+        })
+        .collect();
+    let local_selected: BTreeSet<(BlockId, Hash)> = selected
+        .iter()
+        .filter(|(_, v)| !cited.contains(v))
+        .cloned()
+        .collect();
+    let affected_ids: HashSet<&BlockId> = local_selected
         .iter()
         .chain(&referencing)
         .map(|(id, _)| id)
@@ -1085,7 +1200,7 @@ pub(crate) fn compute_excluding(
                     ImpactKind::BlockVersion,
                     &version_record(&b.id, &h),
                     true,
-                    &b,
+                    &BlockText(&b),
                 )?;
             }
             kinds::CHANGE => {
@@ -1113,7 +1228,7 @@ pub(crate) fn compute_excluding(
                             continue;
                         }
                         let record = version_record(&block.id, &v);
-                        quotes.scan(ImpactKind::BlockVersion, &record, true, block)?;
+                        quotes.scan(ImpactKind::BlockVersion, &record, true, &BlockText(block))?;
                         quoting |= quotes.found.contains_key(&(
                             ImpactKind::BlockVersion as u8,
                             record,
@@ -1212,6 +1327,12 @@ pub(crate) fn compute_excluding(
             kinds::REF_UPDATE => {
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
+            }
+            // a foreign entry (repo links): its source and publication text. It names delivered
+            // versions by hash, which core reports through the versions themselves
+            kinds::FOREIGN => {
+                let e = reader.foreign_entry(&h)?;
+                quotes.scan(audit, &rec, false, &e)?;
             }
             // the carried shapes (no writer yet): each whole typed record, which core reports
             // and cannot erase
@@ -1484,7 +1605,7 @@ pub(crate) fn compute_excluding(
                     || affected_tags.contains(t)
                     || affected_landings.contains(t)
             });
-            target || item_hits(&a.item, &selected, &referencing)
+            target || item_hits(&a.item, &local_selected, &referencing)
         })
         .map(|(h, _)| *h)
         .collect();
@@ -1636,7 +1757,7 @@ fn prospective_hits(
                 return Ok(true);
             }
             if let Op::Create { block } | Op::Update { block, .. } = op {
-                quotes.scan(ImpactKind::BlockVersion, "", true, block)?;
+                quotes.scan(ImpactKind::BlockVersion, "", true, &BlockText(block))?;
             }
         }
     }

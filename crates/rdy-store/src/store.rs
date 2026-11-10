@@ -792,7 +792,11 @@ fn frame_entries(
                 signature: hash,
             });
         }
-        kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
+        kinds::REDACTION => {
+            // a request of any encoding: a cited version target has its own
+            let r: rdy_model::Redaction = crate::codec::decode_split(&o)?;
+            out.push(crate::redaction::request_entry_of(hash, &r));
+        }
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
             // through the codec's wire type, which reads every encoding: a delivered move or a
@@ -1158,13 +1162,14 @@ fn replay_into(
                     .ok_or_else(|| StoreError::corrupt_at(loc))?,
             ],
             // a request's spans are the log's own: a holder's come from its approvals
-            Some(payload) if v.kind == kinds::REDACTION => vec![
+            // (a request of any encoding: a cited version target has its own)
+            Some(payload) if crate::codec::logical_kind(v.kind) == kinds::REDACTION => vec![
                 IndexEntry::Object {
-                    kind: v.kind,
+                    kind: kinds::REDACTION,
                     hash: v.hash,
                     loc,
                 },
-                auth.request_entry(v.hash, payload)?,
+                auth.request_entry(v.kind, v.hash, payload)?,
             ],
             // a foreign removal's proof record is an object only: never local history
             Some(_) if auth.foreign.is_proof_record(v.kind, loc) => {
@@ -2552,8 +2557,8 @@ impl Store {
                     crate::codec::logical_kind(*k) == kinds::REDACTION && Hash::of(p) == request
                 })
             {
-                let (_, stored) = reader.get_kind_raw(kinds::REDACTION, &request)?;
-                out.push(auth.request_entry(request, &stored)?);
+                let (raw, stored) = reader.get_kind_raw(kinds::REDACTION, &request)?;
+                out.push(auth.request_entry(raw, request, &stored)?);
             }
             if let Some(e) = auth.foreign.frame_entries(*kind, *hash, *at) {
                 r.note(crate::codec::logical_kind(*kind), *hash, *at)?;
@@ -2565,7 +2570,7 @@ impl Store {
                     hash: *hash,
                     loc: *at,
                 });
-                out.push(auth.request_entry(*hash, payload)?);
+                out.push(auth.request_entry(*kind, *hash, payload)?);
             } else {
                 out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
             }

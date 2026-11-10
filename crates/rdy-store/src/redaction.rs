@@ -25,7 +25,7 @@ use rdy_model::redaction::{
     BlockResidue, CARRIER_MESSAGE, ChangeResidue, RedactTarget, Redaction, RedactionApply,
     RedactionResidue, ResidualOp, encode_into, record_buffer,
 };
-use rdy_model::{Block, BlockId, Change, ChangeLinks, Hash, LandingRecord, Op};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, Hash, LandingRecord, Op, RepoId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -237,15 +237,16 @@ pub(crate) fn selector_len(t: &RedactTarget) -> usize {
     }
 }
 
-/// The refusal of a request that names a cited block's version: repo links register the
-/// `foreign_version` target, and no request path takes one yet.
-pub const FOREIGN_TARGET_CLOSED: &str =
-    "a foreign_version target cannot be redacted yet: no request path takes one";
+/// The index entry of a `REDACTION` frame of raw kind `raw` with hash `hash`: its carrier, every
+/// object it removes or names (with the residue of its first span) and every span. A request
+/// with a cited version target has its own encoding (`Redaction::encoding`).
+pub(crate) fn request_entry(raw: u8, hash: Hash, payload: &[u8]) -> Result<IndexEntry, StoreError> {
+    let r: Redaction = crate::codec::decode_record(raw, payload)?;
+    Ok(request_entry_of(hash, &r))
+}
 
-/// The index entry of a `REDACTION` frame with hash `hash`: its carrier, every object it removes
-/// or names (with the residue of its first span) and every span.
-pub(crate) fn request_entry(hash: Hash, payload: &[u8]) -> Result<IndexEntry, StoreError> {
-    let r: Redaction = decode(payload)?;
+/// The index entry of the decoded request `r` with hash `hash` (see [`request_entry`]).
+pub(crate) fn request_entry_of(hash: Hash, r: &Redaction) -> IndexEntry {
     let mut objects: BTreeMap<(u8, Hash), Option<Hash>> = BTreeMap::new();
     let mut spans = Vec::with_capacity(r.manifest.spans.len());
     for s in &r.manifest.spans {
@@ -264,7 +265,7 @@ pub(crate) fn request_entry(hash: Hash, payload: &[u8]) -> Result<IndexEntry, St
     for b in &r.manifest.blobs {
         objects.entry((kinds::BLOB_MANIFEST, *b)).or_insert(None);
     }
-    Ok(IndexEntry::RedactionRequest {
+    IndexEntry::RedactionRequest {
         request: hash,
         carrier: r.carrier,
         objects: objects
@@ -272,7 +273,7 @@ pub(crate) fn request_entry(hash: Hash, payload: &[u8]) -> Result<IndexEntry, St
             .map(|((kind, h), residue)| (kind, h, residue))
             .collect(),
         spans,
-    })
+    }
 }
 
 /// The index entry of a `REDACTION_APPLY` frame with hash `hash` at `loc`.
@@ -716,14 +717,16 @@ impl Store {
             limit: limit::RECORD,
         };
         let mut buf = record_buffer().map_err(|_| too_big())?;
-        // each record framed in its kind's latest encoding (`crate::codec`); its id is the
-        // frame's hash
-        let request_frame = crate::codec::frame_latest(
+        // each record framed in its kind's latest encoding (`crate::codec`), a request with a
+        // cited version target in its own (`Redaction::encoding`); its id is the frame's hash
+        let request_frame = crate::codec::frame(
             kinds::REDACTION,
+            request.encoding(),
             encode_into(request, &mut buf)
                 .map_err(|_| too_big())?
                 .to_vec(),
-        );
+        )
+        .map_err(|e| refused(format!("the redaction request does not frame: {e}")))?;
         let request_id = Hash::of(&request_frame.1);
         // a supplied residue is a new one: it is written, and checked, in the latest encoding
         let encoding = crate::codec::latest(kinds::REDACTION_RESIDUE);
@@ -796,10 +799,6 @@ pub(crate) fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
             "a redaction request names at least one target".into(),
         ));
     }
-    // foreign targets stay outside local coverage and erasure: their path is closed
-    if request.targets.iter().any(RedactTarget::is_foreign) {
-        return Err(refused(FOREIGN_TARGET_CLOSED.into()));
-    }
     if request.targets.len() > MAX_TARGETS {
         return Err(StoreError::RedactionLimit {
             limit: limit::TARGETS,
@@ -837,15 +836,16 @@ pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
 }
 
 /// The encoding of the removed frame a residue names (`source_encoding`): a block residue's is
-/// always 0, a change residue's 0 or CHANGE's latest. None for a residue whose source encoding
-/// this registry does not permit.
+/// 0, or BLOCK's optional encoding for a block with a foreign part (repo links: a block that
+/// cites, local or delivered); a change residue's 0 through CHANGE's newest (its optional one
+/// embeds such a block). None for a residue whose source encoding this registry does not
+/// permit.
 pub(crate) fn source_encoding(r: &RedactionResidue) -> Option<u16> {
-    match r {
-        RedactionResidue::Block(b) => (b.source_encoding == 0).then_some(0),
-        RedactionResidue::Change(c) => {
-            (c.source_encoding <= crate::codec::latest(kinds::CHANGE)).then_some(c.source_encoding)
-        }
-    }
+    let (kind, encoding) = match r {
+        RedactionResidue::Block(b) => (kinds::BLOCK, b.source_encoding),
+        RedactionResidue::Change(c) => (kinds::CHANGE, c.source_encoding),
+    };
+    (encoding <= crate::codec::newest(kind)).then_some(encoding)
 }
 
 /// The source encoding residue `r` records, as it is written (whether this registry permits
@@ -948,9 +948,9 @@ pub(crate) fn manifest_in_order(m: &rdy_model::redaction::RedactionManifest) -> 
 
 /// The selector expansion rule of a request, shared by the checked preparation and apply
 /// (`check_selection`) and the open's authorization bootstrap: every target selects something
-/// the manifest lists (an all-versions target a version of its id, a version target that
-/// version of its id, a blob target that blob), and every manifest version and blob is selected
-/// by a target. That every listed version is a stored version of its id, and that an
+/// the manifest lists (an all-versions target a version of its id, a version target or a cited
+/// version target (repo links) that version of its id, a blob target that blob), and every
+/// manifest version and blob is selected by a target. That every listed version is a stored version of its id, and that an
 /// all-versions target lists every stored version, each path checks against its own view of the
 /// log. The error is the refusal's text.
 pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
@@ -962,8 +962,9 @@ pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
                 m.versions.binary_search(&(id.clone(), *version)).is_ok()
             }
             RedactTarget::Blob(h) => m.blobs.binary_search(h).is_ok(),
-            // a cited version is outside the local manifest: it selects nothing here
-            RedactTarget::ForeignVersion { .. } => false,
+            RedactTarget::ForeignVersion { id, version, .. } => {
+                m.versions.binary_search(&(id.clone(), *version)).is_ok()
+            }
         };
         if !found {
             return Err(format!(
@@ -974,8 +975,9 @@ pub(crate) fn targets_agree(request: &Redaction) -> Result<(), String> {
     for (id, v) in &m.versions {
         let covered = request.targets.iter().any(|t| match t {
             RedactTarget::AllVersions(i) => i == id,
-            RedactTarget::Version { id: i, version } => i == id && version == v,
-            RedactTarget::Blob(_) | RedactTarget::ForeignVersion { .. } => false,
+            RedactTarget::Version { id: i, version }
+            | RedactTarget::ForeignVersion { id: i, version, .. } => i == id && version == v,
+            RedactTarget::Blob(_) => false,
         });
         if !covered {
             return Err(format!(
@@ -1032,6 +1034,7 @@ impl Store {
             chunks.extend(manifest.chunks);
         }
         targets_agree(request).map_err(refused)?;
+        self.check_cited(request)?;
         let mut changes: HashSet<Hash> = HashSet::new();
         for v in &versions {
             changes.extend(self.producers(v)?);
@@ -1041,6 +1044,50 @@ impl Store {
             changes,
             chunks,
         })
+    }
+
+    /// Each cited version target (repo links, D-CN4QJ) names a version only the foreign copy
+    /// holds: a delivery of its repo held it under its id, and no local change produces it, so
+    /// every frame of it is a foreign occurrence and the removal reaches no local content. Any
+    /// failure is `Refused`.
+    fn check_cited(&self, request: &Redaction) -> Result<(), StoreError> {
+        let cited: Vec<(&RepoId, &BlockId, &Hash)> = request
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                RedactTarget::ForeignVersion { repo, id, version } => Some((repo, id, version)),
+                _ => None,
+            })
+            .collect();
+        if cited.is_empty() {
+            return Ok(());
+        }
+        let mut held: HashSet<(RepoId, BlockId, Hash)> = HashSet::new();
+        let reader = self.reader();
+        reader.for_each_object_of(kinds::FOREIGN, |h| {
+            let e = reader.foreign_entry(&h)?;
+            if let rdy_model::foreign::ForeignEvent::Delivery { added, changed, .. } = e.event {
+                for v in added.into_iter().chain(changed) {
+                    if cited.iter().any(|(_, _, c)| **c == v.version) {
+                        held.insert((e.repo, v.id, v.version));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        for (repo, id, version) in cited {
+            if !held.contains(&(*repo, id.clone(), *version)) {
+                return Err(refused(format!(
+                    "cited version {repo}:{id}@{version} is not a version a delivery of {repo} holds"
+                )));
+            }
+            if !self.producers(version)?.is_empty() {
+                return Err(refused(format!(
+                    "cited version {repo}:{id}@{version} is local content too: a local change writes it"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Each span of the manifest, in strictly ascending location order (and, at apply, before
@@ -1351,7 +1398,7 @@ impl Store {
             .typed(kinds::REDACTION, &r)?
             .ok_or(StoreError::NotFound(r))?;
         let request = self.redaction_request(&r)?;
-        if Hash::of(&encode(&request)) != r {
+        if rdy_model::encoding::encoded_hash(request.encoding(), &encode(&request)) != r {
             return Err(StoreError::corrupt_at(rloc));
         }
         if request.carrier != carrier {
