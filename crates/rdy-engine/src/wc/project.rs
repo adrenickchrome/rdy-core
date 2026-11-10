@@ -5,12 +5,14 @@
 //! typed as a key is written back as that key.
 
 use crate::error::*;
-use crate::io::{BlockYaml, to_yaml_struct};
+use crate::foreign_refs::ForeignShow;
+use crate::io::{BlockYaml, LinkYaml, to_yaml_struct};
 use crate::keys::key_of;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::layout::FileKind;
 use crate::wc::state::HiddenLink;
 use crate::{Materialized, ReadState, Scope};
+use rdy_model::reference::foreign_token;
 use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, ref_spans, tree};
 use rdy_schema::{
     Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, TypeClass,
@@ -96,7 +98,8 @@ impl ReadState {
                 self.canon_head().map(|h| h.to_string()).unwrap_or_default()
             )
         });
-        project_state(&m, self.pack(), &view, &head, ids)
+        let show = ForeignShow::of(self, &m)?;
+        project_with(&m, self.pack(), &view, &head, ids, show.as_ref())
     }
 }
 
@@ -108,6 +111,18 @@ pub fn project_state(
     view: &str,
     head: &str,
     ids: Option<&[BlockId]>,
+) -> Result<Projection, RdyError> {
+    project_with(m, pack, view, head, ids, None)
+}
+
+/// [`project_state`], with `show` (repo links) writing each cited block by its alias.
+fn project_with(
+    m: &Materialized,
+    pack: &Pack,
+    view: &str,
+    head: &str,
+    ids: Option<&[BlockId]>,
+    show: Option<&ForeignShow<'_>>,
 ) -> Result<Projection, RdyError> {
     let mut missing = vec![];
     let wanted = ids.map(|ids| {
@@ -132,6 +147,7 @@ pub fn project_state(
     let mut p = Projector {
         m,
         pack,
+        show,
         wanted,
         files: vec![],
         blocks: BTreeMap::new(),
@@ -201,6 +217,8 @@ fn path_clash(
 struct Projector<'a> {
     m: &'a Materialized,
     pack: &'a Pack,
+    /// Shows cited blocks by alias (repo links); `None` when the view has no live repo link.
+    show: Option<&'a ForeignShow<'a>>,
     /// The heads of the files to write; `None` for every file.
     wanted: Option<BTreeSet<BlockId>>,
     files: Vec<ProjectedFile>,
@@ -348,6 +366,7 @@ impl Projector<'_> {
             self.blobs.entry(h).or_insert(name);
         }
         let version = self.m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
+        let cited = self.foreign_links(b, &mut hidden);
         self.blocks.insert(
             b.id.to_string(),
             ProjectedBlock {
@@ -357,10 +376,48 @@ impl Projector<'_> {
             },
         );
         let mut y = to_yaml_struct(&c);
+        for (kind, link) in cited {
+            y.links.entry(kind).or_default().push(link);
+        }
         if head {
             y.parent = None;
         }
         y
+    }
+
+    /// The foreign links of `b` a file shows (repo links): per kind, each target by the alias
+    /// that shows it. A store-only kind stays in the store, and a link to a store-only type goes
+    /// to `hidden` in its stored form, as a local one does.
+    fn foreign_links(
+        &self,
+        b: &Block,
+        hidden: &mut BTreeMap<String, Vec<HiddenLink>>,
+    ) -> Vec<(String, LinkYaml)> {
+        let mut shown = vec![];
+        for (kind, list) in &b.foreign.links {
+            if STORE_ONLY_LINK_KINDS.contains(&kind.as_str()) {
+                continue;
+            }
+            for l in list {
+                let store_only = self
+                    .pack
+                    .type_for_prefix(l.target.id.prefix())
+                    .is_some_and(|t| STORE_ONLY_TARGET_TYPES.contains(&t));
+                if store_only {
+                    hidden.entry(kind.clone()).or_default().push(HiddenLink {
+                        target: foreign_token(&l.target.repo, &l.target.id),
+                        part: l.part.clone(),
+                    });
+                    continue;
+                }
+                let target = match self.show {
+                    Some(show) => show.target_text(&l.target),
+                    None => foreign_token(&l.target.repo, &l.target.id),
+                };
+                shown.push((kind.clone(), LinkYaml::new(target, l.part.clone())));
+            }
+        }
+        shown
     }
 
     fn keys_back_value(&self, v: &mut FieldValue) {
@@ -378,6 +435,15 @@ impl Projector<'_> {
         if !text.contains("{{") {
             return text.to_string();
         }
+        // repo links: a cited block is written by the alias that shows it
+        let shown;
+        let text = match self.show {
+            Some(show) => {
+                shown = show.text(text, mode);
+                shown.as_str()
+            }
+            None => text,
+        };
         let mut out = String::with_capacity(text.len());
         let mut last = 0;
         for span in ref_spans(text, mode) {

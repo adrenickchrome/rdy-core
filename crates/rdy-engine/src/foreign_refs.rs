@@ -348,6 +348,116 @@ impl<'a> ForeignCite<'a> {
     }
 }
 
+/// How a working copy and an edit buffer show a cited block (repo links, D-DAPR8, D-FK58A): by
+/// the alias of a live repo link, so that writing it back resolves it as an author's `alias:id`.
+///
+/// An alias shows a target only when that alias's own profile selection holds it now, the first
+/// such alias in sorted order. A target that no alias selects (a block the source dropped, a
+/// repo with no live link, an external decision) keeps the stored `<repo>:<id>` form, which a
+/// write accepts and which keeps the block's held pin. Another profile's alias never shows a
+/// block outside its selection, so a write never widens it.
+pub(crate) struct ForeignShow<'a> {
+    foreign: &'a crate::foreign::ForeignState,
+    links: RepoLinks,
+    /// The blocks each live alias's current profile selection holds, read on first use.
+    held: RefCell<BTreeMap<String, std::rc::Rc<std::collections::BTreeSet<BlockId>>>>,
+}
+
+impl<'a> ForeignShow<'a> {
+    /// The display of the view `m`; `None` when it has no live repo link, so it shows nothing.
+    pub(crate) fn of(
+        st: &'a ReadState,
+        m: &Materialized,
+    ) -> Result<Option<ForeignShow<'a>>, RdyError> {
+        let links = RepoLinks::of_view(m);
+        if links.rows().next().is_none() {
+            return Ok(None);
+        }
+        Ok(Some(ForeignShow {
+            foreign: &**st.foreign()?,
+            links,
+            held: RefCell::new(BTreeMap::new()),
+        }))
+    }
+
+    fn selection(
+        &self,
+        alias: &str,
+        row: &LinkRow,
+    ) -> std::rc::Rc<std::collections::BTreeSet<BlockId>> {
+        self.held
+            .borrow_mut()
+            .entry(alias.to_string())
+            .or_insert_with(|| {
+                std::rc::Rc::new(
+                    self.foreign
+                        .current_for_profile(&row.repo, &row.profile)
+                        .into_keys()
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .clone()
+    }
+
+    /// The alias that shows `target`: the first live alias of its repo whose selection holds it.
+    pub(crate) fn alias_of(&self, target: &ForeignId) -> Option<String> {
+        self.links
+            .aliases_of(&target.repo)
+            .find(|(a, row)| self.selection(a, row).contains(&target.id))
+            .map(|(a, _)| a.to_string())
+    }
+
+    /// `target` as a file or buffer shows it: `alias:id`, else the stored `<repo>:<id>`.
+    pub(crate) fn target_text(&self, target: &ForeignId) -> String {
+        match self.alias_of(target) {
+            Some(a) => format!("{a}:{}", target.id),
+            None => foreign_token(&target.repo, &target.id),
+        }
+    }
+
+    /// `v` with every string leaf shown as [`ForeignShow::text`] shows it (string fields are
+    /// strict references).
+    pub(crate) fn value(&self, v: &rdy_model::FieldValue) -> rdy_model::FieldValue {
+        use rdy_model::FieldValue;
+        match v {
+            FieldValue::Str(s) => FieldValue::Str(self.text(s, RefMode::Strict)),
+            FieldValue::List(items) => {
+                FieldValue::List(items.iter().map(|i| self.value(i)).collect())
+            }
+            FieldValue::Map(m) => {
+                FieldValue::Map(m.iter().map(|(k, i)| (k.clone(), self.value(i))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// `text` with every stored `{{<repo>:<id>}}` reference that an alias shows written as
+    /// `{{alias:id}}`; the `@key` mark and display text stay. It is [`ForeignCite::rewrite`]
+    /// reversed: writing the result back stores the same bytes.
+    pub(crate) fn text(&self, text: &str, mode: RefMode) -> String {
+        if mode == RefMode::Off || !text.contains(':') || !text.contains("{{") {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for span in ref_spans(text, mode) {
+            let Some(ForeignRef::Stored { repo, id }) = foreign_ref(&span.token) else {
+                continue;
+            };
+            let target = ForeignId::new(repo, id);
+            let Some(alias) = self.alias_of(&target) else {
+                continue;
+            };
+            out.push_str(&text[last..span.range.start]);
+            out.push_str(&span.encode(&format!("{alias}:{}", target.id)));
+            last = span.range.end;
+        }
+        out.push_str(&text[last..]);
+        out
+    }
+}
+
 /// The first foreign pin among `blocks` whose content no delivery before `st`'s watermark held
 /// is `E_FOREIGN_VERSION`, its repo shown by `shown`.
 fn check_held<'b>(

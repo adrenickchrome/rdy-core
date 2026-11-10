@@ -2,7 +2,7 @@
 use super::*;
 use rdy_engine::engine::open_report_json;
 use rdy_engine::show::ShowTarget;
-use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope, block_to_yaml};
+use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -338,6 +338,6 @@ pub(super) fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
         "id": b.id.to_string(),
         "version": b.version_hash().to_string(),
         "conflict": conflict,
-        "yaml": block_to_yaml(&b),
+        "yaml": st.block_yaml(&scope, &b)?,
     }))
 }
