@@ -13,8 +13,11 @@ use rdy_store::dump::{
     DumpBatch, DumpHeader, DumpItem, DumpReader, DumpWriter, Frame, RemovalTally,
 };
 use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpChainHeader};
-use rdy_store::follower::{self, FollowStep, FollowerMark, on_follow_step, prepare_follow};
+use rdy_store::follower::{
+    self, FOLLOWER_FILE, FollowStep, FollowerMark, on_follow_step, prepare_follow,
+};
 use rdy_store::format::{self, DumpStore, FEATURE_FOREIGN_COPY, StoreFeatures};
+use rdy_store::fsutil;
 use rdy_store::ingest::Ingest;
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreLock, StoreReader, codec, kinds};
@@ -255,13 +258,18 @@ fn log_prefix(dir: &Path, end: Location) -> Vec<Vec<u8>> {
 
 /// Copies the durable record of the store at `from` (its `FORMAT` and `FEATURES` mirrors, a
 /// follower mark and its segments) to `to`, which must not exist, as a kill would leave it on
-/// disk. The lock and the derived index stay behind: the copy opens by its log.
+/// disk. The lock and the derived index stay behind: the copy opens by its log. The follower mark
+/// is written as the store writes it, a private file: a plain copy takes the folder's inherited
+/// access list on Windows, and the store refuses a mark that is not private.
 fn copy_record(from: &Path, to: &Path) {
     std::fs::create_dir_all(to.join("segments")).unwrap();
     for e in std::fs::read_dir(from).unwrap() {
         let e = e.unwrap();
         let name = e.file_name().to_string_lossy().into_owned();
-        if e.file_type().unwrap().is_file() && !name.starts_with("index") && name != "lock" {
+        if name == FOLLOWER_FILE {
+            let bytes = std::fs::read(e.path()).unwrap();
+            fsutil::write_private_durable(&to.join(&name), &bytes).unwrap();
+        } else if e.file_type().unwrap().is_file() && !name.starts_with("index") && name != "lock" {
             std::fs::copy(e.path(), to.join(&name)).unwrap();
         }
     }
