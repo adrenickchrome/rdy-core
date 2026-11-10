@@ -63,6 +63,16 @@ fn upstream() -> Block {
     )
 }
 
+/// A titled cited claim whose body runs over several paragraphs and a list.
+fn multi() -> Block {
+    block(
+        "c-RTRYP",
+        "claim",
+        &[("title", "Retry policy")],
+        "First sentence of the policy.\n\nSecond paragraph about retries.\n\n- item one\n- item two",
+    )
+}
+
 fn claim(body: &str) -> Block {
     block("c-FRGNC", "claim", &[], body)
 }
@@ -158,7 +168,7 @@ fn world(behind: bool) -> World {
         files.path(),
         "v1",
         &link,
-        &[&upstream(), &claim("Every service logs in UTC.")],
+        &[&upstream(), &claim("Every service logs in UTC."), &multi()],
     );
     let decided = r
         .decide(
@@ -188,7 +198,11 @@ fn world(behind: bool) -> World {
             files.path(),
             "v2",
             &link,
-            &[&upstream(), &claim("Every service logs in local time.")],
+            &[
+                &upstream(),
+                &claim("Every service logs in local time."),
+                &multi(),
+            ],
         );
     }
     r.close().unwrap();
@@ -354,6 +368,32 @@ fn rpl31_cli_links_new_show_and_adopt_upstream() {
     // canon still holds the old decision in force: nothing landed
     let canon = json_ok(s, &["show", &w.old]);
     assert_eq!(canon["status_words"], "live", "{canon}");
+}
+
+#[test]
+fn rpl31_cli_show_cited_block_returns_the_full_content() {
+    let w = world(false);
+    let s = &w.s;
+    let whole = [
+        "Retry policy",
+        "First sentence of the policy.",
+        "Second paragraph about retries.",
+        "item one",
+        "item two",
+    ];
+    let (ok, out) = text(&s.rdy(&["show", "core:c-RTRYP"]));
+    assert!(ok, "{out}");
+    for part in whole {
+        assert!(out.contains(part), "human output lost {part:?}: {out}");
+    }
+    assert!(out.contains("delivered by the hub (link "), "{out}");
+    let v = json_ok(s, &["show", "core:c-RTRYP"]);
+    assert_eq!(v["cited"], true, "{v}");
+    let t = v["text"].as_str().unwrap();
+    for part in whole {
+        assert!(t.contains(part), "json text lost {part:?}: {v}");
+    }
+    assert!(t.contains("delivered: "), "{v}");
 }
 
 #[test]
