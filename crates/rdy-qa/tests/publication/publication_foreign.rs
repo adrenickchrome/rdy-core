@@ -65,10 +65,12 @@ fn deliver(r: &mut Rdy, link: &str, b: &Block) {
             changed: vec![],
             removed: vec![],
             shells: vec![],
-            selection: selection_identity([(&b.id, &version)].into_iter()).unwrap(),
+            selection: selection_identity([(&b.id, &version)]).unwrap(),
         },
     };
-    r.store_mut().put_foreign(&entry, &[b.clone()]).unwrap();
+    r.store_mut()
+        .put_foreign(&entry, std::slice::from_ref(b))
+        .unwrap();
     r.publish_after_foreign_for_tests().unwrap();
 }
 
