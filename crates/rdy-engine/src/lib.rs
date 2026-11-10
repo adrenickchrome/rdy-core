@@ -86,6 +86,7 @@ mod lint;
 pub mod load;
 pub mod load_chain;
 pub mod maintenance;
+pub mod markdown_import;
 mod materialize;
 pub mod mention_review;
 pub mod neighbors;

@@ -37,6 +37,8 @@ criterion = "0.8"
 tempfile = "3"
 semver = "1"
 saphyr-parser = "0.1"
+# Markdown import: the CommonMark event parser (tables through `Options`), in rdy-engine only.
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 libc = "0.2.190"
 # Win32 bindings, only in the platform seams: the site socket's Windows option
 # (SO_EXCLUSIVEADDRUSE, D-FPKPS) in rdy_daemon::sys, handle identity, change time and link
