@@ -39,7 +39,8 @@ use rdy_engine::readiness::assessment::{config_digest, pack_digest};
 use rdy_engine::readiness::check::MAX_REPLAY_STEPS;
 use rdy_engine::{Materialized, ReadState, Scope};
 use rdy_model::assessment::{
-    Assessment, AssessmentSeverity, AssessmentTensionStatus, AssessmentV2, PolicyRef, PolicyVerdict,
+    Assessment, AssessmentForeign, AssessmentSeverity, AssessmentTensionStatus, AssessmentV2,
+    PolicyRef, PolicyVerdict,
 };
 use rdy_model::plan::{Plan, PlanAct, PlanKind, PlanOutcome};
 use rdy_model::{
@@ -130,9 +131,10 @@ pub struct LandingFact {
     pub reaffirm_card: bool,
     /// The assessment the landing names, decoded (its local part).
     pub assessment: Option<Assessment>,
-    /// The `kinds::ASSESSMENT` id of the named assessment's whole record re-encoded now, its
-    /// foreign part included (repo links, ASSESSMENT encoding 2): [`assessment_wire_id`].
-    pub assessment_now: Option<Hash>,
+    /// The named assessment's foreign part (repo links, ASSESSMENT encoding 2). The binding
+    /// rule re-encodes [`Self::assessment`] with it ([`assessment_wire_id`]), so a changed
+    /// local field still changes the id.
+    pub assessment_foreign: Option<AssessmentForeign>,
     /// The newest assessment of the approved version whose frame lies before the landing.
     pub bound_assessment: Option<Hash>,
     /// The approved version's changes.
@@ -246,7 +248,7 @@ impl LandingFact {
             view,
             approved,
             assessment: None,
-            assessment_now: None,
+            assessment_foreign: None,
             bound_assessment: None,
             changes: vec![],
             seal: None,
@@ -263,7 +265,7 @@ impl LandingFact {
             let wire = reader
                 .assessment_wire(&a)
                 .map_err(|e| read_err(format!("assessment {}", a.short()), e))?;
-            fact.assessment_now = Some(assessment_wire_id(&wire));
+            fact.assessment_foreign = Some(wire.foreign.clone());
             fact.assessment = Some(wire.local());
         }
         if let Some(version) = fact.record.approved_version {
@@ -658,7 +660,14 @@ fn binding_rule(l: &LandingFact) -> Vec<Violation> {
             ),
         ));
     }
-    let now = l.assessment_now.unwrap_or_else(|| assessment_id(a));
+    let now = match &l.assessment_foreign {
+        Some(foreign) => {
+            let mut w = AssessmentV2::of(a);
+            w.foreign = foreign.clone();
+            assessment_wire_id(&w)
+        }
+        None => assessment_id(a),
+    };
     if now != h {
         out.push(v(
             "m3_assessment",
