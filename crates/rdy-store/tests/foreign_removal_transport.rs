@@ -746,7 +746,7 @@ fn tamper(bytes: &[u8], f: &dyn Fn(&mut Vec<Frame>)) -> Vec<u8> {
             batches.push(b);
         }
     }
-    let t = reader.trailer().unwrap().clone();
+    let t = *reader.trailer().unwrap();
     let last = batches.last_mut().unwrap();
     let len = |b: &DumpBatch| -> u32 { b.frames.iter().map(|f| f.original_len()).sum() };
     let before = len(last);
@@ -765,6 +765,9 @@ fn tamper(bytes: &[u8], f: &dyn Fn(&mut Vec<Frame>)) -> Vec<u8> {
     .unwrap()
     .0
 }
+
+/// A change to the frames of a dump's last batch.
+type Tamper = Box<dyn Fn(&mut Vec<Frame>)>;
 
 /// Changes the `Removal` entry among `frames` by `f`, in place (its length kept).
 fn edit_entry(frames: &mut [Frame], f: impl Fn(&mut ForeignEntry)) {
@@ -815,7 +818,7 @@ fn rpl37_invalid_removal_transport_writes_nothing() {
     let (inc, _) = dump(&x.store, Some(&pre_end));
 
     let (v1, v2, v3, v5) = (pair(&c.v1), pair(&c.v2), pair(&c.v3), pair(&c.v5));
-    let cases: Vec<(&str, Box<dyn Fn(&mut Vec<Frame>)>)> = vec![
+    let cases: Vec<(&str, Tamper)> = vec![
         // the entry claims another repo, whose deliveries hold none of its versions
         (
             "another repo",
