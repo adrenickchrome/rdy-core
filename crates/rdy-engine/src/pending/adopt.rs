@@ -2,9 +2,9 @@
 //! what this project cites or follows, and the one question it asks: adopt it, keep the approved
 //! pins, or later.
 //!
-//! The cards are internal for now. [`ReadState::adopt_cards`] builds them, but the queue never
-//! lists one, and an answer to one is refused with the unsupported-answer refusal and no write,
-//! until the answer path enables both together.
+//! The queue lists each card as a group of its own, after the re-affirmation cards, and the
+//! answer path takes its options ([`crate::answer::adopt`]): `adopt` lands the delivery in an
+//! isolated landing, `keep` records the person's reason, `later` snoozes the card.
 //!
 //! # Membership
 //!
@@ -62,8 +62,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const ADOPT_REF_PREFIX: &str = "adopt:";
 /// The why line of every adopt card.
 pub const ADOPT_WHY: &str = "a linked project delivered a change that this project has not adopted";
-/// The label of the option that adopts the delivery (`adopt`).
-pub const ADOPT_LABEL: &str = "Adopt the delivery";
+/// The label of the option that adopts the delivery (`adopt`): the store's, which an adopt
+/// landing's evidence must choose.
+pub const ADOPT_LABEL: &str = rdy_store::ADOPT_LABEL;
 /// The label of the option that keeps the approved pins (`keep`).
 pub const KEEP_PIN_LABEL: &str = "Keep the approved pins";
 /// The longest word diff one fact shows, in characters.
@@ -778,10 +779,8 @@ fn card(
 
 impl ReadState {
     /// The adopt cards of this state for `q` (see the module docs), cards cut to the query's
-    /// budget, less the ones `q.person` snoozed in the session `q.session_ref`. A pure read.
-    ///
-    /// The queue does not list these cards yet: this is the one way to read them until their
-    /// answer path exists.
+    /// budget, less the ones `q.person` snoozed in the session `q.session_ref`. A pure read. The
+    /// queue lists the same cards, routed by the live policy.
     #[doc(hidden)]
     pub fn adopt_cards(&self, q: &PendingQuery) -> Result<Vec<Item>, RdyError> {
         let (shown, _) = hide_snoozed(self, q, adopt_items(self, now_ms())?);

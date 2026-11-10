@@ -3688,7 +3688,7 @@ impl Rdy {
             accept,
             chosen,
             keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
-            reaffirm: None,
+            card: None,
         })
     }
 
@@ -3820,8 +3820,190 @@ impl Rdy {
             accept: None,
             chosen: None,
             keys: BTreeMap::new(),
-            reaffirm: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
+            card: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
         })
+    }
+
+    /// The private request of an adopt card's isolated landing (repo links, D-8VJAZ; see
+    /// [`AdoptLanding`]), prepared under the writer and written by [`Rdy::commit_landing`] like
+    /// every approval, the re-affirmation card's path with the adoption's own frozen-decision
+    /// exception. On the canon the card was read on, in memory and in one batch: the fresh
+    /// internal view `adopt-<card hash, first 12 digits>`, its `Create` op, the adoption's one
+    /// change and its `Commit` op, the proposal (the card's title and summary), its bound plan,
+    /// the landing with the person as approver and the card as evidence, the seal when the plan
+    /// has an item, the view's `Close` op, and the person's `Adopt` answer, which names the
+    /// landing. It checks readiness (the plan's gate) and freshness only, and asks for no second
+    /// approval: the person answered this exact card. Nothing is appended here; a refusal leaves
+    /// no view, ref, proposal, landing or answer. An existing view of that name is
+    /// `E_BAD_INPUT`: an old internal view is never reused.
+    pub(crate) fn prepare_adopt_landing(
+        &mut self,
+        req: AdoptLanding<'_>,
+    ) -> Result<(PreparedApproval, Hash), RdyError> {
+        let AdoptLanding {
+            card,
+            approver,
+            relay,
+            evidence,
+            ops,
+            adoption,
+            answer,
+        } = req;
+        let bug = |what: &str| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("{}: {what}", card.r#ref),
+                "report this as a bug in rdy",
+            )
+        };
+        let card_hash: Hash = card
+            .card_hash
+            .parse()
+            .map_err(|_| bug("the card has no hash"))?;
+        let st = self.read();
+        let canon_at = st.canon_head();
+        let view = rdy_store::adopt_view(&card_hash);
+        if st.has_view(&view) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("reserved adopt view already exists: {view}"),
+                "read the fresh adopt card and answer it",
+            ));
+        }
+        let by = approver.provenance();
+        let summary = card.summary.clone().unwrap_or_default();
+        let change = Change {
+            view: view.clone(),
+            ops,
+            deps: vec![],
+            provenance: by.clone(),
+            justification: None,
+            message: card.title.clone(),
+            links: ChangeLinks::default(),
+            read_identity: None,
+        };
+        let mut prepared = self
+            .store
+            .prepare_adopt_propose(rdy_store::AdoptProposeRequest {
+                view: &view,
+                canon_at,
+                change,
+                title: &card.title,
+                summary: &summary,
+                by: by.clone(),
+                adoption: adoption.clone(),
+            })
+            .map_err(crate::answer::internal)?;
+        let version = prepared.version();
+        let committed = prepared
+            .fresh_change()
+            .cloned()
+            .ok_or_else(|| bug("the proposal has no change"))?;
+        // the one change this answer writes must fit one record; nothing is written yet
+        crate::reaffirm::change_fits(&committed, ADOPT_CHANGE, ADOPT_CHANGE_FIX)?;
+        // the order this landing applies its change in, merged with the adoption's authority:
+        // every read of the candidate below takes it from the state's memo, so none merges the
+        // change again without that authority (which would refuse the frozen decisions' moves)
+        let (_, applied) = st
+            .reader()
+            .merge_checked_adopting(
+                &*st.canon_snapshot()?,
+                std::slice::from_ref(&committed),
+                &adoption,
+            )
+            .map_err(crate::answer::internal)?;
+        st.memo
+            .order
+            .put(vec![committed.id()], std::sync::Arc::new(applied));
+        // readiness: the candidate's complete plan on canon, with no answer, and its gate
+        let pp = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            &view,
+            None,
+            Some(std::slice::from_ref(&committed)),
+            &[],
+        )?;
+        let gate = crate::plan::lifecycle::plan_issues(&pp.summary);
+        if gate.iter().any(|i| i.severity == Severity::Error) {
+            let mut e = RdyError::new(
+                E_PROPOSAL_NOT_READY,
+                format!("{} is not ready to land", card.r#ref),
+                "settle the open change-plan items of the adopted blocks, then answer the card again",
+            );
+            e.issues = gate;
+            return Err(e);
+        }
+        let bound = pp.plan(&view, version, by.clone());
+        let bound_id = self.store.bind_plan(&mut prepared, &bound)?;
+        let mut store = self
+            .store
+            .prepare_adopt_land(prepared, by.clone(), relay, evidence)
+            .map_err(crate::answer::internal)?;
+        let computed = match pp.computed.as_ref().and_then(|c| {
+            c.on(
+                &st,
+                &view,
+                &[committed.id()],
+                canon_at,
+                None,
+                &bound.heads,
+                &bound.heads,
+            )
+        }) {
+            Some(c) => c.clone(),
+            None => crate::plan::compute::compute_changes(
+                &st,
+                &view,
+                std::slice::from_ref(&committed),
+                canon_at,
+                &bound.heads,
+                &bound.heads,
+            )?,
+        };
+        let seal = adopt_seal(
+            &view,
+            version,
+            store.hash(),
+            bound_id,
+            &bound,
+            computed,
+            &by,
+        );
+        self.store.plan_landing(&mut store, None, seal.as_ref())?;
+        self.store
+            .close_adopt_view(&mut store, &by)
+            .map_err(crate::answer::internal)?;
+        let answer = Answer {
+            targets: vec![store.hash()],
+            ..answer
+        };
+        let answer_id = self
+            .store
+            .answer_adopt_landing(&mut store, &answer)
+            .map_err(crate::answer::internal)?;
+        Ok((
+            PreparedApproval {
+                store,
+                pref: ProposalRef {
+                    version,
+                    stable: version,
+                    n: 1,
+                },
+                title: card.title.clone(),
+                summary: Some(summary),
+                changes: 1,
+                view,
+                issues: vec![],
+                landed_ops: committed.ops,
+                requests: vec![],
+                accept: None,
+                chosen: None,
+                keys: BTreeMap::new(),
+                card: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
+            },
+            answer_id,
+        ))
     }
 
     /// The freshness check of the removal requests a prepared landing lands, run again under the
@@ -3858,12 +4040,12 @@ impl Rdy {
             requests,
             chosen,
             keys,
-            reaffirm,
+            card,
             ..
         } = prepared;
-        // D-CQMA4: a re-affirmation card's landing was built on the canon its card was read on;
-        // canon must stand there still
-        if let Some((card, canon_at, _)) = &reaffirm
+        // D-CQMA4, D-8VJAZ: a card's isolated landing (a re-affirmation card's or an adopt
+        // card's) was built on the canon its card was read on; canon must stand there still
+        if let Some((card, canon_at, _)) = &card
             && self.store.canon_head()? != *canon_at
         {
             return Err(RdyError::new(
@@ -3938,6 +4120,75 @@ pub(crate) struct ReaffirmLanding<'a> {
     pub(crate) reason: crate::reaffirm::Reason,
 }
 
+/// What [`change_fits`](crate::reaffirm::change_fits) calls an adopt card's one change.
+const ADOPT_CHANGE: &str = "adoption change";
+
+/// The fix of an adopt card's answer whose one change would exceed one record.
+const ADOPT_CHANGE_FIX: &str =
+    "Keep the approved pins, ask the source for a smaller selection, then adopt its next delivery.";
+
+/// The private request of an adopt card's isolated landing (repo links, D-8VJAZ): the bound card
+/// the person answered with `Adopt the delivery`, the person (the approver of the landing), the
+/// relay that carried the answer if any, the card evidence (every option label, the chosen one
+/// and the card's hash), the adoption's updates, the foreign pin moves they make (the frozen
+/// decision exception's authority) and the person's `Adopt` answer, whose target the landing
+/// fills in. Only the card's answer builds it; there is no public way to it.
+pub(crate) struct AdoptLanding<'a> {
+    pub(crate) card: &'a Item,
+    pub(crate) approver: Session,
+    pub(crate) relay: Option<Relay>,
+    pub(crate) evidence: ApprovalEvidence,
+    pub(crate) ops: Vec<Op>,
+    pub(crate) adoption: rdy_store::PinAdoption,
+    pub(crate) answer: Answer,
+}
+
+/// The seal of an adopt card's landing: each item of the adoption's plan with its computed
+/// outcome (the plan has no answer), or none when the plan has no item and re-affirms nothing,
+/// as every landing seals.
+fn adopt_seal(
+    view: &str,
+    version: Hash,
+    landing: Hash,
+    bound_id: Hash,
+    bound: &rdy_model::plan::Plan,
+    computed: crate::plan::compute::ComputedPlan,
+    by: &rdy_model::Provenance,
+) -> Option<rdy_model::plan::Plan> {
+    use rdy_model::plan::{Plan, PlanOutcome, PlanSeal, SealedItem};
+    if computed.items.is_empty() && !computed.reaffirms {
+        return None;
+    }
+    let items = computed
+        .items
+        .into_iter()
+        .map(|c| SealedItem {
+            id: c.id,
+            kind: c.kind,
+            subject: c.subject,
+            cause: c.cause,
+            edge: c.edge,
+            outcome: c.close.unwrap_or(PlanOutcome::Open),
+            answer: None,
+        })
+        .collect();
+    Some(Plan {
+        stable: Some(bound.stable.unwrap_or(bound_id)),
+        prev: Some(bound_id),
+        view: view.to_string(),
+        proposal: Some(version),
+        answers: bound.answers.clone(),
+        heads: bound.heads.clone(),
+        provenance: by.clone(),
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: computed.decisions,
+            items,
+        }),
+    })
+}
+
 /// A landing prepared under the writer by [`Rdy::prepare_landing`] and not yet written: the
 /// store's prepared batch, and what the commit publishes and reports. It holds no writer guard
 /// and no reference into the project.
@@ -3954,10 +4205,11 @@ pub(crate) struct PreparedApproval {
     accept: Option<Change>,
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
-    /// A re-affirmation card's isolated landing (D-CQMA4): the card's ref and the canon head it
-    /// was read on, checked again before the commit, and the card's hash, which binds every
-    /// retry of the answer. None for every other landing.
-    reaffirm: Option<(String, Option<Hash>, String)>,
+    /// A card's isolated landing, a re-affirmation card's (D-CQMA4) or an adopt card's
+    /// (D-8VJAZ): the card's ref and the canon head it was read on, checked again before the
+    /// commit, and the card's hash, which binds every retry of the answer. None for every other
+    /// landing.
+    card: Option<(String, Option<Hash>, String)>,
 }
 
 impl PreparedApproval {
@@ -3967,17 +4219,18 @@ impl PreparedApproval {
     }
 
     /// The proposal version a retry of this approval must approve again (pver1): this one's,
-    /// except for a re-affirmation card's landing, whose version is new in each preparation (the
-    /// card binds the retry instead).
+    /// except for a card's isolated landing (a re-affirmation or an adopt card's), whose version
+    /// is new in each preparation (the card binds the retry instead).
     pub(crate) fn pin(&self) -> Option<ProposalRef> {
-        self.reaffirm.is_none().then_some(self.pref)
+        self.card.is_none().then_some(self.pref)
     }
 
-    /// The hash of the re-affirmation card this landing answers: a retry of the answer binds
-    /// that card, also when the first request named no hash, so a card whose members or binding
-    /// moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other landing.
+    /// The hash of the re-affirmation or adopt card this landing answers: a retry of the answer
+    /// binds that card, also when the first request named no hash, so a card whose members or
+    /// binding moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other
+    /// landing.
     pub(crate) fn card_pin(&self) -> Option<&str> {
-        self.reaffirm.as_ref().map(|(_, _, h)| h.as_str())
+        self.card.as_ref().map(|(_, _, h)| h.as_str())
     }
 
     /// The refusal of this landing when it was prepared again for an approval first bound to

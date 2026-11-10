@@ -3,8 +3,7 @@
 //!
 //! - A delivery that changes content the project cites, or an instruction of the link, or its set,
 //!   makes one adopt card, ref `adopt:<repo>@<entry>`, that binds the repo, the entry and the
-//!   diff. The card is internal until its answer path exists: the queue never lists it, and an
-//!   early answer is refused with no write.
+//!   diff. The queue lists it (rpl20 enabled the card and its answer path together).
 //! - Keep and later move no pin. A keep hides the card until the next delivery that changes
 //!   something; a later hides it for the chat session.
 //! - `adopt-` is reserved: no view and no run takes such a name.
@@ -345,11 +344,17 @@ fn rpl19_adopt_card_binds_repo_entry_and_diff() {
     assert_eq!(now.len(), 1, "{now:#?}");
     assert_eq!(now[0].r#ref, adopt_ref(&v3.entry));
     assert_ne!(now[0].card_hash, c.card_hash);
-    // the card is internal: the queue does not list it, and nothing moved
+    // rpl20: the queue lists the card as adopt_cards reads it, and nothing moved
     let queue = pending(&r);
-    assert!(
-        queue.items.iter().all(|i| i.kind != ItemKind::Adopt),
-        "{queue:#?}"
+    let listed: Vec<_> = queue
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Adopt)
+        .collect();
+    assert_eq!(listed.len(), 1, "{queue:#?}");
+    assert_eq!(
+        (&listed[0].r#ref, &listed[0].card_hash),
+        (&now[0].r#ref, &now[0].card_hash)
     );
     assert_eq!(pins_of(&r, &x), before, "a delivery moves no pin");
     assert_eq!(r.read().canon_head(), canon, "nor canon");

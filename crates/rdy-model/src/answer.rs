@@ -50,10 +50,11 @@ pub enum AnswerAct {
     AcceptVerdict,
     /// The person adopts a delivered change of cited content (repo links, index 17). Item
     /// `adopt:<repo>@<entry>`. Its answer takes ANSWER encoding 1
-    /// ([`crate::encoding::ANSWER_FOREIGN_ENCODING`]). Registered only: no writer yet.
+    /// ([`crate::encoding::ANSWER_FOREIGN_ENCODING`]). The adopt landing writes it in its batch,
+    /// with the landing as its one target, or alone when the card moves no pin.
     Adopt,
     /// The person keeps the approved pins of an adopt item (index 18), with a reason. ANSWER
-    /// encoding 1, as [`AnswerAct::Adopt`]. Registered only: no writer yet.
+    /// encoding 1, as [`AnswerAct::Adopt`]. Written alone, with the reason as its note.
     KeepPin,
 }
 

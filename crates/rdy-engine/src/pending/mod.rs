@@ -25,7 +25,7 @@ pub mod reaffirm;
 mod snooze;
 mod tensions;
 
-pub use adopt::{ADOPT_REF_PREFIX, adopt_ref, is_adopt_ref};
+pub use adopt::{ADOPT_LABEL, ADOPT_REF_PREFIX, KEEP_PIN_LABEL, adopt_ref, is_adopt_ref};
 pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render, render_checked};
 pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
 pub use plan::{DeferralBinding, PlanCardBinding};

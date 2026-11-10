@@ -120,8 +120,9 @@
 //!
 //! Blocking items first; then batches, each with its items directly after it (the `approve`
 //! item, its exceptions by ref, its deferral card, then its advice); then the re-affirmation
-//! cards ([`super::reaffirm`], D-CQMA4), each a group of its own; then the other items that stand
-//! alone (questions);
+//! cards ([`super::reaffirm`], D-CQMA4), each a group of its own; then the adopt cards
+//! ([`super::adopt`], D-8VJAZ), each a group of its own; then the other items that stand alone
+//! (questions);
 //! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
 //! listed, whole groups only; `omitted` counts the rest.
 //!
@@ -131,6 +132,13 @@
 //! ([`super::reaffirm`]). The latest open versions read here (a version a `reject_proposal`
 //! answer took out aside) name the decisions they re-affirm or fully retire, which no card
 //! lists.
+//!
+//! # Adopt cards (repo links, D-8VJAZ)
+//!
+//! Each live repo link whose newest delivery changes what canon cites, or the link's rules or
+//! set, is one `adopt` item ([`super::adopt`]). It never blocks. Its policy role covers the
+//! blocks whose pins it moves and the link block.
+use super::adopt::adopt_items;
 use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, removal_stale,
     render_checked,
@@ -432,6 +440,14 @@ impl ReadState {
             }
             groups.push(Group { items: vec![item] });
         }
+        // D-8VJAZ: each adopt card is a group of its own
+        for item in adopt_items(self, now)? {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.adopt_facts(&item);
+                rt.note(self, &item, None, facts);
+            }
+            groups.push(Group { items: vec![item] });
+        }
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
         let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
@@ -517,6 +533,34 @@ impl Routing {
             }
             _ => vec![],
         };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(&self.canon, &blocks),
+            blocks,
+            decision: false,
+        }
+    }
+
+    /// The facts of adopt card `i` (O10): the blocks whose pins it moves or rebinds and the link
+    /// block, whose rules it moves; `one_way` when one of them is a decision declared `one_way`
+    /// in canon. It belongs to no version.
+    fn adopt_facts(&self, i: &Item) -> ItemFacts {
+        let mut blocks: Vec<BlockId> = match &i.plan_binding {
+            Some(PlanCardBinding::Adopt {
+                link,
+                pins,
+                rebinds,
+                ..
+            }) => pins
+                .iter()
+                .flat_map(|p| p.citers.iter().cloned())
+                .chain(rebinds.iter().map(|r| r.citer.clone()))
+                .chain(std::iter::once(link.clone()))
+                .collect(),
+            _ => vec![],
+        };
+        blocks.sort();
+        blocks.dedup();
         ItemFacts {
             kind: i.kind,
             one_way: one_way_among(&self.canon, &blocks),
@@ -1232,14 +1276,15 @@ struct Group {
 }
 
 impl Group {
-    /// O5: blocking first, then batches, then re-affirmation cards (D-CQMA4), then the other
-    /// items, each by `raised_at`, then by ref (of the first item).
+    /// O5: blocking first, then batches, then re-affirmation cards (D-CQMA4), then adopt cards
+    /// (D-8VJAZ), then the other items, each by `raised_at`, then by ref (of the first item).
     fn key(&self) -> (bool, u8, String, String) {
         let head = &self.items[0];
         let rank = match head.kind {
             ItemKind::Approve => 0,
             ItemKind::Reaffirm => 1,
-            _ => 2,
+            ItemKind::Adopt => 2,
+            _ => 3,
         };
         (
             !head.blocking,

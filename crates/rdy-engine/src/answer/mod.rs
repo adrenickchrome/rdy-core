@@ -60,13 +60,16 @@
 //! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch. The answers to a
 //! re-affirmation card are in [`reaffirm`]: `Keep them suspect` writes one `ANSWER`; `They still
 //! hold` lands the card's members alone, in an isolated landing that records the answer
-//! (D-CQMA4).
+//! (D-CQMA4). The answers to an adopt card are in [`adopt`] (D-8VJAZ): `Keep the approved pins`
+//! writes one `ANSWER` with the person's reason; `Adopt the delivery` lands the delivery's pin
+//! moves alone, in an isolated landing, with the person's `Adopt` `ANSWER` in its batch.
 //!
 //! # Presented answers
 //!
 //! A card the person answers in the local approver UI, or one an MCP client elicited from them,
 //! goes through the same binding and dispatch as the person's own answer ([`presented`],
 //! D-6M0AF): `local`, with evidence `card` or `elicited` and no relay.
+pub mod adopt;
 pub mod batch;
 pub mod presented;
 pub mod question;
@@ -493,12 +496,10 @@ impl Rdy {
             return verdict::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)));
         }
         match (bound.item.kind, bound.option.id.as_str()) {
-            // an adopt item has no answer path but Later yet: batch::act refuses every other
-            // option with the unsupported-answer refusal and writes nothing
-            (_, "later")
-            | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer | ItemKind::Adopt, _) => {
+            (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, by, bound, note)
             }
+            (ItemKind::Adopt, _) => adopt::act(self, by, bound, note),
             (ItemKind::Answer, _) => {
                 question::act(self, by, person, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
             }
@@ -1014,28 +1015,35 @@ mod tests {
         }
     }
 
+    /// rpl20: the answers to an adopt card go to its own acts. A keep with no reason, and an
+    /// adopt of a card that binds no delivery, are refused with no write.
     #[test]
-    fn rpl19_an_early_adopt_answer_is_refused_with_no_write() {
+    fn rpl20_adopt_answers_dispatch_to_their_own_acts() {
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         let s = Session::human("human:qa".into(), Role::Approver).unwrap();
         let by = answerer(&s, "human:qa", &RelayInput::default()).unwrap();
         let before = r.read().seq();
-        for option in ["adopt", "keep"] {
-            let e = match r.dispatch(&by, "human:qa", adopt_bound(option), None) {
-                Err(e) => e,
-                Ok(_) => panic!("{option} has no answer path yet"),
-            };
-            assert_eq!(e.code, E_BAD_INPUT);
-            assert_eq!(
-                e.message,
-                format!(
-                    "adopt:{}@{}: option {option} of a adopt item has no answer path yet",
-                    "7".repeat(32),
-                    "a".repeat(12)
-                )
-            );
-            assert_eq!(r.read().seq(), before, "{option} wrote nothing");
-        }
+        let refused = |r: &mut Rdy, option: &str, note: Option<&str>| match r.dispatch(
+            &by,
+            "human:qa",
+            adopt_bound(option),
+            note.map(str::to_string),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("{option} wrote"),
+        };
+        let e = refused(&mut r, "keep", None);
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "Keep the approved pins needs a note",
+                "pass note with a reason of 1 to 2000 characters"
+            )
+        );
+        let e = refused(&mut r, "adopt", None);
+        assert_eq!(e.code, crate::error::E_INTERNAL, "{e:?}");
+        assert_eq!(r.read().seq(), before, "nothing was written");
     }
 }
