@@ -81,11 +81,7 @@ impl Ignore {
             Err(e) => return Err(read_error(&e)),
         };
         if !meta.is_file() {
-            return Err(RdyError::new(
-                E_CONFIG,
-                ".rdyignore is not a regular file",
-                "replace .rdyignore with a plain text file (rdy does not follow links)",
-            ));
+            return Err(not_regular());
         }
         if meta.len() > MAX_IGNORE_BYTES as u64 {
             return Err(over_bytes());
@@ -94,6 +90,15 @@ impl Ignore {
         std::fs::File::open(&path)
             .and_then(|f| f.take(MAX_IGNORE_BYTES as u64 + 1).read_to_end(&mut bytes))
             .map_err(|e| read_error(&e))?;
+        Ignore::from_bytes(bytes)
+    }
+
+    /// Parses the bytes read from a `.rdyignore` (at most `MAX_IGNORE_BYTES + 1` of them): over
+    /// `MAX_IGNORE_BYTES` bytes, not UTF-8 or over `MAX_IGNORE_PATTERNS` patterns is `E_CONFIG`.
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Result<Ignore, RdyError> {
+        if bytes.len() > MAX_IGNORE_BYTES {
+            return Err(over_bytes());
+        }
         let text = String::from_utf8(bytes).map_err(|_| {
             RdyError::new(
                 E_CONFIG,
@@ -190,7 +195,17 @@ impl Ignore {
     }
 }
 
-fn over_bytes() -> RdyError {
+/// `E_CONFIG` for a `.rdyignore` that is a link, a directory or any other non-regular file.
+pub(crate) fn not_regular() -> RdyError {
+    RdyError::new(
+        E_CONFIG,
+        ".rdyignore is not a regular file",
+        "replace .rdyignore with a plain text file (rdy does not follow links)",
+    )
+}
+
+/// `E_CONFIG` for a `.rdyignore` over `MAX_IGNORE_BYTES`.
+pub(crate) fn over_bytes() -> RdyError {
     RdyError::new(
         E_CONFIG,
         format!(".rdyignore is over {MAX_IGNORE_BYTES} bytes"),
@@ -198,7 +213,8 @@ fn over_bytes() -> RdyError {
     )
 }
 
-fn read_error(e: &std::io::Error) -> RdyError {
+/// `E_CONFIG` for a `.rdyignore` that cannot be read.
+pub(crate) fn read_error(e: &std::io::Error) -> RdyError {
     RdyError::new(
         E_CONFIG,
         format!("cannot read .rdyignore: {e}"),

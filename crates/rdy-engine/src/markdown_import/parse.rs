@@ -26,7 +26,7 @@ fn options() -> Options {
         | Options::ENABLE_GFM
 }
 
-fn unsafe_path(path: &str) -> RdyError {
+pub(super) fn unsafe_path(path: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         format!("Markdown source path is not a contained regular file or directory: {path}"),
@@ -34,7 +34,7 @@ fn unsafe_path(path: &str) -> RdyError {
     )
 }
 
-fn collision(first: &str, second: &str) -> RdyError {
+pub(super) fn collision(first: &str, second: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         format!("Markdown source paths collide: {first}, {second}"),
@@ -50,7 +50,7 @@ fn is_drive(text: &str) -> bool {
 
 /// The number of segments of a plain logical relative path: non-empty segments other than `.`
 /// and `..`, joined by `/`, with no `\`, NUL or drive prefix.
-fn check_path(path: &str) -> Result<usize, RdyError> {
+pub(super) fn check_path(path: &str) -> Result<usize, RdyError> {
     if path.len() > MAX_PATH_BYTES {
         return Err(limit_error(PATH_BYTES));
     }

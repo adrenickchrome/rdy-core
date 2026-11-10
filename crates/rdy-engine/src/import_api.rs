@@ -3,7 +3,8 @@
 //! as a source author; then each warning names its doc, and the reply carries the import's
 //! coverage baseline and onboarding path (D-C6HHV, D-F2SRE). The import is committed before the
 //! baseline is read, so a failed baseline is `coverage_error` on a reply that stands: a client
-//! must never import again.
+//! must never import again. A Markdown import ([`run_import_with`] with `md`) replies the same
+//! way with its source digest, files and `unmapped` rows; its preview writes nothing.
 use crate::consequence::write_and_report_as;
 use crate::coverage::{CoverageReport, Onboarding, coverage_error_text};
 use crate::engine::Engine;
@@ -20,12 +21,18 @@ pub fn run_import(
     view: &str,
     dir: &Path,
 ) -> Result<Value, RdyError> {
-    let scope = Scope::View(view.to_string());
     let (s, target, tree) = (session.clone(), view.to_string(), dir.to_path_buf());
     // the reply is the importer's: every author change is read as this session
-    let mut v = write_and_report_as(engine, session, view, None, move |r| {
+    let v = write_and_report_as(engine, session, view, None, move |r| {
         r.import(&s, &target, &tree)
     })?;
+    Ok(finish_reply(engine, view, v))
+}
+
+/// The import reply `v` with each warning's doc named, and the import's coverage baseline and
+/// onboarding path (or `coverage_error`).
+fn finish_reply(engine: &dyn Engine, view: &str, mut v: Value) -> Value {
+    let scope = Scope::View(view.to_string());
     // each warning names its doc: the title as imported, then the id (the CLI prints it)
     let st = engine.read();
     let docs: Map<String, Value> = v["warnings"]
@@ -54,7 +61,63 @@ pub fn run_import(
     let report = crate::import_prepared::fault(crate::import_prepared::ImportFault::Baseline)
         .and_then(|()| st.coverage_report(&scope, None));
     attach_baseline(&mut v, report, st.onboarding(&scope));
-    Ok(v)
+    v
+}
+
+/// The options of an import: `md` reads `dir` as a Markdown source instead of an export tree;
+/// `dry_run` (a preview) and `expected_source` (the digest a preview gave) need `md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    pub md: bool,
+    pub dry_run: bool,
+    pub expected_source: Option<String>,
+}
+
+/// `E_BAD_INPUT` when `options` set a Markdown option without `md`, or an `expected_source` that
+/// is not a digest's form. Neither reads anything.
+pub fn check_import_options(options: &ImportOptions) -> Result<(), RdyError> {
+    if !options.md && (options.dry_run || options.expected_source.is_some()) {
+        return Err(RdyError::new(
+            crate::E_BAD_INPUT,
+            "dry_run and expected_source require md: true",
+            "use rdy_import with md: true, or rdy import --md",
+        ));
+    }
+    match &options.expected_source {
+        Some(d) => crate::markdown_import::check_expected_source(d),
+        None => Ok(()),
+    }
+}
+
+/// [`run_import`] with `options`. Without `md` it is [`run_import`]. With `md`, `dir` is a
+/// Markdown source: a preview (`dry_run`) replies `{dry_run, source_digest, files, blocks,
+/// unmapped}` and writes nothing; an import replies as [`run_import`] does, with
+/// `source_digest`, `files` and `unmapped` added. Both refuse on a read-only store.
+pub fn run_import_with(
+    engine: &dyn Engine,
+    session: &Session,
+    view: &str,
+    dir: &Path,
+    options: &ImportOptions,
+) -> Result<Value, RdyError> {
+    check_import_options(options)?;
+    if !options.md {
+        return run_import(engine, session, view, dir);
+    }
+    let (s, target, tree) = (session.clone(), view.to_string(), dir.to_path_buf());
+    let expected = options.expected_source.clone();
+    if options.dry_run {
+        // a preview writes nothing: a serialized read, which seals no batch; the preview runs
+        // the write gate itself
+        return engine.read_serialized(Box::new(move |r| {
+            let p = r.preview_markdown(&s, &target, &tree, expected.as_deref())?;
+            Ok(serde_json::to_value(p).expect("a reply serializes"))
+        }));
+    }
+    let v = write_and_report_as(engine, session, view, None, move |r| {
+        r.import_markdown(&s, &target, &tree, expected.as_deref())
+    })?;
+    Ok(finish_reply(engine, view, v))
 }
 
 /// Sets `coverage` and `onboarding` on the import reply. Set here, so it replaces any `coverage`

@@ -6,6 +6,7 @@
 //! confirmed rollback leaves the project unchanged; a rollback the store cannot prove is the
 //! indeterminate refusal, and the handle stays poisoned until reopen.
 
+use crate::brief::BriefRecord;
 use crate::error::*;
 use crate::io::{
     KeyedLink, assign_import_keys, assign_missing_names, check_import_names, import_skeleton_gaps,
@@ -14,11 +15,12 @@ use crate::io::{
 use crate::write::WriteResult;
 use crate::{Delta, Materialized, Rdy, Scope, Session};
 use rdy_model::{ActorRun, Block, BlockId, Change, ChangeLinks, Hash, Op, Provenance, tree};
-use rdy_schema::{has_errors, validate_block, validate_prefix};
+use rdy_schema::{Issue, has_errors, validate_block, validate_prefix};
 use rdy_store::merge::Conflict;
 use rdy_store::{Owner, Rollback};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
 
 /// The refusal of an import whose batch the store could not prove it cut back: frames of it may
 /// stay in the log, so the project may or may not hold the import.
@@ -46,6 +48,22 @@ pub(crate) struct PreparedImport {
     pub(crate) label: Option<String>,
 }
 
+/// An import checked against its view and ready to stage: its author changes and their ops, the
+/// created receipt (not yet registered), the keys it assigns and its warnings, its blobs, and
+/// the view's state, conflicts and claim it was checked against.
+pub(crate) struct PlannedImport {
+    pub(crate) changes: Vec<Change>,
+    pub(crate) all_ops: Vec<Op>,
+    pub(crate) receipt: Option<(Arc<BriefRecord>, usize)>,
+    /// Each imported doc's and folder's id and the key it is given.
+    pub(crate) keys: BTreeMap<String, String>,
+    pub(crate) warnings: Vec<Issue>,
+    pub(crate) blobs: Vec<Vec<u8>>,
+    pub(crate) existing: Arc<Materialized>,
+    pub(crate) conflicts: Arc<Vec<Conflict>>,
+    pub(crate) claim: Option<Owner>,
+}
+
 impl Rdy {
     /// The checks of an import before its source is read: the role rule of every write and the
     /// target view's access.
@@ -63,13 +81,69 @@ impl Rdy {
     }
 
     /// Imports `prepared` into `view` as `s`: every check, key, pin, author group and the
-    /// receipt before the first append, then one batch that seals once ([`Rdy::stage_import`]).
+    /// receipt before the first append ([`Rdy::plan_import`]), then one batch that seals once
+    /// ([`Rdy::stage_import`]).
     pub(crate) fn import_prepared(
         &mut self,
         s: &Session,
         view: &str,
         prepared: PreparedImport,
     ) -> Result<WriteResult, RdyError> {
+        let PlannedImport {
+            changes,
+            all_ops,
+            receipt,
+            keys,
+            warnings,
+            blobs,
+            existing,
+            conflicts,
+            claim,
+        } = self.plan_import(s, view, prepared)?;
+        // blobs go in only once the import is known to be valid and its receipt is built, so a
+        // refused import stores nothing
+        let committed = self.stage_import(
+            view,
+            &blobs,
+            changes,
+            &existing,
+            &conflicts,
+            claim,
+            &s.provenance(),
+            &all_ops,
+        )?;
+        let briefing = crate::brief::register_created(&self.briefs, receipt);
+        let ids: Vec<String> = committed.iter().map(ToString::to_string).collect();
+        let created = all_ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| (format!("op{i}"), op.block_id().to_string()))
+            .collect();
+        Ok(WriteResult {
+            change: ids.last().cloned().unwrap_or_default(),
+            changes: ids,
+            created,
+            names: BTreeMap::new(),
+            keys,
+            inherited: BTreeMap::new(),
+            reaffirmed: vec![],
+            warnings,
+            code_recorded: None,
+            justification: None,
+            briefing,
+        })
+    }
+
+    /// Every check of an import of `prepared` into `view` as `s`, against the view as it is,
+    /// with no append, no view claim and no briefing registered: the claim, conflicts,
+    /// duplicates, authors, names, keys, parents, depth, validation and pins, then the author
+    /// changes and the created receipt. A Markdown preview stops here.
+    pub(crate) fn plan_import(
+        &self,
+        s: &Session,
+        view: &str,
+        prepared: PreparedImport,
+    ) -> Result<PlannedImport, RdyError> {
         let PreparedImport {
             mut blocks,
             keyed,
@@ -387,37 +461,16 @@ impl Rdy {
             || self.read().graph(&scope),
             &all_ops,
         )?;
-        // blobs go in only once the import is known to be valid and its receipt is built, so a
-        // refused import stores nothing
-        let committed = self.stage_import(
-            view,
-            &blobs,
+        Ok(PlannedImport {
             changes,
-            &existing,
-            &conflicts,
-            claim,
-            &s.provenance(),
-            &all_ops,
-        )?;
-        let briefing = crate::brief::register_created(&self.briefs, receipt);
-        let ids: Vec<String> = committed.iter().map(ToString::to_string).collect();
-        let created = all_ops
-            .iter()
-            .enumerate()
-            .map(|(i, op)| (format!("op{i}"), op.block_id().to_string()))
-            .collect();
-        Ok(WriteResult {
-            change: ids.last().cloned().unwrap_or_default(),
-            changes: ids,
-            created,
-            names: BTreeMap::new(),
+            all_ops,
+            receipt,
             keys,
-            inherited: BTreeMap::new(),
-            reaffirmed: vec![],
             warnings,
-            code_recorded: None,
-            justification: None,
-            briefing,
+            blobs,
+            existing,
+            conflicts,
+            claim,
         })
     }
 
