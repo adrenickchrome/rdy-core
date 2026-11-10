@@ -682,7 +682,7 @@ fn rpl32_tag_with_approved_foreign_tension_exports_and_takes() {
             changed: vec![],
             removed: vec![],
             shells: vec![],
-            selection: selection_identity([(&x.id, &version_of(&x))].into_iter()).unwrap(),
+            selection: selection_identity([(&x.id, &version_of(&x))]).unwrap(),
         },
     };
     let delivered = r
