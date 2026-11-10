@@ -569,7 +569,12 @@ fn rpl31_daemon_reads_delivery_without_canon_change() {
         after["version_position"], before["version_position"],
         "{after}"
     );
-    assert_eq!(after["suspects"], before["suspects"], "{after}");
+    // the delivery makes the citing claim suspect on its cited claim (D-Y49PX); it moves no pin
+    assert_eq!(
+        after["suspects"].as_u64(),
+        before["suspects"].as_u64().map(|n| n + 1),
+        "{after}"
+    );
     let two = json_ok(s, &["links"]);
     assert_eq!(two["links"][0]["tag"], "v2", "{two}");
     assert_eq!(two["links"][0]["pins_behind"], 1, "{two}");
@@ -580,4 +585,31 @@ fn rpl31_daemon_reads_delivery_without_canon_change() {
         before["landings"].as_u64().unwrap(),
         "{log}"
     );
+}
+
+/// TASK-2069 (D-Y49PX): `rdy suspects` lists the suspect on the cited claim that the second
+/// delivery changed, the target by its alias, as the MCP tool `rdy_suspects` does.
+#[test]
+fn fsus_cli_suspects_lists_the_foreign_row() {
+    let w = world(true);
+    let s = &w.s;
+    let v = json_ok(s, &["suspects"]);
+    let items = v["items"].as_array().unwrap();
+    let cited: Vec<&Value> = items
+        .iter()
+        .filter(|i| i["target"] == "core:c-FRGNC")
+        .collect();
+    assert_eq!(cited.len(), 1, "{v}");
+    assert_eq!(cited[0]["reason"], "changed", "{v}");
+    let block = cited[0]["block"].as_str().unwrap();
+    let shown = json_ok(s, &["show", block]);
+    assert_eq!(shown["id"], block, "{shown}");
+    assert!(block.starts_with("c-"), "{v}");
+    // the status count is the same rows
+    let status = json_ok(s, &["status"]);
+    assert_eq!(status["suspects"], json!(items.len()), "{status}");
+    // with no second delivery, nothing is suspect
+    let fresh = world(false);
+    let v = json_ok(&fresh.s, &["suspects"]);
+    assert_eq!(v["items"], json!([]), "{v}");
 }

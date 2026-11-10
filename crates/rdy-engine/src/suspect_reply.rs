@@ -1,9 +1,12 @@
 //! The suspect rows a read shows (D-AAQ9Z, D-01QX5; p-TFYXT): the graph's structural suspects,
-//! each with the deferral a person accepted for it, and the code suspects of the local checkout.
+//! each with the deferral a person accepted for it, the code suspects of the local checkout, and
+//! (in [`ReadState::suspect_details`]) the suspects on cited blocks (repo links, D-Y49PX).
 //! `rdy_graph::Suspect` and the stored TRANSITION stay structural: a code row has no target
 //! block, and no deferral text is copied into a stored record.
+use crate::foreign_refs::RepoLinks;
 use crate::{RdyError, ReadState, Scope};
 use rdy_graph::Suspect;
+use rdy_model::foreign::ForeignId;
 use rdy_model::plan::PlanAnswer;
 use rdy_model::{Answer, BlockId, Hash, Provenance};
 use rdy_store::kinds;
@@ -37,13 +40,54 @@ fn optional_hash<S: Serializer>(h: &Option<Hash>, s: S) -> Result<S::Ok, S::Erro
     }
 }
 
+/// The target of a suspect row: a block of this project, or a cited block (repo links, D-Y49PX)
+/// with the text a read shows for it, `<alias>:<id>` (the repo's first live alias, else its first
+/// 12 hex digits, as every cited ref a read shows). Either serializes as that one string.
+///
+/// The order is a local block first, then a cited block by its shown text.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RowTarget {
+    Block(BlockId),
+    Cited { shown: String, target: ForeignId },
+}
+
+impl RowTarget {
+    /// The local target block; none for a cited target.
+    pub fn block(&self) -> Option<&BlockId> {
+        match self {
+            RowTarget::Block(b) => Some(b),
+            RowTarget::Cited { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RowTarget {
+    /// The text a read shows: the block id, or the cited block's `<alias>:<id>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RowTarget::Block(b) => write!(f, "{b}"),
+            RowTarget::Cited { shown, .. } => f.write_str(shown),
+        }
+    }
+}
+
+impl Serialize for RowTarget {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RowTarget::Block(b) => b.serialize(s),
+            RowTarget::Cited { shown, .. } => s.serialize_str(shown),
+        }
+    }
+}
+
 /// One suspect row as a read shows it. A structural row names its target block and may carry the
-/// accepted `deferred`; a code row has a null target, the reason `code_changed` and its `paths`
-/// (`<repo>:<path>`, sorted).
+/// accepted `deferred`; a row on a cited block names it `<alias>:<id>` and carries no deferral; a
+/// code row has a null target, the reason `code_changed` and its `paths` (`<repo>:<path>`,
+/// sorted).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SuspectReply {
     pub block: BlockId,
-    pub target: Option<BlockId>,
+    pub target: Option<RowTarget>,
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deferred: Option<DeferredReply>,
@@ -51,7 +95,8 @@ pub struct SuspectReply {
     pub paths: Option<Vec<String>>,
 }
 
-/// The rows in their one order: by block, then target with null last, then reason.
+/// The rows in their one order: by block, then target (a local block, then a cited block by its
+/// shown text, then null), then reason.
 fn sort_rows(rows: &mut [SuspectReply]) {
     rows.sort_by(|a, b| {
         (&a.block, a.target.is_none(), &a.target, &a.reason).cmp(&(
@@ -65,10 +110,41 @@ fn sort_rows(rows: &mut [SuspectReply]) {
 
 impl ReadState {
     /// Every suspect of `scope` as a read shows it: the structural rows with their accepted
-    /// deferrals, and, in canon, a view or the in-flight scope, the code rows.
+    /// deferrals, the rows on cited blocks ([`ReadState::foreign_suspects`], D-Y49PX), and, in
+    /// canon, a view or the in-flight scope, the code rows.
     pub fn suspect_details(&self, scope: &Scope) -> Result<Vec<SuspectReply>, RdyError> {
         let structural = self.suspects(scope)?;
-        self.suspect_rows(scope, structural, None)
+        let mut rows = self.suspect_rows(scope, structural, None)?;
+        let cited = self.cited_rows(scope)?;
+        if !cited.is_empty() {
+            rows.extend(cited);
+            sort_rows(&mut rows);
+        }
+        Ok(rows)
+    }
+
+    /// The suspects of `scope` on cited blocks as rows: each target shown by the alias of `scope`'s
+    /// repo links, the reason as computed, and no deferral.
+    fn cited_rows(&self, scope: &Scope) -> Result<Vec<SuspectReply>, RdyError> {
+        let found = self.foreign_suspects(scope)?;
+        if found.is_empty() {
+            return Ok(vec![]);
+        }
+        let m = self.materialized(scope)?;
+        let links = RepoLinks::of_view(&m);
+        Ok(found
+            .into_iter()
+            .map(|s| SuspectReply {
+                block: s.block,
+                target: Some(RowTarget::Cited {
+                    shown: format!("{}:{}", links.shown(&s.target.repo), s.target.id),
+                    target: s.target,
+                }),
+                reason: s.reason,
+                deferred: None,
+                paths: None,
+            })
+            .collect())
     }
 
     /// `structural` (already filtered as the caller reads them) as rows, with the accepted
@@ -98,7 +174,7 @@ impl ReadState {
                 };
                 rows.push(SuspectReply {
                     block: s.block.clone(),
-                    target: Some(s.target.clone()),
+                    target: Some(RowTarget::Block(s.target.clone())),
                     reason: s.reason.clone(),
                     deferred,
                     paths: None,

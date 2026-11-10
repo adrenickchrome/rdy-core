@@ -551,3 +551,31 @@ fn rpl30_unknown_keys_and_mixed_supersede_refuse() {
         })
     );
 }
+
+/// TASK-2069 (D-Y49PX): `rdy_suspects` lists the suspect on the cited claim that the second
+/// delivery changed, the target by its alias, as the CLI's `rdy suspects` does.
+#[test]
+fn fsus_rdy_suspects_lists_the_foreign_row() {
+    let mut w = world();
+    let v = rdy_suspects(&mut w.st, p(json!({"scope": "canon"}))).unwrap();
+    let items = v["items"].as_array().unwrap();
+    let rows: Vec<&Value> = items
+        .iter()
+        .filter(|i| i["target"] == "core:c-FRGNC")
+        .collect();
+    assert_eq!(rows.len(), 1, "{v}");
+    assert_eq!(rows[0]["reason"], "changed", "{v}");
+    let block = rows[0]["block"].as_str().unwrap();
+    assert!(block.starts_with("c-"), "{v}");
+    // the citing claim is the one canon holds under the section
+    let st = w.st.engine.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    let b = m.get(&id(block)).expect("the citing block");
+    assert_eq!(b.parent.as_ref(), Some(&w.section), "{v}");
+    // the store holds the cited ref in its stored form, the repo by its hex digits
+    assert!(
+        b.body.contains(&format!("{}:c-FRGNC", cited())),
+        "{}",
+        b.body
+    );
+}

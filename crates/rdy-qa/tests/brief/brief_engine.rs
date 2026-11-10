@@ -262,9 +262,9 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
     .unwrap();
     let b = brief_of(&r, &w(), &[&s.b]);
     assert!(
-        b.suspects
-            .iter()
-            .any(|x| x.block == s.b && x.target.as_ref() == Some(&s.a) && x.reason == "changed"),
+        b.suspects.iter().any(|x| x.block == s.b
+            && x.target.as_ref().and_then(RowTarget::block) == Some(&s.a)
+            && x.reason == "changed"),
         "{:?}",
         b.suspects
     );
