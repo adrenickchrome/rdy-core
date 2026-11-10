@@ -1166,6 +1166,13 @@ fn replay_into(
                 },
                 auth.request_entry(v.hash, payload)?,
             ],
+            // a foreign removal's proof record is an object only: never local history
+            Some(_) if auth.foreign.is_proof_record(v.kind, loc) => {
+                r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
+                auth.foreign
+                    .frame_entries(v.kind, v.hash, loc)
+                    .unwrap_or_default()
+            }
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload, &mut r)?,
             None => {
                 r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
@@ -2521,6 +2528,37 @@ impl Store {
         let open = self.open.take().expect("a batch is open");
         self.acknowledge(open.frames);
         Ok(())
+    }
+
+    /// [`Store::placed_entries`] for a batch that `auth` (its validated authorization) reads:
+    /// a request's entry is the one `auth` gives it, and a foreign removal's proof record is an
+    /// object only (`crate::foreign_removal`).
+    fn placed_entries_under(
+        &self,
+        frames: &[(u8, Vec<u8>)],
+        placed: &[(Location, Hash)],
+        auth: &crate::redaction_io::Authorization,
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        let reader = self.reader();
+        let mut r = Resolver::new(&reader);
+        let mut out = vec![];
+        for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
+            if let Some(e) = auth.foreign.frame_entries(*kind, *hash, *at) {
+                r.note(crate::codec::logical_kind(*kind), *hash, *at)?;
+                out.extend(e);
+            } else if crate::codec::logical_kind(*kind) == kinds::REDACTION {
+                r.note(kinds::REDACTION, *hash, *at)?;
+                out.push(IndexEntry::Object {
+                    kind: kinds::REDACTION,
+                    hash: *hash,
+                    loc: *at,
+                });
+                out.push(auth.request_entry(*hash, payload)?);
+            } else {
+                out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
+            }
+        }
+        Ok(out)
     }
 
     /// The index entries of `frames`, appended at `placed`, in order: each read against the
@@ -4798,7 +4836,7 @@ impl Store {
                 return Err(e.into());
             }
         };
-        let placed_entries = match self.placed_entries(&batch, &placed) {
+        let placed_entries = match self.placed_entries_under(&batch, &placed, &auth) {
             Ok(e) => e,
             Err(e) => {
                 self.roll_back(before);

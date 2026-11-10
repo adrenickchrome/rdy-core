@@ -218,6 +218,8 @@ pub(crate) struct Authorization {
     /// The validated carried records (kind REDACTION_CARRIED) of the sealed log, in log order
     /// (`crate::redaction_carried::overlay`).
     pub(crate) carried: Vec<crate::redaction_carried::CarriedAt>,
+    /// What the verified foreign removals of a project authorize (`crate::foreign_removal`).
+    pub(crate) foreign: crate::foreign_removal::ForeignAuthority,
 }
 
 impl Authorization {
@@ -260,7 +262,9 @@ impl Authorization {
     /// Whether an active redaction exists: a validated apply, or a span whose zeros a carried
     /// record accounts for.
     pub(crate) fn is_active(&self) -> bool {
-        !self.applies.is_empty() || self.spans.values().any(|s| s.carried)
+        !self.applies.is_empty()
+            || !self.foreign.proofs.is_empty()
+            || self.spans.values().any(|s| s.carried)
     }
 
     /// Whether the carried record frame at `loc` is one of the validated carried records.
@@ -282,7 +286,7 @@ impl Authorization {
 
     /// Whether the apply frame at `loc` is one of the validated applies (kept in log order).
     pub(crate) fn holds_apply(&self, loc: Location) -> bool {
-        self.applies.binary_search_by_key(&loc, |a| a.loc).is_ok()
+        self.applies.binary_search_by_key(&loc, |a| a.loc).is_ok() || self.foreign.holds_apply(loc)
     }
 
     /// The objects, frames and bytes of the authorized spans (`checked_payloads` zero).
@@ -363,6 +367,16 @@ impl Authorization {
         for c in self.carried.iter().filter(|c| c.at < upto) {
             at.push((c.at, crate::redaction_carried::entry_of(c)));
         }
+        for f in self.foreign.proofs.iter().filter(|f| f.apply_loc < upto) {
+            at.push((
+                f.apply_loc,
+                IndexEntry::RedactionApply {
+                    apply: f.apply,
+                    request: f.request,
+                    loc: f.apply_loc,
+                },
+            ));
+        }
         at.sort_by_key(|(l, _)| *l);
         Ok(at.into_iter().map(|(_, e)| e).collect())
     }
@@ -378,6 +392,9 @@ impl Authorization {
         payload: &[u8],
     ) -> Result<IndexEntry, StoreError> {
         let entry = crate::redaction::request_entry(hash, payload)?;
+        if let Some(e) = self.foreign.request_entry(&entry) {
+            return Ok(e);
+        }
         match (&self.imported, entry) {
             (
                 Some(imported),
@@ -470,7 +487,7 @@ pub(crate) struct ApplyFrame {
     /// None: its payload matched its hash but is no apply record.
     pub(crate) record: Option<RedactionApply>,
     /// The batch it belongs to (a counter in log order).
-    batch: u64,
+    pub(crate) batch: u64,
     /// The LANDING frames of its batch before it: (location, hash).
     landings: Vec<(Location, Hash)>,
 }
@@ -519,6 +536,9 @@ struct Pending {
     landings: Vec<(Location, Hash)>,
     applies: Vec<ApplyFrame>,
     carried: Vec<CarriedFrame>,
+    /// The FOREIGN frames of the batch: place, raw kind, hash and, when it was read, payload. A
+    /// batch with no apply keeps none of them.
+    foreign: Vec<(Location, u8, Hash, Option<Vec<u8>>)>,
 }
 
 /// What the header pass collected from the sealed batches, in log order. It holds the redaction
@@ -533,6 +553,9 @@ pub(crate) struct Collected {
     pub(crate) applies: Vec<ApplyFrame>,
     /// The carried record frames of the sealed batches, in log order.
     pub(crate) carried: Vec<CarriedFrame>,
+    /// The applies that a FOREIGN Removal entry of their own batch names (a project's foreign
+    /// removals, `crate::foreign_removal`), in log order: they are no native applies.
+    pub(crate) foreign_proofs: Vec<crate::foreign_removal::ProofFrame>,
     /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
     pub(crate) memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
@@ -579,7 +602,17 @@ impl Collected {
         self.residue_at.get(hash).copied()
     }
 
-    fn seal(&mut self, p: Pending) {
+    fn seal(&mut self, mut p: Pending) {
+        if !p.applies.is_empty() && !p.foreign.is_empty() {
+            let start = p.start.expect("a batch with frames has a start");
+            let foreign = std::mem::take(&mut p.foreign);
+            crate::foreign_removal::split(
+                &mut p.applies,
+                &foreign,
+                start,
+                &mut self.foreign_proofs,
+            );
+        }
         for (loc, h) in &p.requests {
             self.request_at.entry(*h).or_insert(*loc);
         }
@@ -629,6 +662,9 @@ impl Collected {
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
             kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
+            kinds::FOREIGN => p
+                .foreign
+                .push((loc, kind, hash, payload.map(<[u8]>::to_vec))),
             _ => {}
         }
         Ok(())
@@ -761,6 +797,18 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                 };
                 if Hash::of(&payload) != hash || !segment::marker_matches(seg, &p.since, &payload) {
                     break;
+                }
+                // a FOREIGN entry of a batch that holds an apply may name it (a foreign
+                // removal): only those entries are read
+                if !p.applies.is_empty() {
+                    for (loc, _, _, body) in &mut p.foreign {
+                        let len = header_at(f, loc.offset, file_len)?
+                            .map(|(l, _, _)| l)
+                            .filter(|l| *l as usize <= MAX_RECORD_BYTES);
+                        if let Some(len) = len {
+                            *body = Some(read_payload(f, loc.offset + HEADER, len)?);
+                        }
+                    }
                 }
                 c.seal(std::mem::take(&mut p));
                 c.sealed_end = Some(Location {
@@ -1683,11 +1731,21 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     let end = loop {
         let mut holes = candidate_holes(&c, readers, &applies)?;
         crate::redaction_carried::candidate_holes(&c, below, &mut holes);
+        crate::foreign_removal::candidate_holes(&c, readers, below, &mut holes)?;
         let end = segment::acknowledged_end(readers, &holes)?;
-        let before = (applies.len(), carried_below(&c, below));
+        let before = (
+            applies.len(),
+            carried_below(&c, below),
+            foreign_below(&c, below),
+        );
         applies.retain(|a| a.loc < end);
         below = end;
-        if (applies.len(), carried_below(&c, below)) == before {
+        if (
+            applies.len(),
+            carried_below(&c, below),
+            foreign_below(&c, below),
+        ) == before
+        {
             break end;
         }
     };
@@ -1698,6 +1756,7 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     };
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, end)?;
     check_log(&mut log, &c.memory, &auth, &sel, end)?;
+    crate::foreign_removal::authorize(&c, &mut log, &mut auth, end)?;
     auth.requests = c
         .requests
         .iter()
@@ -1710,6 +1769,14 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
 /// How many carried record frames lie before `below`.
 fn carried_below(c: &Collected, below: Location) -> usize {
     c.carried.iter().filter(|f| f.loc < below).count()
+}
+
+/// How many foreign removal proofs lie before `below`.
+fn foreign_below(c: &Collected, below: Location) -> usize {
+    c.foreign_proofs
+        .iter()
+        .filter(|f| f.apply.loc < below)
+        .count()
 }
 
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
@@ -1735,7 +1802,7 @@ pub(crate) fn sealed_of(
     readers: &[File],
     carried_upto: Location,
 ) -> Result<Authorization, StoreError> {
-    if c.applies.is_empty() && c.carried.is_empty() {
+    if c.applies.is_empty() && c.carried.is_empty() && c.foreign_proofs.is_empty() {
         return Ok(Authorization::default());
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
@@ -1750,6 +1817,7 @@ pub(crate) fn sealed_of(
         offset: 0,
     });
     check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto)?;
+    crate::foreign_removal::authorize(c, &mut log, &mut auth, upto)?;
     Ok(auth)
 }
 
@@ -1774,6 +1842,7 @@ pub(crate) fn bootstrap_pending(
     };
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, start)?;
     check_log(&mut log, &c.memory, &auth, &sel, start)?;
+    crate::foreign_removal::authorize(&c, &mut log, &mut auth, start)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }

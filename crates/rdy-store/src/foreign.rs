@@ -15,7 +15,8 @@
 //! - Every delivered version stays held until an authorized erasure: a removed or replaced
 //!   version leaves the selection and stays readable through a held pin.
 //!
-//! A Removal entry is reserved: this writer does not take one.
+//! A Removal entry is never taken through this writer: `Store::take_foreign_removal`
+//! (`crate::foreign_removal`) seals one with its proof.
 use crate::error::StoreError;
 use crate::holder::StoreMode;
 use crate::index::hash_from;

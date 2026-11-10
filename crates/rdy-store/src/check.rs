@@ -955,14 +955,25 @@ struct EntryMeta {
 /// A delivered version: its repo, block id and BLOCK version.
 type HeldKey = (RepoId, BlockId, Hash);
 
-/// A Removal entry: its hash, its repo and the versions it names.
-type RemovalOf = (Hash, RepoId, Vec<(BlockId, Hash)>);
+/// A Removal entry: its hash, its repo, its proof's apply and the versions it names.
+type RemovalOf = (Hash, RepoId, Hash, Vec<(BlockId, Hash)>);
 
-/// Whether a Removal entry authorizes the erasure of version `version` of `id` in `repo`. None
-/// does yet: a Removal authorizes erasure only once its portable proof is verified, and this
-/// rdy verifies none, so zeros over a foreign-only version are unapproved.
-fn removal_authorizes(_repo: &RepoId, _id: &BlockId, _version: &Hash) -> bool {
-    false
+/// The Removal entries that are erasure authorities (D-CN4QJ): those whose proof's apply the
+/// store holds, each with what its proof, checked again, approves. A Removal whose apply is not
+/// stored authorizes nothing.
+struct Authorities {
+    /// The `(repo, id, version)` triples a Removal names and its verified proof approves.
+    erased: BTreeSet<HeldKey>,
+    /// The keys of the verified proofs' records: they stay outside canon, and the local edge
+    /// rules do not read them.
+    proof_keys: BTreeSet<crate::object_refs::ObjectKey>,
+}
+
+impl Authorities {
+    /// Whether a Removal authorizes the erasure of version `version` of `id` in `repo`.
+    fn removal_authorizes(&self, repo: &RepoId, id: &BlockId, version: &Hash) -> bool {
+        self.erased.contains(&(*repo, id.clone(), *version))
+    }
 }
 
 impl StoreReader {
@@ -975,9 +986,12 @@ impl StoreReader {
     /// - each Delivery's `selection` is the digest of the selection its source's chain rebuilds,
     ///   and its delta fits that selection;
     /// - each delivered version names a stored BLOCK of its id and encoding. One that reads as
-    ///   removed is corruption unless it is also local content or an authorized Removal names it;
+    ///   removed is corruption unless it is also local content or an authorized Removal names it
+    ///   (one whose proof's apply is stored, whose proof checks again over the store's records
+    ///   and approves that version of that id); a stored proof that fails is corruption;
     /// - no record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN
-    ///   entry or a BLOCK version that only a foreign entry holds;
+    ///   entry or a BLOCK version that only a foreign entry holds (a verified proof's records
+    ///   are the cited project's, and are not read);
     /// - each foreign pin of a local block names the content (never the version hash) of a
     ///   version that a delivery of its repo holds;
     /// - each version a Removal names is one a delivery of its repo holds.
@@ -1024,8 +1038,8 @@ impl StoreReader {
                     (EntryKind::Delivery, *prev)
                 }
                 ForeignEvent::Revoked { prev } => (EntryKind::Revoked, Some(*prev)),
-                ForeignEvent::Removal { versions, .. } => {
-                    removals.push((*h, e.repo, versions.clone()));
+                ForeignEvent::Removal { proof, versions } => {
+                    removals.push((*h, e.repo, *proof, versions.clone()));
                     (EntryKind::Removal, None)
                 }
             };
@@ -1041,16 +1055,17 @@ impl StoreReader {
             );
         }
         self.check_foreign_chains(&metas)?;
+        let authorities = self.foreign_authorities(&removals)?;
         let local = self.local_versions(!held.is_empty())?;
-        self.check_held_versions(&held, &local)?;
+        self.check_held_versions(&held, &local, &authorities)?;
         let foreign_only: BTreeSet<Hash> = held
             .keys()
             .map(|(_, _, v)| *v)
             .filter(|v| !local.contains(v))
             .collect();
-        self.check_foreign_edges(&foreign_only)?;
+        self.check_foreign_edges(&foreign_only, &authorities.proof_keys)?;
         self.check_foreign_pins(&held, &foreign_only)?;
-        for (h, repo, versions) in &removals {
+        for (h, repo, _, versions) in &removals {
             for (id, v) in versions {
                 if !held.contains_key(&(*repo, id.clone(), *v)) {
                     return Err(bad(format!(
@@ -1188,6 +1203,37 @@ impl StoreReader {
         Ok(())
     }
 
+    /// The erasure authorities among `removals` (see [`Authorities`]): each Removal whose apply
+    /// is stored has its proof checked again over the store's records; one that fails is
+    /// `foreign removal <hash>: its proof does not verify: <reason>`.
+    fn foreign_authorities(&self, removals: &[RemovalOf]) -> Result<Authorities, StoreError> {
+        let mut out = Authorities {
+            erased: BTreeSet::new(),
+            proof_keys: BTreeSet::new(),
+        };
+        let mut checked: BTreeMap<Hash, BTreeSet<(BlockId, Hash)>> = BTreeMap::new();
+        for (h, repo, apply, versions) in removals {
+            if !self.has_kind(kinds::REDACTION_APPLY, apply)? {
+                continue;
+            }
+            if !checked.contains_key(apply) {
+                let proof = crate::foreign_removal::stored_proof(self, *apply).map_err(|e| {
+                    bad(format!(
+                        "foreign removal {h}: its proof does not verify: {e}"
+                    ))
+                })?;
+                out.proof_keys.extend(proof.keys);
+                checked.insert(*apply, proof.approved);
+            }
+            for (id, v) in versions {
+                if checked[apply].contains(&(id.clone(), *v)) {
+                    out.erased.insert((*repo, id.clone(), *v));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The BLOCK versions that local changes create or update to. Empty when `needed` is false.
     fn local_versions(&self, needed: bool) -> Result<BTreeSet<Hash>, StoreError> {
         let mut out = BTreeSet::new();
@@ -1218,6 +1264,7 @@ impl StoreReader {
         &self,
         held: &BTreeMap<HeldKey, (Hash, u16)>,
         local: &BTreeSet<Hash>,
+        authorities: &Authorities,
     ) -> Result<(), StoreError> {
         for ((repo, id, v), (_, encoding)) in held {
             let what = || format!("foreign version {v} of {repo}/{id}");
@@ -1238,7 +1285,7 @@ impl StoreReader {
                     }
                 }
                 Err(StoreError::Redacted { .. }) => {
-                    if !local.contains(v) && !removal_authorizes(repo, id, v) {
+                    if !local.contains(v) && !authorities.removal_authorizes(repo, id, v) {
                         return Err(bad(format!(
                             "{}: its BLOCK reads as removed, and no authorized Removal names it",
                             what()
@@ -1255,8 +1302,14 @@ impl StoreReader {
     }
 
     /// No record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN
-    /// entry or a version in `foreign_only`. A removed record has no edge to read.
-    fn check_foreign_edges(&self, foreign_only: &BTreeSet<Hash>) -> Result<(), StoreError> {
+    /// entry or a version in `foreign_only`. A removed record has no edge to read, and a
+    /// verified foreign removal's proof record (`proof_keys`) is the cited project's, outside
+    /// canon.
+    fn check_foreign_edges(
+        &self,
+        foreign_only: &BTreeSet<Hash>,
+        proof_keys: &BTreeSet<crate::object_refs::ObjectKey>,
+    ) -> Result<(), StoreError> {
         let names_foreign = |kind: Option<u8>, h: &Hash| -> Result<Option<String>, StoreError> {
             let entry = match kind {
                 Some(kinds::FOREIGN) => true,
@@ -1283,12 +1336,15 @@ impl StoreReader {
                 Ok(())
             })?;
             for h in hashes {
+                let key = crate::object_refs::ObjectKey { kind, hash: h };
+                if proof_keys.contains(&key) {
+                    continue;
+                }
                 let (raw, payload) = match self.get_kind_raw(kind, &h) {
                     Ok(f) => f,
                     Err(StoreError::Redacted { .. }) => continue,
                     Err(e) => return Err(e),
                 };
-                let key = crate::object_refs::ObjectKey { kind, hash: h };
                 let refs = crate::object_refs::refs_of(raw, &payload)
                     .map_err(|e| bad(format!("object {key}: {e}")))?;
                 for r in refs {

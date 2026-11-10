@@ -17,6 +17,7 @@ pub mod error;
 pub mod fileid;
 pub mod follower;
 pub mod foreign;
+pub mod foreign_removal;
 pub mod format;
 pub mod fsutil;
 pub mod holder;
