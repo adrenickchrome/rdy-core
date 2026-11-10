@@ -1338,7 +1338,7 @@ fn hpb7_every_core_error_keeps_its_static_code() {
             declared.push(value.to_string());
         }
     }
-    assert_eq!(declared.len(), 113, "{declared:?}");
+    assert_eq!(declared.len(), 115, "{declared:?}");
     for code in [
         "E_STREAM_TRUNCATED",
         "E_STREAM_PURPOSE",
@@ -1347,6 +1347,8 @@ fn hpb7_every_core_error_keeps_its_static_code() {
         "E_BRIEF_STALE",
         "E_PLAN_ITEM",
         "E_DEFERRAL_OPEN",
+        "E_FOREIGN_VERSION",
+        "E_FOREIGN_READ_ONLY",
     ] {
         assert!(declared.iter().any(|d| d == code), "{code}");
     }
