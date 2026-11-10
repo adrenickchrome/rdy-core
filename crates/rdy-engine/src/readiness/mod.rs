@@ -536,7 +536,7 @@ pub fn accepted_advice(
                     .iter()
                     .any(|s| matches!(s, SideRef::Change(c) if p.changes.contains(c)))
                 && t.sides.iter().all(|s| match s {
-                    SideRef::Canon { .. } => true,
+                    SideRef::Canon { .. } | SideRef::Foreign { .. } => true,
                     SideRef::Change(c) => p.changes.contains(c),
                     SideRef::Intent { .. } => false,
                 })

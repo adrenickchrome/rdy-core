@@ -193,7 +193,8 @@ fn block_of_item(cx: &DetectCx<'_>, item: &Item, label: &str) -> Result<Arc<Bloc
                 .then(|| canon.get(&item.block).cloned().map(Arc::new))
                 .flatten()
         }
-        SideRef::Intent { .. } => None,
+        // a cited block is never read through local lookup
+        SideRef::Intent { .. } | SideRef::Foreign { .. } => None,
     };
     found.ok_or_else(|| {
         RdyError::new(

@@ -39,6 +39,14 @@ impl Detector for PremiseShift {
     fn kind(&self) -> TensionKind {
         TensionKind::PremiseShift
     }
+    fn across(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        super::foreign::run(cx, self.kind(), seeds, out, super::foreign::premises)
+    }
 
     fn detect(
         &self,
@@ -49,6 +57,8 @@ impl Detector for PremiseShift {
         if cx.scope() == DetectScope::Canon {
             return Ok(());
         }
+        // across projects (repo links, D-Y49PX): a delivery changed a block a change pins
+        self.across(cx, seeds, out)?;
         let writes = cx.writes;
         let citations = citations(writes, seeds);
         if citations.is_empty() {

@@ -597,11 +597,19 @@ fn author(
 }
 
 /// The sides of `t` as a move records them, with the authors `st` (the state that holds it)
-/// gives its changes.
+/// gives its changes. A foreign side records the cited repo and the FOREIGN entry: delivery
+/// provenance, with no local actor or landing (repo links, D-Y49PX). A move with one takes
+/// TRANSITION encoding 1.
 fn sides(st: &ReadState, set: &TensionSet, t: &Tension) -> Result<Vec<SideV1>, RdyError> {
     t.sides
         .iter()
         .map(|s| {
+            if let SideRef::Foreign { repo, entry } = s {
+                return Ok(SideV1::Foreign {
+                    repo: *repo,
+                    entry: *entry,
+                });
+            }
             Ok(SideV1::Local(match s {
                 SideRef::Change(c) => {
                     let (actor, run) = author(st, set, c)?;
@@ -618,8 +626,9 @@ fn sides(st: &ReadState, set: &TensionSet, t: &Tension) -> Result<Vec<SideV1>, R
                     run: None,
                     landing: *landing,
                 },
-                // an intent side is read-time only, never in the open set
-                SideRef::Intent { .. } => Side {
+                // an intent side is read-time only, never in the open set; a foreign side was
+                // recorded above
+                SideRef::Intent { .. } | SideRef::Foreign { .. } => Side {
                     change: None,
                     actor: None,
                     run: None,

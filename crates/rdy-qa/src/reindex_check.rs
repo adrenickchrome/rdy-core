@@ -52,10 +52,11 @@ pub fn derived(r: &Rdy) -> Result<Derived, String> {
         .iter()
         .map(|t| {
             let status = match st.tension_status(t) {
-                TensionStatus::Open => "open",
-                TensionStatus::Dismissed(_) => "dismissed",
+                TensionStatus::Open => "open".to_string(),
+                TensionStatus::Dismissed(_) => "dismissed".to_string(),
+                TensionStatus::Deviated(d) => format!("deviated: {d}"),
             };
-            (tension_label(&t.id), status.to_string())
+            (tension_label(&t.id), status)
         })
         .collect();
     let mut conflicts = BTreeMap::new();

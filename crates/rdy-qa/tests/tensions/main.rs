@@ -11,6 +11,7 @@ mod tensions_dismiss;
 mod tensions_drift;
 mod tensions_duplicate;
 mod tensions_events;
+mod tensions_foreign;
 mod tensions_fork;
 mod tensions_log;
 mod tensions_name_matcher;

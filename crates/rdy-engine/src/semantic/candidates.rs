@@ -533,7 +533,8 @@ fn item_block(cx: &DetectCx<'_>, item: &Item) -> Result<Option<ItemBlock>, RdyEr
                 .flatten()
                 .map(|b| (Arc::new(b), None))
         }
-        SideRef::Intent { .. } => None,
+        // a cited block's semantic pair is not read here
+        SideRef::Intent { .. } | SideRef::Foreign { .. } => None,
     })
 }
 

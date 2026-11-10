@@ -938,9 +938,9 @@ impl ReadState {
     }
 
     /// The tensions that refuse landing `changes` (one version's changes, proposed from view
-    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, not
-    /// dismissed, and with every side canon or one of `changes`, so that landing them would put
-    /// it into canon. By id.
+    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, open (not
+    /// dismissed, not deviated), and with every side canon, cited from a linked project or one of
+    /// `changes`, so that landing them would put it into canon. By id.
     ///
     /// The gate judges what lands (tgat1): a change that another view also holds, or a write the
     /// view overwrites later but a subset leaves out, is read as the landing set has it, not as
@@ -955,7 +955,8 @@ impl ReadState {
                 t.severity == TensionSeverity::Blocking
                     && self.tension_status(t) == TensionStatus::Open
                     && t.sides.iter().all(|s| match s {
-                        SideRef::Canon { .. } => true,
+                        // a cited block stands as canon does (repo links, D-Y49PX)
+                        SideRef::Canon { .. } | SideRef::Foreign { .. } => true,
                         SideRef::Change(h) => mine.contains(h),
                         SideRef::Intent { .. } => false,
                     })

@@ -369,6 +369,8 @@ fn tension_row(
     let dismissal = match status {
         TensionStatus::Dismissed(review) => Some(*review),
         TensionStatus::Open => None,
+        // resolved by a live deviation: no row (repo links, D-8VJAZ)
+        TensionStatus::Deviated(_) => return None,
     };
     let blocks: BTreeSet<BlockId> = t
         .blocks
@@ -419,7 +421,8 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
     let mut tensions: BTreeMap<Hash, AssessmentTension> = BTreeMap::new();
     let mut cut = 0usize;
     for t in i.tensions {
-        if !seen.insert(t.0.tension.as_str()) {
+        // a tension a live deviation resolved is neither open nor dismissed: no row, not cut
+        if matches!(t.2, TensionStatus::Deviated(_)) || !seen.insert(t.0.tension.as_str()) {
             continue;
         }
         match tension_row(t, &answers, i.plan_hash) {

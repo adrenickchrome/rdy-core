@@ -357,6 +357,10 @@ impl Rdy {
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
         let tensions = match &delta {
+            // a delivery or a revocation moves the foreign state, which the tensions across
+            // projects read (repo links, D-Y49PX): the next read builds the set in full; canon's
+            // memo holds no such tension, so it stays
+            _ if !Arc::ptr_eq(&foreign, &prev.foreign) => Arc::default(),
             Delta::Seq | Delta::Tags | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => {
                 Arc::clone(&prev.tensions)
             }

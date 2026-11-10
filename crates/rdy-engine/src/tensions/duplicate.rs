@@ -357,6 +357,14 @@ impl Detector for DuplicateDefinition {
     fn kind(&self) -> TensionKind {
         TensionKind::DuplicateDefinition
     }
+    fn across(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        super::foreign::run(cx, self.kind(), seeds, out, super::foreign::duplicates)
+    }
 
     /// A canon group is the canon blocks of one name group or one text: a landing changes only
     /// the groups of the keys its blocks had or have, and the carry re-detects around every
@@ -481,6 +489,11 @@ impl Detector for DuplicateDefinition {
                     .map(|m| cx.involved(m.side.clone(), &m.block, m.version))
                     .collect::<Result<_, _>>()?,
             });
+        }
+        // across projects (repo links, D-Y49PX): pairs with a cited block, in flight here; the
+        // canon form follows the foreign state and is joined per build
+        if cx.scope() == DetectScope::Inflight {
+            self.across(cx, seeds, out)?;
         }
         Ok(())
     }

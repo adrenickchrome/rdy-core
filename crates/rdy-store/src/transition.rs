@@ -206,8 +206,8 @@ impl Transitions {
 /// One side of a tension move in TRANSITION encoding 1
 /// ([`rdy_model::encoding::TRANSITION_FOREIGN_ENCODING`], repo links): a local side, as [`Side`]
 /// holds it, or a foreign side, the cited repo and the FOREIGN entry that holds it
-/// (`SideRef::Foreign {repo, entry}`, D-Y49PX). Variant order is format. A registered wire shape:
-/// the runtime side stays [`Side`].
+/// (`SideRef::Foreign {repo, entry}`, D-Y49PX). Variant order is format. Active since
+/// tensions across projects (rdy-engine `transitions`): the engine writes a foreign side here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SideV1 {
     Local(Side),

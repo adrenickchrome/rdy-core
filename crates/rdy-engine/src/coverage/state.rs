@@ -764,6 +764,8 @@ impl ReadState {
             let mine: Vec<BlockId> = t.blocks().into_iter().filter(|b| wanted(b)).collect();
             let label = tension_label(&t.id);
             let (code, fix, dismissed) = match self.tension_status(t) {
+                // resolved by a live deviation (repo links, D-8VJAZ): no issue
+                TensionStatus::Deviated(_) => continue,
                 TensionStatus::Open => (
                     IssueCode::OpenTension,
                     fix_open_tension(&label, t.kind.name()),
