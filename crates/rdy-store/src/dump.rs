@@ -788,9 +788,17 @@ impl RemovalTally {
                     kind,
                     hash,
                     payload,
-                } if *kind == kinds::REDACTION && !self.manifests.contains_key(hash) => {
+                } if crate::codec::logical_kind(*kind) == kinds::REDACTION
+                    && !self.manifests.contains_key(hash) =>
+                {
+                    // a request of any registered encoding (`crate::codec`): encoding 1 holds a
+                    // cited version target; a frame that does not split names nothing
                     let mut spans = Vec::new();
-                    if wire::request_spans(payload, &mut spans)? {
+                    let read = match crate::codec::split(*kind, payload) {
+                        Ok(o) => wire::request_spans(o.body, o.version, &mut spans)?,
+                        Err(_) => false,
+                    };
+                    if read {
                         self.manifests
                             .try_reserve(1)
                             .map_err(|_| drop_text::ALLOCATION)?;
@@ -940,13 +948,16 @@ mod wire {
     /// `record allocation failed`. The layout: `carrier`, `actor` (`actor`, `run`, `role`,
     /// `at_ms`), `targets`, `reason_class`, `reason`, then the manifest's `versions`, `blobs`,
     /// `shared_blobs` and `spans` (each `place`, `kind`, `hash`, `len`, `residue`); the fields
-    /// after `spans` are not read.
+    /// after `spans` are not read. `version` is the record's encoding: encoding 1
+    /// (`REDACTION_FOREIGN_ENCODING`) appends the target variant `foreign_version` (index 3:
+    /// `repo`, 16 bytes, then `id` and `version`), which encoding 0 has no form for.
     pub(super) fn request_spans(
         payload: &[u8],
+        version: u16,
         out: &mut Vec<(Location, u8, Hash)>,
     ) -> Result<bool, &'static str> {
         let mut c = Cur(payload);
-        let Some(()) = head(&mut c) else {
+        let Some(()) = head(&mut c, version) else {
             return Ok(false);
         };
         // no count bound but the payload's own (the existing record limits): a count the
@@ -981,8 +992,9 @@ mod wire {
     /// length, the kind, the 32-byte hash and an absent residue.
     const MIN_SPAN_BYTES: usize = 1 + 1 + 1 + 32 + 1 + 1;
 
-    /// Reads a request's fields before its manifest's spans.
-    fn head(c: &mut Cur) -> Option<()> {
+    /// Reads a request's fields before its manifest's spans, of encoding `version`.
+    fn head(c: &mut Cur, version: u16) -> Option<()> {
+        let foreign = version == rdy_model::encoding::REDACTION_FOREIGN_ENCODING;
         c.hash()?; // carrier
         c.bytes()?; // actor.actor
         c.option(|c| c.bytes())?; // actor.run
@@ -997,6 +1009,11 @@ mod wire {
                 c.hash().map(|_| ())
             }
             2 => c.hash().map(|_| ()),
+            3 if foreign => {
+                c.take(16)?; // repo
+                c.bytes()?; // id
+                c.hash().map(|_| ())
+            }
             _ => None,
         })?; // targets
         if c.u32()? > 3 {
@@ -1020,6 +1037,85 @@ mod wire {
             RedactionApply, RedactionManifest,
         };
         use rdy_model::{BlockId, Provenance, Role};
+
+        /// rpl25 (fix round 1): a request of REDACTION encoding 1 holds a cited version target
+        /// (variant 3). The in-place read takes it in encoding 1 and agrees with the record's own
+        /// spans; encoding 0 has no form for it, so the same body read as encoding 0 names
+        /// nothing.
+        #[test]
+        fn rpl25_in_place_read_takes_a_cited_version_target_in_encoding_1() {
+            let id = BlockId::parse("d-FRGNX").unwrap();
+            let span = DropSpan {
+                place: FramePlace {
+                    segment: 2,
+                    offset: 900,
+                },
+                kind: crate::kinds::BLOCK | crate::codec::VERSIONED,
+                hash: Hash([7; 32]),
+                len: 300,
+                residue: Some(Hash([8; 32])),
+            };
+            let r = Redaction {
+                carrier: Hash([1; 32]),
+                actor: Provenance {
+                    actor: "human:founder".into(),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 6_000_000,
+                },
+                targets: vec![
+                    RedactTarget::ForeignVersion {
+                        repo: rdy_model::RepoId([0xab; 16]),
+                        id: id.clone(),
+                        version: Hash([2; 32]),
+                    },
+                    RedactTarget::Version {
+                        id: id.clone(),
+                        version: Hash([3; 32]),
+                    },
+                ],
+                reason_class: ReasonClass::Personal,
+                reason: "a name".into(),
+                manifest: RedactionManifest {
+                    versions: vec![(id.clone(), Hash([2; 32]))],
+                    blobs: vec![],
+                    shared_blobs: vec![],
+                    spans: vec![span.clone()],
+                    inside: vec![],
+                    outside: vec![],
+                    quarantine: vec![],
+                    assessment: AssessmentSupport::NotImplemented,
+                },
+            };
+            assert_eq!(
+                r.encoding(),
+                rdy_model::encoding::REDACTION_FOREIGN_ENCODING
+            );
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let mut out = vec![];
+            assert_eq!(
+                request_spans(
+                    &bytes,
+                    rdy_model::encoding::REDACTION_FOREIGN_ENCODING,
+                    &mut out
+                ),
+                Ok(true)
+            );
+            assert_eq!(
+                out,
+                vec![(
+                    Location {
+                        segment: 2,
+                        offset: 900
+                    },
+                    span.kind,
+                    span.hash
+                )]
+            );
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes, 0, &mut out), Ok(false));
+            assert!(out.is_empty());
+        }
 
         /// hc1: the in-place reads agree with the records' own decoding, for every variant and
         /// option the read layout walks, and a cut record reads as nothing.
@@ -1079,7 +1175,7 @@ mod wire {
             };
             let bytes = postcard::to_allocvec(&r).unwrap();
             let mut out = vec![];
-            assert_eq!(request_spans(&bytes, &mut out), Ok(true));
+            assert_eq!(request_spans(&bytes, 0, &mut out), Ok(true));
             let want: Vec<(Location, u8, Hash)> = spans
                 .iter()
                 .map(|s| {
@@ -1096,19 +1192,22 @@ mod wire {
             assert_eq!(out, want);
             // a span count the remaining bytes cannot hold reads as nothing, and reserves nothing
             let mut c = Cur(&bytes);
-            head(&mut c).unwrap();
+            head(&mut c, 0).unwrap();
             let at = bytes.len() - c.0.len();
             assert_eq!(bytes[at], 2, "the span count");
             let mut forged = bytes[..at].to_vec();
             forged.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // 2^35
             forged.extend_from_slice(&bytes[at + 1..]);
             let mut out = vec![];
-            assert_eq!(request_spans(&forged, &mut out), Ok(false));
+            assert_eq!(request_spans(&forged, 0, &mut out), Ok(false));
             assert_eq!(out.capacity(), 0);
             // a record cut inside its spans reads as nothing
             let spans_at = bytes.len() - 6;
             let mut out = vec![];
-            assert_eq!(request_spans(&bytes[..spans_at / 2], &mut out), Ok(false));
+            assert_eq!(
+                request_spans(&bytes[..spans_at / 2], 0, &mut out),
+                Ok(false)
+            );
             let apply = RedactionApply {
                 request: Hash([6; 32]),
                 landing: Hash([2; 32]),

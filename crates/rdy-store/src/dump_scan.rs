@@ -2234,14 +2234,14 @@ impl<'p> Scan<'p> {
             self.holder_count(rec_, false)?;
         }
         let mut matched = (false, false);
-        // a residue of any encoding (`crate::codec`); the other removal records have encoding 0
+        // a residue or a request of any encoding (`crate::codec`: a request with a cited version
+        // target has REDACTION encoding 1); the other removal records have encoding 0
         let residue = crate::codec::logical_kind(fh.kind) == kinds::REDACTION_RESIDUE;
+        let request = crate::codec::logical_kind(fh.kind) == kinds::REDACTION;
         match fh.kind {
             k if residue
-                || matches!(
-                    k,
-                    kinds::REDACTION | kinds::REDACTION_APPLY | kinds::REDACTION_CARRIED
-                ) =>
+                || request
+                || matches!(k, kinds::REDACTION_APPLY | kinds::REDACTION_CARRIED) =>
             {
                 if fh.len > MAX_RECORD_BYTES as u64 {
                     // a removal record over the record bound is no record: a proof that needs
@@ -2258,7 +2258,7 @@ impl<'p> Scan<'p> {
                 dump::check_carried(fh.kind, &p)
                     .map_err(|what| self.fail(i, damaged(fh.at, what)))?;
                 match fh.kind {
-                    kinds::REDACTION => {
+                    _ if request => {
                         self.collected
                             .note_request(at, fh.hash)
                             .map_err(|_| alloc(i, fh.at))?;

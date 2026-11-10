@@ -621,3 +621,72 @@ fn rpl25_a_block_that_cites_is_redactable() {
     assert_eq!(held.body, X1_TEXT);
     clean(r);
 }
+
+/// Fix round 1 (review finding 1): a store that holds an approved foreign-version request
+/// (REDACTION encoding 1) dumps, and the dump loads. The load finds the request's authorization
+/// for the dropped foreign frame; the loaded copy reads the held version as its residue, keeps
+/// the request's identity and every local byte, and passes fsck before and after a reindex. A
+/// second dump of the loaded copy holds the same bytes.
+#[test]
+fn rpl25_foreign_redaction_dump_loads() {
+    let _clock = pin_clock(6_000_000);
+    let mut w = world();
+    let r = &mut w.r;
+    let (res, prop) = request(r, &writer(), &[aliased(&w.x1)]);
+    let request_id = res.redaction.unwrap();
+    answer(r, &approver(), &prop.r#ref, "approve").unwrap();
+    clean(r);
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("after.rdydump");
+    r.read().dump(&file).unwrap();
+    let dest = out.path().join("copy");
+    std::fs::create_dir(&dest).unwrap();
+    rdy_engine::load::load(&file, &dest).unwrap();
+
+    let mut loaded = Rdy::open(&dest).unwrap();
+    clean(&mut loaded);
+    let st = loaded.read();
+    st.ensure_current_epoch().unwrap();
+    let target = ForeignId::new(cited(), w.x1.id.clone());
+    let held = st
+        .foreign_held(&target, &version_of(&w.x1))
+        .unwrap()
+        .expect("the held version still reads");
+    assert!(held.is_redacted());
+    assert_eq!(held.body, CONTENT_REMOVED);
+    assert_eq!(held.version_hash(), version_of(&w.x1));
+    assert_eq!(held.content_hash(), w.x1.content_hash());
+    let recorded = st.reader().redaction_request(&request_id).unwrap();
+    assert_eq!(recorded.targets, vec![foreign_target(&w.x1)]);
+    assert_eq!(
+        recorded.encoding(),
+        rdy_model::encoding::REDACTION_FOREIGN_ENCODING
+    );
+    let claim = st.block(&Scope::Canon, &w.claim).unwrap();
+    assert!(!claim.is_redacted());
+    assert_eq!(
+        claim,
+        r.read().block(&Scope::Canon, &w.claim).unwrap(),
+        "local content keeps its identity"
+    );
+    let again = dry(&loaded, &[aliased(&w.x1)]).unwrap();
+    assert_eq!(again.report.already_redacted, vec![foreign_target(&w.x1)]);
+    drop(st);
+    let copy_seg = dest.join(".rdy/store/segments");
+    let has = |dir: &Path, needle: &str| {
+        std::fs::read_dir(dir).unwrap().any(|e| {
+            let bytes = std::fs::read(e.unwrap().path()).unwrap();
+            bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+        })
+    };
+    assert!(!has(&copy_seg, X1_TEXT), "load restores no removed byte");
+    assert!(has(&copy_seg, LOCAL_TEXT));
+    // the loaded copy dumps again, and that dump loads
+    let file2 = out.path().join("again.rdydump");
+    loaded.read().dump(&file2).unwrap();
+    let dest2 = out.path().join("copy2");
+    std::fs::create_dir(&dest2).unwrap();
+    rdy_engine::load::load(&file2, &dest2).unwrap();
+    let mut loaded2 = Rdy::open(&dest2).unwrap();
+    clean(&mut loaded2);
+}
