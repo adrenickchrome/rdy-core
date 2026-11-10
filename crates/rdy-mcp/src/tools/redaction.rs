@@ -22,7 +22,7 @@ pub const REDACT_CONTEXT: &str = "redact";
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedactArgs {
-    /// Selectors: a block id (every stored version), id@<64-hex version hash> (one version), or blob:<64-hex manifest hash>. 1 to 256, each at most 256 bytes.
+    /// Selectors: a block id (every stored version), id@<64-hex version hash> (one version), <alias>:<id>@<64-hex version hash> or <repo>:<id>@<64-hex version hash> (one version that a linked project delivered), or blob:<64-hex manifest hash>. 1 to 256, each at most 256 bytes.
     pub targets: Vec<String>,
     /// Why the content goes: secret, personal, legal or retraction.
     #[schemars(extend("enum" = ["secret", "personal", "legal", "retraction"]))]

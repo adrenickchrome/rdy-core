@@ -151,7 +151,7 @@ pub struct ScopeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdParams {
-    /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.
+    /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version; it also takes `<alias>:<id>`, a block cited from a linked project, which it reads without history.
     pub id: String,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,

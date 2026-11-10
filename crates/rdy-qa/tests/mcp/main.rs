@@ -70,6 +70,7 @@ mod mcp_ref;
 mod mcp_reflects;
 mod mcp_reflects_history;
 mod mcp_repo_id;
+mod mcp_repo_links;
 mod mcp_resources;
 mod mcp_reviews;
 mod mcp_rules;

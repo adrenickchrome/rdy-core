@@ -678,6 +678,7 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
     x.step("rdy_inbox", json!({}));
     x.step("rdy_coverage", json!({"scope": "canon"}));
     x.step("rdy_tags", json!({}));
+    x.step("rdy_links", json!({}));
 
     x.step(
         "rdy_publication_check",

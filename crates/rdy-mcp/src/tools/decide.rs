@@ -34,6 +34,8 @@ pub struct DecideParams {
     pub conditional_on: Option<Vec<String>>,
     pub refines: Option<Vec<String>>,
     pub answers: Option<Vec<String>>,
+    /// The cited decisions, cited instructions or external decisions this decision departs from (`<alias>:<id>`, `<alias>:<KEY>` or the stored `<repo>:<id>`). A person confirms a deviation, and it covers the local blocks that cite its target until it is revoked. A target that is not cited or external is refused (E_VALIDATION).
+    pub deviates_from: Option<Vec<String>>,
     /// Pack-defined decision fields, e.g. {"key": "FW-E3", "disposition": "built in M2c3"}: rdy_schema decision lists them; validated against the pack as rdy_write validates fields. Not statement, title, why, recommend, recommend_reason, options or the other fields with their own parameter, nor status, decided_at or recorded_at.
     pub fields: Option<serde_json::Map<String, Value>>,
     /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
@@ -50,12 +52,20 @@ pub struct DecideParams {
 #[serde(deny_unknown_fields)]
 pub struct SupersedeParams {
     pub old: String,
-    /// The words of the old decision that this one retires; omit to supersede all of it.
+    /// The words of the old decision that this one retires; omit to supersede all of it. Goes with decision, not with adopted_as.
     pub part: Option<String>,
-    /// The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it.
-    pub decision: DecideParams,
+    /// The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it. Give decision or adopted_as, not both.
+    pub decision: Option<DecideParams>,
+    /// A cited decision (`<alias>:<id>` or `<alias>:<KEY>`) that is the upstream copy of the old decision: the old decision is superseded by it, and nothing is copied. The old decision must be accepted and local. A person approves it at landing. Give decision or adopted_as, not both.
+    pub adopted_as: Option<String>,
     /// The intent (rdy_intent, in-<hex>) this change is made under; used when decision has none.
     pub intent: Option<String>,
+    /// With adopted_as only: the view to write in (default: your session's). With decision, give view inside decision.
+    pub view: Option<String>,
+    /// With adopted_as only: the briefing token from rdy_brief. With decision, give brief inside decision.
+    pub brief: Option<String>,
+    /// With adopted_as only: the budget for the response's consequences. With decision, give max_tokens inside decision.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -108,8 +118,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         conditional_on: p.conditional_on.unwrap_or_default(),
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
-        // repo links: rdy_decide takes no deviates_from parameter yet
-        deviates_from: vec![],
+        deviates_from: p.deviates_from.unwrap_or_default(),
         no_inherit,
         brief: p.brief,
         fields: p
@@ -138,20 +147,87 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
 }
 
 pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, RdyError> {
-    check_tokens(p.decision.max_tokens)?;
+    match (p.decision, p.adopted_as) {
+        (Some(_), Some(_)) => Err(RdyError::new(
+            E_BAD_INPUT,
+            "give decision or adopted_as, not both",
+            "pass decision to supersede with a new decision, or adopted_as to adopt the cited upstream copy",
+        )),
+        (None, None) => Err(RdyError::new(
+            E_BAD_INPUT,
+            "give decision or adopted_as",
+            "pass decision, the new decision, or adopted_as, the cited decision that is the upstream copy",
+        )),
+        (Some(decision), None) => {
+            if p.view.is_some() || p.brief.is_some() || p.max_tokens.is_some() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "view, brief and max_tokens go inside decision when decision is given",
+                    "move them into decision, or use adopted_as",
+                ));
+            }
+            supersede_with(st, p.old, p.part, decision, p.intent)
+        }
+        (None, Some(adopted_as)) => {
+            if p.part.is_some() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "part goes with decision, not with adopted_as",
+                    "leave part out: an adopted copy supersedes the whole decision",
+                ));
+            }
+            supersede_adopted(
+                st,
+                p.old,
+                adopted_as,
+                p.view,
+                p.brief,
+                p.max_tokens,
+                p.intent,
+            )
+        }
+    }
+}
+
+fn supersede_with(
+    st: &mut McpState,
+    old: String,
+    part: Option<String>,
+    decision: DecideParams,
+    intent: Option<String>,
+) -> Result<Value, RdyError> {
+    check_tokens(decision.max_tokens)?;
     let s = session(st)?;
-    let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
-    let max_tokens = p.decision.max_tokens;
-    let parent = p.decision.parent.clone();
-    let mut input = decision_input(p.decision);
-    input.intent = input.intent.or(p.intent);
-    let (old, part) = (p.old, p.part);
+    let view = decision.view.clone().unwrap_or_else(|| st.view.clone());
+    let max_tokens = decision.max_tokens;
+    let parent = decision.parent.clone();
+    let mut input = decision_input(decision);
+    input.intent = input.intent.or(intent);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         input.parent = r
             .decision_parent(&view, parent.as_deref())?
             .unwrap_or_default();
         r.supersede(&s, &view, &old, part, input)
+    })
+    .map(|v| report_once(st, v))
+}
+
+fn supersede_adopted(
+    st: &mut McpState,
+    old: String,
+    adopted_as: String,
+    view: Option<String>,
+    brief: Option<String>,
+    max_tokens: Option<usize>,
+    intent: Option<String>,
+) -> Result<Value, RdyError> {
+    check_tokens(max_tokens)?;
+    let s = session(st)?;
+    let view = view.unwrap_or_else(|| st.view.clone());
+    let v = view.clone();
+    write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        r.supersede_adopted_as(&s, &view, &old, &adopted_as, brief, intent)
     })
     .map(|v| report_once(st, v))
 }

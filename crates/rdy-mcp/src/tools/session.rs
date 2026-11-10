@@ -272,6 +272,19 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
             })).collect::<Vec<_>>(),
         });
     }
+    // repo links: the live links with their state and the pins behind; left out when the project
+    // has none. A read error never fails the overview. rdy_links has the whole reading.
+    if !past
+        && let Ok(list) = st_.links()
+        && (!list.links.is_empty() || !list.unlinked.is_empty())
+    {
+        out["links"] = json!({
+            "links": list.links.iter().map(|l| json!({
+                "alias": l.alias, "state": l.state, "pins_behind": l.pins_behind,
+            })).collect::<Vec<_>>(),
+            "unlinked": list.unlinked.len(),
+        });
+    }
     // the rest of the reply fits what the warnings leave; the warnings are added whole
     let mut out = budget(
         out,
