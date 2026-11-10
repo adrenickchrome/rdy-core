@@ -248,8 +248,23 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             }
             continue;
         }
+        if name == engine_fields::ADOPTED_AS
+            && (block.block_type != decision::DECISION
+                || (!projection
+                    && decision::status(block) != Some(decision::DecisionStatus::Accepted)))
+        {
+            // repo links (D-8VJAZ): `adopted_as` is engine metadata on an accepted decision only;
+            // the message is the unknown-field template
+            out.push(err(
+                block,
+                "E_FIELD_UNKNOWN",
+                format!("type {} has no field {name:?}", block.block_type),
+                engine_fields::input_fix(name),
+            ));
+            continue;
+        }
         if let Some(shape) = engine_fields::check(name, v) {
-            // `reaffirmed` and `reflects_at` are engine metadata on every type (O22): only rdy's
+            // `reaffirmed`, `reflects_at` and `adopted_as` are engine metadata (O22): only rdy's
             // own writes set them, so a bad shape is damaged stored metadata.
             if shape.is_err() {
                 out.push(err(

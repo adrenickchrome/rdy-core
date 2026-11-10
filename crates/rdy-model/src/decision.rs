@@ -152,6 +152,48 @@ pub fn only_foreign_pins_adopted(old: &Block, new: &Block, moves: &PinMoves) -> 
         })
 }
 
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `b` records, when it is an
+/// accepted decision with a valid `adopted_as` field. Its status is then superseded, by the cited
+/// decision; a field of any other block, or one that does not read as an adoption, records none.
+pub fn upstream_adoption(b: &Block) -> Option<crate::engine_fields::AdoptedAs> {
+    use crate::engine_fields::{ADOPTED_AS, decode_adopted_as};
+    if status(b) != Some(DecisionStatus::Accepted) {
+        return None;
+    }
+    decode_adopted_as(b.fields.get(ADOPTED_AS)?).ok()
+}
+
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `new` records over `old`, when
+/// `new` differs from `old` only by writing the store-only `adopted_as` field, which `old` does
+/// not hold and which reads as an adoption. The same id, type, parent, order, body, links, local
+/// pins, foreign part (links and pins alike) and every other field, tracking, ruling and engine
+/// fields alike: a tracking edit, a re-affirmation or a foreign pin move never rides an
+/// adoption, and an adoption is written once.
+///
+/// It describes a shape only. A frozen decision takes such a write only when it is an accepted
+/// decision and a delivery holds the adopted decision with the recorded content (the store's
+/// upstream-adoption exception).
+///
+/// A redacted block's removed fields are unknown, so a write over one is never an adoption.
+pub fn adopted_as_written(old: &Block, new: &Block) -> Option<crate::engine_fields::AdoptedAs> {
+    use crate::engine_fields::{ADOPTED_AS, decode_adopted_as};
+    if old.is_redacted() || new.is_redacted() || old.fields.contains_key(ADOPTED_AS) {
+        return None;
+    }
+    let written = decode_adopted_as(new.fields.get(ADOPTED_AS)?).ok()?;
+    let rest = new.fields.iter().filter(|(k, _)| k.as_str() != ADOPTED_AS);
+    let same = old.id == new.id
+        && old.block_type == new.block_type
+        && old.parent == new.parent
+        && old.order == new.order
+        && old.body == new.body
+        && old.links == new.links
+        && old.pins == new.pins
+        && old.foreign == new.foreign
+        && old.fields.iter().eq(rest);
+    same.then_some(written)
+}
+
 /// An accepted or rejected decision. A redacted block keeps the frozen fact its marker
 /// recorded; removing a body never unfreezes a decision.
 pub fn is_frozen(b: &Block) -> bool {

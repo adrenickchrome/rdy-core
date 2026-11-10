@@ -81,6 +81,7 @@ pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question", "finding"
 /// (`rdy_model::engine_fields::ENGINE_FIELDS`, p-8YP1G).
 pub const STORE_ONLY_FIELDS: &[&str] = &[
     rdy_model::key::AUTO_FIELD,
+    rdy_model::engine_fields::ADOPTED_AS,
     rdy_model::engine_fields::REAFFIRMED,
     rdy_model::engine_fields::REFLECTS_AT,
 ];

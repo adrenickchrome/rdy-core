@@ -240,6 +240,15 @@ pub enum OpInput {
         #[serde(default)]
         reason: String,
     },
+    /// Repo links (D-8VJAZ "Adopted upstream"): writes the store-only `adopted_as` field on the
+    /// accepted decision `id`, and changes nothing else of it. Only the engine's supersede with
+    /// `adopted_as` builds it ([`Rdy::supersede_adopted_as`], which checks the decision and the
+    /// delivered successor first): no write input names it.
+    #[serde(skip)]
+    AdoptUpstream {
+        id: BlockId,
+        adopted: rdy_model::engine_fields::AdoptedAs,
+    },
 }
 
 /// The fix for an op that does not parse (and names no unknown field).
@@ -1906,7 +1915,7 @@ fn refuse_engine_input(
     {
         (
             format!("{at} sets {f:?}, and rdy sets it"),
-            format!("remove {f}; use reaffirm or repin with code: true"),
+            rdy_model::engine_fields::input_fix(f),
         )
     } else {
         return Ok(());
@@ -1960,6 +1969,8 @@ fn build_ops(
     let mut tracking_edits: BTreeSet<BlockId> = BTreeSet::new();
     // D-EJBPD: decisions this write re-affirms (metadata and pins only), with their causes
     let mut reaffirmed: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
+    // repo links (D-8VJAZ): accepted decisions this write records an upstream adoption on
+    let mut adopted: BTreeSet<BlockId> = BTreeSet::new();
     // D-01QX5: the blocks a repin with `code: true` names
     let mut code_repins: BTreeSet<BlockId> = BTreeSet::new();
     // D-2WR0G: the field names each create or editing update supplies, for the decision basis
@@ -2613,6 +2624,36 @@ fn build_ops(
                     });
                 }
             }
+            OpInput::AdoptUpstream { id, adopted: a } => {
+                // the strict base, stale-base and conflict checks of every edit; a clean frozen
+                // decision passes here, as for an update. The store's upstream-adoption
+                // exception takes the result only when it writes `adopted_as` alone, on an
+                // accepted decision, naming a delivered decision
+                let (base_hash, cur) = current_for_edit(
+                    &ov,
+                    &id,
+                    &None,
+                    &touched,
+                    &rekey_only,
+                    conflicts,
+                    store,
+                    true,
+                )?;
+                let mut block = cur.into_owned();
+                block.fields.insert(
+                    rdy_model::engine_fields::ADOPTED_AS.to_string(),
+                    rdy_model::engine_fields::encode_adopted_as(&a),
+                );
+                adopted.insert(id.clone());
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
+                prior.push((true, block.pins.clone())); // a metadata write keeps every pin
+                touched.insert(id.clone());
+                ov.set(id, Some(block.clone()));
+                ops.push(Op::Update {
+                    base: base_hash,
+                    block,
+                });
+            }
         }
     }
     // akey1 (FW-PR3): a doc or folder created without a key gets one from its path, once every
@@ -2797,6 +2838,7 @@ fn build_ops(
             && !session.role.can_land()
             && !tracking_edits.contains(&block.id)
             && !reaffirmed.contains_key(&block.id)
+            && !adopted.contains(&block.id)
         {
             return Err(RdyError::new(
                 E_PERMISSION,

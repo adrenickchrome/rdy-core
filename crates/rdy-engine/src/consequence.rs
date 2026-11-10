@@ -384,6 +384,18 @@ fn creates_cite_outside(ops: &[Op]) -> bool {
     })
 }
 
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `after` records and `before`
+/// (the same block as it stood, if any) does not: a change that retires its decision wholly, by
+/// the cited decision, though its content hash stays the same.
+pub(crate) fn newly_adopted(
+    before: Option<&Block>,
+    after: Option<&Block>,
+) -> Option<rdy_model::engine_fields::AdoptedAs> {
+    let a = rdy_model::decision::upstream_adoption(after?)?;
+    let was = before.and_then(rdy_model::decision::upstream_adoption);
+    (was.as_ref() != Some(&a)).then_some(a)
+}
+
 /// Whether `ops` create a decision that fully supersedes or revokes a block: then a block they
 /// create can keep a link to a target a pending decision replaces (O9), even when every block
 /// they cite is one they write.
@@ -1412,7 +1424,19 @@ impl ReadState {
                 }
             }
         }
-        let events = Events::of_blocks(touched.iter().filter_map(|id| fin.m.get(id)), reach);
+        let mut events = Events::of_blocks(touched.iter().filter_map(|id| fin.m.get(id)), reach);
+        // repo links: an upstream adoption the version records retires its decision wholly, by
+        // the cited decision
+        for id in touched {
+            if let Some(a) = newly_adopted(base.m.get(id), fin.m.get(id)) {
+                events
+                    .retired
+                    .entry(id.clone())
+                    .or_default()
+                    .by
+                    .insert(a.target.id);
+            }
+        }
         let cmp = Compare::new(
             self,
             &fin.m,

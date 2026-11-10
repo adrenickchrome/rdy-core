@@ -352,7 +352,7 @@ impl Rdy {
         self.write_decision(s, view, d, vec![], msg, None)
     }
 
-    fn require_decision(&mut self, view: &str, id: &str) -> Result<BlockId, RdyError> {
+    pub(crate) fn require_decision(&mut self, view: &str, id: &str) -> Result<BlockId, RdyError> {
         // repo links (D-8VJAZ): a cited decision or an external one is read-only here
         {
             let st = self.read();

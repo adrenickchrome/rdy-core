@@ -22,6 +22,7 @@ pub mod coord_graph;
 pub mod coverage;
 mod cursor;
 mod decide;
+mod decision_adopted;
 pub mod decision_fields;
 pub mod did_you_mean;
 pub mod diff;

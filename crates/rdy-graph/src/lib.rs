@@ -123,6 +123,10 @@ pub struct Graph {
     /// retirement or deletion it re-affirmed that premise against. Only decisions with a valid,
     /// non-empty record are here. [`Graph::edge_suspect`] alone reads it.
     reaffirmed: OrdMap<BlockId, BTreeMap<BlockId, Against>>,
+    /// Repo links (D-8VJAZ "Adopted upstream"): each accepted decision with a valid `adopted_as`
+    /// record, and the id of the cited decision that superseded it upstream. Its status is
+    /// superseded, `by` naming that cited decision.
+    adopted: OrdMap<BlockId, BlockId>,
     /// trk1: the project pack's tracking fields, left out of every content hash.
     tracking: Arc<Tracking>,
 }
@@ -450,7 +454,8 @@ impl Graph {
         }
     }
 
-    /// Records `b`'s decision status and, for a decision, its `reaffirmed` record.
+    /// Records `b`'s decision status and, for a decision, its `reaffirmed` record and, for an
+    /// accepted one, its upstream adoption.
     fn add_status(&mut self, b: &Block) {
         let Some(s) = decision::status(b) else {
             return;
@@ -458,6 +463,9 @@ impl Graph {
         self.decision_status.insert(b.id.clone(), s);
         if let Some(acks) = reaffirmed_of(b) {
             self.reaffirmed.insert(b.id.clone(), acks);
+        }
+        if let Some(a) = decision::upstream_adoption(b) {
+            self.adopted.insert(b.id.clone(), a.target.id);
         }
     }
 
@@ -495,6 +503,7 @@ impl Graph {
             g.redacted.remove(&b.id);
             g.decision_status.remove(&b.id);
             g.reaffirmed.remove(&b.id);
+            g.adopted.remove(&b.id);
             charge(1);
             old_ids.insert(b.id.clone());
             for e in Graph::edges_of(b) {
@@ -560,6 +569,7 @@ impl Graph {
             contents: values(&self.contents, keep),
             redacted: values(&self.redacted, keep),
             reaffirmed: values(&self.reaffirmed, keep),
+            adopted: values(&self.adopted, keep),
             tracking: self.tracking.clone(),
         }
     }
@@ -620,6 +630,8 @@ impl Graph {
                 _ => {}
             }
         }
+        // an upstream adoption supersedes the decision wholly, by the cited decision
+        whole.extend(self.adopted.get(id).cloned());
         Some(if !revoked.is_empty() {
             DerivedStatus::Revoked { by: revoked }
         } else if !whole.is_empty() {
@@ -633,14 +645,20 @@ impl Graph {
 
     /// p-HF5W0: the accepted decisions that supersede (wholly or in part) or revoke `id`,
     /// sorted and once each: the set a re-affirmation of a premise on `id` records. It holds
-    /// every partial superseder, also when a whole superseder or a revoker sets the status.
+    /// every partial superseder, also when a whole superseder or a revoker sets the status, and
+    /// the cited decision of an upstream adoption of `id` (repo links), as its status names it.
     pub fn retiring_decisions(&self, id: &BlockId) -> BTreeSet<BlockId> {
-        self.incoming(id)
+        let mut out: BTreeSet<BlockId> = self
+            .incoming(id)
             .iter()
             .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES))
             .filter(|e| self.accepted(&e.from))
             .map(|e| e.from.clone())
-            .collect()
+            .collect();
+        if self.accepted(id) {
+            out.extend(self.adopted.get(id).cloned());
+        }
+        out
     }
 
     /// p-QMGB4: what `source` re-affirmed its premise on `target` against, when `source` is an
@@ -886,6 +904,10 @@ impl Graph {
             for g in [prev, self] {
                 targets.extend(g.outgoing(d).iter().map(|e| e.to.clone()));
             }
+        }
+        // an upstream adoption decides its decision's own status
+        for item in prev.adopted.diff(&self.adopted) {
+            targets.insert(key_of(item).clone());
         }
         // p-QMGB4: a decision's `reaffirmed` record decides its own suspects, and so does its
         // status (only a live decision uses the record). Every block whose status can differ is

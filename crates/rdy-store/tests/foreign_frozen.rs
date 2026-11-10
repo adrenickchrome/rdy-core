@@ -4,8 +4,15 @@
 //! same write. A write with no such authority (a raw commit, a replayed change, an ordinary
 //! landing) keeps the freeze, and neither a tracking edit nor a re-affirmation can carry a
 //! foreign pin move.
-use rdy_model::decision::{self, only_foreign_pins_adopted};
-use rdy_model::engine_fields::REAFFIRMED;
+//!
+//! rpl21 (D-8VJAZ "Adopted upstream"): the frozen-decision exception of an upstream adoption,
+//! separate from the pin adoption. An accepted decision takes the store-only `adopted_as` field
+//! once, when the field names a decision and content that a delivery holds, and nothing else
+//! changes in the same write. The store checks the recorded successor from the bytes, so a
+//! replay and a landing keep the check. A rejected decision, a second adoption and every write
+//! that changes anything else keep the freeze.
+use rdy_model::decision::{self, adopted_as_written, only_foreign_pins_adopted};
+use rdy_model::engine_fields::{ADOPTED_AS, AdoptedAs, REAFFIRMED, encode_adopted_as};
 use rdy_model::foreign::{
     ForeignDerived, ForeignEntry, ForeignEvent, ForeignId, ForeignPin, ForeignPublication,
     ForeignSource, ForeignVersion, selection_identity,
@@ -394,4 +401,271 @@ fn rpl20_tracking_or_reaffirmation_cannot_smuggle_foreign_changes() {
         frozen: true,
     });
     assert!(!only_foreign_pins_adopted(&acc, &redacted, &moves));
+}
+
+// ---- rpl21: the upstream adoption ----
+
+/// The cited decision that superseded a local one upstream, as its home project delivers it.
+fn upstream() -> Block {
+    Block {
+        id: id("D-PSTRM"),
+        block_type: decision::DECISION.into(),
+        parent: None,
+        order: "V".into(),
+        fields: BTreeMap::from([
+            ("status".to_string(), FieldValue::Str("accepted".into())),
+            (
+                "statement".to_string(),
+                FieldValue::Str("Every service logs in UTC.".into()),
+            ),
+        ]),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        foreign: Default::default(),
+        read_identity: None,
+    }
+}
+
+/// One delivery of the upstream decision, from a second link of the cited repo.
+fn deliver_upstream(s: &mut Store) -> Block {
+    let up = upstream();
+    let sel = BTreeMap::from([(up.id.clone(), version_of(&up))]);
+    let entry = ForeignEntry {
+        repo: cited(),
+        source: ForeignSource::Link {
+            link: "rl-00002".into(),
+            site: "hub.example".into(),
+            at_ms: 1_760_000_000_000,
+        },
+        event: ForeignEvent::Delivery {
+            prev: None,
+            publication: ForeignPublication {
+                tag: "v1".into(),
+                profile: "pf-DECS1".into(),
+                profile_version: None,
+            },
+            set: None,
+            added: vec![fv(&up)],
+            changed: vec![],
+            removed: vec![],
+            shells: vec![],
+            selection: selection_identity(sel.iter()).unwrap(),
+        },
+    };
+    s.put_foreign(&entry, std::slice::from_ref(&up)).unwrap();
+    up
+}
+
+/// The adoption of `b` (a cited block) at its delivered content.
+fn adopted(b: &Block) -> AdoptedAs {
+    AdoptedAs {
+        target: ForeignId::new(cited(), b.id.clone()),
+        pin: pin_of(b),
+    }
+}
+
+/// `d` with `adopted_as` written as `a`.
+fn adopting(d: &Block, a: &AdoptedAs) -> Block {
+    let mut n = d.clone();
+    n.fields.insert(ADOPTED_AS.into(), encode_adopted_as(a));
+    n
+}
+
+#[test]
+fn rpl21_store_takes_only_a_held_upstream_successor() {
+    let (_d, mut s, v1, _v2, acc, rej) = landed();
+    let up = deliver_upstream(&mut s);
+    let canon = s.canon_state().unwrap();
+    let exact = adopting(&acc, &adopted(&up));
+    assert_eq!(adopted_as_written(&acc, &exact), Some(adopted(&up)));
+    // the store checks the recorded successor itself: a commit, a landing's merge and a replay
+    // of the same change into another view each take it, with no authority passed in
+    let up_change = change("x", vec![update(&acc, exact.clone())]);
+    assert!(
+        s.merge_checked(&canon, std::slice::from_ref(&up_change))
+            .is_ok(),
+        "a landing merges the exact adoption"
+    );
+    s.commit_to_view("x", up_change.clone()).unwrap();
+    let mut replayed = up_change.clone();
+    replayed.view = "y".into();
+    s.commit_to_view("y", replayed).unwrap();
+    // its content is the old decision's: no pin of it goes stale
+    assert_eq!(exact.content_hash(), acc.content_hash());
+    // a rejected decision gets no exception, even with a held successor
+    frozen(
+        s.commit_to_view(
+            "z",
+            change("z", vec![update(&rej, adopting(&rej, &adopted(&up)))]),
+        ),
+        "a rejected decision",
+    );
+    // a successor no delivery holds: other content, a block never delivered, a cited block that
+    // is no decision
+    let mut other_content = adopted(&up);
+    other_content.pin.content = Hash([9; 32]);
+    let mut other_encoding = adopted(&up);
+    other_encoding.pin.encoding = 1;
+    let mut never = adopted(&up);
+    never.target = ForeignId::new(cited(), id("D-NEVER"));
+    let mut other_repo = adopted(&up);
+    other_repo.target = ForeignId::new(RepoId([8; 16]), up.id.clone());
+    for (a, what) in [
+        (&other_content, "content no delivery holds"),
+        (&other_encoding, "another encoding"),
+        (&never, "a block never delivered"),
+        (&other_repo, "another repo"),
+        (&adopted(&v1), "a cited claim"),
+    ] {
+        let new = adopting(&acc, a);
+        assert!(
+            adopted_as_written(&acc, &new).is_some(),
+            "{what}: the shape"
+        );
+        frozen(
+            s.merge_checked(&canon, &[change("x", vec![update(&acc, new)])]),
+            what,
+        );
+    }
+    // once landed, the adoption is written for good: no second adoption, no removal
+    let p = s.propose("x", "adopt", prov(Role::Writer)).unwrap();
+    s.land(&p, prov(Role::Approver)).unwrap();
+    let canon = s.canon_state().unwrap();
+    let mut again = exact.clone();
+    let mut second = adopted(&up);
+    second.target = ForeignId::new(cited(), id("D-NEVER"));
+    again
+        .fields
+        .insert(ADOPTED_AS.into(), encode_adopted_as(&second));
+    assert_eq!(adopted_as_written(&exact, &again), None);
+    frozen(
+        s.merge_checked(&canon, &[change("w", vec![update(&exact, again)])]),
+        "a second adoption",
+    );
+    frozen(
+        s.merge_checked(&canon, &[change("w", vec![update(&exact, acc.clone())])]),
+        "a removed adoption",
+    );
+}
+
+#[test]
+fn rpl21_adopted_as_cannot_smuggle_other_changes() {
+    let (_d, mut s, v1, v2, acc, _rej) = landed();
+    let up = deliver_upstream(&mut s);
+    let canon = s.canon_state().unwrap();
+    let a = adopted(&up);
+    let tracking = s.tracking().clone();
+    let exact = adopting(&acc, &a);
+    // the adoption alone is no tracking edit, no re-affirmation and no pin adoption
+    let moves = BTreeMap::from([(target(), (pin_of(&v1), pin_of(&v2)))]);
+    assert!(!decision::only_tracking_changed(&acc, &exact, &tracking));
+    assert!(!decision::only_reaffirmation_changed(&acc, &exact));
+    assert!(!only_foreign_pins_adopted(&acc, &exact, &moves));
+    // each of these rides the adoption on another change: no rule takes it
+    let mut with_tracking = exact.clone();
+    with_tracking
+        .fields
+        .insert("owner".into(), FieldValue::Str("billing".into()));
+    let mut with_reaffirm = exact.clone();
+    with_reaffirm
+        .fields
+        .insert(REAFFIRMED.into(), FieldValue::Str("D-CAUSE".into()));
+    let mut with_ruling = exact.clone();
+    with_ruling.fields.insert(
+        "statement".into(),
+        FieldValue::Str("We follow nothing.".into()),
+    );
+    let mut with_status = exact.clone();
+    with_status
+        .fields
+        .insert("status".into(), FieldValue::Str("proposed".into()));
+    let mut with_body = exact.clone();
+    with_body.body = "Another body.".into();
+    let mut with_order = exact.clone();
+    with_order.order = "W".into();
+    let mut with_parent = exact.clone();
+    with_parent.parent = Some(id("s-PARNT"));
+    let mut with_link = exact.clone();
+    with_link.links.insert(
+        "depends_on".into(),
+        vec![Link {
+            target: id("c-AAAA9"),
+            part: None,
+        }],
+    );
+    let mut with_local_pin = exact.clone();
+    with_local_pin
+        .pins
+        .insert(id("c-AAAA9"), Hash::of(b"a local pin"));
+    let with_pin_move = moved(&exact, pin_of(&v2));
+    let mut with_foreign_link = exact.clone();
+    with_foreign_link.foreign.links.insert(
+        "depends_on".into(),
+        vec![rdy_model::foreign::ForeignLink {
+            target: target(),
+            part: None,
+        }],
+    );
+    let mut bad_shape = acc.clone();
+    bad_shape.fields.insert(
+        ADOPTED_AS.into(),
+        FieldValue::Str(format!("{}:D-PSTRM", cited())),
+    );
+    for (new, what) in [
+        (&with_tracking, "a tracking edit"),
+        (&with_reaffirm, "a re-affirmation"),
+        (&with_ruling, "a ruling field"),
+        (&with_status, "a status"),
+        (&with_body, "the body"),
+        (&with_order, "the order"),
+        (&with_parent, "the parent"),
+        (&with_link, "a local link"),
+        (&with_local_pin, "a local pin"),
+        (&with_pin_move, "a foreign pin move"),
+        (&with_foreign_link, "a foreign link"),
+        (&bad_shape, "a value that is no adoption"),
+    ] {
+        assert_eq!(
+            adopted_as_written(&acc, new),
+            None,
+            "{what}: not the adoption alone"
+        );
+        assert!(
+            !decision::only_tracking_changed(&acc, new, &tracking),
+            "{what}: not tracking-only"
+        );
+        assert!(
+            !decision::only_reaffirmation_changed(&acc, new),
+            "{what}: not a re-affirmation"
+        );
+        frozen(
+            s.merge_checked(&canon, &[change("x", vec![update(&acc, new.clone())])]),
+            what,
+        );
+        frozen(
+            s.commit_to_view("x", change("x", vec![update(&acc, new.clone())])),
+            what,
+        );
+    }
+    // the pin adoption's authority does not cover it either
+    let up_change = change("x", vec![update(&acc, with_pin_move.clone())]);
+    frozen(
+        s.merge_checked_adopting(
+            &canon,
+            std::slice::from_ref(&up_change),
+            &adoption(&acc, &v1, &v2),
+        ),
+        "a pin adoption with an adopted_as",
+    );
+    // a redacted projection is never the adoption's shape
+    let mut redacted = exact.clone();
+    redacted.read_identity = Some(rdy_model::redaction::RedactedBlockIdentity {
+        version: Hash([1; 32]),
+        content_hash: Hash([2; 32]),
+        request: Hash([3; 32]),
+        frozen: true,
+    });
+    assert_eq!(adopted_as_written(&acc, &redacted), None);
+    assert_eq!(adopted_as_written(&redacted, &exact), None);
 }

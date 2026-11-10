@@ -150,7 +150,8 @@ impl<'a> Guard<'a> {
                 | OpInput::Delete { id, .. }
                 | OpInput::Repin { id, .. } => (Some(id), None),
                 OpInput::Reaffirm { id, .. } => (id.as_ref(), None),
-                OpInput::Rebalance { .. } => (None, None),
+                // the engine's own op: its caller checked the decision it writes
+                OpInput::Rebalance { .. } | OpInput::AdoptUpstream { .. } => (None, None),
             };
             if let Some(id) = id {
                 self.check(id)?;

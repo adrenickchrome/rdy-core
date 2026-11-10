@@ -142,8 +142,9 @@ fn check_base(
 /// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
 /// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, so
 /// does a re-affirmation (only `reaffirmed` and pin hashes, D-EJBPD), one that leaves the block
-/// as it is (cf1: the landed side of a conflict, taken), and one that makes exactly the foreign
-/// pin moves `adoption` binds on an accepted decision (repo links, D-8VJAZ). Only the adopt
+/// as it is (cf1: the landed side of a conflict, taken), one that makes exactly the foreign
+/// pin moves `adoption` binds on an accepted decision (repo links, D-8VJAZ), and one that records
+/// a held upstream successor on an accepted decision ([`upstream_adoption`]). Only the adopt
 /// answer's isolated landing passes an adoption; every other write passes `None`.
 fn frozen_for(
     store: &StoreReader,
@@ -157,7 +158,30 @@ fn frozen_for(
                 || decision::only_tracking_changed(base, n, store.tracking())
                 || decision::only_reaffirmation_changed(base, n)
                 || adoption.is_some_and(|a| a.allows(base, n))
+                || upstream_adoption(store, base, n)
         })
+}
+
+/// Repo links (D-8VJAZ "Adopted upstream"): the separate frozen-decision exception of an upstream
+/// adoption. The update of `base` to `new` passes when `base` is an accepted decision (a rejected
+/// one gets no exception), `new` only writes `adopted_as` on it
+/// ([`decision::adopted_as_written`]: once, with every other value equal), and a delivery of the
+/// recorded repo holds a decision with the recorded id and content. The check reads only the
+/// stored bytes and the foreign log, so a commit, a replay and a landing each make it again. A
+/// lookup that fails is no exception: the freeze holds.
+fn upstream_adoption(store: &StoreReader, base: &Block, new: &Block) -> bool {
+    if decision::status(base) != Some(decision::DecisionStatus::Accepted) {
+        return false;
+    }
+    let Some(a) = decision::adopted_as_written(base, new) else {
+        return false;
+    };
+    match store.delivered_version(&a.target, &a.pin) {
+        Ok(Some(version)) => store
+            .get_block(&version)
+            .is_ok_and(|b| b.block_type == decision::DECISION),
+        _ => false,
+    }
 }
 
 /// The foreign pin moves one person's adopt answer approved (repo links, D-8VJAZ): for each
@@ -214,6 +238,39 @@ impl PinAdoption {
         self.moves
             .values()
             .flat_map(|m| m.iter().map(|(t, (_, to))| (t, to)))
+    }
+}
+
+impl StoreReader {
+    /// The BLOCK version of the first delivered version (in FOREIGN object order) of `target`
+    /// whose content and encoding are `pin`'s, from any delivery of `target`'s repo; `None` when
+    /// no delivery held that content.
+    pub(crate) fn delivered_version(
+        &self,
+        target: &rdy_model::foreign::ForeignId,
+        pin: &rdy_model::foreign::ForeignPin,
+    ) -> Result<Option<Hash>, StoreError> {
+        let mut found = None;
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            if found.is_some() {
+                return Ok(());
+            }
+            let e = self.foreign_entry(&h)?;
+            if e.repo != target.repo {
+                return Ok(());
+            }
+            if let rdy_model::foreign::ForeignEvent::Delivery { added, changed, .. } = &e.event {
+                found = added
+                    .iter()
+                    .chain(changed)
+                    .find(|v| {
+                        v.id == target.id && v.content == pin.content && v.encoding == pin.encoding
+                    })
+                    .map(|v| v.version);
+            }
+            Ok(())
+        })?;
+        Ok(found)
     }
 }
 
@@ -1118,23 +1175,7 @@ impl Store {
         target: &rdy_model::foreign::ForeignId,
         pin: &rdy_model::foreign::ForeignPin,
     ) -> Result<bool, StoreError> {
-        let mut found = false;
-        self.for_each_object_of(kinds::FOREIGN, |h| {
-            if found {
-                return Ok(());
-            }
-            let e = self.foreign_entry(&h)?;
-            if e.repo != target.repo {
-                return Ok(());
-            }
-            if let rdy_model::foreign::ForeignEvent::Delivery { added, changed, .. } = &e.event {
-                found = added.iter().chain(changed).any(|v| {
-                    v.id == target.id && v.content == pin.content && v.encoding == pin.encoding
-                });
-            }
-            Ok(())
-        })?;
-        Ok(found)
+        Ok(self.delivered_version(target, pin)?.is_some())
     }
 
     /// The proposal of a card's isolated landing: a re-affirmation card's (`adoption` none) or an

@@ -608,7 +608,7 @@ pub(crate) fn engine_field_message(id: &BlockId, field: &str) -> String {
 }
 
 pub(crate) fn engine_field_fix(field: &str) -> String {
-    format!("remove {field}; use reaffirm or repin with code: true")
+    engine_fields::input_fix(field)
 }
 
 /// The engine metadata fields a decoded entry names, by key and whatever the value is: the check

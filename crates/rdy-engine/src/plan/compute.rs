@@ -611,11 +611,15 @@ struct Lineage {
 }
 
 impl Lineage {
-    fn of(fin: &NetState, touched: &BTreeSet<BlockId>) -> Lineage {
+    fn of(base: &NetState, fin: &NetState, touched: &BTreeSet<BlockId>) -> Lineage {
         let mut out = Lineage::default();
         for b in touched.iter().filter_map(|id| fin.m.get(id)) {
             if b.block_type != DECISION {
                 continue;
+            }
+            // repo links: an upstream adoption the version records retires its decision wholly
+            if crate::consequence::newly_adopted(base.m.get(&b.id), Some(b)).is_some() {
+                out.retired.insert(b.id.clone());
             }
             let links = |name: &str| b.links.get(name).into_iter().flatten();
             for l in links(SUPERSEDES) {
@@ -831,18 +835,22 @@ pub(crate) fn compute_in(
 ) -> Result<ComputedPlan, RdyError> {
     let (base, fin) = (&sides.base, &sides.fin);
     let t = Arc::clone(fin.g.tracking());
-    // D-NJ2SP: the net change, by content (pins, derived fields and engine metadata excluded)
+    // D-NJ2SP: the net change, by content (pins, derived fields and engine metadata excluded);
+    // and an upstream adoption the version records, which retires its decision (repo links)
     let touched: BTreeSet<BlockId> = sides
         .written
         .iter()
         .filter(|id| match (base.m.get(id), fin.m.get(id)) {
             (None, None) => false,
-            (Some(a), Some(b)) => a.content_hash_with(&t) != b.content_hash_with(&t),
+            (Some(a), Some(b)) => {
+                a.content_hash_with(&t) != b.content_hash_with(&t)
+                    || crate::consequence::newly_adopted(Some(a), Some(b)).is_some()
+            }
             _ => true,
         })
         .cloned()
         .collect();
-    let lineage = Lineage::of(fin, &touched);
+    let lineage = Lineage::of(base, fin, &touched);
     let closes = Closes {
         sides,
         t: Arc::clone(&t),

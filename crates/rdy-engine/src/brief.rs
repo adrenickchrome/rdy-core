@@ -2431,6 +2431,19 @@ fn subjects<'a>(
                     created_type: None,
                 });
             }
+            OpInput::AdoptUpstream { id, .. } => {
+                let Some(b) = m.get(id) else {
+                    continue;
+                };
+                if exempt(b) {
+                    continue;
+                }
+                out.push(Subject {
+                    target: b.id.clone(),
+                    stable: effective_stable(m, Some(&b.id)),
+                    created_type: None,
+                });
+            }
             OpInput::Rebalance { parent } => match anchor(&created, parent.as_deref()) {
                 Anchor::At(p) => {
                     if m.get(&p).is_some_and(|b| !exempt(b)) {
