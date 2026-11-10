@@ -287,7 +287,7 @@ fn rpl31_cli_links_new_show_and_adopt_upstream() {
         "--repo",
         &other,
         "--profile",
-        "pf-OTHER",
+        "pf-AGNT2",
         "--title",
         "The peer project",
     ]));
@@ -304,7 +304,7 @@ fn rpl31_cli_links_new_show_and_adopt_upstream() {
             "--repo",
             &other,
             "--profile",
-            "pf-THIRD",
+            "pf-AGNT3",
         ],
     );
     let link_id = created["created"]["$repo_link"].as_str().unwrap();
@@ -322,7 +322,7 @@ fn rpl31_cli_links_new_show_and_adopt_upstream() {
             "--repo",
             &other,
             "--profile",
-            "pf-OTHER",
+            "pf-AGNT2",
         ],
     );
     assert_eq!(e["code"], "E_VALIDATION", "{e}");
