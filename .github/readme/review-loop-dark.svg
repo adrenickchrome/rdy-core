@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="456" viewBox="0 0 880 456" role="img" aria-labelledby="title desc">
+<title id="title">A proposed change, reviewed and approved</title>
+<desc id="desc">An illustrated EU retention change moves from an agent’s proposal, through affected-document review in rdy, to a person’s confirmation and approval of Proposal 1@1.</desc>
+<g font-family="Arial, Helvetica, sans-serif">
+<rect x="0.5" y="0.5" width="879" height="455" rx="20" fill="#3A404C"/>
+<rect x="1.5" y="1.5" width="877" height="453" rx="19" fill="#121419"/>
+<text x="28" y="43" fill="#E5E7EC" font-size="22" font-weight="600" text-anchor="start">EU conversation retention</text>
+<rect x="718" y="23" width="134" height="26" rx="13" fill="#272B35"/>
+<rect x="719" y="24" width="132" height="24" rx="12" fill="#1A1D24"/>
+<text x="785" y="40" fill="#A1A7B4" font-size="12" font-weight="500" text-anchor="middle">Illustrated example</text>
+<rect x="28" y="65.5" width="824" height="1" fill="#272B35"/>
+<circle cx="37" cy="99" r="12" fill="#1D2A4A"/>
+<text x="37" y="103" fill="#B4CAFF" font-size="12" font-weight="700" text-anchor="middle">1</text>
+<text x="58" y="105" fill="#E5E7EC" font-size="16" font-weight="600" text-anchor="start">Agent proposes</text>
+<circle cx="301" cy="99" r="12" fill="#1D2A4A"/>
+<text x="301" y="103" fill="#B4CAFF" font-size="12" font-weight="700" text-anchor="middle">2</text>
+<text x="322" y="105" fill="#E5E7EC" font-size="16" font-weight="600" text-anchor="start">rdy shows affected content</text>
+<circle cx="629" cy="99" r="12" fill="#1D2A4A"/>
+<text x="629" y="103" fill="#B4CAFF" font-size="12" font-weight="700" text-anchor="middle">3</text>
+<text x="650" y="105" fill="#E5E7EC" font-size="16" font-weight="600" text-anchor="start">You approve</text>
+<polygon points="266,98.2 274,98.2 271.5,95.7 272.7,94.5 277.2,99 272.7,103.5 271.5,102.3 274,99.8 266,99.8" fill="#8F96A3"/>
+<polygon points="594,98.2 602,98.2 599.5,95.7 600.7,94.5 605.2,99 600.7,103.5 599.5,102.3 602,99.8 594,99.8" fill="#8F96A3"/>
+<rect x="24" y="124" width="240" height="294" rx="14" fill="#3A404C"/>
+<rect x="25" y="125" width="238" height="292" rx="13" fill="#1A1D24"/>
+<rect x="288" y="124" width="304" height="294" rx="14" fill="#3A404C"/>
+<rect x="289" y="125" width="302" height="292" rx="13" fill="#1A1D24"/>
+<rect x="616" y="124" width="240" height="294" rx="14" fill="#3A404C"/>
+<rect x="617" y="125" width="238" height="292" rx="13" fill="#1A1D24"/>
+<text x="44" y="153" fill="#A1A7B4" font-size="11" font-weight="600" text-anchor="start" letter-spacing="0.6">PROPOSAL 1@1</text>
+<text x="44" y="184" fill="#E5E7EC" font-size="19" font-weight="600" text-anchor="start">EU conversations</text>
+<text x="44" y="239" fill="#8FB0FF" font-size="48" font-weight="600" text-anchor="start">7</text>
+<text x="78" y="237" fill="#B4CAFF" font-size="20" font-weight="500" text-anchor="start">days</text>
+<text x="44" y="263" fill="#A1A7B4" font-size="12.5" font-weight="400" text-anchor="start">Raw-conversation retention</text>
+<rect x="44" y="281.5" width="200" height="1" fill="#3A404C"/>
+<text x="44" y="310" fill="#E5E7EC" font-size="16" font-weight="600" text-anchor="start">30 days</text>
+<text x="107" y="310" fill="#A1A7B4" font-size="14" font-weight="400" text-anchor="start">elsewhere</text>
+<text x="44" y="339" fill="#E5E7EC" font-size="16" font-weight="600" text-anchor="start">2 years</text>
+<text x="104" y="339" fill="#A1A7B4" font-size="13" font-weight="400" text-anchor="start">anonymised metrics</text>
+<text x="44" y="388" fill="#A1A7B4" font-size="12.5" font-weight="400" text-anchor="start">Other rules unchanged</text>
+<text x="308" y="153" fill="#E5E7EC" font-size="17" font-weight="600" text-anchor="start">12 docs reviewed</text>
+<rect x="308" y="169" width="126" height="33" rx="7" fill="#1D2A4A"/>
+<text x="371" y="191" fill="#B4CAFF" font-size="14" font-weight="600" text-anchor="middle">6 updated</text>
+<rect x="444" y="169" width="128" height="33" rx="7" fill="#1D3025"/>
+<text x="508" y="191" fill="#86D49A" font-size="14" font-weight="600" text-anchor="middle">6 upheld</text>
+<text x="308" y="225" fill="#8F96A3" font-size="10.5" font-weight="600" text-anchor="start" letter-spacing="0.7">SELECTED DOCS</text>
+<text x="308" y="250" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">Storage</text>
+<text x="572" y="250" fill="#B4CAFF" font-size="12" font-weight="500" text-anchor="end">Updated</text>
+<rect x="308" y="259.5" width="264" height="1" fill="#272B35"/>
+<text x="308" y="278" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">Privacy page</text>
+<text x="572" y="278" fill="#B4CAFF" font-size="12" font-weight="500" text-anchor="end">Updated</text>
+<rect x="308" y="287.5" width="264" height="1" fill="#272B35"/>
+<text x="308" y="306" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">Backups</text>
+<text x="572" y="306" fill="#B4CAFF" font-size="12" font-weight="500" text-anchor="end">Updated</text>
+<rect x="308" y="315.5" width="264" height="1" fill="#272B35"/>
+<text x="308" y="334" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">Analytics</text>
+<text x="572" y="334" fill="#86D49A" font-size="12" font-weight="500" text-anchor="end">Upheld</text>
+<rect x="308" y="343.5" width="264" height="1" fill="#272B35"/>
+<text x="308" y="362" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">Legal hold</text>
+<text x="572" y="362" fill="#86D49A" font-size="12" font-weight="500" text-anchor="end">Upheld</text>
+<text x="308" y="397" fill="#A1A7B4" font-size="12" font-weight="400" text-anchor="start">Separate EU backups: 7 days</text>
+<text x="636" y="153" fill="#A1A7B4" font-size="11" font-weight="600" text-anchor="start" letter-spacing="0.6">PROPOSAL 1@1</text>
+<circle cx="646" cy="188" r="10" fill="#1D3025"/>
+<polygon points="639.92,188.0 641.84,186.08 644.72,189.28 650.16,182.88 652.4,184.8 644.72,193.76" fill="#86D49A"/>
+<text x="665" y="184" fill="#E5E7EC" font-size="14" font-weight="500" text-anchor="start">EU retention change</text>
+<text x="665" y="204" fill="#86D49A" font-size="14" font-weight="500" text-anchor="start">confirmed</text>
+<rect x="636" y="235" width="200" height="48" rx="8" fill="#8FB0FF"/>
+<rect x="637" y="236" width="198" height="46" rx="7" fill="#8FB0FF"/>
+<polygon points="649.92,258.0 651.84,256.08 654.72,259.28 660.16,252.88 662.4,254.8 654.72,263.76" fill="#121419"/>
+<text x="675" y="264" fill="#121419" font-size="13.2" font-weight="600" text-anchor="start">Approve Proposal 1@1</text>
+<rect x="735.4" y="296" width="1.2" height="18" fill="#3A404C"/>
+<rect x="636" y="326" width="200" height="44" rx="9" fill="#1D3025"/>
+<polygon points="651.92,348.0 653.84,346.08 656.72,349.28 662.16,342.88 664.4,344.8 656.72,353.76" fill="#86D49A"/>
+<text x="676" y="353" fill="#86D49A" font-size="15" font-weight="600" text-anchor="start">Accepted record</text>
+<text x="636" y="397" fill="#A1A7B4" font-size="12" font-weight="400" text-anchor="start">Your answer · This version</text>
+<text x="28" y="442" fill="#8F96A3" font-size="11" font-weight="400" text-anchor="start">Illustration based on the getrdy.dev retention demo.</text>
+</g></svg>
