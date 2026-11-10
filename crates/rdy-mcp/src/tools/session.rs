@@ -83,9 +83,13 @@ pub(crate) fn checked_session(
     stated: Option<&crate::claims::Asked>,
 ) -> Result<(Session, Role, String), RdyError> {
     let role = crate::claims::parse_role(&p.role)?;
-    // D-CQMA4: the views of re-affirmation cards' landings are private
-    if p.view.as_deref().is_some_and(rdy_engine::is_reserved_view) {
-        return Err(rdy_engine::reserved_view_error());
+    // D-CQMA4: the views of re-affirmation and adopt cards' landings are private
+    if let Some(v) = p
+        .view
+        .as_deref()
+        .filter(|v| rdy_engine::is_reserved_view(v))
+    {
+        return Err(rdy_engine::reserved_view_error(v));
     }
     if let Some(v) = p.view.as_deref().filter(|v| v.contains(':')) {
         return Err(RdyError::new(

@@ -250,7 +250,7 @@ fn sess2_a_refused_default_view_suggests_a_run_name_or_a_fork_not_itself() {
 
 const ACTOR_FIX: &str =
     "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
-const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}";
 const REPO_ID: &str = "00000000000000000000000000000000";
 
 /// A project directory with `.rdy/local.yaml` holding `local` (none if `None`), and a user

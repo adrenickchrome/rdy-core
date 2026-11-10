@@ -99,6 +99,11 @@ impl RepoLinks {
         self.by_alias.get(alias)
     }
 
+    /// Every live link with its alias, in alias order.
+    pub(crate) fn rows(&self) -> impl Iterator<Item = (&str, &LinkRow)> {
+        self.by_alias.iter().map(|(a, r)| (a.as_str(), r))
+    }
+
     /// The live aliases of `repo`, in sorted order.
     fn aliases_of<'a>(&'a self, repo: &'a RepoId) -> impl Iterator<Item = (&'a str, &'a LinkRow)> {
         self.by_alias

@@ -3864,15 +3864,25 @@ fn own_view_fix(view: &str, s: &Session) -> String {
     }
 }
 
-/// Whether `name` is reserved for the isolated landings of re-affirmation cards (D-CQMA4): it
-/// starts with `reaffirm-` ([`rdy_store::REAFFIRM_VIEW_PREFIX`]). No public write, view op,
-/// create, fork or session takes such a view; only the card's private writer creates one.
+/// Whether `name` is reserved for the isolated landings of cards: it starts with `reaffirm-`
+/// ([`rdy_store::REAFFIRM_VIEW_PREFIX`], D-CQMA4, re-affirmation cards) or `adopt-`
+/// ([`rdy_store::ADOPT_VIEW_PREFIX`], adopt cards). No public write, view op, create, fork or
+/// session takes such a view; only the card's private writer creates one.
 pub fn is_reserved_view(name: &str) -> bool {
     name.starts_with(rdy_store::REAFFIRM_VIEW_PREFIX)
+        || name.starts_with(rdy_store::ADOPT_VIEW_PREFIX)
 }
 
-/// The refusal of a view name [`is_reserved_view`] reserves.
-pub fn reserved_view_error() -> RdyError {
+/// The refusal of a view name [`is_reserved_view`] reserves: the words of the prefix it starts
+/// with.
+pub fn reserved_view_error(name: &str) -> RdyError {
+    if name.starts_with(rdy_store::ADOPT_VIEW_PREFIX) {
+        return RdyError::new(
+            E_RESERVED_VIEW,
+            "view names that start with adopt- are reserved for adopt cards",
+            "pick a view name that does not start with adopt-",
+        );
+    }
     RdyError::new(
         E_RESERVED_VIEW,
         "view names that start with reaffirm- are reserved for re-affirmation cards",
@@ -3886,7 +3896,7 @@ pub fn reserved_view_error() -> RdyError {
 pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
     non_empty_view(name)?;
     if is_reserved_view(name) {
-        return Err(reserved_view_error());
+        return Err(reserved_view_error(name));
     }
     if name == "canon" {
         return Err(RdyError::new(

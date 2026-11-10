@@ -27,6 +27,9 @@ pub enum ItemKind {
     Defer,
     /// Re-affirm the decisions a changed block made suspect, or keep them suspect (D-CQMA4).
     Reaffirm,
+    /// Adopt a delivery that changes cited content or a link's instructions, or keep the
+    /// approved pins (repo links, D-8VJAZ). Internal until its answer path exists.
+    Adopt,
 }
 
 impl ItemKind {
@@ -39,6 +42,7 @@ impl ItemKind {
             ItemKind::Resolve => "resolve",
             ItemKind::Defer => "defer",
             ItemKind::Reaffirm => "reaffirm",
+            ItemKind::Adopt => "adopt",
         }
     }
 }

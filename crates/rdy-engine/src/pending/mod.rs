@@ -9,9 +9,13 @@
 //! re-affirmation cards ([`reaffirm`]), open questions (`questions`), tensions that need a person
 //! (`tensions`) and snoozes (`snooze`).
 //!
+//! Adopt cards ([`adopt`], repo links) are built beside these parts but are internal for now: the
+//! queue does not list them until their answer path exists.
+//!
 //! The card layout follows cd-W4XVS (one item) and cd-2J1WR (a batch and its exceptions). The
 //! module docs of [`card`] give the layout and the cut rule.
 
+pub mod adopt;
 pub mod card;
 pub mod item;
 pub mod plan;
@@ -21,6 +25,7 @@ pub mod reaffirm;
 mod snooze;
 mod tensions;
 
+pub use adopt::{ADOPT_REF_PREFIX, adopt_ref, is_adopt_ref};
 pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render, render_checked};
 pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
 pub use plan::{DeferralBinding, PlanCardBinding};

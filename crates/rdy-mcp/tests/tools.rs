@@ -357,7 +357,7 @@ fn run_ids_with_colons_become_view_names_without() {
     assert_eq!(e.message, "the run \"batch:7:a\" is not in rdy's run form");
     assert_eq!(
         e.fix,
-        "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}"
+        "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}"
     );
     assert!(st.session.is_none(), "no session was set");
     let e = rdy_session(

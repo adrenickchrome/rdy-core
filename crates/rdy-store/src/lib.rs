@@ -56,6 +56,16 @@ pub use check::{
     landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
 };
 pub use diagram_cache::{CachedDrawing, DiagramCache};
+
+/// The prefix of the internal view of an adopt card's isolated landing (repo links, D-8VJAZ): the
+/// view is `adopt-` and the first 12 hex digits of the card's hash ([`adopt_view`]). No view or
+/// run takes a name with this prefix.
+pub const ADOPT_VIEW_PREFIX: &str = "adopt-";
+
+/// The internal view of the isolated landing of the adopt card whose hash is `card`.
+pub fn adopt_view(card: &rdy_model::Hash) -> String {
+    format!("{ADOPT_VIEW_PREFIX}{}", card.short())
+}
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;

@@ -1132,7 +1132,7 @@ pub(crate) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<boo
 
 /// `item` with its card cut to `max_tokens` and its card's hash (at full size, O7). A card whose
 /// mandatory removal lines do not fit is `E_REDACTION_BUDGET` ([`render_checked`]).
-fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
+pub(super) fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
     item.card = render_checked(&item, max_tokens)?;
     item.card_hash = card_hash(&item).to_string();
     Ok(item)

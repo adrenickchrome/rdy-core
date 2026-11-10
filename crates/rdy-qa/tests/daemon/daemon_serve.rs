@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const ACTOR_FIX: &str =
     "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
-const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}";
 
 #[test]
 fn serve1_start_binds_after_the_store_is_open_and_a_second_start_is_already_running() {

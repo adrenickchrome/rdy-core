@@ -81,6 +81,7 @@ use crate::gate::{
     withdrawn_error,
 };
 use crate::pending::PendingQuery;
+use crate::pending::adopt::{ADOPT_REF_PREFIX, is_adopt_ref};
 use crate::pending::queue::{Eligible, deferral_card, deferral_role};
 use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
@@ -404,7 +405,10 @@ impl Rdy {
         // D-AAQ9Z, D-CQMA4: a deferral card and a re-affirmation card have no recommended
         // option, so a list that names one is refused as a whole, before anything is answered
         if let Some(r) = refs.iter().find(|r| {
-            (r.starts_with("defer:") || r.starts_with(REAFFIRM_REF_PREFIX)) && is_item_ref(r)
+            (r.starts_with("defer:")
+                || r.starts_with(REAFFIRM_REF_PREFIX)
+                || r.starts_with(ADOPT_REF_PREFIX))
+                && is_item_ref(r)
         }) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -489,7 +493,10 @@ impl Rdy {
             return verdict::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)));
         }
         match (bound.item.kind, bound.option.id.as_str()) {
-            (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
+            // an adopt item has no answer path but Later yet: batch::act refuses every other
+            // option with the unsupported-answer refusal and writes nothing
+            (_, "later")
+            | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer | ItemKind::Adopt, _) => {
                 batch::act(self, by, bound, note)
             }
             (ItemKind::Answer, _) => {
@@ -800,8 +807,9 @@ fn bind(
 /// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
 /// block's version), `advice:P-<id>@<n>` (a version's advised tensions), `defer:P-<id>@<n>` (a
 /// version's deferral card, an explicit version only), `reaffirm:<block id>@<version short>` (a
-/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version)
-/// or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
+/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version),
+/// `adopt:<repo>@<entry short>` (an adopt card: the repo's 32 hex digits and the entry's first
+/// 12) or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
 /// that are not items (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
 pub fn is_item_ref(r: &str) -> bool {
     let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
@@ -817,6 +825,9 @@ pub fn is_item_ref(r: &str) -> bool {
     }
     if let Some(p) = r.strip_prefix(REAFFIRM_REF_PREFIX) {
         return block_version(p);
+    }
+    if r.starts_with(ADOPT_REF_PREFIX) {
+        return is_adopt_ref(r);
     }
     match r.strip_prefix("advice:") {
         Some(p) => proposal_version(p),
@@ -953,4 +964,78 @@ fn next_in(st: &ReadState, person: &str, session_ref: Option<String>) -> Option<
         })
         .ok()?;
     q.items.first().map(|i| i.r#ref.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pending::{ItemKind, ItemOption};
+    use rdy_model::Role;
+    use std::collections::BTreeMap;
+
+    /// An adopt item as the queue will hold it, and its `option`.
+    fn adopt_bound(option: &str) -> Bound {
+        let card_option = |id: &str| ItemOption {
+            id: id.to_string(),
+            label: id.to_string(),
+            consequences: vec![],
+            recommended: None,
+        };
+        Bound {
+            item: Item {
+                r#ref: format!("adopt:{}@{}", "7".repeat(32), "a".repeat(12)),
+                kind: ItemKind::Adopt,
+                title: "Adopt the delivery".into(),
+                why: String::new(),
+                blocking: false,
+                summary: None,
+                summary_by: None,
+                facts: vec![],
+                members: vec![],
+                options: vec![
+                    card_option("adopt"),
+                    card_option("keep"),
+                    card_option("later"),
+                ],
+                raised_by: String::new(),
+                raised_at: String::new(),
+                age: String::new(),
+                batch: None,
+                exception: None,
+                card: String::new(),
+                card_hash: String::new(),
+                removal: None,
+                removal_reports: BTreeMap::new(),
+                plan_binding: None,
+                check_verdicts: vec![],
+            },
+            option: card_option(option),
+            card_hash: None,
+        }
+    }
+
+    #[test]
+    fn rpl19_an_early_adopt_answer_is_refused_with_no_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session::human("human:qa".into(), Role::Approver).unwrap();
+        let by = answerer(&s, "human:qa", &RelayInput::default()).unwrap();
+        let before = r.read().seq();
+        for option in ["adopt", "keep"] {
+            let e = match r.dispatch(&by, "human:qa", adopt_bound(option), None) {
+                Err(e) => e,
+                Ok(_) => panic!("{option} has no answer path yet"),
+            };
+            assert_eq!(e.code, E_BAD_INPUT);
+            assert_eq!(
+                e.message,
+                format!(
+                    "adopt:{}@{}: option {option} of a adopt item has no answer path yet",
+                    "7".repeat(32),
+                    "a".repeat(12)
+                )
+            );
+            assert_eq!(r.read().seq(), before, "{option} wrote nothing");
+        }
+    }
 }
