@@ -17,11 +17,13 @@
 //!
 //! Then the delivery is compared with the source's view (D-MEMMQ §5). It is the same when the
 //! profile, the set kind and team, and each selected block's version and derived facts
-//! (status, lifecycle, superseded by) match: [`same_delivery_digest`] of both is equal. A same
-//! delivery writes nothing and returns `unchanged: true`, so a new tag or profile version alone
-//! writes nothing. Any other delivery is one entry: the ids that are new (`added`), the members
-//! whose version or derived facts changed (`changed`, even with no new BLOCK) and the members
-//! the selection left (`removed`).
+//! (status, lifecycle, superseded by) match: [`same_delivery_digest`] of both is equal. Its
+//! shells must match too (D-2CG1N): the digest leaves them out, so the take also compares the
+//! delivery's `selection` with the head's. A same delivery writes nothing and returns
+//! `unchanged: true`, so a new tag or profile version alone writes nothing. Any other delivery
+//! is one entry: the ids that are new (`added`), the members whose version or derived facts
+//! changed (`changed`, even with no new BLOCK) and the members the selection left (`removed`).
+//! A delivery that changes only its shells is an entry with empty deltas and the new shells.
 //!
 //! Right before the write the take checks the caller's file again: the same file identity and
 //! length, and a second read of its framing to the same trailer counts and digest (`input changed
@@ -389,8 +391,11 @@ pub fn take_delivery(
     }
     let d = &report.delivery;
     let incoming = same_delivery_digest(&d.publication.profile, set.as_ref(), &d.versions);
+    // the shells are not in the digest; with equal versions an equal selection means equal
+    // shells, so the head's selection stays the publication's identity (D-2CG1N)
     if let Some(v) = &view
         && view_digest(v) == incoming
+        && v.selection == d.selection
     {
         return Ok(DeliveryTaken {
             entry: v.head,
