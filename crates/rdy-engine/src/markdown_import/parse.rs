@@ -655,6 +655,8 @@ enum Mode {
 enum Piece {
     Src(Range<usize>),
     Ref(Target, Option<String>),
+    /// Source text already in stored form but for `{{` (an external link rewritten).
+    Out(String),
 }
 
 /// A text under construction: source ranges and the references that replace links.
@@ -715,6 +717,27 @@ impl TextBuild {
         true
     }
 
+    /// Replaces the external link at `range` with `inline`, its `[text](target)` form; false
+    /// (the link stays as source text) when the range is not ahead of the text built so far. A
+    /// `!` right before becomes `\!`, so the link does not read as an image.
+    fn rewrite(&mut self, text: &str, range: &Range<usize>, inline: &str) -> bool {
+        if self.start.is_none() || range.start < self.cursor {
+            return false;
+        }
+        let before = &text[self.cursor..range.start];
+        let bang = before
+            .strip_suffix('!')
+            .is_some_and(|b| (b.len() - b.trim_end_matches('\\').len()) % 2 == 0);
+        let keep = if bang { range.start - 1 } else { range.start };
+        if keep > self.cursor {
+            self.pieces.push(Piece::Src(self.cursor..keep));
+        }
+        let lead = if bang { "\\!" } else { "" };
+        self.pieces.push(Piece::Out(format!("{lead}{inline}")));
+        self.cursor = range.end;
+        true
+    }
+
     fn finish(mut self, text: &str, mode: Mode) -> Text {
         if self.start.is_none() {
             return Text::default();
@@ -747,6 +770,10 @@ impl TextBuild {
                             }
                         }
                     }
+                }
+                Piece::Out(out) => {
+                    lit.push_str(&out);
+                    skip = 0;
                 }
                 Piece::Ref(target, display) => {
                     if !lit.is_empty() {
@@ -874,12 +901,58 @@ struct Table {
     excess: bool,
 }
 
+/// `text` with each character rdy's inline subset reads as markup inside a link's text escaped:
+/// an autolink's text is literal.
+fn literal_words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '`' | '*' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// An external link in the one form rdy's inline subset reads, `[text](target)`, with the
+/// source's text (on one line; an autolink's URL, literal; the URL when empty) and no title.
+/// `None` when rdy would not link the target anyway (a scheme other than `http`, `https` or
+/// `mailto`, whitespace, a control character, a backslash, or a reference mark), so the source
+/// text stays.
+fn inline_link(l: &OpenLink, display: &str) -> Option<String> {
+    let dest = l.dest.as_str();
+    let head = &dest[..dest.find(['/', '?', '#']).unwrap_or(dest.len())];
+    let scheme = head.split_once(':')?.0;
+    let linked = ["http", "https", "mailto"]
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s));
+    if !linked
+        || dest.contains("{{")
+        || dest.contains("}}")
+        || dest
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    let words = one_line(display);
+    let words = match (&l.shown, words.trim()) {
+        (Some(shown), _) => literal_words(shown),
+        (None, "") => literal_words(dest),
+        (None, w) => w.to_string(),
+    };
+    let target = dest.replace('(', "\\(").replace(')', "\\)");
+    Some(format!("[{words}]({target})"))
+}
+
 /// An open link: its source range and line, its destination, its definition (for a reference
 /// link) and the range of its text.
 struct OpenLink {
     range: Range<usize>,
     line: usize,
     dest: String,
+    /// An autolink's text (`<https://…>`, `<a@b.c>`): what it shows, literal.
+    shown: Option<String>,
     def: Option<usize>,
     inner: Option<Range<usize>>,
 }
@@ -1257,6 +1330,8 @@ fn build(
                 id,
                 ..
             }) if images == 0 && link.is_none() => {
+                let shown = matches!(link_type, LinkType::Autolink | LinkType::Email)
+                    .then(|| dest_url.to_string());
                 let def = match link_type {
                     LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => it
                         .reference_definitions()
@@ -1264,10 +1339,21 @@ fn build(
                         .and_then(|d| def_at.get(&(d.span.start + off)).copied()),
                     _ => None,
                 };
+                // the parser's range of a collapsed reference (`[text][]`) stops before its `[]`
+                let mut range = r.clone();
+                if matches!(link_type, LinkType::Collapsed) && text[range.end..].starts_with("[]") {
+                    range.end += 2;
+                }
                 link = Some(OpenLink {
-                    range: r.clone(),
+                    range,
                     line: w.lines.of(r.start),
-                    dest: dest_url.to_string(),
+                    // an email autolink names its address alone
+                    dest: if matches!(link_type, LinkType::Email) {
+                        format!("mailto:{dest_url}")
+                    } else {
+                        dest_url.to_string()
+                    },
+                    shown,
                     def,
                     inner: None,
                 });
@@ -1278,7 +1364,28 @@ fn build(
                 let mut converted = false;
                 let mut broken = false;
                 match links.resolve(doc, &l.dest) {
-                    Resolved::External => {}
+                    Resolved::External => {
+                        // rdy reads `[text](target)` alone: every other form is rewritten to it
+                        if let Some(inline) = inline_link(&l, display) {
+                            converted = true;
+                            if text[l.range.clone()] != inline {
+                                let mut apply = |b: &mut TextBuild| {
+                                    converted &= b.rewrite(text, &l.range, &inline);
+                                };
+                                match &mut top {
+                                    Top::Heading { title, .. } => apply(title),
+                                    Top::Prose { text, .. } => apply(text),
+                                    Top::Table(t) => {
+                                        apply(&mut t.text);
+                                        if let Some(c) = &mut t.cell {
+                                            apply(c);
+                                        }
+                                    }
+                                    Top::Code { .. } | Top::None => {}
+                                }
+                            }
+                        }
+                    }
                     Resolved::Broken => broken = true,
                     Resolved::Local(target) => {
                         converted = true;

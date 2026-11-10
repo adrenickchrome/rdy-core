@@ -289,6 +289,36 @@ fn m4bc2_front_matter_problems_stay_as_text_with_a_row() {
     );
 }
 
+/// External links in every CommonMark form rdy's renderer can show as a link.
+const EXTERNAL_LINKS: &str = "# Ext\n\
+    \n\
+    [site][r] and [again][] and [r] and [top][]\n\
+    \n\
+    [titled](https://example.com/t \"Site title\") and <https://auto.example/a_b*c>\n\
+    \n\
+    <a@b.c> and [angle](<https://example.com/a>) and [paren](https://example.com/p_(x))\n\
+    \n\
+    [*two*\n\
+    lines](https://example.com/2) [](https://example.com/empty) [ftp](ftp://example.com/f)\n\
+    \n\
+    [r]: https://example.com\n\
+    [again]: https://example.com/again 'T'\n\
+    [top]: #ext\n";
+
+const EXTERNAL_LINKS_OUTLINE: [&str; 5] = [
+    "0 section <-> Ext",
+    // a definition every use of which became a link is dropped; a collapsed reference
+    // (`[top][]`) is replaced with its `[]`
+    "1 prose <0> [site](https://example.com) and [again](https://example.com/again) and [r](https://example.com) and {{ext.md@0|top}}",
+    // a title is dropped (rdy links have none); an autolink's text is literal
+    "2 prose <0> [titled](https://example.com/t) and [https://auto.example/a_b\\*c](https://auto.example/a_b*c)",
+    // an email autolink is a mailto link; parentheses in a target are escaped
+    "3 prose <0> [a@b.c](mailto:a@b.c) and [angle](https://example.com/a) and [paren](https://example.com/p_\\(x\\))",
+    // link text on one line; an empty text shows the URL; a scheme rdy never links keeps its
+    // source text
+    "4 prose <0> [*two* lines](https://example.com/2) [https://example.com/empty](https://example.com/empty) [ftp](ftp://example.com/f)",
+];
+
 #[test]
 fn m4bc2_links_resolve_across_files_and_duplicate_headings() {
     let index = "# Home\n\
@@ -338,6 +368,7 @@ fn m4bc2_links_resolve_across_files_and_duplicate_headings() {
         md("c/d/index.md", "D\n"),
         md("x/y.md", "Y\n"),
         md("x/y/index.md", "YI\n"),
+        md("ext.md", EXTERNAL_LINKS),
     ];
     let p = convert(&files);
     assert_eq!(
@@ -350,8 +381,9 @@ fn m4bc2_links_resolve_across_files_and_duplicate_headings() {
             // a percent-encoded fragment and path decode once
             "3 prose <0> {{guide/setup.md@3|café}} and {{guide/my notes.md|notes}}",
             "4 prose <0> {{index.md@12|here}} and {{index.md@0|top}} and {{index.md|self}}",
-            // external links stay links
-            "5 prose <0> [ext](https://example.com/x.md) <https://auto.example> [mail](mailto:a@b.c) [proto](//cdn.example/x.md)",
+            // external links stay links, in the inline form rdy reads; an autolink shows its
+            // URL; a protocol-relative target, which rdy never links, keeps its source text
+            "5 prose <0> [ext](https://example.com/x.md) [https://auto.example](https://auto.example) [mail](mailto:a@b.c) [proto](//cdn.example/x.md)",
             // missing, excluded, escaping, non-Markdown, unknown fragment, encoded separator,
             // drive, NUL, directory and query targets stay as their source text
             "6 prose <0> [missing](nope.md) [excluded](drafts/hidden.md)",
@@ -380,6 +412,10 @@ fn m4bc2_links_resolve_across_files_and_duplicate_headings() {
             "4 prose <3> {{index.md|back}} [up](../../index.md)",
         ]
     );
+    // every external link rdy can show becomes the inline form its renderer reads: reference
+    // links, titled links, autolinks and email autolinks too (rdy-render's
+    // m4bc2_imported_external_links_render_as_anchors renders these blocks)
+    assert_eq!(outline(&p, "ext.md"), EXTERNAL_LINKS_OUTLINE);
     assert_eq!(
         rows(&p),
         vec![
