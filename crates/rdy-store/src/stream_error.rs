@@ -64,6 +64,14 @@ pub enum Reason {
     UnlistedDependency(ObjectRef),
     RootTagNotListed,
     UnneededPrerequisite(ObjectKey),
+    /// A link_delivery stream's `DELIVERY` record is missing after its header, or repeats.
+    DeliveryOutOfOrder,
+    /// A `DELIVERY` record's versions are not in strict id order, or its selection digest is not
+    /// their selection identity.
+    InvalidSelection,
+    /// An object record of a link_delivery stream is not the next version its `DELIVERY`
+    /// selects: another key, encoding or block id, or one past the selection.
+    OutsideSelection,
 }
 
 impl Reason {
@@ -90,6 +98,9 @@ impl Reason {
             Reason::UnlistedDependency(_) => "unlisted dependency",
             Reason::RootTagNotListed => "root tag is not in the batch or its prerequisites",
             Reason::UnneededPrerequisite(_) => "unneeded prerequisite",
+            Reason::DeliveryOutOfOrder => "delivery record out of order",
+            Reason::InvalidSelection => "invalid delivered selection",
+            Reason::OutsideSelection => "object is outside the delivered selection",
         }
     }
 }
@@ -198,10 +209,16 @@ impl StreamError {
     /// E_STREAM_PURPOSE: the header's purpose byte `actual` (printed in decimal) is not
     /// tag_history.
     pub fn purpose(record: Option<u64>, offset: u64, actual: u8) -> Self {
+        Self::purpose_for(record, offset, actual, "tag_history")
+    }
+
+    /// E_STREAM_PURPOSE: the header's purpose byte `actual` (printed in decimal) is not
+    /// `expected`, the purpose the operation reads (`tag_history` or `link_delivery`).
+    pub fn purpose_for(record: Option<u64>, offset: u64, actual: u8, expected: &str) -> Self {
         Self::new(
             E_STREAM_PURPOSE,
-            format!("stream purpose {actual} does not match tag_history"),
-            "request a tag_history stream",
+            format!("stream purpose {actual} does not match {expected}"),
+            &format!("request a {expected} stream"),
             record,
             offset,
         )

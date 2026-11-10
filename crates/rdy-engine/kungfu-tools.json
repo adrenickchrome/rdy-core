@@ -24,6 +24,7 @@
 {"tool": "rdy_key_revoke", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_key_show", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_land", "ruleset": "rdy:approvals", "response": "warn"},
+{"tool": "rdy_links", "ruleset": "rdy:read", "response": "warn"},
 {"tool": "rdy_load", "ruleset": "rdy:project-ops", "response": "warn"},
 {"tool": "rdy_log", "ruleset": "rdy:read", "response": "warn"},
 {"tool": "rdy_overview", "ruleset": "rdy:bootstrap", "response": "warn"},

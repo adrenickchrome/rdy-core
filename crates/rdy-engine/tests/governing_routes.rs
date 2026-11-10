@@ -29,6 +29,7 @@ fn block(i: &str, ty: &str, parent: Option<&str>, order: &str, body: &str) -> Bl
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

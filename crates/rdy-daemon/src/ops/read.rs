@@ -2,7 +2,7 @@
 use super::*;
 use rdy_engine::engine::open_report_json;
 use rdy_engine::show::ShowTarget;
-use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope, block_to_yaml};
+use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -157,6 +157,27 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     if let Some(o) = v.as_object_mut() {
         o.extend(rdy_engine::repo::repo_json(&st)?);
     }
+    // repo links: the live links with their state and the pins behind, left out when the project
+    // has none. A read error never fails the status; `rdy links` has the whole reading.
+    if let Ok(list) = st.links()
+        && (!list.links.is_empty() || !list.unlinked.is_empty())
+    {
+        v["links"] = json!({
+            "links": list.links.iter().map(|l| {
+                let mut row = json!({
+                    "alias": l.alias, "state": l.state, "pins_behind": l.pins_behind,
+                });
+                if let Some(last) = &l.last {
+                    row["tag"] = json!(last.tag);
+                    if let Some(at) = &last.delivered_at {
+                        row["delivered_at"] = json!(at);
+                    }
+                }
+                row
+            }).collect::<Vec<_>>(),
+            "unlinked": list.unlinked.len(),
+        });
+    }
     if let Some(c) = coverage {
         v["coverage"] = c;
     }
@@ -216,6 +237,32 @@ pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
             return Ok(to_json(&st.landing_show(&id, None, None)?));
         }
         ShowTarget::Block => {}
+    }
+    // repo links: `<alias>:<id>` is a block cited from a linked project. It has no local history
+    // and no scope of its own to blame: the read is its text, read-only, with its provenance.
+    if rdy_model::reference::foreign_ref(a.id.trim()).is_some() {
+        if a.blame {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "blame applies to blocks of this project, not to cited blocks",
+                "drop --blame to read the cited block",
+            ));
+        }
+        let read = rdy_engine::tool_reads::read_entries(
+            &st,
+            &a.id,
+            &cx.session.default_view(),
+            &a.scope,
+            // yaml carries every field and the body; compact would give only a one-line summary
+            "yaml",
+            None,
+        )?;
+        return Ok(json!({
+            "id": a.id.trim(),
+            "cited": true,
+            "read_only": true,
+            "text": read.entries.join(read.sep),
+        }));
     }
     // refv1: `id@version` or a ref line reads under that version; a clashing scope is refused
     let target = rdy_model::reference::parse_target(&a.id)
@@ -338,6 +385,6 @@ pub(super) fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
         "id": b.id.to_string(),
         "version": b.version_hash().to_string(),
         "conflict": conflict,
-        "yaml": block_to_yaml(&b),
+        "yaml": st.block_yaml(&scope, &b)?,
     }))
 }

@@ -1777,6 +1777,7 @@ mod tests {
             body: String::new(),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
+            foreign: Default::default(),
             read_identity: None,
         };
         let gone = Block::redacted(
@@ -1854,6 +1855,7 @@ mod tests {
             body: body.into(),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
+            foreign: Default::default(),
             read_identity: None,
         };
         let doc = block("d-AAAAA", tree::DOC, None, "");

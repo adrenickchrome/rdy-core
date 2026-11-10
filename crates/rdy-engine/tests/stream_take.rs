@@ -847,6 +847,7 @@ fn ha13_unknown_pack_types_do_not_fail_holder_take() {
         body: "a widget".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let by = |role| Provenance {
@@ -1559,6 +1560,7 @@ fn ha13_take_keeps_the_blob_chunk_lengths() {
             body: String::new(),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
+            foreign: Default::default(),
             read_identity: None,
         };
         let version = r.store_mut().put(kinds::BLOCK, &figure).unwrap();
@@ -1988,6 +1990,7 @@ fn ha1_a_field_deeper_than_the_bound_is_refused_before_it_is_written() {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let issues = rdy_schema::validate_block(r.pack(), &block, None);

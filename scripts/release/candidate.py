@@ -77,11 +77,20 @@ HOSTED_HOMES = ('/Users/runner', '/home/runner')
 # The Windows hosted runner's homes, and the prefixes that mark any Windows user path.
 WINDOWS_HOSTED_HOMES = ('C:\\Users\\runneradmin', 'C:\\Users\\runner')
 WINDOWS_HOST_PREFIXES = ('C:\\Users\\', 'C:/Users/', '\\Users\\')
-# The example user of the docs and of the agent guide that rdy.exe holds ("such as
-# `C:\Users\ana\shop`"). Only the exact example home with one plain name under it, ended by a
-# character that is not part of a path, is an example; any deeper path under it is a host path.
+# The example path of the agent guide that rdy.exe holds ("such as `C:\Users\ana\shop`"). Only
+# these exact strings are examples; any other text under the example home is a host path. Each is
+# spelled as the binary holds it, with the character that closes it in the guide: the parsed row
+# text (one backslash) and the bundle's JSON bytes (each backslash doubled), and the row text that
+# shows a JSON path (each backslash doubled, then doubled again in the JSON bytes).
 WINDOWS_EXAMPLE_HOME = 'C:\\Users\\ana'
-EXAMPLE_NAME_MAX = 64
+WINDOWS_EXAMPLE_TOKENS = (
+    'C:\\Users\\ana\\shop`',
+    'C:\\Users\\ana\\shop.rdydump`',
+    'C:\\\\Users\\\\ana\\\\shop.rdydump"',
+    'C:\\\\Users\\\\ana\\\\shop`',
+    'C:\\\\Users\\\\ana\\\\shop.rdydump`',
+    'C:\\\\\\\\Users\\\\\\\\ana\\\\\\\\shop.rdydump\\"',
+)
 
 
 class ControllerError(Exception):
@@ -482,24 +491,14 @@ def host_patterns(target, extra=()):
 
 
 def example_patterns(target, extra=()):
-    """For the Windows target, the byte patterns of the documented example path: the example home,
-    its slashes either way or doubled as in JSON, then one plain name (a letter or digit first) and
-    no path character after it, in UTF-8 and UTF-16 (little endian). None when the build's own home
-    or another `extra` path lies at or under the example home, and for every other target."""
+    """For the Windows target, the byte strings of the documented example path (`WINDOWS_EXAMPLE_TOKENS`),
+    in UTF-8 and UTF-16 (little endian). None when the build's own home or another `extra` path lies
+    at or under the example home, and for every other target."""
     home = WINDOWS_EXAMPLE_HOME.lower() + '\\'
     if target != WINDOWS_TARGET or any(
             p and (p.replace('/', '\\').lower().rstrip('\\') + '\\').startswith(home) for p in extra):
         return []
-    patterns = []
-    for separator in ('\\', '\\\\', '/'):
-        prefix = separator.join(WINDOWS_EXAMPLE_HOME.split('\\')) + separator
-        for width in (1, 2):
-            char = (lambda c: c) if width == 1 else (lambda c: c + b'\x00')
-            encoded = prefix.encode('ascii' if width == 1 else 'utf-16-le')
-            first, name, path = char(b'[A-Za-z0-9]'), char(b'[A-Za-z0-9_.-]'), char(b'[A-Za-z0-9_.\\\\/:-]')
-            patterns.append(re.compile(re.escape(encoded) + first + b'(?:' + name + b'){0,'
-                                       + str(EXAMPLE_NAME_MAX - 1).encode() + b'}(?!' + path + b')'))
-    return patterns
+    return [token.encode(encoding) for token in WINDOWS_EXAMPLE_TOKENS for encoding in ('utf-8', 'utf-16-le')]
 
 
 def inspect_archive(path, version, target, extra=()):
@@ -514,15 +513,15 @@ def inspect_archive(path, version, target, extra=()):
     examples = example_patterns(target, extra)
     longest = max(len(p) for p in patterns)
     if examples:
-        # an example ends one character (two bytes in UTF-16) before the window does, or at the end
-        longest = max(longest, 2 * (len(WINDOWS_EXAMPLE_HOME) + 4 + EXAMPLE_NAME_MAX + 1) + 1)
+        longest = max(longest, max(len(e) for e in examples))
     hits, spans, capped = set(), set(), False
 
-    def find_examples(window, start, end):
+    def find_examples(window, start):
         for example in examples:
-            for match in example.finditer(window):
-                if end or match.end() + 2 <= len(window):
-                    spans.add((start + match.start(), start + match.end()))
+            at = window.find(example)
+            while at >= 0:
+                spans.add((start + at, start + at + len(example)))
+                at = window.find(example, at + 1)
 
     try:
         with tarfile.open(str(path), mode='r:gz') as archive:
@@ -545,7 +544,7 @@ def inspect_archive(path, version, target, extra=()):
                         break
                     chunk = stream.read(SCAN_CHUNK)
                     if not chunk:
-                        find_examples(tail, base - len(tail), True)
+                        find_examples(tail, base - len(tail))
                         break
                     window, start = tail + chunk, base - len(tail)
                     for pattern in patterns:
@@ -553,7 +552,7 @@ def inspect_archive(path, version, target, extra=()):
                         while at >= 0:
                             hits.add((start + at, start + at + len(pattern)))
                             at = window.find(pattern, at + 1)
-                    find_examples(window, start, False)
+                    find_examples(window, start)
                     base += len(chunk)
                     tail = window[-(longest - 1):]
             if binary is None:

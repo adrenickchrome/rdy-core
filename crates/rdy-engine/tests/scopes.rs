@@ -64,6 +64,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     r.store_mut()

@@ -27,6 +27,9 @@ pub enum ItemKind {
     Defer,
     /// Re-affirm the decisions a changed block made suspect, or keep them suspect (D-CQMA4).
     Reaffirm,
+    /// Adopt a delivery that changes cited content or a link's instructions, or keep the
+    /// approved pins (repo links, D-8VJAZ). Internal until its answer path exists.
+    Adopt,
 }
 
 impl ItemKind {
@@ -39,6 +42,7 @@ impl ItemKind {
             ItemKind::Resolve => "resolve",
             ItemKind::Defer => "defer",
             ItemKind::Reaffirm => "reaffirm",
+            ItemKind::Adopt => "adopt",
         }
     }
 }
@@ -62,17 +66,22 @@ pub enum ExceptionKind {
     BlockingTension,
     /// The version re-affirms a `one_way` decision (D-GV465).
     ReaffirmOneWay,
+    /// It departs from a cited decision, a cited instruction or an external decision: it links
+    /// `deviates_from` (repo links, D-8VJAZ). It widens the first kind's case "against an
+    /// organization's ADR" to every cited or external block.
+    Deviation,
 }
 
 impl ExceptionKind {
     /// Every kind, in the order the docs list them.
-    pub const ALL: [ExceptionKind; 6] = [
+    pub const ALL: [ExceptionKind; 7] = [
         ExceptionKind::Against,
         ExceptionKind::OneWay,
         ExceptionKind::Unapplied,
         ExceptionKind::NotRecommended,
         ExceptionKind::BlockingTension,
         ExceptionKind::ReaffirmOneWay,
+        ExceptionKind::Deviation,
     ];
 
     /// The name on the wire.
@@ -84,6 +93,7 @@ impl ExceptionKind {
             ExceptionKind::NotRecommended => "not_recommended",
             ExceptionKind::BlockingTension => "blocking_tension",
             ExceptionKind::ReaffirmOneWay => "reaffirm_one_way",
+            ExceptionKind::Deviation => "deviation",
         }
     }
 }

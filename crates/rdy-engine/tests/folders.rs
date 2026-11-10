@@ -123,6 +123,7 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     r.store_mut()
@@ -439,6 +440,7 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                foreign: Default::default(),
                 read_identity: None,
             },
         });

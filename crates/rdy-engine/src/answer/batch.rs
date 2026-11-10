@@ -14,6 +14,9 @@
 //! An `approve` item's `accept_verdict:<review>:<version>` option never reaches this table:
 //! `answer_one` dispatches it first ([`super::verdict`], D-JQD5X O14).
 //!
+//! An `adopt` item reaches this table only with `later`: its `adopt` and `keep` options go to
+//! [`super::adopt`] (D-8VJAZ), as a `reaffirm` item's options go to [`super::reaffirm`].
+//!
 //! An elicited Later (D-WPE4R, F2) is the person's own snooze of the chat session the caller's
 //! run names: its `ANSWER` records that run as `person.run`, evidence `elicited` and no relay. A
 //! caller with no run is refused. A Later in the UI never reaches this table: it stores nothing

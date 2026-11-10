@@ -152,11 +152,18 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
             ));
         }
         for tok in b.ref_tokens() {
-            if BlockId::parse(&tok)
-                .ok()
-                .and_then(|id| m.get(&id))
-                .is_none()
-            {
+            // a stored foreign reference (repo links) resolves by the block's own pin of it
+            let resolves = match rdy_model::reference::foreign_ref(&tok) {
+                Some(rdy_model::reference::ForeignRef::Stored { repo, id }) => b
+                    .foreign
+                    .pins
+                    .contains_key(&rdy_model::foreign::ForeignId::new(repo, id)),
+                _ => BlockId::parse(&tok)
+                    .ok()
+                    .and_then(|id| m.get(&id))
+                    .is_some(),
+            };
+            if !resolves {
                 out.push(v(
                     "ref",
                     Some(&b.id),
@@ -292,7 +299,8 @@ fn carried_selects(
             let target = r.targets.iter().any(|t| match t {
                 RedactTarget::AllVersions(i) => i == id,
                 RedactTarget::Version { id: i, version } => i == id && *version == ident.version,
-                RedactTarget::Blob(_) => false,
+                // a cited version never selects a local block
+                RedactTarget::Blob(_) | RedactTarget::ForeignVersion { .. } => false,
             });
             found |= r.request == ident.request && span && target;
             Ok(())

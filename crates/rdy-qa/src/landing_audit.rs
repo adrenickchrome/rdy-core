@@ -40,7 +40,7 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
         Ok(ts) => {
             for t in ts {
                 let all_in = t.sides.iter().all(|s| match s {
-                    SideRef::Canon { .. } => true,
+                    SideRef::Canon { .. } | SideRef::Foreign { .. } => true,
                     SideRef::Change(h) => mine.contains(h),
                     SideRef::Intent { .. } => false,
                 });

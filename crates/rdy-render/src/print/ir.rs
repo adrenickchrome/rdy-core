@@ -539,7 +539,8 @@ impl Reader<'_> {
                         });
                     }
                     _ => {
-                        // a diagram: its caption, then its source in its own language
+                        // a diagram: its source in its own language, and its caption (the site
+                        // puts the caption last)
                         let ctx = Ctx {
                             diagram_lang: attr(tag, "data-lang")
                                 .map(decode)
@@ -926,9 +927,9 @@ mod tests {
              loading=\"lazy\"><figcaption>A case block</figcaption></figure>\
              <figure class=\"diagram\" data-lang=\"mermaid\"><p class=\"visually-hidden\">Alt</p>\
              <div class=\"diagram-canvas\" aria-hidden=\"true\"><pre class=\"mermaid\">A#91;x#93;\
-             </pre></div><figcaption>Alt</figcaption><details class=\"diagram-source\">\
+             </pre></div><details class=\"diagram-source\">\
              <summary>Diagram source</summary><pre class=\"code\"><code>flowchart TD\n  A --&gt; B\
-             </code></pre></details></figure>\
+             </code></pre></details><figcaption>Alt</figcaption></figure>\
              <aside class=\"callout callout-note\"><span class=\"marker\">Note</span><div><p>Mind \
              it.</p></div></aside>\
              <div class=\"normative\"><span class=\"marker\">Requirement · must</span><p>Do it.</p></div>\
@@ -1017,14 +1018,14 @@ mod tests {
                 alt: "A \"case\"".into(),
                 caption: vec![run("A case block")],
             },
-            PBlock::Para {
-                anchor: None,
-                runs: vec![run("Alt")],
-            },
             PBlock::Code {
                 anchor: None,
                 lang: Some("mermaid".into()),
                 text: "flowchart TD\n  A --> B".into(),
+            },
+            PBlock::Para {
+                anchor: None,
+                runs: vec![run("Alt")],
             },
             PBlock::Callout {
                 anchor: None,

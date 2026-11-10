@@ -9,6 +9,7 @@ mod brief_created;
 mod brief_editor;
 mod brief_engine;
 mod brief_entities;
+mod brief_foreign;
 mod brief_inflight;
 mod brief_intents;
 mod brief_mcp;

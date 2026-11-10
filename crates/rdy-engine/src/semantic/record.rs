@@ -3,7 +3,9 @@
 use crate::Rdy;
 use crate::error::{E_BAD_INPUT, E_REVIEW_STALE, RdyError};
 use crate::read_state::Delta;
-use rdy_model::{BlockId, Hash, PairItem, Review, ReviewSubject, SemanticTension};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
+use rdy_model::{BlockId, Hash, PairSide, Review, SemanticTension};
 use rdy_store::StoreError;
 
 impl Rdy {
@@ -17,13 +19,24 @@ impl Rdy {
         r: &Review,
         t: Option<&SemanticTension>,
     ) -> Result<(Hash, Option<Hash>), RdyError> {
+        self.record_verdict_v1(&ReviewV1::of(r), t.map(SemanticTensionV1::of).as_ref())
+    }
+
+    /// [`Rdy::record_verdict`] for a pair of any sides (repo links): a [`ReviewV1`] and a
+    /// [`SemanticTensionV1`].
+    #[doc(hidden)]
+    pub fn record_verdict_v1(
+        &mut self,
+        r: &ReviewV1,
+        t: Option<&SemanticTensionV1>,
+    ) -> Result<(Hash, Option<Hash>), RdyError> {
         let ids = self
             .store_mut()
-            .put_verdict(r, t)
+            .put_verdict_v1(r, t)
             .map_err(|e| refused(e, E_REVIEW_STALE, "call rdy_review_next again"))?;
         // the store wrote it, so its subject is a pair
-        let pairs: Vec<(Hash, &[PairItem])> = match &r.subject {
-            ReviewSubject::Pair { key, items } => vec![(*key, items.as_slice())],
+        let pairs: Vec<(Hash, Vec<PairSide>)> = match &r.subject {
+            ReviewSubjectV1::Pair { key, items } => vec![(*key, items.clone())],
             _ => vec![],
         };
         self.publish(verdict_delta(pairs))?;
@@ -35,11 +48,22 @@ impl Rdy {
     ///
     /// Writes and publishes; it checks nothing a submit or an acceptance checks. Only `submit_verdict` and `accept_advice` call them outside tests.
     #[doc(hidden)]
-    pub fn record_tension_versions(
+    pub fn record_tension_versions<T: Clone + Into<SemanticTensionV1>>(
         &mut self,
-        ts: &[SemanticTension],
+        ts: &[T],
     ) -> Result<Vec<Hash>, RdyError> {
-        let ids = self.store_mut().put_tension_versions(ts).map_err(|e| {
+        // a tension of local sides, or of any sides (repo links)
+        let ts: Vec<SemanticTensionV1> = ts.iter().cloned().map(Into::into).collect();
+        self.record_tension_versions_v1(&ts)
+    }
+
+    /// [`Rdy::record_tension_versions`] for tensions of any sides (repo links).
+    #[doc(hidden)]
+    pub fn record_tension_versions_v1(
+        &mut self,
+        ts: &[SemanticTensionV1],
+    ) -> Result<Vec<Hash>, RdyError> {
+        let ids = self.store_mut().put_tension_versions_v1(ts).map_err(|e| {
             refused(
                 e,
                 E_BAD_INPUT,
@@ -50,7 +74,7 @@ impl Rdy {
             return Ok(ids);
         }
         self.publish(verdict_delta(
-            ts.iter().map(|t| (t.key, t.items.as_slice())).collect(),
+            ts.iter().map(|t| (t.key, t.items.clone())).collect(),
         ))?;
         Ok(ids)
     }
@@ -67,13 +91,27 @@ fn refused(e: StoreError, code: &'static str, fix: &str) -> RdyError {
 }
 
 /// `Delta::Verdict` for `pairs`: their keys, and their blocks sorted and distinct.
-fn verdict_delta(pairs: Vec<(Hash, &[PairItem])>) -> Delta {
+/// A cited side is no local block, so only the local sides' blocks are named.
+fn verdict_delta(pairs: Vec<(Hash, Vec<PairSide>)>) -> Delta {
     let mut blocks: Vec<BlockId> = pairs
         .iter()
-        .flat_map(|(_, items)| items.iter().map(|i| i.block.clone()))
+        .flat_map(|(_, items)| {
+            items
+                .iter()
+                .filter_map(PairSide::local)
+                .map(|i| i.block.clone())
+        })
         .collect();
     blocks.sort();
     blocks.dedup();
+    // a pair of two cited sides has no local block: its tension is found by key, not by block,
+    // so a delta that names no block makes the next read build the set in full
+    if pairs
+        .iter()
+        .any(|(_, items)| items.iter().all(|i| i.local().is_none()))
+    {
+        blocks.clear();
+    }
     Delta::Verdict {
         keys: pairs.into_iter().map(|(k, _)| k).collect(),
         blocks,

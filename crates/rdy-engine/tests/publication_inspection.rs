@@ -680,6 +680,7 @@ fn spv1_inspection_assets_bypass_only_the_output_gate() {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     fig.fields

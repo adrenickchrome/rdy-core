@@ -727,6 +727,7 @@ mod tests {
                     body: "no landing".into(),
                     links: Default::default(),
                     pins: Default::default(),
+                    foreign: Default::default(),
                     read_identity: None,
                 },
             )

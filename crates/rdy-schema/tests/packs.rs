@@ -178,11 +178,12 @@ fn doc_and_folder_are_injected_into_every_pack() {
     let p = set.resolve(&name).unwrap();
     let doc = &p.block_types["doc"];
     assert_eq!(doc.prefix, "d");
-    // a bare doc holds only the engine's instruction, publication profile and authority policy
+    // a bare doc holds only the engine's instruction, repo link, publication profile and authority policy
     assert_eq!(
         doc.children,
         vec![
             "instruction".to_string(),
+            "repo_link".to_string(),
             "publication_profile".to_string(),
             "authority_policy".to_string()
         ]
@@ -204,8 +205,9 @@ fn doc_and_folder_are_injected_into_every_pack() {
     assert!(folder.fields["name"].required && !folder.fields["title"].required);
     let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
     // a doc holds every content type directly, section first (the same list a section holds,
-    // which ends with the instruction), then the publication profile and the authority policy
+    // which ends with the instruction), then the repo link, the publication profile and the authority policy
     let mut want = std.block_types["section"].children.clone();
+    want.push("repo_link".to_string());
     want.push("publication_profile".to_string());
     want.push("authority_policy".to_string());
     assert_eq!(std.block_types["doc"].children, want);
@@ -238,6 +240,7 @@ fn a_pack_keeps_its_doc_children_and_extra_fields_but_not_the_core() {
             "section".to_string(),
             "note".to_string(),
             "instruction".to_string(),
+            "repo_link".to_string(),
             "publication_profile".to_string(),
             "authority_policy".to_string()
         ]

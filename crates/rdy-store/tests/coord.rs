@@ -159,6 +159,7 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
         body: "x".into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     ch.ops.push(Op::Create { block });
@@ -194,6 +195,7 @@ fn claim(id: &str, body: &str) -> Block {
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

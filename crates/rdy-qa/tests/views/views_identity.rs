@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 const ACTOR_FIX: &str =
     "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
 /// The run grammar's fix (D-ME2C0).
-const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}";
 /// The fix of `own` with an owner and none, or with neither.
 const OWN_FIX: &str = "pass owner: {actor, run?}, or none: true to leave it unowned";
 

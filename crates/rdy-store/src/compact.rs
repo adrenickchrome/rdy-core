@@ -131,6 +131,7 @@ fn kind_name(kind: u8) -> Option<&'static str> {
         kinds::DISPUTE => "dispute",
         kinds::DISPUTE_RESOLUTION => "dispute_resolution",
         kinds::CHECK_REQUEST => "check_request",
+        kinds::FOREIGN => "foreign",
         _ => return None,
     })
 }

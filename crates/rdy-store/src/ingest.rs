@@ -36,7 +36,10 @@
 //!
 //! Every batch's refs meet the holder rules (`crate::holder`) before the batch writes a byte:
 //! the first batch sets the mode, a mode ref in a later batch is refused, and a holder's refs
-//! stay in its families. The refusal is the store's own (`StoreError::Decode`).
+//! stay in its families. The refusal is the store's own (`StoreError::Decode`). A holder holds no
+//! FOREIGN entry (repo links, D-FK58A): a holder's batch with one is refused the same way, with
+//! the holder check's text, before it writes a byte. A project's foreign log is ingested as any
+//! other batch, its source refs included.
 //!
 //! The zeros a dropped frame claims are bounded before they are written (ruling task-9, from
 //! tb-A4DAV): one frame claims at most `MAX_BLOB_BYTES` (the reader refuses more, and `batch`
@@ -373,6 +376,7 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
             }
         }
         self.check_refs(b)?;
+        self.check_holder_frames(b)?;
         let end = self.log().end();
         if b.start.segment == end.segment.wrapping_add(1) && b.start.offset == 0 && end.offset > 0 {
             self.log_mut().roll()?;
@@ -535,6 +539,28 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
             rules.abandon_batch();
         }
         judged
+    }
+
+    /// A holder holds no FOREIGN entry (repo links, D-FK58A: a foreign log belongs to a project,
+    /// and a holder's closed refs never receive one): in a holder's log, batch `b`'s first
+    /// FOREIGN frame is refused before the batch writes a byte, with the holder check's own text
+    /// (`holder holds foreign entry {hash}`, `StoreError::Decode`). The mode is the one the first
+    /// batch set ([`Ingest::check_refs`]).
+    fn check_holder_frames(&self, b: &DumpBatch) -> Result<(), StoreError> {
+        if self.mode != StoreMode::Holder {
+            return Ok(());
+        }
+        match b
+            .frames
+            .iter()
+            .find(|f| crate::codec::logical_kind(f.kind()) == kinds::FOREIGN)
+        {
+            Some(f) => Err(StoreError::Decode(format!(
+                "holder holds foreign entry {}",
+                f.hash()
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Releases from the bound the bytes of every dropped frame not yet released whose exact span

@@ -90,6 +90,7 @@ fn land(s: &mut Store, body: &str) -> Hash {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let change = Change {

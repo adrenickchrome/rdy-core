@@ -213,7 +213,7 @@ fn lost_result() -> RdyError {
 /// Publishes the holder's state again from its store after a take wrote a batch. A take that
 /// advanced the redaction epoch (or sealed a removal it could not finish) starts the shared
 /// caches over, as a native removal does, so no read of the new state reuses an old build.
-fn republish(rdy: &mut Rdy, epoch: u64) -> Result<(), RdyError> {
+pub(crate) fn republish(rdy: &mut Rdy, epoch: u64) -> Result<(), RdyError> {
     let pending = rdy.store.reader().check_redaction_epoch().is_err();
     if pending || rdy.store.redaction_epoch() != epoch {
         rdy.renew_epoch_caches();

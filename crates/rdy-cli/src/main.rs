@@ -28,6 +28,7 @@ mod instructions_cmd;
 mod intake_cmd;
 mod intent_cmd;
 mod land_cmd;
+mod links_cmd;
 mod output;
 mod plan_cmd;
 mod policy_cmd;
@@ -170,6 +171,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: rule_cmd::RuleCmd,
     },
+    /// Read the repo links of this project: each link with its alias, repo, state (none, delivered or revoked), last delivery and the pins that are behind. `rdy links show <alias>` lists what a link delivers; `rdy links refs [<alias>]` lists the pins of canon to cited content. A cited block reads as rdy show <alias>:<id>. It writes nothing; a delivery moves no pin, and an adopt card in rdy pending asks the person. The chat path is rdy_links.
+    Links(links_cmd::LinksArgs),
+    /// Supersede a local decision by its adopted copy, the cited decision <alias>:<id> that its home project delivered back. The old decision becomes superseded by the cited one, and its dependents get rebind items. A person approves the landing. The chat path is rdy_supersede with adopted_as.
+    AdoptUpstream(links_cmd::AdoptUpstreamArgs),
     /// Print what waits for the person: the cards of the "needs you" queue, then the versions that are not ready. The chat path is rdy_pending.
     Pending(intake_cmd::PendingArgs),
     /// Answer one card of the queue: rdy answer <ref> <option> [--card <hash>], or rdy answer --all-recommended <ref>... A person answers as themselves; an agent only by relaying the person's words (--relayed-by with --evidence). The CLI has no Later. The chat path is rdy_answer.
@@ -333,6 +338,8 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
         Cmd::Review { cmd } => review_cmd::review(env, cmd),
         Cmd::Rule { cmd } => rule_cmd::rule(env, cmd, projectless),
+        Cmd::Links(a) => links_cmd::links(env, a),
+        Cmd::AdoptUpstream(a) => links_cmd::adopt_upstream(env, a),
         Cmd::Pending(a) => intake_cmd::pending(env, a),
         Cmd::Answer(a) => intake_cmd::answer(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),
@@ -532,6 +539,129 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// rpl31 (D-DAPR8, D-8VJAZ): `rdy links [show <alias> | refs [<alias>]]`, `rdy adopt-upstream
+    /// <old> <alias>:<id> [--view <view>]` and `rdy new repo-link <alias> --parent <doc> --repo
+    /// <id> --profile <id> [--title <text>] [--view <view>]` parse; the commands take no Later and
+    /// no exchange between projects, and the hub's verbs are none of them.
+    #[test]
+    fn rpl31_links_adopt_upstream_and_new_repo_link_parse() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["rdy"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(matches!(
+            parse(&["links"]),
+            Ok(Cli {
+                cmd: Cmd::Links(links_cmd::LinksArgs { cmd: None }),
+                ..
+            })
+        ));
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "show", "core"])
+        else {
+            panic!("links show parses");
+        };
+        assert_eq!(
+            links_cmd::request(&a),
+            serde_json::json!({"op": "show", "alias": "core"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "refs"])
+        else {
+            panic!("links refs parses");
+        };
+        assert_eq!(links_cmd::request(&a), serde_json::json!({"op": "refs"}));
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "refs", "core"])
+        else {
+            panic!("links refs core parses");
+        };
+        assert_eq!(
+            links_cmd::request(&a),
+            serde_json::json!({"op": "refs", "alias": "core"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links"])
+        else {
+            panic!("links parses");
+        };
+        assert_eq!(links_cmd::request(&a), serde_json::json!({}));
+        let Ok(Cli {
+            cmd: Cmd::AdoptUpstream(a),
+            ..
+        }) = parse(&["adopt-upstream", "D-AAAAA", "core:D-BBBBB", "--view", "w"])
+        else {
+            panic!("adopt-upstream parses");
+        };
+        assert_eq!(
+            links_cmd::adopt_request(&a),
+            serde_json::json!({"old": "D-AAAAA", "adopted_as": "core:D-BBBBB", "view": "w"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::AdoptUpstream(a),
+            ..
+        }) = parse(&["adopt-upstream", "D-AAAAA", "core:D-BBBBB"])
+        else {
+            panic!("adopt-upstream parses");
+        };
+        assert_eq!(
+            links_cmd::adopt_request(&a),
+            serde_json::json!({"old": "D-AAAAA", "adopted_as": "core:D-BBBBB"})
+        );
+        assert!(matches!(
+            parse(&[
+                "new",
+                "repo-link",
+                "core",
+                "--parent",
+                "d-AAAAA",
+                "--repo",
+                "ab",
+                "--profile",
+                "pf-AAAAA"
+            ]),
+            Ok(Cli {
+                cmd: Cmd::New {
+                    what: edit_cmd::NewCmd::RepoLink { .. }
+                },
+                ..
+            })
+        ));
+        // each of the three needs its arguments, and none has a Later, a take or an export
+        for bad in [
+            vec!["links", "show"],
+            vec!["links", "bogus"],
+            vec!["links", "--later"],
+            vec!["links", "take"],
+            vec!["links", "export"],
+            vec!["links", "revoke"],
+            vec!["adopt-upstream"],
+            vec!["adopt-upstream", "D-AAAAA"],
+            vec!["adopt-upstream", "D-AAAAA", "core:D-BBBBB", "--later"],
+            vec!["new", "repo-link", "core"],
+            vec![
+                "new",
+                "repo-link",
+                "core",
+                "--parent",
+                "d-AAAAA",
+                "--repo",
+                "ab",
+            ],
+            vec!["take-delivery"],
+        ] {
+            let e = parse(&bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} parses"));
+            assert_eq!(e.exit_code(), 2, "{bad:?}");
+        }
+    }
 
     /// PRE task 2: machine-read versions stay plain; only the human `--version` output carries
     /// the preview mark.

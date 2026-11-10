@@ -3,7 +3,7 @@
 //! landing starts a chain that the landings' `prev` links follow. The tags' divergent histories
 //! are checked one chain at a time, never against canon or the global change -> landing index.
 //!
-//! The check reads every object a tag reaches through its object links (`object_refs::refs_of`),
+//! The check reads every object a tag reaches through its object links (`portable_refs_of`),
 //! once per `ObjectKey`: snapshot versions, change dependencies, proposal, approval and relay
 //! links, blob manifests and chunks. Each object it reads is checked by its own rules too: every
 //! landing it reaches, by any link, keeps the relay and evidence rules (the project's own rule);
@@ -18,6 +18,8 @@
 //! read with the tags' objects too: a twin's tag kept beside the version that names the same
 //! landing. There is no pack validation: a holder has no pack.
 //!
+//! A holder holds no FOREIGN entry (repo links, D-FK58A): a foreign log belongs to a project.
+//!
 //! Every walk is iterative and bounded: [`MAX_LANDING_DEPTH`] landings in one chain,
 //! [`MAX_OBJECTS`] objects and [`MAX_EDGES`] object links. Past a bound the check refuses with
 //! `holder check exceeds {limit}` ([`holder_check_limit`] reads the limit back).
@@ -29,7 +31,7 @@ use crate::holder::{
 };
 use crate::index::hash_from;
 use crate::kinds;
-use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
+use crate::object_refs::{ObjectKey, PORTABLE_KINDS, portable_refs_of};
 use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -148,7 +150,8 @@ impl<'a> Closure<'a> {
                 Err(StoreError::Redacted { .. }) => continue,
                 Err(e) => return Err(e),
             };
-            let refs = refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
+            let refs =
+                portable_refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
             let mut children = Vec::with_capacity(refs.len());
             for r in refs {
                 self.edges += 1;
@@ -459,6 +462,8 @@ impl StoreReader {
         }
         // the holder rule first: the mode's history and the closed ref families
         self.check_meta()?;
+        // a holder keeps tag histories, never a foreign log (D-FK58A)
+        self.check_no_foreign()?;
         let relayed_tags = self.check_answer_tags()?;
         let tags = self.holder_tags()?;
         let mut closure = Closure::new(self, limits);
@@ -514,7 +519,21 @@ impl StoreReader {
             inboxes: 0,
             transitions: 0,
             answers,
+            foreign: 0,
         })
+    }
+
+    /// A holder holds no FOREIGN entry: `holder holds foreign entry {hash}` otherwise.
+    fn check_no_foreign(&self) -> Result<(), StoreError> {
+        let mut found = None;
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            found.get_or_insert(h);
+            Ok(())
+        })?;
+        match found {
+            Some(h) => Err(bad(format!("holder holds foreign entry {h}"))),
+            None => Ok(()),
+        }
     }
 
     /// O11 (ruling task-13): each `answer/tag-object:<hash>` ref names, by 64 lowercase hex

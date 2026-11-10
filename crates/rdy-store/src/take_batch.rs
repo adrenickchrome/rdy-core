@@ -66,7 +66,7 @@ use crate::dump::{ENCODED_DROPPED_LEN, Frame, encoded_dropped_payload, parse_enc
 use crate::error::StoreError;
 use crate::format::{StoreFeature, StoreFeatures};
 use crate::kinds;
-use crate::object_refs::{ObjectKey, ObjectRef, refs_of};
+use crate::object_refs::{ObjectKey, ObjectRef, portable_refs_of};
 use crate::redaction::residue_matches;
 use crate::redaction_import::{Imported, ReceiverCaps, embeds};
 use crate::redaction_io::{Authorization, for_each_seen};
@@ -629,7 +629,7 @@ fn index_files(
             match r {
                 StreamRecord::Present { ref payload, .. } => {
                     let raw = r.raw_kind();
-                    let refs = refs_of(raw, payload)
+                    let refs = portable_refs_of(raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     // the reader checked the frame splits
                     let needs = crate::codec::split(raw, payload)

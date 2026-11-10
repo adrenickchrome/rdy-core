@@ -8,7 +8,7 @@ use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, Rdy, RdyError, ReadState, events, transitions};
 use rdy_model::{Hash, Op, Tag, Verdict};
 use rdy_store::segment::Location;
-use rdy_store::transition::{Cause, Transitions};
+use rdy_store::transition::{Cause, TransitionsV1};
 use rdy_store::{StoreError, StoreReader};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
@@ -90,6 +90,7 @@ impl Rdy {
                     canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
+                    foreign: Arc::clone(&prev.foreign),
                     plan_heads: prev.plan_heads.clone(),
                     retirement_origins: Arc::clone(&prev.retirement_origins),
                     coord: OnceLock::new(),
@@ -172,7 +173,7 @@ impl Rdy {
         next: &ReadState,
         frames: &[(u8, Hash)],
         cause: Option<Cause>,
-    ) -> Result<Transitions, RdyError> {
+    ) -> Result<TransitionsV1, RdyError> {
         let logged = self.logged.as_deref();
         let computed = catch_unwind(AssertUnwindSafe(|| match logged {
             Some(base) => transitions::moves(base, next, frames, cause),
@@ -330,6 +331,12 @@ impl Rdy {
         } else {
             Arc::clone(&prev.coord_heads)
         };
+        // the foreign state: re-read for the sources whose newest entry moved, else carried
+        let foreign = if self.has_foreign_feature() {
+            crate::foreign::ForeignState::after(&prev.foreign, &self.store.reader(), seq)?
+        } else {
+            Arc::clone(&prev.foreign)
+        };
         // the plan refs: only the plan writers move them, each beside its PLAN frame, so a
         // publish whose batch holds no PLAN carries them, and one that does re-reads only the
         // refs of the views its PLAN frames name (final review F3)
@@ -350,6 +357,10 @@ impl Rdy {
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
         let tensions = match &delta {
+            // a delivery or a revocation moves the foreign state, which the tensions across
+            // projects read (repo links, D-Y49PX): the next read builds the set in full; canon's
+            // memo holds no such tension, so it stays
+            _ if !Arc::ptr_eq(&foreign, &prev.foreign) => Arc::default(),
             Delta::Seq | Delta::Tags | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => {
                 Arc::clone(&prev.tensions)
             }
@@ -594,6 +605,7 @@ impl Rdy {
             canon_step_cache: Arc::clone(&self.canon_step_cache),
             inflight_cell,
             coord_heads,
+            foreign,
             plan_heads,
             retirement_origins: Arc::clone(&prev.retirement_origins),
             coord: OnceLock::new(),
@@ -857,6 +869,11 @@ impl Rdy {
             reader.intent_heads()?.into_iter().collect(),
             reader.alt_heads()?.into_iter().collect(),
         )?);
+        let foreign = Arc::new(if self.has_foreign_feature() {
+            crate::foreign::ForeignState::read(&reader, seq, None)?
+        } else {
+            crate::foreign::ForeignState::empty(seq)
+        });
         let plan_heads = crate::plan::api::plan_heads_in(&reader)?;
         let semantic = Arc::new(SemanticState::read(&reader)?);
         let dismissals = Arc::new(reader.dismissals()?.into_iter().collect());
@@ -903,6 +920,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads,
+            foreign,
             plan_heads,
             retirement_origins: Arc::default(),
             coord: OnceLock::new(),
@@ -1006,7 +1024,7 @@ impl Rdy {
         prev: &ReadState,
         requests: &[Hash],
         recheck: Option<Cause>,
-    ) -> Result<Option<Transitions>, RdyError> {
+    ) -> Result<Option<TransitionsV1>, RdyError> {
         let preview = self.redaction_preview(requests)?;
         let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
         let Some(cause) = self.batch_cause(&frames, recheck) else {
@@ -1049,6 +1067,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            foreign: Arc::default(),
             plan_heads: Default::default(),
             retirement_origins: Arc::default(),
             coord: OnceLock::new(),

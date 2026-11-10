@@ -384,6 +384,18 @@ fn creates_cite_outside(ops: &[Op]) -> bool {
     })
 }
 
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `after` records and `before`
+/// (the same block as it stood, if any) does not: a change that retires its decision wholly, by
+/// the cited decision, though its content hash stays the same.
+pub(crate) fn newly_adopted(
+    before: Option<&Block>,
+    after: Option<&Block>,
+) -> Option<rdy_model::engine_fields::AdoptedAs> {
+    let a = rdy_model::decision::upstream_adoption(after?)?;
+    let was = before.and_then(rdy_model::decision::upstream_adoption);
+    (was.as_ref() != Some(&a)).then_some(a)
+}
+
 /// Whether `ops` create a decision that fully supersedes or revokes a block: then a block they
 /// create can keep a link to a target a pending decision replaces (O9), even when every block
 /// they cite is one they write.
@@ -451,12 +463,18 @@ enum Lineage<'r> {
 }
 
 /// The decisions that fully supersede a target, by id, and whether one revokes it (a revoke
-/// wins: the target's literals are all removed).
+/// wins: the target's literals are all removed); and the delivered successors of an upstream
+/// adoption of it (repo links, D-8VJAZ), each by its foreign id and the content and encoding the
+/// adoption records: it is read from the foreign log, never as a local block of that bare id.
 #[derive(Clone, Debug, Default)]
 struct Retired {
     revoke: bool,
     by: BTreeSet<BlockId>,
+    foreign: BTreeSet<AdoptedKey>,
 }
+
+/// An adopted successor: its foreign id and its recorded pin's content and encoding.
+type AdoptedKey = (rdy_model::foreign::ForeignId, Hash, u16);
 
 /// The lineage events of decisions: the targets each fully supersedes or revokes, and the
 /// targets each refines or part-supersedes.
@@ -632,7 +650,7 @@ type BaseState = (Arc<Materialized>, Arc<Graph>);
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LiteralsKey {
     Ordinary,
-    Retired(bool, BTreeSet<BlockId>),
+    Retired(bool, BTreeSet<BlockId>, BTreeSet<AdoptedKey>),
     Partial,
 }
 
@@ -819,7 +837,7 @@ impl<'a> Compare<'a> {
         // entry) and every active one (a retained link) can differ in one reply
         let key = match lineage {
             Lineage::Ordinary => LiteralsKey::Ordinary,
-            Lineage::Retired(r) => LiteralsKey::Retired(r.revoke, r.by.clone()),
+            Lineage::Retired(r) => LiteralsKey::Retired(r.revoke, r.by.clone(), r.foreign.clone()),
             Lineage::Partial => LiteralsKey::Partial,
         };
         let key = (x.clone(), key);
@@ -833,7 +851,12 @@ impl<'a> Compare<'a> {
                 None => LiteralSet::default(),
                 Some(old) if r.revoke => changed_literals(pack, old, None, names, names, true),
                 Some(old) => {
-                    let news: Vec<&Block> = r.by.iter().filter_map(|b| self.m.get(b)).collect();
+                    let adopted = self.adopted_successors(&r.foreign)?;
+                    let news: Vec<&Block> =
+                        r.by.iter()
+                            .filter_map(|b| self.m.get(b))
+                            .chain(&adopted)
+                            .collect();
                     changed_many(pack, old, &news, names, names, true)
                 }
             },
@@ -873,6 +896,23 @@ impl<'a> Compare<'a> {
         };
         self.cache.borrow_mut().insert(key, set.clone());
         Ok(set)
+    }
+
+    /// The delivered successors `keys` name (repo links, D-8VJAZ): each the held BLOCK version
+    /// that carried the recorded content, from the foreign log. A successor no entry holds gives
+    /// nothing, as a local replacement that is gone does.
+    fn adopted_successors(&self, keys: &BTreeSet<AdoptedKey>) -> Result<Vec<Block>, RdyError> {
+        let mut out = vec![];
+        for (target, content, encoding) in keys {
+            let pin = rdy_model::foreign::ForeignPin {
+                content: *content,
+                encoding: *encoding,
+            };
+            if let Some(version) = self.st.foreign_held_pin(target, &pin)? {
+                out.push(self.st.reader().get_block(&version)?);
+            }
+        }
+        Ok(out)
     }
 
     /// The follow-up of `block` (as `src`) on target `x` (D-CFC6V): a decision's by its status
@@ -1412,7 +1452,19 @@ impl ReadState {
                 }
             }
         }
-        let events = Events::of_blocks(touched.iter().filter_map(|id| fin.m.get(id)), reach);
+        let mut events = Events::of_blocks(touched.iter().filter_map(|id| fin.m.get(id)), reach);
+        // repo links: an upstream adoption the version records retires its decision wholly, by
+        // the delivered successor it records (its foreign id and pin, never its bare id)
+        for id in touched {
+            if let Some(a) = newly_adopted(base.m.get(id), fin.m.get(id)) {
+                events
+                    .retired
+                    .entry(id.clone())
+                    .or_default()
+                    .foreign
+                    .insert((a.target, a.pin.content, a.pin.encoding));
+            }
+        }
         let cmp = Compare::new(
             self,
             &fin.m,

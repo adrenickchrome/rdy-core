@@ -317,6 +317,16 @@ fn status_text(v: &Value) -> String {
     if caught_up > 0 {
         out.push_str(&format!("\nopen: caught up {caught_up} frames"));
     }
+    // repo links: one line per live link; the delivered repos no link names are one count
+    for row in v["links"]["links"].as_array().into_iter().flatten() {
+        out.push_str(&format!("\n{}", crate::links_cmd::status_line(row)));
+    }
+    let unlinked = num(&v["links"]["unlinked"]);
+    if unlinked > 0 {
+        out.push_str(&format!(
+            "\n{unlinked} delivered repos have no repo link (rdy links)"
+        ));
+    }
     out.push_str(&warning_lines_with_targets(
         &v["warnings"],
         &v["redaction_warnings"],
@@ -343,6 +353,10 @@ fn warning_lines_with_targets(warnings: &Value, carried: &Value) -> String {
 }
 
 fn show_text(v: &Value) -> String {
+    // repo links: a block cited from a linked project reads as its text, read-only
+    if v["cited"] == true {
+        return text(&v["text"]).to_string();
+    }
     if v["landing"].is_object() {
         // dq7: a landing's row, then its change list
         return format!(

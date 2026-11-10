@@ -23,6 +23,13 @@ pub const E_VIEW_OWNER: &str = "E_VIEW_OWNER";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";
 pub const E_VALIDATION: &str = "E_VALIDATION";
 pub const E_UNKNOWN_REF: &str = "E_UNKNOWN_REF";
+/// A foreign pin names a version no delivery before the read state holds (repo links).
+pub const E_FOREIGN_VERSION: &str = "E_FOREIGN_VERSION";
+/// A write changes a cited block or an external decision (repo links, D-8VJAZ).
+pub const E_FOREIGN_READ_ONLY: &str = "E_FOREIGN_READ_ONLY";
+/// A decision departs from, or an adoption locks, an instruction an organization or team set
+/// locks (repo links, D-8VJAZ).
+pub const E_INSTRUCTION_LOCKED: &str = "E_INSTRUCTION_LOCKED";
 pub const E_UNKNOWN_BLOCK: &str = "E_UNKNOWN_BLOCK";
 pub const E_ALREADY_EXISTS: &str = "E_ALREADY_EXISTS";
 pub const E_STALE_BASE: &str = "E_STALE_BASE";
@@ -1105,7 +1112,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 113] = [
+const CORE_ERROR_CODES: [&str; 116] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1118,6 +1125,9 @@ const CORE_ERROR_CODES: [&str; 113] = [
     E_BAD_INPUT,
     E_VALIDATION,
     E_UNKNOWN_REF,
+    E_FOREIGN_VERSION,
+    E_FOREIGN_READ_ONLY,
+    E_INSTRUCTION_LOCKED,
     E_UNKNOWN_BLOCK,
     E_ALREADY_EXISTS,
     E_STALE_BASE,

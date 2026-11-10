@@ -282,6 +282,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                foreign: Default::default(),
                 read_identity: None,
             },
         })

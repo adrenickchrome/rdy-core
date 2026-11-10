@@ -2,7 +2,9 @@
 //! open view, one new change per source change, in one view op. A replay brings none of its
 //! sources' other dependencies. Each op keeps its source base: a base the target does not hold
 //! is a recorded conflict, unless the replayed result equals the target's version, which the op
-//! then already satisfies. Undo of the one `Include` removes the whole replay.
+//! then already satisfies. Every foreign pin the sources hold must name content that a delivery
+//! of this store carried (`ReadState::check_carried_pins`, `E_FOREIGN_VERSION`). Undo of the one
+//! `Include` removes the whole replay.
 use super::{
     Action, ConflictInfo, check_view_op, conflict_infos, no_view, owner_of, parse_change, strings,
 };
@@ -255,7 +257,9 @@ impl Rdy {
     /// and another result) is a recorded conflict. A block the call creates or moves under a
     /// parent needs that parent clean once the whole call is applied: held by the target, or
     /// created by a selected source whose replay is clean (ruling task-7 item 1, as include's
-    /// parent rule counts every id the call creates). Nothing is written when any check fails.
+    /// parent rule counts every id the call creates). Every foreign pin of a source must be held
+    /// here (`E_FOREIGN_VERSION`, before the order is read). Nothing is written when any check
+    /// fails.
     pub fn view_replay(
         &mut self,
         s: &Session,
@@ -323,6 +327,12 @@ impl Rdy {
                 .ok_or_else(limit)?;
             sources.push((*c, change));
         }
+        // the foreign pins of every source, before anything is ordered or written: a source
+        // another path carried here cannot bring a pin whose delivery this store lacks
+        st.check_carried_pins(
+            &Scope::View(view.to_string()),
+            sources.iter().map(|(_, c)| c),
+        )?;
         // 4. the order: the graph the selected sources induce. A source that puts a block under a
         // parent another selected source creates also follows that source, so the child's
         // replay can depend on the parent's; when those extra edges would make a cycle, the

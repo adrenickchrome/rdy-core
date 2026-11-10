@@ -350,6 +350,7 @@ fn pub12_implicit_references_count_missing_targets_only() {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     // `d-ANCH0` refers to `d-0THER`, which is in the source (and so selected), and to
@@ -491,6 +492,7 @@ fn blk(id: &str, ty: &str, parent: Option<&str>, name: &str) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

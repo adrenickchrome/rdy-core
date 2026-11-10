@@ -44,7 +44,7 @@ pub struct AnswerParams {
     /// The item ref, as rdy_pending gives it. Leave out with all_recommended.
     pub r#ref: Option<String>,
     /// The id of the option the person chose, as the card lists it (`approve`, `reject`,
-    /// `confirm`, `later`, `o1`, ...). Leave out with all_recommended.
+    /// `confirm`, `adopt`, `keep`, `later`, `o1`, ...). Leave out with all_recommended.
     pub option: Option<String>,
     /// The card_hash rdy_pending gave with the card the person was shown. A card that changed
     /// since is refused, with the fresh card in corrected.

@@ -532,6 +532,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let change = Change {
@@ -792,6 +793,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     a.store_mut()
@@ -878,6 +880,7 @@ fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     r.store_mut()

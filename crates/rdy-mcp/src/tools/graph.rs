@@ -14,6 +14,19 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
+    // repo links: `<alias>:<id>` is a block cited from a linked project. It has no local
+    // neighbourhood or history: the context is its read-only text with its provenance.
+    if rdy_model::reference::foreign_ref(p.id.trim()).is_some() {
+        let read =
+            rdy_engine::tool_reads::read_entries(&st_, &p.id, &st.view, &p.scope, "compact", None)?;
+        let v = json!({
+            "id": p.id.trim(),
+            "cited": true,
+            "read_only": true,
+            "text": read.entries.join(read.sep),
+        });
+        return Ok(budget(v, p.max_tokens));
+    }
     let (scope, id) = read_target(&st.view, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
     let mut v = serde_json::to_value(ctx).expect("context json");

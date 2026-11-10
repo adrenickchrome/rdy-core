@@ -27,6 +27,19 @@
 //! body decodes through its frozen type (`rdy_model::encoding::Legacy*V0`), never directly into
 //! the larger current struct, and converts with the new options absent.
 //!
+//! Repo links (D-FK58A, store feature `foreign_copy`) register FOREIGN at encoding 1 and an
+//! optional encoding for eight kinds ([`OPTIONAL`]). The writer chooses by value, never by kind
+//! alone: a value takes its kind's optional encoding only when it holds a shape the latest
+//! encoding has no form for (a block with a foreign part, a change that embeds one, a delivered
+//! transition or a foreign side or target, a foreign pair side, a repo-links answer act, a
+//! foreign assessment part or a deviation exception, a `foreign_version` target), and its kind's
+//! latest encoding otherwise, so every local value keeps its bytes and its hash. A reader holds
+//! each frame to the same choice: an optional-encoding frame without such a shape, or a
+//! latest-encoding frame with one, does not decode. A runtime type reads an optional-encoding
+//! frame only when it can hold its shape; the registered wire types (`ReviewV1`,
+//! `SemanticTensionV1`, `AssessmentV2`, `crate::transition::TransitionsV1`) read every encoding
+//! of their kind.
+//!
 //! A typed read of a CHANGE or a LANDING keeps the identity of its frame
 //! (`Change::read_identity`, `LandingRecord::read_identity`). [`encode`] writes such a stored read
 //! in its own encoding and refuses it when its bytes do not hash to the identity: a caller that
@@ -34,11 +47,20 @@
 use crate::bounded::{self, RecordError};
 use crate::error::StoreError;
 use crate::kinds;
+use crate::transition::{Transitions, TransitionsV1};
+use rdy_model::assessment::{Assessment, AssessmentV2};
 use rdy_model::encoding::{
-    EncodedIdentity, LegacyChangeV0, LegacyLandingV0, LegacyRedactionResidueV0, encoded_hash,
+    ANSWER_FOREIGN_ENCODING, ASSESSMENT_FOREIGN_ENCODING, BLOCK_FOREIGN_ENCODING,
+    CHANGE_FOREIGN_ENCODING, EncodedIdentity, ForeignBlockV1, ForeignChangeV2, LegacyChangeV0,
+    LegacyLandingV0, LegacyRedactionResidueV0, PAIR_FOREIGN_ENCODING, REDACTION_FOREIGN_ENCODING,
+    TRANSITION_FOREIGN_ENCODING, encoded_hash,
 };
-use rdy_model::redaction::RedactionResidue;
-use rdy_model::{Change, ChangeReadIdentity, Hash, LandingRecord};
+use rdy_model::redaction::{Redaction, RedactionResidue};
+use rdy_model::review::ReviewV1;
+use rdy_model::semantic::SemanticTensionV1;
+use rdy_model::{
+    Answer, Block, Change, ChangeReadIdentity, Hash, LandingRecord, Review, SemanticTension,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::any::{Any, TypeId};
@@ -51,13 +73,20 @@ pub const IDENTITY_MISMATCH: &str = "stored record identity does not match its b
 /// The bit a versioned frame's raw kind sets.
 pub const VERSIONED: u8 = 0x80;
 
-/// Checks, before a writer appends it, that the frame of `value` at `kind`'s latest encoding fits
-/// one record: from version 1 on, the two-byte version prefix counts with the body against
-/// [`bounded::MAX_RECORD_BYTES`], as a stream and a dump bound the frame. The length is counted
-/// without building the encoding.
-pub fn fits_latest<T: Serialize + ?Sized>(kind: u8, value: &T) -> Result<(), RecordError> {
-    let prefix = if latest(kind) == 0 { 0 } else { 2 };
-    let len = postcard::experimental::serialized_size(value).map_err(|_| RecordError::Decode)?;
+/// Checks, before a writer appends it, that the frame of `value` in the encoding the writer
+/// chooses for it ([`encode_new`]) fits one record: from version 1 on, the two-byte version
+/// prefix counts with the body against [`bounded::MAX_RECORD_BYTES`], as a stream and a dump
+/// bound the frame. A value in its kind's latest encoding is counted without building the
+/// encoding.
+pub fn fits_latest<T: Serialize + 'static>(kind: u8, value: &T) -> Result<(), RecordError> {
+    let (version, len) = match shaped_body(kind, value) {
+        Some((version, body)) => (version, body.len()),
+        None => (
+            latest(kind),
+            postcard::experimental::serialized_size(value).map_err(|_| RecordError::Decode)?,
+        ),
+    };
+    let prefix = if version == 0 { 0 } else { 2 };
     bounded::record_len(len.saturating_add(prefix))
 }
 
@@ -137,13 +166,44 @@ pub const REGISTERED: &[(u8, u16)] = &[
     (kinds::DISPUTE, 1),
     (kinds::DISPUTE_RESOLUTION, 1),
     (kinds::CHECK_REQUEST, 1),
+    (kinds::FOREIGN, 1),
 ];
+
+/// The optional encodings repo links register (D-FK58A, store feature `foreign_copy`): (logical
+/// kind, version). A value takes one only when it holds a shape its kind's latest encoding has
+/// no form for; every other value keeps its kind's latest encoding ([`latest`]). A frame of one
+/// needs `foreign_copy` (`crate::format::required_features`).
+pub const OPTIONAL: &[(u8, u16)] = &[
+    (kinds::BLOCK, BLOCK_FOREIGN_ENCODING),
+    (kinds::CHANGE, CHANGE_FOREIGN_ENCODING),
+    (kinds::REVIEW, PAIR_FOREIGN_ENCODING),
+    (kinds::TENSION, PAIR_FOREIGN_ENCODING),
+    (kinds::TRANSITION, TRANSITION_FOREIGN_ENCODING),
+    (kinds::ANSWER, ANSWER_FOREIGN_ENCODING),
+    (kinds::REDACTION, REDACTION_FOREIGN_ENCODING),
+    (kinds::ASSESSMENT, ASSESSMENT_FOREIGN_ENCODING),
+];
+
+/// The optional encoding of logical kind `kind` ([`OPTIONAL`]), if it has one.
+pub fn optional(kind: u8) -> Option<u16> {
+    OPTIONAL.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
+}
+
+/// The newest encoding of logical kind `kind` that this rdy reads: its latest encoding or its
+/// optional one, whichever is higher. A frame of a higher version is an unknown encoding.
+pub fn newest(kind: u8) -> u16 {
+    latest(kind).max(optional(kind).unwrap_or(0))
+}
 
 /// The first encoding of logical kind `kind`: 1 for a kind registered after encodings existed
 /// (it has no encoding 0), else 0.
 pub fn first(kind: u8) -> u16 {
     match kind {
-        kinds::ASSESSMENT | kinds::DISPUTE | kinds::DISPUTE_RESOLUTION | kinds::CHECK_REQUEST => 1,
+        kinds::ASSESSMENT
+        | kinds::DISPUTE
+        | kinds::DISPUTE_RESOLUTION
+        | kinds::CHECK_REQUEST
+        | kinds::FOREIGN => 1,
         _ => 0,
     }
 }
@@ -153,8 +213,10 @@ thread_local! {
     static TEST_ENCODINGS: RefCell<Vec<(u8, u16)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The latest encoding of logical kind `kind`: what every new object of it is written in. It is
-/// the kind's [`REGISTERED`] version, else 0 (or a higher test-registered one on this thread).
+/// The latest encoding of logical kind `kind`: what every new object of it is written in, unless
+/// the object holds a shape that only the kind's optional encoding has a form for
+/// ([`OPTIONAL`]). It is the kind's [`REGISTERED`] version, else 0 (or a higher test-registered
+/// one on this thread).
 pub fn latest(kind: u8) -> u16 {
     let registered = REGISTERED
         .iter()
@@ -171,9 +233,22 @@ pub fn latest(kind: u8) -> u16 {
     })
 }
 
+/// Whether `version` of logical kind `kind` is one only a test hook registers on this thread
+/// ([`test_encoding`]): it decodes as encoding 0 does.
+fn is_test_version(kind: u8, version: u16) -> bool {
+    let registered = REGISTERED
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, v)| *v)
+        .max()
+        .unwrap_or(0);
+    version > registered && version <= latest(kind)
+}
+
 /// Splits a stored frame: an unmarked raw kind is encoding 0 and its whole payload; a marked one
 /// needs its two version bytes (`Decode`), a nonzero version (`NoncanonicalVersion`) that its
-/// kind registers (`UnknownVersion`), and a kind that may be versioned (`Kind`).
+/// kind registers, latest or optional (`UnknownVersion`), and a kind that may be versioned
+/// (`Kind`).
 pub fn split(kind: u8, payload: &[u8]) -> Result<ObjectBytes<'_>, RecordError> {
     if kind & VERSIONED == 0 {
         if first(kind) > 0 {
@@ -196,7 +271,7 @@ pub fn split(kind: u8, payload: &[u8]) -> Result<ObjectBytes<'_>, RecordError> {
     if version == 0 {
         return Err(RecordError::NoncanonicalVersion);
     }
-    if version > latest(logical) {
+    if version > newest(logical) {
         return Err(RecordError::UnknownVersion);
     }
     Ok(ObjectBytes {
@@ -222,7 +297,7 @@ pub fn frame(kind: u8, version: u16, body: Vec<u8>) -> Result<(u8, Vec<u8>), Rec
     if never_versioned(kind) {
         return Err(RecordError::Kind);
     }
-    if version > latest(kind) {
+    if version > newest(kind) {
         return Err(RecordError::UnknownVersion);
     }
     let mut payload = Vec::with_capacity(2 + body.len());
@@ -255,13 +330,174 @@ fn mismatch() -> StoreError {
     StoreError::Refused(IDENTITY_MISMATCH.into())
 }
 
-/// The body of change `c` in encoding `version`: the frozen encoding-0 shape, or the current.
+/// The body of change `c` in encoding `version`: the frozen encoding-0 shape, the current
+/// shape (encoding 1, a change that embeds no foreign block), or the foreign shape (encoding 2,
+/// a change that embeds one). A change with no form in `version` is the mismatch refusal.
 fn change_body(c: &Change, version: u16) -> Result<Vec<u8>, StoreError> {
     match version {
         0 => Ok(postcard_of(
             &LegacyChangeV0::from_current(c).ok_or_else(mismatch)?,
         )),
+        CHANGE_FOREIGN_ENCODING if c.embeds_foreign() => Ok(postcard_of(&ForeignChangeV2::of(c))),
+        CHANGE_FOREIGN_ENCODING => Err(mismatch()),
+        _ if c.embeds_foreign() => Err(mismatch()),
         _ => Ok(postcard_of(c)),
+    }
+}
+
+/// The encoding and body of a new `value` whose body is not its own postcard encoding in its
+/// kind's latest encoding: a value with a shape that needs its kind's optional encoding
+/// ([`OPTIONAL`]), or a registered wire value with no such shape, written in its runtime form.
+/// None for every other value.
+fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<u8>)> {
+    let any: &dyn Any = value;
+    let local = latest(kind);
+    if let Some(b) = any.downcast_ref::<Block>() {
+        return (!b.foreign.is_empty())
+            .then(|| (BLOCK_FOREIGN_ENCODING, postcard_of(&ForeignBlockV1::of(b))));
+    }
+    if let Some(c) = as_change(any) {
+        return c.embeds_foreign().then(|| {
+            (
+                CHANGE_FOREIGN_ENCODING,
+                postcard_of(&ForeignChangeV2::of(c)),
+            )
+        });
+    }
+    if let Some(a) = any.downcast_ref::<Answer>() {
+        return a
+            .act
+            .is_foreign()
+            .then(|| (ANSWER_FOREIGN_ENCODING, postcard_of(a)));
+    }
+    if let Some(r) = any.downcast_ref::<Redaction>() {
+        return (r.encoding() == REDACTION_FOREIGN_ENCODING)
+            .then(|| (REDACTION_FOREIGN_ENCODING, postcard_of(r)));
+    }
+    if let Some(a) = any.downcast_ref::<Assessment>() {
+        return a.has_foreign_shape().then(|| {
+            (
+                ASSESSMENT_FOREIGN_ENCODING,
+                postcard_of(&AssessmentV2::of(a)),
+            )
+        });
+    }
+    if let Some(t) = any.downcast_ref::<Transitions>() {
+        return t.has_foreign().then(|| {
+            (
+                TRANSITION_FOREIGN_ENCODING,
+                postcard_of(&TransitionsV1::of(t)),
+            )
+        });
+    }
+    if let Some(w) = any.downcast_ref::<TransitionsV1>() {
+        return Some(match w.has_foreign() {
+            true => (TRANSITION_FOREIGN_ENCODING, postcard_of(w)),
+            false => (local, postcard_of(&w.clone().into_local()?)),
+        });
+    }
+    if let Some(w) = any.downcast_ref::<ReviewV1>() {
+        return Some(match w.has_foreign() {
+            true => (PAIR_FOREIGN_ENCODING, postcard_of(w)),
+            false => (local, postcard_of(&w.clone().into_local()?)),
+        });
+    }
+    if let Some(w) = any.downcast_ref::<SemanticTensionV1>() {
+        return Some(match w.has_foreign() {
+            true => (PAIR_FOREIGN_ENCODING, postcard_of(w)),
+            false => (local, postcard_of(&w.clone().into_local()?)),
+        });
+    }
+    if let Some(w) = any.downcast_ref::<AssessmentV2>() {
+        return Some(match w.has_foreign() {
+            true => (ASSESSMENT_FOREIGN_ENCODING, postcard_of(w)),
+            false => (local, postcard_of(&w.clone().into_local()?)),
+        });
+    }
+    None
+}
+
+/// Whether `body`, of a frame of logical kind `kind` and encoding `version`, is the body the
+/// writer writes for `value` ([`shaped_body`], else its kind's latest encoding): None for a type
+/// that has no optional encoding.
+fn shaped_canonical(kind: u8, version: u16, body: &[u8], any: &dyn Any) -> Option<bool> {
+    let local = latest(kind);
+    let local_form = |v: &dyn erased::Encode| version == local && v.encodes_as(body);
+    let shaped =
+        |form: Option<(u16, Vec<u8>)>| form.is_some_and(|(v, b)| v == version && b == body);
+    if let Some(b) = any.downcast_ref::<Block>() {
+        return Some(match b.foreign.is_empty() {
+            true => local_form(b),
+            false => shaped(shaped_body(kind, b)),
+        });
+    }
+    if let Some(a) = any.downcast_ref::<Answer>() {
+        return Some(match a.act.is_foreign() {
+            true => version == ANSWER_FOREIGN_ENCODING && bounded::encodes_as(a, body),
+            false => local_form(a),
+        });
+    }
+    if let Some(r) = any.downcast_ref::<Redaction>() {
+        return Some(match r.encoding() == REDACTION_FOREIGN_ENCODING {
+            true => version == REDACTION_FOREIGN_ENCODING && bounded::encodes_as(r, body),
+            false => local_form(r),
+        });
+    }
+    if let Some(t) = any.downcast_ref::<Transitions>() {
+        return Some(match t.has_foreign() {
+            true => shaped(shaped_body(kind, t)),
+            false => local_form(t),
+        });
+    }
+    if let Some(r) = any.downcast_ref::<Review>() {
+        return Some(local_form(r));
+    }
+    if let Some(t) = any.downcast_ref::<SemanticTension>() {
+        return Some(local_form(t));
+    }
+    if let Some(a) = any.downcast_ref::<Assessment>() {
+        return Some(match a.has_foreign_shape() {
+            true => shaped(shaped_body(kind, a)),
+            false => local_form(a),
+        });
+    }
+    if any.is::<TransitionsV1>()
+        || any.is::<ReviewV1>()
+        || any.is::<SemanticTensionV1>()
+        || any.is::<AssessmentV2>()
+    {
+        return Some(shaped(wire_body(kind, any)));
+    }
+    None
+}
+
+/// [`shaped_body`] of a registered wire value behind `any`.
+fn wire_body(kind: u8, any: &dyn Any) -> Option<(u16, Vec<u8>)> {
+    if let Some(w) = any.downcast_ref::<TransitionsV1>() {
+        return shaped_body(kind, w);
+    }
+    if let Some(w) = any.downcast_ref::<ReviewV1>() {
+        return shaped_body(kind, w);
+    }
+    if let Some(w) = any.downcast_ref::<SemanticTensionV1>() {
+        return shaped_body(kind, w);
+    }
+    if let Some(w) = any.downcast_ref::<AssessmentV2>() {
+        return shaped_body(kind, w);
+    }
+    None
+}
+
+/// A value whose postcard encoding can be compared with bytes without building it.
+mod erased {
+    pub(super) trait Encode {
+        fn encodes_as(&self, bytes: &[u8]) -> bool;
+    }
+
+    impl<T: serde::Serialize> Encode for T {
+        fn encodes_as(&self, bytes: &[u8]) -> bool {
+            crate::bounded::encodes_as(self, bytes)
+        }
     }
 }
 
@@ -322,13 +558,14 @@ pub fn encode<T: Serialize + 'static>(kind: u8, value: &T) -> Result<EncodedObje
     Ok(encode_new(kind, value))
 }
 
-/// `value` as a new object of logical kind `kind`, in that kind's latest encoding, its read
-/// identity (if any) ignored. For a kind whose values have none: every kind but CHANGE and
-/// LANDING, whose writers use [`encode`].
-pub fn encode_new<T: Serialize + ?Sized>(kind: u8, value: &T) -> EncodedObject {
-    let body = postcard_of(value);
-    let version = latest(kind);
-    let (_, payload) = frame(kind, version, body).expect("the latest encoding of a kind frames");
+/// `value` as a new object of logical kind `kind`, its read identity (if any) ignored: in its
+/// kind's optional encoding when it holds a shape only that encoding has a form for
+/// ([`OPTIONAL`]), else in its kind's latest encoding. For a kind whose values have no read
+/// identity: every kind but CHANGE and LANDING, whose writers use [`encode`].
+pub fn encode_new<T: Serialize + 'static>(kind: u8, value: &T) -> EncodedObject {
+    let (version, body) =
+        shaped_body(kind, value).unwrap_or_else(|| (latest(kind), postcard_of(value)));
+    let (_, payload) = frame(kind, version, body).expect("the chosen encoding of a kind frames");
     EncodedObject {
         kind,
         version,
@@ -337,7 +574,7 @@ pub fn encode_new<T: Serialize + ?Sized>(kind: u8, value: &T) -> EncodedObject {
 }
 
 /// [`encode_new`]'s `(raw kind, payload)` item.
-pub fn item_new<T: Serialize + ?Sized>(kind: u8, value: &T) -> (u8, Vec<u8>) {
+pub fn item_new<T: Serialize + 'static>(kind: u8, value: &T) -> (u8, Vec<u8>) {
     encode_new(kind, value).into_item()
 }
 
@@ -383,9 +620,18 @@ fn dispatches(kind: u8, t: TypeId) -> bool {
         DISPUTE => &[TypeId::of::<rdy_model::dispute::Dispute>()],
         DISPUTE_RESOLUTION => &[TypeId::of::<rdy_model::dispute::DisputeResolution>()],
         CHECK_REQUEST => &[TypeId::of::<rdy_model::check_request::CheckRequest>()],
+        FOREIGN => &[TypeId::of::<rdy_model::foreign::ForeignEntry>()],
         _ => &[],
     };
-    want.contains(&t)
+    // the registered wire types read every encoding of their kind
+    let wire: &[TypeId] = match kind {
+        REVIEW => &[TypeId::of::<ReviewV1>()],
+        TENSION => &[TypeId::of::<SemanticTensionV1>()],
+        TRANSITION => &[TypeId::of::<TransitionsV1>()],
+        ASSESSMENT => &[TypeId::of::<AssessmentV2>()],
+        _ => &[],
+    };
+    want.contains(&t) || wire.contains(&t)
 }
 
 /// The name of logical kind `kind`, as this module names kinds (`kinds::TAG` is `TAG`), or its
@@ -420,6 +666,7 @@ fn kind_name(kind: u8) -> String {
         DISPUTE => "DISPUTE",
         DISPUTE_RESOLUTION => "DISPUTE_RESOLUTION",
         CHECK_REQUEST => "CHECK_REQUEST",
+        FOREIGN => "FOREIGN",
         _ => return kind.to_string(),
     };
     name.to_string()
@@ -540,6 +787,15 @@ fn body_of<T: DeserializeOwned + 'static>(
                 reader
                     .read::<LegacyChangeV0>(o.body)?
                     .into_current(identity())
+            } else if version == CHANGE_FOREIGN_ENCODING {
+                // encoding 2 embeds a foreign block; a change that embeds none is encoding 1
+                let c = reader
+                    .read::<ForeignChangeV2>(o.body)?
+                    .into_current(identity());
+                if !c.embeds_foreign() {
+                    return Err(BodyError::Record(RecordError::Decode));
+                }
+                c
             } else {
                 let mut c: Change = reader.read(o.body)?;
                 c.read_identity = Some(ChangeReadIdentity::Stored(identity()));
@@ -565,8 +821,134 @@ fn body_of<T: DeserializeOwned + 'static>(
                 .into_current(),
         )
         .ok_or(wrong),
+        (kinds::BLOCK, _) => shaped::<Block, ForeignBlockV1, T>(
+            o,
+            reader,
+            Shape {
+                optional: BLOCK_FOREIGN_ENCODING,
+                wire_foreign: |w| !w.foreign.is_empty(),
+                local_foreign: |_| false,
+                of: ForeignBlockV1::of,
+                into_local: |w| Some(w.into_current()),
+            },
+        ),
+        (kinds::ANSWER, _) => shaped::<Answer, Answer, T>(
+            o,
+            reader,
+            Shape {
+                optional: ANSWER_FOREIGN_ENCODING,
+                wire_foreign: |a| a.act.is_foreign(),
+                local_foreign: |a| a.act.is_foreign(),
+                of: Answer::clone,
+                into_local: Some,
+            },
+        ),
+        (kinds::REDACTION, _) => shaped::<Redaction, Redaction, T>(
+            o,
+            reader,
+            Shape {
+                optional: REDACTION_FOREIGN_ENCODING,
+                wire_foreign: |r| r.encoding() == REDACTION_FOREIGN_ENCODING,
+                local_foreign: |r| r.encoding() == REDACTION_FOREIGN_ENCODING,
+                of: Redaction::clone,
+                into_local: Some,
+            },
+        ),
+        (kinds::TRANSITION, _) => shaped::<Transitions, TransitionsV1, T>(
+            o,
+            reader,
+            Shape {
+                optional: TRANSITION_FOREIGN_ENCODING,
+                wire_foreign: TransitionsV1::has_foreign,
+                local_foreign: Transitions::has_foreign,
+                of: TransitionsV1::of,
+                into_local: TransitionsV1::into_local,
+            },
+        ),
+        (kinds::REVIEW, _) => shaped::<Review, ReviewV1, T>(
+            o,
+            reader,
+            Shape {
+                optional: PAIR_FOREIGN_ENCODING,
+                wire_foreign: ReviewV1::has_foreign,
+                local_foreign: |_| false,
+                of: ReviewV1::of,
+                into_local: ReviewV1::into_local,
+            },
+        ),
+        (kinds::TENSION, _) => shaped::<SemanticTension, SemanticTensionV1, T>(
+            o,
+            reader,
+            Shape {
+                optional: PAIR_FOREIGN_ENCODING,
+                wire_foreign: SemanticTensionV1::has_foreign,
+                local_foreign: |_| false,
+                of: SemanticTensionV1::of,
+                into_local: SemanticTensionV1::into_local,
+            },
+        ),
+        (kinds::ASSESSMENT, _) => shaped::<Assessment, AssessmentV2, T>(
+            o,
+            reader,
+            Shape {
+                optional: ASSESSMENT_FOREIGN_ENCODING,
+                wire_foreign: AssessmentV2::has_foreign,
+                local_foreign: Assessment::has_foreign_shape,
+                of: AssessmentV2::of,
+                into_local: AssessmentV2::into_local,
+            },
+        ),
         _ => reader.read(o.body),
     }
+}
+
+/// How a kind with an optional encoding reads: `L` is its runtime type, `W` the layout of its
+/// optional encoding.
+struct Shape<L, W> {
+    /// The optional encoding.
+    optional: u16,
+    /// Whether a value of the optional encoding holds a shape only that encoding has a form for.
+    wire_foreign: fn(&W) -> bool,
+    /// Whether a value of the latest encoding holds such a shape (a runtime type that has one).
+    local_foreign: fn(&L) -> bool,
+    /// The optional layout of a runtime value.
+    of: fn(&L) -> W,
+    /// The runtime value of an optional-encoding value, when the runtime type can hold it.
+    into_local: fn(W) -> Option<L>,
+}
+
+/// The body of split frame `o` of a kind with an optional encoding, as `T` (its runtime type
+/// `L` or its wire type `W`). The optional encoding reads `W` and holds a foreign shape; any
+/// other encoding of the kind reads `L` (a test-registered one as encoding 0 does) and holds
+/// none. A frame that breaks the writer's choice, or whose shape `T` cannot hold, is `Decode`.
+fn shaped<L, W, T>(o: &ObjectBytes<'_>, reader: Reader, s: Shape<L, W>) -> Result<T, BodyError>
+where
+    L: DeserializeOwned + 'static,
+    W: DeserializeOwned + 'static,
+    T: 'static,
+{
+    let refused = || BodyError::Record(RecordError::Decode);
+    let wrong = || BodyError::Record(RecordError::Kind);
+    let wants_wire =
+        TypeId::of::<T>() == TypeId::of::<W>() && TypeId::of::<W>() != TypeId::of::<L>();
+    if o.version == s.optional && !is_test_version(o.kind, o.version) {
+        let w: W = reader.read(o.body)?;
+        if !(s.wire_foreign)(&w) {
+            return Err(refused());
+        }
+        if wants_wire {
+            return cast(w).ok_or_else(wrong);
+        }
+        return cast((s.into_local)(w).ok_or_else(refused)?).ok_or_else(wrong);
+    }
+    let l: L = reader.read(o.body)?;
+    if (s.local_foreign)(&l) && !is_test_version(o.kind, o.version) {
+        return Err(refused());
+    }
+    if wants_wire {
+        return cast((s.of)(&l)).ok_or_else(wrong);
+    }
+    cast(l).ok_or_else(wrong)
 }
 
 /// [`decode_record`] of a split frame.
@@ -582,8 +964,9 @@ pub fn decode_split<T: DeserializeOwned + 'static>(o: &ObjectBytes<'_>) -> Resul
 }
 
 /// Whether `body`, of split frame `o`, is the canonical encoding of `value` in `o`'s encoding:
-/// the bytes a writer of that encoding writes for it. No allocation beyond the comparison for
-/// a kind with one shape.
+/// the bytes a writer of that encoding writes for it. For a kind with an optional encoding
+/// ([`OPTIONAL`]), `o`'s encoding must also be the one the writer chooses for `value`. No
+/// allocation beyond the comparison for a value in its kind's latest encoding.
 pub fn is_canonical<T: Serialize + 'static>(o: &ObjectBytes<'_>, value: &T) -> bool {
     let any: &dyn Any = value;
     let body = if let Some(c) = as_change(any) {
@@ -592,6 +975,8 @@ pub fn is_canonical<T: Serialize + 'static>(o: &ObjectBytes<'_>, value: &T) -> b
         landing_body(l, o.version).ok()
     } else if let Some(r) = any.downcast_ref::<RedactionResidue>() {
         residue_body(r, o.version)
+    } else if let Some(ok) = shaped_canonical(o.kind, o.version, o.body, any) {
+        return ok;
     } else {
         return bounded::encodes_as(value, o.body);
     };

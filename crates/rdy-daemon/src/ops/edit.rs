@@ -193,7 +193,7 @@ fn create_supporting(
 
 /// The briefed create of [`create_supporting`] for the whole create op `op` (its body and links
 /// too), under `parent`.
-fn create_briefed(
+pub(super) fn create_briefed(
     cx: &OpContext,
     op: Value,
     parent: Option<String>,

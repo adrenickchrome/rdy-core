@@ -210,7 +210,7 @@ pub(crate) fn restating_type(pack: &Pack, b: &Block) -> bool {
 
 /// Whether text `p` (its shingles), edited to `n`, drifts from `y`: they match at `threshold` or
 /// more, and some shingle `p` and `y` share is not in `n`.
-fn drifts(p: &[u64], y: &[u64], n: &[u64], threshold: u32) -> bool {
+pub(crate) fn drifts(p: &[u64], y: &[u64], n: &[u64], threshold: u32) -> bool {
     similarity(p, y) >= threshold
         && p.iter()
             .any(|s| y.binary_search(s).is_ok() && n.binary_search(s).is_err())
@@ -820,6 +820,14 @@ impl Detector for RestatementDrift {
     fn kind(&self) -> TensionKind {
         TensionKind::RestatementDrift
     }
+    fn across(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        super::foreign::run(cx, self.kind(), seeds, out, super::foreign::drift)
+    }
 
     fn detect(
         &self,
@@ -830,7 +838,12 @@ impl Detector for RestatementDrift {
         match cx.scope() {
             // the canon part is always a full run
             DetectScope::Canon => Self::canon(cx, out),
-            DetectScope::Inflight => Self::inflight(cx, seeds, out),
+            // across projects (repo links, D-Y49PX): a delivered change of a pinned block, in
+            // flight here; the canon form follows the foreign state and is joined per build
+            DetectScope::Inflight => {
+                Self::inflight(cx, seeds, out)?;
+                self.across(cx, seeds, out)
+            }
         }
     }
 }

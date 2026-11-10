@@ -166,8 +166,7 @@ impl StoreHandle {
         crate::publication_take::take_publication(&self.local, batches, target, verdict)
     }
 
-    /// The engine handle, so a sibling module's tests can write through it.
-    #[cfg(test)]
+    /// The engine handle, so a sibling module (and its tests) can write through it.
     pub(crate) fn local(&self) -> &Local {
         &self.local
     }

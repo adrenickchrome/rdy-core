@@ -5,7 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
-use rdy_model::assessment::Assessment;
+use rdy_model::assessment::{Assessment, AssessmentV2};
 use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
@@ -85,6 +85,17 @@ fn tag_ref(name: &str) -> String {
 }
 
 pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
+    apply_op_adopting(store, state, op, None)
+}
+
+/// [`apply_op`], where an update may take the foreign pin moves of `adoption` on a frozen
+/// decision (repo links, D-8VJAZ); with `None`, exactly `apply_op`.
+fn apply_op_adopting(
+    store: &StoreReader,
+    state: &mut StateSnapshot,
+    op: &Op,
+    adoption: Option<&PinAdoption>,
+) -> Result<(), StoreError> {
     match op {
         Op::Create { block } => {
             if state.blocks.contains_key(&block.id) {
@@ -93,11 +104,11 @@ pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Resu
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Update { base, block } => {
-            check_base(store, state, &block.id, *base, Some(block))?;
+            check_base(store, state, &block.id, *base, Some(block), adoption)?;
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Delete { base, id } => {
-            check_base(store, state, id, *base, None)?;
+            check_base(store, state, id, *base, None, adoption)?;
             state.blocks.remove(id);
         }
     }
@@ -105,13 +116,14 @@ pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Resu
 }
 
 /// The op's base is the state's version of `id`, and not a frozen decision, unless the op is an
-/// update to `new` that changes only tracking fields of it (trk1).
+/// update to `new` that changes only tracking fields of it (trk1), or that `adoption` allows.
 fn check_base(
     store: &StoreReader,
     state: &StateSnapshot,
     id: &BlockId,
     base: Hash,
     new: Option<&Block>,
+    adoption: Option<&PinAdoption>,
 ) -> Result<(), StoreError> {
     let actual = state.blocks.get(id).copied();
     if actual != Some(base) {
@@ -121,7 +133,7 @@ fn check_base(
             actual,
         });
     }
-    if frozen_for(store, &store.get_block(&base)?, new) {
+    if frozen_for(store, &store.get_block(&base)?, new, adoption) {
         return Err(StoreError::Frozen(id.clone()));
     }
     Ok(())
@@ -129,15 +141,137 @@ fn check_base(
 
 /// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
 /// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, so
-/// does a re-affirmation (only `reaffirmed` and pin hashes, D-EJBPD), and so does one that leaves
-/// the block as it is (cf1: the landed side of a conflict, taken).
-fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
+/// does a re-affirmation (only `reaffirmed` and pin hashes, D-EJBPD), one that leaves the block
+/// as it is (cf1: the landed side of a conflict, taken), one that makes exactly the foreign
+/// pin moves `adoption` binds on an accepted decision (repo links, D-8VJAZ), and one that records
+/// a held upstream successor on an accepted decision ([`upstream_adoption`]). Only the adopt
+/// answer's isolated landing passes an adoption; every other write passes `None`.
+fn frozen_for(
+    store: &StoreReader,
+    base: &Block,
+    new: Option<&Block>,
+    adoption: Option<&PinAdoption>,
+) -> bool {
     decision::is_frozen(base)
         && !new.is_some_and(|n| {
             n == base
                 || decision::only_tracking_changed(base, n, store.tracking())
                 || decision::only_reaffirmation_changed(base, n)
+                || adoption.is_some_and(|a| a.allows(base, n))
+                || upstream_adoption(store, base, n)
         })
+}
+
+/// Repo links (D-8VJAZ "Adopted upstream"): the separate frozen-decision exception of an upstream
+/// adoption. The update of `base` to `new` passes when `base` is an accepted decision (a rejected
+/// one gets no exception), `new` only writes `adopted_as` on it
+/// ([`decision::adopted_as_written`]: once, with every other value equal), and a delivery of the
+/// recorded repo holds a decision with the recorded id and content. The check reads only the
+/// stored bytes and the foreign log, so a commit, a replay and a landing each make it again. A
+/// lookup that fails is no exception: the freeze holds.
+fn upstream_adoption(store: &StoreReader, base: &Block, new: &Block) -> bool {
+    if decision::status(base) != Some(decision::DecisionStatus::Accepted) {
+        return false;
+    }
+    let Some(a) = decision::adopted_as_written(base, new) else {
+        return false;
+    };
+    match store.delivered_version(&a.target, &a.pin) {
+        Ok(Some(version)) => store
+            .get_block(&version)
+            .is_ok_and(|b| b.block_type == decision::DECISION),
+        _ => false,
+    }
+}
+
+/// The foreign pin moves one person's adopt answer approved (repo links, D-8VJAZ): for each
+/// citing block, each cited target's pin before and after. It is the one authority under which a
+/// frozen decision's foreign pin moves. Only the isolated landing of an adopt answer passes one
+/// ([`Store::prepare_adopt_propose`], [`Store::prepare_adopt_land`]), and the store checks that
+/// every pin it moves to names content a delivery holds. A raw commit, a replayed change, an
+/// ordinary landing, a tracking edit and a re-affirmation pass none, so each keeps the freeze.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PinAdoption {
+    moves: BTreeMap<BlockId, decision::PinMoves>,
+}
+
+impl PinAdoption {
+    /// Adds the move of `citer`'s pin of `target` from `from` to `to`.
+    pub fn insert(
+        &mut self,
+        citer: BlockId,
+        target: rdy_model::foreign::ForeignId,
+        from: rdy_model::foreign::ForeignPin,
+        to: rdy_model::foreign::ForeignPin,
+    ) {
+        self.moves
+            .entry(citer)
+            .or_default()
+            .insert(target, (from, to));
+    }
+
+    /// Whether it binds no move.
+    pub fn is_empty(&self) -> bool {
+        self.moves.is_empty()
+    }
+
+    /// Whether the update of frozen decision `base` to `new` is exactly this adoption's moves on
+    /// it: `base` is an accepted decision (a rejected one gets no exception) and `new` differs
+    /// from it only by those moves ([`decision::only_foreign_pins_adopted`]).
+    pub fn allows(&self, base: &Block, new: &Block) -> bool {
+        decision::status(base) == Some(decision::DecisionStatus::Accepted)
+            && self
+                .moves
+                .get(&base.id)
+                .is_some_and(|m| decision::only_foreign_pins_adopted(base, new, m))
+    }
+
+    /// Every target and the pin it moves to.
+    fn destinations(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &rdy_model::foreign::ForeignId,
+            &rdy_model::foreign::ForeignPin,
+        ),
+    > {
+        self.moves
+            .values()
+            .flat_map(|m| m.iter().map(|(t, (_, to))| (t, to)))
+    }
+}
+
+impl StoreReader {
+    /// The BLOCK version of the first delivered version (in FOREIGN object order) of `target`
+    /// whose content and encoding are `pin`'s, from any delivery of `target`'s repo; `None` when
+    /// no delivery held that content.
+    pub(crate) fn delivered_version(
+        &self,
+        target: &rdy_model::foreign::ForeignId,
+        pin: &rdy_model::foreign::ForeignPin,
+    ) -> Result<Option<Hash>, StoreError> {
+        let mut found = None;
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            if found.is_some() {
+                return Ok(());
+            }
+            let e = self.foreign_entry(&h)?;
+            if e.repo != target.repo {
+                return Ok(());
+            }
+            if let rdy_model::foreign::ForeignEvent::Delivery { added, changed, .. } = &e.event {
+                found = added
+                    .iter()
+                    .chain(changed)
+                    .find(|v| {
+                        v.id == target.id && v.content == pin.content && v.encoding == pin.encoding
+                    })
+                    .map(|v| v.version);
+            }
+            Ok(())
+        })?;
+        Ok(found)
+    }
 }
 
 impl StoreReader {
@@ -322,6 +456,27 @@ impl StoreReader {
         canon: &StateSnapshot,
         changes: &[Change],
     ) -> Result<(Merged, Vec<usize>), StoreError> {
+        self.merge_checked_with(canon, changes, None)
+    }
+
+    /// [`StoreReader::merge_checked`] of an adopt answer's isolated landing (repo links,
+    /// D-8VJAZ): an update of a frozen decision may make exactly the foreign pin moves
+    /// `adoption` binds. Every other check is `merge_checked`'s.
+    pub fn merge_checked_adopting(
+        &self,
+        canon: &StateSnapshot,
+        changes: &[Change],
+        adoption: &PinAdoption,
+    ) -> Result<(Merged, Vec<usize>), StoreError> {
+        self.merge_checked_with(canon, changes, Some(adoption))
+    }
+
+    pub(crate) fn merge_checked_with(
+        &self,
+        canon: &StateSnapshot,
+        changes: &[Change],
+        adoption: Option<&PinAdoption>,
+    ) -> Result<(Merged, Vec<usize>), StoreError> {
         let (merged, at) = self.merge_onto_indexed(self.canon_head()?, canon, changes)?;
         if let Some(c) = merged.conflicts.first() {
             return Err(match c.base {
@@ -345,7 +500,7 @@ impl StoreReader {
                     _ => None,
                 };
                 if let Some(base) = op.base()
-                    && frozen_for(self, &self.get_block(&base)?, new)
+                    && frozen_for(self, &self.get_block(&base)?, new, adoption)
                 {
                     return Err(StoreError::Frozen(op.block_id().clone()));
                 }
@@ -515,6 +670,23 @@ impl Store {
         claim: Option<Owner>,
         committer: &Provenance,
     ) -> Result<CommitParts, StoreError> {
+        self.commit_parts_with(name, changes, current, conflicts, claim, committer, None)
+    }
+
+    /// [`Store::commit_parts`], where an op may make the foreign pin moves of `adoption` on a
+    /// frozen decision (an adopt answer's isolated proposal, repo links); with `None`, exactly
+    /// `commit_parts`.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_parts_with(
+        &self,
+        name: &str,
+        changes: Vec<Change>,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+        conflicts: &[Conflict],
+        claim: Option<Owner>,
+        committer: &Provenance,
+        adoption: Option<&PinAdoption>,
+    ) -> Result<CommitParts, StoreError> {
         // a read projection is refused before any check reads it as a write
         for change in &changes {
             self.refuse_projection(change)?;
@@ -563,7 +735,7 @@ impl Store {
         // a small state with those; an op on a conflicted block, first in its change to touch
         // it, checks its base against the conflict's base and sides instead
         for change in &changes {
-            self.check_ops(change, current, conflicts)?;
+            self.check_ops(change, current, conflicts, adoption)?;
         }
         // 3. each change's frames; a commit op names the change id, which depends on deps, so
         // the changes, their view ops and the view's head land in one write
@@ -685,6 +857,7 @@ impl Store {
         change: &Change,
         current: &dyn Fn(&BlockId) -> Option<Hash>,
         conflicts: &[Conflict],
+        adoption: Option<&PinAdoption>,
     ) -> Result<(), StoreError> {
         let mut state = StateSnapshot::default();
         for op in &change.ops {
@@ -743,7 +916,7 @@ impl Store {
                         }
                     }
                 }
-                _ => apply_op(self, &mut state, op)?,
+                _ => apply_op_adopting(self, &mut state, op, adoption)?,
             }
         }
         Ok(())
@@ -937,31 +1110,125 @@ impl Store {
             summary,
             by,
         } = req;
-        if !view.starts_with(crate::REAFFIRM_VIEW_PREFIX) {
+        self.card_propose(
+            CardRequest {
+                view,
+                canon_at,
+                change,
+                title,
+                summary,
+                by,
+            },
+            None,
+        )
+    }
+
+    /// Prepares the proposal of an adopt answer's isolated landing (repo links, D-8VJAZ),
+    /// writing nothing, as [`Store::prepare_reaffirm_propose`] prepares a re-affirmation card's:
+    /// the internal view's `Create` op, the adoption's change, its `Commit` op, then the
+    /// proposal's first version and its refs. The change's updates may make exactly the foreign
+    /// pin moves of `adoption` on accepted decisions, and only those ([`PinAdoption`]); every
+    /// pin the adoption moves to must name content a delivery of its repo holds. Refused, with
+    /// nothing built: a view outside [`crate::ADOPT_VIEW_PREFIX`] (`Refused`), a pin no delivery
+    /// holds (`Refused`), a view that exists (`ViewExists`), a canon that moved since the card
+    /// was read (`Refused`), a change of another view or with an op other than an update
+    /// (`Refused`), and each check of the commit writer (a frozen decision changed beyond the
+    /// adoption is `Frozen`). [`Store::bind_plan`] adds its bound plan; only
+    /// [`Store::prepare_adopt_land`] takes it on.
+    pub fn prepare_adopt_propose(
+        &self,
+        req: AdoptProposeRequest<'_>,
+    ) -> Result<PreparedProposal, StoreError> {
+        let AdoptProposeRequest {
+            view,
+            canon_at,
+            change,
+            title,
+            summary,
+            by,
+            adoption,
+        } = req;
+        for (target, to) in adoption.destinations() {
+            if !self.holds_foreign_content(target, to)? {
+                return Err(StoreError::Refused(format!(
+                    "an adoption moves {target} to content {}, which no delivery holds",
+                    to.content
+                )));
+            }
+        }
+        self.card_propose(
+            CardRequest {
+                view,
+                canon_at,
+                change,
+                title,
+                summary,
+                by,
+            },
+            Some(adoption),
+        )
+    }
+
+    /// Whether a delivery of `target`'s repo held a version of `target` whose content is `pin`'s.
+    fn holds_foreign_content(
+        &self,
+        target: &rdy_model::foreign::ForeignId,
+        pin: &rdy_model::foreign::ForeignPin,
+    ) -> Result<bool, StoreError> {
+        Ok(self.delivered_version(target, pin)?.is_some())
+    }
+
+    /// The proposal of a card's isolated landing: a re-affirmation card's (`adoption` none) or an
+    /// adopt answer's (see [`Store::prepare_reaffirm_propose`], [`Store::prepare_adopt_propose`]).
+    fn card_propose(
+        &self,
+        req: CardRequest<'_>,
+        adoption: Option<PinAdoption>,
+    ) -> Result<PreparedProposal, StoreError> {
+        let CardRequest {
+            view,
+            canon_at,
+            change,
+            title,
+            summary,
+            by,
+        } = req;
+        let (prefix, what) = match adoption {
+            None => (crate::REAFFIRM_VIEW_PREFIX, "re-affirmation"),
+            Some(_) => (crate::ADOPT_VIEW_PREFIX, "adopt"),
+        };
+        if !view.starts_with(prefix) {
             return Err(StoreError::Refused(format!(
-                "a re-affirmation view starts with {}",
-                crate::REAFFIRM_VIEW_PREFIX
+                "a {what} view starts with {prefix}"
             )));
         }
         if self.view_head(view)?.is_some() {
             return Err(StoreError::ViewExists(view.to_string()));
         }
         if self.canon_head()? != canon_at {
-            return Err(StoreError::Refused(
-                "canon moved since the re-affirmation card was read".into(),
-            ));
+            return Err(StoreError::Refused(format!(
+                "canon moved since the {what} card was read"
+            )));
         }
         if change.view != view
             || change.ops.is_empty()
             || !change.ops.iter().all(|op| matches!(op, Op::Update { .. }))
         {
-            return Err(StoreError::Refused(
-                "a re-affirmation change holds only updates of its own view".into(),
-            ));
+            return Err(StoreError::Refused(format!(
+                "a {what} change holds only updates of its own view"
+            )));
         }
         let canon = self.canon_state()?;
         let current = |id: &BlockId| canon.blocks.get(id).copied();
-        let parts = self.commit_parts(view, vec![change], &current, &[], None, &by)?;
+        let parts = self.commit_parts_with(
+            view,
+            vec![change],
+            &current,
+            &[],
+            None,
+            &by,
+            adoption.as_ref(),
+        )?;
         let (cid, pos) = parts.placed[0];
         let committed: Change =
             crate::codec::decode_record(parts.changes[pos].0, &parts.changes[pos].1)?;
@@ -982,9 +1249,8 @@ impl Store {
             }
             items.push((kind, payload));
         }
-        let head = head.ok_or_else(|| {
-            StoreError::Refused("the re-affirmation commit gave no view head".into())
-        })?;
+        let head = head
+            .ok_or_else(|| StoreError::Refused(format!("the {what} commit gave no view head")))?;
         let p = self.first_of(view, title, Some(summary), by, vec![cid], None)?;
         let stable = proposal_hash(&p);
         let (version, frames) = self.version_items(&p, stable)?;
@@ -1001,6 +1267,7 @@ impl Store {
             fresh: Some(FreshView {
                 head,
                 change: committed,
+                adoption,
             }),
         })
     }
@@ -1046,6 +1313,17 @@ impl Store {
         prepared: &mut PreparedProposal,
         a: &Assessment,
     ) -> Result<Hash, StoreError> {
+        self.bind_assessment_wire(prepared, &AssessmentV2::of(a))
+    }
+
+    /// [`Store::bind_assessment`] of `a` in the layout that carries its foreign part (repo
+    /// links): encoding 2 when the foreign part is not empty or an exception row is a deviation,
+    /// else the local layout, byte for byte.
+    pub fn bind_assessment_wire(
+        &self,
+        prepared: &mut PreparedProposal,
+        a: &AssessmentV2,
+    ) -> Result<Hash, StoreError> {
         if prepared.fresh.is_some() {
             return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
         }
@@ -1058,7 +1336,7 @@ impl Store {
                 crate::carried_records::ASSESSMENT_PROPOSAL,
             ));
         }
-        self.check_carried::<Assessment>(&item, &prepared.items)?;
+        self.check_carried::<AssessmentV2>(&item, &prepared.items)?;
         prepared.items.push(item);
         prepared.assessment = Some(id);
         Ok(id)
@@ -1068,17 +1346,23 @@ impl Store {
     /// [`Store::bind_assessment`]: the version it assesses, like every object it names, must be
     /// held (`NotFound` otherwise). Returns its hash.
     pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
+        self.put_assessment_wire(&AssessmentV2::of(a))
+    }
+
+    /// [`Store::put_assessment`] of `a` in the layout that carries its foreign part, as
+    /// [`Store::bind_assessment_wire`] writes it.
+    pub fn put_assessment_wire(&mut self, a: &AssessmentV2) -> Result<Hash, StoreError> {
         self.ensure_writable()?;
         let item = crate::codec::item_new(kinds::ASSESSMENT, a);
         let id = Hash::of(&item.1);
-        self.check_carried::<Assessment>(&item, &[])?;
+        self.check_carried::<AssessmentV2>(&item, &[])?;
         self.write_guarded(vec![item])?;
         Ok(id)
     }
 
     /// Checks `item`, a carried record's frame (an ASSESSMENT, a DISPUTE or a
     /// DISPUTE_RESOLUTION, decoded as a `T`), as the frame after `batch`: its bounded encoding and
-    /// its own rules (`carried_records::validate_local`: `Assessment::validate`,
+    /// its own rules (`carried_records::validate_local`: `AssessmentV2::validate`,
     /// `Dispute::validate`), as `record <hash> (kind <kind>): <reason>`; every object it names
     /// (`object_refs::refs_of`) in `batch` or the store with its kind (`NotFound(<hash>)` for the
     /// first that is not); and the bindings it names (`carried_records::validate_refs`, reading
@@ -1442,12 +1726,43 @@ pub struct ReaffirmProposeRequest<'a> {
     pub by: Provenance,
 }
 
+/// The private request of an adopt answer's isolated proposal (repo links, D-8VJAZ;
+/// [`Store::prepare_adopt_propose`]): the internal view (`adopt-` and the card hash's first 12
+/// digits), the canon head the card was read on, the one change of the adoption's updates, the
+/// card's title and summary, the person who answered the card, and the foreign pin moves the
+/// card bound. Only the engine's adopt answer builds it.
+pub struct AdoptProposeRequest<'a> {
+    /// The internal view: [`crate::ADOPT_VIEW_PREFIX`] and the card hash's first 12 digits.
+    pub view: &'a str,
+    /// The canon head the card was read on; canon must still stand there.
+    pub canon_at: Option<Hash>,
+    /// The adoption's updates, each on its block's version in canon.
+    pub change: Change,
+    pub title: &'a str,
+    pub summary: &'a str,
+    pub by: Provenance,
+    /// The foreign pin moves the person's adopt answer approved.
+    pub adoption: PinAdoption,
+}
+
 /// The fresh internal view of a prepared re-affirmation proposal: its head after its `Create`
 /// and `Commit` ops, and its one change as committed (its deps set).
 #[derive(Clone, Debug)]
 pub(crate) struct FreshView {
     pub(crate) head: ViewHead,
     pub(crate) change: Change,
+    /// The foreign pin moves of an adopt answer's proposal; none for a re-affirmation card's.
+    pub(crate) adoption: Option<PinAdoption>,
+}
+
+/// The parts of a card's isolated proposal ([`Store::card_propose`]).
+struct CardRequest<'a> {
+    view: &'a str,
+    canon_at: Option<Hash>,
+    change: Change,
+    title: &'a str,
+    summary: &'a str,
+    by: Provenance,
 }
 
 /// A proposal built by [`Store::prepare_propose`] and not yet written. Its frames are private:
@@ -1549,8 +1864,15 @@ impl crate::carried_records::CarriedSource for PendingFrames<'_> {
 
 impl StoreReader {
     /// The assessment `h`, decoded; an object of another kind with that hash is named as what it
-    /// is.
+    /// is. A record with a foreign part (repo links, ASSESSMENT encoding 2) reads as its local
+    /// part, a read projection: [`StoreReader::assessment_wire`] reads the whole record.
     pub fn assessment(&self, h: &Hash) -> Result<Assessment, StoreError> {
+        self.assessment_wire(h).map(|w| w.local())
+    }
+
+    /// The assessment `h` in the layout that carries its foreign part (repo links, ASSESSMENT
+    /// encoding 2): a local record reads with an empty foreign part.
+    pub fn assessment_wire(&self, h: &Hash) -> Result<AssessmentV2, StoreError> {
         self.get_named(kinds::ASSESSMENT, "assessment", h)
     }
 

@@ -3,18 +3,23 @@
 //!
 //! - `<id>`: every stored version of a block;
 //! - `<id>@<hash>`: one version, by its full 64-digit lowercase hash;
-//! - `blob:<hash>`: a blob, by its full manifest hash.
+//! - `blob:<hash>`: a blob, by its full manifest hash;
+//! - `<alias>:<id>@<hash>`: one delivered version of a cited block (repo links, D-CN4QJ), by the
+//!   alias of a live repo link, the block's id in the cited project and the full version hash.
+//!   Its stored form `<repo>:<id>@<hash>` names the cited repo by its 32 hex digits.
 //!
 //! No key, path, glob, short hash, `meta/` ref, tag or landing is a selector. The checks run in
 //! the order the plan fixes: target count, then each selector's byte length and syntax in input
-//! order, then the reason class, then the reason.
+//! order, then the reason class, then the reason, then each alias in input order (an alias no
+//! live repo link holds is the write path's `E_UNKNOWN_REF`).
 use super::RedactInput;
 use crate::error::{
     REDACTION_CAUSE_INVALID, REDACTION_CAUSE_METADATA, RdyError, redaction_limit, redaction_reason,
     redaction_target,
 };
 use rdy_model::redaction::{ReasonClass, RedactTarget};
-use rdy_model::{BlockId, Hash};
+use rdy_model::reference::{ForeignRef, foreign_ref};
+use rdy_model::{BlockId, Hash, RepoId};
 use rdy_store::redaction::{MAX_TARGET_BYTES, MAX_TARGETS, limit};
 use std::cmp::Ordering;
 
@@ -44,45 +49,88 @@ fn full_hash(text: &str) -> Option<Hash> {
     text.parse().ok()
 }
 
+/// A selector by its syntax: a target, or a cited version named through a repo link's alias,
+/// which only the project's live repo links resolve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Selector {
+    Target(RedactTarget),
+    Aliased {
+        alias: String,
+        id: BlockId,
+        version: Hash,
+    },
+}
+
 /// The selector `text`, by its syntax alone (`E_REDACTION_TARGET`, cause `invalid selector`, or
 /// `metadata is not content` for a ref, tag, landing, proposal or view). Whether it names a
-/// stored object is checked against the store later.
-pub fn parse_selector(text: &str) -> Result<RedactTarget, RdyError> {
+/// stored object is checked against the store later, and an alias against the live repo links.
+pub fn parse_selector(text: &str) -> Result<Selector, RdyError> {
     let invalid = || redaction_target(&quoted(text), REDACTION_CAUSE_INVALID);
     if METADATA_PREFIXES.iter().any(|p| text.starts_with(p)) {
         return Err(redaction_target(&quoted(text), REDACTION_CAUSE_METADATA));
     }
     if let Some(h) = text.strip_prefix("blob:") {
-        return full_hash(h).map(RedactTarget::Blob).ok_or_else(invalid);
+        return full_hash(h)
+            .map(|h| Selector::Target(RedactTarget::Blob(h)))
+            .ok_or_else(invalid);
     }
-    if let Some((id, h)) = text.split_once('@') {
-        return match (BlockId::parse(id), full_hash(h)) {
-            (Ok(id), Some(version)) => Ok(RedactTarget::Version { id, version }),
-            _ => Err(invalid()),
+    if let Some((left, h)) = text.split_once('@') {
+        let version = full_hash(h).ok_or_else(invalid)?;
+        if left.contains(':') {
+            // a cited version: the alias or stored form of a foreign reference, by id only
+            return match foreign_ref(left) {
+                Some(ForeignRef::Stored { repo, id }) => {
+                    Ok(Selector::Target(RedactTarget::ForeignVersion {
+                        repo,
+                        id,
+                        version,
+                    }))
+                }
+                Some(ForeignRef::Alias { alias, target }) => match BlockId::parse(target) {
+                    Ok(id) => Ok(Selector::Aliased {
+                        alias: alias.to_string(),
+                        id,
+                        version,
+                    }),
+                    Err(_) => Err(invalid()),
+                },
+                None => Err(invalid()),
+            };
+        }
+        return match BlockId::parse(left) {
+            Ok(id) => Ok(Selector::Target(RedactTarget::Version { id, version })),
+            Err(_) => Err(invalid()),
         };
     }
     BlockId::parse(text)
-        .map(RedactTarget::AllVersions)
+        .map(|id| Selector::Target(RedactTarget::AllVersions(id)))
         .map_err(|_| invalid())
 }
 
-/// The selector of `t` in the input grammar, with full hashes.
+/// The selector of `t` in the input grammar, with full hashes. A cited block's version (repo
+/// links) shows its repo's 32 hex digits where the input names the link's alias.
 pub fn selector_text(t: &RedactTarget) -> String {
     match t {
         RedactTarget::AllVersions(id) => id.to_string(),
         RedactTarget::Version { id, version } => format!("{id}@{version}"),
         RedactTarget::Blob(h) => format!("blob:{h}"),
+        RedactTarget::ForeignVersion { repo, id, version } => format!("{repo}:{id}@{version}"),
     }
 }
 
-/// The canonical order of normalized selectors: all-versions, then versions, then blobs; then
-/// id bytes; then hash bytes.
+/// The canonical order of normalized selectors: all-versions, then versions, then blobs, then
+/// cited versions; then repo bytes; then id bytes; then hash bytes.
 pub fn target_order(a: &RedactTarget, b: &RedactTarget) -> Ordering {
-    fn key(t: &RedactTarget) -> (u8, &[u8], Option<&Hash>) {
+    fn key(t: &RedactTarget) -> (u8, Option<&RepoId>, &[u8], Option<&Hash>) {
         match t {
-            RedactTarget::AllVersions(id) => (0, id.as_str().as_bytes(), None),
-            RedactTarget::Version { id, version } => (1, id.as_str().as_bytes(), Some(version)),
-            RedactTarget::Blob(h) => (2, &[], Some(h)),
+            RedactTarget::AllVersions(id) => (0, None, id.as_str().as_bytes(), None),
+            RedactTarget::Version { id, version } => {
+                (1, None, id.as_str().as_bytes(), Some(version))
+            }
+            RedactTarget::Blob(h) => (2, None, &[], Some(h)),
+            RedactTarget::ForeignVersion { repo, id, version } => {
+                (3, Some(repo), id.as_str().as_bytes(), Some(version))
+            }
         }
     }
     key(a).cmp(&key(b))
@@ -121,9 +169,13 @@ pub(crate) struct Checked {
 
 /// Checks `input` in the fixed order: the target count (none is `E_REDACTION_TARGET` with
 /// target `[]`; more than 256 is `E_REDACTION_LIMIT`), each selector's byte length (256) and
-/// syntax in input order, the reason class, then the reason (1 to 4096 UTF-8 bytes after
-/// trimming).
-pub(crate) fn check_input(input: &RedactInput) -> Result<Checked, RdyError> {
+/// syntax in input order, the reason class, the reason (1 to 4096 UTF-8 bytes after trimming),
+/// then each alias in input order: `repo_of` gives the repo the live repo link of that alias
+/// cites, or its refusal.
+pub(crate) fn check_input(
+    input: &RedactInput,
+    repo_of: &mut dyn FnMut(&str) -> Result<RepoId, RdyError>,
+) -> Result<Checked, RdyError> {
     if input.targets.is_empty() {
         return Err(redaction_target("[]", REDACTION_CAUSE_INVALID));
     }
@@ -137,13 +189,24 @@ pub(crate) fn check_input(input: &RedactInput) -> Result<Checked, RdyError> {
         }
         targets.push(parse_selector(text)?);
     }
-    targets.sort_by(target_order);
-    targets.dedup();
     let class = parse_reason_class(&input.reason_class)?;
     let reason = input.reason.trim();
     if reason.is_empty() || reason.len() > MAX_REASON_BYTES {
         return Err(redaction_reason());
     }
+    let mut targets = targets
+        .into_iter()
+        .map(|t| match t {
+            Selector::Target(t) => Ok(t),
+            Selector::Aliased { alias, id, version } => Ok(RedactTarget::ForeignVersion {
+                repo: repo_of(&alias)?,
+                id,
+                version,
+            }),
+        })
+        .collect::<Result<Vec<_>, RdyError>>()?;
+    targets.sort_by(target_order);
+    targets.dedup();
     Ok(Checked {
         targets,
         class,

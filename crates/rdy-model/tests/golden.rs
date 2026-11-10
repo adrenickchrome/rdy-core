@@ -33,6 +33,7 @@ fn block() -> Block {
             }],
         )]),
         pins: BTreeMap::from([(BlockId::parse("t-MEDGR").unwrap(), Hash::of(b"pinned"))]),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

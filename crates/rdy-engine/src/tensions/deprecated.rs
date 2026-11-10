@@ -316,6 +316,14 @@ impl Detector for DeprecatedReference {
     fn kind(&self) -> TensionKind {
         TensionKind::DeprecatedReference
     }
+    fn across(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        super::foreign::run(cx, self.kind(), seeds, out, super::foreign::deprecated)
+    }
 
     fn detect(
         &self,
@@ -324,9 +332,12 @@ impl Detector for DeprecatedReference {
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError> {
         match cx.scope() {
+            // across projects (repo links, D-Y49PX): a deprecated cited block, in flight here;
+            // the canon form follows the foreign state and is joined per build
             DetectScope::Inflight => {
                 Self::inflight(cx, seeds, out)?;
-                Self::inflight_mentions(cx, seeds, out)
+                Self::inflight_mentions(cx, seeds, out)?;
+                self.across(cx, seeds, out)
             }
             DetectScope::Canon => {
                 Self::canon(cx, out)?;

@@ -12,7 +12,8 @@ use crate::tensions::{
     SideRef, Tension, TensionSeverity, TensionStatus, tension_id, tension_label,
 };
 use crate::{Rdy, ReadState, Session};
-use rdy_model::{Hash, SemanticTension};
+use rdy_model::Hash;
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_store::Relay;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -279,12 +280,12 @@ impl Rdy {
         let chosen = chosen(&advised, &req.tensions, &pref)?;
         let provenance = who.provenance();
         let mut keys = BTreeSet::new();
-        let versions: Vec<SemanticTension> = chosen
+        let versions: Vec<SemanticTensionV1> = chosen
             .iter()
             .filter(|a| keys.insert(a.open.record.key))
             .map(|a| {
                 let first = &a.open.record;
-                SemanticTension {
+                SemanticTensionV1 {
                     key: first.key,
                     items: first.items.clone(),
                     review: first.review,
@@ -297,7 +298,7 @@ impl Rdy {
                 }
             })
             .collect();
-        let ids = self.record_tension_versions(&versions)?;
+        let ids = self.record_tension_versions_v1(&versions)?;
         let version_of: BTreeMap<Hash, Hash> = versions.iter().map(|v| v.key).zip(ids).collect();
         // the acceptance is written: what cannot be read now leaves the old labels and an empty
         // now_blocking, not an error
@@ -335,13 +336,13 @@ impl Rdy {
 /// Every tension of the pairs `versions` accepted, in state `st`: each form of each pair, in any
 /// view or proposal (the acceptance binds to the pair's two texts). By id; empty when the set
 /// cannot be read.
-fn forms_of(st: &ReadState, versions: &[SemanticTension]) -> Vec<Arc<Tension>> {
+fn forms_of(st: &ReadState, versions: &[SemanticTensionV1]) -> Vec<Arc<Tension>> {
     let Ok(set) = st.tensions() else {
         return vec![];
     };
     let mut out: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
     for v in versions {
-        let Some(item) = v.items.first() else {
+        let Some(item) = v.items.iter().find_map(rdy_model::PairSide::local) else {
             continue;
         };
         for t in set.involving_block(&item.block) {

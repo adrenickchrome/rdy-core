@@ -1,10 +1,14 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
+use rdy_model::review::ReviewSubjectV1;
+use rdy_model::{AltSet, AltStatus, Hash, Verdict};
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
-use rdy_store::transition::{SuspectMove, TensionMove};
+use rdy_store::transition::{
+    Author, SideV1, SuspectMove, SuspectMoveV1, SuspectTarget, TensionMove, TensionMoveV1,
+    TransitionsV1, Why,
+};
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -113,14 +117,137 @@ pub enum EventKind {
         run: Option<String>,
     },
     /// A tension that opened in this batch, read from the batch's `TRANSITION` record (plan
-    /// M2e2, founder decision C, D-Z0EMP): the move's fields beside `event`.
-    TensionOpened(TensionMove),
+    /// M2e2, founder decision C, D-Z0EMP): the move's fields beside `event`. A side cited from
+    /// a linked project is carried as [`SideV1::Foreign`] (repo links, D-Y49PX); see
+    /// [`tension_json`].
+    #[serde(serialize_with = "tension_json")]
+    TensionOpened(TensionMoveV1),
     /// A tension that this batch resolved (or dismissed), from the batch's record.
-    TensionResolved(TensionMove),
+    #[serde(serialize_with = "tension_json")]
+    TensionResolved(TensionMoveV1),
     /// A suspect that this batch made new, from the batch's record.
-    SuspectNew(SuspectMove),
+    SuspectNew(SuspectMoved),
     /// A suspect that this batch made gone, from the batch's record.
-    SuspectGone(SuspectMove),
+    SuspectGone(SuspectMoved),
+}
+
+/// One logged suspect move: on a local target, with the fields the released record holds, or on
+/// a block cited from a linked project (repo links, D-Y49PX). In JSON a cited target is its
+/// stored reference form, `<repo hex>:<id>`; a local move reads as it always has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuspectMoved {
+    Local(SuspectMove),
+    Foreign(SuspectMoveV1),
+}
+
+impl SuspectMoved {
+    /// The move of `m`: local when its target is.
+    pub fn of(m: SuspectMoveV1) -> SuspectMoved {
+        match m.as_local() {
+            Some(local) => SuspectMoved::Local(local),
+            None => SuspectMoved::Foreign(m),
+        }
+    }
+}
+
+/// A move on a cited target as its event's JSON writes it.
+#[derive(serde::Serialize)]
+struct ForeignMoveJson<'a> {
+    block: &'a rdy_model::BlockId,
+    target: String,
+    reason: &'a str,
+    writers: &'a [Author],
+    why: &'a Why,
+}
+
+impl serde::Serialize for SuspectMoved {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SuspectMoved::Local(m) => m.serialize(s),
+            SuspectMoved::Foreign(m) => ForeignMoveJson {
+                block: &m.block,
+                target: match &m.target {
+                    SuspectTarget::Local(t) => t.to_string(),
+                    SuspectTarget::Foreign(t) => {
+                        rdy_model::reference::foreign_token(&t.repo, &t.id)
+                    }
+                },
+                reason: &m.reason,
+                writers: &m.writers,
+                why: &m.why,
+            }
+            .serialize(s),
+        }
+    }
+}
+
+/// One side of a tension move as its event's JSON writes it: a local side as it always has been,
+/// a cited one as its repo and FOREIGN entry in hex.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum SideJson<'a> {
+    Local(&'a rdy_store::transition::Side),
+    Foreign {
+        #[serde(serialize_with = "rdy_model::foreign::hex_repo::serialize")]
+        repo: &'a rdy_model::RepoId,
+        #[serde(serialize_with = "hex::one")]
+        entry: &'a Hash,
+    },
+}
+
+/// A tension move with a cited side as its event's JSON writes it: the fields of a local move,
+/// in its order.
+#[derive(serde::Serialize)]
+struct ForeignTensionJson<'a> {
+    #[serde(serialize_with = "hex::one")]
+    tension: &'a Hash,
+    kind: &'a str,
+    severity: &'a str,
+    sides: Vec<SideJson<'a>>,
+    #[serde(serialize_with = "hex::opt")]
+    rekey: &'a Option<Hash>,
+    why: &'a Why,
+}
+
+/// The JSON of tension move `m`. A move whose sides are all local reads exactly as the released
+/// event did ([`TensionMove`]); a cited side reads `{"repo": <hex>, "entry": <hex>}` in its place.
+fn tension_json<S: serde::Serializer>(m: &TensionMoveV1, s: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    let local: Option<Vec<rdy_store::transition::Side>> = m
+        .sides
+        .iter()
+        .map(|side| match side {
+            SideV1::Local(l) => Some(l.clone()),
+            SideV1::Foreign { .. } => None,
+        })
+        .collect();
+    match local {
+        Some(sides) => TensionMove {
+            tension: m.tension,
+            kind: m.kind.clone(),
+            severity: m.severity.clone(),
+            sides,
+            rekey: m.rekey,
+            why: m.why.clone(),
+        }
+        .serialize(s),
+        None => ForeignTensionJson {
+            tension: &m.tension,
+            kind: &m.kind,
+            severity: &m.severity,
+            sides: m
+                .sides
+                .iter()
+                .map(|side| match side {
+                    SideV1::Local(l) => SideJson::Local(l),
+                    SideV1::Foreign { repo, entry } => SideJson::Foreign { repo, entry },
+                })
+                .collect(),
+            rekey: &m.rekey,
+            why: &m.why,
+        }
+        .serialize(s),
+    }
 }
 
 /// Hashes in an event's JSON as lowercase hex strings.
@@ -306,16 +433,17 @@ pub fn events_for_batch(
                 });
             }
             kinds::REVIEW => {
-                let r = reader.review(&hash)?;
+                // the wire type reads a review of any encoding (repo links)
+                let r = reader.review_v1(&hash)?;
                 let kind = match r.subject {
-                    ReviewSubject::Tension { id, vkey, .. } => EventKind::TensionDismissed {
+                    ReviewSubjectV1::Tension { id, vkey, .. } => EventKind::TensionDismissed {
                         tension: id,
                         vkey,
                         review: hash,
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
-                    ReviewSubject::Pair { key, .. } => EventKind::ReviewSubmitted {
+                    ReviewSubjectV1::Pair { key, .. } => EventKind::ReviewSubmitted {
                         review: hash,
                         pair: key,
                         verdict: verdict_name(r.verdict).to_string(),
@@ -324,7 +452,7 @@ pub fn events_for_batch(
                     },
                     // a mention review (FW-CV4) is not a tension dismissal, and a check review is
                     // carried with no event yet: no event names either
-                    ReviewSubject::Mention { .. } | ReviewSubject::Check { .. } => continue,
+                    ReviewSubjectV1::Mention { .. } | ReviewSubjectV1::Check { .. } => continue,
                 };
                 out.push(Event {
                     seq,
@@ -333,15 +461,24 @@ pub fn events_for_batch(
                 });
             }
             kinds::TRANSITION => {
-                let rec = reader.transitions(&hash)?;
+                // the wire type reads a record of any encoding (repo links)
+                let rec: TransitionsV1 = reader.get_typed(kinds::TRANSITION, &hash)?;
                 let at_ms = rec.at_ms;
                 let moves = rec
                     .resolved
                     .into_iter()
                     .map(EventKind::TensionResolved)
                     .chain(rec.opened.into_iter().map(EventKind::TensionOpened))
-                    .chain(rec.gone.into_iter().map(EventKind::SuspectGone))
-                    .chain(rec.new.into_iter().map(EventKind::SuspectNew));
+                    .chain(
+                        rec.gone
+                            .into_iter()
+                            .map(|m| EventKind::SuspectGone(SuspectMoved::of(m))),
+                    )
+                    .chain(
+                        rec.new
+                            .into_iter()
+                            .map(|m| EventKind::SuspectNew(SuspectMoved::of(m))),
+                    );
                 out.extend(moves.map(|kind| Event { seq, at_ms, kind }));
             }
             _ => {}

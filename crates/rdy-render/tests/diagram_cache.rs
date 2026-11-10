@@ -406,10 +406,10 @@ fn rdb7_every_surface_reads_the_cache() {
     let a = build_publication(&bare, &m, TAG, false, IMPLICIT_ORG, &inputs).unwrap();
     assert_eq!(asset_of(&page(&a.files, "flow.html")), own, "no cache");
     drop(read);
-    // the print: a drawn diagram prints as its source (caption, then code); a failed row
-    // prints as the site's fallback code block (code, then caption)
+    // the print: a drawn diagram prints as its source (code, then caption, as the site
+    // orders them); a failed row prints as the site's fallback code block (code, then caption)
     let (code, caption) = flow_print(&r);
-    assert!(caption < code, "drawn: the source after its caption");
+    assert!(code < caption, "drawn: the source, then its caption");
     cache(&r).put(
         &key(FLOW),
         &CachedDrawing::Failed("a planted reason".into()),

@@ -1,4 +1,6 @@
-use crate::encoding::{CHANGE_ENCODING, EncodedIdentity, encoded_hash};
+use crate::encoding::{
+    CHANGE_ENCODING, CHANGE_FOREIGN_ENCODING, EncodedIdentity, ForeignChangeV2, encoded_hash,
+};
 use crate::{ActorRun, Block, BlockId, Hash};
 use serde::{Deserialize, Serialize};
 
@@ -130,17 +132,41 @@ pub struct Change {
 
 impl Change {
     /// The change's id: a stored read's recorded hash, a residue projection's recorded id, and
-    /// for a new change the hash of its latest encoding ([`CHANGE_ENCODING`]: the version prefix
-    /// and the body).
+    /// for a new change the hash of the encoding it is written in ([`Change::encoding`]: the
+    /// version prefix and the body).
     pub fn id(&self) -> Hash {
         match self.read_identity {
             Some(ChangeReadIdentity::Stored(i)) => i.hash,
             Some(ChangeReadIdentity::Redacted(id)) => id,
-            None => encoded_hash(
-                CHANGE_ENCODING,
-                &postcard::to_allocvec(self)
-                    .expect("postcard encoding of an in-memory value cannot fail"),
-            ),
+            None => {
+                let body = if self.embeds_foreign() {
+                    postcard::to_allocvec(&ForeignChangeV2::of(self))
+                } else {
+                    postcard::to_allocvec(self)
+                };
+                encoded_hash(
+                    self.encoding(),
+                    &body.expect("postcard encoding of an in-memory value cannot fail"),
+                )
+            }
+        }
+    }
+
+    /// Whether an op of the change embeds a block with a foreign part (repo links).
+    pub fn embeds_foreign(&self) -> bool {
+        self.ops.iter().any(|op| match op {
+            Op::Create { block } | Op::Update { block, .. } => !block.foreign.is_empty(),
+            Op::Delete { .. } => false,
+        })
+    }
+
+    /// The encoding a new change is written in: [`CHANGE_FOREIGN_ENCODING`] when it embeds a
+    /// block with a foreign part, else the released [`CHANGE_ENCODING`].
+    pub fn encoding(&self) -> u16 {
+        if self.embeds_foreign() {
+            CHANGE_FOREIGN_ENCODING
+        } else {
+            CHANGE_ENCODING
         }
     }
 

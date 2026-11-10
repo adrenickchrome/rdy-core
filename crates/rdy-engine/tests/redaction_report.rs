@@ -943,8 +943,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 28; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=28).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 29; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=29).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -975,6 +975,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::DISPUTE,
             kinds::DISPUTE_RESOLUTION,
             kinds::CHECK_REQUEST,
+            kinds::FOREIGN,
         ],
         ASSIGNED_KINDS
     );

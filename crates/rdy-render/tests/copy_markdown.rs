@@ -258,9 +258,9 @@ fn dgm4_source_diagrams_and_removed_notices_copy_as_text() {
         <div class=\"diagram-canvas\" aria-hidden=\"true\"><svg viewBox=\"0 0 10 10\">\
         <text>Drawn label</text></svg></div>\
         <div class=\"diagram-tools\"><button type=\"button\">Expand</button></div>\
-        <figcaption>The flow</figcaption><details class=\"diagram-source\">\
+        <details class=\"diagram-source\">\
         <summary>Diagram source</summary><pre class=\"code\"><code>flowchart TD\n  A --&gt; B\
-        </code></pre></details></figure>\
+        </code></pre></details><figcaption>The flow</figcaption></figure>\
         <figure class=\"diagram\" data-lang=\"d2\"><div class=\"diagram-canvas\" \
         aria-hidden=\"true\"><svg><text>x</text></svg></div><details class=\"diagram-source\">\
         <summary>Diagram source</summary><pre class=\"code\"><code>a -&gt; b: `go`</code></pre>\
@@ -271,7 +271,7 @@ fn dgm4_source_diagrams_and_removed_notices_copy_as_text() {
     assert_eq!(
         pairs(&parts),
         pairs(&[text(
-            "The flow\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n\
+            "```mermaid\nflowchart TD\n  A --> B\n```\n\nThe flow\n\n\
              ```d2\na -> b: `go`\n```\n\nContent removed.\n"
         )])
     );

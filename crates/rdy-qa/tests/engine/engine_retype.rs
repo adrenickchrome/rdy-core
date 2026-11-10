@@ -156,6 +156,7 @@ fn rtyp1_e_prefix_is_a_create_time_check_only() {
         body: "x".into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     assert!(

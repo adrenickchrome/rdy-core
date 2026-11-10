@@ -7,7 +7,7 @@
 //! content, and every record that quotes a complete source string of a selected version. Quoted
 //! text is returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
-use super::scan::{Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
+use super::scan::{BlockText, Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
 use super::targets::{Checked, check_input, selector_text};
 use super::{Limits, RedactInput, limits};
 use crate::ReadState;
@@ -19,21 +19,24 @@ use crate::error::{
     W_REDACTION_REUSE, W_REDACTION_REUSE_MESSAGE, W_REDACTION_SECRET, W_REDACTION_SECRET_MESSAGE,
     redaction_limit, redaction_target, sig_invalid,
 };
+use rdy_model::foreign::ForeignEvent;
 use rdy_model::redaction::{
     AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
     FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
     RedactionManifest, RedactionResidue, RedactionWarning, encode_into,
 };
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, RedactionCarried, Review, ReviewSubject, SemanticTension, StateSnapshot, Tag,
+    Redaction, RedactionCarried, RepoId, StateSnapshot, Tag,
 };
 use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::redaction::limit;
 use rdy_store::redaction_carried::decode_carried;
 use rdy_store::segment::Location;
-use rdy_store::transition::Transitions;
+use rdy_store::transition::TransitionsV1;
 use rdy_store::{StoreError, StoreReader, ViewOp, ViewOpKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -325,6 +328,37 @@ struct RequestFacts {
     proposal: Option<Hash>,
 }
 
+/// An ASSESSMENT as the report reads it. The wire type reads a record of any encoding; the
+/// runtime type refuses ASSESSMENT encoding 2 with a foreign part (repo links: a propose that
+/// reaches a cited block writes one). The report's facts are the local part. A record with no
+/// foreign part is searched for quotes in its runtime shape, as before; one with a foreign part
+/// is searched as the whole wire record, as a TRANSITION is.
+struct ReadAssessment {
+    local: rdy_model::assessment::Assessment,
+    wire: Option<rdy_model::assessment::AssessmentV2>,
+}
+
+impl ReadAssessment {
+    fn read(reader: &StoreReader, h: &Hash) -> Result<ReadAssessment, RdyError> {
+        let w: rdy_model::assessment::AssessmentV2 = reader.get_typed(kinds::ASSESSMENT, h)?;
+        Ok(ReadAssessment {
+            local: w.local(),
+            wire: (!w.foreign.is_empty()).then_some(w),
+        })
+    }
+
+    /// [`Quotes::scan`] of the record as `record`, or [`Quotes::scan_unbound`] when `unbound`.
+    fn scan(&self, quotes: &mut Quotes<'_>, record: &str, unbound: bool) -> Result<(), RdyError> {
+        let kind = ImpactKind::Assessment;
+        match (&self.wire, unbound) {
+            (Some(w), true) => quotes.scan_unbound(kind, record, false, w),
+            (Some(w), false) => quotes.scan(kind, record, false, w),
+            (None, true) => quotes.scan_unbound(kind, record, false, &self.local),
+            (None, false) => quotes.scan(kind, record, false, &self.local),
+        }
+    }
+}
+
 /// Whether `a` names a block of the removal in its scope, reach, tensions, issues, confidence
 /// reasons or suspects (a block or its cause), or its policy version is a removed version.
 fn assessment_hits(
@@ -445,17 +479,20 @@ fn landing_history(
 }
 
 /// The block ids a review names: its citations and its subject's blocks.
-fn review_blocks(r: &Review) -> Vec<&BlockId> {
+fn review_blocks(r: &ReviewV1) -> Vec<&BlockId> {
     let mut out: Vec<&BlockId> = r.citations.iter().map(|f| &f.block).collect();
     match &r.subject {
-        ReviewSubject::Tension { blocks, .. } => out.extend(blocks),
-        ReviewSubject::Mention { block, entity } => {
+        ReviewSubjectV1::Tension { blocks, .. } => out.extend(blocks),
+        ReviewSubjectV1::Mention { block, entity } => {
             out.push(block);
             out.push(entity);
         }
-        ReviewSubject::Pair { items, .. } => out.extend(items.iter().map(|i| &i.block)),
+        // a cited side names no local block
+        ReviewSubjectV1::Pair { items, .. } => {
+            out.extend(items.iter().filter_map(|s| s.local()).map(|i| &i.block));
+        }
         // a check review names its request, not a block
-        ReviewSubject::Check { .. } => {}
+        ReviewSubjectV1::Check { .. } => {}
     }
     out
 }
@@ -473,15 +510,98 @@ fn view_op_changes(op: &ViewOp) -> Vec<Hash> {
     }
 }
 
+/// What the foreign log delivered (repo links, D-FK58A): for each delivered BLOCK version, the
+/// `(repo, id)` pairs a delivery held it under (any source, live or revoked), and the versions
+/// only the foreign copy holds (no local change produces them). A local selector never reaches
+/// a version only the foreign copy holds; a `foreign_version` target reaches nothing else.
+#[derive(Default)]
+struct Delivered {
+    held: HashMap<Hash, Vec<(RepoId, BlockId)>>,
+    only: HashSet<Hash>,
+}
+
+impl Delivered {
+    /// The delivered versions `reader` holds. A store with no FOREIGN entry has none.
+    fn read(reader: &StoreReader) -> Result<Delivered, RdyError> {
+        let mut held: HashMap<Hash, Vec<(RepoId, BlockId)>> = HashMap::new();
+        let mut entries: Vec<Hash> = vec![];
+        reader.for_each_object_of(kinds::FOREIGN, |h| {
+            entries
+                .try_reserve(1)
+                .map_err(|_| StoreError::RedactionLimit {
+                    limit: limit::RECORD,
+                })?;
+            entries.push(h);
+            Ok(())
+        })?;
+        for h in entries {
+            let e = reader.foreign_entry(&h)?;
+            let ForeignEvent::Delivery { added, changed, .. } = e.event else {
+                continue;
+            };
+            for v in added.into_iter().chain(changed) {
+                let pairs = held.entry(v.version).or_default();
+                if !pairs.iter().any(|(r, i)| *r == e.repo && *i == v.id) {
+                    pairs.push((e.repo, v.id));
+                }
+            }
+        }
+        let mut only = HashSet::new();
+        for v in held.keys() {
+            if reader.producers(v)?.is_empty() {
+                only.insert(*v);
+            }
+        }
+        Ok(Delivered { held, only })
+    }
+
+    /// Whether `version` of `id` is only in the foreign copy, delivered from `repo`.
+    fn holds(&self, repo: &RepoId, id: &BlockId, version: &Hash) -> bool {
+        self.only.contains(version)
+            && self
+                .held
+                .get(version)
+                .is_some_and(|p| p.iter().any(|(r, i)| r == repo && i == id))
+    }
+
+    /// Whether `version` is only in the foreign copy, delivered from `repo` under another id.
+    fn holds_other(&self, repo: &RepoId, version: &Hash) -> bool {
+        self.only.contains(version)
+            && self
+                .held
+                .get(version)
+                .is_some_and(|p| p.iter().any(|(r, _)| r == repo))
+    }
+}
+
 /// Checks each normalized target that the index can check alone: a version must be a stored
-/// block version of its id; a blob must be a stored blob manifest.
-fn check_known(reader: &StoreReader, targets: &[RedactTarget]) -> Result<(), RdyError> {
+/// block version of its id that a local change wrote; a blob must be a stored blob manifest. A
+/// cited block's version (repo links) must be one a delivery of its repo held under its id and
+/// that only the foreign copy holds: a version of another delivered block is `version belongs to
+/// another block`, any other `unknown target`. A local version selector that names a version
+/// only the foreign copy holds is `unknown target`.
+fn check_known(
+    reader: &StoreReader,
+    targets: &[RedactTarget],
+    delivered: &Delivered,
+) -> Result<(), RdyError> {
     for t in targets {
         let name = selector_text(t);
         match t {
             RedactTarget::AllVersions(_) => {}
+            RedactTarget::ForeignVersion { repo, id, version } => {
+                if delivered.holds(repo, id, version) {
+                    continue;
+                }
+                let cause = if delivered.holds_other(repo, version) {
+                    REDACTION_CAUSE_OTHER_BLOCK
+                } else {
+                    REDACTION_CAUSE_UNKNOWN
+                };
+                return Err(redaction_target(&name, cause));
+            }
             RedactTarget::Version { id, version } => {
-                if !reader.has_kind(kinds::BLOCK, version)? {
+                if !reader.has_kind(kinds::BLOCK, version)? || delivered.only.contains(version) {
                     return Err(redaction_target(&name, REDACTION_CAUSE_UNKNOWN));
                 }
                 if reader.get_block(version)?.id != *id {
@@ -523,6 +643,7 @@ fn check_expansion(
     reader: &StoreReader,
     targets: &[RedactTarget],
     limits: &Limits,
+    delivered: &Delivered,
 ) -> Result<(), RdyError> {
     let removed = |kind: u8, h: &Hash| -> Result<bool, RdyError> {
         Ok(reader.redaction_of(kind, h)?.is_some())
@@ -537,6 +658,10 @@ fn check_expansion(
         .collect();
     if !ids.is_empty() {
         reader.for_each_object_of(kinds::BLOCK, |v| {
+            // a version only the foreign copy holds is no version of a local id
+            if delivered.only.contains(&v) {
+                return Ok(());
+            }
             let b = reader.get_block(&v)?;
             if let Some((n, all)) = ids.get_mut(&b.id) {
                 *n += 1;
@@ -567,6 +692,8 @@ fn check_expansion(
     for t in targets {
         let live = match t {
             RedactTarget::AllVersions(_) => continue,
+            // a cited version selects its one held version, in the foreign copy only
+            RedactTarget::ForeignVersion { version, .. } => !removed(kinds::BLOCK, version)?,
             RedactTarget::Version { id, version } => {
                 !live_ids.contains(id) && !removed(kinds::BLOCK, version)?
             }
@@ -684,6 +811,23 @@ impl OwnBatches {
     }
 }
 
+/// The repo of a repo link alias, by the live repo links of canon (`foreign_refs::RepoLinks`,
+/// read once on first use): an alias no live link holds is the write path's `E_UNKNOWN_REF`.
+fn repo_of(state: &ReadState) -> impl FnMut(&str) -> Result<RepoId, RdyError> + '_ {
+    let mut links: Option<crate::foreign_refs::RepoLinks> = None;
+    move |alias: &str| {
+        if links.is_none() {
+            let m = state.materialized(&crate::Scope::Canon)?;
+            links = Some(crate::foreign_refs::RepoLinks::of_view(&m));
+        }
+        links
+            .as_ref()
+            .and_then(|l| l.get(alias))
+            .map(|row| row.repo)
+            .ok_or_else(|| crate::foreign_refs::unknown_alias(alias))
+    }
+}
+
 /// The report, the manifest it hashes, the residues a request records and the request's own
 /// targets. `quarantine` is sorted and deduplicated here.
 pub(crate) fn compute(
@@ -718,14 +862,15 @@ pub(crate) fn compute_excluding(
         targets,
         class,
         reason,
-    } = check_input(input)?;
+    } = check_input(input, &mut repo_of(state))?;
     let limits = limits();
     let reader = state.reader();
     let mut quarantine = quarantine.to_vec();
     quarantine.sort();
     quarantine.dedup();
-    check_known(reader, &targets)?;
-    check_expansion(reader, &targets, &limits)?;
+    let delivered = Delivered::read(reader)?;
+    check_known(reader, &targets, &delivered)?;
+    check_expansion(reader, &targets, &limits, &delivered)?;
 
     // the walk, under the frame and byte bounds
     let frames = walk(reader, state.seq(), &limits)?;
@@ -741,6 +886,9 @@ pub(crate) fn compute_excluding(
     let mut manifests: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
     for f in &frames {
         match f.kind {
+            // a version only the foreign copy holds is no version of a local id, and its blob
+            // field names no local blob
+            kinds::BLOCK if delivered.only.contains(&f.hash) => {}
             kinds::BLOCK if !block_ids.contains_key(&f.hash) => {
                 let b = reader.get_block(&f.hash)?;
                 if let Some(h) = b
@@ -795,6 +943,9 @@ pub(crate) fn compute_excluding(
             },
             RedactTarget::Version { id, version } => vec![(id.clone(), *version)],
             RedactTarget::Blob(_) => vec![],
+            // the one held version, whose frames are the foreign copy's occurrences only
+            // (`check_known`: no local change produces it)
+            RedactTarget::ForeignVersion { id, version, .. } => vec![(id.clone(), *version)],
         };
         expanded.push((t.clone(), versions));
     }
@@ -909,7 +1060,22 @@ pub(crate) fn compute_excluding(
         .copied()
         .chain(referencing.iter().map(|(_, v)| *v))
         .collect();
-    let affected_ids: HashSet<&BlockId> = selected
+    // a cited version's id is an id of the cited project: no local record references it by id,
+    // so the local reference rows read the local selection only (D-CN4QJ: the foreign copy's
+    // occurrences only)
+    let cited: HashSet<Hash> = request_targets
+        .iter()
+        .filter_map(|t| match t {
+            RedactTarget::ForeignVersion { version, .. } => Some(*version),
+            _ => None,
+        })
+        .collect();
+    let local_selected: BTreeSet<(BlockId, Hash)> = selected
+        .iter()
+        .filter(|(_, v)| !cited.contains(v))
+        .cloned()
+        .collect();
+    let affected_ids: HashSet<&BlockId> = local_selected
         .iter()
         .chain(&referencing)
         .map(|(id, _)| id)
@@ -1021,8 +1187,8 @@ pub(crate) fn compute_excluding(
     let mut snapshots: HashSet<Hash> = HashSet::new();
     let mut tags: Vec<(Hash, String, Hash)> = vec![];
     let mut view_refs: Vec<(String, Vec<Hash>, bool)> = vec![];
-    let mut reviews: Vec<(Hash, Review)> = vec![];
-    let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
+    let mut reviews: Vec<(Hash, ReviewV1)> = vec![];
+    let mut tensions: Vec<(Hash, SemanticTensionV1)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
     // TASK-1237 (D-6B1W1, p-EYDH3): in a request's freshness, the records written after the
@@ -1048,9 +1214,11 @@ pub(crate) fn compute_excluding(
             // title or statement), and the report lists them. The record stays out of the
             // manifest rows, so the request never stales at its own propose
             if f.kind == kinds::ASSESSMENT {
-                let a: rdy_model::assessment::Assessment =
-                    reader.get_typed(kinds::ASSESSMENT, &f.hash)?;
-                quotes.scan_unbound(ImpactKind::Assessment, &f.hash.to_string(), false, &a)?;
+                ReadAssessment::read(reader, &f.hash)?.scan(
+                    &mut quotes,
+                    &f.hash.to_string(),
+                    true,
+                )?;
             }
             continue;
         }
@@ -1069,7 +1237,7 @@ pub(crate) fn compute_excluding(
                     ImpactKind::BlockVersion,
                     &version_record(&b.id, &h),
                     true,
-                    &b,
+                    &BlockText(&b),
                 )?;
             }
             kinds::CHANGE => {
@@ -1097,7 +1265,7 @@ pub(crate) fn compute_excluding(
                             continue;
                         }
                         let record = version_record(&block.id, &v);
-                        quotes.scan(ImpactKind::BlockVersion, &record, true, block)?;
+                        quotes.scan(ImpactKind::BlockVersion, &record, true, &BlockText(block))?;
                         quoting |= quotes.found.contains_key(&(
                             ImpactKind::BlockVersion as u8,
                             record,
@@ -1141,12 +1309,12 @@ pub(crate) fn compute_excluding(
                 view_refs.push((op.view, named, later(i)));
             }
             kinds::REVIEW => {
-                let r: Review = reader.get_typed(kinds::REVIEW, &h)?;
+                let r: ReviewV1 = reader.get_typed(kinds::REVIEW, &h)?;
                 quotes.scan(ImpactKind::Review, &rec, false, &r)?;
                 reviews.push((h, r));
             }
             kinds::TENSION => {
-                let t: SemanticTension = reader.get_typed(kinds::TENSION, &h)?;
+                let t: SemanticTensionV1 = reader.get_typed(kinds::TENSION, &h)?;
                 quotes.scan(ImpactKind::Tension, &rec, false, &t)?;
                 tensions.push((h, t));
             }
@@ -1167,8 +1335,13 @@ pub(crate) fn compute_excluding(
                 quotes.scan(audit, &rec, false, &s)?;
             }
             kinds::TRANSITION => {
-                let t: Transitions = reader.get_typed(kinds::TRANSITION, &h)?;
-                quotes.scan(audit, &rec, false, &t)?;
+                // the wire type reads a record of any encoding (repo links); a record with no
+                // cited target or side is scanned in its runtime shape, as before
+                let t: TransitionsV1 = reader.get_typed(kinds::TRANSITION, &h)?;
+                match t.clone().into_local() {
+                    Some(local) => quotes.scan(audit, &rec, false, &local)?,
+                    None => quotes.scan(audit, &rec, false, &t)?,
+                }
             }
             kinds::REDACTION => {
                 let r: Redaction = reader.get_typed(kinds::REDACTION, &h)?;
@@ -1192,11 +1365,17 @@ pub(crate) fn compute_excluding(
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
             }
+            // a foreign entry (repo links): its source and publication text. It names delivered
+            // versions by hash, which core reports through the versions themselves
+            kinds::FOREIGN => {
+                let e = reader.foreign_entry(&h)?;
+                quotes.scan(audit, &rec, false, &e)?;
+            }
             // the carried shapes (no writer yet): each whole typed record, which core reports
             // and cannot erase
             kinds::ASSESSMENT => {
-                let a: rdy_model::assessment::Assessment =
-                    reader.get_typed(kinds::ASSESSMENT, &h)?;
+                // the wire type reads a record of any encoding (repo links)
+                let read = ReadAssessment::read(reader, &h)?;
                 // ruling task-10 A and Amendment 2 (2026-10-29): an assessment of a version that
                 // carries this request is read for quotes and listed, in any batch, but it is
                 // left out of the manifest: no `inside` row and no `carried.assessments` entry.
@@ -1206,13 +1385,15 @@ pub(crate) fn compute_excluding(
                 // that names a removed block stays in the report
                 if own
                     .as_ref()
-                    .is_some_and(|o| o.versions.contains(&a.proposal))
+                    .is_some_and(|o| o.versions.contains(&read.local.proposal))
                 {
-                    quotes.scan_unbound(ImpactKind::Assessment, &rec, false, &a)?;
+                    read.scan(&mut quotes, &rec, true)?;
                     continue;
                 }
-                quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
-                if assessment_hits(&a, &versions, &affected_ids) {
+                read.scan(&mut quotes, &rec, false)?;
+                // a foreign part names cited versions by hash only, as a FOREIGN entry does: the
+                // local reference rows read the local part (D-CN4QJ)
+                if assessment_hits(&read.local, &versions, &affected_ids) {
                     carried.assessments.push(h);
                 }
             }
@@ -1415,7 +1596,7 @@ pub(crate) fn compute_excluding(
     }
     let mut affected_reviews: HashSet<Hash> = HashSet::new();
     for (h, r) in &reviews {
-        let request = matches!(&r.subject, ReviewSubject::Check { request } if affected_requests.contains(request));
+        let request = matches!(&r.subject, ReviewSubjectV1::Check { request } if affected_requests.contains(request));
         if request || review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
             affected_reviews.insert(*h);
         }
@@ -1424,7 +1605,10 @@ pub(crate) fn compute_excluding(
     let mut affected_tensions: HashSet<Hash> = tensions
         .iter()
         .filter(|(_, t)| {
-            t.items.iter().any(|i| affected_ids.contains(&i.block))
+            t.items
+                .iter()
+                .filter_map(|s| s.local())
+                .any(|i| affected_ids.contains(&i.block))
                 || affected_reviews.contains(&t.review)
         })
         .map(|(h, _)| *h)
@@ -1463,7 +1647,7 @@ pub(crate) fn compute_excluding(
                     || affected_tags.contains(t)
                     || affected_landings.contains(t)
             });
-            target || item_hits(&a.item, &selected, &referencing)
+            target || item_hits(&a.item, &local_selected, &referencing)
         })
         .map(|(h, _)| *h)
         .collect();
@@ -1615,7 +1799,7 @@ fn prospective_hits(
                 return Ok(true);
             }
             if let Op::Create { block } | Op::Update { block, .. } = op {
-                quotes.scan(ImpactKind::BlockVersion, "", true, block)?;
+                quotes.scan(ImpactKind::BlockVersion, "", true, &BlockText(block))?;
             }
         }
     }

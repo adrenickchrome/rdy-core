@@ -188,6 +188,7 @@ fn raw_figure(id: &str, parent: &str, order: &str, blob: &str, alt: &str) -> Blo
         body: String::new(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }
@@ -541,6 +542,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
                 body: String::new(),
                 links: Default::default(),
                 pins: Default::default(),
+                foreign: Default::default(),
                 read_identity: None,
             },
         });

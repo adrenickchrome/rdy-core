@@ -101,6 +101,28 @@ pub(crate) enum NewCmd {
         #[arg(long)]
         locked: bool,
     },
+    /// A repo link: the alias this project uses for a cited project, the repo and the
+    /// publication profile it delivers. It sits under a doc and gets no key. `rdy links` reads
+    /// what it delivers. A person approves its landing: the authority policy never accepts it.
+    /// The chat path is rdy_write.
+    RepoLink {
+        /// The alias: a lowercase letter, then up to 23 lowercase letters, digits or hyphens.
+        alias: String,
+        /// The doc to put it in (id, key or path).
+        #[arg(long)]
+        parent: String,
+        /// The cited project's repo id: 32 lowercase hex digits.
+        #[arg(long)]
+        repo: String,
+        /// The id of the publication profile the cited project delivers.
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        title: Option<String>,
+        /// The view to write (default: the session's, `work` for the human).
+        #[arg(long)]
+        view: Option<String>,
+    },
     /// A source: a release, commit or spec that a finding cites. It lives only in the store. Omit
     /// parent to record it in the decision home, or at the project root when the project names
     /// none. The chat path is rdy_write.
@@ -368,6 +390,21 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             }
             return new_supporting(env, "source", args, view);
         }
+        NewCmd::RepoLink {
+            alias,
+            parent,
+            repo,
+            profile,
+            title,
+            view,
+        } => {
+            let mut args = json!({"alias": alias, "parent": parent, "repo": repo,
+                "profile": profile});
+            if let Some(t) = title {
+                args["title"] = json!(t);
+            }
+            return new_supporting(env, "repo_link", args, view);
+        }
         NewCmd::Instruction {
             parent,
             text,
@@ -390,6 +427,7 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
         NewCmd::Profile { .. }
         | NewCmd::Finding { .. }
         | NewCmd::Source { .. }
+        | NewCmd::RepoLink { .. }
         | NewCmd::Instruction { .. } => {
             unreachable!("handled above")
         }
@@ -416,6 +454,7 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
         NewCmd::Profile { .. }
         | NewCmd::Finding { .. }
         | NewCmd::Source { .. }
+        | NewCmd::RepoLink { .. }
         | NewCmd::Instruction { .. } => {
             unreachable!("handled above")
         }

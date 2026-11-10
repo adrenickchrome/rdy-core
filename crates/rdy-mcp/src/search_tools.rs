@@ -1,6 +1,7 @@
 //! msrch1: `rdy_search`, the find-text tool. The search itself is `ReadState::search`.
-use crate::tools::{McpState, check_tokens, scope_of, serialize_briefing, session};
-use rdy_engine::search::{DEFAULT_SEARCH_TOKENS, SearchFilters};
+use crate::tools::{McpState, check_tokens, scope_of, session};
+use rdy_engine::search::SearchFilters;
+use rdy_engine::tool_reads;
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -58,15 +59,9 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
     session(st)?;
     let st_ = st.engine.read();
     let scope = scope_of(&st.view, &st_, &p.scope)?;
-    let brief = p.brief.unwrap_or(false);
-    // With a briefing the caller's budget covers both halves: the hits and the briefing.
-    let total = p.max_tokens.unwrap_or(DEFAULT_SEARCH_TOKENS);
-    let (search_tokens, briefing_tokens) = if brief {
-        (Some(total / 2), Some(total - total / 2))
-    } else {
-        (p.max_tokens, None)
-    };
-    let r = st_.search(
+    let briefs = st.engine.briefs();
+    tool_reads::search_reply(
+        &st_,
         &scope,
         &SearchQuery {
             text: p.query,
@@ -90,46 +85,7 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
             },
         },
         p.page.as_deref(),
-        search_tokens,
-    )?;
-    // The page's hits, and the blocks of each entity sheet: a call whose every hit is held by a
-    // sheet still gets a briefing over the sheet's blocks.
-    let mut ids: Vec<String> = Vec::new();
-    if brief {
-        let hits = r
-            .matches
-            .iter()
-            .flat_map(|m| std::iter::once(&m.id).chain(m.also.iter().map(|a| &a.id)));
-        let sheets = r.entities.iter().flat_map(|e| {
-            std::iter::once(&e.id)
-                .chain(e.facts.iter().map(|b| &b.id))
-                .chain(e.also_described_in.iter().map(|b| &b.id))
-        });
-        // the order of first sight, de-duplicated in O(1) a step
-        let mut seen: std::collections::HashSet<&String> = std::collections::HashSet::new();
-        for id in hits.chain(sheets) {
-            if seen.insert(id) {
-                ids.push(id.clone());
-            }
-        }
-    }
-    let briefing = if !ids.is_empty() {
-        // A briefing that fails fails the call: never a token without its briefing.
-        let b = st_.brief(&scope, &Coverage { ids, path: None }, briefing_tokens)?;
-        b.register(&st.engine.briefs());
-        Some(serialize_briefing(&b)?)
-    } else {
-        None
-    };
-    let mut v = serde_json::to_value(&r).map_err(|e| {
-        RdyError::new(
-            E_INTERNAL,
-            format!("a search result did not serialize: {e}"),
-            "report this as a bug in rdy",
-        )
-    })?;
-    if let (Some(b), Some(o)) = (briefing, v.as_object_mut()) {
-        o.insert("briefing".to_string(), b);
-    }
-    Ok(v)
+        p.max_tokens,
+        p.brief.unwrap_or(false).then_some(&*briefs),
+    )
 }

@@ -83,9 +83,13 @@ pub(crate) fn checked_session(
     stated: Option<&crate::claims::Asked>,
 ) -> Result<(Session, Role, String), RdyError> {
     let role = crate::claims::parse_role(&p.role)?;
-    // D-CQMA4: the views of re-affirmation cards' landings are private
-    if p.view.as_deref().is_some_and(rdy_engine::is_reserved_view) {
-        return Err(rdy_engine::reserved_view_error());
+    // D-CQMA4: the views of re-affirmation and adopt cards' landings are private
+    if let Some(v) = p
+        .view
+        .as_deref()
+        .filter(|v| rdy_engine::is_reserved_view(v))
+    {
+        return Err(rdy_engine::reserved_view_error(v));
     }
     if let Some(v) = p.view.as_deref().filter(|v| v.contains(':')) {
         return Err(RdyError::new(
@@ -266,6 +270,19 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
                 "label": m.label, "view": m.view, "owner": m.owner,
                 "changes": m.changes, "mine": m.view == st.view,
             })).collect::<Vec<_>>(),
+        });
+    }
+    // repo links: the live links with their state and the pins behind; left out when the project
+    // has none. A read error never fails the overview. rdy_links has the whole reading.
+    if !past
+        && let Ok(list) = st_.links()
+        && (!list.links.is_empty() || !list.unlinked.is_empty())
+    {
+        out["links"] = json!({
+            "links": list.links.iter().map(|l| json!({
+                "alias": l.alias, "state": l.state, "pins_behind": l.pins_behind,
+            })).collect::<Vec<_>>(),
+            "unlinked": list.unlinked.len(),
         });
     }
     // the rest of the reply fits what the warnings leave; the warnings are added whole

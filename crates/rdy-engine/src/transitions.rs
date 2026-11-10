@@ -10,9 +10,11 @@ use crate::tensions::{SideRef, Tension, TensionSeverity, TensionStatus, tension_
 use crate::{RdyError, ReadState, Scope, events};
 use imbl::ordmap::DiffItem;
 use rdy_graph::Suspect;
-use rdy_model::Hash;
+use rdy_graph::foreign::ForeignSuspect;
+use rdy_model::{BlockId, Hash};
 use rdy_store::transition::{
-    Author, Cause, Side, SuspectMove, TensionMove, Transitions, Why, suspect_key,
+    Author, Cause, Side, SideV1, SuspectMoveV1, SuspectTarget, TensionMoveV1, TransitionsV1, Why,
+    foreign_suspect_key, suspect_key,
 };
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
@@ -53,7 +55,7 @@ pub(crate) fn moves(
     next: &ReadState,
     frames: &[(u8, Hash)],
     cause: Option<Cause>,
-) -> Result<Transitions, RdyError> {
+) -> Result<TransitionsV1, RdyError> {
     let reader = next.reader();
     let bset = base.tensions()?;
     let nset = next.tensions()?;
@@ -67,13 +69,7 @@ pub(crate) fn moves(
         Some(c) => why(c, None),
         None => batch_why(reader, frames)?,
     };
-    let mut rec = Transitions {
-        at_ms: 0,
-        resolved: vec![],
-        opened: vec![],
-        gone: vec![],
-        new: vec![],
-    };
+    let mut rec = empty();
     for t in &resolved {
         let w = match (cause, nset.get(&t.id).map(|t| next.tension_status(t))) {
             // a write batch's tension that stays in the set and becomes dismissed
@@ -88,7 +84,7 @@ pub(crate) fn moves(
             }
             _ => batch.clone(),
         };
-        rec.resolved.push(TensionMove {
+        rec.resolved.push(TensionMoveV1 {
             tension: t.id,
             kind: t.kind.name().to_string(),
             severity: t.severity.to_string(),
@@ -98,7 +94,7 @@ pub(crate) fn moves(
         });
     }
     for t in &opened {
-        rec.opened.push(TensionMove {
+        rec.opened.push(TensionMoveV1 {
             tension: t.id,
             kind: t.kind.name().to_string(),
             severity: t.severity.to_string(),
@@ -133,7 +129,7 @@ pub(crate) fn reconcile_moves(
     prev: Option<&ReadState>,
     frames: &[(u8, Hash)],
     cause: Option<Cause>,
-) -> Result<Transitions, RdyError> {
+) -> Result<TransitionsV1, RdyError> {
     let reader = next.reader();
     let table_t: BTreeMap<Hash, Hash> = reader.open_tensions()?.into_iter().collect();
     let table_s: BTreeMap<Hash, Hash> = reader.open_suspects()?.into_iter().collect();
@@ -172,11 +168,11 @@ pub(crate) fn reconcile_moves(
         Some(p) => Some(moves(p, next, frames, cause)?),
         None => None,
     };
-    let made_t = |list: fn(&Transitions) -> &Vec<TensionMove>, id: &Hash| {
+    let made_t = |list: fn(&TransitionsV1) -> &Vec<TensionMoveV1>, id: &Hash| {
         made.as_ref()
             .and_then(|m| list(m).iter().find(|t| t.tension == *id).cloned())
     };
-    let made_s = |list: fn(&Transitions) -> &Vec<SuspectMove>, key: &Hash| {
+    let made_s = |list: fn(&TransitionsV1) -> &Vec<SuspectMoveV1>, key: &Hash| {
         made.as_ref()
             .and_then(|m| list(m).iter().find(|s| s.key() == *key).cloned())
     };
@@ -214,12 +210,13 @@ pub(crate) fn reconcile_moves(
             pair(o, *id);
         }
     }
-    let mut records: BTreeMap<Hash, Transitions> = BTreeMap::new();
-    let mut record = |h: Hash| -> Result<Transitions, RdyError> {
+    let mut records: BTreeMap<Hash, TransitionsV1> = BTreeMap::new();
+    let mut record = |h: Hash| -> Result<TransitionsV1, RdyError> {
         if let Some(r) = records.get(&h) {
             return Ok(r.clone());
         }
-        let r = reader.transitions(&h)?;
+        // the wire type reads a record of any encoding (a cited target takes encoding 1)
+        let r: TransitionsV1 = reader.get_typed(kinds::TRANSITION, &h)?;
         records.insert(h, r.clone());
         Ok(r)
     };
@@ -231,7 +228,7 @@ pub(crate) fn reconcile_moves(
             .find(|t| t.tension == *id)
             .ok_or_else(|| unknown_move(*opened_by, &format!("tension {id}")))?;
         let why = made_t(|m| &m.resolved, id).map_or_else(|| other.clone(), |m| m.why);
-        rec.resolved.push(TensionMove {
+        rec.resolved.push(TensionMoveV1 {
             rekey: rekey_to.get(id).copied(),
             why,
             ..opened
@@ -240,7 +237,7 @@ pub(crate) fn reconcile_moves(
     for id in &opening {
         let t = next_open[id];
         let why = made_t(|m| &m.opened, id).map_or_else(|| other.clone(), |m| m.why);
-        rec.opened.push(TensionMove {
+        rec.opened.push(TensionMoveV1 {
             tension: t.id,
             kind: t.kind.name().to_string(),
             severity: t.severity.to_string(),
@@ -256,7 +253,7 @@ pub(crate) fn reconcile_moves(
             .find(|s| s.key() == *key)
             .ok_or_else(|| unknown_move(*made_by, &format!("suspect {key}")))?;
         let why = made_s(|m| &m.gone, key).map_or_else(|| other.clone(), |m| m.why);
-        rec.gone.push(SuspectMove { why, ..new });
+        rec.gone.push(SuspectMoveV1 { why, ..new });
     }
     for key in &new_keys {
         let why = made_s(|m| &m.new, key).map_or_else(|| other.clone(), |m| m.why);
@@ -268,12 +265,12 @@ pub(crate) fn reconcile_moves(
 }
 
 /// The number of moves in `rec`.
-pub(crate) fn count(rec: &Transitions) -> usize {
-    rec.resolved.len() + rec.opened.len() + rec.gone.len() + rec.new.len()
+pub(crate) fn count(rec: &TransitionsV1) -> usize {
+    rec.count()
 }
 
-fn empty() -> Transitions {
-    Transitions {
+fn empty() -> TransitionsV1 {
+    TransitionsV1 {
         at_ms: 0,
         resolved: vec![],
         opened: vec![],
@@ -396,18 +393,49 @@ fn other_severity(s: TensionSeverity) -> TensionSeverity {
     }
 }
 
-/// The suspects `next` made gone and new against `base`, each by key. The suspects are
+/// One open suspect of canon: on a local target, or on a cited one (repo links, D-Y49PX).
+#[derive(Clone, Debug)]
+enum AnySuspect {
+    Local(Suspect),
+    Foreign(ForeignSuspect),
+}
+
+impl AnySuspect {
+    fn block(&self) -> &BlockId {
+        match self {
+            AnySuspect::Local(s) => &s.block,
+            AnySuspect::Foreign(s) => &s.block,
+        }
+    }
+
+    /// Its identity: the released `suspect_key` of a local suspect, `foreign_suspect_key` of a
+    /// cited one.
+    fn key(&self) -> Hash {
+        match self {
+            AnySuspect::Local(s) => suspect_key(&s.block, &s.target, &s.reason),
+            AnySuspect::Foreign(s) => foreign_suspect_key(&s.block, &s.target, &s.reason),
+        }
+    }
+}
+
+type SuspectSets = (BTreeMap<Hash, AnySuspect>, BTreeMap<Hash, AnySuspect>);
+
+/// The suspects `next` made gone and new against `base`, each by key: the local ones
+/// ([`local_suspect_moves`]) and the ones on cited blocks ([`foreign_suspect_moves`]).
+fn suspect_moves(base: &ReadState, next: &ReadState) -> Result<SuspectSets, RdyError> {
+    let (mut gone, mut new) = local_suspect_moves(base, next)?;
+    foreign_suspect_moves(base, next, &mut gone, &mut new)?;
+    Ok((gone, new))
+}
+
+/// The local suspects `next` made gone and new against `base`, each by key. The suspects are
 /// canon's (task-15 ruling: in canon, a stale citation is a suspect; an in-flight citer of a
 /// changed premise is a premise shift tension), so a batch that cannot change canon moves
 /// none: same canon head, same pack. With the same pack, only the blocks whose suspects can
 /// differ are compared (`Graph::suspect_candidates`); a new pack can change the
 /// presentational trait or the tracking fields without changing a block, so then the whole
 /// sets are compared.
-#[allow(clippy::type_complexity)]
-fn suspect_moves(
-    base: &ReadState,
-    next: &ReadState,
-) -> Result<(BTreeMap<Hash, Suspect>, BTreeMap<Hash, Suspect>), RdyError> {
+fn local_suspect_moves(base: &ReadState, next: &ReadState) -> Result<SuspectSets, RdyError> {
     let mut gone = BTreeMap::new();
     let mut new = BTreeMap::new();
     let same_pack = Arc::ptr_eq(&base.pack, &next.pack);
@@ -415,8 +443,8 @@ fn suspect_moves(
         return Ok((gone, new));
     }
     if !same_pack {
-        let mut after = canon_suspects(next)?;
-        for (k, s) in canon_suspects(base)? {
+        let mut after = local_canon_suspects(next)?;
+        for (k, s) in local_canon_suspects(base)? {
             if after.remove(&k).is_none() {
                 gone.insert(k, s);
             }
@@ -447,21 +475,77 @@ fn suspect_moves(
     Ok((gone, new))
 }
 
-/// The open suspects of `st`: canon's, without those of a presentational source, by key.
-fn canon_suspects(st: &ReadState) -> Result<BTreeMap<Hash, Suspect>, RdyError> {
+/// Adds to `gone` and `new` the suspects on cited blocks that `next` made gone and new against
+/// `base` (repo links, D-Y49PX). They read canon's foreign pins and the foreign cut, so a batch
+/// that changes neither (same canon head, same pack, same foreign cut) moves none; else the
+/// two sets are compared whole. A delivery moves no pin: its moves come from the cut.
+fn foreign_suspect_moves(
+    base: &ReadState,
+    next: &ReadState,
+    gone: &mut BTreeMap<Hash, AnySuspect>,
+    new: &mut BTreeMap<Hash, AnySuspect>,
+) -> Result<(), RdyError> {
+    let same_cut = Arc::ptr_eq(base.foreign()?, next.foreign()?);
+    if same_cut && Arc::ptr_eq(&base.pack, &next.pack) && base.canon_head == next.canon_head {
+        return Ok(());
+    }
+    let mut after = foreign_canon_suspects(next)?;
+    for (k, s) in foreign_canon_suspects(base)? {
+        if after.remove(&k).is_none() {
+            gone.insert(k, s);
+        }
+    }
+    new.extend(after);
+    Ok(())
+}
+
+/// The open suspects of `st`: canon's local ones (without those of a presentational source)
+/// and its suspects on cited blocks, by key.
+fn canon_suspects(st: &ReadState) -> Result<BTreeMap<Hash, AnySuspect>, RdyError> {
+    let mut out = local_canon_suspects(st)?;
+    out.extend(foreign_canon_suspects(st)?);
+    Ok(out)
+}
+
+/// The local open suspects of `st`: canon's, without those of a presentational source, by key.
+fn local_canon_suspects(st: &ReadState) -> Result<BTreeMap<Hash, AnySuspect>, RdyError> {
     Ok(st
         .suspects(&Scope::Canon)?
         .into_iter()
-        .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
+        .map(|s| {
+            (
+                suspect_key(&s.block, &s.target, &s.reason),
+                AnySuspect::Local(s),
+            )
+        })
+        .collect())
+}
+
+/// Canon's suspects on cited blocks in `st`, by key.
+fn foreign_canon_suspects(st: &ReadState) -> Result<BTreeMap<Hash, AnySuspect>, RdyError> {
+    Ok(st
+        .foreign_suspects(&Scope::Canon)?
+        .into_iter()
+        .map(AnySuspect::Foreign)
+        .map(|s| (s.key(), s))
         .collect())
 }
 
 /// `list` (suspects of `st`'s canon, materialized as `m`) without those of a presentational
 /// source, by key.
-fn keyed(st: &ReadState, m: &crate::Materialized, list: Vec<Suspect>) -> BTreeMap<Hash, Suspect> {
+fn keyed(
+    st: &ReadState,
+    m: &crate::Materialized,
+    list: Vec<Suspect>,
+) -> BTreeMap<Hash, AnySuspect> {
     list.into_iter()
         .filter(|s| !st.is_presentational_source(m, s))
-        .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
+        .map(|s| {
+            (
+                suspect_key(&s.block, &s.target, &s.reason),
+                AnySuspect::Local(s),
+            )
+        })
         .collect()
 }
 
@@ -470,20 +554,28 @@ fn keyed(st: &ReadState, m: &crate::Materialized, list: Vec<Suspect>) -> BTreeMa
 fn suspect_move(
     st: &ReadState,
     set: &TensionSet,
-    s: &Suspect,
+    s: &AnySuspect,
     why: Why,
-) -> Result<SuspectMove, RdyError> {
+) -> Result<SuspectMoveV1, RdyError> {
     let mut writers = BTreeSet::new();
-    for w in set.writes().all_on(&s.block) {
+    for w in set.writes().all_on(s.block()) {
         if w.live {
             let (actor, run) = author(st, set, &w.change)?;
             writers.insert(Author { actor, run });
         }
     }
-    Ok(SuspectMove {
-        block: s.block.clone(),
-        target: s.target.clone(),
-        reason: s.reason.clone(),
+    let (block, target, reason) = match s {
+        AnySuspect::Local(s) => (&s.block, SuspectTarget::Local(s.target.clone()), &s.reason),
+        AnySuspect::Foreign(s) => (
+            &s.block,
+            SuspectTarget::Foreign(s.target.clone()),
+            &s.reason,
+        ),
+    };
+    Ok(SuspectMoveV1 {
+        block: block.clone(),
+        target,
+        reason: reason.clone(),
         writers: writers.into_iter().collect(),
         why,
     })
@@ -505,12 +597,20 @@ fn author(
 }
 
 /// The sides of `t` as a move records them, with the authors `st` (the state that holds it)
-/// gives its changes.
-fn sides(st: &ReadState, set: &TensionSet, t: &Tension) -> Result<Vec<Side>, RdyError> {
+/// gives its changes. A foreign side records the cited repo and the FOREIGN entry: delivery
+/// provenance, with no local actor or landing (repo links, D-Y49PX). A move with one takes
+/// TRANSITION encoding 1.
+fn sides(st: &ReadState, set: &TensionSet, t: &Tension) -> Result<Vec<SideV1>, RdyError> {
     t.sides
         .iter()
         .map(|s| {
-            Ok(match s {
+            if let SideRef::Foreign { repo, entry } = s {
+                return Ok(SideV1::Foreign {
+                    repo: *repo,
+                    entry: *entry,
+                });
+            }
+            Ok(SideV1::Local(match s {
                 SideRef::Change(c) => {
                     let (actor, run) = author(st, set, c)?;
                     Side {
@@ -526,22 +626,27 @@ fn sides(st: &ReadState, set: &TensionSet, t: &Tension) -> Result<Vec<Side>, Rdy
                     run: None,
                     landing: *landing,
                 },
-                // an intent side is read-time only, never in the open set
-                SideRef::Intent { .. } => Side {
+                // an intent side is read-time only, never in the open set; a foreign side was
+                // recorded above
+                SideRef::Intent { .. } | SideRef::Foreign { .. } => Side {
                     change: None,
                     actor: None,
                     run: None,
                     landing: None,
                 },
-            })
+            }))
         })
         .collect()
 }
 
 /// What a write batch of `frames` did, as its moves' cause (closed, first match wins): a
-/// landing; a commit; a review; an alternative set version; another view op; else written.
+/// delivery or revocation of a repo link (its FOREIGN entry; D-Y49PX); a landing; a commit; a
+/// review; an alternative set version; another view op; else written.
 fn batch_why(reader: &StoreReader, frames: &[(u8, Hash)]) -> Result<Why, RdyError> {
     let first = |kind: u8| frames.iter().find(|(k, _)| *k == kind).map(|(_, h)| *h);
+    if let Some(h) = first(kinds::FOREIGN) {
+        return Ok(why(Cause::Delivered, Some(h)));
+    }
     if let Some(h) = first(kinds::LANDING) {
         return Ok(why(Cause::Landed, Some(h)));
     }

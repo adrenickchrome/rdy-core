@@ -1,0 +1,427 @@
+{
+  "format": "tally-build-list/1",
+  "project": {
+    "name": "tally",
+    "description": "Tally collects error reports from apps and helps a team find and fix the errors.",
+    "pack": "rdy-standard",
+    "config": {
+      "decisions.home": "design/decisions"
+    }
+  },
+  "baseline": {
+    "view": "sample-baseline",
+    "write_message": "Tally sample baseline: 3 folders, 5 docs, one decision and the content that follows it",
+    "write_implements": "$D30",
+    "proposal_title": "Tally sample: the baseline with 30-day retention",
+    "proposal_summary": "The Tally design: an overview, a glossary, one decision (keep raw error events for 30 days), a storage requirement and the purge job runbook that follow it.",
+    "approval": {
+      "question": "Shall I land the Tally sample baseline?",
+      "evidence": "Approve."
+    },
+    "tag": {
+      "version": "v1.0.0",
+      "message": "Tally design with 30-day retention",
+      "question": "Shall I tag the approved state as v1.0.0?",
+      "evidence": "Tag it v1.0.0."
+    }
+  },
+  "folders": [
+    {
+      "name": "$f_product",
+      "fields": {
+        "name": "product",
+        "title": "Product",
+        "description": "What Tally does, what it is made of and the words that the docs use."
+      },
+      "docs": [
+        {
+          "name": "$d_gloss",
+          "fields": {
+            "name": "glossary",
+            "title": "Glossary",
+            "doc_type": "page",
+            "lifecycle": "stable"
+          },
+          "blocks": [
+            {
+              "type": "prose",
+              "body": "This page defines the words that the {{$d_overview|Tally docs}} use."
+            },
+            {
+              "name": "$t_event",
+              "type": "term",
+              "fields": {
+                "name": "Raw error event",
+                "aliases": [
+                  "error event",
+                  "raw event"
+                ]
+              },
+              "body": "One error report as the app sent it: the error message, the stack trace, the app version and the device details. It can hold personal data, such as a user ID or an email address."
+            },
+            {
+              "name": "$t_issue",
+              "type": "term",
+              "fields": {
+                "name": "Issue"
+              },
+              "body": "A group of raw error events that share one cause. Tally keeps an issue after it deletes the raw error events in it."
+            },
+            {
+              "name": "$t_ret",
+              "type": "term",
+              "fields": {
+                "name": "Retention period"
+              },
+              "body": "The time that Tally keeps a raw error event after the event arrives. When the time ends, the purge job deletes the event."
+            }
+          ]
+        },
+        {
+          "name": "$d_overview",
+          "fields": {
+            "name": "overview",
+            "title": "Tally overview",
+            "doc_type": "overview",
+            "lifecycle": "stable"
+          },
+          "blocks": [
+            {
+              "type": "prose",
+              "body": "Tally is a small service that collects error reports from apps. This page says what Tally does, what it is made of and what it does not do."
+            },
+            {
+              "name": "$s_sum",
+              "type": "section",
+              "fields": {
+                "title": "Summary"
+              },
+              "blocks": [
+                {
+                  "type": "prose",
+                  "body": "An app sends a report to Tally when an error occurs. Tally stores each report as a {{$t_event|raw error event}}. It groups the events that share one cause into an {{$t_issue|issue}}. A team reads the issues to find and fix the errors in its app."
+                },
+                {
+                  "type": "prose",
+                  "body": "The {{$d_dec|decisions}} and the {{$d_store|storage requirements}} set how long Tally keeps the events. The {{$d_purge|purge job runbook}} says how the team deletes them.",
+                  "links": {
+                    "describes": [
+                      "$t_ret"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "$s_goals",
+              "type": "section",
+              "fields": {
+                "title": "Goals"
+              },
+              "blocks": [
+                {
+                  "type": "prose",
+                  "body": "- Show a team each new error within one minute.\n- Keep the stored data small and easy to delete.\n- Store only the data that a team needs to fix an error.",
+                  "links": {
+                    "describes": [
+                      "$t_event"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "$s_non",
+              "type": "section",
+              "fields": {
+                "title": "Non-goals"
+              },
+              "blocks": [
+                {
+                  "type": "prose",
+                  "body": "- Tally does not monitor the speed or the uptime of an app.\n- Tally is not a long-term record of errors. A team that needs one exports its issues.",
+                  "links": {
+                    "describes": [
+                      "$t_issue"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "$s_parts",
+              "type": "section",
+              "fields": {
+                "title": "Parts"
+              },
+              "blocks": [
+                {
+                  "name": "$m_store",
+                  "type": "component",
+                  "fields": {
+                    "name": "Event store"
+                  },
+                  "body": "The database that holds the raw error events and the issues. The {{$t_ret|retention period}} sets how much it holds."
+                },
+                {
+                  "name": "$m_purge",
+                  "type": "component",
+                  "fields": {
+                    "name": "Purge job"
+                  },
+                  "body": "A nightly job that deletes each raw error event whose {{$t_ret|retention period}} has ended. The {{$d_purge|purge job runbook}} says how to run it."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "$f_design",
+      "fields": {
+        "name": "design",
+        "title": "Design",
+        "description": "The decisions and the requirements that set how Tally stores raw error events."
+      },
+      "docs": [
+        {
+          "name": "$d_dec",
+          "fields": {
+            "name": "decisions",
+            "title": "Decisions",
+            "doc_type": "decisions-log",
+            "lifecycle": "stable"
+          },
+          "blocks": [
+            {
+              "type": "prose",
+              "body": "This page records the decisions about Tally. Nobody edits a decision after the team accepts it. A new decision replaces it instead."
+            },
+            {
+              "name": "$s_dec",
+              "type": "section",
+              "fields": {
+                "title": "Decisions"
+              },
+              "blocks": [
+                {
+                  "name": "$D30",
+                  "type": "decision",
+                  "decision": {
+                    "title": "Keep raw error events for 30 days",
+                    "statement": "Tally keeps each raw error event for 30 days after it arrives. Then the purge job deletes it. Issues stay after their events go.",
+                    "why": "Most teams release once a month. With 30 days, a team can see when an error started in the current release. The storage cost stays known.",
+                    "options": [
+                      "Keep raw error events for 7 days",
+                      "Keep raw error events for 30 days",
+                      "Keep raw error events for 90 days"
+                    ],
+                    "kind": "product",
+                    "reversibility": "two_way",
+                    "affects": [
+                      "$t_event",
+                      "$m_purge",
+                      "$m_store"
+                    ],
+                    "body": "Rejected:\n- 7 days. A team that releases once a month loses the events from the start of the release.\n- 90 days. It triples the storage cost, and it keeps personal data longer than a team needs it."
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "$d_store",
+          "fields": {
+            "name": "storage",
+            "title": "Storage requirements",
+            "doc_type": "page",
+            "lifecycle": "stable"
+          },
+          "blocks": [
+            {
+              "type": "prose",
+              "body": "This page states what the {{$m_store|event store}} must do. Each requirement names the decision that it follows."
+            },
+            {
+              "name": "$r_size",
+              "type": "requirement",
+              "fields": {
+                "priority": "must"
+              },
+              "body": "The event store must hold every raw error event for the retention period that {{$D30|the retention decision}} sets, with 20% free space above that amount.",
+              "links": {
+                "decided_by": [
+                  "$D30"
+                ],
+                "describes": [
+                  "$m_store",
+                  "$t_event",
+                  "$t_ret"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "$f_ops",
+      "fields": {
+        "name": "operations",
+        "title": "Operations",
+        "description": "Guides for the people who run Tally from day to day."
+      },
+      "docs": [
+        {
+          "name": "$d_purge",
+          "fields": {
+            "name": "purge-job",
+            "title": "Purge job runbook",
+            "doc_type": "page",
+            "lifecycle": "stable"
+          },
+          "blocks": [
+            {
+              "type": "prose",
+              "body": "The {{$m_purge|purge job}} deletes raw error events when their retention period ends. This guide says how the job runs and what to do when it fails.",
+              "links": {
+                "describes": [
+                  "$t_event",
+                  "$t_ret"
+                ]
+              }
+            },
+            {
+              "name": "$s_runs",
+              "type": "section",
+              "fields": {
+                "title": "How the job runs"
+              },
+              "blocks": [
+                {
+                  "name": "$f_purge",
+                  "type": "flow",
+                  "fields": {
+                    "name": "Nightly purge",
+                    "steps": [
+                      "The purge job starts every night at 02:00 UTC.",
+                      "It deletes each raw error event that arrived more than 30 days ago, as {{$D30|the retention decision}} sets.",
+                      "It keeps every issue, also when it deletes all the events in that issue."
+                    ]
+                  },
+                  "links": {
+                    "decided_by": [
+                      "$D30"
+                    ],
+                    "describes": [
+                      "$m_purge",
+                      "$t_event",
+                      "$t_issue"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "$s_fail",
+              "type": "section",
+              "fields": {
+                "title": "When the job fails"
+              },
+              "blocks": [
+                {
+                  "type": "prose",
+                  "body": "1. Open the job log and find the first error.\n2. Fix the cause, for example a full disk or a lost database connection.\n3. Run the job again with `tally purge --now`.\n4. Check that no raw error event is older than the retention period.",
+                  "links": {
+                    "describes": [
+                      "$m_purge",
+                      "$t_event",
+                      "$t_ret"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "first_session": {
+    "ask": "Change Tally's retention period from 30 days to 7 days, to lower the storage cost and the privacy risk.",
+    "search": "retention",
+    "confirm_reason": "These blocks state no retention period, so they still hold with 7 days.",
+    "supersede": {
+      "name": "$D7",
+      "old": "$D30",
+      "decision": {
+        "title": "Keep raw error events for 7 days",
+        "statement": "Tally keeps each raw error event for 7 days after it arrives. Then the purge job deletes it. Issues stay after their events go.",
+        "why": "Most teams act on an error within a week. A shorter period cuts the storage cost and the privacy risk of personal data in events.",
+        "options": [
+          "Keep raw error events for 7 days",
+          "Keep raw error events for 30 days",
+          "Keep raw error events for 90 days"
+        ],
+        "kind": "product",
+        "reversibility": "two_way",
+        "recommend": "confirm",
+        "recommend_reason": "The person asked for 7 days to lower the storage cost and the privacy risk.",
+        "body": "Rejected:\n- 30 days. It keeps personal data three weeks longer than most teams need it.\n- 90 days. It costs the most and keeps personal data the longest."
+      }
+    },
+    "fix": {
+      "implements": "$D7",
+      "ops": [
+        {
+          "op": "update",
+          "id": "$f_purge",
+          "fields": {
+            "steps": [
+              "The purge job starts every night at 02:00 UTC.",
+              "It deletes each raw error event that arrived more than 7 days ago, as {{$D7|the retention decision}} sets.",
+              "It keeps every issue, also when it deletes all the events in that issue."
+            ]
+          },
+          "links": {
+            "decided_by": [
+              "$D7"
+            ],
+            "implements": [
+              "$D7"
+            ]
+          }
+        },
+        {
+          "op": "update",
+          "id": "$r_size",
+          "body": "The event store must hold every raw error event for the retention period that {{$D7|the retention decision}} sets, with 20% free space above that amount.",
+          "links": {
+            "decided_by": [
+              "$D7"
+            ],
+            "implements": [
+              "$D7"
+            ]
+          }
+        }
+      ]
+    },
+    "proposal": {
+      "title": "Keep raw error events for 7 days",
+      "summary": "A new decision replaces the 30-day decision. The purge job runbook now says 7 days. The storage requirement keeps its words and now cites the new decision."
+    },
+    "approval": {
+      "question": "Shall I land the 7-day retention change?",
+      "evidence": "Approve."
+    },
+    "tag": {
+      "version": "v1.1.0",
+      "message": "Raw error events kept for 7 days",
+      "question": "Shall I tag the approved state as v1.1.0?",
+      "evidence": "Tag it v1.1.0."
+    }
+  }
+}

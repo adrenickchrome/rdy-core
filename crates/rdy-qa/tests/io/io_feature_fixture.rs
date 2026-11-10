@@ -287,11 +287,12 @@ const SETS: [FeatureSet; 2] = [
     },
 ];
 
-/// The dump members of every registered set: the on-disk inventory of `ha17_` adds them to the
-/// released pairs' members.
+/// The dump members of every registered set and every per-feature first-use fixture: the on-disk
+/// inventory of `ha17_` adds them to the released pairs' members.
 pub(crate) fn dump_members() -> Vec<&'static str> {
     SETS.iter()
         .flat_map(|s| s.dump.iter().map(|(n, _)| *n))
+        .chain(first_use_members())
         .collect()
 }
 
@@ -452,12 +453,112 @@ fn e1_encodings() -> Value {
     json!(m)
 }
 
-/// The manifest of a store that has used every registered feature.
+/// A registered first-use feature that a later task froze in a fixture of its own, not in a
+/// complete set: its dump members with their blake3 and its native store fixture. Its dump's
+/// manifest holds the feature, through first use, with its class and minimum rdy.
+struct FirstUse {
+    name: &'static str,
+    dump: &'static [(&'static str, &'static str)],
+    native: &'static str,
+}
+
+/// The per-feature first-use fixtures, oldest first. One, once registered, never leaves this
+/// list. `foreign_copy` (repo links, registered by Task 3) is frozen by Task 33 ("Freeze the
+/// released-format compatibility matrix"): the dump pair `v4-f1-e1-foreign-copy` and the native
+/// store `store/foreign-copy-1`, whose own tests are `rpl33_` in the release and store areas.
+const FIRST_USE: &[FirstUse] = &[FirstUse {
+    name: "foreign_copy",
+    dump: &[
+        (
+            "v4-f1-e1-foreign-copy.rdydump",
+            "6aca7c40fefdff88db530fdbce96355f38e068c85e65ba4e8e627b9977a78bbf",
+        ),
+        (
+            "v4-f1-e1-foreign-copy.expect.json",
+            "d293339ba509481420ed4c8e5305e3c45b94c93de97273a65365061c8c817db9",
+        ),
+    ],
+    native: "fixtures/store/foreign-copy-1/expect.json",
+}];
+
+/// The dump members of every per-feature first-use fixture.
+fn first_use_members() -> Vec<&'static str> {
+    FIRST_USE
+        .iter()
+        .flat_map(|f| f.dump.iter().map(|(n, _)| *n))
+        .collect()
+}
+
+/// The manifest of a store that has used every registered feature that a complete set covers:
+/// every registered feature less the per-feature [`FIRST_USE`] ones. Each of those is checked
+/// here as every other feature is checked by its set: registered, out of what a new store writes,
+/// its members on disk with their pinned blake3, its dump manifest holding it through first use,
+/// and its native store fixture recording the same manifest. With the complete set's manifest,
+/// the per-feature manifests cover every registered feature.
 fn all_features() -> StoreFeatures {
-    StoreFeatures {
-        manifest_version: 1,
-        features: registered_features(),
+    let registered = registered_features();
+    let mut covered: Vec<String> = vec![];
+    for f in FIRST_USE {
+        let reg = registered
+            .iter()
+            .find(|r| r.name == f.name)
+            .unwrap_or_else(|| panic!("{}: a first-use feature is registered", f.name));
+        assert!(
+            !baseline_features()
+                .features
+                .iter()
+                .any(|b| b.name == f.name),
+            "{}: a new store writes it, so a complete set must cover it",
+            f.name
+        );
+        for (name, digest) in f.dump {
+            let bytes = std::fs::read(fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(Hash::of(&bytes).to_string(), *digest, "{name}");
+        }
+        let dump = f
+            .dump
+            .iter()
+            .find(|(n, _)| n.ends_with(".rdydump"))
+            .unwrap()
+            .0;
+        let manifest = s18::file_facts(dump, &fixture(dump))["store_format"]["features"].clone();
+        let features = manifest["features"].as_array().unwrap();
+        assert!(
+            features.contains(&serde_json::to_value(reg).unwrap()),
+            "{dump}: its manifest holds {} as registered",
+            f.name
+        );
+        let native: Value = serde_json::from_str(
+            &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(f.native)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(native["store"]["manifest"], manifest, "{}", f.native);
+        for g in features {
+            let name = g["name"].as_str().unwrap().to_string();
+            assert!(
+                registered.iter().any(|r| r.name == name),
+                "{dump}: {name} is registered"
+            );
+            covered.push(name);
+        }
     }
+    let all = StoreFeatures {
+        manifest_version: 1,
+        features: registered
+            .iter()
+            .filter(|r| !FIRST_USE.iter().any(|f| f.name == r.name))
+            .cloned()
+            .collect(),
+    };
+    covered.extend(all.features.iter().map(|f| f.name.clone()));
+    for r in &registered {
+        assert!(
+            covered.contains(&r.name),
+            "{}: no frozen fixture covers it",
+            r.name
+        );
+    }
+    all
 }
 
 /// Writes the fourteen members of the set `v4-f1-e1` once. Run by hand, never by the gate, after

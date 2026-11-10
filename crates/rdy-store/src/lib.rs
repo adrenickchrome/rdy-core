@@ -16,6 +16,8 @@ pub mod dump_scan;
 pub mod error;
 pub mod fileid;
 pub mod follower;
+pub mod foreign;
+pub mod foreign_removal;
 pub mod format;
 pub mod fsutil;
 pub mod holder;
@@ -54,6 +56,20 @@ pub use check::{
     landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
 };
 pub use diagram_cache::{CachedDrawing, DiagramCache};
+
+/// The prefix of the internal view of an adopt card's isolated landing (repo links, D-8VJAZ): the
+/// view is `adopt-` and the first 12 hex digits of the card's hash ([`adopt_view`]). No view or
+/// run takes a name with this prefix.
+pub const ADOPT_VIEW_PREFIX: &str = "adopt-";
+
+/// The label of an adopt card's option that adopts the delivery (`adopt`): the choice the
+/// evidence of an adopt answer's landing records.
+pub const ADOPT_LABEL: &str = "Adopt the delivery";
+
+/// The internal view of the isolated landing of the adopt card whose hash is `card`.
+pub fn adopt_view(card: &rdy_model::Hash) -> String {
+    format!("{ADOPT_VIEW_PREFIX}{}", card.short())
+}
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
@@ -70,5 +86,7 @@ pub use store::{
     on_leftover_checked_for_tests, unclean_closes_for_tests,
 };
 mod state;
-pub use state::{OrderOnlyEdits, PreparedTag, ViewRecord, apply_op};
+pub use state::{
+    AdoptProposeRequest, OrderOnlyEdits, PinAdoption, PreparedTag, ViewRecord, apply_op,
+};
 pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

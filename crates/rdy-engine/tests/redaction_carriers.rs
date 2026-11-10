@@ -407,8 +407,8 @@ fn check_table(s: &mut Scan, table: Table) {
 
 #[test]
 fn ok8_every_carried_kind_has_a_text_policy() {
-    // the assigned-kind registry: every code 1..=28 but the unassigned 12
-    let want: BTreeSet<u8> = (1..=28u8).filter(|k| *k != 12).collect();
+    // the assigned-kind registry: every code 1..=29 but the unassigned 12
+    let want: BTreeSet<u8> = (1..=29u8).filter(|k| *k != 12).collect();
     assert_eq!(
         ASSIGNED_KINDS.iter().copied().collect::<BTreeSet<u8>>(),
         want
@@ -428,7 +428,7 @@ fn ok8_every_carried_kind_has_a_text_policy() {
     }
     require_text_policies(&ASSIGNED_KINDS).unwrap();
     // an unassigned or future kind is refused, never read as absent
-    for k in [12u8, 29, 127] {
+    for k in [12u8, 30, 127] {
         let e = require_text_policies(&[k]).unwrap_err();
         assert_eq!(
             e.message,

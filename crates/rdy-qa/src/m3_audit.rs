@@ -39,7 +39,8 @@ use rdy_engine::readiness::assessment::{config_digest, pack_digest};
 use rdy_engine::readiness::check::MAX_REPLAY_STEPS;
 use rdy_engine::{Materialized, ReadState, Scope};
 use rdy_model::assessment::{
-    Assessment, AssessmentSeverity, AssessmentTensionStatus, PolicyRef, PolicyVerdict,
+    Assessment, AssessmentForeign, AssessmentSeverity, AssessmentTensionStatus, AssessmentV2,
+    PolicyRef, PolicyVerdict,
 };
 use rdy_model::plan::{Plan, PlanAct, PlanKind, PlanOutcome};
 use rdy_model::{
@@ -128,8 +129,12 @@ pub struct LandingFact {
     /// The landing of a re-affirmation card (its view starts with `reaffirm-`): the stated
     /// landing with no assessment.
     pub reaffirm_card: bool,
-    /// The assessment the landing names, decoded.
+    /// The assessment the landing names, decoded (its local part).
     pub assessment: Option<Assessment>,
+    /// The named assessment's foreign part (repo links, ASSESSMENT encoding 2). The binding
+    /// rule re-encodes [`Self::assessment`] with it ([`assessment_wire_id`]), so a changed
+    /// local field still changes the id.
+    pub assessment_foreign: Option<AssessmentForeign>,
     /// The newest assessment of the approved version whose frame lies before the landing.
     pub bound_assessment: Option<Hash>,
     /// The approved version's changes.
@@ -243,6 +248,7 @@ impl LandingFact {
             view,
             approved,
             assessment: None,
+            assessment_foreign: None,
             bound_assessment: None,
             changes: vec![],
             seal: None,
@@ -256,11 +262,11 @@ impl LandingFact {
         let fact = &mut self;
         let at = fact.at;
         if let Some(a) = fact.record.assessment {
-            fact.assessment = Some(
-                reader
-                    .assessment(&a)
-                    .map_err(|e| read_err(format!("assessment {}", a.short()), e))?,
-            );
+            let wire = reader
+                .assessment_wire(&a)
+                .map_err(|e| read_err(format!("assessment {}", a.short()), e))?;
+            fact.assessment_foreign = Some(wire.foreign.clone());
+            fact.assessment = Some(wire.local());
         }
         if let Some(version) = fact.record.approved_version {
             fact.bound_assessment = reader
@@ -304,6 +310,13 @@ fn chain_of(
 /// today.
 pub fn assessment_id(a: &Assessment) -> Hash {
     Hash::of(&rdy_store::codec::item_new(kinds::ASSESSMENT, a).1)
+}
+
+/// The `kinds::ASSESSMENT` id of the whole record `w` encoded now: its local layout when its
+/// foreign part is empty and no exception row is a deviation, else encoding 2 with the foreign
+/// part, as the store writes it (`Store::bind_assessment_wire`).
+pub fn assessment_wire_id(w: &AssessmentV2) -> Hash {
+    Hash::of(&rdy_store::codec::item_new(kinds::ASSESSMENT, w).1)
 }
 
 /// The effective lifecycle of `id` in `m` is `stable` (its own `lifecycle`, else its nearest
@@ -647,7 +660,14 @@ fn binding_rule(l: &LandingFact) -> Vec<Violation> {
             ),
         ));
     }
-    let now = assessment_id(a);
+    let now = match &l.assessment_foreign {
+        Some(foreign) => {
+            let mut w = AssessmentV2::of(a);
+            w.foreign = foreign.clone();
+            assessment_wire_id(&w)
+        }
+        None => assessment_id(a),
+    };
     if now != h {
         out.push(v(
             "m3_assessment",
@@ -1090,7 +1110,14 @@ pub fn holds_of(st: &ReadState, version: &Hash) -> Result<Vec<Hold>, Violation> 
             .map(|t| t.blocks.iter().collect())
             .collect();
         let accepted = st.semantic().tensions().any(|o| {
-            let blocks: BTreeSet<&BlockId> = o.record.items.iter().map(|i| &i.block).collect();
+            // an assessment names a tension's local blocks: a cited side is no local block
+            let blocks: BTreeSet<&BlockId> = o
+                .record
+                .items
+                .iter()
+                .filter_map(|s| s.local())
+                .map(|i| &i.block)
+                .collect();
             o.record.blocking && advisory.contains(&blocks)
         });
         if accepted {

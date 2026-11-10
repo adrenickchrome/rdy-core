@@ -2112,6 +2112,10 @@ fn relc1_four_entry_manifest_verifies_before_extract() {
         manifest_names(IV)
     );
     check_plain(&kit, &kit.input()).expect("the four-line manifest");
+    // the three archive lines with no sample install too: Release 1 (0.47.0) ships no sample
+    let kit = Kit::new(target);
+    kit.write_manifest(kit.lines()[..3].concat().as_bytes());
+    check_plain(&kit, &kit.input()).expect("the three-line manifest with no sample");
 
     // A manifest that OpenSSH accepts but whose grammar is wrong stops the run as `checksums`,
     // after the signature and before any extraction, install or run.
@@ -2121,9 +2125,9 @@ fn relc1_four_entry_manifest_verifies_before_extract() {
             let lines = kit.lines();
             kit.write_manifest(format!("{}{}", lines[0], lines[2]).as_bytes());
         }),
-        ("the historical three-line manifest", |kit| {
+        ("an archive line missing", |kit| {
             let lines = kit.lines();
-            kit.write_manifest(lines[..3].concat().as_bytes());
+            kit.write_manifest(format!("{}{}{}", lines[0], lines[2], lines[3]).as_bytes());
         }),
         ("the sample line before the archives", |kit| {
             let mut lines = kit.lines();

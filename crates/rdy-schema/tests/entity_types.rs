@@ -101,6 +101,7 @@ mod nb3 {
             body: "Words.".into(),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
+            foreign: Default::default(),
             read_identity: None,
         }
     }

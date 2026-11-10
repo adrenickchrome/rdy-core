@@ -71,25 +71,29 @@ pub struct RebasedView {
 /// [`Store::commit_land`] writes them, with the signatures of its landing.
 #[derive(Debug)]
 pub struct PreparedLanding {
-    items: Vec<(u8, Vec<u8>)>,
+    pub(crate) items: Vec<(u8, Vec<u8>)>,
     applies: Option<PreparedRedactionApply>,
-    landing: LandingRecord,
-    hash: Hash,
+    pub(crate) landing: LandingRecord,
+    pub(crate) hash: Hash,
     outcome: LandOutcome,
     /// Whether [`Store::plan_landing`] added the landing's plans.
     planned: bool,
     /// A re-affirmation card's landing (D-CQMA4): its internal view's name and head after the
     /// landing's rebase, and whether [`Store::close_reaffirm_view`] closed it. None for every
     /// other landing.
-    fresh: Option<FreshLanding>,
+    pub(crate) fresh: Option<FreshLanding>,
 }
 
 /// The internal view of a prepared re-affirmation landing.
 #[derive(Debug)]
-struct FreshLanding {
+pub(crate) struct FreshLanding {
     view: String,
     head: ViewHead,
-    closed: bool,
+    pub(crate) closed: bool,
+    /// Whether it is an adopt answer's landing (repo links), not a re-affirmation card's.
+    pub(crate) adopt: bool,
+    /// Whether [`Store::answer_adopt_landing`] added its Adopt answer.
+    pub(crate) answered: bool,
 }
 
 /// What a landing is built on: a proposal version the store holds, or the in-memory proposal of a
@@ -255,7 +259,7 @@ impl Store {
         relay: Option<Relay>,
         evidence: Option<ApprovalEvidence>,
     ) -> Result<PreparedLanding, StoreError> {
-        if prepared.fresh.is_none() || prepared.plan.is_none() {
+        if prepared.fresh.as_ref().is_none_or(|f| f.adoption.is_some()) || prepared.plan.is_none() {
             return Err(StoreError::Refused(
                 "a re-affirmation landing takes a re-affirmation proposal with its bound plan"
                     .into(),
@@ -283,12 +287,82 @@ impl Store {
         by: &Provenance,
     ) -> Result<(), StoreError> {
         let planned = prepared.planned;
-        let Some(fresh) = prepared.fresh.as_mut().filter(|f| !f.closed && planned) else {
+        let Some(fresh) = prepared
+            .fresh
+            .as_mut()
+            .filter(|f| !f.closed && !f.adopt && planned)
+        else {
             return Err(StoreError::Refused(
                 "only a sealed re-affirmation landing closes its view, once".into(),
             ));
         };
         let (op, _, head) = self.close_part(&fresh.view, &fresh.head, REAFFIRM_CLOSE_REASON, by);
+        prepared.items.push(op);
+        prepared
+            .items
+            .extend(self.ref_items_pub(vec![(view_ref(&fresh.view), encode(&head))]));
+        fresh.head = head;
+        fresh.closed = true;
+        Ok(())
+    }
+
+    /// The landing of an adopt answer (repo links, D-8VJAZ), prepared without writing anything,
+    /// as [`Store::prepare_reaffirm_land`] prepares a re-affirmation card's: the batch starts with
+    /// `prepared`'s frames, then the landing of that version with every check of
+    /// [`Store::prepare_land`], where the merge may make exactly the adoption's foreign pin moves
+    /// on frozen decisions. The approval is the person's answer to the card: `evidence` is card or
+    /// elicited evidence that names the card's hash and chooses [`crate::ADOPT_LABEL`]
+    /// (`Refused` otherwise), local or relayed by `relay`. [`Store::plan_landing`] then adds its
+    /// plans, [`Store::close_adopt_view`] closes the view and [`Store::answer_adopt_landing`] adds
+    /// the Adopt answer; [`Store::commit_land`] writes the batch only with its view closed.
+    /// `prepared` must come from [`Store::prepare_adopt_propose`] with its plan bound.
+    pub fn prepare_adopt_land(
+        &self,
+        prepared: PreparedProposal,
+        approver: Provenance,
+        relay: Option<Relay>,
+        evidence: ApprovalEvidence,
+    ) -> Result<PreparedLanding, StoreError> {
+        if prepared.fresh.as_ref().is_none_or(|f| f.adoption.is_none()) || prepared.plan.is_none() {
+            return Err(StoreError::Refused(
+                "an adopt landing takes an adopt proposal with its bound plan".into(),
+            ));
+        }
+        if !matches!(evidence.kind, EvidenceKind::Card | EvidenceKind::Elicited)
+            || evidence.card_hash.is_none()
+            || evidence.choice.as_deref() != Some(crate::ADOPT_LABEL)
+        {
+            return Err(StoreError::Refused(
+                "an adopt landing records the person's answer to the adopt card".into(),
+            ));
+        }
+        let req = LandRequest {
+            proposal: prepared.version(),
+            accept: None,
+            approver,
+            alt: None,
+            relay,
+            evidence: Some(evidence),
+            assessment: None,
+        };
+        self.land_frames(LandBase::Fresh(Box::new(prepared)), req, &|_| {})
+    }
+
+    /// Closes the internal view of the adopt landing `prepared` (repo links), after its plans
+    /// when it has any: a `Close` op after the landing's rebase of the view, by `by`, and the
+    /// view's head ref, the batch's only write of it. Refused for any other landing, or twice.
+    /// Writes nothing.
+    pub fn close_adopt_view(
+        &self,
+        prepared: &mut PreparedLanding,
+        by: &Provenance,
+    ) -> Result<(), StoreError> {
+        let Some(fresh) = prepared.fresh.as_mut().filter(|f| !f.closed && f.adopt) else {
+            return Err(StoreError::Refused(
+                "only an adopt landing closes its view, once".into(),
+            ));
+        };
+        let (op, _, head) = self.close_part(&fresh.view, &fresh.head, ADOPT_CLOSE_REASON, by);
         prepared.items.push(op);
         prepared
             .items
@@ -337,12 +411,13 @@ impl Store {
             None => None,
         };
         // 2. the proposing view's head and included set
-        let (head, included, mut items, fresh_change) = match fresh {
+        let (head, included, mut items, fresh_change, adoption) = match fresh {
             None => (
                 self.view_head(&p.view)?
                     .ok_or_else(|| StoreError::UnknownView(p.view.clone()))?,
                 self.included(&p.view)?,
                 vec![],
+                None,
                 None,
             ),
             Some(prepared) => {
@@ -354,6 +429,7 @@ impl Store {
                     Arc::new(p.changes.clone()),
                     prepared.items,
                     Some(f.change),
+                    f.adoption,
                 )
             }
         };
@@ -422,7 +498,12 @@ impl Store {
         };
         changes.extend(accept_change.iter().cloned());
         let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
-        let state = self.merge_checked(&prev_state, &changes)?.0.state;
+        // an adopt answer's landing may make exactly its adoption's foreign pin moves on frozen
+        // decisions (repo links, D-8VJAZ); every other landing passes none
+        let state = self
+            .merge_checked_with(&prev_state, &changes, adoption.as_ref())?
+            .0
+            .state;
         let snapshot = crate::codec::item_new(kinds::SNAPSHOT, &state);
         let sid = Hash::of(&snapshot.1);
         items.push(snapshot);
@@ -714,6 +795,8 @@ impl Store {
                 view: p.view.clone(),
                 head,
                 closed: false,
+                adopt: adoption.is_some(),
+                answered: false,
             }),
             (Some(_), None) => {
                 return Err(StoreError::Refused(
@@ -810,9 +893,15 @@ impl Store {
             ..
         } = prepared;
         // a re-affirmation card's landing is written only whole: sealed, its view closed
-        if fresh.is_some_and(|f| !f.closed) {
+        if fresh.as_ref().is_some_and(|f| !f.closed && !f.adopt) {
             return Err(StoreError::Refused(
                 "a re-affirmation landing is written only with its view closed".into(),
+            ));
+        }
+        // an adopt answer's landing too: its view closed and its Adopt answer in the batch
+        if fresh.is_some_and(|f| f.adopt && !(f.closed && f.answered)) {
+            return Err(StoreError::Refused(
+                "an adopt landing is written only with its view closed and its answer".into(),
             ));
         }
         items.extend(crate::signature::frames(signatures)?);
@@ -924,6 +1013,9 @@ impl Store {
 
 /// The reason of the `Close` op of a re-affirmation card's internal view.
 pub const REAFFIRM_CLOSE_REASON: &str = "the re-affirmation card landed";
+
+/// The reason of the `Close` op of an adopt answer's internal view (repo links).
+pub const ADOPT_CLOSE_REASON: &str = "the adopt card landed";
 
 /// A relayed landing carries a relay kind of evidence (card or text); an elicited approval is the
 /// human's own answer and has no relay (FW-B9, D4). A landing with no relay records card evidence

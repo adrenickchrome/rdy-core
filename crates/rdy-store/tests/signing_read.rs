@@ -29,6 +29,7 @@ fn landed(s: &mut Store) -> Hash {
         body: "x".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     s.commit_to_view(

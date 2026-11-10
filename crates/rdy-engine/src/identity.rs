@@ -15,12 +15,12 @@ pub const MAX_RUN_BYTES: usize = 64;
 
 /// Runs that name a scope or a reserved view, compared exactly (case-sensitive).
 const RESERVED_RUNS: [&str; 4] = ["none", "canon", "inflight", "work"];
-/// Every run beginning with this is reserved (re-affirmation views).
-const RESERVED_RUN_PREFIX: &str = "reaffirm-";
+/// Every run beginning with one of these is reserved (re-affirmation and adopt views).
+const RESERVED_RUN_PREFIXES: [&str; 2] = ["reaffirm-", "adopt-"];
 
 const ACTOR_FIX: &str =
     "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
-const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}";
 
 /// The fallback name when USER is absent or normalizes to nothing.
 const UNKNOWN: &str = "unknown";
@@ -35,11 +35,12 @@ fn is_run_byte(b: u8) -> bool {
 }
 
 /// A run: 1 to 64 bytes of letters, digits, `-`, `_` and `.`, with a letter or digit at each
-/// end; not exactly `none`, `canon`, `inflight` or `work`, and not beginning `reaffirm-`.
+/// end; not exactly `none`, `canon`, `inflight` or `work`, and not beginning `reaffirm-` or
+/// `adopt-`.
 pub fn is_run(value: &str) -> bool {
     plain(value, MAX_RUN_BYTES, is_run_end, is_run_byte)
         && !RESERVED_RUNS.contains(&value)
-        && !value.starts_with(RESERVED_RUN_PREFIX)
+        && !RESERVED_RUN_PREFIXES.iter().any(|p| value.starts_with(p))
 }
 
 /// The refusal of `value` as an actor: its bounded echo, and the form as the fix.

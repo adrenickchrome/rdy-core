@@ -769,6 +769,7 @@ fn ha10_presence_is_exact_sorted_and_bounded() {
         body: "nobody points here".into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let orphan_hash = r.store_mut().put(kinds::BLOCK, &orphan).unwrap();

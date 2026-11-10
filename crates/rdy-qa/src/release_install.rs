@@ -1972,16 +1972,18 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     ))
 }
 
-/// Checks the verified manifest: exactly the four lines for `version`, in this order: the
-/// macOS, Windows and Linux archives, then the sample. Each line is 64 lowercase hexadecimal
-/// digits, two spaces, the file name and LF. A missing, extra, repeated or reordered line, a
-/// path, a CR and a preview name are all refused.
+/// Checks the verified manifest: the lines for `version`, in this order: the macOS, Windows and
+/// Linux archives, then the sample. The sample line is optional: Release 1 (0.47.0) ships no
+/// sample, so its manifest has the three archive lines only. Each line is 64 lowercase
+/// hexadecimal digits, two spaces, the file name and LF. A missing archive, an extra, repeated or
+/// reordered line, a path, a CR and a preview name are all refused.
 fn check_manifest(bytes: &[u8], version: &str) -> Result<(), InstallFailure> {
     let bad = InstallFailure::Checksums;
     let text = std::str::from_utf8(bytes).map_err(|_| bad)?;
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let names = manifest_names(version);
-    if lines.len() != names.len() {
+    // all four lines, or the three archive lines with no sample
+    if lines.len() != names.len() && lines.len() != names.len() - 1 {
         return Err(bad);
     }
     for (line, name) in lines.iter().zip(&names) {
@@ -3488,7 +3490,12 @@ mod tests {
         let refused = |what: &str, t: String| {
             assert_eq!(check_manifest(t.as_bytes(), "0.14.0"), Err(bad), "{what}");
         };
-        refused("the sample omitted", text(&refs[..3]));
+        assert_eq!(
+            check_manifest(text(&refs[..3]).as_bytes(), "0.14.0"),
+            Ok(()),
+            "the sample omitted (Release 1 ships none)"
+        );
+        refused("the sample alone", text(&refs[3..]));
         refused("an archive omitted", text(&[refs[0], refs[2], refs[3]]));
         refused(
             "a line repeated",
@@ -3556,7 +3563,8 @@ mod tests {
             line(SAMPLE_FILE)
         );
         assert_eq!(check_manifest(full.as_bytes(), "0.14.0"), Ok(()));
-        // the historical two-line and three-line manifests are not accepted
+        // the three archive lines with no sample are accepted (Release 1); the historical two-line
+        // manifest is not
         let two = format!("{}{}", target_line(TARGETS[0]), target_line(TARGETS[1]));
         assert_eq!(
             check_manifest(two.as_bytes(), "0.14.0"),
@@ -3570,6 +3578,13 @@ mod tests {
             line(SAMPLE_FILE)
         );
         assert!(check_manifest(unsorted.as_bytes(), "0.14.0").is_err());
+        let three = format!(
+            "{}{}{}",
+            target_line(TARGETS[0]),
+            target_line(WINDOWS_TARGET),
+            target_line(TARGETS[1])
+        );
+        assert_eq!(check_manifest(three.as_bytes(), "0.14.0"), Ok(()));
         assert!(!archive_name("0.14.0", WINDOWS_TARGET).ends_with(".zip"));
         if !tar_or_skip(&crate::test_name!(
             "wx35a_archive_bytes_and_manifest_names_are_stable"

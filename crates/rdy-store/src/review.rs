@@ -12,7 +12,9 @@ use crate::coord::key_hash;
 use crate::error::StoreError;
 use crate::index::hash_from;
 use crate::{Store, StoreReader, kinds};
-use rdy_model::{BlockId, Hash, Review, ReviewSubject, SemanticTension, Verdict, pair_key};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::{PairSide, SemanticTensionV1};
+use rdy_model::{BlockId, Hash, Review, ReviewSubject, SemanticTension, Verdict, pair_key_sides};
 use std::collections::BTreeSet;
 
 /// The ref prefix of dismissals: `dismiss/<vkey>` names the review that dismissed the tension.
@@ -175,10 +177,33 @@ impl Store {
         r: &Review,
         t: Option<&SemanticTension>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
+        self.put_verdict_v1(&ReviewV1::of(r), t.map(SemanticTensionV1::of).as_ref())
+    }
+
+    /// [`Store::put_verdict`] for a pair of any sides (repo links): the review's subject is a
+    /// pair whose sides are local or cited, and the first version is a [`SemanticTensionV1`]. A
+    /// pair of local sides writes the bytes `put_verdict` writes.
+    pub fn put_verdict_v1(
+        &mut self,
+        r: &ReviewV1,
+        t: Option<&SemanticTensionV1>,
+    ) -> Result<(Hash, Option<Hash>), StoreError> {
         self.ensure_writable()?;
-        let (key, items) = match (&r.subject, r.verdict) {
-            (ReviewSubject::Pair { key, items }, Verdict::Tension | Verdict::NoTension) => {
-                (*key, items)
+        let (key, items): (Hash, Vec<PairSide>) = match (&r.subject, r.verdict) {
+            (ReviewSubjectV1::Pair { key, items }, Verdict::Tension | Verdict::NoTension) => {
+                let [a, b] = items.as_slice() else {
+                    return Err(refuse(format!(
+                        "pair key {key} does not match its two items"
+                    )));
+                };
+                // two distinct blocks (a cited block is distinct from a local one, and by
+                // repo), under the key their sides hash to
+                if a.target() == b.target() || *key != pair_key_sides(items) {
+                    return Err(refuse(format!(
+                        "pair key {key} does not match its two items"
+                    )));
+                }
+                (*key, items.clone())
             }
             _ => {
                 return Err(refuse(
@@ -186,11 +211,7 @@ impl Store {
                 ));
             }
         };
-        if items.len() != 2 || items[0].block == items[1].block || key != pair_key(items) {
-            return Err(refuse(format!(
-                "pair key {key} does not match its two items"
-            )));
-        }
+        let items = &items;
         let tension = r.verdict == Verdict::Tension;
         if tension != t.is_some() {
             return Err(refuse(
@@ -231,7 +252,7 @@ impl Store {
                     Some(_) => {}
                 }
             }
-            if held == id || !tension || self.review(&held)?.verdict != Verdict::NoTension {
+            if held == id || !tension || self.review_v1(&held)?.verdict != Verdict::NoTension {
                 return Err(refuse(format!("pair {key} is settled by review {held}")));
             }
         }
@@ -256,6 +277,15 @@ impl Store {
         &mut self,
         ts: &[SemanticTension],
     ) -> Result<Vec<Hash>, StoreError> {
+        let ts: Vec<SemanticTensionV1> = ts.iter().map(SemanticTensionV1::of).collect();
+        self.put_tension_versions_v1(&ts)
+    }
+
+    /// [`Store::put_tension_versions`] for tensions of any sides (repo links).
+    pub fn put_tension_versions_v1(
+        &mut self,
+        ts: &[SemanticTensionV1],
+    ) -> Result<Vec<Hash>, StoreError> {
         self.ensure_writable()?;
         let mut seen = BTreeSet::new();
         let mut items = vec![];
@@ -279,7 +309,7 @@ impl Store {
                     "semantic tension {key}: version {prev} is not the latest ({held})"
                 )));
             }
-            let latest = self.semantic_tension(&held)?;
+            let latest = self.semantic_tension_v1(&held)?;
             if latest.blocking {
                 return Err(refuse(format!(
                     "semantic tension {key} is accepted already"
@@ -313,8 +343,14 @@ impl Store {
 }
 
 impl StoreReader {
-    /// The review with hash `h`.
+    /// The review with hash `h`, when its pair has no cited side; a review of a pair with a cited
+    /// side reads as [`StoreReader::review_v1`].
     pub fn review(&self, h: &Hash) -> Result<Review, StoreError> {
+        self.get_typed(kinds::REVIEW, h)
+    }
+
+    /// The review with hash `h`, its pair's sides local or cited.
+    pub fn review_v1(&self, h: &Hash) -> Result<ReviewV1, StoreError> {
         self.get_typed(kinds::REVIEW, h)
     }
 
@@ -358,8 +394,14 @@ impl StoreReader {
         self.hash_refs(SEMANTIC_REF, "semantic tension")
     }
 
-    /// The semantic tension version with hash `h`.
+    /// The semantic tension version with hash `h`, when every side is local; a tension with a
+    /// cited side reads as [`StoreReader::semantic_tension_v1`].
     pub fn semantic_tension(&self, h: &Hash) -> Result<SemanticTension, StoreError> {
+        self.get_typed(kinds::TENSION, h)
+    }
+
+    /// The semantic tension version with hash `h`, its sides local or cited.
+    pub fn semantic_tension_v1(&self, h: &Hash) -> Result<SemanticTensionV1, StoreError> {
         self.get_typed(kinds::TENSION, h)
     }
 

@@ -61,6 +61,10 @@ pub const DISPUTE_RESOLUTION: u8 = 27;
 /// A request for a check (`rdy_model::check_request::CheckRequest`); ref `check/<hash>` names
 /// it. A carried record, no writer yet. Its first encoding is 1.
 pub const CHECK_REQUEST: u8 = 28;
+/// One entry of the foreign log (`rdy_model::foreign::ForeignEntry`; repo links, D-FK58A): a
+/// delivery, a revocation or a removal from one source, outside canon. Its first encoding is 1.
+/// Registered only: no writer yet.
+pub const FOREIGN: u8 = 29;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

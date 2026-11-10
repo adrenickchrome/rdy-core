@@ -184,7 +184,7 @@ fn sg1_a_blocking_tension_alone_is_flagged_and_a_dismissed_or_advisory_one_is_no
         .filter(|t| {
             t.severity == TensionSeverity::Advisory
                 && t.sides.iter().all(|s| match s {
-                    SideRef::Canon { .. } => true,
+                    SideRef::Canon { .. } | SideRef::Foreign { .. } => true,
                     SideRef::Change(h) => *h == mine,
                     SideRef::Intent { .. } => false,
                 })
