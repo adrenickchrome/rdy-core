@@ -16,6 +16,7 @@
 //! row bound.
 use crate::ReadState;
 use crate::error::RdyError;
+use crate::materialize::Materialized;
 use crate::readiness::Candidate;
 use crate::tensions::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus};
 use rdy_model::assessment::{
@@ -23,7 +24,7 @@ use rdy_model::assessment::{
     AssessmentPlanAnswerRef, MAX_ROWS,
 };
 use rdy_model::foreign::ForeignId;
-use rdy_model::{BlockId, Hash, Op, RepoId};
+use rdy_model::{BlockId, Hash, RepoId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -117,22 +118,18 @@ pub fn assessment_foreign(
             });
         }
     }
-    // the pins of the blocks the version writes: the held version of each cited content
+    // the pins of every block in the local reach, as the candidate projects it (canon at the
+    // version's base plus its changes in order): written blocks and unchanged ones alike
     let reader = st.reader();
-    let mut last: BTreeMap<BlockId, Option<Arc<rdy_model::Block>>> = BTreeMap::new();
+    let mut m = match crate::readiness::canon_scope(st, c.p.canon_at) {
+        Some(scope) => (*st.materialized(&scope)?).clone(),
+        None => Materialized::default(),
+    };
     for h in &c.p.changes {
-        for op in &reader.change(h)?.ops {
-            match op {
-                Op::Create { block } | Op::Update { block, .. } => {
-                    last.insert(block.id.clone(), Some(Arc::new(block.clone())));
-                }
-                Op::Delete { id, .. } => {
-                    last.insert(id.clone(), None);
-                }
-            }
-        }
+        m = m.with(&reader.change(h)?.ops);
     }
-    for block in last.values().flatten() {
+    for id in &a.reach {
+        let Some(block) = m.get(id) else { continue };
         for (target, pin) in &block.foreign.pins {
             if let Some(version) = st.foreign_held_pin(target, pin)? {
                 reach.insert(AssessmentForeignReach {

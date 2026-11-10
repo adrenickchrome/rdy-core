@@ -398,3 +398,74 @@ fn rpl17_advisory_foreign_tension_has_plan_item() {
         .expect("the tension row");
     assert!(row.answer.is_some());
 }
+
+/// rpl17 fix round 1: the foreign reach holds the held version of the pins of every block in
+/// the local reach, an unchanged block that a plan item names included, with no open foreign
+/// tension on it.
+#[test]
+fn rpl17_foreign_reach_covers_unchanged_blocks_in_the_local_reach() {
+    let mut fx = fixture();
+    // `b` pins the live cited claim and a local claim `t`; the deprecated reference `o` is
+    // answered and both land in canon
+    let b = id_of(&fx.r, "Builds on");
+    let parent =
+        fx.r.read()
+            .block(&Scope::View("p".into()), &b)
+            .unwrap()
+            .parent
+            .unwrap()
+            .to_string();
+    let w = write(
+        &mut fx.r,
+        "p",
+        json!([{"op": "create", "type": "claim", "id": "$t", "parent": parent,
+                "body": "Target."}]),
+    );
+    let t = w.created["$t"].clone();
+    write(
+        &mut fx.r,
+        "p",
+        json!([{"op": "update", "id": b.to_string(),
+                "body": format!("Builds on {{{{core:c-FRGNP}}}} and {{{{{t}}}}}.")}]),
+    );
+    common::answer_open_items(&mut fx.r, &writer(), "p");
+    land(&mut fx.r, "p");
+    // view q edits `t` only: `b` is unchanged and becomes a suspect, so a plan item names it
+    write(
+        &mut fx.r,
+        "q",
+        json!([{"op": "update", "id": t, "body": "Target, reworded."}]),
+    );
+    common::answer_open_items(&mut fx.r, &writer(), "q");
+    let p =
+        fx.r.propose(&writer(), "q", "q", Some(common::TEST_SUMMARY))
+            .unwrap_or_else(|e| panic!("propose q: {e} {:?}", e.issues));
+    let pref = fx.r.resolve_proposal(&p.id).unwrap();
+    let st = fx.r.read();
+    let rec = st.reader().proposal(&p.id.parse().unwrap()).unwrap();
+    let c = Candidate::stored(&st, pref, rec).unwrap();
+    let (readiness, wire) = assess_wire(&st, &c, &st.gate_config()).unwrap();
+    assert!(readiness.issues.is_empty(), "{:#?}", readiness.issues);
+    let wire = wire.expect("a ready version has a record");
+    assert!(
+        wire.local().reach.contains(&b),
+        "the unchanged block is in the local reach: {:?}",
+        wire.local().reach
+    );
+    assert!(wire.foreign.tensions.is_empty(), "{:#?}", wire.foreign);
+    let held = AssessmentForeignReach {
+        target: ForeignId::new(cited(), fx.live.id.clone()),
+        version: fx.live.version_hash(),
+    };
+    assert!(wire.foreign.reach.contains(&held), "{:#?}", wire.foreign);
+}
+
+/// The id of the claim whose body starts with `prefix`, in canon or view `p`.
+fn id_of(r: &Rdy, prefix: &str) -> BlockId {
+    let st = r.read();
+    let m = st.materialized(&Scope::View("p".into())).unwrap();
+    m.iter()
+        .find(|b| b.body.starts_with(prefix))
+        .map(|b| b.id.clone())
+        .expect("claim")
+}
