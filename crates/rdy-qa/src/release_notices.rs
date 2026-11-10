@@ -10,7 +10,8 @@
 //! cache into a new directory, checks each copy against `Cargo.lock`, and returns the release
 //! notes part that names them. [`check_release_text`] checks a release's notes against that part,
 //! and checks their changes part: in place, and naming any store or dump format move since the
-//! previous release with a dump-and-load step only when the store format moves (D-7PQEF, D-MYEW8).
+//! previous release with a dump-and-load step only when the store format moves (D-7PQEF, D-MYEW8),
+//! and each store feature and sync stream format first carried since then (repo links, rpl33).
 use crate::platform;
 use crate::release_install::{
     self, TARGETS, WINDOWS_TARGET, valid_path, valid_target, valid_version,
@@ -988,6 +989,109 @@ pub fn release_format_move_line(version: &str) -> Result<Option<String>, String>
     Ok(format_move_line(version, previous, current_store()))
 }
 
+/// What a project does first that makes its store use registered feature `name`, for the
+/// feature-move line; a feature not listed is "first uses it".
+const FEATURE_FIRST_USE: &[(&str, &str)] = &[(
+    rdy_store::format::FEATURE_FOREIGN_COPY,
+    "takes its first repo link delivery",
+)];
+
+/// The sync stream formats added after Release 1, each with the first rdy that writes it and
+/// the stream purpose it carries. A tag history stays in [`rdy_store::sync_stream::STREAM_FORMAT`].
+const SYNC_FORMAT_MOVES: &[(u32, &str, &str)] = &[(
+    rdy_store::sync_stream::LINK_DELIVERY_FORMAT,
+    rdy_store::format::FOREIGN_COPY_REQUIRED_RDY,
+    "link_delivery",
+)];
+
+/// Whether `first` (the first rdy of a format or feature) is newer than the previous release
+/// `previous` and no newer than `version`: the release `version` is the first published one
+/// that carries it.
+fn first_in(version: &str, previous: &str, first: &str) -> bool {
+    match (
+        version_key(version),
+        version_key(previous),
+        version_key(first),
+    ) {
+        (Some(v), Some(p), Some(f)) => p < f && f <= v,
+        _ => false,
+    }
+}
+
+/// The lines that the changes part's Changes group must hold for the moves from the previous
+/// release `previous` to `version`, which writes `current` and registers `features`: the format
+/// move line of [`format_move_line`], one feature-move line per registered feature whose first
+/// rdy comes after `previous` (when `previous` already wrote feature stores; a move to feature
+/// stores is the format move), and one line per sync stream format first written after
+/// `previous`. A feature-move line names the feature, its class and minimum rdy, and says that
+/// store format 19 and the dump format stay; only a store that first uses the feature needs the
+/// minimum rdy, so no line says that every store does.
+fn move_lines(
+    version: &str,
+    previous: (&str, u32, u32),
+    current: impl Into<WrittenStore>,
+    features: &[rdy_store::format::StoreFeature],
+) -> Vec<String> {
+    let current = current.into();
+    let (prev, _, ps) = previous;
+    let mut out: Vec<String> = format_move_line(version, previous, current)
+        .into_iter()
+        .collect();
+    if let WrittenStore::Features(cd) = current
+        && ps == rdy_store::format::FEATURE_STORE_FORMAT
+    {
+        for f in features {
+            if !first_in(version, prev, &f.required_rdy) {
+                continue;
+            }
+            let (name, class, need) = (&f.name, f.class.as_str(), &f.required_rdy);
+            let first_use = FEATURE_FIRST_USE
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or("first uses it", |(_, u)| u);
+            out.push(format!(
+                "- **Breaking for older rdy: rdy {version} adds the store feature `{name}` (class {class}, minimum rdy {need}); store format {ps} and dump format {cd} stay.** A store starts to use `{name}` only when its project {first_use}, and only a store or dump that uses it needs rdy {need}: rdy {prev} refuses one with `E_STORE_FORMAT` and names rdy {need}. rdy {version} opens a store made by rdy {prev} as it is, and loads every earlier dump."
+            ));
+        }
+    }
+    for (format, first, purpose) in SYNC_FORMAT_MOVES {
+        if !first_in(version, prev, first) {
+            continue;
+        }
+        let tag = rdy_store::sync_stream::STREAM_FORMAT;
+        out.push(format!(
+            "- **Breaking for older rdy: rdy {version} adds sync stream format {format} (purpose `{purpose}`); a tag history stays sync stream format {tag}.** rdy {version} reads sync stream formats {tag} and {format}. rdy {prev} reads sync stream format {tag} only and refuses a format {format} file."
+        ));
+    }
+    out
+}
+
+/// Every move line of `version` against [`RELEASED`], the store this rdy writes
+/// ([`current_store`]) and its registered features: [`release_format_move_line`]'s line, then
+/// the feature-move and stream-move lines. `Err` when no published release comes before
+/// `version`.
+pub fn release_move_lines(version: &str) -> Result<Vec<String>, String> {
+    let previous = previous_release(version, RELEASED).ok_or(MSG_INVALID_ARGUMENTS)?;
+    Ok(move_lines(
+        version,
+        previous,
+        current_store(),
+        &rdy_store::format::registered_features(),
+    ))
+}
+
+/// Checks the changes part of release notes `text` with [`check_changes`], once per move line
+/// of `lines`, or once with none when nothing moved.
+fn check_moves(heading: &str, lines: &[String], text: &str) -> Result<(), Refused> {
+    if lines.is_empty() {
+        return check_changes(heading, None, text);
+    }
+    for line in lines {
+        check_changes(heading, Some(line), text)?;
+    }
+    Ok(())
+}
+
 /// Checks the changes part of release notes `text` (D-7PQEF): exactly one `heading` line; the
 /// level-two heading before it starts `## Try it` and the one after it is `## Feedback`; its
 /// level-three headings are [`CHANGES_GROUPS`], at least one, in order, none twice; and when
@@ -1233,8 +1337,13 @@ fn check_with(version: &str, text: &str, src: &Sources) -> Result<(), Refused> {
         .ok_or_else(|| refused(Kind::Arguments, "no earlier release"))?;
     let (mpl, _) = union_sources(src)?;
     check_notes(&notes_part(version, &mpl)?, text)?;
-    let line = format_move_line(version, previous, current_store());
-    check_changes(&changes_heading(previous.0), line.as_deref(), text)
+    let lines = move_lines(
+        version,
+        previous,
+        current_store(),
+        &rdy_store::format::registered_features(),
+    );
+    check_moves(&changes_heading(previous.0), &lines, text)
 }
 
 /// [`check_release_text`] of the release notes file `notes`: a regular file (not a link) of at
@@ -2561,6 +2670,79 @@ mod tests {
             "## Try it\n\nSteps.\n\n{}## Feedback\n\nTell us.\n\n{part}\n<details>\n<summary><b>About this preview</b></summary>\n\nText.\n\n</details>\n\n<details>\n<summary><b>Verify the download (optional)</b></summary>\n\nMore.\n\n</details>\n",
             changes_part()
         )
+    }
+
+    /// rpl33: the first release that carries `foreign_copy` and sync stream format 3 names both
+    /// moves in its Changes group: the feature with its class and minimum rdy, store format 19
+    /// and dump format 4 unchanged, and only a store that uses the feature needing that rdy; and
+    /// the new stream format beside the unchanged tag-history format. No line moves the store or
+    /// dump format, and a release before or after the first one has neither line.
+    #[test]
+    fn rpl33_feature_and_stream_moves_name_foreign_copy_and_sync_3() {
+        use rdy_store::format::{FOREIGN_COPY_REQUIRED_RDY, registered_features};
+        assert_eq!(FOREIGN_COPY_REQUIRED_RDY, "0.48.0");
+        let features = registered_features();
+        let want = [
+            "- **Breaking for older rdy: rdy 0.48.0 adds the store feature `foreign_copy` (class incompatible, minimum rdy 0.48.0); store format 19 and dump format 4 stay.** A store starts to use `foreign_copy` only when its project takes its first repo link delivery, and only a store or dump that uses it needs rdy 0.48.0: rdy 0.47.0 refuses one with `E_STORE_FORMAT` and names rdy 0.48.0. rdy 0.48.0 opens a store made by rdy 0.47.0 as it is, and loads every earlier dump.",
+            "- **Breaking for older rdy: rdy 0.48.0 adds sync stream format 3 (purpose `link_delivery`); a tag history stays sync stream format 2.** rdy 0.48.0 reads sync stream formats 2 and 3. rdy 0.47.0 reads sync stream format 2 only and refuses a format 3 file.",
+        ];
+        let got = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
+        assert_eq!(got, want);
+        assert_eq!(
+            format_move_line("0.48.0", ("0.47.0", 4, 19), current_store()),
+            None,
+            "sentinel 19 and dump format 4 do not move"
+        );
+        for line in &got {
+            assert!(!line.contains("every store") && !line.contains("rdy dump --out"));
+        }
+        // the same moves after any earlier feature-store release
+        let after_046 = move_lines("0.48.0", ("0.46.0", 4, 19), current_store(), &features);
+        assert_eq!(after_046.len(), 2);
+        assert!(after_046[0].contains("rdy 0.46.0 refuses one with `E_STORE_FORMAT`"));
+        // before the first release that carries them, and after it, no line
+        assert!(move_lines("0.47.1", ("0.47.0", 4, 19), current_store(), &features).is_empty());
+        assert!(move_lines("0.49.0", ("0.48.0", 4, 19), current_store(), &features).is_empty());
+        // from a scalar store, the move to feature stores is the one store line, and the stream
+        // line still names sync stream format 3
+        let from_scalar = move_lines("0.48.0", ("0.25.0", 3, 18), current_store(), &features);
+        assert_eq!(from_scalar.len(), 2);
+        assert!(from_scalar[0].contains("moves from 18 to feature-based stores"));
+        assert_eq!(from_scalar[1], want[1].replace("0.47.0", "0.25.0"));
+        // against the published rows
+        let published = release_move_lines("0.48.0").expect("a release before 0.48.0");
+        let previous = previous_release("0.48.0", RELEASED).expect("row").0;
+        assert_eq!(
+            published,
+            want.map(|l| l.replace("rdy 0.47.0", &format!("rdy {previous}")))
+        );
+        assert_eq!(release_move_lines("0.36.0"), Ok(vec![]));
+    }
+
+    /// rpl33: the changes part must hold every move line in its Changes group; notes that lack
+    /// the feature-move line or the stream-move line are refused as not naming the format move.
+    #[test]
+    fn rpl33_notes_must_hold_every_move_line() {
+        let features = rdy_store::format::registered_features();
+        let lines = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
+        assert_eq!(lines.len(), 2);
+        let heading = changes_heading("0.47.0");
+        let part = |held: &[&String]| {
+            let body: String = held.iter().map(|l| format!("{l}\n")).collect();
+            format!(
+                "## Try it\n\nSteps.\n\n{heading}\n\n### Changes\n\n{body}- Another change.\n\n## Feedback\n\nTell us.\n"
+            )
+        };
+        assert_eq!(
+            check_moves(&heading, &lines, &part(&[&lines[0], &lines[1]])),
+            Ok(())
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let other = &lines[1 - i];
+            let e = check_moves(&heading, &lines, &part(&[other])).unwrap_err();
+            assert_eq!(e.text(), MSG_FORMAT_MOVE, "{line}");
+        }
+        assert_eq!(check_moves(&heading, &[], &part(&[])), Ok(()));
     }
 
     /// The published 0.20.0 row is the previous release of later versions (TASK-540).

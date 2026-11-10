@@ -39,7 +39,7 @@ use rdy_engine::readiness::assessment::{config_digest, pack_digest};
 use rdy_engine::readiness::check::MAX_REPLAY_STEPS;
 use rdy_engine::{Materialized, ReadState, Scope};
 use rdy_model::assessment::{
-    Assessment, AssessmentSeverity, AssessmentTensionStatus, PolicyRef, PolicyVerdict,
+    Assessment, AssessmentSeverity, AssessmentTensionStatus, AssessmentV2, PolicyRef, PolicyVerdict,
 };
 use rdy_model::plan::{Plan, PlanAct, PlanKind, PlanOutcome};
 use rdy_model::{
@@ -128,8 +128,11 @@ pub struct LandingFact {
     /// The landing of a re-affirmation card (its view starts with `reaffirm-`): the stated
     /// landing with no assessment.
     pub reaffirm_card: bool,
-    /// The assessment the landing names, decoded.
+    /// The assessment the landing names, decoded (its local part).
     pub assessment: Option<Assessment>,
+    /// The `kinds::ASSESSMENT` id of the named assessment's whole record re-encoded now, its
+    /// foreign part included (repo links, ASSESSMENT encoding 2): [`assessment_wire_id`].
+    pub assessment_now: Option<Hash>,
     /// The newest assessment of the approved version whose frame lies before the landing.
     pub bound_assessment: Option<Hash>,
     /// The approved version's changes.
@@ -243,6 +246,7 @@ impl LandingFact {
             view,
             approved,
             assessment: None,
+            assessment_now: None,
             bound_assessment: None,
             changes: vec![],
             seal: None,
@@ -256,11 +260,11 @@ impl LandingFact {
         let fact = &mut self;
         let at = fact.at;
         if let Some(a) = fact.record.assessment {
-            fact.assessment = Some(
-                reader
-                    .assessment(&a)
-                    .map_err(|e| read_err(format!("assessment {}", a.short()), e))?,
-            );
+            let wire = reader
+                .assessment_wire(&a)
+                .map_err(|e| read_err(format!("assessment {}", a.short()), e))?;
+            fact.assessment_now = Some(assessment_wire_id(&wire));
+            fact.assessment = Some(wire.local());
         }
         if let Some(version) = fact.record.approved_version {
             fact.bound_assessment = reader
@@ -304,6 +308,13 @@ fn chain_of(
 /// today.
 pub fn assessment_id(a: &Assessment) -> Hash {
     Hash::of(&rdy_store::codec::item_new(kinds::ASSESSMENT, a).1)
+}
+
+/// The `kinds::ASSESSMENT` id of the whole record `w` encoded now: its local layout when its
+/// foreign part is empty and no exception row is a deviation, else encoding 2 with the foreign
+/// part, as the store writes it (`Store::bind_assessment_wire`).
+pub fn assessment_wire_id(w: &AssessmentV2) -> Hash {
+    Hash::of(&rdy_store::codec::item_new(kinds::ASSESSMENT, w).1)
 }
 
 /// The effective lifecycle of `id` in `m` is `stable` (its own `lifecycle`, else its nearest
@@ -647,7 +658,7 @@ fn binding_rule(l: &LandingFact) -> Vec<Violation> {
             ),
         ));
     }
-    let now = assessment_id(a);
+    let now = l.assessment_now.unwrap_or_else(|| assessment_id(a));
     if now != h {
         out.push(v(
             "m3_assessment",

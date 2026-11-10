@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod edit_loop;
 pub mod every_kind;
 pub mod fixtures;
+pub mod foreign_fixture;
 pub mod gate_steps;
 pub mod git_repo;
 pub mod golden;

@@ -10,3 +10,4 @@ mod release_notices_unix;
 mod release_one;
 mod release_package;
 mod release_package_unix;
+mod release_repo_links_formats;
