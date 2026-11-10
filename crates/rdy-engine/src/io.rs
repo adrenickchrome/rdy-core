@@ -1596,15 +1596,15 @@ impl Rdy {
         }
         let scope = Scope::View(view.to_string());
         let m = st.materialized(&scope)?;
-        if let Ok(cur) = st.block(&scope, &edited.id) {
-            if let Some(show) = ForeignShow::of(&st, &m)? {
-                if edited.body == show.text(&cur.body, RefMode::for_body(&cur.block_type)) {
-                    edited.body = cur.body.clone();
-                }
-                for (k, v) in edited.fields.iter_mut() {
-                    if cur.fields.get(k).is_some_and(|c| show.value(c) == *v) {
-                        *v = cur.fields[k].clone();
-                    }
+        if let Ok(cur) = st.block(&scope, &edited.id)
+            && let Some(show) = ForeignShow::of(&st, &m)?
+        {
+            if edited.body == show.text(&cur.body, RefMode::for_body(&cur.block_type)) {
+                edited.body = cur.body.clone();
+            }
+            for (k, v) in edited.fields.iter_mut() {
+                if cur.fields.get(k).is_some_and(|c| show.value(c) == *v) {
+                    *v = cur.fields[k].clone();
                 }
             }
         }
