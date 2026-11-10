@@ -296,6 +296,11 @@ impl Detector for Semantic {
                 }
             }
         }
+        // a pair of two cited sides has no local block to start from: a standing condition, read
+        // in the canon scope on a full run, as the team collisions are
+        if seeds.is_none() && cx.scope() == DetectScope::Canon {
+            keys.extend(state.foreign_only().copied());
+        }
         for key in keys {
             let Some(t) = state.tension(&key) else {
                 continue;

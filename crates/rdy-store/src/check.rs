@@ -17,10 +17,12 @@ use crate::segment::Location;
 use crate::transition::TransitionsV1;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::foreign::ForeignEvent;
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
     AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, Block, BlockId, Change,
-    EvidenceKind, Hash, Intent, LandingRecord, Op, RepoId, Review, ReviewSubject, SemanticTension,
-    Verdict, pair_key,
+    EvidenceKind, Hash, Intent, LandingRecord, Op, RepoId, Review, ReviewSubject, Verdict,
+    pair_key_sides,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -446,7 +448,7 @@ impl StoreReader {
         for (key, value) in self.refs_with_prefix(PAIR_REF)? {
             let key = key_hash(&key, PAIR_REF, "verdict")?;
             let h = crate::index::hash_from(&value, &format!("verdict ref {key}"))?;
-            let r: Review = match self.get_typed(kinds::REVIEW, &h) {
+            let r: ReviewV1 = match self.get_typed(kinds::REVIEW, &h) {
                 Err(StoreError::NotFound(_)) => {
                     return Err(bad(format!("pair {key}: {h} is not a stored review")));
                 }
@@ -454,11 +456,11 @@ impl StoreReader {
             };
             let on_this_pair = matches!(
                 &r.subject,
-                ReviewSubject::Pair { key: k, items }
+                ReviewSubjectV1::Pair { key: k, items }
                     if *k == key
                         && items.len() == 2
-                        && items[0].block != items[1].block
-                        && pair_key(items) == key
+                        && items[0].target() != items[1].target()
+                        && pair_key_sides(items) == key
             );
             if !on_this_pair || !matches!(r.verdict, Verdict::Tension | Verdict::NoTension) {
                 return Err(bad(format!(
@@ -486,7 +488,7 @@ impl StoreReader {
         for (key, value) in self.refs_with_prefix(SEMANTIC_REF)? {
             let key = key_hash(&key, SEMANTIC_REF, "semantic tension")?;
             let latest = crate::index::hash_from(&value, &format!("semantic tension ref {key}"))?;
-            let read = |h: &Hash| -> Result<SemanticTension, StoreError> {
+            let read = |h: &Hash| -> Result<SemanticTensionV1, StoreError> {
                 match self.get_typed(kinds::TENSION, h) {
                     Err(StoreError::NotFound(_)) => Err(bad(format!(
                         "semantic tension {key}: version {h} is not a stored semantic tension"
@@ -521,12 +523,12 @@ impl StoreReader {
                 && !first.blocking
                 && first.relay.is_none()
                 && first.relayed_by.is_none()
-                && match self.get_typed::<Review>(kinds::REVIEW, &first.review) {
+                && match self.get_typed::<ReviewV1>(kinds::REVIEW, &first.review) {
                     Err(StoreError::NotFound(_)) => false,
                     r => {
                         let r = r?;
                         r.verdict == Verdict::Tension
-                            && matches!(&r.subject, ReviewSubject::Pair { items, .. } if *items == first.items)
+                            && matches!(&r.subject, ReviewSubjectV1::Pair { items, .. } if *items == first.items)
                     }
                 };
             if !follows {

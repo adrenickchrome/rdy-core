@@ -135,7 +135,7 @@ fn assert_cross(r: &mut Rdy, a: (&BlockId, &str, Hash), b: (&BlockId, &str, Hash
         });
         assert_eq!(q.items, want, "the exact writes");
         assert_eq!(q.rule, rule);
-        assert_eq!(q.change, c, "the request belongs to each change");
+        assert_eq!(q.change, Some(c), "the request belongs to each change");
     }
     let q = with_key(&reqs(r, &a.2), key).unwrap().clone();
     assert_eq!(

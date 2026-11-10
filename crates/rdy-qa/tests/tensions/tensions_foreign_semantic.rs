@@ -450,3 +450,168 @@ fn rpl16_only_person_accepted_semantic_advice_blocks() {
         of_kind(&w.r, TensionKind::Semantic)
     );
 }
+
+/// Two team sets deliver one instruction each (and an organization set one that is no team's).
+struct Teams {
+    _dir: tempfile::TempDir,
+    files: tempfile::TempDir,
+    r: Rdy,
+    links: BTreeMap<String, BlockId>,
+    red: Block,
+    blue: Block,
+}
+
+fn teams() -> Teams {
+    let (dir, mut r) = project();
+    let files = tempfile::tempdir().unwrap();
+    let other = RepoId([9; 16]);
+    let (_s, links) = linked(&mut r, &[("red", cited()), ("blue", other), ("org", other)]);
+    let reason = [("applies_to", "all")];
+    let red = block(
+        "ai-FRGNR",
+        "instruction",
+        &reason,
+        "Always run the full test suite before you push a branch.",
+    );
+    let blue = block(
+        "ai-FRGNB",
+        "instruction",
+        &reason,
+        "Never run the test suite before a push; the pipeline runs it.",
+    );
+    let org = block(
+        "ai-FRGNZ",
+        "instruction",
+        &reason,
+        "Write every commit message in the imperative mood.",
+    );
+    deliver(
+        &mut r,
+        files.path(),
+        "red",
+        &links["red"],
+        cited(),
+        Some(ForeignSet::Team("red".into())),
+        &[(&red, live())],
+    );
+    deliver(
+        &mut r,
+        files.path(),
+        "blue",
+        &links["blue"],
+        other,
+        Some(ForeignSet::Team("blue".into())),
+        &[(&blue, live())],
+    );
+    deliver(
+        &mut r,
+        files.path(),
+        "org",
+        &links["org"],
+        other,
+        Some(ForeignSet::Organization),
+        &[(&org, live())],
+    );
+    Teams {
+        _dir: dir,
+        files,
+        r,
+        links,
+        red,
+        blue,
+    }
+}
+
+#[test]
+fn rpl16_two_team_sets_pair_through_review() {
+    let mut w = teams();
+    // the queue offers the one pair of two cited instructions of two team sets; the
+    // organization set's instruction is no team's and pairs with neither
+    let all = w.r.read().review_requests().unwrap();
+    assert_eq!(all.len(), 1, "{all:#?}");
+    let q = all[0].clone();
+    assert_eq!((q.rule, q.change), (Rule::Team, None));
+    assert!(q.items.iter().all(|i| i.side.is_foreign()), "{q:#?}");
+    let mut ids: Vec<&BlockId> = q.items.iter().map(|i| &i.block).collect();
+    ids.sort();
+    assert_eq!(ids, vec![&w.blue.id, &w.red.id]);
+    let sides: Vec<PairSide> = q.items.iter().map(|i| i.pair_side()).collect();
+    assert_eq!(q.key, pair_key_sides(&sides));
+    // the case reads both cited blocks from the foreign state
+    let case = w.r.read().case_of(&q.key, &q.items).unwrap();
+    assert_eq!(case.rule, Some(Rule::Team));
+    assert!(case.blocks.iter().all(|b| b.side.starts_with("foreign:")));
+    assert!(
+        case.blocks
+            .iter()
+            .all(|b| b.doc.is_empty() && b.governing.is_empty())
+    );
+    // a reviewer judges it and a tension opens, advisory, with two foreign sides
+    let info = submit(&mut w.r, &q, "tension", Some("blocking"));
+    assert_eq!(info.severity, Some(TensionSeverity::Advisory));
+    assert!(info.tension.is_some(), "{info:?}");
+    assert!(w.r.read().semantic().settled(&q.key).is_some());
+    assert!(w.r.read().review_requests().unwrap().is_empty());
+    let t = one(&w.r, TensionKind::Semantic);
+    assert_eq!(t.severity, TensionSeverity::Advisory);
+    assert!(t.sides.iter().all(SideRef::is_foreign) && t.sides.len() == 2);
+    assert_eq!(rdy_engine::tensions::semantic::pair_of(&t), Some(q.key));
+    assert!(
+        w.r.read()
+            .canon_tensions()
+            .unwrap()
+            .iter()
+            .any(|c| c.id == t.id),
+        "a pair of two cited sides stands in canon"
+    );
+    let h: Hash = info.review.parse().unwrap();
+    let wire = w.r.read().reader().review_v1(&h).unwrap();
+    assert_eq!(
+        wire.subject,
+        ReviewSubjectV1::Pair {
+            key: q.key,
+            items: sides.clone()
+        }
+    );
+    // a person's accepted advice is the version that blocks
+    let open = w.r.read().semantic().tension(&q.key).unwrap().clone();
+    let mut next = open.record.clone();
+    next.prev = Some(open.version);
+    next.blocking = true;
+    next.relay = Some(RelayEvidence {
+        quoted: "accept the advice".into(),
+        session_ref: "chat".into(),
+        question: None,
+    });
+    w.r.record_tension_versions(&[next]).unwrap();
+    let accepted = one(&w.r, TensionKind::Semantic);
+    assert_eq!(accepted.severity, TensionSeverity::Blocking);
+    // it survives a reopen
+    let dir = w._dir.path().to_path_buf();
+    let id = accepted.id;
+    let (files, links, other) = (w.files, w.links, RepoId([9; 16]));
+    w.r.close().unwrap();
+    let mut r = Rdy::open(&dir).unwrap();
+    assert_eq!(one(&r, TensionKind::Semantic).id, id);
+    // a delivery that changes one text resolves it: the pair judged is gone
+    let moved = block(
+        "ai-FRGNB",
+        "instruction",
+        &[("applies_to", "all")],
+        "Run the unit tests before a push and leave the rest to the pipeline.",
+    );
+    deliver(
+        &mut r,
+        files.path(),
+        "blue2",
+        &links["blue"],
+        other,
+        Some(ForeignSet::Team("blue".into())),
+        &[(&moved, live())],
+    );
+    assert!(
+        of_kind(&r, TensionKind::Semantic).is_empty(),
+        "{:#?}",
+        of_kind(&r, TensionKind::Semantic)
+    );
+}

@@ -1013,8 +1013,13 @@ fn verdict_carry(
         .filter(|d| d.stored())
         .collect();
     let mut next = prev.clone();
-    if stored.is_empty() || blocks.is_empty() {
+    if stored.is_empty() {
         return Ok(Some(next));
+    }
+    // a pair of two cited sides names no block (its tension has no local block to start from),
+    // so the delta names none: the next read builds in full
+    if blocks.is_empty() {
+        return Ok(None);
     }
     let kinds: BTreeSet<_> = stored.iter().map(|d| d.kind()).collect();
     let seeds: BTreeSet<BlockId> = blocks.iter().cloned().collect();

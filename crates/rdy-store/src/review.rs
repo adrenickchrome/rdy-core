@@ -252,7 +252,7 @@ impl Store {
                     Some(_) => {}
                 }
             }
-            if held == id || !tension || self.review(&held)?.verdict != Verdict::NoTension {
+            if held == id || !tension || self.review_v1(&held)?.verdict != Verdict::NoTension {
                 return Err(refuse(format!("pair {key} is settled by review {held}")));
             }
         }

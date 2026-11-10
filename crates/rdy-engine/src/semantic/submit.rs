@@ -489,7 +489,9 @@ impl Rdy {
         let Some(items) = st.pair_now_sides(&pair)? else {
             return Err(not_current(&label));
         };
-        if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+        if !items.iter().any(|i| matches!(i.side, SideRef::Change(_)))
+            && !items.iter().all(|i| i.side.is_foreign())
+        {
             return Err(stale(format!(
                 "request {label} ended: both blocks are in canon now"
             )));
@@ -587,9 +589,17 @@ impl Rdy {
         if verdict == Verdict::Tension {
             // the verdict is stored: a failed lookup gives no label and never fails the reply
             // final review M8: the tensions of one of the pair's blocks, not the whole set
-            let open = self.read().tensions().ok().and_then(|set| {
-                set.involving_block(&items[0].block)
-                    .into_iter()
+            // a pair of two cited sides has no local block to look under: it stands in canon
+            let st = self.read();
+            let found = match items.iter().find(|i| !i.side.is_foreign()) {
+                Some(local) => st
+                    .tensions()
+                    .ok()
+                    .map(|set| set.involving_block(&local.block)),
+                None => st.canon_tensions().ok(),
+            };
+            let open = found.and_then(|ts| {
+                ts.into_iter()
                     .find(|t| pair_of(t) == Some(key))
                     .map(|t| (tension_label(&t.id), t.severity))
             });

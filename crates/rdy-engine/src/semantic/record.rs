@@ -104,6 +104,14 @@ fn verdict_delta(pairs: Vec<(Hash, Vec<PairSide>)>) -> Delta {
         .collect();
     blocks.sort();
     blocks.dedup();
+    // a pair of two cited sides has no local block: its tension is found by key, not by block,
+    // so a delta that names no block makes the next read build the set in full
+    if pairs
+        .iter()
+        .any(|(_, items)| items.iter().all(|i| i.local().is_none()))
+    {
+        blocks.clear();
+    }
     Delta::Verdict {
         keys: pairs.into_iter().map(|(k, _)| k).collect(),
         blocks,

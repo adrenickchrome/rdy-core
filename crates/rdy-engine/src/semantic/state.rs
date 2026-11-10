@@ -1,6 +1,6 @@
 //! The verdicts and semantic tensions of one published state, read from the store's pair/ and semantic/ refs. A function of the log: reindex rebuilds it.
 use crate::error::RdyError;
-use imbl::OrdMap;
+use imbl::{OrdMap, OrdSet};
 use rdy_model::review::{ReviewSubjectV1, ReviewV1};
 use rdy_model::semantic::{PairTarget, SemanticTensionV1};
 use rdy_model::{BlockId, Hash, PairSide, Verdict};
@@ -40,6 +40,9 @@ pub struct SemanticState {
     by_item: OrdMap<PairSide, Partners>,
     /// How many semantic tensions each local block takes part in (a cited side is no local block).
     blocks: OrdMap<BlockId, usize>,
+    /// The keys of the semantic tensions with no local side (a pair of two cited sides): no
+    /// local block reaches them, so a reader that finds tensions by block reads these apart.
+    foreign_only: OrdSet<Hash>,
 }
 
 impl SemanticState {
@@ -128,6 +131,11 @@ impl SemanticState {
         self.blocks.keys()
     }
 
+    /// The keys of the semantic tensions whose two sides are both cited, in key order.
+    pub fn foreign_only(&self) -> impl Iterator<Item = &Hash> {
+        self.foreign_only.iter()
+    }
+
     /// Whether any semantic tension exists.
     pub fn has_tensions(&self) -> bool {
         !self.tensions.is_empty()
@@ -169,6 +177,9 @@ impl SemanticState {
         for item in record.items.iter().filter_map(PairSide::local) {
             *self.blocks.entry(item.block.clone()).or_default() += 1;
         }
+        if record.items.iter().all(|i| i.local().is_none()) {
+            self.foreign_only.insert(key);
+        }
         self.tensions
             .insert(key, Arc::new(OpenTension { version, record }));
     }
@@ -194,6 +205,7 @@ impl SemanticState {
                 }
             }
         }
+        self.foreign_only.remove(key);
         for item in old.record.items.iter().filter_map(PairSide::local) {
             if let Some(n) = self.blocks.get_mut(&item.block) {
                 *n -= 1;

@@ -95,6 +95,15 @@ impl ReadState {
                 }
             }
         }
+        // the pairs of two cited sides, which no change writes: after every change's
+        for q in self.team_requests()? {
+            if !seen.insert(q.key) || semantic.settled(&q.key).is_some() {
+                continue;
+            }
+            if visit(q)?.is_break() {
+                return Ok(());
+            }
+        }
         Ok(())
     }
 }
