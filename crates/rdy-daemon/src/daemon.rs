@@ -234,23 +234,38 @@ pub struct DaemonHandle {
     tick: Arc<Notify>,
     keepers: Keepers,
     check: Arc<ProjectCheck>,
+    /// The daemon's idle timeout (`DaemonConfig::idle_timeout`).
+    idle: Option<Duration>,
 }
 
-/// What keeps a daemon from idling out: its open socket connections plus its holds (a live page
-/// in view, ls6). `count` carries the sum; every change of either part writes it under the
-/// watch's lock, so concurrent changes publish their sums in order.
+/// What keeps a daemon from idling out: its active clients (open socket connections, admitted MCP
+/// over HTTP calls and open listens) plus its holds (a live page in view, ls6). `count` carries the
+/// sum; every change of any part writes it under the watch's lock, so concurrent changes publish
+/// their sums in order. That lock is the keepers' lock: admission, the build check, the last
+/// client's end and the idle exit decide under it.
 #[derive(Clone)]
 struct Keepers {
     connections: Arc<AtomicUsize>,
     holds: Arc<AtomicUsize>,
+    /// Admitted MCP over HTTP calls whose permits live ([`HttpPermit`]), and open listens.
+    http_calls: Arc<AtomicUsize>,
+    http_streams: Arc<AtomicUsize>,
     count: Arc<watch::Sender<usize>>,
-    /// Whether a client of another build came (D-CCC6E): the daemon exits when its last
-    /// connection closes. Read and written only inside `update`, under the watch's lock, as the
-    /// connection count changes. Never cleared.
+    /// Whether a client of another build came (D-CCC6E): the daemon exits when its last active
+    /// client ends. Read and written only inside `update`, under the watch's lock, as the active
+    /// client count changes. Never cleared.
     replace: Arc<AtomicBool>,
     /// Whether the daemon is leaving to be replaced: its run files are gone or going. Under the
     /// same lock.
     leaving: Arc<AtomicBool>,
+    /// The build of the client that latched the replacement: what W_DAEMON_BUILD names in this
+    /// build's MCP over HTTP replies (HTTP carries no client build of its own). Set once.
+    newer_build: Arc<OnceLock<String>>,
+    /// The daemon's stop signal. Once it is set, admission is sealed.
+    stop: Arc<watch::Sender<bool>>,
+    reason: Arc<OnceLock<ExitReason>>,
+    files: RunFiles,
+    run: RunDir,
 }
 
 /// What a hello of another build, or any hello after one, finds under the keepers' lock.
@@ -269,14 +284,85 @@ impl Keepers {
     fn update(&self, change: impl FnOnce(&Self)) {
         self.count.send_modify(|n| {
             change(self);
-            *n = self.connections.load(Ordering::SeqCst) + self.holds.load(Ordering::SeqCst);
+            *n = self.active() + self.holds.load(Ordering::SeqCst);
         });
+    }
+
+    /// The active clients: open socket connections and admitted HTTP work. Read it under the lock.
+    fn active(&self) -> usize {
+        self.connections.load(Ordering::SeqCst) + self.http()
+    }
+
+    /// Admitted MCP over HTTP calls and open listens.
+    fn http(&self) -> usize {
+        self.http_calls.load(Ordering::SeqCst) + self.http_streams.load(Ordering::SeqCst)
+    }
+
+    fn counter(&self, work: HttpWork) -> &AtomicUsize {
+        match work {
+            HttpWork::Call => &self.http_calls,
+            HttpWork::Listen => &self.http_streams,
+        }
+    }
+
+    /// Inside `update`, after an active client ended: when it was the last one and a client of
+    /// another build latched the replacement, marks the daemon leaving and removes its run files
+    /// before a new client can be told anything (the next one starts a successor). True when the
+    /// caller must then [`Self::leave_for_build`]. Holds and site pages are not active clients.
+    fn leave_if_last(&self) -> bool {
+        if self.active() == 0
+            && self.replace.load(Ordering::SeqCst)
+            && !self.leaving.swap(true, Ordering::SeqCst)
+        {
+            self.files.remove(&self.run);
+            return true;
+        }
+        false
+    }
+
+    /// Stops the daemon to be replaced, once [`Self::leave_if_last`] said so, outside the lock.
+    fn leave_for_build(&self, why: &str) {
+        log(why);
+        let _ = self.reason.set(ExitReason::BuildReplaced);
+        self.stop.send_replace(true);
+    }
+
+    /// The idle timer's end: under the lock, stops the daemon when nothing keeps it, so no request
+    /// can enter between the check and the stop. True when it stopped the daemon.
+    fn idle_exit(&self, idle: Duration) -> bool {
+        let mut stopped = false;
+        self.update(|k| {
+            if k.active() + k.holds.load(Ordering::SeqCst) == 0 && !*k.stop.borrow() {
+                let _ = k.reason.set(ExitReason::Idle);
+                k.stop.send_replace(true);
+                stopped = true;
+            }
+        });
+        if stopped {
+            log(&format!("idle for {} s, exiting", idle.as_secs_f64()));
+        }
+        stopped
+    }
+
+    /// Returns once no admitted HTTP work is left.
+    async fn http_drained(&self) {
+        let mut count = self.count.subscribe();
+        loop {
+            let busy = {
+                let _sum = count.borrow_and_update();
+                self.http()
+            };
+            if busy == 0 || count.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
 /// While one lives, the daemon's idle timer does not run (ls6: a live page in view keeps the
 /// daemon up; a page in a background tab closes its stream, ruling task-6). The project check
-/// still runs on the idle tick, which counts socket connections only (D-A6ZZA).
+/// still runs on the idle tick, which counts socket connections only (D-A6ZZA). A hold is no
+/// active client: it does not hold off a replacement by another build (D-CCC6E).
 pub struct IdleHold(Keepers);
 
 impl Drop for IdleHold {
@@ -287,11 +373,126 @@ impl Drop for IdleHold {
     }
 }
 
+/// The kind of MCP over HTTP work a permit admits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpWork {
+    /// One request: from its admission until its worker ends, even when its response is gone.
+    Call,
+    /// An open `subscriptions/listen` stream, until it ends.
+    Listen,
+}
+
+/// The MCP over HTTP work a daemon runs now, for status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HttpActivity {
+    /// Admitted calls whose permits live.
+    pub calls: usize,
+    /// Open listen streams.
+    pub streams: usize,
+}
+
+/// MCP over HTTP's way into a daemon. Cheap to clone. Each admitted request holds an
+/// [`HttpPermit`]: while one lives the daemon has an active client, as it has for an open socket
+/// connection, so it neither idles out nor leaves to be replaced by another build (D-CCC6E). A
+/// stop or a replacement seals admission, under the keepers' lock.
+#[derive(Clone)]
+pub struct HttpAdmission {
+    keepers: Keepers,
+}
+
+impl HttpAdmission {
+    /// Admits one piece of work, or `None` once the daemon is stopping or leaving to be replaced.
+    pub fn admit(&self, work: HttpWork) -> Option<HttpPermit> {
+        let mut admitted = false;
+        self.keepers.update(|k| {
+            if k.leaving.load(Ordering::SeqCst) || *k.stop.borrow() {
+                return;
+            }
+            k.counter(work).fetch_add(1, Ordering::SeqCst);
+            k.files.http_started();
+            admitted = true;
+        });
+        admitted.then(|| HttpPermit {
+            keepers: self.keepers.clone(),
+            work,
+        })
+    }
+
+    /// The calls and listens admitted now.
+    pub fn activity(&self) -> HttpActivity {
+        // under the watch's lock: one consistent pair
+        let _sum = self.keepers.count.borrow();
+        HttpActivity {
+            calls: self.keepers.http_calls.load(Ordering::SeqCst),
+            streams: self.keepers.http_streams.load(Ordering::SeqCst),
+        }
+    }
+
+    /// The build of the client that latched this daemon's replacement while other clients were
+    /// active, once one has: this build's next tool reply to each actor and run owes it
+    /// W_DAEMON_BUILD. HTTP traffic never sets it.
+    pub fn newer_build(&self) -> Option<String> {
+        self.keepers.newer_build.get().cloned()
+    }
+}
+
+/// One admitted piece of MCP over HTTP work ([`HttpAdmission::admit`]). Keep it with the worker,
+/// not the response: a write runs on after its client goes away, and stays counted. Dropping the
+/// last active client's permit after a client of another build came stops the daemon to be
+/// replaced; during a stop, `daemon.pid` and the host's drain wait for it.
+pub struct HttpPermit {
+    keepers: Keepers,
+    work: HttpWork,
+}
+
+impl HttpPermit {
+    /// Completes once the daemon stops, after admission is sealed: an open stream ends then.
+    pub async fn cancelled(&self) {
+        let mut stop = self.keepers.stop.subscribe();
+        let _ = stop.wait_for(|stopped| *stopped).await;
+    }
+}
+
+impl Drop for HttpPermit {
+    fn drop(&mut self) {
+        let mut start = None;
+        let mut last = false;
+        self.keepers.update(|k| {
+            k.counter(self.work).fetch_sub(1, Ordering::SeqCst);
+            start = k.files.http_ended(&k.run);
+            last = k.leave_if_last();
+        });
+        // last: no load or successor acts before every file of this daemon is gone
+        drop(start);
+        if last {
+            self.keepers.leave_for_build(
+                "the last MCP over HTTP request ended after a client of another build; exiting to be replaced",
+            );
+        }
+    }
+}
+
 impl DaemonHandle {
+    /// MCP over HTTP's admission into this daemon and its activity.
+    pub fn http_admission(&self) -> HttpAdmission {
+        HttpAdmission {
+            keepers: self.keepers.clone(),
+        }
+    }
+
+    /// Test hook: ends the idle timer now, as its expiry does: the daemon stops with `Idle` when
+    /// no active client and no hold keeps it. True when it stopped. A daemon with no idle timeout
+    /// never idles out. A test needs no clock.
+    #[doc(hidden)]
+    pub fn expire_idle(&self) -> bool {
+        self.idle.is_some_and(|idle| self.keepers.idle_exit(idle))
+    }
+
     /// Asks `run` to stop and returns at once. The socket and the pid file are removed here, so
     /// no new client can reach the daemon once this returns, and `run` then leaves those paths
-    /// alone (a successor may already have re-created them); `run` drains and returns. A second
-    /// stop is a no-op.
+    /// alone (a successor may already have re-created them); `run` drains and returns. While
+    /// admitted MCP over HTTP work runs, the pid file stays until its last permit ends. The stop
+    /// seals HTTP admission. A second stop is a no-op.
     pub fn stop(&self) {
         // before the signal, so `run` cannot get to the files first and this return before
         // they are gone
@@ -330,7 +531,8 @@ impl DaemonHandle {
         IdleHold(self.keepers.clone())
     }
 
-    /// Open socket connections plus holds: while above 0, the daemon does not idle out.
+    /// Active clients (open socket connections, admitted MCP over HTTP work) plus holds: while
+    /// above 0, the daemon does not idle out.
     pub fn keepers(&self) -> usize {
         *self.keepers.count.borrow()
     }
@@ -359,6 +561,7 @@ impl DaemonHandle {
     /// or, when the check could not take it, the listener, the socket and its record. This
     /// removes each file while it is still this daemon's, closes the listener, and then lets the
     /// start lock go. Every other stop has removed its files already, and then this does nothing.
+    /// While admitted MCP over HTTP work runs, all of this waits for its last permit to end.
     pub fn drained(&self) {
         let mut files = self.files.lock();
         let start = files.drained(&self.run);
@@ -375,7 +578,7 @@ pub struct Daemon {
     readiness: Readiness,
     /// Set by the path that stops the daemon for a reason other than `Stopped`.
     reason: Arc<OnceLock<ExitReason>>,
-    /// `info.connections` plus the holds, so `run` can watch the sum reach 0 (the idle timer).
+    /// The active clients plus the holds, so `run` can watch the sum reach 0 (the idle timer).
     keepers: Keepers,
     files: RunFiles,
     listener: Option<sys::Listener>,
@@ -402,9 +605,16 @@ impl Daemon {
         let keepers = Keepers {
             connections: Arc::clone(&info.connections),
             holds: Arc::new(AtomicUsize::new(0)),
+            http_calls: Arc::new(AtomicUsize::new(0)),
+            http_streams: Arc::new(AtomicUsize::new(0)),
             count: Arc::new(watch::channel(0).0),
             replace: Arc::new(AtomicBool::new(false)),
             leaving: Arc::new(AtomicBool::new(false)),
+            newer_build: Arc::new(OnceLock::new()),
+            stop: Arc::clone(&info.stop),
+            reason: Arc::clone(&reason),
+            files: files.clone(),
+            run: config.run.clone(),
         };
         let check = Arc::new(ProjectCheck {
             root: config.run.root(),
@@ -443,6 +653,7 @@ impl Daemon {
             tick: Arc::clone(&self.tick),
             keepers: self.keepers.clone(),
             check: Arc::clone(&self.check),
+            idle: self.config.idle_timeout,
         }
     }
 
@@ -534,11 +745,11 @@ impl Daemon {
                         None
                     };
                 }
+                // under the keepers' lock: an HTTP request admitted meanwhile keeps the daemon,
+                // and its count change arms the timer again when it ends
                 _ = sleep_until_some(idle_at), if idle_at.is_some() => {
-                    let secs = idle.unwrap_or_default().as_secs_f64();
-                    log(&format!("idle for {secs} s, exiting"));
-                    let _ = self.reason.set(ExitReason::Idle);
-                    self.info.stop.send_replace(true);
+                    idle_at = None;
+                    self.keepers.idle_exit(idle.unwrap_or_default());
                 }
                 accepted = listener.accept() => match accepted {
                     Ok(stream) => {
@@ -551,7 +762,6 @@ impl Daemon {
                             keepers: self.keepers.clone(),
                             handler: Arc::clone(&self.handler),
                             session: None,
-                            ctx: Arc::clone(&ctx),
                         };
                         tasks.spawn(Arc::clone(&ctx).serve(stream, end));
                     }
@@ -574,7 +784,8 @@ impl Daemon {
         } else {
             self.files.remove(&self.config.run);
         }
-        // (3) every connection task sees `info.stop` and finishes
+        // (3) every connection task sees `info.stop` and finishes; admission is sealed (the stop
+        // is set), so every open listen hears its cancel, and an admitted call runs to its end
         while tasks.try_join_next().is_some() {}
         if reason != ExitReason::Idle {
             log(&format!(
@@ -582,9 +793,17 @@ impl Daemon {
                 tasks.len()
             ));
         }
-        // (4) the bounded wait
+        let http = self.keepers.http();
+        if http > 0 {
+            log(&format!(
+                "stop requested, draining {http} MCP over HTTP requests"
+            ));
+        }
+        // (4) the bounded wait, for connections and admitted HTTP work alike
+        let keepers = self.keepers.clone();
         let drained = tokio::time::timeout(STOP_GRACE, async {
             while tasks.join_next().await.is_some() {}
+            keepers.http_drained().await;
         })
         .await;
         if drained.is_err() {
@@ -593,6 +812,13 @@ impl Daemon {
                 tasks.len(),
                 STOP_GRACE.as_secs()
             ));
+            let http = self.keepers.http();
+            if http > 0 {
+                log(&format!(
+                    "{http} MCP over HTTP requests still running after {} s; daemon.pid stays until they end",
+                    STOP_GRACE.as_secs()
+                ));
+            }
         }
         // dropping the set aborts what is left; each task's `ConnEnd` still runs. A handler
         // inside `spawn_blocking` finishes on its own thread and its reply goes nowhere.
@@ -628,6 +854,10 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
 /// no successor opens one while this daemon's writes drain. A check that cannot take the lock
 /// keeps the record, the endpoint, the listener and the pid file until then instead, so a load
 /// finds a live peer and is refused.
+///
+/// Admitted MCP over HTTP work ([`HttpPermit`]) is writes in flight on every stop path, whatever
+/// the start lock: while a permit lives, `daemon.pid` stays, and the host's drain waits too. The
+/// last permit's end finishes what came meanwhile.
 #[derive(Clone, Default)]
 struct RunFiles(Arc<Mutex<Files>>);
 
@@ -645,6 +875,12 @@ struct Files {
     kept: bool,
     /// The listener, open while `kept`.
     listener: Option<sys::Listener>,
+    /// Live HTTP permits, counted with the keepers under their lock.
+    http_live: usize,
+    /// The pid file's removal came while `http_live` was above 0: it goes with the last permit.
+    pid_held: bool,
+    /// The host's drain came while `http_live` was above 0: it ends with the last permit.
+    drain_pending: bool,
 }
 
 impl Files {
@@ -665,7 +901,15 @@ impl Files {
     }
 
     fn remove_pid(&mut self, run: &RunDir) {
-        if self.kept || std::mem::replace(&mut self.pid_removed, true) || self.bound.is_none() {
+        if self.kept || self.pid_removed {
+            return;
+        }
+        if self.http_live > 0 {
+            self.pid_held = true;
+            return;
+        }
+        self.pid_removed = true;
+        if self.bound.is_none() {
             return;
         }
         let own = sys::own_pid_record().ok();
@@ -678,12 +922,32 @@ impl Files {
     /// The end of the drain: closes a kept listener, removes every file still to go, and hands
     /// back the start lock for the caller to let go once this lock is released.
     fn drained(&mut self, run: &RunDir) -> Option<StartGuard> {
+        if self.http_live > 0 {
+            self.drain_pending = true;
+            return None;
+        }
         // closed first: a client that connects now finds no live peer, and goes to the lock
         drop(self.listener.take());
         self.kept = false;
         self.remove_endpoint(run);
         self.remove_pid(run);
         self.start.take()
+    }
+
+    /// One HTTP permit ended. The last one finishes a drain or a pid file removal that came
+    /// meanwhile, and hands back the start lock as `drained` does.
+    fn http_ended(&mut self, run: &RunDir) -> Option<StartGuard> {
+        self.http_live = self.http_live.saturating_sub(1);
+        if self.http_live > 0 {
+            return None;
+        }
+        if std::mem::take(&mut self.drain_pending) {
+            return self.drained(run);
+        }
+        if std::mem::take(&mut self.pid_held) {
+            self.remove_pid(run);
+        }
+        None
     }
 }
 
@@ -738,6 +1002,16 @@ impl RunFiles {
     /// The project check could not take the start lock: every file stays until the drain ends.
     fn keep_until_drained(&self) {
         self.lock().kept = true;
+    }
+
+    /// An HTTP permit was admitted (under the keepers' lock).
+    fn http_started(&self) {
+        self.lock().http_live += 1;
+    }
+
+    /// An HTTP permit ended (under the keepers' lock); see `Files::http_ended`.
+    fn http_ended(&self, run: &RunDir) -> Option<StartGuard> {
+        self.lock().http_ended(run)
     }
 
     /// Closes the listener, or keeps it open until the drain ends while the files are kept.
@@ -921,7 +1195,6 @@ struct ConnEnd {
     keepers: Keepers,
     handler: Arc<dyn Handler>,
     session: Option<SessionInfo>,
-    ctx: Arc<Conn>,
 }
 
 impl Drop for ConnEnd {
@@ -937,26 +1210,17 @@ impl Drop for ConnEnd {
             }
         }
         // under the watch's lock, so concurrent ends publish their counts in order; the sum
-        // keeps the holds. The last connection of a latched daemon stops it: holds and site
-        // pages are not connections (D-CCC6E)
+        // keeps the holds. The last active client of a latched daemon stops it: admitted HTTP
+        // work is active, holds and site pages are not (D-CCC6E)
         let mut last = false;
         self.keepers.update(|k| {
-            let left = k.connections.fetch_sub(1, Ordering::SeqCst) - 1;
-            if left == 0
-                && k.replace.load(Ordering::SeqCst)
-                && !k.leaving.swap(true, Ordering::SeqCst)
-            {
-                // before a new client can be told anything: the next one starts a successor
-                self.ctx.files.remove(&self.ctx.run);
-                last = true;
-            }
+            k.connections.fetch_sub(1, Ordering::SeqCst);
+            last = k.leave_if_last();
         });
         if last {
-            log(
+            self.keepers.leave_for_build(
                 "the last connection closed after a client of another build; exiting to be replaced",
             );
-            let _ = self.ctx.reason.set(ExitReason::BuildReplaced);
-            self.ctx.info.stop.send_replace(true);
         }
     }
 }
@@ -1002,21 +1266,24 @@ impl Conn {
         self.check.check()
     }
 
-    /// The build step, under the lock that changes the connection count. Another build alone
-    /// removes the run files, before its `exiting` reply, and stops the daemon; with another
-    /// connection it latches the replacement and is served.
+    /// The build step, under the lock that changes the active client count. Another build alone
+    /// removes the run files, before its `exiting` reply, and stops the daemon; beside another
+    /// connection or admitted HTTP work it latches the replacement, publishes its build for the
+    /// HTTP replies' W_DAEMON_BUILD, and is served.
     fn check_build(&self, build: &str) -> BuildCheck {
         let mut check = BuildCheck::Serve;
         self.keepers.update(|k| {
             if k.leaving.load(Ordering::SeqCst) {
                 check = BuildCheck::Leaving;
             } else if build != self.build {
-                if k.connections.load(Ordering::SeqCst) == 1 {
+                // this connection is one of them
+                if k.active() == 1 {
                     k.leaving.store(true, Ordering::SeqCst);
                     self.files.remove(&self.run);
                     check = BuildCheck::Replace;
                 } else {
                     k.replace.store(true, Ordering::SeqCst);
+                    let _ = k.newer_build.set(build.to_string());
                 }
             }
         });

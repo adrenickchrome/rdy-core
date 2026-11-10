@@ -1,6 +1,7 @@
 //! What every connection of the daemon shares: the published state, the writer, the open report,
 //! the pack watch and its generation, the hub of connected MCP sessions and its notifier, and
 //! the session-end hooks.
+use crate::daemon::HttpAdmission;
 use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
 use crate::site::SiteInfo;
@@ -16,6 +17,7 @@ use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
 use rdy_mcp::notify::NotifyHub;
+use rdy_mcp::server::DaemonBuildWarning;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +63,9 @@ pub struct Shared {
     /// The profile-only listeners this daemon owns (D-DK03K) and the HTTP limits every listener
     /// shares; filled in by the daemon's start, closed and joined at its stop.
     pub profile_sites: crate::site::profiles::ProfileSites,
+    /// MCP over HTTP's admission into the daemon that serves this, and its activity: set once by
+    /// the daemon's start, right after its bind. Unset for a `Shared` that no daemon serves.
+    pub http: OnceLock<HttpAdmission>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -114,6 +119,7 @@ impl Shared {
                 site_info: OnceLock::new(),
                 identity: OnceLock::new(),
                 profile_sites: Default::default(),
+                http: OnceLock::new(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -139,6 +145,20 @@ impl Shared {
     /// Records the version and build this daemon serves as. Set once, before it serves.
     pub fn set_daemon_identity(&self, version: &str, build: &str) {
         let _ = self.identity.set((version.to_string(), build.to_string()));
+    }
+
+    /// W_DAEMON_BUILD for this daemon's MCP over HTTP replies: once a client of another build has
+    /// latched its replacement (D-CCC6E), the warning that names that build. HTTP carries no
+    /// client build, so this is the only way an HTTP client hears of it; the claim registry's
+    /// mark hands it out once per actor and run (D-PBXS5).
+    pub fn http_build_warning(&self) -> Option<DaemonBuildWarning> {
+        let (version, daemon_build) = self.identity.get()?.clone();
+        let client_build = self.http.get()?.newer_build()?;
+        Some(DaemonBuildWarning {
+            version,
+            daemon_build,
+            client_build,
+        })
     }
 
     /// The engine over this daemon: reads from the published state, writes on the writer.

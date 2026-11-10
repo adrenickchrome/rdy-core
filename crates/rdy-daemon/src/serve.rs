@@ -340,6 +340,8 @@ fn start_checked(
     }
     let handle = daemon.handle();
     let readiness = daemon.readiness();
+    // MCP over HTTP enters through the daemon's keepers: its work counts as active clients
+    let _ = shared.http.set(handle.http_admission());
     if let Err(err) = start_point(StartPoint::Bound) {
         handle.stop();
         drop(daemon);
