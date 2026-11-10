@@ -469,7 +469,7 @@ impl ReadState {
                     Op::Delete { .. } => None,
                 };
                 let was = old.as_ref().is_some_and(is_locked);
-                let is = new.is_some_and(|b| is_locked(b));
+                let is = new.is_some_and(is_locked);
                 let edit = match (&old, new) {
                     (_, None) if was => LockEdit::Removed,
                     (_, Some(_)) if !was && is => LockEdit::Locked,
