@@ -1071,7 +1071,7 @@ fn import_label(dir: &Path) -> Option<String> {
 impl Rdy {
     /// Imports the export tree at `dir` (format 2 or 3) into `view` as `s`: the tree is decoded
     /// into one prepared value, which the shared import path checks, stages in one batch and
-    /// seals once ([`Rdy::import_prepared`]).
+    /// seals once (`Rdy::import_prepared`).
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
         self.check_import_access(s, view)?;
         // sym1: the export's own root entries are never followed either

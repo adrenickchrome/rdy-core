@@ -493,7 +493,7 @@ impl Rdy {
 }
 
 /// A test-support fault point of the shared import path. Every point is inert unless a test
-/// armed it on its thread ([`fail_next_import_at_for_tests`]), which needs the `test-support`
+/// armed it on its thread (`fail_next_import_at_for_tests`), which needs the `test-support`
 /// feature.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
