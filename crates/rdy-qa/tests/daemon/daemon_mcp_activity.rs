@@ -243,7 +243,7 @@ async fn mht5_cancelled_response_keeps_running_writer_counted() {
         released.recv().unwrap();
     });
     // the response only waits on the worker; aborting it detaches the worker
-    let response = tokio::spawn(async move { worker.await });
+    let response = tokio::spawn(worker);
     in_flight.await.unwrap();
     response.abort();
     assert!(
