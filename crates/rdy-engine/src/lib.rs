@@ -42,6 +42,7 @@ pub mod foreign_delivery;
 pub mod foreign_facts;
 mod foreign_guard;
 mod foreign_refs;
+pub mod foreign_removal;
 mod foreign_signals;
 pub mod formats;
 mod fsck;

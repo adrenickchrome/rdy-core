@@ -516,9 +516,25 @@ impl StoreReader {
     /// entries and versions are its own. The set of counted versions grows fallibly: a refused
     /// growth is `StoreError::Refused`.
     pub fn foreign_bytes(&self, repo: &RepoId) -> Result<u64, StoreError> {
+        self.count_foreign_bytes(repo, None)
+    }
+
+    /// [`StoreReader::foreign_bytes`] as it stood at the log end `end`: only the FOREIGN entries
+    /// stored before `end` count, with the versions their deliveries name (a read state's cut,
+    /// whose watermark is the log end it was published at).
+    pub fn foreign_bytes_before(&self, repo: &RepoId, end: Location) -> Result<u64, StoreError> {
+        self.count_foreign_bytes(repo, Some(end))
+    }
+
+    fn count_foreign_bytes(&self, repo: &RepoId, end: Option<Location>) -> Result<u64, StoreError> {
         let mut total = 0u64;
         let mut counted: std::collections::HashSet<Hash> = std::collections::HashSet::new();
         self.for_each_object_of(kinds::FOREIGN, |h| {
+            if let Some(end) = end
+                && !self.has_kind_before(kinds::FOREIGN, &h, end)?
+            {
+                return Ok(());
+            }
             let e = self.foreign_entry(&h)?;
             if e.repo != *repo {
                 return Ok(());

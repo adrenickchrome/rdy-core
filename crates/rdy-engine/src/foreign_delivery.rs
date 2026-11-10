@@ -98,7 +98,7 @@ fn hex_repo<S: Serializer>(r: &RepoId, s: S) -> Result<S::Ok, S::Error> {
 }
 
 /// E_BAD_INPUT: the stream's repo is this project's own.
-fn cites_itself() -> RdyError {
+pub(crate) fn cites_itself() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "a project cannot cite itself",

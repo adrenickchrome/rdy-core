@@ -11,6 +11,7 @@
 
 pub mod capabilities;
 mod follower;
+pub mod foreign_removal;
 pub mod history;
 pub mod link_take;
 pub mod links;
@@ -26,6 +27,7 @@ pub mod take;
 mod value;
 
 pub use follower::Follower;
+pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
 pub use link_take::{DeliverySource, DeliveryTaken, LinkRevoked, LinkSource};
 pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
