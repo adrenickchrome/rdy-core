@@ -596,12 +596,24 @@ impl AssessmentForeign {
     pub fn is_empty(&self) -> bool {
         self.reach.is_empty() && self.tensions.is_empty()
     }
+
+    /// Checks the structure of a decoded foreign part: each list is within [`MAX_ROWS`], sorted
+    /// and distinct. It never normalizes the record.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.reach.len() > MAX_ROWS || self.tensions.len() > MAX_ROWS {
+            return Err(LIMIT);
+        }
+        if !strictly_increasing(&self.reach, |r| r) || !strictly_increasing(&self.tensions, |t| t) {
+            return Err(ORDER);
+        }
+        Ok(())
+    }
 }
 
 /// An assessment in ASSESSMENT encoding 2 ([`crate::encoding::ASSESSMENT_FOREIGN_ENCODING`], repo
 /// links): the fields of [`Assessment`] in their order, then its foreign part. An ASSESSMENT takes
-/// it only when the foreign part is not empty; encoding 1 stays the local layout. A registered
-/// wire shape: no consumer reads it yet. Field order is format.
+/// it only when the foreign part is not empty; encoding 1 stays the local layout. The engine builds it
+/// (`readiness::assessment::assess_wire`). Field order is format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssessmentV2 {
@@ -660,24 +672,36 @@ impl AssessmentV2 {
         if self.has_foreign() {
             return None;
         }
-        Some(Assessment {
+        Some(self.local())
+    }
+
+    /// The local part: the fields of [`Assessment`], whatever the foreign part holds.
+    pub fn local(&self) -> Assessment {
+        Assessment {
             proposal: self.proposal,
             base: self.base,
             method: self.method,
-            pack: self.pack,
+            pack: self.pack.clone(),
             config: self.config,
-            policy: self.policy,
-            facts: self.facts,
-            tensions: self.tensions,
+            policy: self.policy.clone(),
+            facts: self.facts.clone(),
+            tensions: self.tensions.clone(),
             tensions_omitted: self.tensions_omitted,
-            suspects: self.suspects,
+            suspects: self.suspects.clone(),
             suspects_omitted: self.suspects_omitted,
-            coverage: self.coverage,
-            confidence: self.confidence,
-            reach: self.reach,
-            card: self.card,
-            scope: self.scope,
-            issues: self.issues,
-        })
+            coverage: self.coverage.clone(),
+            confidence: self.confidence.clone(),
+            reach: self.reach.clone(),
+            card: self.card.clone(),
+            scope: self.scope.clone(),
+            issues: self.issues.clone(),
+        }
+    }
+
+    /// Checks the structure of a decoded record: the local part as [`Assessment::validate`]
+    /// does, then the foreign part.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.local().validate()?;
+        self.foreign.validate()
     }
 }

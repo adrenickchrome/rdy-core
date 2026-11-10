@@ -39,6 +39,7 @@ pub mod filter;
 pub mod follower;
 pub mod foreign;
 pub mod foreign_delivery;
+pub mod foreign_facts;
 mod foreign_guard;
 mod foreign_refs;
 mod foreign_signals;

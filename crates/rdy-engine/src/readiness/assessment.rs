@@ -16,10 +16,10 @@ use crate::{CoverageGate, ProposalRef};
 use rdy_model::assessment::{
     AssessedPolicy, Assessment, AssessmentCard, AssessmentConfidence, AssessmentCounts,
     AssessmentCoverage, AssessmentException, AssessmentExceptionKind, AssessmentFacts,
-    AssessmentIssue, AssessmentLevel, AssessmentPack, AssessmentPlanAnswerRef,
+    AssessmentForeign, AssessmentIssue, AssessmentLevel, AssessmentPack, AssessmentPlanAnswerRef,
     AssessmentPlanCounts, AssessmentReversal, AssessmentReversibility, AssessmentScope,
     AssessmentScores, AssessmentSeverity, AssessmentSuspect, AssessmentTension,
-    AssessmentTensionStatus, MAX_ROWS, MAX_TEXT_BYTES,
+    AssessmentTensionStatus, AssessmentV2, MAX_ROWS, MAX_TEXT_BYTES,
 };
 use rdy_model::{BlockId, Hash};
 use rdy_schema::{Issue, Pack, Severity};
@@ -511,6 +511,66 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
         return Err(too_large(&i.pref));
     }
     Ok(a)
+}
+
+/// The assessment record of a ready candidate in the wire layout that carries its foreign part
+/// (ASSESSMENT encoding 2, repo links, D-Y49PX): the local record [`super::assess`] builds, kept
+/// as it is, and the foreign reach and foreign tension sides ([`assessment_foreign`]). The
+/// foreign part is empty for a version with no cited block and no foreign tension, and the
+/// record then encodes as the local layout. A record the store would refuse (O9) makes the
+/// candidate not ready, with that one issue, as for the local record. It writes nothing.
+pub fn assess_wire(
+    st: &crate::ReadState,
+    c: &super::Candidate,
+    gate: &GateConfig,
+) -> Result<(super::Readiness, Option<AssessmentV2>), crate::error::RdyError> {
+    let assessed = super::assess(st, c, gate)?;
+    let Some(a) = assessed.assessment else {
+        return Ok((assessed.readiness, None));
+    };
+    // the rows the local record was built from (as the queue lists them)
+    let fixed = crate::plan::compute::fixed_tensions(st, &c.pref.version)?;
+    let listed = st.listed_tensions(
+        &c.p.view,
+        &c.p.changes,
+        &BTreeSet::new(),
+        fixed.as_ref().map(|f| &f.ids),
+    )?;
+    let rows: Vec<_> = listed
+        .iter()
+        .take(MAX_TENSION_ROWS)
+        .map(|(_, t)| (t.clone(), st.tension_status(t)))
+        .collect();
+    let foreign = crate::foreign_facts::assessment_foreign(st, c, &a, &rows)?;
+    match build_wire(&c.pref, &a, foreign) {
+        Ok(w) => Ok((assessed.readiness, Some(w))),
+        Err(issue) => {
+            let mut r = assessed.readiness;
+            r.issues = vec![issue];
+            r.card = None;
+            r.policy = None;
+            Ok((r, None))
+        }
+    }
+}
+
+/// `a` with the foreign part `foreign`, as the store would write it. Err only for O9's bound: a
+/// record the store's bounded decoder would refuse. The result passes [`AssessmentV2::validate`].
+pub fn build_wire(
+    pref: &ProposalRef,
+    a: &Assessment,
+    foreign: AssessmentForeign,
+) -> Result<AssessmentV2, Issue> {
+    let mut w = AssessmentV2::of(a);
+    w.foreign = foreign;
+    if w.validate().is_err() || codec::fits_latest(kinds::ASSESSMENT, &w).is_err() {
+        return Err(too_large(pref));
+    }
+    let (raw, payload) = codec::item_new(kinds::ASSESSMENT, &w);
+    codec::split(raw, &payload)
+        .and_then(|o| codec::decode_bounded_split::<AssessmentV2>(&o))
+        .map_err(|_| too_large(pref))?;
+    Ok(w)
 }
 
 #[cfg(test)]
