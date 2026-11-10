@@ -10,7 +10,7 @@ rdy stores what you intend and decided, and gives it to whoever needs it in a fo
 
 This is **Release 1**, the first release of rdy with a compatibility promise. See "About Release 1" at the bottom.
 
-<!-- The picture of the review loop goes here (TASK-2043). -->
+[![rdy. Your intent, ready for anyone who needs it.](.github/readme/social-card.png)](https://getrdy.dev/)
 
 ## How it works
 
