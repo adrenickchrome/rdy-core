@@ -1854,7 +1854,16 @@ fn ain6_public_words_match_the_approved_description() {
         "{help}"
     );
     let readme = read("README.md");
-    let top: Vec<_> = readme.lines().take(6).collect();
+    // the lean README (TASK-2040) sets the headline in bold; the words stay exact
+    let top: Vec<_> = readme
+        .lines()
+        .take(6)
+        .map(|l| {
+            l.strip_prefix("**")
+                .and_then(|l| l.strip_suffix("**"))
+                .unwrap_or(l)
+        })
+        .collect();
     assert!(top.contains(&HEADLINE) && top.contains(&ABOUT), "{top:?}");
     let agents = read("AGENTS.md");
     // the line number of the next AGENTS.md line is pinned by pre2_public_tree_names_no_private_project
@@ -1906,11 +1915,10 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
         .unwrap()
         .0;
     assert!(step.contains("```sh\n   rdy setup\n   ```\n"), "{step}");
+    // the lean README (TASK-2040) keeps the rule in two sentences; the detail is on getrdy.dev/docs
     for said in [
-        "`rdy_session`, then `rdy_instructions`",
-        "That call gives the agent rdy's guide, so you download nothing.",
-        "To read the whole guide yourself, run `rdy instructions --full`.",
-        "The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.",
+        "to load rdy's built-in guide at the start of each task",
+        "You download nothing.",
     ] {
         assert!(step.contains(said), "{said}: {step}");
     }
@@ -1927,7 +1935,7 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
     }
     assert!(!readme.contains("The guide in step 3"));
     assert!(!tried.contains("releases/tag"), "{tried}");
-    // quick use first; verification stays optional and last
+    // quick use first; verification stays optional and last (Quick start moved to getrdy.dev/docs, TASK-2040)
     let at = |what: &str| {
         readme
             .find(what)
@@ -1938,7 +1946,6 @@ fn agi6_readme_uses_setup_and_no_guide_download() {
         at("curl -fsSL https://getrdy.dev/install.sh | sh"),
         at("## Try it: your first project\n"),
         at("rdy setup\n"),
-        at("## Quick start\n"),
         at("<summary><b>Verify the download (optional)</b></summary>"),
         at("You do not need this to use rdy."),
     ];
