@@ -31,6 +31,16 @@
 //!    is). Each file's trailer removal facts must be what its applies resolve, and its header's
 //!    repo and store format what the log's meta refs say. Proof failures are reported after the
 //!    framing of every file.
+//!
+//!    A project's foreign removal (an apply that a FOREIGN `Removal` entry of its own batch
+//!    names, `crate::foreign_removal`) never reaches the local validator: its request's spans
+//!    name places of the cited log. Once every input is read, the whole chain authorizes it as
+//!    a log's bootstrap does (`foreign_removal::authorize`): its proof checked again over the
+//!    chain's records, each version its entry names approved by the proof, held by a delivery
+//!    of the entry's repo and produced by no local change, and each delivered frame of it
+//!    keeping its tuple. It releases the `DROPPED` records of those frames, and only those. Its
+//!    landing and apply give no carried record and no local authority: a stop before it keeps
+//!    a retained frame it did not drop as the frame is, and refuses one that only it dropped.
 //! 4. The meaning checks of the whole chain, as a log's bootstrap runs them (`Scan::meaning`):
 //!    the carried records' own rules, and the applies' meaning against every frame (a project's
 //!    `check_log`; a holder's copy and embedding rules), over walks of the chain's frames.
@@ -61,8 +71,10 @@ use crate::dump::{
 };
 use crate::dump_chain::{BatchMarker, DumpKind, chain_text, follows};
 use crate::error::StoreError;
+use crate::foreign_removal::ProofFrame;
 use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, StoreFeatures, decode_u32};
 use crate::holder::{FirstBatch, REF_STORE_MODE, StoreMode};
+use crate::index::RedactedSpan;
 use crate::kinds::{self, BatchCommit};
 use crate::meta::{REF_REPO_ID, decode_repo_id};
 use crate::object_refs::ObjectKey;
@@ -694,6 +706,16 @@ struct CarriedFact {
     apply: Hash,
 }
 
+/// One foreign removal of a project's chain (an apply that a FOREIGN `Removal` entry of its own
+/// batch names, `crate::foreign_removal`): its apply, the end of its batch, its input, and, once
+/// the whole chain authorized it, the occurrences of this log it erases.
+struct ForeignFact {
+    apply: Hash,
+    batch_end: Location,
+    file: usize,
+    spans: Vec<RedactedSpan>,
+}
+
 /// One frame of a removable kind in a holder's chain.
 #[derive(Clone, Copy, Debug)]
 struct KeyCopy {
@@ -1180,6 +1202,77 @@ impl FrameLog for ChainAccess<'_, '_> {
     }
 }
 
+/// The chain's frames as a foreign removal's authorization reads them
+/// (`foreign_removal::authorize`): as [`ChainAccess`], but a record the forward pass did not
+/// note (a proof's landing, change, proposal or blob manifest) is found by its place, read and
+/// hash-checked. A dropped frame serves no record.
+struct ByPlace<'b, 'a, 'p>(&'b mut ChainAccess<'a, 'p>);
+
+impl RecordAccess for ByPlace<'_, '_, '_> {
+    fn frame_kind(
+        &mut self,
+        loc: Location,
+        len: u32,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<u8>, StoreError> {
+        self.0.frame_kind(loc, len, kind, hash)
+    }
+
+    fn record(
+        &mut self,
+        loc: Location,
+        kind: u8,
+        hash: &Hash,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        if self.0.find(loc).is_some() {
+            return self.0.record(loc, kind, hash);
+        }
+        let Some(f) = self.0.frame_at(loc)? else {
+            return Ok(None);
+        };
+        if f.kind != kind || f.hash != *hash || f.dropped || f.marker.is_some() {
+            return Ok(None);
+        }
+        let p = self.0.payload_of(&f, f.len)?;
+        Ok((Hash::of(&p) == *hash).then_some(p))
+    }
+}
+
+impl FrameLog for ByPlace<'_, '_, '_> {
+    fn header_at(&mut self, loc: Location) -> Result<Option<(u32, u8, Hash)>, StoreError> {
+        self.0.header_at(loc)
+    }
+
+    fn payload(&mut self, loc: Location, len: u32) -> Result<Vec<u8>, StoreError> {
+        self.0.payload(loc, len)
+    }
+
+    fn payload_is_zero(&mut self, loc: Location, len: u32) -> Result<bool, StoreError> {
+        self.0.payload_is_zero(loc, len)
+    }
+
+    fn walk(
+        &mut self,
+        upto: Location,
+        memory: &BTreeMap<Location, (u8, Vec<u8>)>,
+        f: &mut dyn FnMut(&Seen<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.0.walk(upto, memory, f)
+    }
+
+    fn carried_record<'f>(
+        &mut self,
+        f: &'f CarriedFrame,
+    ) -> Result<Option<Cow<'f, RedactionCarried>>, StoreError> {
+        self.0.carried_record(f)
+    }
+
+    fn keeps_carried(&self) -> bool {
+        self.0.keeps_carried()
+    }
+}
+
 /// A read window over one input for the frame walks: heads of a sequential walk cost one read
 /// per `ERASE_BUFFER` bytes.
 struct Window<'f> {
@@ -1347,6 +1440,8 @@ struct FileScan {
     batches: u64,
     frames: u64,
     applies: u64,
+    /// The foreign removals among its applies.
+    foreign: u64,
     last: Option<(Location, BatchMarker)>,
     /// The validated applies of this input (indexes into the scan's applies).
     validated: Vec<usize>,
@@ -1391,6 +1486,15 @@ struct Scan<'p> {
     carried_by_apply: HashMap<Hash, Hash>,
     validator: Validator,
     applies: Vec<ApplyFact>,
+    /// The FOREIGN frames of the current batch, with their places: a `Removal` entry among them
+    /// may name one of its applies.
+    batch_foreign: Vec<(Location, Rec)>,
+    /// The foreign removals of a project's chain, in physical order (`collected.foreign_proofs`
+    /// holds their frames, in the same order).
+    foreign: Vec<ForeignFact>,
+    /// The inputs that hold a foreign removal, each with the lowest span of its validated local
+    /// applies: its trailer's first removed span is checked once the foreign spans are known.
+    foreign_trailers: Vec<(usize, Option<Location>)>,
     carried: Vec<CarriedFact>,
     drops: HashMap<(u32, u64), DropRec>,
     unreleased: u64,
@@ -1531,6 +1635,9 @@ impl<'p> Scan<'p> {
             carried_by_apply: HashMap::new(),
             validator: Validator::default(),
             applies: Vec::new(),
+            batch_foreign: Vec::new(),
+            foreign: Vec::new(),
+            foreign_trailers: Vec::new(),
             carried: Vec::new(),
             drops: HashMap::new(),
             unreleased: 0,
@@ -1546,6 +1653,7 @@ impl<'p> Scan<'p> {
         if let Some(e) = self.proof_error.take() {
             return Err(e);
         }
+        self.foreign_removals()?;
         self.unreleased_drop()?;
         if self.holder_has_applies()
             && let Some(e) = self.holder.over.take()
@@ -1635,6 +1743,7 @@ impl<'p> Scan<'p> {
                 batches: 0,
                 frames: 0,
                 applies: 0,
+                foreign: 0,
                 last: None,
                 validated: Vec::new(),
             };
@@ -1642,6 +1751,7 @@ impl<'p> Scan<'p> {
             let mut events: Vec<Event> = Vec::new();
             self.batch_landings.clear();
             self.landing_hashes.clear();
+            self.batch_foreign.clear();
             let mut start = f.at;
             while f.at < end {
                 visited += 1;
@@ -1709,6 +1819,7 @@ impl<'p> Scan<'p> {
                     hashes.clear();
                     self.batch_landings.clear();
                     self.landing_hashes.clear();
+                    self.batch_foreign.clear();
                     f.at = fh.end();
                     start = f.at;
                     last = Some(marker);
@@ -1811,6 +1922,7 @@ impl<'p> Scan<'p> {
             batches: 0,
             frames: 0,
             applies: 0,
+            foreign: 0,
             last: None,
             validated: Vec::new(),
         };
@@ -1972,6 +2084,7 @@ impl<'p> Scan<'p> {
         let first_of_log = self.mode.is_none();
         self.batch_landings.clear();
         self.landing_hashes.clear();
+        self.batch_foreign.clear();
         let mut pairs: Vec<(u8, Hash)> = Vec::new();
         let mut events: Vec<Event> = Vec::new();
         let mut place = start.offset;
@@ -2255,6 +2368,11 @@ impl<'p> Scan<'p> {
                 if (holder || first_of_log) && is_removable(crate::codec::logical_kind(fh.kind)) {
                     push(events, Event::Copy { at, rec: rec_ }, i, fh.at)?;
                 }
+                // its `Removal` entry may name an apply of this batch: read again by its place
+                // when an apply needs it
+                if crate::codec::logical_kind(fh.kind) == kinds::FOREIGN {
+                    push(&mut self.batch_foreign, (at, rec_), i, fh.at)?;
+                }
                 self.skip(r, f, fh)?;
             }
         }
@@ -2363,7 +2481,17 @@ impl<'p> Scan<'p> {
             } => {
                 let idx = match self.mode {
                     Some(StoreMode::Holder) => self.holder_apply(f.file, at, offset, hash, end)?,
-                    _ => self.native_apply(f.file, at, offset, hash, record, landings, end)?,
+                    // a foreign removal's proof names places of the cited log: it never reaches
+                    // the local validator
+                    _ => match self.removal_naming(hash)? {
+                        Some((entry_loc, entry)) => {
+                            return self
+                                .foreign_apply(f, at, hash, record, entry_loc, entry, start, end);
+                        }
+                        None => {
+                            self.native_apply(f.file, at, offset, hash, record, landings, end)?
+                        }
+                    },
                 };
                 f.validated.push(idx);
                 Ok(())
@@ -2490,6 +2618,66 @@ impl<'p> Scan<'p> {
             }
             e => e,
         }
+    }
+
+    /// The place and versions of the first FOREIGN `Removal` entry of the current batch that
+    /// names the apply `hash` (`foreign_removal::split`'s rule); None when none does. An entry
+    /// over the record bound, or one that does not decode, names nothing.
+    fn removal_naming(
+        &mut self,
+        hash: Hash,
+    ) -> Result<Option<(Location, crate::foreign_removal::RemovalEntry)>, StoreError> {
+        for i in 0..self.batch_foreign.len() {
+            let (loc, r) = self.batch_foreign[i];
+            if r.len as usize > MAX_RECORD_BYTES {
+                continue;
+            }
+            let p = self.lookups.read(&r)?;
+            if let Some(entry) = crate::foreign_removal::removal_of(r.kind, &p)
+                && entry.proof == hash
+            {
+                return Ok(Some((loc, entry)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A project's foreign removal: noted with its entry, as the log's header pass notes it
+    /// (`foreign_removal::split`). The whole chain authorizes it once every input is read
+    /// ([`Scan::foreign_removals`]), as a log's bootstrap does.
+    #[allow(clippy::too_many_arguments)]
+    fn foreign_apply(
+        &mut self,
+        f: &mut FileScan,
+        at: Location,
+        hash: Hash,
+        record: Option<rdy_model::redaction::RedactionApply>,
+        entry_loc: Location,
+        entry: crate::foreign_removal::RemovalEntry,
+        start: Location,
+        end: Location,
+    ) -> Result<(), StoreError> {
+        let refused = || damaged(PRELUDE_LEN, drop_text::ALLOCATION);
+        self.collected
+            .foreign_proofs
+            .try_reserve(1)
+            .map_err(|_| refused())?;
+        self.foreign.try_reserve(1).map_err(|_| refused())?;
+        self.collected.foreign_proofs.push(ProofFrame {
+            apply: ApplyFrame::new(at, hash, record, self.batch_no, Vec::new()),
+            entry_loc,
+            repo: entry.repo,
+            versions: entry.versions,
+            batch_start: start,
+        });
+        self.foreign.push(ForeignFact {
+            apply: hash,
+            batch_end: end,
+            file: f.file,
+            spans: Vec::new(),
+        });
+        f.foreign += 1;
+        Ok(())
     }
 
     /// A project's apply: the store's validator, over the chain's records.
@@ -2900,6 +3088,15 @@ impl<'p> Scan<'p> {
                 first = Some(first.map_or(l, |x| x.min(l)));
             }
         }
+        // a foreign removal's spans are known once the whole chain authorized it
+        if f.foreign > 0 {
+            if self.foreign_trailers.try_reserve(1).is_err() {
+                self.proof_failed(f.file, damaged(PRELUDE_LEN, drop_text::ALLOCATION));
+            } else {
+                self.foreign_trailers.push((f.file, first));
+            }
+            return;
+        }
         if first != env.trailer.first_removed {
             let at = env.len - (FRAME_HEADER + dump::TRAILER_LEN as u64);
             self.proof_failed(f.file, damaged(at, chain_text::REMOVALS));
@@ -2963,9 +3160,23 @@ impl<'p> Scan<'p> {
                     .check_meaning(&self.collected, &mut access, upto),
             }
         };
-        match checked {
-            Ok(()) => Ok(()),
-            Err(StoreError::RedactionCorrupt { segment, offset }) => {
+        let file = self
+            .applies
+            .first()
+            .map(|a| a.file)
+            .or_else(|| self.carried.first().map(|c| c.file))
+            .unwrap_or(0);
+        checked.map_err(|e| self.chain_refusal(e, file))
+    }
+
+    /// The refusal of a meaning check of the whole chain that failed with `e`: a corrupt place
+    /// is blamed on the record of the frame it names (at a dropped frame's place, its span does
+    /// not match; elsewhere, no valid authorization); a record that does not decode or a landing
+    /// no person approved is no valid authorization at input `file`, as is a refused
+    /// allocation; any other error passes through.
+    fn chain_refusal(&mut self, e: StoreError, file: usize) -> ScanError {
+        match e {
+            StoreError::RedactionCorrupt { segment, offset } => {
                 let loc = Location { segment, offset };
                 let what = if self.drops.contains_key(&key(loc)) {
                     drop_text::SPAN
@@ -2981,18 +3192,12 @@ impl<'p> Scan<'p> {
                     lens: &self.lens,
                 }
                 .blame(loc);
-                Err(ScanError::Input {
+                ScanError::Input {
                     file,
                     source: damaged(at, what),
-                })
+                }
             }
-            Err(e) => {
-                let file = self
-                    .applies
-                    .first()
-                    .map(|a| a.file)
-                    .or_else(|| self.carried.first().map(|c| c.file))
-                    .unwrap_or(0);
+            e => {
                 let source = match e {
                     StoreError::RedactionHuman | StoreError::Decode(_) => {
                         damaged(PRELUDE_LEN, drop_text::NO_AUTHORIZATION)
@@ -3002,9 +3207,81 @@ impl<'p> Scan<'p> {
                     }
                     e => e,
                 };
-                Err(ScanError::Input { file, source })
+                ScanError::Input { file, source }
             }
         }
+    }
+
+    /// The foreign removals of a project's chain, authorized as a log's bootstrap authorizes
+    /// them, over the whole chain and after its local applies (`foreign_removal::authorize`):
+    /// each proof passes `sync_proof::check` over the chain's own records, each version its
+    /// entry names is one the proof approves, that a delivery of the entry's repo holds and that
+    /// no local change produces, and each of the version's delivered frames keeps its approved
+    /// tuple. Each dropped frame of an occurrence it erases is then released by it, and each
+    /// input that holds one must record, as its first removed span, the lowest span of its local
+    /// applies and foreign removals. Its spans are never read as places of this log: they are
+    /// derived from this log's frames.
+    fn foreign_removals(&mut self) -> Result<(), ScanError> {
+        if self.foreign.is_empty() {
+            return Ok(());
+        }
+        let first_file = self.foreign[0].file;
+        let upto = self.envs[self.envs.len() - 1].header.log_end;
+        let mut auth = self.validator.auth.clone();
+        let checked = {
+            let mut access = ChainAccess {
+                lookups: &mut self.lookups,
+                batches: &mut self.batches,
+                recs: &self.recs,
+                batch: &[],
+                drops: &self.drops,
+                lens: &self.lens,
+            };
+            crate::foreign_removal::authorize(
+                &self.collected,
+                &mut ByPlace(&mut access),
+                &mut auth,
+                upto,
+            )
+        };
+        if let Err(e) = checked {
+            return Err(self.chain_refusal(e, first_file));
+        }
+        for p in &auth.foreign.proofs {
+            if let Some(x) = self.foreign.iter_mut().find(|x| x.apply == p.apply) {
+                x.spans = p.spans().to_vec();
+            }
+        }
+        for i in 0..self.foreign.len() {
+            let apply = self.foreign[i].apply;
+            for j in 0..self.foreign[i].spans.len() {
+                let s = self.foreign[i].spans[j];
+                if let Err(source) =
+                    self.release(s.loc, apply, (s.kind, s.hash, s.len, s.residue), None)
+                {
+                    let file = self.blame.take().unwrap_or(self.foreign[i].file);
+                    return Err(ScanError::Input { file, source });
+                }
+            }
+        }
+        for (file, local) in std::mem::take(&mut self.foreign_trailers) {
+            let first = self
+                .foreign
+                .iter()
+                .filter(|x| x.file == file)
+                .flat_map(|x| x.spans.iter().map(|s| s.loc))
+                .chain(local)
+                .min();
+            let env = &self.envs[file - self.base];
+            if first != env.trailer.first_removed {
+                let at = env.len - (FRAME_HEADER + dump::TRAILER_LEN as u64);
+                return Err(ScanError::Input {
+                    file,
+                    source: damaged(at, chain_text::REMOVALS),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Refuses the first dropped frame (in physical order) that no validated authorization
@@ -3140,6 +3417,14 @@ impl<'p> Scan<'p> {
             .iter()
             .filter(|a| a.batch_end <= end)
             .map(|a| a.hash)
+            .collect();
+        // the foreign removals after the end: no carried record names one (its proof stays in
+        // the foreign log), so a retained frame only one of them dropped has no authority
+        let later_foreign: HashSet<Hash> = self
+            .foreign
+            .iter()
+            .filter(|x| x.batch_end > end)
+            .map(|x| x.apply)
             .collect();
         // the retained carried records, by their source apply
         let mut kept: HashMap<Hash, usize> = HashMap::new();
@@ -3386,6 +3671,12 @@ impl<'p> Scan<'p> {
                         authority,
                         residue: d.residue,
                     },
+                    None if later_foreign.contains(&d.apply) => {
+                        return Err(ScanError::Input {
+                            file: d.file,
+                            source: damaged(d.offset, drop_text::NO_AUTHORIZATION),
+                        });
+                    }
                     None => FrameAction::Keep,
                 }
             };
@@ -3459,6 +3750,28 @@ impl<'p> Scan<'p> {
                         action,
                     },
                 )?;
+            }
+            // the retained occurrences a foreign removal at or before the end erases: zeros,
+            // never written even for a moment; a later one leaves them as they are
+            for x in self.foreign.iter().filter(|x| x.batch_end <= end) {
+                for s in x
+                    .spans
+                    .iter()
+                    .filter(|s| s.loc < end && !self.drops.contains_key(&key(s.loc)))
+                {
+                    put(
+                        s.loc,
+                        Planned {
+                            kind: s.kind,
+                            hash: s.hash,
+                            len: s.len,
+                            action: FrameAction::Zero {
+                                authority: x.apply,
+                                residue: s.residue,
+                            },
+                        },
+                    )?;
+                }
             }
         }
         Ok((planned, carried, residues.into_values().collect()))

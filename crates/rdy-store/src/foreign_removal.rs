@@ -16,7 +16,8 @@
 //!
 //! - the proof passes `sync_proof::check` over the log's own records;
 //! - each version the entry names is an approved BLOCK object of the proof, whose block residue
-//!   has the entry's id;
+//!   has the entry's id, and a delivery of the entry's repo before the entry holds it (the
+//!   take's rule: the proof is checked against its source repo);
 //! - no local change before the entry produces the version: local content is never erased;
 //! - each frame of the version before the entry that a FOREIGN batch wrote (a delivery's frame)
 //!   is a span; at least one exists, and each keeps the approved length and, when intact, is
@@ -50,10 +51,11 @@ use std::fmt;
 use std::fs::File;
 
 /// One apply that a FOREIGN `Removal` entry of its own batch names: the apply frame, the
-/// entry's place and versions, and where the batch starts.
+/// entry's place, repo and versions, and where the batch starts.
 pub(crate) struct ProofFrame {
     pub(crate) apply: ApplyFrame,
     pub(crate) entry_loc: Location,
+    pub(crate) repo: RepoId,
     pub(crate) versions: Vec<(BlockId, Hash)>,
     pub(crate) batch_start: Location,
 }
@@ -72,22 +74,52 @@ pub(crate) fn split(
         let Some(body) = body.as_deref().filter(|b| Hash::of(b) == *hash) else {
             continue;
         };
-        let Ok(entry) = codec::decode_bounded::<ForeignEntry>(*raw, body) else {
+        let Some(entry) = removal_of(*raw, body) else {
             continue;
         };
-        let ForeignEvent::Removal { proof, versions } = entry.event else {
-            continue;
-        };
-        if let Some(i) = applies.iter().position(|a| a.hash == proof) {
+        if let Some(i) = applies.iter().position(|a| a.hash == entry.proof) {
             out.push(ProofFrame {
                 apply: applies.remove(i),
                 entry_loc: *loc,
-                versions,
+                repo: entry.repo,
+                versions: entry.versions,
                 batch_start: start,
             });
         }
     }
     out.sort_by_key(|p| p.apply.loc);
+}
+
+/// The apply that the `Removal` entry of a FOREIGN frame (raw kind `raw`, payload `payload`)
+/// names, when the payload decodes within its bounds as one; None for any other entry. The hash
+/// is the caller's to check.
+pub(crate) fn removal_proof(raw: u8, payload: &[u8]) -> Option<Hash> {
+    removal_of(raw, payload).map(|e| e.proof)
+}
+
+/// What a FOREIGN `Removal` entry names: its repo, the apply of its proof and the versions it
+/// erases.
+pub(crate) struct RemovalEntry {
+    pub(crate) repo: RepoId,
+    pub(crate) proof: Hash,
+    pub(crate) versions: Vec<(BlockId, Hash)>,
+}
+
+/// The `Removal` entry of a FOREIGN frame (raw kind `raw`, payload `payload`), as
+/// [`removal_proof`] reads it.
+pub(crate) fn removal_of(raw: u8, payload: &[u8]) -> Option<RemovalEntry> {
+    if payload.len() > MAX_RECORD_BYTES {
+        return None;
+    }
+    let e = codec::decode_bounded::<ForeignEntry>(raw, payload).ok()?;
+    match e.event {
+        ForeignEvent::Removal { proof, versions } => Some(RemovalEntry {
+            repo: e.repo,
+            proof,
+            versions,
+        }),
+        _ => None,
+    }
 }
 
 /// What one verified foreign removal authorizes: its apply and request, the versions its entry
@@ -111,6 +143,13 @@ pub(crate) struct ForeignAuthority {
     closure: BTreeSet<Location>,
     /// The requests a proof's landing approves beside the one it applies.
     closure_requests: HashSet<Hash>,
+}
+
+impl ForeignProven {
+    /// The occurrences this removal erases in this log: each frame, with its residue.
+    pub(crate) fn spans(&self) -> &[RedactedSpan] {
+        &self.spans
+    }
 }
 
 impl ForeignAuthority {
@@ -334,14 +373,16 @@ pub(crate) fn authorize(
         .iter()
         .flat_map(|p| p.versions.iter().map(|(_, v)| *v))
         .collect();
+    let repos: HashSet<RepoId> = proofs.iter().map(|p| p.repo).collect();
     // one walk: the first frame of each proof key, the frames of the named versions with their
-    // batches, whether each batch holds a FOREIGN entry, and the first local producer of each
-    // named version
+    // batches, whether each batch holds a FOREIGN entry, the first local producer of each named
+    // version, and the first delivery of each proof repo that holds it
     let mut first: HashMap<ObjectKey, (Location, u8, u32)> = HashMap::new();
     let mut blocks: Vec<BlockFrame> = vec![];
     let mut foreign_batch: Vec<bool> = vec![];
     let mut in_foreign = false;
     let mut producers: HashMap<Hash, Location> = HashMap::new();
+    let mut delivered: HashMap<(RepoId, BlockId, Hash), Location> = HashMap::new();
     let spans = &auth.spans;
     let residues = &auth.residues;
     log.walk(upto, &c.memory, &mut |f| {
@@ -359,7 +400,28 @@ pub(crate) fn authorize(
                 .or_insert((f.loc, f.kind, f.len));
         }
         match kind {
-            kinds::FOREIGN => in_foreign = true,
+            kinds::FOREIGN => {
+                in_foreign = true;
+                let intact = if f.len as usize <= MAX_RECORD_BYTES {
+                    f.intact()?
+                } else {
+                    None
+                };
+                if let Some(p) = intact
+                    && let Ok(e) = codec::decode_bounded::<ForeignEntry>(f.kind, &p)
+                    && repos.contains(&e.repo)
+                    && let ForeignEvent::Delivery { added, changed, .. } = e.event
+                {
+                    for v in added.into_iter().chain(changed) {
+                        if named.contains(&v.version) {
+                            delivered
+                                .try_reserve(1)
+                                .map_err(|_| crate::redaction_io::out_of_memory())?;
+                            delivered.entry((e.repo, v.id, v.version)).or_insert(f.loc);
+                        }
+                    }
+                }
+            }
             kinds::BLOCK if named.contains(&f.hash) => blocks.push(BlockFrame {
                 loc: f.loc,
                 raw: f.kind,
@@ -447,6 +509,13 @@ pub(crate) fn authorize(
                 return Err(at_entry());
             };
             if approved != *id || producers.get(v).is_some_and(|l| *l < p.entry_loc) {
+                return Err(at_entry());
+            }
+            // a delivery of the entry's repo holds the version
+            if !delivered
+                .get(&(p.repo, id.clone(), *v))
+                .is_some_and(|l| *l < p.entry_loc)
+            {
                 return Err(at_entry());
             }
             let r = tuple.residue.ok_or_else(at_entry)?;

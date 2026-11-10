@@ -582,9 +582,13 @@ pub struct RemovalFacts {
 ///   record names (the earliest).
 ///
 /// So a hole that only a carried record explains is no span, and the authority a `DROPPED`
-/// record names is not the rule. [`RemovalTally::facts`] resolves from the batches alone (the
-/// reader's view of a file); [`RemovalTally::resolved`] asks the store's own authorization (the
-/// writer's). Growth is fallible.
+/// record names is not the rule. A project's foreign removal (an apply that a FOREIGN `Removal`
+/// entry of its own batch names, `crate::foreign_removal`) is no local removal: its request's
+/// manifest places are places of the cited log, never of this one. Its spans are the occurrences
+/// its entry erased in this log, which a dump holds as `DROPPED` records naming that apply.
+/// [`RemovalTally::facts`] resolves from the batches alone (the reader's view of a file);
+/// [`RemovalTally::resolved`] asks the store's own authorization (the writer's). Growth is
+/// fallible.
 #[derive(Clone, Debug, Default)]
 pub struct RemovalTally {
     /// The `REDACTION_APPLY` frames seen.
@@ -597,6 +601,13 @@ pub struct RemovalTally {
     manifests: HashMap<Hash, Vec<(Location, u8, Hash)>>,
     /// The lowest place of each key (kind, hash) of a dropped frame.
     dropped: HashMap<(u8, Hash), Location>,
+    /// The requests of the foreign removals seen, once each: their spans are this log's, in
+    /// the store's redaction rows, never their manifests' places.
+    foreign_requests: HashSet<Hash>,
+    /// The foreign removals' applies seen.
+    foreign_applies: HashSet<Hash>,
+    /// The lowest place of a dropped frame of each apply that a dropped frame names.
+    dropped_by_apply: HashMap<Hash, Location>,
     /// The mode the first batch sets, when the first batch seen starts at the origin.
     mode: Option<StoreMode>,
     /// Whether a batch was seen.
@@ -637,7 +648,7 @@ impl RemovalTally {
         upto: Location,
     ) -> Result<RemovalFacts, StoreError> {
         let mut first: Option<Location> = None;
-        for request in &self.requests {
+        for request in self.requests.iter().chain(&self.foreign_requests) {
             let (_, spans) = reader.index().redaction_request_items(request)?;
             for p in spans.iter().map(|s| s.loc).filter(|p| *p < upto) {
                 first = Some(first.map_or(p, |f| f.min(p)));
@@ -679,9 +690,17 @@ impl RemovalTally {
             .flatten()
     }
 
-    /// The lowest manifest place of the applies' requests (a project's resolution).
+    /// The lowest manifest place of the applies' requests, and the lowest dropped frame of each
+    /// foreign removal (a project's resolution).
     fn project_first(&self) -> Option<Location> {
-        self.manifest_spans().map(|(at, _, _)| *at).min()
+        let foreign = self
+            .foreign_applies
+            .iter()
+            .filter_map(|a| self.dropped_by_apply.get(a).copied());
+        self.manifest_spans()
+            .map(|(at, _, _)| *at)
+            .chain(foreign)
+            .min()
     }
 
     /// The lowest dropped frame of a key the applies' requests list (a holder's resolution).
@@ -700,6 +719,24 @@ impl RemovalTally {
         let origin = b.start.segment == 0 && b.start.offset == 0;
         // the first batch of the log sets its mode (as `crate::holder::FirstBatch` reads it)
         let mut mode = (first && origin).then_some(StoreMode::Project);
+        // the applies a FOREIGN `Removal` entry of this batch names (read only in a batch that
+        // holds an apply): foreign removals, no local ones
+        let mut proofs: Vec<Hash> = Vec::new();
+        let has_apply = b
+            .frames
+            .iter()
+            .any(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY));
+        if has_apply {
+            for f in &b.frames {
+                if let Frame::Present { kind, payload, .. } = f
+                    && crate::codec::logical_kind(*kind) == kinds::FOREIGN
+                    && let Some(p) = crate::foreign_removal::removal_proof(*kind, payload)
+                {
+                    proofs.try_reserve(1).map_err(|_| drop_text::ALLOCATION)?;
+                    proofs.push(p);
+                }
+            }
+        }
         let mut at = b.start.offset;
         for f in &b.frames {
             let place = Location {
@@ -716,6 +753,23 @@ impl RemovalTally {
                             Some(v) if v == HOLDER_MODE => Some(StoreMode::Holder),
                             _ => None,
                         };
+                    }
+                }
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } if *kind == kinds::REDACTION_APPLY && proofs.contains(hash) => {
+                    self.applies = self.applies.saturating_add(1);
+                    self.foreign_applies
+                        .try_reserve(1)
+                        .map_err(|_| drop_text::ALLOCATION)?;
+                    self.foreign_applies.insert(*hash);
+                    if let Some(request) = wire::apply_request(payload) {
+                        self.foreign_requests
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.foreign_requests.insert(request);
                     }
                 }
                 Frame::Present { kind, payload, .. } if *kind == kinds::REDACTION_APPLY => {
@@ -744,15 +798,28 @@ impl RemovalTally {
                     }
                 }
                 Frame::Present { .. } => {}
-                Frame::Dropped { kind, hash, .. } => match self.dropped.get_mut(&(*kind, *hash)) {
-                    Some(low) => *low = (*low).min(place),
-                    None => {
-                        self.dropped
-                            .try_reserve(1)
-                            .map_err(|_| drop_text::ALLOCATION)?;
-                        self.dropped.insert((*kind, *hash), place);
+                Frame::Dropped {
+                    kind, hash, apply, ..
+                } => {
+                    match self.dropped.get_mut(&(*kind, *hash)) {
+                        Some(low) => *low = (*low).min(place),
+                        None => {
+                            self.dropped
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.dropped.insert((*kind, *hash), place);
+                        }
                     }
-                },
+                    match self.dropped_by_apply.get_mut(apply) {
+                        Some(low) => *low = (*low).min(place),
+                        None => {
+                            self.dropped_by_apply
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.dropped_by_apply.insert(*apply, place);
+                        }
+                    }
+                }
             }
             at = at
                 .checked_add(FRAME_HEADER)
