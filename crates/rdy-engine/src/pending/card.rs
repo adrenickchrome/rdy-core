@@ -365,6 +365,7 @@ fn exception_words(kind: ExceptionKind) -> &'static str {
         ExceptionKind::NotRecommended => "it is not recommended",
         ExceptionKind::BlockingTension => "a blocking tension involves it",
         ExceptionKind::ReaffirmOneWay => "it re-affirms a one_way decision",
+        ExceptionKind::Deviation => "it departs from cited or external content",
     }
 }
 
@@ -795,7 +796,7 @@ Options
 
     #[test]
     fn di4_every_exception_kind_has_card_text() {
-        assert_eq!(ExceptionKind::ALL.len(), 6);
+        assert_eq!(ExceptionKind::ALL.len(), 7);
         for kind in ExceptionKind::ALL {
             let mut i = exception();
             i.exception = Some(kind);
@@ -822,7 +823,8 @@ Options
                 "unapplied",
                 "not_recommended",
                 "blocking_tension",
-                "reaffirm_one_way"
+                "reaffirm_one_way",
+                "deviation"
             ]
         );
     }
@@ -834,7 +836,7 @@ Options
         assert_eq!(e.message, "unknown exception kind sideways");
         assert_eq!(
             e.fix,
-            "use one of: against, one_way, unapplied, not_recommended, blocking_tension, reaffirm_one_way"
+            "use one of: against, one_way, unapplied, not_recommended, blocking_tension, reaffirm_one_way, deviation"
         );
         // The wire (serde) refuses it too, and never makes a kind of it.
         assert!(serde_json::from_str::<ExceptionKind>("\"sideways\"").is_err());

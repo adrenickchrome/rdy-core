@@ -32,12 +32,13 @@
 //! alone: a value takes its kind's optional encoding only when it holds a shape the latest
 //! encoding has no form for (a block with a foreign part, a change that embeds one, a delivered
 //! transition or a foreign side or target, a foreign pair side, a repo-links answer act, a
-//! foreign assessment part, a `foreign_version` target), and its kind's latest encoding
-//! otherwise, so every local value keeps its bytes and its hash. A reader holds each frame to
-//! the same choice: an optional-encoding frame without such a shape, or a latest-encoding frame
-//! with one, does not decode. A runtime type reads an optional-encoding frame only when it can
-//! hold its shape; the registered wire types (`ReviewV1`, `SemanticTensionV1`, `AssessmentV2`,
-//! `crate::transition::TransitionsV1`) read every encoding of their kind.
+//! foreign assessment part or a deviation exception, a `foreign_version` target), and its kind's
+//! latest encoding otherwise, so every local value keeps its bytes and its hash. A reader holds
+//! each frame to the same choice: an optional-encoding frame without such a shape, or a
+//! latest-encoding frame with one, does not decode. A runtime type reads an optional-encoding
+//! frame only when it can hold its shape; the registered wire types (`ReviewV1`,
+//! `SemanticTensionV1`, `AssessmentV2`, `crate::transition::TransitionsV1`) read every encoding
+//! of their kind.
 //!
 //! A typed read of a CHANGE or a LANDING keeps the identity of its frame
 //! (`Change::read_identity`, `LandingRecord::read_identity`). [`encode`] writes such a stored read
@@ -373,6 +374,14 @@ fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<
         return (r.encoding() == REDACTION_FOREIGN_ENCODING)
             .then(|| (REDACTION_FOREIGN_ENCODING, postcard_of(r)));
     }
+    if let Some(a) = any.downcast_ref::<Assessment>() {
+        return a.has_foreign_shape().then(|| {
+            (
+                ASSESSMENT_FOREIGN_ENCODING,
+                postcard_of(&AssessmentV2::of(a)),
+            )
+        });
+    }
     if let Some(t) = any.downcast_ref::<Transitions>() {
         return t.has_foreign().then(|| {
             (
@@ -447,7 +456,10 @@ fn shaped_canonical(kind: u8, version: u16, body: &[u8], any: &dyn Any) -> Optio
         return Some(local_form(t));
     }
     if let Some(a) = any.downcast_ref::<Assessment>() {
-        return Some(local_form(a));
+        return Some(match a.has_foreign_shape() {
+            true => shaped(shaped_body(kind, a)),
+            false => local_form(a),
+        });
     }
     if any.is::<TransitionsV1>()
         || any.is::<ReviewV1>()
@@ -881,7 +893,7 @@ fn body_of<T: DeserializeOwned + 'static>(
             Shape {
                 optional: ASSESSMENT_FOREIGN_ENCODING,
                 wire_foreign: AssessmentV2::has_foreign,
-                local_foreign: |_| false,
+                local_foreign: Assessment::has_foreign_shape,
                 of: AssessmentV2::of,
                 into_local: AssessmentV2::into_local,
             },

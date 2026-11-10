@@ -11,17 +11,18 @@
 //! coverage and none enters a local reach.
 //!
 //! [`assessment_foreign`] is the foreign part an assessment records (ASSESSMENT encoding 2): the
-//! held version of each pin a written block holds, the cited side of each foreign fact, and the
-//! foreign sides of the version's tension rows. Each list is sorted, distinct and within the
-//! row bound.
+//! held version of each pin a block of the local reach holds, the cited side of each foreign
+//! fact, the foreign sides of the version's tension rows, and for each cited block of that reach
+//! the FOREIGN entry that delivered the version the current view holds (freshness compares it,
+//! D-Y49PX). Each list is sorted, distinct and within the row bound.
 use crate::ReadState;
 use crate::error::RdyError;
 use crate::materialize::Materialized;
 use crate::readiness::Candidate;
 use crate::tensions::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus};
 use rdy_model::assessment::{
-    Assessment, AssessmentForeign, AssessmentForeignReach, AssessmentForeignTension,
-    AssessmentPlanAnswerRef, MAX_ROWS,
+    Assessment, AssessmentForeign, AssessmentForeignDelivered, AssessmentForeignReach,
+    AssessmentForeignTension, AssessmentPlanAnswerRef, MAX_ROWS,
 };
 use rdy_model::foreign::ForeignId;
 use rdy_model::{BlockId, Hash, RepoId};
@@ -139,8 +140,25 @@ pub fn assessment_foreign(
             }
         }
     }
+    let reach: Vec<AssessmentForeignReach> = reach.into_iter().take(MAX_ROWS).collect();
+    // the delivery in force for each cited block of the reach: what freshness compares
+    let foreign = st.foreign()?;
+    let mut delivered: BTreeMap<&ForeignId, Hash> = BTreeMap::new();
+    for r in &reach {
+        if let Some(held) = foreign.current_version(&r.target) {
+            delivered.insert(&r.target, held.entry);
+        }
+    }
+    let delivered = delivered
+        .into_iter()
+        .map(|(target, entry)| AssessmentForeignDelivered {
+            target: target.clone(),
+            entry,
+        })
+        .collect();
     Ok(AssessmentForeign {
-        reach: reach.into_iter().take(MAX_ROWS).collect(),
+        reach,
         tensions: tensions.into_iter().take(MAX_ROWS).collect(),
+        delivered,
     })
 }

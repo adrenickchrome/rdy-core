@@ -528,6 +528,10 @@ pub fn assess_wire(
     let Some(a) = assessed.assessment else {
         return Ok((assessed.readiness, None));
     };
+    // a project that holds no delivery has no foreign part: no pin resolves, no side is foreign
+    if st.foreign()?.is_empty() {
+        return Ok((assessed.readiness, Some(AssessmentV2::of(&a))));
+    }
     // the rows the local record was built from (as the queue lists them)
     let fixed = crate::plan::compute::fixed_tensions(st, &c.pref.version)?;
     let listed = st.listed_tensions(

@@ -686,7 +686,8 @@ pub(crate) fn assessment_entry(
     at: Location,
     o: &crate::codec::ObjectBytes<'_>,
 ) -> Result<IndexEntry, StoreError> {
-    let a: rdy_model::assessment::Assessment = crate::codec::decode_bounded_split(o)
+    // the wire layout reads both encodings (repo links: a foreign part or a deviation row)
+    let a: rdy_model::assessment::AssessmentV2 = crate::codec::decode_bounded_split(o)
         .map_err(|e| crate::carried_records::refusal(&hash, kinds::ASSESSMENT, &e.to_string()))?;
     Ok(IndexEntry::AssessmentProposal {
         proposal: a.proposal,

@@ -1107,6 +1107,80 @@ fn policy_acceptance(
     Ok(live.reference())
 }
 
+/// Repo links (D-Y49PX "Freshness"): the refusal message when a delivery since the stored
+/// assessment `w` of version `pref` changed a cited block of its foreign reach: a block in its
+/// local reach pins it, or it is a foreign side of a tension in its reach
+/// (`foreign_facts::assessment_foreign` records each such side's cited block in the foreign
+/// reach, so one check covers both). The record holds, for each such block, the FOREIGN entry
+/// that delivered the version the current view held then; the block moved when the entry in
+/// force now differs, or one of the two is absent: a delivery added, changed or removed it, or a
+/// revocation took its source out of the current view. A delivery that carries it unchanged
+/// moves nothing. The message names the entry in force now (for a block no live source selects
+/// now, the newest entry of a source of its repo) and the blocks it moved, each shown
+/// `<alias>:<id>` by canon's repo links; of several entries, the first in log order. None when
+/// nothing moved. It reads the foreign state and computes nothing else; a fresh record carries
+/// the entries of now, so the next approval passes the check.
+fn foreign_moved(
+    st: &ReadState,
+    pref: &ProposalRef,
+    w: &rdy_model::assessment::AssessmentV2,
+) -> Result<Option<String>, RdyError> {
+    use rdy_model::foreign::ForeignId;
+    use rdy_store::segment::Location;
+    if w.foreign.reach.is_empty() {
+        return Ok(None);
+    }
+    let foreign = st.foreign()?;
+    let reader = st.reader();
+    let then: BTreeMap<&ForeignId, &Hash> = w
+        .foreign
+        .delivered
+        .iter()
+        .map(|d| (&d.target, &d.entry))
+        .collect();
+    let targets: BTreeSet<&ForeignId> = w.foreign.reach.iter().map(|r| &r.target).collect();
+    // per moved block, the entry that moved it and that entry's place in the log
+    let mut moved: BTreeMap<(Location, Hash), Vec<&ForeignId>> = BTreeMap::new();
+    for t in targets {
+        let now = foreign.current_version(t);
+        if now.map(|h| &h.entry) == then.get(t).copied() {
+            continue;
+        }
+        let by = match now {
+            Some(h) => Some((h.at, h.entry)),
+            None => {
+                // the newest entry of a source of the block's repo: the removal or revocation
+                let mut newest: Option<(Location, Hash)> = None;
+                for (_, v) in foreign.sources().filter(|(_, v)| v.repo == t.repo) {
+                    if let Some(at) = reader.kind_location(rdy_store::kinds::FOREIGN, &v.head)?
+                        && newest.is_none_or(|(n, _)| n < at)
+                    {
+                        newest = Some((at, v.head));
+                    }
+                }
+                newest
+            }
+        };
+        if let Some(key) = by {
+            moved.entry(key).or_default().push(t);
+        }
+    }
+    let Some(((_, entry), hit)) = moved.into_iter().next() else {
+        return Ok(None);
+    };
+    let canon = st.materialized(&crate::Scope::Canon)?;
+    let links = crate::foreign_refs::RepoLinks::of_view(&canon);
+    let shown: Vec<String> = hit
+        .iter()
+        .map(|t| format!("{}:{}", links.shown(&t.repo), t.id))
+        .collect();
+    Ok(Some(format!(
+        "proposal {pref} moved: delivery {} changed {} after its assessment",
+        entry.short(),
+        shown.join(", ")
+    )))
+}
+
 /// M3c O16's freshness checks of version `pref` (record `p`) against its assessment `a`, after
 /// M3b's: the message of the first that fails, or None. `since` is the landings since `a.base`,
 /// newest first. (1) The live policy (canon's at its head) is not the one `a` was judged under.
@@ -2888,10 +2962,11 @@ impl Rdy {
                 },
             };
             // a read error never fails the reply (as `tensions_error`): the version is stored,
-            // not ready, with the error as its one issue
-            crate::readiness::assess(&now, &c, &now.gate_config()).unwrap_or_else(|e| {
-                crate::readiness::Assessed {
-                    readiness: crate::readiness::Readiness {
+            // not ready, with the error as its one issue. Repo links (D-Y49PX): the record
+            // carries its foreign reach, which freshness compares at approval.
+            crate::readiness::assessment::assess_wire(&now, &c, &now.gate_config()).unwrap_or_else(
+                |e| {
+                    let readiness = crate::readiness::Readiness {
                         issues: vec![Issue {
                             severity: Severity::Error,
                             code: e.code,
@@ -2904,14 +2979,19 @@ impl Rdy {
                         policy: None,
                         warnings: vec![],
                         checks_omitted: (0, 0),
-                    },
-                    assessment: None,
-                }
-            })
+                    };
+                    (readiness, None)
+                },
+            )
         };
-        let assessment = match &assessed.assessment {
-            Some(a) => Some(self.store.bind_assessment(&mut prepared, a)?),
+        let (readiness, wire) = assessed;
+        let assessment = match &wire {
+            Some(w) => Some(self.store.bind_assessment_wire(&mut prepared, w)?),
             None => None,
+        };
+        let assessed = crate::readiness::Assessed {
+            readiness,
+            assessment: wire.map(|w| w.local()),
         };
         let written = self.store.commit_propose(prepared)?;
         let answer = written.answer;
@@ -3098,7 +3178,8 @@ impl Rdy {
             }
             return Err(proposal_not_ready(pref, issues));
         };
-        let a = st.reader().assessment(&h)?;
+        let wire = st.reader().assessment_wire(&h)?;
+        let a = wire.local();
         let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
         let since = Self::landings_since(st, a.base)?;
         for (l, rec) in since.iter().rev() {
@@ -3119,6 +3200,11 @@ impl Rdy {
                 );
                 return Err(self.moved_fresh(st, pref, p, message)?);
             }
+        }
+        // repo links (D-Y49PX "Freshness"): a delivery after the assessment that changed a
+        // cited block of its foreign reach, even when canon stayed still
+        if let Some(message) = foreign_moved(st, pref, &wire)? {
+            return Err(self.moved_fresh(st, pref, p, message)?);
         }
         if pack_digest(st.pack()) != a.pack.digest {
             let message = format!("proposal {pref} moved: the pack changed after its assessment");
@@ -3149,10 +3235,12 @@ impl Rdy {
         message: String,
     ) -> Result<RdyError, RdyError> {
         let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
-        let assessed = crate::readiness::assess(st, &c, &st.gate_config())?;
-        let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
+        // repo links (D-Y49PX): the fresh record carries the foreign reach of now
+        let (readiness, wire) =
+            crate::readiness::assessment::assess_wire(st, &c, &st.gate_config())?;
+        let (Some(mut a), Some(mut card)) = (wire, readiness.card) else {
             let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
-            e.issues = assessed.readiness.issues;
+            e.issues = readiness.issues;
             return Ok(e);
         };
         // the fresh record assesses the version on the canon it was computed on, so the next
@@ -3168,7 +3256,7 @@ impl Rdy {
         card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
         card.card_hash = crate::pending::card_hash(&card).to_string();
         self.store
-            .put_assessment(&a)
+            .put_assessment_wire(&a)
             .map_err(crate::answer::internal)?;
         self.publish(Delta::Seq)?;
         Ok(RdyError::new(

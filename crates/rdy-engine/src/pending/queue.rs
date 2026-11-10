@@ -165,12 +165,15 @@ use rdy_model::assessment::{
     AssessedPolicy, Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue,
     AssessmentPage, AssessmentScoreChange, MAX_TEXT_BYTES,
 };
+use rdy_model::block::ADOPTED_AS;
 use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
+use rdy_model::foreign::ForeignId;
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Justification, Op, Proposal};
 use rdy_schema::policy::{JustificationKind, POLICY_TYPE, PolicyFields};
-use rdy_schema::{Issue, Severity, supporting};
+use rdy_schema::repo_link::REPO_LINK;
+use rdy_schema::{DEVIATES_FROM, Issue, Severity, supporting};
 use rdy_store::redaction::limit;
 use serde::Serialize;
 use std::cell::OnceCell;
@@ -976,6 +979,7 @@ fn exception_record(k: ExceptionKind) -> AssessmentExceptionKind {
         ExceptionKind::NotRecommended => AssessmentExceptionKind::NotRecommended,
         ExceptionKind::BlockingTension => AssessmentExceptionKind::BlockingTension,
         ExceptionKind::ReaffirmOneWay => AssessmentExceptionKind::ReaffirmOneWay,
+        ExceptionKind::Deviation => AssessmentExceptionKind::Deviation,
     }
 }
 
@@ -1472,6 +1476,13 @@ impl Version {
         let mut decisions = vec![];
         let mut reaffirms = vec![];
         let canon = st.materialized(&Scope::Canon)?;
+        // repo links (D-8VJAZ): a deviation's targets show by the prospective canon's aliases,
+        // read once and only for a version that records a deviation
+        let links = OnceCell::new();
+        let shown = |t: &ForeignId| {
+            let links = links.get_or_init(|| crate::foreign_refs::RepoLinks::of_view(&next));
+            format!("{}:{}", links.shown(&t.repo), t.id)
+        };
         for id in ids {
             let Some(b) = next.get(&id) else { continue };
             if decision::status(b) != Some(DecisionStatus::Proposed) {
@@ -1486,7 +1497,7 @@ impl Version {
                 }
                 continue;
             }
-            let kinds = exception_kinds(b, &live, &tensions, || {
+            let kinds = exception_kinds(b, &live, &shown, &tensions, || {
                 lands_unapplied(&next, &g, st.pack(), b)
             });
             decisions.push(Decision {
@@ -1995,6 +2006,29 @@ impl Version {
                 .map(|d| (ExceptionKind::ReaffirmOneWay, d.r#ref.clone())),
         );
         let redaction = !crate::redaction::requests_carried(st, &self.p.changes)?.is_empty();
+        // repo links (D-8VJAZ): the repo links it writes (a deleted one read in canon), and the
+        // decisions whose adopted_as it writes
+        let repo_links = self
+            .touched
+            .iter()
+            .filter(|id| {
+                [self.next.get(id), canon.get(id)]
+                    .into_iter()
+                    .flatten()
+                    .any(|b| b.block_type == REPO_LINK)
+            })
+            .cloned()
+            .collect();
+        let adopted_as = self
+            .touched
+            .iter()
+            .filter(|id| {
+                let field = |b: Option<&Block>| b.and_then(|b| b.fields.get(ADOPTED_AS)).cloned();
+                let now = field(self.next.get(id));
+                now.is_some() && now != field(canon.get(id))
+            })
+            .cloned()
+            .collect();
         let (noncode_deferrals, plan_items) = match &self.plan {
             Ok(plan) => (
                 if plan.bound.is_some() {
@@ -2022,6 +2056,8 @@ impl Version {
             exceptions,
             redaction,
             changes_policy: !self.policy_changes.is_empty(),
+            repo_links,
+            adopted_as,
             noncode_deferrals,
             stable_docs,
             plan_items,
@@ -2948,11 +2984,13 @@ pub(super) fn open_tensions(st: &ReadState, p: &Proposal) -> Result<Vec<Arc<Tens
 }
 
 /// The exception kinds decision `b` carries, in the closed order, each with its detail. `live`
-/// says whether a block is a decision live in canon; `unapplied` whether no content would apply
-/// `b` once it lands.
+/// says whether a block is a decision live in canon; `shown` how a cited or external block shows
+/// (`<alias>:<id>`); `unapplied` whether no content would apply `b` once it lands. A deviation
+/// (repo links, D-8VJAZ) comes right after `against`, whose case it widens.
 fn exception_kinds(
     b: &Block,
     live: &impl Fn(&BlockId) -> bool,
+    shown: &impl Fn(&ForeignId) -> String,
     tensions: &[Arc<Tension>],
     unapplied: impl FnOnce() -> bool,
 ) -> Vec<(ExceptionKind, String)> {
@@ -2975,6 +3013,17 @@ fn exception_kinds(
     against.extend(sides.iter().map(|o| format!("a tension with {o}")));
     if !against.is_empty() {
         kinds.push((ExceptionKind::Against, against.join("; ")));
+    }
+    let departs: Vec<String> = b
+        .foreign
+        .links
+        .get(DEVIATES_FROM)
+        .into_iter()
+        .flatten()
+        .map(|l| shown(&l.target))
+        .collect();
+    if !departs.is_empty() {
+        kinds.push((ExceptionKind::Deviation, departs.join(", ")));
     }
     if b.field_str("reversibility") == Some("one_way") {
         kinds.push((
@@ -3024,6 +3073,7 @@ fn fact_name(k: ExceptionKind) -> &'static str {
         ExceptionKind::NotRecommended => "Recommendation",
         ExceptionKind::BlockingTension => "Blocking",
         ExceptionKind::ReaffirmOneWay => "Re-affirms",
+        ExceptionKind::Deviation => "Deviates from",
     }
 }
 

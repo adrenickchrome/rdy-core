@@ -1250,3 +1250,47 @@ fn rpl3_unknown_encoding_is_bounded() {
         RecordError::Decode
     );
 }
+
+#[test]
+fn rpl18_a_deviation_exception_takes_the_foreign_assessment_encoding() {
+    // repo links (D-8VJAZ): the released layout (encoding 1) has six exception kinds; a record
+    // with a deviation row is written in encoding 2, with an empty foreign part
+    let mut a = assessment();
+    a.facts.exceptions = vec![AssessmentException {
+        kind: AssessmentExceptionKind::Deviation,
+        reference: "D-00001@0123456789ab".into(),
+    }];
+    assert!(a.has_foreign_shape());
+    let wire = AssessmentV2::of(&a);
+    assert!(wire.has_foreign() && wire.foreign.is_empty());
+    let item = codec::item_new(kinds::ASSESSMENT, &a);
+    assert_eq!(item, codec::item_new(kinds::ASSESSMENT, &wire));
+    assert_eq!(
+        item,
+        (raw(kinds::ASSESSMENT, 2), payload(2, &postcard_of(&wire)))
+    );
+    assert!(features_of(&item).contains(&FEATURE_FOREIGN_COPY.to_string()));
+    // the runtime record and the wire record both read it back
+    let read: Assessment = codec::decode_record(item.0, &item.1).unwrap();
+    assert_eq!(read, a);
+    let o = codec::split(item.0, &item.1).unwrap();
+    assert!(codec::is_canonical(&o, &read));
+    assert_eq!(
+        codec::decode_record::<AssessmentV2>(item.0, &item.1).unwrap(),
+        wire
+    );
+    // a released-layout frame that carries the deviation tag does not decode
+    let forged = (kinds::ASSESSMENT | VERSIONED, payload(1, &postcard_of(&a)));
+    assert!(codec::decode_record::<Assessment>(forged.0, &forged.1).is_err());
+    assert!(codec::decode_record::<AssessmentV2>(forged.0, &forged.1).is_err());
+    // a record with no deviation keeps the released layout and its bytes
+    let local = assessment();
+    assert!(!local.has_foreign_shape());
+    assert_eq!(
+        codec::item_new(kinds::ASSESSMENT, &local),
+        (
+            kinds::ASSESSMENT | VERSIONED,
+            payload(1, &postcard_of(&local))
+        )
+    );
+}

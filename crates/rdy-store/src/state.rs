@@ -5,7 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
-use rdy_model::assessment::Assessment;
+use rdy_model::assessment::{Assessment, AssessmentV2};
 use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
@@ -1046,6 +1046,17 @@ impl Store {
         prepared: &mut PreparedProposal,
         a: &Assessment,
     ) -> Result<Hash, StoreError> {
+        self.bind_assessment_wire(prepared, &AssessmentV2::of(a))
+    }
+
+    /// [`Store::bind_assessment`] of `a` in the layout that carries its foreign part (repo
+    /// links): encoding 2 when the foreign part is not empty or an exception row is a deviation,
+    /// else the local layout, byte for byte.
+    pub fn bind_assessment_wire(
+        &self,
+        prepared: &mut PreparedProposal,
+        a: &AssessmentV2,
+    ) -> Result<Hash, StoreError> {
         if prepared.fresh.is_some() {
             return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
         }
@@ -1058,7 +1069,7 @@ impl Store {
                 crate::carried_records::ASSESSMENT_PROPOSAL,
             ));
         }
-        self.check_carried::<Assessment>(&item, &prepared.items)?;
+        self.check_carried::<AssessmentV2>(&item, &prepared.items)?;
         prepared.items.push(item);
         prepared.assessment = Some(id);
         Ok(id)
@@ -1068,17 +1079,23 @@ impl Store {
     /// [`Store::bind_assessment`]: the version it assesses, like every object it names, must be
     /// held (`NotFound` otherwise). Returns its hash.
     pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
+        self.put_assessment_wire(&AssessmentV2::of(a))
+    }
+
+    /// [`Store::put_assessment`] of `a` in the layout that carries its foreign part, as
+    /// [`Store::bind_assessment_wire`] writes it.
+    pub fn put_assessment_wire(&mut self, a: &AssessmentV2) -> Result<Hash, StoreError> {
         self.ensure_writable()?;
         let item = crate::codec::item_new(kinds::ASSESSMENT, a);
         let id = Hash::of(&item.1);
-        self.check_carried::<Assessment>(&item, &[])?;
+        self.check_carried::<AssessmentV2>(&item, &[])?;
         self.write_guarded(vec![item])?;
         Ok(id)
     }
 
     /// Checks `item`, a carried record's frame (an ASSESSMENT, a DISPUTE or a
     /// DISPUTE_RESOLUTION, decoded as a `T`), as the frame after `batch`: its bounded encoding and
-    /// its own rules (`carried_records::validate_local`: `Assessment::validate`,
+    /// its own rules (`carried_records::validate_local`: `AssessmentV2::validate`,
     /// `Dispute::validate`), as `record <hash> (kind <kind>): <reason>`; every object it names
     /// (`object_refs::refs_of`) in `batch` or the store with its kind (`NotFound(<hash>)` for the
     /// first that is not); and the bindings it names (`carried_records::validate_refs`, reading
@@ -1549,8 +1566,15 @@ impl crate::carried_records::CarriedSource for PendingFrames<'_> {
 
 impl StoreReader {
     /// The assessment `h`, decoded; an object of another kind with that hash is named as what it
-    /// is.
+    /// is. A record with a foreign part (repo links, ASSESSMENT encoding 2) reads as its local
+    /// part, a read projection: [`StoreReader::assessment_wire`] reads the whole record.
     pub fn assessment(&self, h: &Hash) -> Result<Assessment, StoreError> {
+        self.assessment_wire(h).map(|w| w.local())
+    }
+
+    /// The assessment `h` in the layout that carries its foreign part (repo links, ASSESSMENT
+    /// encoding 2): a local record reads with an empty foreign part.
+    pub fn assessment_wire(&self, h: &Hash) -> Result<AssessmentV2, StoreError> {
         self.get_named(kinds::ASSESSMENT, "assessment", h)
     }
 
