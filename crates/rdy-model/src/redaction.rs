@@ -57,7 +57,8 @@ pub enum RedactTarget {
     /// the block's id there and the held BLOCK version. JSON writes `foreign_version`. A request
     /// with one takes REDACTION encoding 1 ([`crate::encoding::REDACTION_FOREIGN_ENCODING`]),
     /// which encoding 0 has no form for; its scope is the foreign copy's occurrences only.
-    /// Registered only: no writer takes one yet.
+    /// Written by the citing project's redaction of a cited version (D-CN4QJ): the selector
+    /// `<alias>:<id>@<hash>` or its stored form `<repo>:<id>@<hash>`.
     ForeignVersion {
         #[serde(with = "crate::foreign::hex_repo")]
         repo: RepoId,
