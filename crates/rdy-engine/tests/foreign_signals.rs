@@ -376,3 +376,123 @@ fn rpl14_delivery_seals_moves_without_moving_pins() {
         "a reindex moves no suspect"
     );
 }
+
+/// Fix round 1 (review finding 1): the facts a real export derives make the citer suspect. A
+/// decision revoked through `Rdy::revoke` and one wholly superseded by a landed decision travel
+/// as `revoked` and `superseded` (the source graph's derived status at the exported landing,
+/// not the stored `status` field), and the successor stays inside the selection. Fed to the
+/// foreign graph, a citer's non-premise `affects` edge to each is suspect.
+#[test]
+fn rpl14_a_real_revoke_or_supersede_export_is_suspect_downstream() {
+    use rdy_graph::foreign::{ForeignNodes, suspects_of};
+    use rdy_model::foreign::{ForeignLink, ForeignParts};
+
+    let d = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(&d.path().join("src"), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "decision", "id": "$gone", "parent": "$doc",
+             "fields": {"statement": "Use the gone way.", "status": "proposed"}},
+            {"op": "create", "type": "decision", "id": "$old", "parent": "$doc",
+             "fields": {"statement": "Use the old way.", "status": "proposed"}}
+        ]),
+    );
+    land(&mut r, "seed");
+    let (doc, gone, old) = (
+        w.created["$doc"].clone(),
+        id(&w.created["$gone"]),
+        id(&w.created["$old"]),
+    );
+    r.revoke(&writer(), "retire", gone.as_str(), "No longer.", &doc, None)
+        .unwrap();
+    let w2 = write(
+        &mut r,
+        "retire",
+        json!([
+            {"op": "create", "type": "decision", "id": "$new", "parent": doc,
+             "fields": {"statement": "Use the new way.", "status": "proposed"},
+             "links": {"supersedes": [{"target": old.to_string()}]}}
+        ]),
+    );
+    land(&mut r, "retire");
+    let new = id(&w2.created["$new"]);
+
+    // the source graph retires both
+    let st = r.read();
+    let g = st.graph(&Scope::Canon).unwrap();
+    assert_eq!(g.status(&gone).map(|s| s.tag()), Some("revoked"));
+    assert_eq!(g.status(&old).map(|s| s.tag()), Some("superseded"));
+
+    let landing = st.canon_head().unwrap();
+    let mut out = Vec::new();
+    let report = rdy_engine::link_export::write(
+        &st,
+        "v1.0.0",
+        Hash::of(b"tag"),
+        landing,
+        "implicit:org",
+        &mut out,
+    )
+    .unwrap();
+    let by_id: BTreeMap<BlockId, ForeignVersion> = report
+        .delivery
+        .versions
+        .iter()
+        .map(|v| (v.id.clone(), v.clone()))
+        .collect();
+    assert_eq!(by_id[&gone].derived.status.as_deref(), Some("revoked"));
+    assert!(by_id[&gone].derived.superseded_by.is_empty());
+    assert_eq!(by_id[&old].derived.status.as_deref(), Some("superseded"));
+    assert_eq!(by_id[&old].derived.superseded_by, vec![new.clone()]);
+    assert_eq!(by_id[&new].derived.status.as_deref(), Some("accepted"));
+    assert!(by_id[&new].derived.superseded_by.is_empty());
+
+    // consumed by the citing side: `affects` alone is no premise, so only retirement counts
+    let repo = cited();
+    let mut nodes = ForeignNodes::default();
+    nodes.add_selection(repo, &report.delivery.versions);
+    let mut c = Block {
+        id: id("c-CCCCC"),
+        block_type: "claim".into(),
+        parent: Some(id("s-SSSSS")),
+        order: "V".into(),
+        fields: BTreeMap::new(),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        foreign: ForeignParts::default(),
+        read_identity: None,
+    };
+    for t in [&gone, &old, &new] {
+        let target = ForeignId::new(repo, t.clone());
+        c.foreign
+            .links
+            .entry("affects".into())
+            .or_default()
+            .push(ForeignLink {
+                target: target.clone(),
+                part: None,
+            });
+        c.foreign.pins.insert(
+            target,
+            ForeignPin {
+                content: by_id[t].content,
+                encoding: by_id[t].encoding,
+            },
+        );
+    }
+    let mut got: Vec<(BlockId, String, Option<BlockId>)> = suspects_of(&c, &nodes)
+        .into_iter()
+        .map(|s| (s.target.id, s.reason, s.successor))
+        .collect();
+    got.sort();
+    let mut want = vec![
+        (gone.clone(), "revoked".to_string(), None),
+        (old.clone(), "superseded".to_string(), Some(new.clone())),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}

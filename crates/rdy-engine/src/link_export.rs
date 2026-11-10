@@ -18,7 +18,11 @@
 //!   directly.
 //! - A version that an approved removal dropped travels as its residue (a `DROPPED` record), with
 //!   the content identity the removal recorded and no derived fact.
-//! - `superseded_by` lists only selected blocks, so no id outside the selection is disclosed.
+//! - `status` is the stored status, except that a decision the source graph retires at the
+//!   landing is `revoked` or `superseded` (an accepted decision revokes or wholly supersedes it),
+//!   as a local suspect reads it, also when the retiring decision is outside the selection.
+//! - `superseded_by` lists only the selected accepted decisions that wholly supersede the block,
+//!   so no id outside the selection is disclosed.
 //!
 //! [`tag_uses`] lists the foreign pins of the blocks a tag holds, each with the version this
 //! state holds for it and the delivery that carried it, from the retained delivery history.
@@ -27,6 +31,7 @@ use crate::error::{E_INTERNAL, E_LIMIT, RdyError};
 use crate::publication::{profile_facts, resolve};
 use crate::read_state::ReadState;
 use crate::stream_error::to_rdy;
+use rdy_graph::{DerivedStatus, EdgeKind};
 use rdy_model::decision::SUPERSEDES;
 use rdy_model::foreign::{
     ForeignDerived, ForeignId, ForeignPin, ForeignPublication, ForeignShell, ForeignVersion,
@@ -40,7 +45,7 @@ use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{
     DeliveryRecord, DeliveryReport, MAX_DELIVERY_VERSIONS, StreamHeader, StreamRecord, StreamWriter,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 /// The most rows [`tag_uses`] returns.
@@ -98,26 +103,34 @@ pub fn write(
     }
     let selected: BTreeSet<&BlockId> = entries.iter().map(|e| &e.id).collect();
 
-    // the selected blocks that supersede each selected block
-    let mut superseded_by: BTreeMap<&BlockId, Vec<BlockId>> = BTreeMap::new();
-    for e in &entries {
-        let Some(b) = resolved.m.get(&e.id) else {
-            return Err(internal("a selected block is missing from its selection"));
-        };
-        if e.redaction.is_some() {
-            continue;
-        }
-        for l in b.links.get(SUPERSEDES).into_iter().flatten() {
-            if let Some(t) = selected.get(&l.target)
-                && **t != e.id
-            {
-                let by = superseded_by.entry(*t).or_default();
-                if !by.contains(&e.id) {
-                    by.push(e.id.clone());
-                }
-            }
-        }
-    }
+    // the retirement facts come from the source graph at the landing (D-Y49PX): a decision an
+    // accepted decision revokes or wholly supersedes is retired there, as a local suspect reads
+    // it, also when the retiring decision is outside the selection. Only the accepted decisions
+    // that wholly supersede it and that the selection holds are named.
+    let graph = read.graph(&scope)?;
+    let accepted = |id: &BlockId| {
+        matches!(
+            graph.status(id),
+            Some(s) if !matches!(s, DerivedStatus::Proposed | DerivedStatus::Rejected)
+        )
+    };
+    let retirement = |id: &BlockId| match graph.status(id) {
+        Some(DerivedStatus::Revoked { .. }) => Some("revoked"),
+        Some(DerivedStatus::Superseded { .. }) => Some("superseded"),
+        _ => None,
+    };
+    let superseders = |id: &BlockId| {
+        let mut by: Vec<BlockId> = graph
+            .incoming(id)
+            .iter()
+            .filter(|l| matches!(&l.kind, EdgeKind::Link(n) if n == SUPERSEDES) && l.part.is_none())
+            .filter(|l| l.from != *id && selected.contains(&l.from) && accepted(&l.from))
+            .map(|l| l.from.clone())
+            .collect();
+        by.sort();
+        by.dedup();
+        by
+    };
 
     // one version per selected block; each block is read once and dropped
     let mut versions = Vec::with_capacity(entries.len());
@@ -154,9 +167,11 @@ pub fn write(
                 content: stored.content_hash_with(tracking),
                 encoding: stored.encoding(),
                 derived: ForeignDerived {
-                    status: stored.field_str("status").map(str::to_string),
+                    status: retirement(&e.id)
+                        .or(stored.field_str("status"))
+                        .map(str::to_string),
                     lifecycle: stored.field_str("lifecycle").map(str::to_string),
-                    superseded_by: superseded_by.remove(&e.id).unwrap_or_default(),
+                    superseded_by: superseders(&e.id),
                 },
             }
         };

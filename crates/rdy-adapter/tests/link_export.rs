@@ -293,7 +293,7 @@ fn rpl9_export_has_derived_facts_and_residue() {
     let site = row(&rows, "site");
     let (report, bytes) = export(&snap, "v1.0.0", &site.selector);
 
-    // the derived facts come from the tag's blocks; the removed block has none
+    // the derived facts come from the tag's state; the removed block has none
     let by_id: BTreeMap<_, _> = report
         .delivery
         .versions
@@ -305,7 +305,8 @@ fn rpl9_export_has_derived_facts_and_residue() {
     assert_eq!(old.derived.superseded_by, vec![s.new.clone()]);
     assert!(new.derived.superseded_by.is_empty());
     assert_eq!(new.derived.status.as_deref(), Some("accepted"));
-    assert_eq!(old.derived.status.as_deref(), Some("accepted"));
+    // rpl14 fix 1: a decision the source graph retires travels as retired (D-Y49PX)
+    assert_eq!(old.derived.status.as_deref(), Some("superseded"));
     assert_eq!(by_id[&s.ap].derived, ForeignDerived::default());
     assert_ne!(by_id[&s.ap].content, Hash([0; 32]));
 
