@@ -41,6 +41,7 @@ pub mod foreign;
 pub mod foreign_delivery;
 pub mod foreign_facts;
 mod foreign_guard;
+mod foreign_instructions;
 mod foreign_refs;
 pub mod foreign_removal;
 mod foreign_signals;
