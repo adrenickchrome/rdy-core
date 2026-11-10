@@ -2844,6 +2844,13 @@ fn build_ops(
                 };
                 foreign_pins.insert(target, pin);
             }
+            // a repo link keeps its adopted instruction baseline (D-MEMMQ, C14): those pins cite
+            // nothing, and only an adopt landing moves them
+            for (target, pin) in crate::foreign_refs::instruction_baseline(block) {
+                foreign_pins
+                    .entry(target.clone())
+                    .or_insert_with(|| pin.clone());
+            }
             // msw7: a tracking edit of a frozen decision keeps the set of targets it pins; a new
             // or dropped {{id}} in a tracking field would repin it, which the ruling forbids
             if tracking_edits.contains(&block.id)

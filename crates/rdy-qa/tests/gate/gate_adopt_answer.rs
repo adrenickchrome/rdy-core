@@ -834,3 +834,42 @@ fn rpl20_adopt_moves_the_link_instruction_baseline() {
     );
     r.fsck().unwrap();
 }
+
+/// Fix round 1: the instruction baseline pins the adoption leaves on the repo_link block cite
+/// nothing, so an ordinary write of the link keeps them; only an adopt landing moves them.
+#[test]
+fn rpl20_link_edit_keeps_the_adopted_instruction_baseline() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let files = tempfile::tempdir().unwrap();
+    let (_s, link) = linked(&mut r);
+    let rule = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the present tense.",
+    );
+    let org = Some(ForeignSet::Organization);
+    deliver_in(&mut r, files.path(), "v1", &link, org, &[&rule]);
+    let card = the_card(&r);
+    answer(&mut r, &card.r#ref, "adopt", None, Some(&card.card_hash)).unwrap();
+    let adopted = pins_of(&r, &link);
+    let rule_id = ForeignId::new(cited(), rule.id.clone());
+    assert_eq!(adopted.get(&rule_id), Some(&pin_of(&rule)), "{adopted:#?}");
+    // a title-only edit of the link, landed
+    put(
+        &mut r,
+        "title",
+        json!([{"op": "update", "id": link.to_string(), "fields": {"title": "Core rules"}}]),
+    );
+    land(&mut r, "title").unwrap();
+    let b = r.read().block(&Scope::Canon, &link).unwrap();
+    assert_eq!(b.field_str("title"), Some("Core rules"), "the edit landed");
+    assert_eq!(
+        b.foreign.pins, adopted,
+        "the edit keeps the adopted baseline"
+    );
+    assert!(
+        adopt_items(&r).is_empty(),
+        "the rule stays in force: no card"
+    );
+    r.fsck().unwrap();
+}

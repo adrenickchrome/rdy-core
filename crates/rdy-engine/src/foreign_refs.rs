@@ -9,7 +9,9 @@
 //! - The store keeps `{{<repo>:<id>}}` (a key typed bare keeps the `@key` mark) and a foreign
 //!   link `{target: {repo, id}}`. A new citation pins the content of the selected current
 //!   delivery. A citation the block already holds keeps its pin: repin, plan repin and reaffirm
-//!   never move a foreign pin.
+//!   never move a foreign pin. A repo link's pins of its repo's instructions are the adopted
+//!   instruction baseline: they cite nothing, an ordinary write of the link keeps them, and only
+//!   an adopt landing moves them.
 //! - Aliases are unique among live repo links, and a link never names this project's own repo.
 //! - [`ReadState::check_held_pins`] is the one held-pin check: every foreign pin must name content
 //!   a delivery before the state's watermark carried. A write applies it before it appends;
@@ -61,6 +63,16 @@ fn link_of(b: &Block) -> Option<(&str, RepoId)> {
         .parse()
         .ok()?;
     Some((alias, repo))
+}
+
+/// The instruction baseline pins of the repo link block `b` (D-MEMMQ, C14): its pins of the
+/// instructions of the repo it names. An adopt landing moves them and they cite nothing, so an
+/// ordinary write of the link keeps them. None when `b` is no valid repo link.
+pub(crate) fn instruction_baseline(b: &Block) -> impl Iterator<Item = (&ForeignId, &ForeignPin)> {
+    let repo = link_of(b).map(|(_, r)| r);
+    b.foreign.pins.iter().filter(move |(t, _)| {
+        Some(t.repo) == repo && t.id.prefix() == rdy_schema::instruction::INSTRUCTION_PREFIX
+    })
 }
 
 impl RepoLinks {
