@@ -28,6 +28,7 @@ mod instructions_cmd;
 mod intake_cmd;
 mod intent_cmd;
 mod land_cmd;
+mod links_cmd;
 mod output;
 mod plan_cmd;
 mod policy_cmd;
@@ -170,6 +171,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: rule_cmd::RuleCmd,
     },
+    /// Read the repo links of this project: each link with its alias, repo, state (none, delivered or revoked), last delivery and the pins that are behind. `rdy links show <alias>` lists what a link delivers; `rdy links refs [<alias>]` lists the pins of canon to cited content. A cited block reads as rdy show <alias>:<id>. It writes nothing; a delivery moves no pin, and an adopt card in rdy pending asks the person. The chat path is rdy_links.
+    Links(links_cmd::LinksArgs),
+    /// Supersede a local decision by its adopted copy, the cited decision <alias>:<id> that its home project delivered back. The old decision becomes superseded by the cited one, and its dependents get rebind items. A person approves the landing. The chat path is rdy_supersede with adopted_as.
+    AdoptUpstream(links_cmd::AdoptUpstreamArgs),
     /// Print what waits for the person: the cards of the "needs you" queue, then the versions that are not ready. The chat path is rdy_pending.
     Pending(intake_cmd::PendingArgs),
     /// Answer one card of the queue: rdy answer <ref> <option> [--card <hash>], or rdy answer --all-recommended <ref>... A person answers as themselves; an agent only by relaying the person's words (--relayed-by with --evidence). The CLI has no Later. The chat path is rdy_answer.
@@ -333,6 +338,8 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
         Cmd::Review { cmd } => review_cmd::review(env, cmd),
         Cmd::Rule { cmd } => rule_cmd::rule(env, cmd, projectless),
+        Cmd::Links(a) => links_cmd::links(env, a),
+        Cmd::AdoptUpstream(a) => links_cmd::adopt_upstream(env, a),
         Cmd::Pending(a) => intake_cmd::pending(env, a),
         Cmd::Answer(a) => intake_cmd::answer(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),

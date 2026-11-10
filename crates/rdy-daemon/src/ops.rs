@@ -27,6 +27,7 @@ mod edit;
 mod instructions;
 mod intake;
 mod land;
+mod links;
 mod plan;
 mod policy;
 mod project;
@@ -55,6 +56,7 @@ use edit::{
 use instructions::instructions;
 use intake::{answer, pending};
 use land::{approve, land, propose, tag};
+use links::{adopt_upstream, links, new_repo_link};
 use plan::{plan, reaffirm, repin};
 use policy::policy;
 pub use project::{Cleaned, clean_quarantine, quarantine};
@@ -121,6 +123,7 @@ pub const OPS: &[&str] = &[
     "block",
     "brief",
     "instructions",
+    "links",
     "search",
     "diff",
     "query",
@@ -137,9 +140,11 @@ pub const OPS: &[&str] = &[
     "new_finding",
     "new_source",
     "new_instruction",
+    "new_repo_link",
     "rule",
     "keys_assign",
     "edit_block",
+    "adopt_upstream",
     "propose",
     "approve",
     "land",
@@ -497,6 +502,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{parent, text, applies_to, reason, locked?, view?}",
             )?,
         ),
+        "new_repo_link" => new_repo_link(
+            cx,
+            parse(op, args, "{alias, parent, repo, profile, title?, view?}")?,
+        ),
         "rule" => rule(cx, &args),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
@@ -507,6 +516,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{yaml, view?, base?, conflict?, brief?, max_tokens?, reason?}",
             )?,
         ),
+        "adopt_upstream" => adopt_upstream(cx, parse(op, args, "{old, adopted_as, view?}")?),
         "propose" => propose(
             cx,
             parse(
@@ -653,6 +663,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             publish::run(cx.engine.read(), &cx.engine.root(), cx.session, req)
         }
         "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
+        "links" => links(cx, parse(op, args, "{op?, alias?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

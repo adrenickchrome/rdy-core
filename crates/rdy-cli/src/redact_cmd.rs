@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 #[derive(clap::Args)]
 pub(crate) struct RedactArgs {
-    /// What to remove: a block id (every version), id@full-version-hash, or
+    /// What to remove: a block id (every version), id@full-version-hash, a cited version
+    /// <alias>:<id>@full-version-hash (erases only the copy delivered from the linked project), or
     /// blob:full-manifest-hash.
     #[arg(value_name = "TARGET")]
     targets: Vec<String>,
