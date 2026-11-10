@@ -11,6 +11,7 @@
 
 pub mod capabilities;
 mod follower;
+pub mod foreign_facts;
 pub mod foreign_removal;
 pub mod history;
 pub mod link_take;

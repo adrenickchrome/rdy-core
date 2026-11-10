@@ -783,6 +783,24 @@ fn card(
 }
 
 impl ReadState {
+    /// The delivery that the last landed `adopt` answer of the source of `repo` whose newest
+    /// entry is `head` named, with the set it served (D-0DNKT, D-MEMMQ): `None` when no adopt
+    /// answer exists. A `keep` answer moves nothing. A revoked source reads from its last
+    /// delivery, so its baseline stays readable. A pure read.
+    pub fn adopted_delivery(
+        &self,
+        repo: &RepoId,
+        head: Hash,
+    ) -> Result<Option<(Hash, Option<ForeignSet>)>, RdyError> {
+        let start = match self.reader().foreign_entry(&head)?.event {
+            ForeignEvent::Revoked { prev } => prev,
+            _ => head,
+        };
+        Ok(walk(self, repo, start)?.baseline)
+    }
+}
+
+impl ReadState {
     /// The adopt cards of this state for `q` (see the module docs), cards cut to the query's
     /// budget, less the ones `q.person` snoozed in the session `q.session_ref`. A pure read. The
     /// queue lists the same cards, routed by the live policy.
