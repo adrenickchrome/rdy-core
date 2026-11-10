@@ -17240,6 +17240,7 @@
       "E_HAS_DEPENDENTS": "\"E_HAS_DEPENDENTS\"",
       "E_HELD_BY_READER": "\"E_HELD_BY_READER\"",
       "E_HUB_ACTOR_CLAIM": "\"E_HUB_ACTOR_CLAIM\"",
+      "E_INSTRUCTION_LOCKED": "\"E_INSTRUCTION_LOCKED\"",
       "E_INTENT_EXPIRED": "\"E_INTENT_EXPIRED\"",
       "E_INTERNAL": "\"E_INTERNAL\"",
       "E_IO": "\"E_IO\"",
@@ -18025,6 +18026,7 @@
       "LINEAGE_DECISION_FIX": "\"a decision that governs it was refined or partly superseded: check that it still holds, and supersede it if not; no repin is needed\"",
       "LINEAGE_FIX": "\"a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed\"",
       "LOAD_CHAIN_FIX": "\"pass the full dump, then each increment in chain order\"",
+      "LOCKED_FIX": "\"add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction\"",
       "LOST_FIX": "\"run rdy status: it finishes the commit if the store recorded it\"",
       "MCP_HUMAN_CLAIM_FIX": "\"claim your own agent: actor, and relay the person's words with rdy_answer\"",
       "NAME_DOC_FIX": "\"pass doc: rdy_policy {op: \\\"init\\\", doc} / rdy policy init --doc <doc>\"",
@@ -18106,6 +18108,7 @@
       "SUPERSEDE_CONFIRM_FIX": "\"this block states no removed value. Check that it still holds, then point each listed link at the decision in force.\"",
       "SUPERSEDE_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest, then point each listed link at the decision in force.\"",
       "SUPERSEDE_UPDATE_FIX": "\"update the block for the removed values. Point each listed link at the decision in force.\"",
+      "TARGET_FIX": "\"name the cited decision as alias:id: rdy_links {op: \\\"show\\\", alias} / rdy links show <alias>\"",
       "TENSION_FIX": "\"resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve\"",
       "TIME_FIX": "\"write an RFC 3339 UTC time, such as 2026-10-21T15:10:58Z, or a date, such as 2026-10-05\"",
       "TOP_FIX": "\"give a file path relative to the code repo's top folder, such as src/main.rs\"",
@@ -27391,6 +27394,7 @@
     "store_only": {
       "fields": [
         "key_auto",
+        "adopted_as",
         "reaffirmed",
         "reflects_at"
       ],
