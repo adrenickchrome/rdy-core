@@ -615,3 +615,64 @@ fn rpl16_two_team_sets_pair_through_review() {
         of_kind(&r, TensionKind::Semantic)
     );
 }
+
+#[test]
+fn rpl16_settled_team_pairs_do_not_consume_the_candidate_limit() {
+    // two team sets of five instructions each: 25 pairs, more than one read's limit of 20
+    let (_dir, mut r) = project();
+    let files = tempfile::tempdir().unwrap();
+    let other = RepoId([9; 16]);
+    let (_s, links) = linked(&mut r, &[("red", cited()), ("blue", other)]);
+    let reason = [("applies_to", "all")];
+    let five = |team: &str, letter: char| -> Vec<Block> {
+        (1..=5)
+            .map(|n| {
+                block(
+                    &format!("ai-FRG{letter}{n}"),
+                    "instruction",
+                    &reason,
+                    &format!("Rule {n} of the {team} team: do step {n} before you push."),
+                )
+            })
+            .collect()
+    };
+    let (red, blue) = (five("red", 'R'), five("blue", 'B'));
+    let red_sel: Vec<(&Block, ForeignDerived)> = red.iter().map(|b| (b, live())).collect();
+    let blue_sel: Vec<(&Block, ForeignDerived)> = blue.iter().map(|b| (b, live())).collect();
+    deliver(
+        &mut r,
+        files.path(),
+        "red",
+        &links["red"],
+        cited(),
+        Some(ForeignSet::Team("red".into())),
+        &red_sel,
+    );
+    deliver(
+        &mut r,
+        files.path(),
+        "blue",
+        &links["blue"],
+        other,
+        Some(ForeignSet::Team("blue".into())),
+        &blue_sel,
+    );
+    let mut judged = std::collections::BTreeSet::new();
+    let first = r.read().review_requests().unwrap();
+    assert_eq!(first.len(), 20, "{first:#?}");
+    for q in &first {
+        assert_eq!(q.rule, Rule::Team);
+        submit(&mut r, q, "no_tension", None);
+        assert!(judged.insert(q.key));
+    }
+    // the settled pairs leave room: the next read offers the five pairs not yet judged
+    let rest = r.read().review_requests().unwrap();
+    assert_eq!(rest.len(), 5, "{rest:#?}");
+    for q in &rest {
+        assert!(!judged.contains(&q.key), "a settled pair came back: {q:#?}");
+        submit(&mut r, q, "no_tension", None);
+        assert!(judged.insert(q.key));
+    }
+    assert_eq!(judged.len(), 25);
+    assert!(r.read().review_requests().unwrap().is_empty());
+}

@@ -244,7 +244,8 @@ impl ReadState {
 
     /// The requests of the team pairs: two cited instructions that two different team sets
     /// deliver, in no change. Pairs with the same normalized text come first, then the rest, by
-    /// the order of the sides; at most [`MAX_CANDIDATES`], each pair once. Reads at most
+    /// the order of the sides; at most [`MAX_CANDIDATES`] unsettled pairs, each once (a settled
+    /// pair is left out before the limit counts, so it never hides a later pair). Reads at most
     /// [`MAX_TEAM_MEMBERS`] cited instructions.
     pub(super) fn team_requests(&self) -> Result<Vec<Request>, RdyError> {
         let foreign = self.foreign()?;
@@ -284,6 +285,7 @@ impl ReadState {
         }
         let differ =
             |a: &BTreeSet<String>, b: &BTreeSet<String>| a.iter().any(|x| b.iter().any(|y| x != y));
+        let semantic = self.semantic();
         let mut out: Vec<Request> = vec![];
         let mut seen: BTreeSet<Hash> = BTreeSet::new();
         for same_text in [true, false] {
@@ -299,7 +301,9 @@ impl ReadState {
                     let mut items = vec![a.1.clone(), b.1.clone()];
                     items.sort_by_key(Item::pair_side);
                     let key = items_key(&items);
-                    if seen.insert(key) {
+                    // a settled pair takes no place: else the first pairs, once judged, would
+                    // hold the limit and hide the rest for good
+                    if semantic.settled(&key).is_none() && seen.insert(key) {
                         out.push(Request {
                             key,
                             items,
