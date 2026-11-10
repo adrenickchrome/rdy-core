@@ -253,8 +253,8 @@ pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
             &a.id,
             &cx.session.default_view(),
             &a.scope,
-            // markdown carries the whole block; compact would give only its one-line summary
-            "markdown",
+            // yaml carries every field and the body; compact would give only a one-line summary
+            "yaml",
             None,
         )?;
         return Ok(json!({
