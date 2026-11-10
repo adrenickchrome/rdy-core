@@ -1,0 +1,59 @@
+{
+  "name": "tally.rdydump",
+  "size": 30167,
+  "sha256": "f5105a820d21fa71d787dbf7df8e7d6cd7b50e43557e2bae84161b458c6cb3b1",
+  "blake3": "128af8070159d2b46b716d6b00bd90a5481548d321571b1831f37addf4cc52f4",
+  "build_list_sha256": "5efa03bdb11dfd9183130565a51a3e9cc9c91de9d3277b38ba484b41c53b3eba",
+  "builder_revision": "2bc4b5cbdb5f3b13840e23d35facaaa1cfe54b59",
+  "rdy_version": "0.47.0",
+  "dump_format": 4,
+  "store_format": {
+    "features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "assessment",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "content_hash_v2",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        }
+      ],
+      "manifest_version": 1
+    }
+  },
+  "landing": "7ce5dcb4c1088f60dda5f3e0a8062bd496685296177e5407efe54fc42bc9f8e6",
+  "tag": "v1.0.0",
+  "ids": {
+    "$D30": "D-MFTBD",
+    "$d_dec": "d-C3YFZ",
+    "$d_gloss": "d-ZZH1T",
+    "$d_overview": "d-K5924",
+    "$d_purge": "d-HJMR0",
+    "$d_store": "d-R9MP2",
+    "$f_design": "fd-Y03QJ",
+    "$f_ops": "fd-1CNHT",
+    "$f_product": "fd-EA5B2",
+    "$f_purge": "f-T7H5D",
+    "$m_purge": "m-X9Q9Y",
+    "$m_store": "m-QYVR6",
+    "$r_size": "r-BWMBP",
+    "$s_dec": "s-X581W",
+    "$s_fail": "s-MCB9M",
+    "$s_goals": "s-Q281K",
+    "$s_non": "s-B5K1Y",
+    "$s_parts": "s-2M48V",
+    "$s_runs": "s-CEG1C",
+    "$s_sum": "s-DMVW4",
+    "$t_event": "t-XA1GN",
+    "$t_issue": "t-VRXRC",
+    "$t_ret": "t-G914Y"
+  }
+}
