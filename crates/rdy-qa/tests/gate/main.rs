@@ -12,6 +12,7 @@ mod gate_considered_options;
 mod gate_coverage_lowered;
 mod gate_exceptions;
 mod gate_foreign;
+mod gate_foreign_locks;
 mod gate_freshness;
 mod gate_grounded;
 mod gate_identity;

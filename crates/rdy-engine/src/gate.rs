@@ -3430,6 +3430,9 @@ impl Rdy {
         });
         let changes = changes_of(&st, &p.changes)?;
         linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
+        // repo links (rpl23): a deviation written before its target's organization or team lock
+        // was adopted never lands
+        crate::foreign_locks::check_landing(&st, changes.iter().flat_map(|c| &c.ops))?;
         // FW-HB1, RULING F1's limit: --strict and reviews.require_up_to_date refuse any landing
         // since the version was proposed
         Self::check_base_moved(&st, &pref, &p, &opts)?;

@@ -11,6 +11,8 @@
 //!   `E_VALIDATION`. Approval rules are the proposal's (a deviation is a CONFIRM exception).
 //! - A deviation governs the local blocks that cite its target; its decision id is the waiver
 //!   key ([`ReadState::deviations`]).
+//! - A decision never departs from an instruction that an organization or team set locks in
+//!   force: `E_INSTRUCTION_LOCKED` ([`crate::foreign_locks`]).
 use crate::error::*;
 use crate::foreign::ForeignState;
 use crate::foreign_refs::{RepoLinks, unknown_alias};
@@ -173,8 +175,9 @@ impl<'a> Guard<'a> {
 }
 
 /// Refuses a `deviates_from` target of `block` that is cited but neither a decision nor an
-/// instruction. An external decision always passes. A target whose pin no delivery holds is left
-/// to the held-pin check.
+/// instruction, and one that an organization or team set locks (`E_INSTRUCTION_LOCKED`,
+/// [`crate::foreign_locks`]). An external decision always passes the type check. A target whose
+/// pin no delivery holds is left to the held-pin check.
 pub(crate) fn check_deviation_targets(
     st: &ReadState,
     links: &RepoLinks,
@@ -204,7 +207,8 @@ pub(crate) fn check_deviation_targets(
             )));
         }
     }
-    Ok(())
+    // a decision never departs from an instruction an organization or team set locks (rpl23)
+    crate::foreign_locks::check_deviation(st, block)
 }
 
 /// One deviation: a decision that departs from a cited block or an external decision.

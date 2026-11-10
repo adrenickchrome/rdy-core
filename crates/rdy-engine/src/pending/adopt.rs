@@ -258,13 +258,18 @@ fn walk(st: &ReadState, repo: &RepoId, head: Hash) -> Result<Walk, RdyError> {
 /// The citations of canon: per repo, each cited block with the blocks that pin it and the pin.
 type Citations = BTreeMap<RepoId, Vec<(ForeignId, BlockId, ForeignPin)>>;
 
+/// The citations of `m`. A repo link's instruction baseline pins cite nothing (C14): only that
+/// link's own instruction rows move them, so another link of the same repo never does (rpl23).
 fn citations(m: &crate::Materialized) -> Citations {
     let mut out: Citations = BTreeMap::new();
     for b in m
         .iter()
         .filter(|b| !b.foreign.pins.is_empty() && !b.is_redacted())
     {
-        for (target, pin) in &b.foreign.pins {
+        let baseline: BTreeSet<&ForeignId> = crate::foreign_refs::instruction_baseline(b)
+            .map(|(t, _)| t)
+            .collect();
+        for (target, pin) in b.foreign.pins.iter().filter(|(t, _)| !baseline.contains(t)) {
             out.entry(target.repo)
                 .or_default()
                 .push((target.clone(), b.id.clone(), pin.clone()));

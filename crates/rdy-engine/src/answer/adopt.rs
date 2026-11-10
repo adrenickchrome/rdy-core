@@ -35,6 +35,13 @@
 //! `adopt-<card hash, first 12 digits>`, asks for no second approval and checks only readiness
 //! and freshness. When the card moves no pin (a rebind or a set change alone), the `Adopt` ANSWER
 //! is written alone. A refusal writes nothing, and the card stays open with its hash.
+//!
+//! # Locks
+//!
+//! Before either write, an adoption whose instruction baseline, under the delivery's set, would
+//! lock an instruction that a live deviation departs from is refused with `E_INSTRUCTION_LOCKED`
+//! and the fix `revoke the deviation <id> first, then answer the adopt item again`
+//! ([`crate::foreign_locks`]). It writes nothing.
 use super::{
     AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer, assurance, changed, labels, put_alone,
 };
@@ -183,7 +190,12 @@ fn adopt(
         ));
     }
     let answer = record(by, &b, AnswerAct::Adopt, ADOPT_LABEL, note)?;
-    let adoption = adoption_of(&r.read(), &b)?;
+    let adoption = {
+        let st = r.read();
+        let adoption = adoption_of(&st, &b)?;
+        check_locks(&st, &b, &adoption)?;
+        adoption
+    };
     if adoption.ops.is_empty() {
         let h = put_alone(r, &answer)?;
         return Ok(AnswerStep::Done(Box::new(info(b, by, AnswerAct::Adopt, h))));
@@ -261,6 +273,30 @@ fn adoption_of(st: &ReadState, b: &Bound) -> Result<Adoption, RdyError> {
     // every pin the adoption writes names a version a delivery holds
     st.check_held_pins(&Scope::Canon, &changed_blocks)?;
     Ok(Adoption { ops, moves })
+}
+
+/// Refuses the adoption when the instruction baseline it leaves, under the delivery's set, locks
+/// an instruction that a live deviation departs from (rpl23, `E_INSTRUCTION_LOCKED`): the
+/// baseline the adoption's update of the link block writes, else the one canon's link pins.
+fn check_locks(st: &ReadState, b: &Bound, adoption: &Adoption) -> Result<(), RdyError> {
+    let Some(PlanCardBinding::Adopt {
+        repo, link, entry, ..
+    }) = &b.item.plan_binding
+    else {
+        return Err(bug(b, "the card binds no delivery"));
+    };
+    let updated = adoption.ops.iter().find_map(|op| match op {
+        Op::Update { block, .. } if block.id == *link => Some(block.clone()),
+        _ => None,
+    });
+    let block = match updated {
+        Some(blk) => blk,
+        None => match st.materialized(&Scope::Canon)?.get(link) {
+            Some(blk) => blk.clone(),
+            None => return Ok(()),
+        },
+    };
+    crate::foreign_locks::check_adopt(st, link, repo, entry, &block.foreign.pins)
 }
 
 /// Why a row does not apply: the card moved, or a read failed.
