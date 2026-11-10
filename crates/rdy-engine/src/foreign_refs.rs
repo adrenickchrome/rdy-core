@@ -15,12 +15,13 @@
 //! - Aliases are unique among live repo links, and a link never names this project's own repo.
 //! - [`ReadState::check_held_pins`] is the one held-pin check: every foreign pin must name content
 //!   a delivery before the state's watermark carried. A write applies it before it appends;
-//!   replay, carry and adoption call it too.
+//!   adoption calls it too, and [`ReadState::check_carried_pins`] applies it to the changes that
+//!   view replay, or any other path that brings changes, takes.
 use crate::error::*;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_model::foreign::{ForeignId, ForeignPin};
 use rdy_model::reference::{ForeignRef, foreign_ref, foreign_token};
-use rdy_model::{Block, BlockId, RefMode, RepoId, key, ref_spans};
+use rdy_model::{Block, BlockId, Change, Op, RefMode, RepoId, key, ref_spans};
 use rdy_schema::repo_link::{
     FIX as LINK_FIX, REPO_LINK, REPO_LINK_PREFIX, is_valid_alias, is_valid_repo_id,
     message as link_message,
@@ -499,5 +500,26 @@ impl ReadState {
             }
         };
         check_held(self, blocks, &shown)
+    }
+
+    /// [`ReadState::check_held_pins`] over every block version that `changes` write: the check
+    /// of changes that this store may not have written through a checked write, before any of
+    /// them is applied (repo links, D-FK58A, D-NXHX3). A path that brings changes calls it
+    /// first; view replay calls it on its source changes. So a carried change cannot bring a pin
+    /// whose delivery the store lacks. The check reads the foreign log only: it never takes or
+    /// records a delivery. A deleted block holds no pin.
+    pub fn check_carried_pins<'c>(
+        &self,
+        scope: &Scope,
+        changes: impl IntoIterator<Item = &'c Change>,
+    ) -> Result<(), RdyError> {
+        let blocks = changes
+            .into_iter()
+            .flat_map(|c| &c.ops)
+            .filter_map(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } => Some(block),
+                Op::Delete { .. } => None,
+            });
+        self.check_held_pins(scope, blocks)
     }
 }
