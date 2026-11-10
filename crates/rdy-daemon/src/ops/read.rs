@@ -253,7 +253,8 @@ pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
             &a.id,
             &cx.session.default_view(),
             &a.scope,
-            "compact",
+            // markdown carries the whole block; compact would give only its one-line summary
+            "markdown",
             None,
         )?;
         return Ok(json!({
