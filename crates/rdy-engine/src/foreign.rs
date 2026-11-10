@@ -313,6 +313,24 @@ impl ReadState {
             .get(&(target.repo, target.id.clone(), pin.content, pin.encoding))
             .copied())
     }
+
+    /// The version of `target` that `pin` holds, compared with `delivered` by content and
+    /// encoding, which are all a pin records: `delivered`'s own version when it carries the
+    /// pinned content, so that a version that only moved the block is the same baseline;
+    /// otherwise the held version [`ReadState::foreign_held_pin`] reports, kept as provenance.
+    pub(crate) fn foreign_pin_baseline(
+        &self,
+        target: &ForeignId,
+        pin: &ForeignPin,
+        delivered: Option<&HeldVersion>,
+    ) -> Result<Option<Hash>, RdyError> {
+        match delivered {
+            Some(h) if h.version.content == pin.content && h.version.encoding == pin.encoding => {
+                Ok(Some(h.version.version))
+            }
+            _ => self.foreign_held_pin(target, pin),
+        }
+    }
 }
 
 impl Rdy {

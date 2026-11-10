@@ -753,3 +753,43 @@ fn rpl23_another_link_of_the_repo_never_moves_a_baseline() {
     assert_eq!(fx.pins(&fx.link("lib"))[&target], pin_of(&loose));
     fx.r.fsck().unwrap();
 }
+
+/// Final review fix (finding 2): an instruction pin names content and encoding, not one version.
+/// A delivery that only moves an adopted locked instruction to another place keeps its lock in
+/// force. Neither `unadopted_locked` nor the link's pending list reports it, also after the next
+/// adoption.
+#[test]
+fn rplf_reordered_lock_stays_adopted() {
+    let mut fx = fixture(&[("org", repo(7), "pf-AGNT1")]);
+    let org = Some(ForeignSet::Organization);
+    let lock = rule("ai-KPT01", "Every claim names its owner.", true);
+    let open = |n: usize| {
+        rule(
+            "ai-FRE01",
+            &format!("Prefer short sections, round {n}."),
+            false,
+        )
+    };
+    fx.deliver("org", "v0", org.clone(), &[&lock, &open(0)]);
+    fx.adopt("org");
+    assert!(fx.r.read().unadopted_locked().unwrap().is_empty());
+    let target = ForeignId::new(repo(7), id("ai-KPT01"));
+    for (n, order) in ["W", "X", "Y", "Z", "V"].into_iter().enumerate() {
+        let mut moved = lock.clone();
+        moved.order = order.into();
+        assert_eq!(moved.content_hash(), lock.content_hash(), "{order}");
+        fx.deliver(
+            "org",
+            &format!("v{}", n + 1),
+            org.clone(),
+            &[&moved, &open(n + 1)],
+        );
+        fx.adopt("org");
+        assert_eq!(fx.pins(&fx.link("org"))[&target], pin_of(&lock), "{order}");
+        let rows = fx.r.read().unadopted_locked().unwrap();
+        assert!(rows.is_empty(), "{order}: {rows:#?}");
+        let show = fx.r.read().link_show("org").unwrap();
+        assert!(show.pending.is_empty(), "{order}: {:#?}", show.pending);
+    }
+    fx.r.fsck().unwrap();
+}

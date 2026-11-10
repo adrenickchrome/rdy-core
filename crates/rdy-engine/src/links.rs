@@ -428,7 +428,7 @@ impl ReadState {
         }
         let mut pending = vec![];
         if let Some(v) = view.filter(|v| !v.revoked) {
-            let baseline = adopted_instructions(self, &cut.m, &row.link, &row.repo)?;
+            let baseline = adopted_instructions(self, &cut.m, &row.link, &row.repo, &v.members)?;
             for r in instruction_rows(&v.members, &baseline)
                 .into_iter()
                 .take(ROWS_MAX)

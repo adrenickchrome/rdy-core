@@ -873,3 +873,68 @@ fn rpl20_link_edit_keeps_the_adopted_instruction_baseline() {
     );
     r.fsck().unwrap();
 }
+
+/// Final review fix (finding 2): an instruction pin names content and encoding, not one version.
+/// A delivery that only moves an adopted instruction to another place keeps it in force. Neither
+/// the card nor the link's pending list reports it, also after the next adoption.
+#[test]
+fn rplf_reordered_instruction_stays_adopted() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let files = tempfile::tempdir().unwrap();
+    let (_s, link) = linked(&mut r);
+    let rule = block(
+        "ai-RGMT1",
+        "instruction",
+        "Write every claim in the present tense.",
+    );
+    let other = |n: usize| {
+        block(
+            "ai-RGMT2",
+            "instruction",
+            &format!("Name every owner, round {n}."),
+        )
+    };
+    let org = Some(ForeignSet::Organization);
+    deliver_in(
+        &mut r,
+        files.path(),
+        "v0",
+        &link,
+        org.clone(),
+        &[&rule, &other(0)],
+    );
+    let card = the_card(&r);
+    answer(&mut r, &card.r#ref, "adopt", None, Some(&card.card_hash)).unwrap();
+    let rule_id = ForeignId::new(cited(), rule.id.clone());
+    assert_eq!(pins_of(&r, &link)[&rule_id], pin_of(&rule));
+    for (n, order) in ["W", "X", "Y", "Z", "V"].into_iter().enumerate() {
+        let mut moved = rule.clone();
+        moved.order = order.into();
+        assert_eq!(moved.content_hash(), rule.content_hash(), "{order}");
+        let changed = other(n + 1);
+        deliver_in(
+            &mut r,
+            files.path(),
+            &format!("v{}", n + 1),
+            &link,
+            org.clone(),
+            &[&moved, &changed],
+        );
+        // the card offers the changed instruction alone
+        let card = the_card(&r);
+        let Some(PlanCardBinding::Adopt { instructions, .. }) = &card.plan_binding else {
+            panic!("{:#?}", card.plan_binding)
+        };
+        let ids: Vec<&BlockId> = instructions.iter().map(|i| &i.id).collect();
+        assert_eq!(ids, vec![&changed.id], "{order}: {instructions:#?}");
+        answer(&mut r, &card.r#ref, "adopt", None, Some(&card.card_hash)).unwrap();
+        assert_eq!(pins_of(&r, &link)[&rule_id], pin_of(&rule), "{order}");
+        assert!(
+            adopt_items(&r).is_empty(),
+            "{order}: the adoption settles it"
+        );
+        let show = r.read().link_show("core").unwrap();
+        assert!(show.pending.is_empty(), "{order}: {:#?}", show.pending);
+    }
+    r.fsck().unwrap();
+}

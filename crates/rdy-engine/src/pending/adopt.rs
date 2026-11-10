@@ -426,12 +426,14 @@ pub(crate) fn adopted_set(
 
 /// The instructions in force for a link: the versions its `repo_link` block pins (D-MEMMQ). An
 /// adopt answer settles a delivery, but it is no evidence that every instruction in it was
-/// adopted, so the pins alone say what is in force.
+/// adopted, so the pins alone say what is in force. A pin records content and encoding, so a
+/// member of `members` that carries the pinned content stands for the pin's version.
 pub(crate) fn adopted_instructions(
     st: &ReadState,
     m: &crate::Materialized,
     link: &BlockId,
     repo: &RepoId,
+    members: &BTreeMap<BlockId, HeldVersion>,
 ) -> Result<BTreeMap<BlockId, Hash>, RdyError> {
     let mut out = BTreeMap::new();
     let Some(b) = m.get(link) else {
@@ -440,7 +442,7 @@ pub(crate) fn adopted_instructions(
     for (target, pin) in &b.foreign.pins {
         if target.repo == *repo
             && is_instruction(&target.id)
-            && let Some(v) = st.foreign_held_pin(target, pin)?
+            && let Some(v) = st.foreign_pin_baseline(target, pin, members.get(&target.id))?
         {
             out.insert(target.id.clone(), v);
         }
@@ -544,7 +546,7 @@ pub(crate) fn adopt_items(st: &ReadState, now: i64) -> Result<Vec<Item>, RdyErro
         rebinds.sort();
         rebinds.dedup();
         let baseline_set = w.baseline.as_ref().and_then(|(_, s)| s.clone());
-        let in_force = adopted_instructions(st, &m, &row.link, &row.repo)?;
+        let in_force = adopted_instructions(st, &m, &row.link, &row.repo, &view.members)?;
         let rows = instruction_rows(&view.members, &in_force);
         let set = AdoptSet {
             from: baseline_set,

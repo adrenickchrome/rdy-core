@@ -518,7 +518,8 @@ impl ReadState {
                 && let Some(link) = m.get(&row.link)
             {
                 for (target, pin) in instruction_baseline(link) {
-                    if let Some(v) = self.foreign_held_pin(target, pin)?
+                    let delivered = view.members.get(&target.id);
+                    if let Some(v) = self.foreign_pin_baseline(target, pin, delivered)?
                         && self
                             .foreign_held(target, &v)?
                             .is_some_and(|b| is_locked(&b))
