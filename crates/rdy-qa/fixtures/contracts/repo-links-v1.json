@@ -8,6 +8,7 @@
       },
       "not_probed_commands": {
         "add": "working copy: the working_copy row records its replies",
+        "adopt-upstream": "needs a delivered cited decision and its local copy; cli_repo_links pins its replies",
         "alt": "needs two open views and a question; its MCP twin is listed too",
         "auth": "signs in to a hosted service",
         "check": "checks a file; the config row records its refusal",
@@ -31,6 +32,7 @@
         "new finding": "needs a finding pack",
         "new instruction": "writes an instruction; cli_instructions pins its replies",
         "new profile": "needs a publication profile",
+        "new repo-link": "writes a repo_link block; cli_repo_links pins its replies",
         "new source": "needs a source file",
         "pack": "checks a pack file; the schema_packs row covers it",
         "plan confirm": "needs an open plan item",
@@ -670,6 +672,88 @@
             "agent_key": "null",
             "key": "null",
             "sign": "string"
+          }
+        },
+        "links": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "links": [
+              {
+                "alias": "string",
+                "delivered_at": "string",
+                "link": "string",
+                "pins_behind": "number",
+                "profile": "string",
+                "profile_version": "string",
+                "repo": "string",
+                "state": "string",
+                "tag": "string"
+              }
+            ],
+            "unlinked": [
+              {
+                "delivered_at": "string",
+                "pins_behind": "number",
+                "profile_version": "string",
+                "repo": "string",
+                "state": "string",
+                "tag": "string"
+              }
+            ]
+          }
+        },
+        "links refs": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "repos": [
+              {
+                "alias": "string",
+                "pins": [
+                  {
+                    "behind": "bool",
+                    "cited_by": [
+                      "string"
+                    ],
+                    "delivered": "string",
+                    "held": "string",
+                    "target": "string"
+                  }
+                ],
+                "repo": "string"
+              }
+            ]
+          }
+        },
+        "links show": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "blocks": [
+              {
+                "block_type": "string",
+                "id": "string",
+                "pin?": "string",
+                "status?": "string",
+                "summary": "string",
+                "version": "string"
+              }
+            ],
+            "link": {
+              "alias": "string",
+              "delivered_at": "string",
+              "link": "string",
+              "pins_behind": "number",
+              "profile": "string",
+              "profile_version": "string",
+              "repo": "string",
+              "state": "string",
+              "tag": "string"
+            }
           }
         },
         "log": {
@@ -9636,6 +9720,295 @@
         {
           "args": [
             {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "LinksArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "links",
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "alias",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "ALIAS"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "alias"
+                  ],
+                  "id": "Show",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "show",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "alias",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "value_names": [
+                    "ALIAS"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "alias"
+                  ],
+                  "id": "Refs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "refs",
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "old",
+              "index": 1,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "OLD"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "adopted_as",
+              "index": 2,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "ALIAS:ID"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "view",
+              "long": "view",
+              "num_args": "1",
+              "value_names": [
+                "VIEW"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "adopted_as",
+                "old",
+                "view"
+              ],
+              "id": "AdoptUpstreamArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "adopt-upstream",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
               "action": "set",
               "id": "max_tokens",
               "long": "max-tokens",
@@ -10866,6 +11239,129 @@
                 }
               ],
               "name": "instruction",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "alias",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "ALIAS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "parent",
+                  "long": "parent",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "PARENT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "repo",
+                  "long": "repo",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REPO"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "profile",
+                  "long": "profile",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "PROFILE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "title",
+                  "long": "title",
+                  "num_args": "1",
+                  "value_names": [
+                    "TITLE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "view",
+                  "long": "view",
+                  "num_args": "1",
+                  "value_names": [
+                    "VIEW"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "alias",
+                    "parent",
+                    "profile",
+                    "repo",
+                    "title",
+                    "view"
+                  ],
+                  "id": "RepoLink",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "repo-link",
               "subcommands": []
             },
             {
@@ -16923,6 +17419,8 @@
       "v4-f1-e1-ck-holder.rdydump": "7016 f0fde8153ed1a1801bc8ad163c08e578684445086ba9de175c163e3b06616bae",
       "v4-f1-e1-ck.expect.json": "18732 0a4881db4127014b6e49ee43ab7b207182ad16774075295d98fbd2b38b7b52f7",
       "v4-f1-e1-ck.rdydump": "13383 2c576d7c7e1114d6a3ff0b955babb7c6c71d379e2f278e8fcd6bcacd7b8f2cce",
+      "v4-f1-e1-foreign-copy.expect.json": "27431 d293339ba509481420ed4c8e5305e3c45b94c93de97273a65365061c8c817db9",
+      "v4-f1-e1-foreign-copy.rdydump": "20793 6aca7c40fefdff88db530fdbce96355f38e068c85e65ba4e8e627b9977a78bbf",
       "v4-f1-e1-holder-chain-1.rdydump": "4486 49a98826eb8c1bb79f02301ce1430526a6f4e012dba10c26673f2280c76bd6cf",
       "v4-f1-e1-holder-chain-2.rdydump": "15678 fe9739ea5b0d378f5112f48857be3fd55cd46ae0b56c0e6cc513f8593020a9c2",
       "v4-f1-e1-holder-chain-full.rdydump": "53920 ded080d6d9ce7d1b9d64ee4bb331dd924f61a1ed2140335daa131c52330a2d12",
@@ -18045,6 +18543,7 @@
       "LIMIT_FIX": "\"shorten .rdyignore; one pattern can cover many files (**/*.draft.yaml)\"",
       "LINEAGE_DECISION_FIX": "\"a decision that governs it was refined or partly superseded: check that it still holds, and supersede it if not; no repin is needed\"",
       "LINEAGE_FIX": "\"a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed\"",
+      "LINKS_OP_FIX": "\"use op list, show or refs\"",
       "LOAD_CHAIN_FIX": "\"pass the full dump, then each increment in chain order\"",
       "LOCKED_FIX": "\"add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction\"",
       "LOST_FIX": "\"run rdy status: it finishes the commit if the store recorded it\"",
@@ -18063,7 +18562,7 @@
       "NO_USER_FILE_MESSAGE": "\"the user config path is not available\"",
       "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
       "OCCUPIED_FIX": "\"Choose an unused absolute path with instructions.person, or move this path aside, then run rdy setup.\"",
-      "OP_FIX": "\"use op list, show or refs\"",
+      "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_FIX": "\"Search these pages, or go to the home page.\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
@@ -19479,8 +19978,75 @@
       },
       "rdy_links": {
         "ok": {
-          "links": [],
-          "unlinked": []
+          "links": [
+            {
+              "alias": "string",
+              "delivered_at": "string",
+              "link": "string",
+              "pins_behind": "number",
+              "profile": "string",
+              "profile_version": "string",
+              "repo": "string",
+              "state": "string",
+              "tag": "string"
+            }
+          ],
+          "unlinked": [
+            {
+              "delivered_at": "string",
+              "pins_behind": "number",
+              "profile_version": "string",
+              "repo": "string",
+              "state": "string",
+              "tag": "string"
+            }
+          ]
+        }
+      },
+      "rdy_links refs": {
+        "ok": {
+          "repos": [
+            {
+              "alias": "string",
+              "pins": [
+                {
+                  "behind": "bool",
+                  "cited_by": [
+                    "string"
+                  ],
+                  "delivered": "string",
+                  "held": "string",
+                  "target": "string"
+                }
+              ],
+              "repo": "string"
+            }
+          ]
+        }
+      },
+      "rdy_links show": {
+        "ok": {
+          "blocks": [
+            {
+              "block_type": "string",
+              "id": "string",
+              "pin?": "string",
+              "status?": "string",
+              "summary": "string",
+              "version": "string"
+            }
+          ],
+          "link": {
+            "alias": "string",
+            "delivered_at": "string",
+            "link": "string",
+            "pins_behind": "number",
+            "profile": "string",
+            "profile_version": "string",
+            "repo": "string",
+            "state": "string",
+            "tag": "string"
+          }
         }
       },
       "rdy_log": {
@@ -28517,7 +29083,9 @@
       "v2-f1-e1-ck.expect.json": "15574 c728a7deb8f066a523b990dd0266fe30b6bdbdc974cff005076dcbb62a0379e6",
       "v2-f1-e1-ck.rdysync": "5792 9ffaffb4df66be3b35b42e1acad1d96b9b855f6a31b52f58f299f462ee06bce3",
       "v2-f1-e1.expect.json": "119223 8c5369c80a9be4d8da3c6d6e8e7457a7ab35da89616964480efbd167dae6fd70",
-      "v2-f1-e1.rdysync": "70239 7e6d2097cead2408ec60a99add09e4138dcbf729b6eff1b25c36b19c76334ddc"
+      "v2-f1-e1.rdysync": "70239 7e6d2097cead2408ec60a99add09e4138dcbf729b6eff1b25c36b19c76334ddc",
+      "v3-f1-e1-link-delivery.expect.json": "6550 39086987b327e970e423151b9c32c7f342f47fb020a30b8987ab57008a19de27",
+      "v3-f1-e1-link-delivery.rdysync": "1583 b38779eba592db56274f4a156edb70baacbe4a51dbfe9ca70242e65586eb483f"
     },
     "header_fields": [
       "features_len: u32",
