@@ -572,16 +572,17 @@ class agi6_Candidate(Fixture):
                  b'In JSON, write each backslash twice: `"C:\\\\Users\\\\ana\\\\shop.rdydump"`.\n'
                  b'with a native path, such as `C:\\Users\\ana\\shop`. Messages show plain drive paths\n')
         filler = b'\0' * (CANDIDATE.SCAN_CHUNK - 20)
-        for binary in (guide, 'C:\\Users\\ana\\shop`'.encode('utf-16-le'), b'C:/Users/ana/shop ',
-                       filler + b'`C:\\Users\\ana\\shop.rdydump`', b'C:\\Users\\ana\\shop'):
+        for binary in (guide, 'C:\\Users\\ana\\shop`'.encode('utf-16-le'),
+                       filler + b'`C:\\Users\\ana\\shop.rdydump`'):
             path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + binary, preview=False))
             self.assertEqual(CANDIDATE.inspect_archive(path, V, WINDOWS, extra=extra), 0, binary[-60:])
         # Every other user path still refuses, next to the example too, and so does the example
-        # user's home with more than one plain name under it.
+        # user's home with anything but a documented token.
         for binary in (guide + b'C:\\Users\\nick\\Repo', b'C:\\Users\\anabel\\x', b'C:\\Users\\Ana\\x',
                        b'\\Users\\ana\\x', guide + 'C:\\Users\\runneradmin\\.cargo'.encode('utf-16-le'),
                        b'C:\\Users\\ana\\..\\runneradmin\\x', b'C:\\Users\\ana\\.cargo\\registry\\src',
                        'C:\\Users\\ana\\.rustup\\toolchains'.encode('utf-16-le'), b'C:/Users/ana/src/main.rs',
+                       b'C:/Users/ana/shop ', b'C:\\Users\\ana\\shop',
                        filler + b'C:\\Users\\ana\\shop\\src\\lib.rs'):
             path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + binary, preview=False))
             with self.assertRaises(ControllerError) as caught:
@@ -602,6 +603,61 @@ class agi6_Candidate(Fixture):
         path.write_bytes(release_archive(LINUX, b'/Users/ana/shop', preview=False))
         with self.assertRaises(ControllerError):
             CANDIDATE.inspect_archive(path, V, LINUX)
+
+    # What rdy.exe holds of the guide's example path: the raw bundle bytes and the parsed row text,
+    # each token with the characters that close it in the guide.
+    EXAMPLE_TOKENS = (
+        'C:\\Users\\ana\\shop`', 'C:\\Users\\ana\\shop.rdydump`', 'C:\\\\Users\\\\ana\\\\shop.rdydump"',
+        'C:\\\\Users\\\\ana\\\\shop`', 'C:\\\\Users\\\\ana\\\\shop.rdydump`',
+        'C:\\\\\\\\Users\\\\\\\\ana\\\\\\\\shop.rdydump\\"',
+    )
+
+    def scan_windows(self, text, encoding, extra=()):
+        path = self.tmp / CANDIDATE.release_archive_name(V, WINDOWS)
+        path.write_bytes(release_archive(WINDOWS, b'MZ rdy ' + text.encode(encoding), preview=False))
+        return CANDIDATE.inspect_archive(path, V, WINDOWS, extra=list(extra))
+
+    def test_relc1_each_documented_example_token_passes_the_windows_scan(self):
+        for token in self.EXAMPLE_TOKENS:
+            for encoding in ('utf-8', 'utf-16-le'):
+                self.assertEqual(self.scan_windows('x ' + token + ' y', encoding), 0, (token, encoding))
+
+    def test_relc1_only_the_exact_example_tokens_pass_the_windows_scan(self):
+        for text in ('C:\\Users\\ana\\shop dir\\src\\lib.rs', '`C:\\Users\\ana\\shop dir`',
+                     'C:\\Users\\ana\\shop\\src\\lib.rs', '`C:\\Users\\ana\\shop\\src\\lib.rs`',
+                     'C:\\Users\\ana\\other', '`C:\\Users\\ana\\other`', 'C:\\Users\\ana\\shop\u00e9',
+                     '`C:\\Users\\ana\\shop\u00e9`', '`C:\\Users\\ana\\shop\\x`'):
+            for encoding in ('utf-8', 'utf-16-le'):
+                with self.assertRaises(ControllerError, msg=(text, encoding)) as caught:
+                    self.scan_windows(text, encoding)
+                self.assertEqual(str(caught.exception), 'the ' + WINDOWS + ' binary holds 1 host path', (text, encoding))
+        # a token followed by a path is flagged, in both encodings
+        for token in self.EXAMPLE_TOKENS:
+            for encoding in ('utf-8', 'utf-16-le'):
+                with self.assertRaises(ControllerError, msg=(token, encoding)):
+                    self.scan_windows(token[:-1] + '\\x', encoding)
+
+    def test_relc1_builder_home_at_the_example_home_removes_the_example_exemption(self):
+        for token in self.EXAMPLE_TOKENS:
+            for encoding in ('utf-8', 'utf-16-le'):
+                with self.assertRaises(ControllerError, msg=(token, encoding)):
+                    self.scan_windows(token, encoding, extra=['C:\\Users\\ana'])
+                with self.assertRaises(ControllerError, msg=(token, encoding)):
+                    self.scan_windows(token, encoding, extra=['C:/Users/ana/work'])
+
+    def test_relc1_example_tokens_match_the_constant_and_occur_in_the_guide(self):
+        self.assertEqual(sorted(CANDIDATE.WINDOWS_EXAMPLE_TOKENS), sorted(self.EXAMPLE_TOKENS))
+        root = Path(__file__).resolve().parents[2]
+        raw = (root / 'release' / 'agent-guide.json').read_text(encoding='utf-8')
+        rows = '\n'.join(row['text'] for ruleset in json.loads(raw)['rulesets'] for row in ruleset['rows'])
+        for token in self.EXAMPLE_TOKENS:
+            self.assertTrue(token in raw or token in rows, token)
+        # and the guide holds no other text under the example home
+        for text in (raw, rows):
+            spans = [m.span() for token in self.EXAMPLE_TOKENS
+                     for m in re.finditer(re.escape(token), text)]
+            for m in re.finditer(r'(?i)Users[\\/]+ana', text):
+                self.assertTrue(any(a <= m.start() and m.end() <= b for a, b in spans), text[m.start() - 5:m.end() + 20])
 
     def test_relc1_native_windows_build_uses_exe_and_remaps_paths(self):
         raw = guide_tests.valid_bundle(V)
