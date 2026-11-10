@@ -328,6 +328,37 @@ struct RequestFacts {
     proposal: Option<Hash>,
 }
 
+/// An ASSESSMENT as the report reads it. The wire type reads a record of any encoding; the
+/// runtime type refuses ASSESSMENT encoding 2 with a foreign part (repo links: a propose that
+/// reaches a cited block writes one). The report's facts are the local part. A record with no
+/// foreign part is searched for quotes in its runtime shape, as before; one with a foreign part
+/// is searched as the whole wire record, as a TRANSITION is.
+struct ReadAssessment {
+    local: rdy_model::assessment::Assessment,
+    wire: Option<rdy_model::assessment::AssessmentV2>,
+}
+
+impl ReadAssessment {
+    fn read(reader: &StoreReader, h: &Hash) -> Result<ReadAssessment, RdyError> {
+        let w: rdy_model::assessment::AssessmentV2 = reader.get_typed(kinds::ASSESSMENT, h)?;
+        Ok(ReadAssessment {
+            local: w.local(),
+            wire: (!w.foreign.is_empty()).then_some(w),
+        })
+    }
+
+    /// [`Quotes::scan`] of the record as `record`, or [`Quotes::scan_unbound`] when `unbound`.
+    fn scan(&self, quotes: &mut Quotes<'_>, record: &str, unbound: bool) -> Result<(), RdyError> {
+        let kind = ImpactKind::Assessment;
+        match (&self.wire, unbound) {
+            (Some(w), true) => quotes.scan_unbound(kind, record, false, w),
+            (Some(w), false) => quotes.scan(kind, record, false, w),
+            (None, true) => quotes.scan_unbound(kind, record, false, &self.local),
+            (None, false) => quotes.scan(kind, record, false, &self.local),
+        }
+    }
+}
+
 /// Whether `a` names a block of the removal in its scope, reach, tensions, issues, confidence
 /// reasons or suspects (a block or its cause), or its policy version is a removed version.
 fn assessment_hits(
@@ -1183,9 +1214,11 @@ pub(crate) fn compute_excluding(
             // title or statement), and the report lists them. The record stays out of the
             // manifest rows, so the request never stales at its own propose
             if f.kind == kinds::ASSESSMENT {
-                let a: rdy_model::assessment::Assessment =
-                    reader.get_typed(kinds::ASSESSMENT, &f.hash)?;
-                quotes.scan_unbound(ImpactKind::Assessment, &f.hash.to_string(), false, &a)?;
+                ReadAssessment::read(reader, &f.hash)?.scan(
+                    &mut quotes,
+                    &f.hash.to_string(),
+                    true,
+                )?;
             }
             continue;
         }
@@ -1341,8 +1374,8 @@ pub(crate) fn compute_excluding(
             // the carried shapes (no writer yet): each whole typed record, which core reports
             // and cannot erase
             kinds::ASSESSMENT => {
-                let a: rdy_model::assessment::Assessment =
-                    reader.get_typed(kinds::ASSESSMENT, &h)?;
+                // the wire type reads a record of any encoding (repo links)
+                let read = ReadAssessment::read(reader, &h)?;
                 // ruling task-10 A and Amendment 2 (2026-10-29): an assessment of a version that
                 // carries this request is read for quotes and listed, in any batch, but it is
                 // left out of the manifest: no `inside` row and no `carried.assessments` entry.
@@ -1352,13 +1385,15 @@ pub(crate) fn compute_excluding(
                 // that names a removed block stays in the report
                 if own
                     .as_ref()
-                    .is_some_and(|o| o.versions.contains(&a.proposal))
+                    .is_some_and(|o| o.versions.contains(&read.local.proposal))
                 {
-                    quotes.scan_unbound(ImpactKind::Assessment, &rec, false, &a)?;
+                    read.scan(&mut quotes, &rec, true)?;
                     continue;
                 }
-                quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
-                if assessment_hits(&a, &versions, &affected_ids) {
+                read.scan(&mut quotes, &rec, false)?;
+                // a foreign part names cited versions by hash only, as a FOREIGN entry does: the
+                // local reference rows read the local part (D-CN4QJ)
+                if assessment_hits(&read.local, &versions, &affected_ids) {
                     carried.assessments.push(h);
                 }
             }

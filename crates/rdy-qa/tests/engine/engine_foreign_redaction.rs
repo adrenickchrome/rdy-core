@@ -690,3 +690,53 @@ fn rpl25_foreign_redaction_dump_loads() {
     let mut loaded2 = Rdy::open(&dest2).unwrap();
     clean(&mut loaded2);
 }
+
+/// Gate fix 2 (gate after rpl18 to rpl22): since rpl18 a propose whose reach cites a delivered
+/// block stores its assessment in ASSESSMENT encoding 2 with a foreign part, which the runtime
+/// `Assessment` refuses to read. The report reads the wire record: a report over such a store
+/// succeeds, and the removal of a local block that the assessment names lists the assessment.
+#[test]
+fn rpl25_report_reads_an_assessment_with_a_foreign_part() {
+    let _clock = pin_clock(7_000_000);
+    let w = world();
+    let r = &w.r;
+    let st = r.read();
+    let reader = st.reader();
+    let mut named: Vec<Hash> = vec![];
+    reader
+        .for_each_object_of(kinds::ASSESSMENT, |h| {
+            let a = reader.assessment_wire(&h)?;
+            if a.foreign.is_empty() {
+                return Ok(());
+            }
+            // the runtime type cannot hold the foreign part, so it refuses the record
+            assert!(
+                reader
+                    .get_typed::<rdy_model::assessment::Assessment>(kinds::ASSESSMENT, &h)
+                    .is_err()
+            );
+            if a.scope.blocks.contains(&w.claim) || a.reach.contains(&w.claim) {
+                named.push(h);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        !named.is_empty(),
+        "the citing propose stores a foreign part"
+    );
+    drop(st);
+    let report = dry(r, &[w.claim.to_string()]).unwrap().report;
+    for h in &named {
+        assert!(
+            report.inside.iter().any(|row| {
+                row.kind == rdy_model::redaction::ImpactKind::Assessment
+                    && row.record == h.to_string()
+            }),
+            "assessment {h} is listed: {:#?}",
+            report.inside
+        );
+    }
+    // a report on the cited version reads the same store
+    dry(r, &[aliased(&w.x1)]).unwrap();
+}
