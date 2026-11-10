@@ -64,8 +64,6 @@ pub struct SupersedeParams {
     pub view: Option<String>,
     /// With adopted_as only: the briefing token from rdy_brief. With decision, give brief inside decision.
     pub brief: Option<String>,
-    /// With adopted_as only: the budget for the response's consequences. With decision, give max_tokens inside decision.
-    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -159,10 +157,10 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
             "pass decision, the new decision, or adopted_as, the cited decision that is the upstream copy",
         )),
         (Some(decision), None) => {
-            if p.view.is_some() || p.brief.is_some() || p.max_tokens.is_some() {
+            if p.view.is_some() || p.brief.is_some() {
                 return Err(RdyError::new(
                     E_BAD_INPUT,
-                    "view, brief and max_tokens go inside decision when decision is given",
+                    "view and brief go inside decision when decision is given",
                     "move them into decision, or use adopted_as",
                 ));
             }
@@ -176,15 +174,7 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
                     "leave part out: an adopted copy supersedes the whole decision",
                 ));
             }
-            supersede_adopted(
-                st,
-                p.old,
-                adopted_as,
-                p.view,
-                p.brief,
-                p.max_tokens,
-                p.intent,
-            )
+            supersede_adopted(st, p.old, adopted_as, p.view, p.brief, p.intent)
         }
     }
 }
@@ -219,14 +209,12 @@ fn supersede_adopted(
     adopted_as: String,
     view: Option<String>,
     brief: Option<String>,
-    max_tokens: Option<usize>,
     intent: Option<String>,
 ) -> Result<Value, RdyError> {
-    check_tokens(max_tokens)?;
     let s = session(st)?;
     let view = view.unwrap_or_else(|| st.view.clone());
     let v = view.clone();
-    write_and_report(&*st.engine, &v, max_tokens, move |r| {
+    write_and_report(&*st.engine, &v, None, move |r| {
         r.supersede_adopted_as(&s, &view, &old, &adopted_as, brief, intent)
     })
     .map(|v| report_once(st, v))
