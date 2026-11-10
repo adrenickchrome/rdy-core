@@ -6,7 +6,7 @@ rdy stores what you intend and decided, and gives it to whoever needs it in a fo
 
 [![Latest release](https://img.shields.io/github/v/release/adrenickchrome/rdy-core?color=2456C9)](https://github.com/adrenickchrome/rdy-core/releases/latest) [![Docs](https://img.shields.io/badge/docs-getrdy.dev-2456C9)](https://getrdy.dev/docs/) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2456C9)](#license)
 
-[Documentation](https://getrdy.dev/docs/v0.47.0/docs/) · [Install](#install) · [Try it](#try-it-your-first-project) · [Releases](https://github.com/adrenickchrome/rdy-core/releases) · [Report problems](#report-problems)
+[Documentation](https://getrdy.dev/docs/latest/docs/) · [Install](#install) · [Try it](#try-it-your-first-project) · [Releases](https://github.com/adrenickchrome/rdy-core/releases) · [Report problems](#report-problems)
 
 This is **Release 1**, the first release of rdy with a compatibility promise. See "About Release 1" at the bottom.
 
@@ -17,6 +17,11 @@ This is **Release 1**, the first release of rdy with a compatibility promise. Se
 - **Before an agent writes**, rdy shows it what governs the change and what depends on it.
 - **After the write**, rdy shows what the change affected.
 - **Nothing joins the accepted design** until a person approves it.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/review-loop-dark.svg">
+  <img src=".github/readme/review-loop-light.svg" alt="An illustrated EU retention change moves from an agent’s proposal, through affected-document review in rdy, to a person’s confirmation and approval of Proposal 1@1.">
+</picture>
 
 rdy computes. Agents write. People decide.
 
@@ -137,19 +142,19 @@ To check the signature yourself, see "Verify the download" at the bottom. You do
 
    Open the link. Then change a decision and watch rdy follow the consequences. Ask your agent: “For EU customers, raw conversations must be deleted after 7 days. Keep the 30-day rule elsewhere and the 2-year metrics window.”
 
-Next: [Make your first change](https://getrdy.dev/docs/v0.47.0/docs/guide/start-here/first-change) and [Build a useful design](https://getrdy.dev/docs/v0.47.0/docs/guide/start-here/build-a-design).
+Next: [Make your first change](https://getrdy.dev/docs/latest/docs/guide/start-here/first-change) and [Build a useful design](https://getrdy.dev/docs/latest/docs/guide/start-here/build-a-design).
 
 ## Documentation
 
-The docs for this release are at **[getrdy.dev/docs](https://getrdy.dev/docs/v0.47.0/docs/)**. [Each release](https://getrdy.dev/docs/) keeps its own edition.
+The docs for the latest release are at **[getrdy.dev/docs](https://getrdy.dev/docs/latest/docs/)**. [Each release](https://getrdy.dev/docs/) keeps its own edition.
 
 | To | Read |
 |---|---|
-| Work with an agent, from a first project to a full design | [User guide](https://getrdy.dev/docs/v0.47.0/docs/guide/) |
-| Learn blocks, views, briefings, decisions and tensions | [Concepts](https://getrdy.dev/docs/v0.47.0/docs/concepts/) |
-| Look up a command, a tool or an error code | [CLI](https://getrdy.dev/docs/v0.47.0/docs/reference/cli) · [MCP tools](https://getrdy.dev/docs/v0.47.0/docs/reference/mcp-tools) · [Errors](https://getrdy.dev/docs/v0.47.0/docs/reference/errors) |
-| See the store, the daemon, the config and the working copy | [How rdy is built](https://getrdy.dev/docs/v0.47.0/internals/) |
-| Read what your agent reads | [Agent guide](https://getrdy.dev/docs/v0.47.0/agent-guide/) |
+| Work with an agent, from a first project to a full design | [User guide](https://getrdy.dev/docs/latest/docs/guide/) |
+| Learn blocks, views, briefings, decisions and tensions | [Concepts](https://getrdy.dev/docs/latest/docs/concepts/) |
+| Look up a command, a tool or an error code | [CLI](https://getrdy.dev/docs/latest/docs/reference/cli) · [MCP tools](https://getrdy.dev/docs/latest/docs/reference/mcp-tools) · [Errors](https://getrdy.dev/docs/latest/docs/reference/errors) |
+| See the store, the daemon, the config and the working copy | [How rdy is built](https://getrdy.dev/docs/latest/internals/) |
+| Read what your agent reads | [Agent guide](https://getrdy.dev/docs/latest/agent-guide/) |
 
 <details>
 <summary><b>Upgrade from a preview, or build from source</b></summary>
