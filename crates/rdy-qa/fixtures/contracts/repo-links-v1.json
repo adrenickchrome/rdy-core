@@ -17858,6 +17858,26 @@
         "use the holder for the stream's repo"
       ],
       [
+        "E_FOREIGN_VERSION",
+        "a write cites a version of a linked project's block that no delivery holds: <alias>:<id> has no delivered version <12 hex>",
+        "wait for the delivery that holds it, or pin a delivered version: rdy_links {op: \"show\", alias} / rdy links show <alias>"
+      ],
+      [
+        "E_FOREIGN_READ_ONLY",
+        "a write changes content cited from a linked project or an external decision (edit, move, delete, supersede, refine or revoke): <ref> is cited from <alias> and is read-only here",
+        "change it in its home project; to depart from it here, record a deviation: rdy_decide with deviates_from / a decision with deviates_from in rdy edit"
+      ],
+      [
+        "E_INSTRUCTION_LOCKED",
+        "a deviation or an adoption would depart from an instruction that its organization or team set locks: <alias>:<id> is locked by its <organization | team <name>> set",
+        "add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction"
+      ],
+      [
+        "E_RESERVED_VIEW",
+        "a write names a view that starts with reaffirm- or adopt- (reserved for re-affirmation and adopt cards), or names canon or inflight",
+        "pick a view name that does not start with reaffirm- or adopt-, and write to a view, not canon"
+      ],
+      [
         "E_DUMP_CHAIN",
         "The dump files do not form a chain, or the predecessor does not match this store.",
         "Pass a full dump and its increments in order, or start a new chain."
@@ -18043,7 +18063,7 @@
       "NO_USER_FILE_MESSAGE": "\"the user config path is not available\"",
       "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
       "OCCUPIED_FIX": "\"Choose an unused absolute path with instructions.person, or move this path aside, then run rdy setup.\"",
-      "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
+      "OP_FIX": "\"use op list, show or refs\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_FIX": "\"Search these pages, or go to the home page.\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
@@ -18580,6 +18600,10 @@
       "E_STREAM_TRUNCATED",
       "E_STREAM_PURPOSE",
       "E_REPO_MISMATCH",
+      "E_FOREIGN_VERSION",
+      "E_FOREIGN_READ_ONLY",
+      "E_INSTRUCTION_LOCKED",
+      "E_RESERVED_VIEW",
       "E_DUMP_CHAIN",
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
@@ -19451,6 +19475,12 @@
           "agent_key": "null",
           "key": "null",
           "sign": "string"
+        }
+      },
+      "rdy_links": {
+        "ok": {
+          "links": [],
+          "unlinked": []
         }
       },
       "rdy_log": {
@@ -21129,6 +21159,14 @@
               "fix": "string",
               "when": "string"
             },
+            "E_FOREIGN_READ_ONLY": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_FOREIGN_VERSION": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_FROZEN": {
               "fix": "string",
               "when": "string"
@@ -21138,6 +21176,10 @@
               "when": "string"
             },
             "E_HELD_BY_READER": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_INSTRUCTION_LOCKED": {
               "fix": "string",
               "when": "string"
             },
@@ -21238,6 +21280,10 @@
               "when": "string"
             },
             "E_REPO_MISMATCH": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_RESERVED_VIEW": {
               "fix": "string",
               "when": "string"
             },
@@ -22206,6 +22252,7 @@
       "rdy_key_revoke",
       "rdy_key_show",
       "rdy_land",
+      "rdy_links",
       "rdy_load",
       "rdy_log",
       "rdy_overview",
@@ -22488,7 +22535,7 @@
               ]
             },
             "option": {
-              "description": "The id of the option the person chose, as the card lists it (`approve`, `reject`,\n`confirm`, `later`, `o1`, ...). Leave out with all_recommended.",
+              "description": "The id of the option the person chose, as the card lists it (`approve`, `reject`,\n`confirm`, `adopt`, `keep`, `later`, `o1`, ...). Leave out with all_recommended.",
               "type": [
                 "string",
                 "null"
@@ -22740,7 +22787,7 @@
               ]
             },
             "id": {
-              "description": "A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.",
+              "description": "A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version; it also takes `<alias>:<id>`, a block cited from a linked project, which it reads without history.",
               "type": "string"
             },
             "max_tokens": {
@@ -22855,6 +22902,16 @@
               ]
             },
             "depends_on": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "deviates_from": {
+              "description": "The cited decisions, cited instructions or external decisions this decision departs from (`<alias>:<id>`, `<alias>:<KEY>` or the stored `<repo>:<id>`). A person confirms a deviation, and it covers the local blocks that cite its target until it is revoked. A target that is not cited or external is refused (E_VALIDATION).",
               "items": {
                 "type": "string"
               },
@@ -23216,7 +23273,7 @@
               ]
             },
             "id": {
-              "description": "A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.",
+              "description": "A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version; it also takes `<alias>:<id>`, a block cited from a linked project, which it reads without history.",
               "type": "string"
             },
             "max_tokens": {
@@ -23529,6 +23586,29 @@
           "required": [
             "proposal"
           ],
+          "type": "object"
+        }
+      },
+      "rdy_links": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "description": "The alias of a repo link. Required by show; optional with refs; refused with list.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "list (default): every repo link with its state, and the delivered repos no link names. show: what the link `alias` delivers and the instructions it has not adopted; needs alias. refs: the pins of canon to cited content, by repo; alias limits it to that link's repo.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },
@@ -24279,7 +24359,7 @@
               ]
             },
             "id": {
-              "description": "A block id, key or path (wallets/transactions); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.",
+              "description": "A block id, key or path (wallets/transactions); <alias>:<id> reads a block cited from a linked project, read-only (rdy_links lists the aliases); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.",
               "type": [
                 "string",
                 "null"
@@ -24357,7 +24437,7 @@
               "type": "string"
             },
             "targets": {
-              "description": "Selectors: a block id (every stored version), id@<64-hex version hash> (one version), or blob:<64-hex manifest hash>. 1 to 256, each at most 256 bytes.",
+              "description": "Selectors: a block id (every stored version), id@<64-hex version hash> (one version), <alias>:<id>@<64-hex version hash> or <repo>:<id>@<64-hex version hash> (one version that a linked project delivered), or blob:<64-hex manifest hash>. 1 to 256, each at most 256 bytes.",
               "items": {
                 "type": "string"
               },
@@ -25398,6 +25478,16 @@
                     "null"
                   ]
                 },
+                "deviates_from": {
+                  "description": "The cited decisions, cited instructions or external decisions this decision departs from (`<alias>:<id>`, `<alias>:<KEY>` or the stored `<repo>:<id>`). A person confirms a deviation, and it covers the local blocks that cite its target until it is revoked. A target that is not cited or external is refused (E_VALIDATION).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "effective_from": {
                   "description": "When the decision takes effect (RFC 3339); defaults to when it is recorded.",
                   "type": [
@@ -25519,9 +25609,30 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "adopted_as": {
+              "description": "A cited decision (`<alias>:<id>` or `<alias>:<KEY>`) that is the upstream copy of the old decision: the old decision is superseded by it, and nothing is copied. The old decision must be accepted and local. A person approves it at landing. Give decision or adopted_as, not both.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "brief": {
+              "description": "With adopted_as only: the briefing token from rdy_brief. With decision, give brief inside decision.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "decision": {
-              "$ref": "#/$defs/DecideParams",
-              "description": "The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it."
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DecideParams"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it. Give decision or adopted_as, not both."
             },
             "intent": {
               "description": "The intent (rdy_intent, in-<hex>) this change is made under; used when decision has none.",
@@ -25534,7 +25645,14 @@
               "type": "string"
             },
             "part": {
-              "description": "The words of the old decision that this one retires; omit to supersede all of it.",
+              "description": "The words of the old decision that this one retires; omit to supersede all of it. Goes with decision, not with adopted_as.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "view": {
+              "description": "With adopted_as only: the view to write in (default: your session's). With decision, give view inside decision.",
               "type": [
                 "string",
                 "null"
@@ -25542,7 +25660,6 @@
             }
           },
           "required": [
-            "decision",
             "old"
           ],
           "type": "object"
