@@ -25,10 +25,11 @@ use rdy_model::redaction::{
     FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
     RedactionManifest, RedactionResidue, RedactionWarning, encode_into,
 };
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
 use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, RedactionCarried, RepoId, Review, ReviewSubject, StateSnapshot, Tag,
+    Redaction, RedactionCarried, RepoId, StateSnapshot, Tag,
 };
 use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
@@ -447,21 +448,20 @@ fn landing_history(
 }
 
 /// The block ids a review names: its citations and its subject's blocks.
-fn review_blocks(r: &Review) -> Vec<&BlockId> {
+fn review_blocks(r: &ReviewV1) -> Vec<&BlockId> {
     let mut out: Vec<&BlockId> = r.citations.iter().map(|f| &f.block).collect();
     match &r.subject {
-        ReviewSubject::Tension { blocks, .. } => out.extend(blocks),
-        ReviewSubject::Mention { block, entity } => {
+        ReviewSubjectV1::Tension { blocks, .. } => out.extend(blocks),
+        ReviewSubjectV1::Mention { block, entity } => {
             out.push(block);
             out.push(entity);
         }
-        ReviewSubject::Pair { items, .. } => out.extend(items.iter().map(|i| &i.block)),
         // a cited side names no local block
-        ReviewSubject::ForeignPair { items, .. } => {
+        ReviewSubjectV1::Pair { items, .. } => {
             out.extend(items.iter().filter_map(|s| s.local()).map(|i| &i.block));
         }
         // a check review names its request, not a block
-        ReviewSubject::Check { .. } => {}
+        ReviewSubjectV1::Check { .. } => {}
     }
     out
 }
@@ -1156,7 +1156,7 @@ pub(crate) fn compute_excluding(
     let mut snapshots: HashSet<Hash> = HashSet::new();
     let mut tags: Vec<(Hash, String, Hash)> = vec![];
     let mut view_refs: Vec<(String, Vec<Hash>, bool)> = vec![];
-    let mut reviews: Vec<(Hash, Review)> = vec![];
+    let mut reviews: Vec<(Hash, ReviewV1)> = vec![];
     let mut tensions: Vec<(Hash, SemanticTensionV1)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
@@ -1276,7 +1276,7 @@ pub(crate) fn compute_excluding(
                 view_refs.push((op.view, named, later(i)));
             }
             kinds::REVIEW => {
-                let r: Review = reader.get_typed(kinds::REVIEW, &h)?;
+                let r: ReviewV1 = reader.get_typed(kinds::REVIEW, &h)?;
                 quotes.scan(ImpactKind::Review, &rec, false, &r)?;
                 reviews.push((h, r));
             }
@@ -1561,7 +1561,7 @@ pub(crate) fn compute_excluding(
     }
     let mut affected_reviews: HashSet<Hash> = HashSet::new();
     for (h, r) in &reviews {
-        let request = matches!(&r.subject, ReviewSubject::Check { request } if affected_requests.contains(request));
+        let request = matches!(&r.subject, ReviewSubjectV1::Check { request } if affected_requests.contains(request));
         if request || review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
             affected_reviews.insert(*h);
         }

@@ -15,11 +15,11 @@ use rdy_model::foreign::{
     ForeignDerived, ForeignId, ForeignPublication, ForeignSet, ForeignSource, ForeignVersion,
     selection_identity,
 };
-use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::review::ReviewSubjectV1;
 use rdy_model::semantic::{ForeignPairItem, PairSide, SemanticTensionV1, local_sides};
 use rdy_model::{
-    Block, BlockId, FieldValue, Hash, PairItem, RelayEvidence, RepoId, ReviewSubject, Role,
-    pair_key, pair_key_sides,
+    Block, BlockId, FieldValue, Hash, PairItem, RelayEvidence, RepoId, Role, pair_key,
+    pair_key_sides,
 };
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::{of_kind, one};
@@ -347,24 +347,19 @@ fn rpl16_reviewer_can_pair_local_and_foreign() {
     // author here, and the local block was written by `agent:a`
     let info = submit(&mut w.r, &q, "tension", None);
     assert_eq!(info.severity, Some(TensionSeverity::Advisory));
-    // the verdict is a ForeignPair review in REVIEW encoding 1, settled by the pair key
-    let review = w.r.store().review(&info.review.parse().unwrap()).unwrap();
-    let ReviewSubject::ForeignPair { key, items } = review.subject else {
-        panic!("{:?}", review.subject);
-    };
-    assert_eq!((key, &items), (q.key, &sides));
+    // the verdict is a review in REVIEW encoding 1: the local review type holds no cited
+    // side, the wire type reads its pair of sides
     let h: Hash = info.review.parse().unwrap();
+    assert!(w.r.read().reader().review(&h).is_err());
+    let wire = w.r.read().reader().review_v1(&h).unwrap();
     assert_eq!(
-        w.r.read()
-            .reader()
-            .get_typed::<ReviewV1>(kinds::REVIEW, &h)
-            .unwrap()
-            .subject,
+        wire.subject,
         ReviewSubjectV1::Pair {
-            key,
+            key: q.key,
             items: sides.clone()
         }
     );
+    assert_eq!(wire.citations.len(), 1);
     assert!(w.r.read().semantic().settled(&q.key).is_some());
     assert!(
         w.r.read()

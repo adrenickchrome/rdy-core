@@ -3,8 +3,9 @@
 use crate::Rdy;
 use crate::error::{E_BAD_INPUT, E_REVIEW_STALE, RdyError};
 use crate::read_state::Delta;
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
 use rdy_model::semantic::SemanticTensionV1;
-use rdy_model::{BlockId, Hash, PairSide, Review, ReviewSubject, SemanticTension};
+use rdy_model::{BlockId, Hash, PairSide, Review, SemanticTension};
 use rdy_store::StoreError;
 
 impl Rdy {
@@ -18,15 +19,15 @@ impl Rdy {
         r: &Review,
         t: Option<&SemanticTension>,
     ) -> Result<(Hash, Option<Hash>), RdyError> {
-        self.record_verdict_v1(r, t.map(SemanticTensionV1::of).as_ref())
+        self.record_verdict_v1(&ReviewV1::of(r), t.map(SemanticTensionV1::of).as_ref())
     }
 
-    /// [`Rdy::record_verdict`] for a pair of any sides (repo links): a `ForeignPair` review and a
+    /// [`Rdy::record_verdict`] for a pair of any sides (repo links): a [`ReviewV1`] and a
     /// [`SemanticTensionV1`].
     #[doc(hidden)]
     pub fn record_verdict_v1(
         &mut self,
-        r: &Review,
+        r: &ReviewV1,
         t: Option<&SemanticTensionV1>,
     ) -> Result<(Hash, Option<Hash>), RdyError> {
         let ids = self
@@ -35,10 +36,7 @@ impl Rdy {
             .map_err(|e| refused(e, E_REVIEW_STALE, "call rdy_review_next again"))?;
         // the store wrote it, so its subject is a pair
         let pairs: Vec<(Hash, Vec<PairSide>)> = match &r.subject {
-            ReviewSubject::Pair { key, items } => {
-                vec![(*key, rdy_model::semantic::local_sides(items))]
-            }
-            ReviewSubject::ForeignPair { key, items } => vec![(*key, items.clone())],
+            ReviewSubjectV1::Pair { key, items } => vec![(*key, items.clone())],
             _ => vec![],
         };
         self.publish(verdict_delta(pairs))?;

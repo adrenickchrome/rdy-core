@@ -12,10 +12,9 @@ use crate::{
     E_BAD_INPUT, E_NOT_FOUND, E_PERMISSION, E_REVIEW_INVALID, E_REVIEW_STALE, E_SELF_REVIEW, Rdy,
     RdyError, ReadState, Session, now_ms,
 };
-use rdy_model::semantic::{SemanticTensionV1, has_foreign_side};
-use rdy_model::{
-    BlockId, Citation, Hash, PairItem, PairSide, Review, ReviewSubject, Role, Verdict, hash_of,
-};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
+use rdy_model::{BlockId, Citation, Hash, PairSide, Role, Verdict};
 use serde::{Deserialize, Serialize};
 
 /// The most citations one verdict takes.
@@ -546,24 +545,13 @@ impl Rdy {
         let leases = self.leases();
         let sides: Vec<PairSide> = items.iter().map(Item::pair_side).collect();
         let provenance = s.provenance();
-        // a pair with a cited side is a `ForeignPair`, stored in REVIEW encoding 1; a local
-        // pair keeps its released layout and key
-        let subject = if has_foreign_side(&sides) {
-            ReviewSubject::ForeignPair {
+        // the wire review reads and writes a pair of any sides: a pair of local sides is written
+        // in the released layout, with its released key and review id
+        let review = ReviewV1 {
+            subject: ReviewSubjectV1::Pair {
                 key,
                 items: sides.clone(),
-            }
-        } else {
-            ReviewSubject::Pair {
-                key,
-                items: sides
-                    .iter()
-                    .filter_map(|s| s.local().cloned())
-                    .collect::<Vec<PairItem>>(),
-            }
-        };
-        let review = Review {
-            subject,
+            },
             case_hash: Some(sent_hash),
             verdict,
             reason: String::new(),
@@ -571,11 +559,7 @@ impl Rdy {
             provenance: provenance.clone(),
         };
         // the id the store gives the review: the hash of its stored frame
-        let review_id = if review.has_foreign() {
-            Hash::of(&rdy_store::codec::item_new(rdy_store::kinds::REVIEW, &review).1)
-        } else {
-            hash_of(&review)
-        };
+        let review_id = Hash::of(&rdy_store::codec::item_new(rdy_store::kinds::REVIEW, &review).1);
         let first = (verdict == Verdict::Tension).then(|| SemanticTensionV1 {
             key,
             items: sides,

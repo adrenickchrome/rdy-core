@@ -1,7 +1,8 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
+use rdy_model::review::ReviewSubjectV1;
+use rdy_model::{AltSet, AltStatus, Hash, Verdict};
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use rdy_store::transition::{
@@ -432,27 +433,26 @@ pub fn events_for_batch(
                 });
             }
             kinds::REVIEW => {
-                let r = reader.review(&hash)?;
+                // the wire type reads a review of any encoding (repo links)
+                let r = reader.review_v1(&hash)?;
                 let kind = match r.subject {
-                    ReviewSubject::Tension { id, vkey, .. } => EventKind::TensionDismissed {
+                    ReviewSubjectV1::Tension { id, vkey, .. } => EventKind::TensionDismissed {
                         tension: id,
                         vkey,
                         review: hash,
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
-                    ReviewSubject::Pair { key, .. } | ReviewSubject::ForeignPair { key, .. } => {
-                        EventKind::ReviewSubmitted {
-                            review: hash,
-                            pair: key,
-                            verdict: verdict_name(r.verdict).to_string(),
-                            actor: r.provenance.actor,
-                            run: r.provenance.run,
-                        }
-                    }
+                    ReviewSubjectV1::Pair { key, .. } => EventKind::ReviewSubmitted {
+                        review: hash,
+                        pair: key,
+                        verdict: verdict_name(r.verdict).to_string(),
+                        actor: r.provenance.actor,
+                        run: r.provenance.run,
+                    },
                     // a mention review (FW-CV4) is not a tension dismissal, and a check review is
                     // carried with no event yet: no event names either
-                    ReviewSubject::Mention { .. } | ReviewSubject::Check { .. } => continue,
+                    ReviewSubjectV1::Mention { .. } | ReviewSubjectV1::Check { .. } => continue,
                 };
                 out.push(Event {
                     seq,

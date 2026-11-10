@@ -297,7 +297,7 @@ impl ReadState {
         let key = pair_of(t)?;
         let open = self.semantic().tension(&key)?;
         let rec = &open.record;
-        let r = self.reader().review(&rec.review).ok()?;
+        let r = self.reader().review_v1(&rec.review).ok()?;
         let accepted = rec.blocking.then(|| {
             let p = &rec.provenance;
             let relay = rec.relay.as_ref();

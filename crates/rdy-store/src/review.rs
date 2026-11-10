@@ -12,10 +12,9 @@ use crate::coord::key_hash;
 use crate::error::StoreError;
 use crate::index::hash_from;
 use crate::{Store, StoreReader, kinds};
-use rdy_model::semantic::{PairSide, SemanticTensionV1, has_foreign_side, local_sides};
-use rdy_model::{
-    BlockId, Hash, Review, ReviewSubject, SemanticTension, Verdict, pair_key, pair_key_sides,
-};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::{PairSide, SemanticTensionV1};
+use rdy_model::{BlockId, Hash, Review, ReviewSubject, SemanticTension, Verdict, pair_key_sides};
 use std::collections::BTreeSet;
 
 /// The ref prefix of dismissals: `dismiss/<vkey>` names the review that dismissed the tension.
@@ -178,37 +177,28 @@ impl Store {
         r: &Review,
         t: Option<&SemanticTension>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
-        self.put_verdict_v1(r, t.map(SemanticTensionV1::of).as_ref())
+        self.put_verdict_v1(&ReviewV1::of(r), t.map(SemanticTensionV1::of).as_ref())
     }
 
     /// [`Store::put_verdict`] for a pair of any sides (repo links): the review's subject is a
-    /// `Pair` of two local items or a `ForeignPair` with a cited side, and the first version is
-    /// a [`SemanticTensionV1`]. A local pair writes the bytes `put_verdict` writes.
+    /// pair whose sides are local or cited, and the first version is a [`SemanticTensionV1`]. A
+    /// pair of local sides writes the bytes `put_verdict` writes.
     pub fn put_verdict_v1(
         &mut self,
-        r: &Review,
+        r: &ReviewV1,
         t: Option<&SemanticTensionV1>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
         self.ensure_writable()?;
         let (key, items): (Hash, Vec<PairSide>) = match (&r.subject, r.verdict) {
-            (ReviewSubject::Pair { key, items }, Verdict::Tension | Verdict::NoTension) => {
-                if items.len() != 2 || items[0].block == items[1].block || *key != pair_key(items) {
-                    return Err(refuse(format!(
-                        "pair key {key} does not match its two items"
-                    )));
-                }
-                (*key, local_sides(items))
-            }
-            (ReviewSubject::ForeignPair { key, items }, Verdict::Tension | Verdict::NoTension) => {
+            (ReviewSubjectV1::Pair { key, items }, Verdict::Tension | Verdict::NoTension) => {
                 let [a, b] = items.as_slice() else {
                     return Err(refuse(format!(
                         "pair key {key} does not match its two items"
                     )));
                 };
-                if a.target() == b.target()
-                    || !has_foreign_side(items)
-                    || *key != pair_key_sides(items)
-                {
+                // two distinct blocks (a cited block is distinct from a local one, and by
+                // repo), under the key their sides hash to
+                if a.target() == b.target() || *key != pair_key_sides(items) {
                     return Err(refuse(format!(
                         "pair key {key} does not match its two items"
                     )));
@@ -353,8 +343,14 @@ impl Store {
 }
 
 impl StoreReader {
-    /// The review with hash `h`.
+    /// The review with hash `h`, when its pair has no cited side; a review of a pair with a cited
+    /// side reads as [`StoreReader::review_v1`].
     pub fn review(&self, h: &Hash) -> Result<Review, StoreError> {
+        self.get_typed(kinds::REVIEW, h)
+    }
+
+    /// The review with hash `h`, its pair's sides local or cited.
+    pub fn review_v1(&self, h: &Hash) -> Result<ReviewV1, StoreError> {
         self.get_typed(kinds::REVIEW, h)
     }
 

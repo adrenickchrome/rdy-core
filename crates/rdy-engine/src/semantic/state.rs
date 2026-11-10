@@ -1,8 +1,9 @@
 //! The verdicts and semantic tensions of one published state, read from the store's pair/ and semantic/ refs. A function of the log: reindex rebuilds it.
 use crate::error::RdyError;
 use imbl::OrdMap;
-use rdy_model::semantic::{PairTarget, SemanticTensionV1, local_sides};
-use rdy_model::{BlockId, Hash, PairSide, Review, ReviewSubject, Verdict};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::{PairTarget, SemanticTensionV1};
+use rdy_model::{BlockId, Hash, PairSide, Verdict};
 use rdy_store::review::{PAIR_REF, SEMANTIC_REF};
 use rdy_store::{StoreError, StoreReader};
 use std::sync::Arc;
@@ -46,7 +47,7 @@ impl SemanticState {
     pub fn read(reader: &StoreReader) -> Result<SemanticState, RdyError> {
         let mut s = SemanticState::default();
         for (key, review) in reader.verdicts()? {
-            s.settle(key, review, reader.review(&review)?)?;
+            s.settle(key, review, reader.review_v1(&review)?)?;
         }
         for (key, version) in reader.semantic_tensions()? {
             s.open(key, version, reader.semantic_tension_v1(&version)?);
@@ -65,7 +66,7 @@ impl SemanticState {
             s.settled.remove(key);
             s.close(key);
             if let Some(review) = ref_hash(reader, PAIR_REF, key, "verdict ref")? {
-                s.settle(*key, review, reader.review(&review)?)?;
+                s.settle(*key, review, reader.review_v1(&review)?)?;
             }
             if let Some(version) = ref_hash(reader, SEMANTIC_REF, key, "semantic tension ref")? {
                 s.open(*key, version, reader.semantic_tension_v1(&version)?);
@@ -132,10 +133,9 @@ impl SemanticState {
         !self.tensions.is_empty()
     }
 
-    fn settle(&mut self, key: Hash, review: Hash, r: Review) -> Result<(), RdyError> {
+    fn settle(&mut self, key: Hash, review: Hash, r: ReviewV1) -> Result<(), RdyError> {
         let items = match r.subject {
-            ReviewSubject::Pair { items, .. } => local_sides(&items),
-            ReviewSubject::ForeignPair { items, .. } => items,
+            ReviewSubjectV1::Pair { items, .. } => items,
             _ => {
                 return Err(StoreError::Decode(format!(
                     "verdict ref {PAIR_REF}{key} names review {review}, which is not a review of a pair"
