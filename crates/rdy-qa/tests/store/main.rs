@@ -8,6 +8,7 @@ mod store_crash;
 mod store_dump;
 mod store_feature_fixture;
 mod store_flush;
+mod store_foreign_crash;
 mod store_foreign_fixture;
 mod store_format;
 mod store_fsck;
