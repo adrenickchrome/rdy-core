@@ -4,11 +4,13 @@
 
 rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.
 
+[![Latest release](https://img.shields.io/github/v/release/adrenickchrome/rdy-core?color=2456C9)](https://github.com/adrenickchrome/rdy-core/releases/latest) [![Docs](https://img.shields.io/badge/docs-getrdy.dev-2456C9)](https://getrdy.dev/docs/) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2456C9)](#license)
+
 [Documentation](https://getrdy.dev/docs/v0.47.0/docs/) · [Install](#install) · [Try it](#try-it-your-first-project) · [Releases](https://github.com/adrenickchrome/rdy-core/releases) · [Report problems](#report-problems)
 
 This is **Release 1**, the first release of rdy with a compatibility promise. See "About Release 1" at the bottom.
 
-<!-- Open question 1: one picture of the review loop goes here. -->
+<!-- The picture of the review loop goes here (TASK-2043). -->
 
 ## How it works
 
