@@ -79,15 +79,12 @@ fn ui4_ui_defaults_true_and_only_user_local_override() {
         std::hint::black_box(ServeConfig::DEFAULT).ui,
         "the default is on"
     );
-    // no MCP-over-HTTP key comes with it
-    assert!(!keys.iter().any(|k| k.starts_with("serve.mcp")), "{keys:?}");
 
     // absent: true, from the default level, no warning
     let (_d, p) = project();
     let e = effective(&p, None).unwrap();
     assert_eq!(origin(&e, KEY), (Value::Bool(true), Level::Default));
     assert!(e.warnings.is_empty(), "{:?}", e.warnings);
-    assert!(!e.origins.iter().any(|o| o.key.starts_with("serve.mcp")));
     assert!(serve_config(&p).ui);
     assert!(Rdy::open(&p).unwrap().serve_config().ui);
 
@@ -214,19 +211,6 @@ fn ui4_ui_defaults_true_and_only_user_local_override() {
     assert_eq!(
         e.warnings[0].fix,
         "did you mean serve.ui? set it in .rdy/local.yaml or the user config and remove serve.uii from .rdy.yaml"
-    );
-    // an MCP-over-HTTP key is unknown too: no such setting exists
-    project_file(&p, "");
-    local(&p, Some("serve:\n  mcp_http: true\n"));
-    let e = effective(&p, None).unwrap();
-    assert!(!e.origins.iter().any(|o| o.key == "serve.mcp_http"));
-    assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
-    assert!(
-        e.warnings[0]
-            .message
-            .starts_with("unknown key serve.mcp_http in .rdy/local.yaml"),
-        "{}",
-        e.warnings[0].message
     );
 }
 

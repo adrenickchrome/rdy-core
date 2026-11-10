@@ -180,6 +180,9 @@ pub(crate) struct ServeSection {
     /// The user or local config only; `config_levels` ignores a project value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ui: Option<bool>,
+    /// The user or local config only; `config_levels` ignores a project value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_http: Option<bool>,
 }
 
 impl ServeSection {
@@ -190,6 +193,7 @@ impl ServeSection {
             && self.site_lan.is_none()
             && self.site_lan_address.is_none()
             && self.ui.is_none()
+            && self.mcp_http.is_none()
     }
 
     pub(crate) fn resolve(&self) -> ServeConfig {
@@ -211,6 +215,7 @@ impl ServeSection {
                 .and_then(|a| a.parse::<Ipv4Addr>().ok())
                 .filter(Ipv4Addr::is_private),
             ui: self.ui.unwrap_or(ServeConfig::DEFAULT.ui),
+            mcp_http: self.mcp_http.unwrap_or(ServeConfig::DEFAULT.mcp_http),
         }
     }
 }
@@ -231,6 +236,10 @@ pub struct ServeConfig {
     ///
     /// Default: true. User and local config only.
     pub ui: bool,
+    /// Enable MCP over HTTP on the local site listener.
+    ///
+    /// Default: false. User and local config only. Inert until the transport exists.
+    pub mcp_http: bool,
 }
 
 impl ServeConfig {
@@ -241,6 +250,7 @@ impl ServeConfig {
         site_lan: false,
         site_lan_address: None,
         ui: true,
+        mcp_http: false,
     };
 }
 
@@ -264,6 +274,7 @@ pub fn serve_config(project: &Path) -> ServeConfig {
             .and_then(serde_yaml_ng::Value::as_str)
             .map(str::to_string),
         ui: value("ui").and_then(serde_yaml_ng::Value::as_bool),
+        mcp_http: value("mcp_http").and_then(serde_yaml_ng::Value::as_bool),
     }
     .resolve()
 }

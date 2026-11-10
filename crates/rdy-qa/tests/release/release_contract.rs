@@ -97,10 +97,10 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baseline (`release-1.json`, frozen) with the
-/// additions since. A capture writes this file, never the baseline.
+/// The current contract fixture: the released baselines (`release-1.json` and `repo-links-v1.json`,
+/// both frozen) with the additions since. A capture writes this file, never a baseline.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/repo-links-v1.json")
+    qa_root().join("fixtures/contracts/mcp-http-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -4822,6 +4822,69 @@ fn ok14_release_contract_matches_all_surfaces() {
             "row {name} changed: a public contract change needs an upgrade or deprecation path (D-TXFHR)"
         );
     }
+}
+
+/// mht1: the successor fixture holds the two released baselines unchanged. `release-1.json` and
+/// `repo-links-v1.json` keep their bytes, and `mcp-http-v1.json` differs from `repo-links-v1.json`
+/// in exactly the `serve.mcp_http` rows: its key row, its listing line and its probe rows.
+#[test]
+fn mht1_contract_successor_keeps_released_baselines() {
+    let dir = qa_root().join("fixtures/contracts");
+    let sha = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).expect("a fixture");
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(
+        sha("release-1.json"),
+        "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6"
+    );
+    assert_eq!(
+        sha("repo-links-v1.json"),
+        "61b01d9bd9d60fbe8894c32ffc58cab433c42a7c332de7fde8ba00414bf31848"
+    );
+    let was: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
+    let now = read_fixture();
+    // the successor equals the baseline but for the three config members
+    let (mut was_rest, mut now_rest) = (was.clone(), now.clone());
+    for doc in [&mut was_rest, &mut now_rest] {
+        doc["config"]["keys"] = Value::Null;
+        doc["config"]["listing"] = Value::Null;
+        doc["cli"]["runtime"]["probes"]["config"] = Value::Null;
+    }
+    assert_eq!(was_rest, now_rest, "only the serve.mcp_http rows may move");
+    // the key row: one more, right after serve.ui
+    let keys = |v: &Value| -> Vec<Value> { v["config"]["keys"].as_array().expect("keys").clone() };
+    let (old_keys, new_keys) = (keys(&was), keys(&now));
+    assert_eq!(new_keys.len(), old_keys.len() + 1);
+    let at = new_keys
+        .iter()
+        .position(|k| k["key"] == "serve.mcp_http")
+        .expect("the new key row");
+    assert_eq!(new_keys[at - 1]["key"], "serve.ui");
+    assert_eq!(
+        new_keys[at],
+        json!({"default": "false", "key": "serve.mcp_http", "levels": ["local", "user"], "type": "Bool"})
+    );
+    let mut without = new_keys.clone();
+    without.remove(at);
+    assert_eq!(without, old_keys, "every released key row keeps its bytes");
+    // the listing: one more line, in the text of both captures
+    for capture in ["configured", "defaults"] {
+        let listing = now["config"]["listing"][capture]["text"]
+            .as_str()
+            .expect("listing text");
+        assert!(
+            listing.contains("serve.ui = true  # set at: local, user\nserve.mcp_http = false  # set at: local, user\n"),
+            "{capture}: {listing}"
+        );
+    }
+    // the baseline still reads
+    let released = read_released();
+    assert!(released["config"]["keys"].is_array());
 }
 
 /// Every member typed by hand is listed in [`DESCRIPTIVE`], and each listed member is in the
