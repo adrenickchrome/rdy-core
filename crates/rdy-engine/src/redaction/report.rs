@@ -25,10 +25,10 @@ use rdy_model::redaction::{
     FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget,
     RedactionManifest, RedactionResidue, RedactionWarning, encode_into,
 };
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, RedactionCarried, RepoId, Review, ReviewSubject, SemanticTension, StateSnapshot,
-    Tag,
+    Redaction, RedactionCarried, RepoId, Review, ReviewSubject, StateSnapshot, Tag,
 };
 use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
@@ -456,6 +456,10 @@ fn review_blocks(r: &Review) -> Vec<&BlockId> {
             out.push(entity);
         }
         ReviewSubject::Pair { items, .. } => out.extend(items.iter().map(|i| &i.block)),
+        // a cited side names no local block
+        ReviewSubject::ForeignPair { items, .. } => {
+            out.extend(items.iter().filter_map(|s| s.local()).map(|i| &i.block));
+        }
         // a check review names its request, not a block
         ReviewSubject::Check { .. } => {}
     }
@@ -1153,7 +1157,7 @@ pub(crate) fn compute_excluding(
     let mut tags: Vec<(Hash, String, Hash)> = vec![];
     let mut view_refs: Vec<(String, Vec<Hash>, bool)> = vec![];
     let mut reviews: Vec<(Hash, Review)> = vec![];
-    let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
+    let mut tensions: Vec<(Hash, SemanticTensionV1)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
     // TASK-1237 (D-6B1W1, p-EYDH3): in a request's freshness, the records written after the
@@ -1277,7 +1281,7 @@ pub(crate) fn compute_excluding(
                 reviews.push((h, r));
             }
             kinds::TENSION => {
-                let t: SemanticTension = reader.get_typed(kinds::TENSION, &h)?;
+                let t: SemanticTensionV1 = reader.get_typed(kinds::TENSION, &h)?;
                 quotes.scan(ImpactKind::Tension, &rec, false, &t)?;
                 tensions.push((h, t));
             }
@@ -1566,7 +1570,10 @@ pub(crate) fn compute_excluding(
     let mut affected_tensions: HashSet<Hash> = tensions
         .iter()
         .filter(|(_, t)| {
-            t.items.iter().any(|i| affected_ids.contains(&i.block))
+            t.items
+                .iter()
+                .filter_map(|s| s.local())
+                .any(|i| affected_ids.contains(&i.block))
                 || affected_reviews.contains(&t.review)
         })
         .map(|(h, _)| *h)

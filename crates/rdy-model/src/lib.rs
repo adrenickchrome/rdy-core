@@ -58,4 +58,4 @@ pub mod reference;
 pub mod review;
 pub use review::{Citation, Review, ReviewSubject, Verdict};
 pub mod semantic;
-pub use semantic::{PairItem, SemanticTension, pair_key};
+pub use semantic::{PairItem, PairSide, PairTarget, SemanticTension, pair_key, pair_key_sides};

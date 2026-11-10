@@ -4,6 +4,7 @@ use crate::semantic::candidates::{Item, Rule, request_label};
 use crate::tensions::index::{DetectCx, canon_index_of};
 use crate::tensions::{DetectScope, SideRef};
 use crate::{E_INTERNAL, E_REVIEW_STALE, Materialized, RdyError, ReadState};
+use rdy_model::foreign::ForeignId;
 use rdy_model::{Block, BlockId, Hash, decision};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -132,26 +133,33 @@ impl ReadState {
         // rf6: live decisions by the four routes, one cache for both blocks
         let mut cache = rdy_graph::GoverningCache::default();
         for (item, block) in [(ia, &a), (ib, &b)] {
-            let (doc, headings) = headings_of(&m, block);
-            let governing = crate::query::governing_ids(
-                self.pack(),
-                &m,
-                &g,
-                &block.id,
-                rdy_graph::GoverningStatuses::Live,
-                &mut cache,
-            )
-            .into_iter()
-            .take(MAX_GOVERNING)
-            .map(|d| CaseDecision {
-                statement: m
-                    .get(&d)
-                    .and_then(|x| x.field_str("statement"))
-                    .unwrap_or_default()
-                    .to_string(),
-                id: d.to_string(),
-            })
-            .collect();
+            // a cited block sits in no local doc and has no local governing decision: its ids
+            // are another project's, never looked up in this one
+            let (doc, headings, governing) = if item.side.is_foreign() {
+                (String::new(), vec![], vec![])
+            } else {
+                let (doc, headings) = headings_of(&m, block);
+                let governing = crate::query::governing_ids(
+                    self.pack(),
+                    &m,
+                    &g,
+                    &block.id,
+                    rdy_graph::GoverningStatuses::Live,
+                    &mut cache,
+                )
+                .into_iter()
+                .take(MAX_GOVERNING)
+                .map(|d| CaseDecision {
+                    statement: m
+                        .get(&d)
+                        .and_then(|x| x.field_str("statement"))
+                        .unwrap_or_default()
+                        .to_string(),
+                    id: d.to_string(),
+                })
+                .collect();
+                (doc, headings, governing)
+            };
             blocks.push(CaseBlock {
                 id: block.id.to_string(),
                 block_type: block.block_type.clone(),
@@ -193,8 +201,22 @@ fn block_of_item(cx: &DetectCx<'_>, item: &Item, label: &str) -> Result<Arc<Bloc
                 .then(|| canon.get(&item.block).cloned().map(Arc::new))
                 .flatten()
         }
-        // a cited block is never read through local lookup
-        SideRef::Intent { .. } | SideRef::Foreign { .. } => None,
+        // a cited block is read from the foreign state, at the version the item names: the
+        // current delivered one
+        SideRef::Foreign { repo, .. } => {
+            let target = ForeignId::new(*repo, item.block.clone());
+            match cx.st.foreign()?.current_version(&target) {
+                Some(held) if held.version.version == item.version => cx
+                    .st
+                    .reader()
+                    .get_block(&item.version)
+                    .ok()
+                    .filter(|b| !b.is_redacted() && b.id == item.block)
+                    .map(Arc::new),
+                _ => None,
+            }
+        }
+        SideRef::Intent { .. } => None,
     };
     found.ok_or_else(|| {
         RdyError::new(

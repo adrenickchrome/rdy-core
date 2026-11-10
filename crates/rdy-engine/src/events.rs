@@ -441,13 +441,15 @@ pub fn events_for_batch(
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
-                    ReviewSubject::Pair { key, .. } => EventKind::ReviewSubmitted {
-                        review: hash,
-                        pair: key,
-                        verdict: verdict_name(r.verdict).to_string(),
-                        actor: r.provenance.actor,
-                        run: r.provenance.run,
-                    },
+                    ReviewSubject::Pair { key, .. } | ReviewSubject::ForeignPair { key, .. } => {
+                        EventKind::ReviewSubmitted {
+                            review: hash,
+                            pair: key,
+                            verdict: verdict_name(r.verdict).to_string(),
+                            actor: r.provenance.actor,
+                            run: r.provenance.run,
+                        }
+                    }
                     // a mention review (FW-CV4) is not a tension dismissal, and a check review is
                     // carried with no event yet: no event names either
                     ReviewSubject::Mention { .. } | ReviewSubject::Check { .. } => continue,

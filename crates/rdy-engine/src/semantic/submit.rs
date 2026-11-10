@@ -12,9 +12,9 @@ use crate::{
     E_BAD_INPUT, E_NOT_FOUND, E_PERMISSION, E_REVIEW_INVALID, E_REVIEW_STALE, E_SELF_REVIEW, Rdy,
     RdyError, ReadState, Session, now_ms,
 };
+use rdy_model::semantic::{SemanticTensionV1, has_foreign_side};
 use rdy_model::{
-    BlockId, Citation, Hash, PairItem, Review, ReviewSubject, Role, SemanticTension, Verdict,
-    hash_of,
+    BlockId, Citation, Hash, PairItem, PairSide, Review, ReviewSubject, Role, Verdict, hash_of,
 };
 use serde::{Deserialize, Serialize};
 
@@ -175,11 +175,12 @@ pub(crate) fn bounded_note(text: &str) -> Option<&str> {
     bounded(text)
 }
 
-/// The request a submit names: its key and its pair, as (block, content).
+/// The request a submit names: its key and its pair, as sides (a local block at its content, or
+/// a cited block at its delivered content identity).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundRequest {
     pub key: Hash,
-    pub pair: Vec<(BlockId, Hash)>,
+    pub pair: Vec<PairSide>,
 }
 
 /// The request a submit names: a derived request of a pair, or a durable check request.
@@ -189,8 +190,8 @@ pub enum ResolvedRequest {
     Check(Box<FoundCheck>),
 }
 
-/// A derived request a prefix matches: its key and its pair, as (block, content).
-type Match = (Hash, Vec<(BlockId, Hash)>);
+/// A derived request a prefix matches: its key and its pair, as sides.
+type Match = (Hash, Vec<PairSide>);
 
 /// The ambiguity refusal: `given` names `n` requests.
 fn ambiguous(given: &str, n: usize) -> RdyError {
@@ -222,10 +223,7 @@ impl ReadState {
                 .semantic()
                 .settled_with_prefix(hex)
                 .into_iter()
-                .map(|(k, v)| {
-                    let pair = v.items.iter().map(|i| (i.block.clone(), i.content));
-                    (k, pair.collect())
-                })
+                .map(|(k, v)| (k, v.items.clone()))
                 .collect();
         }
         if found.is_empty() {
@@ -233,10 +231,7 @@ impl ReadState {
                 .review_requests()?
                 .into_iter()
                 .filter(|q| q.key.to_string().starts_with(hex))
-                .map(|q| {
-                    let pair = q.items.iter().map(|i| (i.block.clone(), i.content));
-                    (q.key, pair.collect())
-                })
+                .map(|q| (q.key, q.items.iter().map(Item::pair_side).collect()))
                 .collect();
         }
         Ok(found)
@@ -492,7 +487,7 @@ impl Rdy {
         let st = self.read();
         let label = request_label(&key);
         // 6. the items now (final ruling 2: as the queue names them, per view)
-        let Some(items) = st.pair_now(&pair)? else {
+        let Some(items) = st.pair_now_sides(&pair)? else {
             return Err(not_current(&label));
         };
         if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
@@ -549,29 +544,42 @@ impl Rdy {
             advice,
         } = v;
         let leases = self.leases();
-        let pair_items: Vec<PairItem> = items
-            .iter()
-            .map(|i| PairItem {
-                block: i.block.clone(),
-                content: i.content,
-            })
-            .collect();
+        let sides: Vec<PairSide> = items.iter().map(Item::pair_side).collect();
         let provenance = s.provenance();
-        let review = Review {
-            subject: ReviewSubject::Pair {
+        // a pair with a cited side is a `ForeignPair`, stored in REVIEW encoding 1; a local
+        // pair keeps its released layout and key
+        let subject = if has_foreign_side(&sides) {
+            ReviewSubject::ForeignPair {
                 key,
-                items: pair_items.clone(),
-            },
+                items: sides.clone(),
+            }
+        } else {
+            ReviewSubject::Pair {
+                key,
+                items: sides
+                    .iter()
+                    .filter_map(|s| s.local().cloned())
+                    .collect::<Vec<PairItem>>(),
+            }
+        };
+        let review = Review {
+            subject,
             case_hash: Some(sent_hash),
             verdict,
             reason: String::new(),
             citations,
             provenance: provenance.clone(),
         };
-        let first = (verdict == Verdict::Tension).then(|| SemanticTension {
+        // the id the store gives the review: the hash of its stored frame
+        let review_id = if review.has_foreign() {
+            Hash::of(&rdy_store::codec::item_new(rdy_store::kinds::REVIEW, &review).1)
+        } else {
+            hash_of(&review)
+        };
+        let first = (verdict == Verdict::Tension).then(|| SemanticTensionV1 {
             key,
-            items: pair_items,
-            review: hash_of(&review),
+            items: sides,
+            review: review_id,
             advice: advice.clone(),
             blocking: false,
             relay: None,
@@ -579,7 +587,7 @@ impl Rdy {
             prev: None,
             provenance,
         });
-        let (id, _) = self.record_verdict(&review, first.as_ref())?;
+        let (id, _) = self.record_verdict_v1(&review, first.as_ref())?;
         for k in release {
             leases.release(k);
         }

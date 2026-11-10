@@ -515,7 +515,7 @@ pub fn accepted_advice(
     let mut cache = crate::tensions::info::InfoCache::default();
     let mut refusing = vec![];
     for o in sem.tensions().filter(|o| o.record.blocking) {
-        let Some(item) = o.record.items.first() else {
+        let Some(item) = o.record.items.iter().find_map(rdy_model::PairSide::local) else {
             continue;
         };
         let forms: Vec<_> = set
@@ -548,9 +548,9 @@ pub fn accepted_advice(
                 .iter()
                 .map(|i| Involved {
                     side: SideRef::Canon { landing: None },
-                    block: i.block.clone(),
+                    block: i.block().clone(),
                     version: None,
-                    content: Some(i.content),
+                    content: Some(i.content()),
                 })
                 .collect();
             advisory.contains(&tension_vkey(

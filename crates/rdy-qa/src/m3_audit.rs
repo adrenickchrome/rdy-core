@@ -1090,7 +1090,14 @@ pub fn holds_of(st: &ReadState, version: &Hash) -> Result<Vec<Hold>, Violation> 
             .map(|t| t.blocks.iter().collect())
             .collect();
         let accepted = st.semantic().tensions().any(|o| {
-            let blocks: BTreeSet<&BlockId> = o.record.items.iter().map(|i| &i.block).collect();
+            // an assessment names a tension's local blocks: a cited side is no local block
+            let blocks: BTreeSet<&BlockId> = o
+                .record
+                .items
+                .iter()
+                .filter_map(|s| s.local())
+                .map(|i| &i.block)
+                .collect();
             o.record.blocking && advisory.contains(&blocks)
         });
         if accepted {

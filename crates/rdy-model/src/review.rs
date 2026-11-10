@@ -31,7 +31,14 @@ impl Review {
             ReviewSubject::Mention { .. } => None,
             ReviewSubject::Pair { .. } => None,
             ReviewSubject::Check { .. } => None,
+            ReviewSubject::ForeignPair { .. } => None,
         }
+    }
+
+    /// Whether the subject is a pair with a cited side: the one case that takes REVIEW
+    /// encoding 1.
+    pub fn has_foreign(&self) -> bool {
+        matches!(self.subject, ReviewSubject::ForeignPair { .. })
     }
 }
 
@@ -54,6 +61,11 @@ pub enum ReviewSubject {
     Pair { key: Hash, items: Vec<PairItem> },
     /// A check request's case (appended: index 3): the CHECK_REQUEST it answers.
     Check { request: Hash },
+    /// A pair with a cited side (repo links; appended: index 4): the pair key
+    /// ([`crate::semantic::pair_key_sides`]) and the two sides. Written in REVIEW encoding 1
+    /// ([`crate::encoding::PAIR_FOREIGN_ENCODING`]) as a [`ReviewSubjectV1::Pair`]; a pair of
+    /// local sides is a [`ReviewSubject::Pair`].
+    ForeignPair { key: Hash, items: Vec<PairSide> },
 }
 
 /// The verdict of a review. Field order is format.
@@ -110,7 +122,7 @@ pub enum ReviewSubjectV1 {
 
 /// A review in REVIEW encoding 1: the fields of [`Review`] in their order, its subject as
 /// [`ReviewSubjectV1`]. A REVIEW takes it only when its pair has a foreign side. A registered
-/// wire shape: no consumer reads it yet. Field order is format.
+/// wire shape. Field order is format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewV1 {
     pub subject: ReviewSubjectV1,
@@ -149,6 +161,10 @@ impl ReviewV1 {
                 items: local_sides(items),
             },
             ReviewSubject::Check { request } => ReviewSubjectV1::Check { request: *request },
+            ReviewSubject::ForeignPair { key, items } => ReviewSubjectV1::Pair {
+                key: *key,
+                items: items.clone(),
+            },
         };
         ReviewV1 {
             subject,
@@ -165,7 +181,8 @@ impl ReviewV1 {
         matches!(&self.subject, ReviewSubjectV1::Pair { items, .. } if has_foreign_side(items))
     }
 
-    /// The runtime review, when every pair side is local.
+    /// The runtime review: a pair with a cited side is a [`ReviewSubject::ForeignPair`]. `None`
+    /// is never returned; the shape keeps the codec's signature.
     pub fn into_local(self) -> Option<Review> {
         let subject = match self.subject {
             ReviewSubjectV1::Tension {
@@ -184,10 +201,16 @@ impl ReviewV1 {
                 blocks,
             },
             ReviewSubjectV1::Mention { block, entity } => ReviewSubject::Mention { block, entity },
-            ReviewSubjectV1::Pair { key, items } => ReviewSubject::Pair {
-                key,
-                items: into_local_items(items)?,
-            },
+            ReviewSubjectV1::Pair { key, items } => {
+                if has_foreign_side(&items) {
+                    ReviewSubject::ForeignPair { key, items }
+                } else {
+                    ReviewSubject::Pair {
+                        key,
+                        items: into_local_items(items)?,
+                    }
+                }
+            }
             ReviewSubjectV1::Check { request } => ReviewSubject::Check { request },
         };
         Some(Review {

@@ -36,7 +36,8 @@
 //! otherwise, so every local value keeps its bytes and its hash. A reader holds each frame to
 //! the same choice: an optional-encoding frame without such a shape, or a latest-encoding frame
 //! with one, does not decode. A runtime type reads an optional-encoding frame only when it can
-//! hold its shape; the registered wire types (`ReviewV1`, `SemanticTensionV1`, `AssessmentV2`,
+//! hold its shape (a `Review` holds a pair with a cited side as `ReviewSubject::ForeignPair`);
+//! the registered wire types (`ReviewV1`, `SemanticTensionV1`, `AssessmentV2`,
 //! `crate::transition::TransitionsV1`) read every encoding of their kind.
 //!
 //! A typed read of a CHANGE or a LANDING keeps the identity of its frame
@@ -387,6 +388,11 @@ fn shaped_body<T: Serialize + 'static>(kind: u8, value: &T) -> Option<(u16, Vec<
             false => (local, postcard_of(&w.clone().into_local()?)),
         });
     }
+    if let Some(r) = any.downcast_ref::<Review>() {
+        return r
+            .has_foreign()
+            .then(|| (PAIR_FOREIGN_ENCODING, postcard_of(&ReviewV1::of(r))));
+    }
     if let Some(w) = any.downcast_ref::<ReviewV1>() {
         return Some(match w.has_foreign() {
             true => (PAIR_FOREIGN_ENCODING, postcard_of(w)),
@@ -441,7 +447,10 @@ fn shaped_canonical(kind: u8, version: u16, body: &[u8], any: &dyn Any) -> Optio
         });
     }
     if let Some(r) = any.downcast_ref::<Review>() {
-        return Some(local_form(r));
+        return Some(match r.has_foreign() {
+            true => shaped(shaped_body(kind, r)),
+            false => local_form(r),
+        });
     }
     if let Some(t) = any.downcast_ref::<SemanticTension>() {
         return Some(local_form(t));
@@ -859,7 +868,7 @@ fn body_of<T: DeserializeOwned + 'static>(
             Shape {
                 optional: PAIR_FOREIGN_ENCODING,
                 wire_foreign: ReviewV1::has_foreign,
-                local_foreign: |_| false,
+                local_foreign: Review::has_foreign,
                 of: ReviewV1::of,
                 into_local: ReviewV1::into_local,
             },

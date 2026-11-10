@@ -163,7 +163,7 @@ fn assert_cross(r: &mut Rdy, a: (&BlockId, &str, Hash), b: (&BlockId, &str, Hash
     let mut got: Vec<(BlockId, Hash)> = settled
         .items
         .iter()
-        .map(|i| (i.block.clone(), i.content))
+        .map(|i| (i.block().clone(), i.content()))
         .collect();
     got.sort();
     let mut exp = vec![(a.0.clone(), ka), (b.0.clone(), kb)];
