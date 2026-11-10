@@ -718,10 +718,7 @@ pub(crate) fn cited_governs(
     let links = RepoLinks::of_view(m);
     let mut deviations: BTreeMap<ForeignId, Vec<DeviationRow>> = BTreeMap::new();
     for d in st.deviations(scope)?.into_iter().filter(|d| d.live) {
-        let reason = m
-            .get(&d.decision)
-            .map(|b| statement_of(b))
-            .unwrap_or_default();
+        let reason = m.get(&d.decision).map(statement_of).unwrap_or_default();
         deviations.entry(d.target).or_default().push(DeviationRow {
             id: d.decision.to_string(),
             reason,
