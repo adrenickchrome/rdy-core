@@ -2093,7 +2093,13 @@ fn build_ops(
                     explicit_reflects.insert(new_id.clone());
                 }
                 let (mut local, mut foreign_links) = res.links(links)?;
-                local.retain(|_, v| !v.is_empty());
+                // a create keeps a kind given as an empty list, as it did before repo links (the
+                // store holds it; only an update's empty list removes a kind). A kind whose every
+                // target is foreign has no local entry, and the foreign part keeps no empty kind,
+                // so a local block keeps its bytes.
+                local.retain(|k, v| {
+                    !v.is_empty() || foreign_links.get(k).is_none_or(|f| f.is_empty())
+                });
                 foreign_links.retain(|_, v| !v.is_empty());
                 let mut block = Block {
                     id: new_id.clone(),
