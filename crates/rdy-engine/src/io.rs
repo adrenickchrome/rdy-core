@@ -10,12 +10,10 @@ use crate::write::{
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::foreign::ForeignLink;
 use rdy_model::{
-    ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
-    Link, Op, Provenance, RefMode, Role, engine_fields, tree,
+    Block, BlockId, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Provenance,
+    RefMode, Role, engine_fields, tree,
 };
-use rdy_schema::{
-    Issue, Pack, Severity, has_errors, skeleton_gaps, validate_block, validate_prefix,
-};
+use rdy_schema::{Issue, Pack, Severity, skeleton_gaps};
 use rdy_store::segment::Location;
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -195,19 +193,25 @@ fn bad_authors(what: String) -> RdyError {
 /// How far after now an `at_ms` in `authors.yaml` may be: 24 h, for clocks that differ.
 const AUTHORS_FUTURE_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// `authors.yaml` of export `dir`, checked against the import's blocks: by id, each with its
-/// zero-based row in the file. No file is no rows.
-fn read_authors(
-    dir: &Path,
+/// The text of `authors.yaml` of export `dir`: `None` when there is no file.
+pub(crate) fn read_authors_text(dir: &Path) -> Result<Option<String>, RdyError> {
+    match std::fs::read_to_string(dir.join(AUTHORS_FILE)) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(bad_authors(e.to_string())),
+    }
+}
+
+/// `authors.yaml` (its `text`; `None` when there is no file), checked against the import's
+/// blocks: by id, each with its zero-based row in the file. No file is no rows.
+pub(crate) fn parse_authors(
+    text: Option<&str>,
     blocks: &[Block],
 ) -> Result<BTreeMap<BlockId, (Provenance, usize)>, RdyError> {
-    let path = dir.join(AUTHORS_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(bad_authors(e.to_string())),
+    let Some(text) = text else {
+        return Ok(BTreeMap::new());
     };
-    let rows: Vec<AuthorYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
+    let rows: Vec<AuthorYaml> = serde_yaml_ng::from_str(text).map_err(|e| {
         crate::did_you_mean::unknown_field_error(AUTHORS_FILE, &e.to_string())
             .unwrap_or_else(|| bad_authors(e.to_string()))
     })?;
@@ -378,7 +382,7 @@ fn export_level(
 
 /// A doc imported without a name gets the name readers already use, de-duplicated against names
 /// under the same parent in the import and in the view.
-fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
+pub(crate) fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
     let mut taken: BTreeMap<Option<BlockId>, BTreeSet<String>> = BTreeMap::new();
     for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
         let set = taken.entry(b.parent.clone()).or_insert_with(|| {
@@ -409,7 +413,10 @@ fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
 
 /// Refuses an import whose docs or folders share a name (ignoring case) with each other or with
 /// what the view already holds under the same parent: export would overwrite one with the other.
-fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), RdyError> {
+pub(crate) fn check_import_names(
+    blocks: &[Block],
+    existing: &Materialized,
+) -> Result<(), RdyError> {
     let mut seen: BTreeMap<(Option<BlockId>, String), BlockId> = BTreeMap::new();
     for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
         let Some(name) = b.field_str("name") else {
@@ -440,7 +447,7 @@ fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), R
 /// key1: refuses a key held twice (ignoring case) among the incoming blocks or between an
 /// incoming block and another block of the view, then stores every key reference (and, lkey1,
 /// every key link target) as its id.
-fn resolve_import_keys(
+pub(crate) fn resolve_import_keys(
     blocks: &mut [Block],
     keyed: Vec<Vec<KeyedLink>>,
     existing: &Materialized,
@@ -487,7 +494,10 @@ fn resolve_import_keys(
 /// block the import does not bring, the keys assigned so far, and the name of every other
 /// top-level doc or folder after the import (a key that is another block's path would make that
 /// path unreachable); all compared folded.
-fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap<String, String> {
+pub(crate) fn assign_import_keys(
+    blocks: &mut [Block],
+    existing: &Materialized,
+) -> BTreeMap<String, String> {
     let wanted: Vec<usize> = (0..blocks.len())
         .filter(|&i| {
             tree::is_tree_type(&blocks[i].block_type) && !blocks[i].fields.contains_key("key")
@@ -577,7 +587,10 @@ fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap
 }
 
 /// skel1: the required sections each imported doc lacks among the imported sections under it.
-fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_schema::Issue> {
+pub(crate) fn import_skeleton_gaps(
+    pack: &rdy_schema::Pack,
+    blocks: &[Block],
+) -> Vec<rdy_schema::Issue> {
     let titles = crate::keys::section_titles(blocks);
     blocks
         .iter()
@@ -1056,17 +1069,11 @@ fn import_label(dir: &Path) -> Option<String> {
 }
 
 impl Rdy {
+    /// Imports the export tree at `dir` (format 2 or 3) into `view` as `s`: the tree is decoded
+    /// into one prepared value, which the shared import path checks, stages in one batch and
+    /// seals once ([`Rdy::import_prepared`]).
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
-        // D-Y9DNZ: an import writes into a view under the role rule of every write; the trust
-        // check is at landing, where an imported decision status needs a person
-        if !s.role.can_write() {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                format!("role {:?} cannot import", s.role),
-                "start the session as a writer",
-            ));
-        }
-        crate::write::check_view_access(&self.read(), view, s, crate::views::Action::Commit)?;
+        self.check_import_access(s, view)?;
         // sym1: the export's own root entries are never followed either
         for root in ["rdy-export.yaml", "docs", "blobs", AUTHORS_FILE] {
             refuse_symlink(&dir.join(root))?;
@@ -1138,7 +1145,7 @@ impl Rdy {
                 blob_bytes.push(bytes);
             }
         }
-        let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
+        let (blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
             let ignore = crate::wc::ignore::Ignore::load(dir)?;
             let (loaded, diags) = tree_io::read_tree_with(&dir.join("docs"), "docs", Some(&ignore));
             // p-8YP1G: a tree that sets engine metadata is refused before anything is stored or
@@ -1169,360 +1176,18 @@ impl Rdy {
             }
             loaded.into_iter().map(|l| (l.block, l.keyed)).unzip()
         };
-        let scope = Scope::View(view.to_string());
-        // an import is a commit: it claims an unowned view and checks against the view's
-        // recorded conflicts, as `write_linked` does
-        let st = self.read();
-        let claim = crate::views::commit_claim(&st, s, view)?;
-        let conflicts = st.conflicts(&scope)?;
-        let existing = st.materialized(&scope)?;
-        drop(st);
-        // duplicates first: a duplicated doc would otherwise read as a name clash with itself
-        let mut ids = BTreeSet::new();
-        for b in &blocks {
-            if !ids.insert(&b.id) {
-                return Err(RdyError::new(
-                    E_ALREADY_EXISTS,
-                    format!("block {} appears more than once in the import", b.id),
-                    "remove the duplicate from the export files",
-                ));
-            }
-        }
-        drop(ids);
-        let authors = read_authors(dir, &blocks)?;
-        assign_missing_names(&mut blocks, &existing);
-        check_import_names(&blocks, &existing)?;
-        resolve_import_keys(&mut blocks, keyed, &existing)?;
-        let keys = assign_import_keys(&mut blocks, &existing);
-        let incoming: BTreeMap<BlockId, &Block> =
-            blocks.iter().map(|b| (b.id.clone(), b)).collect();
-        let parent_of = |id: &BlockId| -> Option<Option<BlockId>> {
-            incoming
-                .get(id)
-                .map(|b| b.parent.clone())
-                .or_else(|| existing.get(id).map(|b| b.parent.clone()))
-        };
-        for b in &blocks {
-            if let Some(p) = &b.parent
-                && parent_of(p).is_none()
-            {
-                return Err(RdyError::new(
-                    E_UNKNOWN_BLOCK,
-                    format!(
-                        "{} has parent {p}, which is in neither the import nor the view",
-                        b.id
-                    ),
-                    "export the whole project",
-                ));
-            }
-            let mut seen = BTreeSet::from([b.id.clone()]);
-            let mut folders = usize::from(b.block_type == tree::FOLDER);
-            let mut cur = b.parent.clone();
-            while let Some(c) = cur {
-                if !seen.insert(c.clone()) {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("{} is part of a parent cycle", b.id),
-                        "fix the parent fields in the export",
-                    ));
-                }
-                let is_folder = incoming
-                    .get(&c)
-                    .copied()
-                    .or_else(|| existing.get(&c))
-                    .is_some_and(|p| p.block_type == tree::FOLDER);
-                folders += usize::from(is_folder);
-                if folders > tree::MAX_FOLDER_DEPTH {
-                    break;
-                }
-                cur = parent_of(&c).flatten();
-            }
-            if folders > tree::MAX_FOLDER_DEPTH {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!(
-                        "{} sits {folders} folders deep (at most {} allowed)",
-                        b.id,
-                        tree::MAX_FOLDER_DEPTH
-                    ),
-                    format!(
-                        "keep folders at most {} deep: move it higher in the export",
-                        tree::MAX_FOLDER_DEPTH
-                    ),
-                ));
-            }
-        }
-        let mut issues = vec![];
-        for b in &blocks {
-            if existing.get(&b.id).is_some() {
-                return Err(RdyError::new(
-                    E_ALREADY_EXISTS,
-                    format!("block {} already exists in view {view}", b.id),
-                    "import into a fresh project or view",
-                ));
-            }
-            // msw1 (#1160): a create/create conflict has no base, so the view reads the block as
-            // absent; importing it would silently resolve the conflict with the import's version
-            if let Some(c) = conflicts.iter().find(|c| c.block == b.id) {
-                return Err(RdyError::new(
-                    E_ALREADY_EXISTS,
-                    format!(
-                        "block {} already exists in view {view}: it is conflicted ({})",
-                        b.id,
-                        c.id.short()
-                    ),
-                    "import into a fresh project or view",
-                ));
-            }
-            let exists = |id: &BlockId| incoming.contains_key(id) || existing.get(id).is_some();
-            for t in b.ref_tokens() {
-                match BlockId::parse(&t) {
-                    Ok(id) if exists(&id) => {}
-                    _ => {
-                        return Err(RdyError::new(
-                            E_UNKNOWN_REF,
-                            format!(
-                                "{} references {{{{{t}}}}}, which is not in the import",
-                                b.id
-                            ),
-                            format!(
-                                "export the whole project, or remove the reference; {}",
-                                crate::keys::literal_hint(&t)
-                            ),
-                        ));
-                    }
-                }
-            }
-            for l in b.links.values().flatten() {
-                if !exists(&l.target) {
-                    return Err(RdyError::new(
-                        E_UNKNOWN_REF,
-                        format!("{} links to {}, which is not in the import", b.id, l.target),
-                        "export the whole project",
-                    ));
-                }
-            }
-            // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
-            // project; non-asset types may have a field named blob that is not an asset
-            if self.pack.is_asset(&b.block_type)
-                && let Some(v) = b.fields.get("blob")
-            {
-                let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
-                    Some(h) => imported_blobs.contains(&h) || self.store.has_blob(&h)?,
-                    None => false,
-                };
-                if !known {
-                    return Err(RdyError::new(
-                        E_UNKNOWN_REF,
-                        format!(
-                            "{} names blob {}, which is neither in the export's blobs/ nor a blob in this project",
-                            b.id,
-                            v.as_str().unwrap_or("(not a string)")
-                        ),
-                        "export the whole project again: rdy export copies every figure's blob",
-                    ));
-                }
-            }
-            let parent = b
-                .parent
-                .as_ref()
-                .and_then(|p| incoming.get(p).copied().or_else(|| existing.get(p)));
-            issues.extend(validate_prefix(&self.pack, b));
-            let mut found = validate_block(&self.pack, b, parent);
-            crate::write::name_unknown_evidence_key(b, &mut found);
-            // D-2WR0G: an import supplies every field it writes, so each decision's basis and
-            // times are checked here, before any blob or change is stored
-            let names: BTreeSet<String> = b.fields.keys().cloned().collect();
-            crate::decision_fields::merge_set(b, &names, &mut found);
-            issues.extend(found);
-        }
-        if let Some(e) = crate::error::nesting_refusal(&issues) {
-            return Err(e);
-        }
-        if has_errors(&issues) {
-            let mut e = RdyError::new(
-                E_VALIDATION,
-                "the import does not validate against this project's pack",
-                "fix the listed blocks or use a compatible pack",
-            );
-            e.issues = issues;
-            return Err(e);
-        }
-        // lpin1: every pin is recomputed from the imported content, as a write's create pins
-        // it: each cited target (reference or link) to its content hash, the incoming block
-        // with that id first, else the view's. A block is never pinned to itself. Pins in the
-        // files are ignored. A removed version's stub in the view gets no pin: its tracking
-        // hash cannot be recomputed, and its recorded hash would be a false one (D-3M81W).
-        let tracking = self.store.tracking();
-        let content = |id: &BlockId| {
-            incoming
-                .get(id)
-                .copied()
-                .or_else(|| existing.get(id))
-                .filter(|t| !t.is_redacted())
-                .map(|t| t.content_hash_with(tracking))
-        };
-        let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
-            .iter()
-            .map(|b| {
-                let refs = b.ref_tokens();
-                let refs = refs.iter().filter_map(|t| BlockId::parse(t).ok());
-                let links = b.links.values().flatten().map(|l| l.target.clone());
-                refs.chain(links)
-                    .filter(|t| *t != b.id)
-                    .filter_map(|t| content(&t).map(|h| (t, h)))
-                    .collect()
-            })
-            .collect();
-        for (b, p) in blocks.iter_mut().zip(pins) {
-            b.pins = p;
-        }
-        // blobs go in only once the import is known to be valid, so a refused import stores nothing
-        for bytes in &blob_bytes {
-            self.store.put_blob(bytes)?;
-        }
-        let warnings = import_skeleton_gaps(&self.pack, &blocks);
-        // one change per author (grouped by actor), oldest first; blocks with no author row are
-        // the importer's, last. Each change takes the run, role and time of its newest block
-        // (largest at_ms, then id). Changes with the same time keep the file's order: each sits
-        // at its author's last row with its newest time.
-        struct Group {
-            /// The newest block: its time, then its id.
-            newest: (i64, BlockId),
-            provenance: Provenance,
-            /// The last row of authors.yaml with this author's newest time.
-            tie_row: usize,
-            ops: Vec<Op>,
-        }
-        let mut groups: BTreeMap<String, Group> = BTreeMap::new();
-        let mut mine: Vec<Op> = vec![];
-        for block in blocks {
-            match authors.get(&block.id) {
-                Some((p, row)) => {
-                    let newest = (p.at_ms, block.id.clone());
-                    let g = groups.entry(p.actor.clone()).or_insert_with(|| Group {
-                        newest: newest.clone(),
-                        provenance: p.clone(),
-                        tie_row: *row,
-                        ops: vec![],
-                    });
-                    if p.at_ms > g.newest.0 {
-                        g.tie_row = *row;
-                    } else if p.at_ms == g.newest.0 {
-                        g.tie_row = g.tie_row.max(*row);
-                    }
-                    if newest > g.newest {
-                        g.newest = newest;
-                        g.provenance = p.clone();
-                    }
-                    g.ops.push(Op::Create { block });
-                }
-                None => mine.push(Op::Create { block }),
-            }
-        }
-        let mut groups: Vec<Group> = groups.into_values().collect();
-        groups.sort_by_key(|g| g.tie_row);
-        // stable: groups with the same time stay in row order
-        groups.sort_by_key(|g| g.provenance.at_ms);
-        let order: Vec<(Provenance, Vec<Op>)> =
-            groups.into_iter().map(|g| (g.provenance, g.ops)).collect();
-        // df6: the messages name the directory, never its path (a path can hold a user name)
-        let from = import_label(dir)
-            .map(|l| format!(" from {l}"))
-            .unwrap_or_default();
-        let mut planned: Vec<(Provenance, Vec<Op>, String)> = order
-            .into_iter()
-            .map(|(p, ops)| {
-                let message = format!(
-                    "import{}: {} block(s) by {}, imported by {}",
-                    from,
-                    ops.len(),
-                    p.actor,
-                    s.actor
-                );
-                (p, ops, message)
-            })
-            .collect();
-        // an export with no blocks still writes the importer's (empty) change, as before
-        if !mine.is_empty() || planned.is_empty() {
-            planned.push((s.provenance(), mine, format!("import{from}")));
-        }
-        // one write for every change (all or nothing). Each change keeps its author's
-        // provenance; the view ops (the implicit create, a claim, the commits) and the view's
-        // last write are the importer's, so the view stays the importer's, `rdy undo` by the
-        // importer finds the import, and the view is not idle after old author times. Every
-        // change stores the importer (FW-F7b).
-        let importer = ActorRun {
-            actor: s.actor.clone(),
-            run: s.run.clone(),
-        };
-        let mut all_ops = vec![];
-        let changes: Vec<Change> = planned
-            .into_iter()
-            .map(|(provenance, ops, message)| {
-                all_ops.extend(ops.iter().cloned());
-                Change {
-                    view: view.into(),
-                    ops,
-                    deps: vec![],
-                    provenance,
-                    justification: None,
-                    message,
-                    links: ChangeLinks {
-                        imported_by: Some(importer.clone()),
-                        ..ChangeLinks::default()
-                    },
-                    read_identity: None,
-                }
-            })
-            .collect();
-        // nb9 (O9): one receipt over every author change's creates, on the final candidate,
-        // before anything is appended; registered once the import is published
-        let receipt = crate::brief::created_record(
-            &self.pack,
-            &existing,
-            || self.read().graph(&scope),
-            &all_ops,
-        )?;
-        let committed = self.store.commit_many(
+        self.import_prepared(
+            s,
             view,
-            changes,
-            &|id| existing.version_of(id),
-            &conflicts,
-            claim,
-            &s.provenance(),
-        )?;
-        // one change carries the build forward as a commit; several are read again
-        match committed.as_slice() {
-            [one] => self.publish(crate::Delta::Commit {
-                view: view.to_string(),
-                change: *one,
-                ops: all_ops.clone(),
-            })?,
-            _ => self.publish(crate::Delta::View {
-                view: view.to_string(),
-            })?,
-        }
-        let briefing = crate::brief::register_created(&self.briefs, receipt);
-        let ids: Vec<String> = committed.iter().map(ToString::to_string).collect();
-        let created = all_ops
-            .iter()
-            .enumerate()
-            .map(|(i, op)| (format!("op{i}"), op.block_id().to_string()))
-            .collect();
-        Ok(WriteResult {
-            change: ids.last().cloned().unwrap_or_default(),
-            changes: ids,
-            created,
-            names: BTreeMap::new(),
-            keys,
-            inherited: BTreeMap::new(),
-            reaffirmed: vec![],
-            warnings,
-            code_recorded: None,
-            justification: None,
-            briefing,
-        })
+            crate::import_prepared::PreparedImport {
+                blocks,
+                keyed,
+                authors: read_authors_text(dir),
+                blobs: blob_bytes,
+                blob_hashes: imported_blobs,
+                label: import_label(dir),
+            },
+        )
     }
 
     /// lkey1: `edit_block_with` for a block written as YAML, a key as a link target resolved

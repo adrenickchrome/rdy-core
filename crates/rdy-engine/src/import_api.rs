@@ -51,11 +51,9 @@ pub fn run_import(
     }
     // the import's baseline, page by page, and the path to the target: the import is committed,
     // so a failure here must not make the reply an error
-    attach_baseline(
-        &mut v,
-        st.coverage_report(&scope, None),
-        st.onboarding(&scope),
-    );
+    let report = crate::import_prepared::fault(crate::import_prepared::ImportFault::Baseline)
+        .and_then(|()| st.coverage_report(&scope, None));
+    attach_baseline(&mut v, report, st.onboarding(&scope));
     Ok(v)
 }
 

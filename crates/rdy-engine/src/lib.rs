@@ -68,6 +68,7 @@ pub mod hub_types;
 pub mod identity;
 pub mod import_api;
 mod import_facts;
+pub mod import_prepared;
 pub mod inbox;
 pub mod inflight;
 pub mod instructions;

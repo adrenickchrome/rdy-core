@@ -81,9 +81,9 @@ pub use segment::SegmentReader;
 pub use store::OpenPolicy;
 pub use store::{
     BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL,
-    LeftoverHookGuard, MAX_BLOB_BYTES, NoticeCapture, OpenReport, Store, StoreLock, StoreReader,
-    capture_notices_for_tests, check_chunk_len, drop_unclean_for_tests, lock_error, notice,
-    on_leftover_checked_for_tests, unclean_closes_for_tests,
+    LeftoverHookGuard, MAX_BLOB_BYTES, NoticeCapture, OpenReport, Rollback, SealFailure, Store,
+    StoreLock, StoreReader, capture_notices_for_tests, check_chunk_len, drop_unclean_for_tests,
+    lock_error, notice, on_leftover_checked_for_tests, unclean_closes_for_tests,
 };
 mod state;
 pub use state::{
