@@ -26,9 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Fields rdy sets and keeps in the store: a working-copy file never shows them. From the
-/// file-formats page's store-only field list (p-8YP1G): the path-derived key mark and the two
-/// engine metadata fields, in that order.
-pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto", "reaffirmed", "reflects_at"];
+/// file-formats page's store-only field list (p-8YP1G): the path-derived key mark, then the
+/// engine metadata fields by name. Repo links adds `adopted_as` to `reaffirmed` and `reflects_at`
+/// (D-8VJAZ: a store-only engine field, as `reaffirmed` is).
+pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto", "adopted_as", "reaffirmed", "reflects_at"];
 
 /// Link kinds that live only in the store (justification links): D-4WC6R adds `reflects`, the
 /// engine link kind from a block to the source it reflects.

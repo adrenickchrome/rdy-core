@@ -237,6 +237,87 @@ fn world() -> World {
     }
 }
 
+/// A project with the repo link `core`; the landed, accepted local decision `old` that states
+/// `rule`, and the landed claim `dep` that depends on it and states `dep_body`; then the delivery
+/// of the upstream copy that `upstream` makes from `old`'s id.
+fn rule_world(rule: &str, dep_body: &str, upstream: impl FnOnce(&BlockId) -> Block) -> World {
+    let (d, mut r) = rdy_qa::fixtures::project();
+    let files = tempfile::tempdir().unwrap();
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d",
+             "fields": {"title": "Guide", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d",
+             "fields": {"title": "Rules"}},
+            {"op": "create", "type": "repo_link", "id": "$l", "parent": "$d",
+             "fields": {"alias": "core", "repo": cited().to_string(), "profile": PROFILE}}
+        ]),
+    );
+    land(&mut r, "seed").unwrap();
+    let (section, link) = (created(&w, "$s"), created(&w, "$l"));
+    let decided = r
+        .decide(
+            &writer(),
+            "dec",
+            DecisionInput {
+                parent: section.to_string(),
+                statement: rule.into(),
+                title: Some("Log retention".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("decide: {e:?}"));
+    let old = BlockId::parse(&decided.created["$decision"]).unwrap();
+    land(&mut r, "dec").unwrap();
+    let w = put(
+        &mut r,
+        "dep",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": section.to_string(),
+                "body": dep_body,
+                "links": {"depends_on": [old.to_string()]}}]),
+    );
+    land(&mut r, "dep").unwrap();
+    deliver(&mut r, files.path(), "v1", &link, &[&upstream(&old)]);
+    World {
+        _d: d,
+        _files: files,
+        r,
+        section,
+        old,
+        dep: created(&w, "$c"),
+    }
+}
+
+/// The upstream copy, as decision `id_` that states `rule`.
+fn upstream_rule(id_: &str, rule: &str) -> Block {
+    block(
+        id_,
+        "decision",
+        &[
+            ("title", "Log retention"),
+            ("statement", rule),
+            ("status", "accepted"),
+        ],
+        "",
+    )
+}
+
+/// The kinds of the items the plan of view `view` gives `dep` for cause `old`.
+fn dep_kinds(r: &Rdy, view: &str, dep: &BlockId, old: &BlockId) -> Vec<PlanKind> {
+    let plan = r.read().view_plan(view).unwrap();
+    plan.items
+        .iter()
+        .filter_map(|row| match row {
+            PlanRow::Live(i) if i.subject == dep.as_str() && i.cause == old.as_str() => {
+                Some(i.kind)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn canon_block(r: &Rdy, b: &BlockId) -> Block {
     r.read().block(&Scope::Canon, b).unwrap()
 }
@@ -362,8 +443,8 @@ fn rpl21_adopted_as_supersedes_and_offers_rebinds() {
     assert!(
         items.iter().any(|i| i.subject == w.dep.as_str()
             && i.cause == w.old.as_str()
-            && matches!(i.kind, PlanKind::Update | PlanKind::Rejustify)),
-        "{items:#?}"
+            && i.kind == PlanKind::Rejustify),
+        "the upstream copy states what the old decision stated: {items:#?}"
     );
     // landed, canon keeps the status and the dependent's suspect
     land(&mut w.r, "up").unwrap();
@@ -658,4 +739,39 @@ fn verdict(r: &Rdy, p: &ProposalInfo) -> PolicyVerdict {
         .policy
         .expect("a verdict")
         .verdict
+}
+
+/// The plan compares the old decision with the delivered successor that the adoption records,
+/// read from the foreign log, never with a local block of the same bare id.
+#[test]
+fn rpl21_adoption_compares_with_the_delivered_successor() {
+    const RULE: &str = "Keep logs for 30 days.";
+    const DEP: &str = "Billing keeps its logs for 30 days.";
+    // (successor id: other or the same as old's, successor rule, the dependent's item)
+    let cases = [
+        (false, RULE, PlanKind::Rejustify),
+        (false, "Keep logs for 60 days.", PlanKind::Update),
+        (true, RULE, PlanKind::Rejustify),
+        (true, "Keep logs for 60 days.", PlanKind::Update),
+    ];
+    let mut wrong = vec![];
+    for (same_id, rule, want) in cases {
+        let mut w = rule_world(RULE, DEP, |old| {
+            let id_ = if same_id { old.as_str() } else { "D-PSTRM" };
+            upstream_rule(id_, rule)
+        });
+        let target = if same_id {
+            format!("core:{}", w.old)
+        } else {
+            "core:D-PSTRM".to_string()
+        };
+        adopt(&mut w.r, "up", &w.old, &target).unwrap_or_else(|e| panic!("adopt {target}: {e:?}"));
+        let got = dep_kinds(&w.r, "up", &w.dep, &w.old);
+        if got != [want] {
+            wrong.push(format!(
+                "same id {same_id}, successor states {rule:?}: {got:?}, want {want:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

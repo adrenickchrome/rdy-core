@@ -542,7 +542,7 @@ fn rf1_reflects_and_supporting_links_are_store_only() {
     );
     assert_eq!(
         STORE_ONLY_FIELDS,
-        &["key_auto", "reaffirmed", "reflects_at"]
+        &["key_auto", "adopted_as", "reaffirmed", "reflects_at"]
     );
 
     // a pack cannot declare the reflects link kind, alone or beside its own

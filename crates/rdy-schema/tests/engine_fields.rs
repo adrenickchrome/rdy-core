@@ -2,8 +2,8 @@
 //! defines either or marks it as tracking; both validators accept them on every type and check
 //! their stored shapes, as for `key_auto`.
 use rdy_model::engine_fields::{
-    self, Against, MAX_ENGINE_ENTRIES, MAX_REASON_CHARS, REAFFIRMED, REFLECTS_AT, Reaffirmation,
-    ReflectsAt,
+    self, ADOPTED_AS, Against, MAX_ENGINE_ENTRIES, MAX_REASON_CHARS, REAFFIRMED, REFLECTS_AT,
+    Reaffirmation, ReflectsAt,
 };
 use rdy_model::{Block, BlockId, FieldValue, Hash};
 use rdy_schema::*;
@@ -178,8 +178,11 @@ fn cp1_pack_cannot_own_engine_fields() {
             format!("invalid pack: type decision: field {field} is reserved for the engine"),
         );
     }
-    // both are store-only: a working copy never shows them
-    assert_eq!(STORE_ONLY_FIELDS, ["key_auto", REAFFIRMED, REFLECTS_AT]);
+    // both are store-only: a working copy never shows them; so is `adopted_as` (D-8VJAZ)
+    assert_eq!(
+        STORE_ONLY_FIELDS,
+        ["key_auto", ADOPTED_AS, REAFFIRMED, REFLECTS_AT]
+    );
 }
 
 #[test]
