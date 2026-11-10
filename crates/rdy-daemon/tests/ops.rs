@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 66);
+    assert_eq!(OPS.len(), 69);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -74,6 +74,18 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
         OPS[new_doc + 4],
         "new_instruction",
         "ain5: new_instruction follows new_source"
+    );
+    assert_eq!(
+        OPS[new_doc + 5],
+        "new_repo_link",
+        "rpl31: new_repo_link follows new_instruction"
+    );
+    assert_eq!(OPS[brief + 2], "links", "rpl31: links follows instructions");
+    let edit_block = OPS.iter().position(|o| *o == "edit_block").unwrap();
+    assert_eq!(
+        OPS[edit_block + 1],
+        "adopt_upstream",
+        "rpl31: adopt_upstream follows edit_block"
     );
     let fsck = OPS.iter().position(|o| *o == "fsck").unwrap();
     assert_eq!(OPS[fsck + 1], "compact", "mh7: compact follows fsck");

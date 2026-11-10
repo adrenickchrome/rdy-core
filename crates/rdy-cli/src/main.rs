@@ -533,6 +533,129 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    /// rpl31 (D-DAPR8, D-8VJAZ): `rdy links [show <alias> | refs [<alias>]]`, `rdy adopt-upstream
+    /// <old> <alias>:<id> [--view <view>]` and `rdy new repo-link <alias> --parent <doc> --repo
+    /// <id> --profile <id> [--title <text>] [--view <view>]` parse; the commands take no Later and
+    /// no exchange between projects, and the hub's verbs are none of them.
+    #[test]
+    fn rpl31_links_adopt_upstream_and_new_repo_link_parse() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["rdy"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(matches!(
+            parse(&["links"]),
+            Ok(Cli {
+                cmd: Cmd::Links(links_cmd::LinksArgs { cmd: None }),
+                ..
+            })
+        ));
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "show", "core"])
+        else {
+            panic!("links show parses");
+        };
+        assert_eq!(
+            links_cmd::request(&a),
+            serde_json::json!({"op": "show", "alias": "core"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "refs"])
+        else {
+            panic!("links refs parses");
+        };
+        assert_eq!(links_cmd::request(&a), serde_json::json!({"op": "refs"}));
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links", "refs", "core"])
+        else {
+            panic!("links refs core parses");
+        };
+        assert_eq!(
+            links_cmd::request(&a),
+            serde_json::json!({"op": "refs", "alias": "core"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::Links(a), ..
+        }) = parse(&["links"])
+        else {
+            panic!("links parses");
+        };
+        assert_eq!(links_cmd::request(&a), serde_json::json!({}));
+        let Ok(Cli {
+            cmd: Cmd::AdoptUpstream(a),
+            ..
+        }) = parse(&["adopt-upstream", "D-AAAAA", "core:D-BBBBB", "--view", "w"])
+        else {
+            panic!("adopt-upstream parses");
+        };
+        assert_eq!(
+            links_cmd::adopt_request(&a),
+            serde_json::json!({"old": "D-AAAAA", "adopted_as": "core:D-BBBBB", "view": "w"})
+        );
+        let Ok(Cli {
+            cmd: Cmd::AdoptUpstream(a),
+            ..
+        }) = parse(&["adopt-upstream", "D-AAAAA", "core:D-BBBBB"])
+        else {
+            panic!("adopt-upstream parses");
+        };
+        assert_eq!(
+            links_cmd::adopt_request(&a),
+            serde_json::json!({"old": "D-AAAAA", "adopted_as": "core:D-BBBBB"})
+        );
+        assert!(matches!(
+            parse(&[
+                "new",
+                "repo-link",
+                "core",
+                "--parent",
+                "d-AAAAA",
+                "--repo",
+                "ab",
+                "--profile",
+                "pf-AAAAA"
+            ]),
+            Ok(Cli {
+                cmd: Cmd::New {
+                    what: edit_cmd::NewCmd::RepoLink { .. }
+                },
+                ..
+            })
+        ));
+        // each of the three needs its arguments, and none has a Later, a take or an export
+        for bad in [
+            vec!["links", "show"],
+            vec!["links", "bogus"],
+            vec!["links", "--later"],
+            vec!["links", "take"],
+            vec!["links", "export"],
+            vec!["links", "revoke"],
+            vec!["adopt-upstream"],
+            vec!["adopt-upstream", "D-AAAAA"],
+            vec!["adopt-upstream", "D-AAAAA", "core:D-BBBBB", "--later"],
+            vec!["new", "repo-link", "core"],
+            vec![
+                "new",
+                "repo-link",
+                "core",
+                "--parent",
+                "d-AAAAA",
+                "--repo",
+                "ab",
+            ],
+            vec!["take-delivery"],
+        ] {
+            let e = parse(&bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} parses"));
+            assert_eq!(e.exit_code(), 2, "{bad:?}");
+        }
+    }
+
     /// PRE task 2: machine-read versions stay plain; only the human `--version` output carries
     /// the preview mark.
     #[test]
