@@ -722,10 +722,10 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     // 1. the first delivery: the hub's act, no local one
     let first = c.deliver(s, "v1.0.0", None);
     assert!(!first.unchanged && first.added > 0, "{first:?}");
-    stays(&c, &canon, "a delivery");
+    stays(c, &canon, "a delivery");
     let again = c.deliver(s, "v1.0.0", None);
     assert!(again.unchanged, "the same selection writes nothing");
-    stays(&c, &canon, "a repeated delivery");
+    stays(c, &canon, "a repeated delivery");
     let rows = c.handle(|h| h.snapshot().unwrap().link_adoption().unwrap());
     assert_eq!(rows[0].state, LinkState::Delivered);
     assert_eq!(rows[0].last.as_ref().map(|l| l.entry), Some(first.entry));
@@ -734,10 +734,10 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     after(c, "first delivery");
 
     // 2. the citation: the person lands a claim that pins the delivered page
-    c.cite(&s);
-    moved(&c, &mut canon, "the citation");
+    c.cite(s);
+    moved(c, &mut canon, "the citation");
     let claim = c.claim.clone().unwrap();
-    let (held, current) = held_of(&c, &s);
+    let (held, current) = held_of(c, s);
     assert!(held.is_some() && held == current, "pinned at the delivery");
     let v1 = held.unwrap();
     let refs = c.handle(|h| h.snapshot().unwrap().foreign_refs().unwrap());
@@ -752,17 +752,17 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     after(c, "citation");
 
     // an open proposal pins the same page: the next delivery shifts its premise
-    let open = open_premise(&c, &s);
-    stays(&c, &canon, "an open proposal");
-    let (gate, _) = engine_gate(&c, &open);
+    let open = open_premise(c, s);
+    stays(c, &canon, "an open proposal");
+    let (gate, _) = engine_gate(c, &open);
     assert_eq!(gate, vec![], "nothing shifted yet");
 
     // 3. a changed source: v1.1.0 changes the page. The pin stays; a suspect and an adopt card
     // appear; canon stays.
     let second = c.deliver(s, "v1.1.0", None);
     assert!(!second.unchanged && second.changed == 1, "{second:?}");
-    stays(&c, &canon, "a delivery that changes a cited page");
-    let (held, current) = held_of(&c, &s);
+    stays(c, &canon, "a delivery that changes a cited page");
+    let (held, current) = held_of(c, s);
     assert_eq!(held, Some(v1), "the pin stays behind");
     assert!(current.is_some() && current != held);
     let v2 = current.unwrap();
@@ -794,7 +794,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
 
     // the adapter's facts for the open proposal are the engine's own, from the same log, and
     // the delivery shifted its premise
-    let (gate, readiness) = engine_gate(&c, &open);
+    let (gate, readiness) = engine_gate(c, &open);
     let seen = c.handle(|h| h.snapshot().unwrap().foreign_tension_gate(&open).unwrap());
     assert_eq!(seen, gate, "{readiness}");
     assert_eq!(seen.len(), 1, "{seen:#?} {readiness}");
@@ -807,8 +807,8 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
 
     // 4. keep: the reason is recorded, the pin is retained and canon stays
     c.answer("keep").unwrap();
-    stays(&c, &canon, "a keep answer");
-    assert_eq!(held_of(&c, &s), (Some(v1), Some(v2)));
+    stays(c, &canon, "a keep answer");
+    assert_eq!(held_of(c, s), (Some(v1), Some(v2)));
     let rows = c.handle(|h| h.snapshot().unwrap().link_adoption().unwrap());
     assert_eq!(rows[0].adopted, None, "a keep answer adopts nothing");
     after(c, "keep");
@@ -817,7 +817,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     // force: the unadopted lock names it and nothing moves.
     let third = c.deliver(s, "v1.2.0", org());
     assert!(!third.unchanged && third.added >= 1, "{third:?}");
-    stays(&c, &canon, "a delivery that locks a rule");
+    stays(c, &canon, "a delivery that locks a rule");
     let unadopted = c.handle(|h| h.snapshot().unwrap().unadopted_locked().unwrap());
     assert_eq!(unadopted.len(), 1, "{unadopted:#?}");
     assert_eq!(
@@ -832,7 +832,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     let dev = c
         .deviate(&dv_ref, "Billing retries five times.")
         .unwrap_or_else(|e| panic!("deviate: {e:?}"));
-    moved(&c, &mut canon, "the deviation");
+    moved(c, &mut canon, "the deviation");
     let refs = c.handle(|h| h.snapshot().unwrap().foreign_refs().unwrap());
     let departs: Vec<_> = refs[0].refs.iter().filter(|r| r.citer == dev).collect();
     assert_eq!(departs.len(), 1, "{refs:#?}");
@@ -846,15 +846,15 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
         )
         .unwrap_err();
     assert_eq!(e.code, "E_UNKNOWN_REF", "{e:?}");
-    stays(&c, &canon, "a refused deviation");
+    stays(c, &canon, "a refused deviation");
     after(c, "deviation");
 
     // 7. adoption: the person adopts the delivery of v1.2.0. The pin moves to the page's current
     // version, the organization's lock has force, and the unadopted lock is gone.
     c.answer("adopt").unwrap();
-    moved(&c, &mut canon, "the adoption");
+    moved(c, &mut canon, "the adoption");
     // the delivery added a rule and changed no cited page: the page's pin stays behind
-    assert_eq!(held_of(&c, &s), (Some(v1), Some(v2)));
+    assert_eq!(held_of(c, s), (Some(v1), Some(v2)));
     let rows = c.handle(|h| h.snapshot().unwrap().link_adoption().unwrap());
     assert_eq!(
         rows[0].adopted,
@@ -893,21 +893,21 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
         &format!("core:{} is locked by its organization set", s.lk),
         "add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction",
     );
-    stays(&c, &canon, "a refused deviation from a lock");
+    stays(c, &canon, "a refused deviation from a lock");
     after(c, "adoption");
 
     // a later delivery changes the page again: its adopt answer moves the pin to the page's
     // current version, in one landing
     let fourth = c.deliver(s, "v1.3.0", org());
     assert!(!fourth.unchanged && fourth.changed == 1, "{fourth:?}");
-    stays(&c, &canon, "a delivery that changes a cited page again");
-    let (held, current) = held_of(&c, &s);
+    stays(c, &canon, "a delivery that changes a cited page again");
+    let (held, current) = held_of(c, s);
     assert_eq!(held, Some(v1));
     let v3 = current.unwrap();
     assert!(v3 != v1 && v3 != v2);
     c.answer("adopt").unwrap();
-    moved(&c, &mut canon, "the second adoption");
-    assert_eq!(held_of(&c, &s), (Some(v3), Some(v3)), "the pin moved");
+    moved(c, &mut canon, "the second adoption");
+    assert_eq!(held_of(c, s), (Some(v3), Some(v3)), "the pin moved");
     let rows = c.handle(|h| h.snapshot().unwrap().link_adoption().unwrap());
     assert_eq!(
         rows[0].adopted.as_ref().map(|a| a.entry),
@@ -923,7 +923,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
             .unwrap_or_else(|e| panic!("adopt upstream: {e:?}"));
         land(r, "upstream");
     });
-    moved(&c, &mut canon, "the upstream adoption");
+    moved(c, &mut canon, "the upstream adoption");
     let status = c.rdy(|r| {
         format!(
             "{:?}",
@@ -938,12 +938,12 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
 
     // 9. a revocation: the hub's act. The link's last view stays readable, a later delivery is
     // refused, and canon stays.
-    let before = c.facts(&s);
+    let before = c.facts(s);
     let revoked = c.revoke();
     assert!(!revoked.unchanged);
-    stays(&c, &canon, "a revocation");
+    stays(c, &canon, "a revocation");
     assert!(c.revoke().unchanged, "a revoked source writes nothing more");
-    let gone = c.facts(&s);
+    let gone = c.facts(s);
     assert!(gone.view.as_ref().unwrap().revoked);
     // the pins and the held versions stay; a revoked source offers no current selection
     let held = |f: &Facts| -> Vec<_> {
@@ -987,7 +987,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
         "the repo link is revoked",
         "use a live repo link",
     );
-    stays(&c, &canon, "a refused delivery");
+    stays(c, &canon, "a refused delivery");
     after(c, "revocation");
 
     // 10. a removal: the cited project removes the page's text. The history carries the proof,
@@ -1003,13 +1003,13 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     let mut want = vec![(s.ap.clone(), v1), (s.ap.clone(), v2), (s.ap.clone(), v3)];
     want.sort();
     assert_eq!(applied, want);
-    stays(&c, &canon, "a removal");
+    stays(c, &canon, "a removal");
     assert!([v1, v2, v3].iter().all(|v| block_removed(c.root(), *v)));
     assert!(
         !on_disk(c.root(), LEAKED),
         "no byte of the removed text stays"
     );
-    let end = c.facts(&s);
+    let end = c.facts(s);
     // the count keeps the removal entry and the residue of the erased copies
     assert!(end.bytes > 0);
     assert_eq!(
@@ -1026,7 +1026,7 @@ fn journey(s: &Source, c: &mut Citing, after: &mut dyn FnMut(&Citing, &str)) -> 
     // the removal proof again writes nothing
     let again = c.handle(|h| h.take_foreign_removal(&history, s.repo).unwrap());
     assert!(again.unchanged);
-    stays(&c, &canon, "a repeated removal");
+    stays(c, &canon, "a repeated removal");
     after(c, "removal");
     Ends {
         pages: [v1, v2, v3],
