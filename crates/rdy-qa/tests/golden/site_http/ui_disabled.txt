@@ -7,7 +7,7 @@ X-Frame-Options: DENY
 Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 Connection: close
 Content-Type: text/html; charset=utf-8
-Content-Length: 3590
+Content-Length: 3608
 
 <!doctype html>
 <html lang="en" data-rdy-kind="not-found">
@@ -34,7 +34,7 @@ Content-Length: 3590
 </header>
 
 <div class="app">
-  <aside class="sidenav" id="sidebar"><details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages"><ul class="nav-root"><li class="nav-group"><ul><li class="nav-item"><a href="/index.html">Home</a></li><li class="nav-item"><a href="/seed.html">Seed</a></li></ul></li></ul></nav></details>
+  <aside class="sidenav" id="sidebar" aria-label="Site"><details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages"><ul class="nav-root"><li class="nav-group"><ul><li class="nav-item"><a href="/index.html">Home</a></li><li class="nav-item"><a href="/seed.html">Seed</a></li></ul></li></ul></nav></details>
     <div class="theme theme-drawer" role="radiogroup" aria-label="Colour theme">
       <button type="button" role="radio" data-theme-choice="system" aria-checked="true">Auto</button>
       <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>

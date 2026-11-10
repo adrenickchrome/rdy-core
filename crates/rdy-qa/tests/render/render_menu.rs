@@ -225,11 +225,16 @@ fn sr12_the_versions_page_has_the_site_layout() {
         "{head}"
     );
     // the frame: the drawer, then the main column with the crumbs, the menu and the footer
-    assert!(at("<div class=\"app\">") < at("<aside class=\"sidenav\" id=\"sidebar\">"));
     assert!(
-        at("<aside class=\"sidenav\" id=\"sidebar\">") < at("<main class=\"content\" id=\"main\"")
+        at("<div class=\"app\">")
+            < at("<aside class=\"sidenav\" id=\"sidebar\" aria-label=\"Site\">")
     );
-    let drawer = &html[at("<aside class=\"sidenav\" id=\"sidebar\">")..at("</aside>")];
+    assert!(
+        at("<aside class=\"sidenav\" id=\"sidebar\" aria-label=\"Site\">")
+            < at("<main class=\"content\" id=\"main\"")
+    );
+    let drawer =
+        &html[at("<aside class=\"sidenav\" id=\"sidebar\" aria-label=\"Site\">")..at("</aside>")];
     assert!(
         drawer.contains(
             "<div class=\"theme theme-drawer\" role=\"radiogroup\" aria-label=\"Colour theme\">"

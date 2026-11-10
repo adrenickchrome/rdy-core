@@ -237,23 +237,23 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "b20d5140a30e1d505f88c14876f0a8e853490ce49ff89c80e09c03a53b726ccf",
-        "10d95fdaccde87bbbcb5598f2d451b374096d7e73d2a1916e609d129eb6d5670",
+        "2b2942b261761332b735bf188a989a70591cb53fefdd56064003e08af185341f",
+        "3c463e38c30b971f78be38e1b8f41cfc60a4bbb5c565d0d819edbc16184f0465",
     ),
     (
         "tag",
-        "423cf95667942f150039e7c489144810a2d223561b57b5a62afa6765a4f8d132",
-        "ab4d4aa4942ec323c38d35cf3204f5fee2e7072cbba8b8c040819aabc28db237",
+        "2205b4ba8bece7837fad454bcbe8410a7be8fbf6d1324251cc06f0ecb98a182c",
+        "ead4453ea1cb7fd967723f309e9aad91dae732c1acce4e1859ea218eb3f81d08",
     ),
     (
         "view",
-        "48a25babc63a87e3db0d60dc5a469dab889817d1c0caef2066c019096fc42d32",
-        "c866995179d2bbc81f82ae4c8dd922cc1eef949208a6179f983f4ed95957d917",
+        "03339f715f5313e8e92f85f588e61af6d4686f4a5cad2b241d4f54a8f06634fc",
+        "eab91607e650409254e5d36707599e9a8f44cab79b148e021948278734c825a3",
     ),
     (
         "proposal",
-        "18e7e3a9c6cdaf33bbe2a0f3a570719c3ad1a5bf64aea7535bb7d976394712d3",
-        "b8430a4a510ae4bf34879d27e373e8c089b0f8eef69a34a3bd84f21684460f9f",
+        "5d2645ccf00edc546df126872b458180c6b2adbadb5e9f9de679c057bd50f58a",
+        "e1927ce229b71dbf8ec9a9ff297dba139cf185f310b0898a612fc8d953d5daa8",
     ),
 ];
 
@@ -295,31 +295,31 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
         [
-            "449e831d3d9a8ce4c815d67c82ceb9882cb4ef3a0d7942814d9e9cc19b23cf59",
-            "998a127285a0c7a623a78212f23eb98cceb92d1bdfaf7bdfa5f6f43d26853adc",
-            "938c9836e463189769cb4d487178c6425a9fbe988027970549c20768293d1b40",
-            "9c07f3c2a6b76e09131538f66b58ef5eb6826791faa2351d8ac4e0102744a980",
-            "5be1453c6b29b76de993e5a562b3e972926d57b1073fd4dccf2a21a4b4058832",
+            "7df1bc6c03640d1f5f912c4ccda9f80d94dbf749497bd94bc820aef60d664fce",
+            "b3826ab0c67fd3712ab13832626f1fdd1d830a05d6e904387ee20c6612678bd8",
+            "840b9ce1dc431cc9550fc985144ebedab4c4127b55212bb159938a733ec159d7",
+            "b8ced92384c39f43280164e3daedc7b303d8aa7cd3ddcd4601ab85dac0f73b88",
+            "7123dfbf1473c1ecd951631f0dd656eb5e42663ed712749e8d14d87b3b4e2d3d",
         ],
     ),
     (
         "tag",
         [
-            "fa8390847bb9fb3ca37037994919553542c8e3d35034d23b63d24c7c3d5b71f0",
-            "b343a5b5d478cfdeca78cd8fc3c4040afcacfdf16f76306be4122c254a97a104",
-            "c8a8b44f679d1d5be3116346f252b6dd14e1109418d8a070c73a0767096bdcc5",
-            "db1857ceb8bf4b1082e70cfd9998c0fc162f16aee6dc0d19b244a7fcf0905bef",
-            "64ee2f7e057704eabf633568380874172061d9c64de3b0ea5209611ffa945fb0",
+            "26e4f19e3f15182e2ef91d87363a21945eed6d283e5de83f5c92834db58f4c75",
+            "1c6f05d0f8c4d0bf68b2840751f487348db56b51191c8fd8aaa4eea25cdff01d",
+            "b6637f99fd02c5c1d3fd452e14b12a29dc80dfdda0a02067160d242becad5ed4",
+            "b3ada5447380be2263827a850d76ee5e4272d6b0a8dd08ab5be2f169ed073df3",
+            "f46fdbf2dd1c477b9274cfd1a47fb9548212eaebc9a7992eca5344a32b195e3d",
         ],
     ),
     (
         "view",
         [
-            "28270a66f2a099986b7123828f7797dfba9a748da1a7bfc42d71527355879eca",
-            "9d0ee3035447042b8ef884e13947f952fdf3269a2f159cdc34c5a2123b8576f8",
-            "40640e6325548294e74f05ccb7a4910a65d9242fab0df3b5c2c232ecbad93fb1",
-            "6fd72f8df9966c7d1429a0c30d2081800699fb43a7288cad204b42c7e68f548f",
-            "513f948e73af5d16b2352b42e9611a59bd64f1b80e772a929fed3f829411def6",
+            "57a295d1e12dcd87b5057a75ec960aab8df167a01824ee1c2fdef7530efb0306",
+            "630fa826e8fb59d9cb68883fb583453b492a50075fff2e92211b9bb7663acbb9",
+            "9dc60ab3b6704cb058f23f01514f718b169f3bb781e622bf10cfb924d35826aa",
+            "c0ceb6424823c01fb23b5528ba5e2c4ac673eb4033d2cf4989115719fb269349",
+            "c59ee2168cce38620d411e7b6799a12e07c7028a2cd4d75ae142adfd551804ff",
         ],
     ),
     (

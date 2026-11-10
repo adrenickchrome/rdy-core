@@ -512,7 +512,7 @@ fn dgm9_copy_block_section_and_page_markdown() {
         "Rust\n\n```rust\nfn main() {}\n```\n".to_string(),
         "### Nested part\n".to_string(),
         "Inside nested.\n".to_string(),
-        "Two boxes\n\n```mermaid\ngraph TD\n  A --> B\n```\n".to_string(),
+        "```mermaid\ngraph TD\n  A --> B\n```\n\nTwo boxes\n".to_string(),
         "After nested.\n".to_string(),
         format!("![A small figure](http://h/assets/{hash}.png)\n\nA small figure\n"),
         "**Ledger** The ledger term.\n".to_string(),
@@ -554,7 +554,7 @@ fn dgm9_copy_block_section_and_page_markdown() {
     assert!(
         all[6]
             .text
-            .ends_with("```mermaid\ngraph TD\n  A --> B\n```\n")
+            .ends_with("```mermaid\ngraph TD\n  A --> B\n```\n\nTwo boxes\n")
     );
     assert!(!all[6].text.contains("After nested."));
     assert!(all[1].text.contains("After nested.") && !all[1].text.contains("Second part"));

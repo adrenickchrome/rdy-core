@@ -33,15 +33,15 @@ impl Drop for Unseed {
 const BASE_PDF_DIGESTS: [(&str, &str); 3] = [
     (
         "canon",
-        "3e298d3543d81c636214bffe97f81b26b8e7f011af61d3868178e28af5b26e99",
+        "1c3ed55b16b7df6192e3cd0a7795c435a1ad18b90d98d5b48f5e92f50b88d608",
     ),
     (
         "tag:v1.0.0",
-        "039f3d221943252c4e87d59415486509f26729e18e7f0290c7f86d768ca2f77a",
+        "8ce4edbf3003d4bd21bbc5c11a7bc467b137e3e5f2fc2f089c4851a7b218f624",
     ),
     (
         "view:editing",
-        "a6766c573ab574521a87bfc5d9be59915452d1125433da1d1ed4bfd4cc0f975b",
+        "bfbe44086964f07ea9463997c18e3163ed86fabc45102ceea443341f974770bc",
     ),
 ];
 

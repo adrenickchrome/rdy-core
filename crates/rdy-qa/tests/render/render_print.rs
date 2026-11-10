@@ -485,12 +485,12 @@ fn ec3_a_diagram_prints_as_its_source() {
                 assert_eq!(lang.as_deref(), Some("mermaid"));
                 assert!(src.starts_with("flowchart TD\n"), "{src}");
                 assert!(!src.contains("t-XTQDJ"), "a reference reads as its label");
-                // its caption (the alt text) comes just before it
+                // its caption (the alt text) comes just after it, as on the site
                 assert!(
-                    matches!(blocks[i - 1], PBlock::Para { runs, .. }
+                    matches!(blocks[i + 1], PBlock::Para { runs, .. }
                         if text(runs) == "The grammar of a pattern as a tree"),
                     "{:?}",
-                    blocks[i - 1]
+                    blocks[i + 1]
                 );
             }
             // a diagram is no picture, and its "Diagram source" summary is not printed
@@ -682,15 +682,15 @@ fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "3f84b35feec2162c0724b3ed07f28ad8e8568530faf0ba4f1dd6715f30ed596b",
+            "7cb70319d50f3c521ba0bb140bdf48586cf66cd01f4c33c66f839686469970cd",
         ),
         (
             "view:editing",
-            "25f084e2efff94b69b6a237b8df88a38953195e7c6cd2c475ac47840eadb031c",
+            "1faf8bf1f620d781c5b767492fc64d0cc06fd846fa1589d4f7f42f0d35e8e664",
         ),
         (
             "view:reserved",
-            "e628ccdea1dacde632c1ef81ca4b0ee748a391e63af59eec540399e170746a41",
+            "6e047b114f4843e94fd4f87ff3b99d1d315e23d2c41d0494954ff14542f3a32a",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
