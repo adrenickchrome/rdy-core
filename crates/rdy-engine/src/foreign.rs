@@ -282,6 +282,22 @@ impl ReadState {
             .map(|(_, source, entry)| (source.clone(), *entry)))
     }
 
+    /// Every version of `target` that an entry before this state's watermark delivered, whatever
+    /// source delivered it and whether that source is live, revoked or no longer selects it, in
+    /// version-hash order: the retained earlier texts a drift without a pin reads (repo links,
+    /// D-Y49PX).
+    pub fn foreign_versions(&self, target: &ForeignId) -> Result<Vec<Hash>, RdyError> {
+        let foreign = self.foreign()?;
+        let index = foreign.held_index(&self.reader)?;
+        let lo = (target.repo, target.id.clone(), Hash([0; 32]));
+        Ok(index
+            .versions
+            .range(lo..)
+            .take_while(|(r, id, _)| *r == target.repo && *id == target.id)
+            .map(|(_, _, v)| *v)
+            .collect())
+    }
+
     /// The version that carried the content a foreign pin records for `target`, when an entry
     /// before this state's watermark delivered it, whatever its source's state now. `None` when
     /// no such entry exists: the pin's version is not held here (repo links, D-FK58A).

@@ -116,10 +116,14 @@ pub enum EventKind {
         run: Option<String>,
     },
     /// A tension that opened in this batch, read from the batch's `TRANSITION` record (plan
-    /// M2e2, founder decision C, D-Z0EMP): the move's fields beside `event`.
-    TensionOpened(TensionMove),
+    /// M2e2, founder decision C, D-Z0EMP): the move's fields beside `event`. A side cited from
+    /// a linked project is carried as [`SideV1::Foreign`] (repo links, D-Y49PX); see
+    /// [`tension_json`].
+    #[serde(serialize_with = "tension_json")]
+    TensionOpened(TensionMoveV1),
     /// A tension that this batch resolved (or dismissed), from the batch's record.
-    TensionResolved(TensionMove),
+    #[serde(serialize_with = "tension_json")]
+    TensionResolved(TensionMoveV1),
     /// A suspect that this batch made new, from the batch's record.
     SuspectNew(SuspectMoved),
     /// A suspect that this batch made gone, from the batch's record.
@@ -176,23 +180,72 @@ impl serde::Serialize for SuspectMoved {
     }
 }
 
-/// The runtime form of tension move `m`. A foreign side has no runtime form before the five
-/// kinds across projects give one; no record holds one yet, and it is left out.
-fn tension_move(m: TensionMoveV1) -> TensionMove {
-    TensionMove {
-        tension: m.tension,
-        kind: m.kind,
-        severity: m.severity,
-        sides: m
-            .sides
-            .into_iter()
-            .filter_map(|s| match s {
-                SideV1::Local(s) => Some(s),
-                SideV1::Foreign { .. } => None,
-            })
-            .collect(),
-        rekey: m.rekey,
-        why: m.why,
+/// One side of a tension move as its event's JSON writes it: a local side as it always has been,
+/// a cited one as its repo and FOREIGN entry in hex.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum SideJson<'a> {
+    Local(&'a rdy_store::transition::Side),
+    Foreign {
+        #[serde(serialize_with = "rdy_model::foreign::hex_repo::serialize")]
+        repo: &'a rdy_model::RepoId,
+        #[serde(serialize_with = "hex::one")]
+        entry: &'a Hash,
+    },
+}
+
+/// A tension move with a cited side as its event's JSON writes it: the fields of a local move,
+/// in its order.
+#[derive(serde::Serialize)]
+struct ForeignTensionJson<'a> {
+    #[serde(serialize_with = "hex::one")]
+    tension: &'a Hash,
+    kind: &'a str,
+    severity: &'a str,
+    sides: Vec<SideJson<'a>>,
+    #[serde(serialize_with = "hex::opt")]
+    rekey: &'a Option<Hash>,
+    why: &'a Why,
+}
+
+/// The JSON of tension move `m`. A move whose sides are all local reads exactly as the released
+/// event did ([`TensionMove`]); a cited side reads `{"repo": <hex>, "entry": <hex>}` in its place.
+fn tension_json<S: serde::Serializer>(m: &TensionMoveV1, s: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    let local: Option<Vec<rdy_store::transition::Side>> = m
+        .sides
+        .iter()
+        .map(|side| match side {
+            SideV1::Local(l) => Some(l.clone()),
+            SideV1::Foreign { .. } => None,
+        })
+        .collect();
+    match local {
+        Some(sides) => TensionMove {
+            tension: m.tension,
+            kind: m.kind.clone(),
+            severity: m.severity.clone(),
+            sides,
+            rekey: m.rekey,
+            why: m.why.clone(),
+        }
+        .serialize(s),
+        None => ForeignTensionJson {
+            tension: &m.tension,
+            kind: &m.kind,
+            severity: &m.severity,
+            sides: m
+                .sides
+                .iter()
+                .map(|side| match side {
+                    SideV1::Local(l) => SideJson::Local(l),
+                    SideV1::Foreign { repo, entry } => SideJson::Foreign { repo, entry },
+                })
+                .collect(),
+            rekey: &m.rekey,
+            why: &m.why,
+        }
+        .serialize(s),
     }
 }
 
@@ -412,12 +465,8 @@ pub fn events_for_batch(
                 let moves = rec
                     .resolved
                     .into_iter()
-                    .map(|m| EventKind::TensionResolved(tension_move(m)))
-                    .chain(
-                        rec.opened
-                            .into_iter()
-                            .map(|m| EventKind::TensionOpened(tension_move(m))),
-                    )
+                    .map(EventKind::TensionResolved)
+                    .chain(rec.opened.into_iter().map(EventKind::TensionOpened))
                     .chain(
                         rec.gone
                             .into_iter()

@@ -51,12 +51,12 @@ fn canon() -> Side {
         landing: Some(Hash::of(b"l1")),
     }
 }
-fn tm(id: &[u8], sides: Vec<Side>, w: Why) -> TensionMove {
-    TensionMove {
+fn tm(id: &[u8], sides: Vec<Side>, w: Why) -> TensionMoveV1 {
+    TensionMoveV1 {
         tension: Hash::of(id),
         kind: "edit_collision".into(),
         severity: "blocking".into(),
-        sides,
+        sides: sides.into_iter().map(SideV1::Local).collect(),
         rekey: None,
         why: w,
     }
@@ -448,7 +448,7 @@ fn ib5_a_batch_of_many_rekey_folds_pairs_each_resolution_with_its_opening() {
     let mine = || vec![side(b"c1", "agent:a", "a"), side(b"c2", "agent:b", "b")];
     let old = |i: usize| Hash::of(format!("old{i}").as_bytes());
     let new = |i: usize| Hash::of(format!("new{i}").as_bytes());
-    let resolutions: Vec<TensionMove> = (0..K)
+    let resolutions: Vec<TensionMoveV1> = (0..K)
         .map(|i| {
             let mut m = tm(b"", mine(), why(Cause::PackReload, None));
             m.tension = old(i);
@@ -457,7 +457,7 @@ fn ib5_a_batch_of_many_rekey_folds_pairs_each_resolution_with_its_opening() {
         })
         .collect();
     // the openings come in reverse order, so a fold must find its partner, not its neighbour
-    let openings: Vec<TensionMove> = (0..K)
+    let openings: Vec<TensionMoveV1> = (0..K)
         .rev()
         .map(|i| {
             let mut m = tm(b"", mine(), why(Cause::PackReload, None));

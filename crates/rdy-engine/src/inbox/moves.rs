@@ -8,15 +8,15 @@ use rdy_model::{BlockId, Hash, RepoId};
 use rdy_store::inbox::InboxSub;
 use rdy_store::segment::Location;
 use rdy_store::transition::{
-    Author, Cause, SuspectMove, SuspectMoveV1, SuspectTarget, TensionMove, Why,
+    Author, Cause, SideV1, SuspectMove, SuspectMoveV1, SuspectTarget, TensionMoveV1, Why,
 };
 use std::collections::BTreeMap;
 
 /// One logged move of a batch, as Task 6 reads it from the batch's events.
 #[derive(Clone, Copy, Debug)]
 pub enum MoveRef<'a> {
-    Opened(&'a TensionMove),
-    Resolved(&'a TensionMove),
+    Opened(&'a TensionMoveV1),
+    Resolved(&'a TensionMoveV1),
     New(&'a SuspectMove),
     Gone(&'a SuspectMove),
     /// A suspect on a block cited from a linked project (repo links, D-Y49PX).
@@ -177,10 +177,15 @@ type Made = (&'static str, Vec<String>, String);
 /// The session's in-flight changes among the sides of `m`, sorted and distinct: a side matches
 /// when it holds a change and its actor and run are the session's (a canon side never matches).
 /// Empty when the move does not concern the session.
-fn own_changes(sub: &InboxSub, m: &TensionMove) -> Vec<Hash> {
+fn own_changes(sub: &InboxSub, m: &TensionMoveV1) -> Vec<Hash> {
     let mut out: Vec<Hash> = m
         .sides
         .iter()
+        .filter_map(|s| match s {
+            SideV1::Local(s) => Some(s),
+            // a cited side has no actor and is never the session's
+            SideV1::Foreign { .. } => None,
+        })
         .filter(|s| s.actor.as_deref() == Some(sub.actor.as_str()) && s.run == sub.run)
         .filter_map(|s| s.change)
         .collect();
@@ -244,7 +249,7 @@ fn folds(moves: &[MoveRef<'_>], mine: &[Vec<Hash>]) -> Vec<Option<usize>> {
     out
 }
 
-fn resolved_at<'a>(moves: &[MoveRef<'a>], j: usize) -> Option<&'a TensionMove> {
+fn resolved_at<'a>(moves: &[MoveRef<'a>], j: usize) -> Option<&'a TensionMoveV1> {
     match moves[j] {
         MoveRef::Resolved(o) => Some(o),
         _ => None,
@@ -253,7 +258,7 @@ fn resolved_at<'a>(moves: &[MoveRef<'a>], j: usize) -> Option<&'a TensionMove> {
 
 /// The `tension_resolved` or `tension_dismissed` entry of a resolution on the session's in-flight
 /// changes that no opening of the batch folds.
-fn resolved(m: &TensionMove) -> Made {
+fn resolved(m: &TensionMoveV1) -> Made {
     let mut ids = vec![m.tension.to_string()];
     ids.extend(m.why.id.map(|h| h.to_string()));
     let t12 = m.tension.short();
@@ -276,7 +281,7 @@ fn resolved(m: &TensionMove) -> Made {
 
 /// The `tension_opened` entry of opening `n` on the session's in-flight changes `changes` (not
 /// empty, sorted); `replaced` is the resolution it folds, if any.
-fn opened(n: &TensionMove, replaced: Option<&TensionMove>, changes: &[Hash]) -> Made {
+fn opened(n: &TensionMoveV1, replaced: Option<&TensionMoveV1>, changes: &[Hash]) -> Made {
     let t12 = n.tension.short();
     let c12 = changes.first().map(Hash::short).unwrap_or_default();
     let what = match replaced {

@@ -7,11 +7,11 @@ use rdy_model::Role;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::*;
-use rdy_store::transition::{Cause, TensionMove};
+use rdy_store::transition::{Cause, TensionMoveV1};
 use serde_json::json;
 
 /// The tension moves among `kinds`: (resolved, opened).
-fn tension_moves(kinds: &[EventKind]) -> (Vec<&TensionMove>, Vec<&TensionMove>) {
+fn tension_moves(kinds: &[EventKind]) -> (Vec<&TensionMoveV1>, Vec<&TensionMoveV1>) {
     let resolved = kinds
         .iter()
         .filter_map(|k| match k {

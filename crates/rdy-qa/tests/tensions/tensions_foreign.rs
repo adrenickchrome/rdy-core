@@ -717,3 +717,125 @@ fn rpl15_live_deviation_resolves_only_covered_pairs() {
         "{listed:#}"
     );
 }
+
+#[test]
+fn rpl15_drift_without_a_pin_reads_earlier_delivered_text() {
+    let (_d, mut r) = project();
+    let files = tempfile::tempdir().unwrap();
+    let (s, links) = linked(&mut r, &[("core", cited())]);
+    let link = links["core"].clone();
+    let text = "every request carries a trace id that the gateway sets and every service keeps it";
+    let trace1 = block("c-FRGNW", "claim", &[], text);
+    deliver(
+        &mut r,
+        files.path(),
+        "v1",
+        &link,
+        cited(),
+        None,
+        &[(&trace1, live())],
+    );
+    // a local claim restates the delivered text, with no citation and so no pin
+    let w = put(
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "claim", "id": "$x", "parent": s.to_string(),
+                "body": text}]),
+    );
+    land(&mut r, "w").unwrap();
+    let restates = created(&w, "$x");
+    let trace2 = block(
+        "c-FRGNW",
+        "claim",
+        &[],
+        "every request carries a span id that the edge sets",
+    );
+    let v2 = deliver(
+        &mut r,
+        files.path(),
+        "v2",
+        &link,
+        cited(),
+        None,
+        &[(&trace2, live())],
+    );
+    let t = across(&r, TensionKind::RestatementDrift, &restates);
+    assert_eq!(foreign_side(&t), (cited(), v2.entry, trace2.id.clone()));
+    assert_eq!(t.severity, TensionSeverity::Advisory);
+}
+
+#[test]
+fn rpl15_events_carry_foreign_sides() {
+    let (_d, mut r) = project();
+    let files = tempfile::tempdir().unwrap();
+    let other = RepoId([9; 16]);
+    let (_s, links) = linked(&mut r, &[("red", cited()), ("blue", other)]);
+    let text = "Always run the full test suite before you push a branch.";
+    let reason = [("applies_to", "all")];
+    let red = block("ai-FRGNR", "instruction", &reason, text);
+    let blue = block("ai-FRGNB", "instruction", &reason, text);
+    let from = r.read().seq();
+    let rx = r.subscribe();
+    let tr = deliver(
+        &mut r,
+        files.path(),
+        "red",
+        &links["red"],
+        cited(),
+        Some(ForeignSet::Team("red".into())),
+        &[(&red, live())],
+    );
+    let tb = deliver(
+        &mut r,
+        files.path(),
+        "blue",
+        &links["blue"],
+        other,
+        Some(ForeignSet::Team("blue".into())),
+        &[(&blue, live())],
+    );
+    let mut want = vec![
+        SideV1::Foreign {
+            repo: cited(),
+            entry: tr.entry,
+        },
+        SideV1::Foreign {
+            repo: other,
+            entry: tb.entry,
+        },
+    ];
+    want.sort_by_key(|s| format!("{s:?}"));
+    let opened = |events: &[rdy_engine::events::Event]| -> Vec<SideV1> {
+        let ms: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                rdy_engine::events::EventKind::TensionOpened(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ms.len(), 1, "{ms:#?}");
+        let mut sides = ms[0].sides.clone();
+        sides.sort_by_key(|s| format!("{s:?}"));
+        sides
+    };
+    // live: the bus hands out both foreign sides
+    let live_events: Vec<_> = rx.try_iter().map(|e| (*e).clone()).collect();
+    assert_eq!(opened(&live_events), want);
+    // replayed: the log gives the same
+    let replayed = r.replay_events(from).unwrap();
+    assert_eq!(opened(&replayed), want);
+    // the JSON names each foreign side by repo and entry
+    let e = replayed
+        .iter()
+        .find(|e| matches!(e.kind, rdy_engine::events::EventKind::TensionOpened(_)))
+        .unwrap();
+    let v = serde_json::to_value(e).unwrap();
+    let sides = v["kind"]["sides"].as_array().unwrap().clone();
+    assert_eq!(sides.len(), 2, "{v:#}");
+    for (repo, entry) in [(cited(), tr.entry), (other, tb.entry)] {
+        assert!(
+            sides.contains(&json!({"repo": repo.to_string(), "entry": entry.to_string()})),
+            "{v:#}"
+        );
+    }
+}

@@ -14,9 +14,10 @@
 //!   also trigger, with two foreign sides (D-4W1ZR);
 //! - value disagreement: a local block tied (a reference, a `describes` or an `affects` link) to
 //!   a cited `value` states another number in its unit, read against the version its pin holds;
-//! - restatement drift: a local block pins a cited block whose pinned text it closely matched
-//!   (drift's threshold and shingles), and the current delivered version removes a run they
-//!   share;
+//! - restatement drift: a local block closely matched (drift's threshold and shingles) earlier
+//!   text of a cited block, and the current delivered version removes a run they share. The
+//!   earlier text is the pinned one when the local block pins the cited block, else each
+//!   retained earlier delivered version (no citation needed);
 //! - deprecated reference: a local block points (a reference or an impact link) at a cited
 //!   block whose delivered facts say deprecated, superseded or revoked, or names a deprecated
 //!   cited definition in its text without a tie to it;
@@ -434,7 +435,54 @@ pub(crate) fn values(
     Ok(())
 }
 
-/// Restatement drift across projects.
+/// One retained earlier text of a cited block that a local block without a pin for it is read
+/// against: the index of the block's current version in [`Across::current`] and the earlier
+/// version's shingles.
+struct Earlier {
+    now: usize,
+    set: Vec<u64>,
+}
+
+/// Every earlier delivered text of the current delivered view that drift reads: per current
+/// cited block of a restating type, each other held version of a restating type and drift's
+/// length, with an inverted index from each shingle to the earlier texts that hold it.
+fn earlier_texts(
+    ax: &Across<'_, '_>,
+) -> Result<(Vec<Earlier>, BTreeMap<u64, Vec<usize>>), RdyError> {
+    let cx = ax.cx;
+    let pack = cx.st.pack();
+    let reader = cx.st.reader();
+    let mut texts = vec![];
+    let mut holders: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (i, now) in ax.current()?.iter().enumerate() {
+        if !restating_type(pack, &now.block) {
+            continue;
+        }
+        for v in cx.st.foreign_versions(&now.target())? {
+            if v == now.version {
+                continue;
+            }
+            let was = reader.get_block(&v)?;
+            if was.is_redacted() || was.id != now.block.id || !restating_type(pack, &was) {
+                continue;
+            }
+            let p = text_of(&was.body);
+            if p.words < DRIFT_MIN_WORDS {
+                continue;
+            }
+            for s in &p.set {
+                holders.entry(*s).or_default().push(texts.len());
+            }
+            texts.push(Earlier { now: i, set: p.set });
+        }
+    }
+    Ok((texts, holders))
+}
+
+/// Restatement drift across projects. A local block that pins a cited block is read against the
+/// pinned text; one without a pin for it, against each retained earlier delivered text. Either
+/// way drift's threshold and shared-shingle removal decide, and the current version is the
+/// foreign side.
 pub(crate) fn drift(
     ax: &Across<'_, '_>,
     kind: TensionKind,
@@ -444,8 +492,16 @@ pub(crate) fn drift(
     let cx = ax.cx;
     let pack = cx.st.pack();
     let threshold = pack.drift_threshold();
+    let mut earlier: Option<(Vec<Earlier>, BTreeMap<u64, Vec<usize>>)> = None;
+    let summary = |now: &Cited, l: &Local| {
+        format!(
+            "{} (delivered) changed text that {} restates",
+            ax.shown(&now.repo, &now.block.id),
+            l.item.block
+        )
+    };
     for l in ax.locals(seeds)? {
-        if l.block.foreign.pins.is_empty() || !restating_type(pack, &l.block) {
+        if !restating_type(pack, &l.block) {
             continue;
         }
         let y = text_of(&l.block.body);
@@ -471,12 +527,34 @@ pub(crate) fn drift(
             }
             let n = text_of(&now.block.body);
             if drifts(&p.set, &y.set, &n.set, threshold) {
-                let summary = format!(
-                    "{} (delivered) changed text that {} restates",
-                    ax.shown(&now.repo, &now.block.id),
-                    l.item.block
-                );
-                out.push(pair(kind, &l, &now, summary));
+                out.push(pair(kind, &l, &now, summary(&now, &l)));
+            }
+        }
+        // no pin: the retained earlier texts that share a shingle with this block
+        if earlier.is_none() {
+            earlier = Some(earlier_texts(ax)?);
+        }
+        let Some((texts, holders)) = &earlier else {
+            continue;
+        };
+        let near: BTreeSet<usize> = y
+            .set
+            .iter()
+            .filter_map(|s| holders.get(s))
+            .flatten()
+            .copied()
+            .collect();
+        let current = ax.current()?;
+        let mut raised: BTreeSet<usize> = BTreeSet::new();
+        for e in near.into_iter().map(|k| &texts[k]) {
+            let now = &current[e.now];
+            if raised.contains(&e.now) || l.block.foreign.pins.contains_key(&now.target()) {
+                continue;
+            }
+            let n = text_of(&now.block.body);
+            if drifts(&e.set, &y.set, &n.set, threshold) {
+                raised.insert(e.now);
+                out.push(pair(kind, &l, now, summary(now, &l)));
             }
         }
     }

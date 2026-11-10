@@ -1960,6 +1960,9 @@ fn sg5_each_inbox_is_a_function_of_the_log() {
                 })
                 .filter(|m| {
                     m.sides.iter().any(|s| {
+                        let rdy_store::transition::SideV1::Local(s) = s else {
+                            return false;
+                        };
                         s.change.is_some()
                             && s.actor.as_deref() == Some(actor.as_str())
                             && s.run.as_deref() == Some(run_name.as_str())
