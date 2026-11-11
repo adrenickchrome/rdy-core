@@ -427,6 +427,33 @@ class rsig4_Candidate(Fixture):
         self.assertIn('if-no-files-found: error', windows)
         self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', windows)
         self.assertIn('artifact_digest: ${{ steps.upload.outputs.artifact-digest }}', windows)
+        # Candidate run 42959728195: a failed fast gate logged only "FAIL". Each build job prints the
+        # report's failing tests after a failed gate and uploads the report under a qa-report-* name,
+        # which never clashes with candidate.py's build artifact names.
+        for name, target in (('build-mac', MAC), ('build-linux', LINUX), ('build-windows', 'x86_64-pc-windows-msvc')):
+            job = jobs[name]
+            gate = job.index('windows_gate.ps1') if name == 'build-windows' else job.index('cargo qa --skip-perf')
+            counts = job.index('candidate.py gate-counts')
+            between = job[gate:counts]
+            self.assertEqual(between.count('        if: failure()\n'), 2, name)
+            if name == 'build-windows':
+                self.assertIn('run: ./scripts/ci/windows_report.ps1 -Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', between)
+                self.assertIn('${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*', between)
+                self.assertIn('${{ env.RDY_CI_ROOT }}\\logs\\gate.*', between)
+            else:
+                self.assertIn("sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md", between)
+                self.assertIn('path: target/qa/report.*', between)
+            self.assertIn('uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2', between)
+            report = 'qa-report-' + target + '-a${{ github.run_attempt }}'
+            self.assertIn('name: ' + report, between)
+            self.assertNotIn('id: upload', between)
+            for attempt in (1, 2):
+                self.assertNotEqual(report.replace('${{ github.run_attempt }}', str(attempt)),
+                                    CANDIDATE.artifact_name(target, attempt))
+                self.assertFalse(report.startswith(CANDIDATE.candidate_artifact_name(attempt)[:-2]))
+            # the build artifact and its outputs are unchanged
+            self.assertEqual(job.count('id: upload'), 1)
+            self.assertLess(job.index('name: ' + report), job.index('id: upload'))
         assemble = jobs['assemble']
         self.assertIn('    needs: [check, build-mac, build-windows, build-linux]\n', assemble)
         self.assertIn('    permissions:\n      contents: read\n', assemble)

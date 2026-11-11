@@ -80,6 +80,22 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo qa --skip-perf --require-all
+      - name: Failing tests
+        # The log names the cause: the qa report's failing gates, tests and panic excerpts.
+        if: failure()
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Upload the qa report
+        # Named qa-report-*, never rdy-candidate-*: candidate.py's build artifact names stay unique.
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-aarch64-apple-darwin-a${{ github.run_attempt }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
       - name: Fast gate counts
         run: >-
           python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
@@ -146,6 +162,22 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo qa --skip-perf --require-all
+      - name: Failing tests
+        # The log names the cause: the qa report's failing gates, tests and panic excerpts.
+        if: failure()
+        run: |
+          test -f target/qa/report.md || { echo "No qa report at target/qa/report.md"; exit 0; }
+          grep -E '^\|.*\| FAIL \|' target/qa/report.md || true
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
+      - name: Upload the qa report
+        # Named qa-report-*, never rdy-candidate-*: candidate.py's build artifact names stay unique.
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-x86_64-unknown-linux-gnu-a${{ github.run_attempt }}
+          path: target/qa/report.*
+          if-no-files-found: warn
+          retention-days: 14
       - name: Fast gate counts
         run: >-
           python3 -B scripts/release/candidate.py gate-counts --report target/qa/report.json
@@ -209,6 +241,22 @@ jobs:
         env:
           RDY_QA_HOSTED_CI: "1"
         run: ./scripts/ci/windows_gate.ps1
+      - name: Qa report, failing tests and counts
+        # The log names the cause: the qa report's failing gates, tests and panic excerpts.
+        if: failure()
+        shell: pwsh
+        run: ./scripts/ci/windows_report.ps1 -Report "$env:RDY_CI_ROOT\work\target\qa\report.md"
+      - name: Upload the qa report and gate logs
+        # Named qa-report-*, never rdy-candidate-*: candidate.py's build artifact names stay unique.
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qa-report-x86_64-pc-windows-msvc-a${{ github.run_attempt }}
+          path: |
+            ${{ env.RDY_CI_ROOT }}\work\target\qa\report.*
+            ${{ env.RDY_CI_ROOT }}\logs\gate.*
+          if-no-files-found: warn
+          retention-days: 14
       - name: Fast gate counts
         shell: pwsh
         run: >-
