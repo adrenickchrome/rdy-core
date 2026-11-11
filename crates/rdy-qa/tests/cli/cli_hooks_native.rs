@@ -79,7 +79,8 @@ impl Native {
         let w = World::new();
         let tmp = short_tempdir();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
-        let global = base.join("no-global");
+        // Not under the canonical `base`: on Windows that is a `\\?\` path, which Git cannot read.
+        let global = tmp.path().join("no-global");
         std::fs::write(&global, "").unwrap();
         let project = base.join(project_dir);
         w.project_at(&project);
