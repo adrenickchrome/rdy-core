@@ -8309,3 +8309,329 @@ fn relc5_contract_captures_complete_config_listing() {
         }
     }
 }
+
+/// m4a5: the members of `m4a-v1.json` that differ from its predecessor `mcp-http-v1.json`, as
+/// `added|removed|changed <path>`, each with the task that owns it. Closed: a member that is not
+/// here is byte-identical. The fixtures' lists of identified entries are compared by identity.
+const M4A_CHANGES: &[(&str, &str)] = &[
+    // m4a3: the `rdy hook` command family and the two setup options
+    ("added /cli/runtime/probes/hook check", "m4a3"),
+    ("added /cli/runtime/probes/hook install", "m4a3"),
+    ("added /cli/runtime/probes/hook remove", "m4a3"),
+    ("added /cli/runtime/probes/hook run-code", "m4a3"),
+    ("added /cli/runtime/probes/hook run-edit", "m4a3"),
+    ("added /cli/runtime/probes/setup hooks", "m4a3"),
+    ("added /cli/tree/subcommands/name=hook", "m4a3"),
+    (
+        "added /cli/tree/subcommands/name=setup/args/id=code_hook",
+        "m4a3",
+    ),
+    (
+        "added /cli/tree/subcommands/name=setup/args/id=edit_hook",
+        "m4a3",
+    ),
+    ("added /cli/tree/subcommands/name=setup/groups", "m4a3"),
+    // m4a1: the four warnings and the texts of the hook forms
+    ("added /errors_warnings/codes/W_HOOK_CONFLICT", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_DIRECT_EDIT", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_NO_CITATION", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_UNAVAILABLE", "m4a1"),
+    ("added /errors_warnings/templates/HOOK_CONFLICT_FIX", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_CONFLICT_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_DIRECT_EDIT_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_DIRECT_EDIT_MESSAGE",
+        "m4a1",
+    ),
+    ("added /errors_warnings/templates/HOOK_FORM_FIX", "m4a1"),
+    ("added /errors_warnings/templates/HOOK_FORM_MESSAGE", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_HOST_ABSENT_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_HOST_ABSENT_MESSAGE",
+        "m4a1",
+    ),
+    ("added /errors_warnings/templates/HOOK_LIMIT_FIX", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_LIMIT_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_NO_CITATION_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_NO_CITATION_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_UNAVAILABLE_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_UNAVAILABLE_MESSAGE",
+        "m4a1",
+    ),
+    // m4a4: the tool, its results, and the rows that say which tool refuses with which code
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_CONFLICT",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_DIRECT_EDIT",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_NO_CITATION",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_UNAVAILABLE",
+        "m4a4",
+    ),
+    ("changed /mcp/refusal_error_rows", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook check", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook install", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook remove", "m4a4"),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_CONFLICT",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_DIRECT_EDIT",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_NO_CITATION",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_UNAVAILABLE",
+        "m4a4",
+    ),
+    ("changed /mcp/tool_names", "m4a4"),
+    ("added /mcp/tools/rdy_hook", "m4a4"),
+];
+
+/// The sha256 of `m4a-v1.json`, frozen when M4a's last task closed its diff. A later contract
+/// change is a successor fixture (`m4bc-v1.json`), never an edit of this file.
+const M4A_V1_SHA: &str = "3974e297320209c29f2a0f84421a1ffa4513eb666328167aaa6e83a4bedae989";
+
+fn m4a5_fixture(name: &str) -> (Vec<u8>, Value) {
+    let path = qa_root().join("fixtures/contracts").join(name);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+    (bytes, value)
+}
+
+/// A list of identified entries as an object keyed by identity (`key=`, `name=`, `id=` or the
+/// first string of a row), so a change reads as the entry's own path. Other lists stay lists.
+fn m4a5_keyed(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), m4a5_keyed(x))).collect())
+        }
+        Value::Array(a) => {
+            let identity = |e: &Value| -> Option<String> {
+                for k in ["key", "name", "id"] {
+                    if let Some(s) = e.get(k).and_then(Value::as_str) {
+                        return Some(format!("{k}={s}"));
+                    }
+                }
+                e.as_array()?.first()?.as_str().map(|s| format!("row={s}"))
+            };
+            let ids: Option<Vec<String>> = a.iter().map(identity).collect();
+            match ids {
+                Some(ids)
+                    if !a.is_empty()
+                        && ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+                            == ids.len() =>
+                {
+                    let mut m = Map::new();
+                    for (id, e) in ids.into_iter().zip(a) {
+                        m.insert(id, m4a5_keyed(e));
+                    }
+                    Value::Object(m)
+                }
+                _ => Value::Array(a.iter().map(m4a5_keyed).collect()),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Every member where `now` differs from `was`, as `added|removed|changed <path>`.
+fn m4a5_leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
+    match (was, now) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for k in keys {
+                let at = format!("{path}/{k}");
+                match (a.get(k), b.get(k)) {
+                    (None, Some(_)) => out.push(format!("added {at}")),
+                    (Some(_), None) => out.push(format!("removed {at}")),
+                    (Some(x), Some(y)) => m4a5_leaves(x, y, &at, out),
+                    (None, None) => unreachable!("the key is in one of the objects"),
+                }
+            }
+        }
+        _ if was != now => out.push(format!("changed {path}")),
+        _ => {}
+    }
+}
+
+#[test]
+fn m4a5_contract_changes_only_hook_surfaces() {
+    let (_, old) = m4a5_fixture("mcp-http-v1.json");
+    let (new_bytes, new) = m4a5_fixture("m4a-v1.json");
+
+    // every changed member is listed with its owner, and none else moved
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    let mut want: Vec<String> = M4A_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    found.sort();
+    want.sort();
+    assert_eq!(
+        found, want,
+        "every changed path of m4a-v1.json is listed with its task, and none else"
+    );
+    for (path, owner) in M4A_CHANGES {
+        assert!(
+            ["m4a1", "m4a3", "m4a4"].contains(owner),
+            "{path}: owner {owner}"
+        );
+        assert!(
+            path.contains("hook")
+                || path.contains("HOOK")
+                || path.contains("refusal_error_rows")
+                || path.contains("tool_names"),
+            "{path} is no hook surface"
+        );
+    }
+    // an addition is never a removal: nothing the predecessor records is gone
+    assert!(
+        found.iter().all(|f| !f.starts_with("removed ")),
+        "{found:#?}"
+    );
+
+    // the storage and format vectors of the predecessor are untouched
+    for member in [
+        "/config",
+        "/derived_identities",
+        "/dump_load",
+        "/inventory_version",
+        "/markdown_exports",
+        "/schema_packs",
+        "/signatures",
+        "/site_urls",
+        "/store",
+        "/sync",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    assert_eq!(
+        new.pointer("/errors_warnings/envelope"),
+        old.pointer("/errors_warnings/envelope")
+    );
+    assert_eq!(
+        new["cli"]["runtime"]["probes"].as_object().unwrap().len(),
+        { old["cli"]["runtime"]["probes"].as_object().unwrap().len() + 6 }
+    );
+
+    // the warning inventory: four warnings, exactly
+    let codes = |v: &Value| -> std::collections::BTreeSet<String> {
+        v.pointer("/errors_warnings/codes")
+            .and_then(Value::as_object)
+            .expect("codes")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let added: Vec<String> = codes(&new).difference(&codes(&old)).cloned().collect();
+    assert_eq!(
+        added,
+        [
+            "W_HOOK_CONFLICT",
+            "W_HOOK_DIRECT_EDIT",
+            "W_HOOK_NO_CITATION",
+            "W_HOOK_UNAVAILABLE"
+        ]
+    );
+    assert!(codes(&old).is_subset(&codes(&new)));
+    let template = |name: &str| {
+        new["errors_warnings"]["templates"][name]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        template("HOOK_NO_CITATION_MESSAGE"),
+        "This commit touches code anchored to a decision and has no Implements trailer."
+    );
+    assert_eq!(
+        template("HOOK_DIRECT_EDIT_MESSAGE"),
+        "An agent edited rdy working-copy files directly."
+    );
+    assert_eq!(
+        template("HOOK_DIRECT_EDIT_FIX"),
+        "Read and write through rdy's tools. Call rdy_instructions and load rdy:write."
+    );
+
+    // the MCP inventory: one tool added, every other tool as it was
+    let tools = |v: &Value| v["mcp"]["tools"].as_object().expect("tools").clone();
+    let (was, now) = (tools(&old), tools(&new));
+    assert_eq!(was.len(), 61);
+    assert_eq!(now.len(), 62);
+    let extra: Vec<&String> = now.keys().filter(|k| !was.contains_key(*k)).collect();
+    assert_eq!(extra, ["rdy_hook"]);
+    for (name, spec) in &was {
+        assert_eq!(&now[name], spec, "{name} moved");
+    }
+    let names = |v: &Value| -> Vec<String> {
+        v["mcp"]["tool_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut expect = names(&old);
+    expect.push("rdy_hook".to_string());
+    expect.sort();
+    let mut got = names(&new);
+    got.sort();
+    assert_eq!(got, expect);
+
+    // the generated kungfu delivery: the tool has its row in the table and its ruleset's line
+    let policy = rdy_engine::kungfu::policy("rdy_hook").expect("a kungfu row for rdy_hook");
+    assert_eq!(policy.ruleset, Some("rdy:project-ops"));
+    assert_eq!(rdy_engine::kungfu::TOOLS.len(), 62);
+    let owner = rdy_engine::kungfu::owner("project-ops").expect("the project-ops value");
+    assert!(
+        owner.suffix.contains("rdy_hook"),
+        "the ruleset's delivery line names the tool: {}",
+        owner.suffix
+    );
+
+    // frozen: a later change is a successor fixture, and the predecessors keep their bytes
+    let sha = |bytes: &[u8]| -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(sha(&new_bytes), M4A_V1_SHA, "m4a-v1.json is frozen");
+    assert_eq!(
+        sha(&m4a5_fixture("mcp-http-v1.json").0),
+        "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de"
+    );
+}

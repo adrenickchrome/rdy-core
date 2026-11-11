@@ -24,6 +24,7 @@ mod cli_editor;
 mod cli_entities;
 mod cli_export;
 mod cli_hooks;
+mod cli_hooks_native;
 mod cli_hub_auth;
 mod cli_hub_config;
 mod cli_hub_keys;
