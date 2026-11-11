@@ -4187,6 +4187,126 @@ fn mcp_links_probes(seen: &mut Seen) {
     }
 }
 
+/// m4a4: the `rdy_hook` tool over a daemon-backed stdio session, each reply with populated
+/// warnings and files: checks that warn, pass and cannot finish, a refused form, installs and
+/// removes that write, keep, remove and skip a file, and a reader that may check and not install.
+fn mcp_hook_probes(seen: &mut Seen) {
+    let h = HookWorld::new();
+    let hooks = h.app.path().join(".git").join("hooks");
+    h.app
+        .run(&["config", "core.hooksPath", &hooks.to_string_lossy()]);
+    let root = h.root.clone();
+    let app = h.app.path().to_path_buf();
+    let checkout = app.to_string_lossy().into_owned();
+    let head = h.app.run(&["rev-parse", "HEAD"]);
+    let (code, _, err) = h.run(&root, &["checkout"], None);
+    assert_eq!(code, 0, "rdy checkout: {err}");
+    let doc = root.join("spec.yaml");
+    assert!(doc.is_file(), "the checkout wrote the doc");
+    let doc_text = doc.to_string_lossy().into_owned();
+    // the checkout command ran direct and left no daemon; the probes start their own
+    h.w.stop(h.project.path());
+
+    let session =
+        |who: &str, role: &str| json!({"actor": format!("agent:{who}"), "run": who, "role": role});
+    let mut r = h.w.mcp(h.project.path());
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_session",
+        "rdy_session",
+        session("hook-r", "reader"),
+    );
+    let mut w = h.w.mcp(h.project.path());
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_session",
+        "rdy_session",
+        session("hook-w", "writer"),
+    );
+
+    // checks: a warned code check, a cited one, one at a HEAD the checkout no longer has, a
+    // warned edit check, a refused form, and a reader's check
+    let message = "feat: change\n";
+    let cited = format!("feat: change\n\nImplements: {}\n", h.decision);
+    let code_check = |head: &str, paths: Value, message: &str| {
+        json!({"op": "check", "kind": "code", "repo": "app", "checkout": checkout,
+               "head": head, "paths": paths, "message": message})
+    };
+    let zero = "0".repeat(40);
+    for args in [
+        code_check(&head, json!(["src/anchored.rs", "src/plain.rs"]), message),
+        code_check(&head, json!(["src/anchored.rs"]), &cited),
+        code_check(&zero, json!(["src/anchored.rs"]), message),
+        json!({"op": "check", "kind": "edit", "paths": [doc_text]}),
+        json!({"op": "check", "kind": "edit", "pathz": [doc_text]}),
+    ] {
+        mcp_probe(seen, &mut w, "rdy_hook", "rdy_hook check", args);
+    }
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_hook",
+        "rdy_hook check",
+        json!({"op": "check", "kind": "edit", "paths": [doc_text]}),
+    );
+
+    // installs and removes: written, kept and removed, then skipped beside a person's own hook
+    // and a settings file that is not JSON; a reader's install is refused
+    let code_hook = json!({"kind": "code", "repo": "app"});
+    let edit_hook = json!({"kind": "edit", "harness": "claude-code"});
+    let with_op = |op: &str, target: &Value| {
+        let mut v = target.clone();
+        v["op"] = json!(op);
+        v
+    };
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "install", "remove"] {
+            mcp_probe(
+                seen,
+                &mut w,
+                "rdy_hook",
+                &format!("rdy_hook {op}"),
+                with_op(op, target),
+            );
+        }
+    }
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_hook",
+        "rdy_hook install",
+        with_op("install", &code_hook),
+    );
+    let own = hooks.join("commit-msg");
+    std::fs::create_dir_all(&hooks).expect("the hooks folder");
+    std::fs::write(&own, "#!/bin/sh\nexit 0\n").expect("the person's own hook");
+    let settings = root.join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("the settings folder");
+    std::fs::write(&settings, "not json").expect("a settings file that is not JSON");
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "remove"] {
+            let reply = mcp_probe(
+                seen,
+                &mut w,
+                "rdy_hook",
+                &format!("rdy_hook {op}"),
+                with_op(op, target),
+            );
+            assert_eq!(
+                ok_of(&reply)["warnings"][0]["code"],
+                "W_HOOK_CONFLICT",
+                "{reply:?}"
+            );
+        }
+    }
+    std::fs::remove_file(&own).expect("drop the person's hook");
+    std::fs::remove_file(&settings).expect("drop the settings file");
+    drop((r, w));
+    h.w.stop(h.project.path());
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
@@ -4194,6 +4314,7 @@ fn mcp_row() -> Value {
     mcp_probes(&rich, &mut seen);
     mcp_publication_probes(&mut seen);
     mcp_links_probes(&mut seen);
+    mcp_hook_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());

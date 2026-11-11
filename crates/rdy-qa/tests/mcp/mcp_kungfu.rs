@@ -727,6 +727,12 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
             "evidence": "Drop it.", "session_ref": "chat-1"}),
     );
 
+    // m4a4: a check outside the project and its worktrees, so the reply is the same whatever the
+    // ruleset value was
+    x.step(
+        "rdy_hook",
+        json!({"op": "check", "kind": "edit", "paths": [s("outside.txt")]}),
+    );
     x.step("rdy_dump", json!({"out": s("dump.rdy")}));
     x.step("rdy_stream_check", json!({"file": s("dump.rdy")}));
     x.step(
@@ -851,7 +857,7 @@ fn kfu4_each_tool_keeps_its_action_for_all_values() {
 
     // the matrix accounts for every router name
     let names: BTreeSet<String> = kungfu::TOOLS.iter().map(|p| p.tool.to_string()).collect();
-    assert_eq!(names.len(), 61);
+    assert_eq!(names.len(), 62);
     assert_eq!(correct.called, names);
 
     same_steps(&correct, &absent, "absent");

@@ -430,7 +430,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 71 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 73 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `PlanAnswerSpecParams`, `PlanGroupParams`,
@@ -455,6 +455,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         DumpParams,
         EditorialParams,
         ExportParams,
+        HookParams,
         CitationParams,
         IdParams,
         ImportParams,
@@ -2026,7 +2027,7 @@ fn kfu3_other_unknown_keys_keep_their_errors() {
 #[test]
 fn kfu3_schemas_and_parameter_lists_do_not_disclose_it() {
     let tools = listed_tools();
-    assert_eq!(tools.len(), 61, "the registered tools");
+    assert_eq!(tools.len(), 62, "the registered tools");
     for t in &tools {
         let name = t["name"].as_str().unwrap();
         let schema = &t["inputSchema"];

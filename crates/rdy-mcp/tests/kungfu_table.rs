@@ -51,9 +51,9 @@ async fn registered() -> Vec<String> {
 #[tokio::test]
 async fn kfu3_every_registered_tool_has_one_policy() {
     let names = registered().await;
-    assert_eq!(names.len(), 61);
+    assert_eq!(names.len(), 62);
     let unique: BTreeSet<&str> = names.iter().map(String::as_str).collect();
-    assert_eq!(unique.len(), 61, "a tool is listed twice");
+    assert_eq!(unique.len(), 62, "a tool is listed twice");
     let rows: BTreeSet<&str> = kungfu::TOOLS.iter().map(|p| p.tool).collect();
     assert_eq!(rows.len(), kungfu::TOOLS.len(), "a tool has two rows");
     assert_eq!(

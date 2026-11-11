@@ -28,6 +28,7 @@ mod mcp_export;
 mod mcp_golden;
 mod mcp_grounded;
 mod mcp_history;
+mod mcp_hooks;
 mod mcp_http_claims;
 mod mcp_http_discovery;
 mod mcp_http_parity;
