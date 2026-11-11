@@ -45,11 +45,20 @@ pub type Response = http::Response<BoxBody<Bytes, Infallible>>;
 /// The calls of one HTTP claim that may wait for its turn, beside the one that runs.
 pub const MAX_WAITING_CALLS: usize = 8;
 
+/// mht4: the listen requests one daemon keeps open over HTTP.
+pub const MAX_LISTENS: usize = 32;
+
+/// mht4: the resource URIs one listen request may name.
+pub const MAX_LISTEN_URIS: usize = 128;
+
+/// mht4: the longest resource URI a listen request may name, in bytes.
+pub const MAX_LISTEN_URI_BYTES: usize = 4096;
+
 /// The wall clock lease times are read on, in milliseconds (a test sets it).
 pub type LeaseClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// Reserves the capacity of one listen stream, or refuses it. The owner of the listen streams
-/// injects it; with none injected, every listen is admitted.
+/// Reserves the capacity of one listen stream, or refuses it. By default it is the daemon's
+/// [`MAX_LISTENS`] (mht4); a test injects its own.
 pub type ListenCapacity = Arc<dyn Fn() -> Result<ListenReservation, RdyError> + Send + Sync>;
 
 /// One listen stream's reserved capacity. It is held from admission through rmcp's dispatch to
@@ -191,7 +200,9 @@ struct Admitted {
     /// its capacity, its queue).
     claim: Result<Option<Asked>, RdyError>,
     _queued: Option<Queued>,
-    _listen: Option<ListenReservation>,
+    /// An admitted listen's reservation, until the listen takes it ([`listen_of`]); a refused
+    /// or never-established listen drops it with its request.
+    listen: Mutex<Option<ListenReservation>>,
     #[cfg(test)]
     seen: Arc<Mutex<Vec<http::HeaderMap>>>,
 }
@@ -224,6 +235,70 @@ pub(crate) fn claim_of(
     ))
 }
 
+/// mht4: an admitted HTTP listen, as its handler takes it: the claim it acts for and its
+/// reservation, which the listen holds until it ends. `None` on stdio.
+pub(crate) fn listen_of(
+    extensions: &rmcp::model::Extensions,
+) -> Option<(Key, Option<ListenReservation>)> {
+    let parts = extensions.get::<http::request::Parts>()?;
+    let admitted = parts.extensions.get::<Arc<Admitted>>()?;
+    let key = admitted.claim.as_ref().ok()?.as_ref()?.identity()?;
+    let reservation = admitted
+        .listen
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    Some((key, reservation))
+}
+
+/// The refusal of a listen when [`MAX_LISTENS`] listens are open.
+fn listens_full() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("MCP over HTTP has {MAX_LISTENS} open listen requests"),
+        "cancel an older subscriptions/listen request",
+    )
+}
+
+/// A listen filter inside its bounds, checked before anything copies it: at most
+/// [`MAX_LISTEN_URIS`] URIs of at most [`MAX_LISTEN_URI_BYTES`] bytes each.
+fn filter_bounds(filter: &rmcp::model::SubscriptionFilter) -> Result<(), RdyError> {
+    let uris = filter.resource_subscriptions.as_deref().unwrap_or_default();
+    if uris.len() > MAX_LISTEN_URIS {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!("the listen filter has over {MAX_LISTEN_URIS} resource URIs"),
+            format!("use at most {MAX_LISTEN_URIS} resource URIs in one listen request"),
+        ));
+    }
+    if uris.iter().any(|u| u.len() > MAX_LISTEN_URI_BYTES) {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!("a listen resource URI is over {MAX_LISTEN_URI_BYTES} bytes"),
+            format!("use a resource URI of at most {MAX_LISTEN_URI_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// One of the daemon's [`MAX_LISTENS`] listens, given back when it drops.
+struct OpenListen(Arc<AtomicUsize>);
+
+impl Drop for OpenListen {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Reserves one of the [`MAX_LISTENS`] listens `open` counts, or refuses.
+fn reserve_listen(open: &Arc<AtomicUsize>) -> Result<ListenReservation, RdyError> {
+    open.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        (n < MAX_LISTENS).then_some(n + 1)
+    })
+    .map_err(|_| listens_full())?;
+    Ok(ListenReservation::new(OpenListen(Arc::clone(open))))
+}
+
 /// The refusal of a call whose claim already has [`MAX_WAITING_CALLS`] calls waiting.
 fn queue_full() -> RdyError {
     RdyError::new(
@@ -242,8 +317,8 @@ enum Asks {
     },
     /// `resources/read`.
     Read,
-    /// `subscriptions/listen`.
-    Listen,
+    /// `subscriptions/listen`, with its filter's bounds checked.
+    Listen(Result<(), RdyError>),
     /// Anything else: discovery, listing, notifications, or a body rmcp refuses.
     Other,
 }
@@ -258,6 +333,8 @@ pub struct HttpMcp {
     leases: Arc<LeaseRegistry>,
     lease_clock: LeaseClock,
     listen: ListenCapacity,
+    /// The listens the default capacity holds open.
+    listens: Arc<AtomicUsize>,
     #[cfg(test)]
     seen: Arc<Mutex<Vec<http::HeaderMap>>>,
 }
@@ -267,6 +344,8 @@ impl HttpMcp {
     /// project's other MCP sessions.
     pub fn new(engine: Arc<dyn Engine>, hub: Arc<NotifyHub>) -> HttpMcp {
         let proto = RdyServer::new(Arc::clone(&engine), None, Arc::clone(&hub));
+        let listens = Arc::new(AtomicUsize::new(0));
+        let open = Arc::clone(&listens);
         HttpMcp {
             kungfu_counts: proto.kungfu_counts(),
             leases: engine.leases(),
@@ -274,7 +353,8 @@ impl HttpMcp {
             engine,
             hub,
             lease_clock: Arc::new(rdy_engine::now_ms),
-            listen: Arc::new(|| Ok(ListenReservation::new(()))),
+            listen: Arc::new(move || reserve_listen(&open)),
+            listens,
             #[cfg(test)]
             seen: Default::default(),
         }
@@ -342,6 +422,11 @@ impl HttpMcp {
             .map_or(0, |s| s.queued.load(Ordering::SeqCst))
     }
 
+    /// The listens the default capacity holds now: admitted, open, or still ending.
+    pub fn listen_streams(&self) -> usize {
+        self.listens.load(Ordering::SeqCst)
+    }
+
     /// Holds claim `key`'s turn, so its calls wait (a test seam for the queue bound). `None`
     /// when the claim has no state.
     #[doc(hidden)]
@@ -376,7 +461,9 @@ impl HttpMcp {
                         arguments: c.params.arguments.clone(),
                     },
                     ClientRequest::ReadResourceRequest(_) => Asks::Read,
-                    ClientRequest::SubscriptionsListenRequest(_) => Asks::Listen,
+                    ClientRequest::SubscriptionsListenRequest(l) => {
+                        Asks::Listen(filter_bounds(&l.params.notifications))
+                    }
                     _ => Asks::Other,
                 };
                 let id = serde_json::to_value(&r.id).unwrap_or(Value::Null);
@@ -387,12 +474,13 @@ impl HttpMcp {
         let mut admitted = Admitted {
             claim: Ok(None),
             _queued: None,
-            _listen: None,
+            listen: Mutex::new(None),
             #[cfg(test)]
             seen: Arc::clone(&self.seen),
         };
         let mut slot: Option<(Key, Arc<Slot>)> = None;
         let mut gate = None;
+        let listens = matches!(asks, Asks::Listen(_));
         match asks {
             Asks::Other => {}
             Asks::Call { .. } | Asks::Read => {
@@ -422,16 +510,23 @@ impl HttpMcp {
                     }
                 }
             }
-            Asks::Listen => {
+            Asks::Listen(bounds) => {
+                // the claim, then the filter's bounds, then the capacity (mht4)
                 let parsed = claims::parse(Some(&meta)).and_then(|a| {
-                    a.as_ref()
-                        .and_then(Asked::identity)
-                        .ok_or_else(tools::no_session)
+                    let asked = a.ok_or_else(tools::no_session)?;
+                    let key = asked.identity().ok_or_else(tools::no_session)?;
+                    Ok((asked, key))
                 });
-                let refusal = match parsed.and_then(|key| Ok((key.clone(), self.slot(&key)?))) {
+                let parsed = parsed.and_then(|(asked, key)| {
+                    bounds?;
+                    let s = self.slot(&key)?;
+                    admitted.claim = Ok(Some(asked));
+                    Ok((key, s))
+                });
+                let refusal = match parsed {
                     Ok((key, s)) => match (self.listen)() {
                         Ok(r) => {
-                            admitted._listen = Some(r);
+                            *admitted.listen.lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
                             slot = Some((key, s));
                             None
                         }
@@ -454,9 +549,16 @@ impl HttpMcp {
             .as_ref()
             .map_or_else(LeaseRegistry::local_owner, |s| s.lease_owner);
         let state = Arc::new(Mutex::new(self.request_state(key, lease_owner)));
+        // each listen is a session of its own in the hub, so two listens of one claim never
+        // share a registration (mht4)
+        let hub_sid = if listens {
+            LeaseRegistry::local_owner()
+        } else {
+            lease_owner
+        };
         let server = self.proto.for_http(
             state,
-            lease_owner,
+            hub_sid,
             slot,
             gate.as_ref().map(|(g, _)| Arc::clone(g)),
         );
@@ -509,6 +611,118 @@ impl HttpMcp {
             status,
             headers,
             body,
+        }
+    }
+}
+
+impl HttpMcp {
+    /// One in-memory request to [`HttpMcp::handle`], with its response open: the MCP test
+    /// harness's client for a stream it reads one message at a time. Dropping it is the client
+    /// going away.
+    #[doc(hidden)]
+    pub async fn open(&self, headers: &[(&str, &str)], body: Vec<u8>) -> Opened {
+        let mut request = http::Request::builder().method("POST").uri("/~mcp");
+        for (k, v) in headers {
+            request = request.header(*k, *v);
+        }
+        let request = request
+            .body(Full::new(Bytes::from(body)))
+            .expect("a valid test request");
+        let response = self.handle(request).await;
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let sse = headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v.starts_with("text/event-stream"));
+        Opened {
+            status,
+            headers,
+            sse,
+            body: response.into_body(),
+            text: Vec::new(),
+            ready: std::collections::VecDeque::new(),
+            ended: false,
+        }
+    }
+}
+
+/// One in-memory response, read as it comes: a JSON reply, or an SSE stream's messages.
+#[doc(hidden)]
+pub struct Opened {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    sse: bool,
+    body: BoxBody<Bytes, Infallible>,
+    text: Vec<u8>,
+    ready: std::collections::VecDeque<Value>,
+    ended: bool,
+}
+
+impl Opened {
+    /// The value of header `name` (lowercase), if any.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The next JSON-RPC message of the response, or `None` once it ended. An SSE event with
+    /// no JSON data (a keep-alive, a priming event) is skipped.
+    pub async fn next(&mut self) -> Option<Value> {
+        loop {
+            if let Some(v) = self.ready.pop_front() {
+                return Some(v);
+            }
+            if self.ended {
+                return None;
+            }
+            match self.body.frame().await {
+                None => {
+                    self.ended = true;
+                    let rest = std::mem::take(&mut self.text);
+                    if self.sse {
+                        self.events(&rest);
+                    } else if let Ok(v) = serde_json::from_slice(&rest) {
+                        self.ready.push_back(v);
+                    }
+                }
+                Some(Ok(frame)) => {
+                    let Ok(data) = frame.into_data() else {
+                        continue;
+                    };
+                    self.text.extend_from_slice(&data);
+                    if self.sse {
+                        while let Some(end) = self.text.windows(2).position(|w| w == b"\n\n") {
+                            let event: Vec<u8> = self.text.drain(..end + 2).collect();
+                            self.events(&event);
+                        }
+                    }
+                }
+                Some(Err(never)) => match never {},
+            }
+        }
+    }
+
+    /// The JSON data of one SSE event, queued.
+    fn events(&mut self, event: &[u8]) {
+        let text = String::from_utf8_lossy(event);
+        let data: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .collect();
+        if let Ok(v) = serde_json::from_str(&data) {
+            self.ready.push_back(v);
         }
     }
 }

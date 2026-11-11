@@ -49,7 +49,8 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
         ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
-        SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
+        SubscribeRequestMethod, SubscribeRequestParams, SubscriptionFilter,
+        UnsubscribeRequestMethod, UnsubscribeRequestParams,
     },
     service::{RequestContext, SubscriptionContext},
     tool_handler,
@@ -226,6 +227,11 @@ impl RdyServer {
             Some(slot) => Some(crate::http::Turn::take(slot, &self.state).await),
             None => None,
         }
+    }
+
+    /// mht4: whether this server answers one MCP-over-HTTP request.
+    pub(crate) fn over_http(&self) -> bool {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).http
     }
 
     /// This server with `agent` as its session's signer: the caller's own SSH agent.
@@ -608,6 +614,10 @@ impl ServerHandler for RdyServer {
         request: SubscribeRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
+        // mht4: a stateless HTTP request has no peer to push to later: no hidden channel
+        if self.over_http() {
+            return Err(rmcp::ErrorData::method_not_found::<SubscribeRequestMethod>());
+        }
         self.resources_subscribe(&request.uri, context.peer).await
     }
 
@@ -617,6 +627,9 @@ impl ServerHandler for RdyServer {
         request: UnsubscribeRequestParams,
         _context: RequestContext<rmcp::RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
+        if self.over_http() {
+            return Err(rmcp::ErrorData::method_not_found::<UnsubscribeRequestMethod>());
+        }
         self.resources_unsubscribe(&request.uri)
     }
 

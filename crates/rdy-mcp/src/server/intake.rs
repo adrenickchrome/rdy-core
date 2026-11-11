@@ -6,6 +6,10 @@
 //! `elicitation/create` itself and waits for the reply, holding no state lock, registry lock or
 //! engine writer. Both flows keep the card waiting in the hub's registry, consume it once, and
 //! reach the writer only with a validated choice, through the engine's presented answer.
+//!
+//! Over MCP-over-HTTP only the 2026-07-28 flow runs (mht4): an older revision's first ask and
+//! retry are refused with `E_ELICITATION_UNAVAILABLE` once the claim, kungfu and `asked`
+//! checks pass, before a card is inserted, looked up or consumed.
 
 use super::CALL;
 use crate::claims;
@@ -103,17 +107,21 @@ impl RdyServer {
         context: RequestContext<RoleServer>,
     ) -> Result<Step, RdyError> {
         let args = request.arguments.unwrap_or_default();
+        let version = context.protocol_version();
+        // mht4: over HTTP an older revision never reaches the person
+        let unreachable = self.over_http() && !elicitation::reaches_over_http(version.as_ref());
         if request.request_state.is_some() || request.input_responses.is_some() {
             let terminal = elicitation::parse_responses(request.input_responses.as_ref());
             let v = self
-                .continued(args, request.request_state, terminal)
+                .continued(args, request.request_state, terminal, unreachable)
                 .await?;
             return Ok(Step::Done(v));
         }
-        let route = elicitation::route(
-            context.protocol_version().as_ref(),
-            context.client_capabilities().as_ref(),
-        );
+        let route =
+            match elicitation::route(version.as_ref(), context.client_capabilities().as_ref()) {
+                _ if unreachable => Route::Unavailable,
+                route => route,
+            };
         let (bound, item, handle) = self
             .opened(move |st| {
                 let (ask, s) = asked(st, args)?;
@@ -147,16 +155,22 @@ impl RdyServer {
         }
     }
 
-    /// The retry of a call that returned `input_required`.
+    /// The retry of a call that returned `input_required`. An `unreachable` retry (an older
+    /// revision over HTTP) is refused after its `asked` checks, before its handle is read, so a
+    /// later modern retry still finds the card.
     async fn continued(
         &self,
         args: JsonObject,
         handle: Option<String>,
         terminal: Option<Terminal>,
+        unreachable: bool,
     ) -> Result<Value, RdyError> {
         let (bound, settled) = self
             .opened(move |st| {
                 let (ask, s) = asked(st, args)?;
+                if unreachable {
+                    return Err(elicitation::unavailable());
+                }
                 let handle = handle.ok_or_else(elicitation::gone)?;
                 let bound = ask.bound(s.actor, s.run);
                 let settled = settle(st, &handle, &bound, terminal)?;
