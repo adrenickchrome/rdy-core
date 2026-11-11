@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4a-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4bc-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -97,12 +97,12 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json` and
-/// `mcp-http-v1.json`, all frozen) with the additions since. A capture writes this file, never a
-/// baseline. It starts as a byte copy of `mcp-http-v1.json`, whose bytes
-/// `mht8_http_contract_capture_is_complete` pins; a later contract change is a successor fixture.
+/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
+/// `mcp-http-v1.json` and `m4a-v1.json`, all frozen) with the additions since. A capture writes
+/// this file, never a baseline. It starts as a byte copy of `m4a-v1.json`, whose bytes
+/// `m4a5_contract_changes_only_hook_surfaces` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/m4a-v1.json")
+    qa_root().join("fixtures/contracts/m4bc-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -8639,4 +8639,175 @@ fn m4a5_contract_changes_only_hook_surfaces() {
         sha(&m4a5_fixture("mcp-http-v1.json").0),
         "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de"
     );
+}
+
+/// m4bc1: the members of `m4bc-v1.json` that differ from its predecessor `m4a-v1.json`, as
+/// `added|removed|changed <path>`. Closed: a member that is not here is byte-identical. The
+/// fixtures' lists of identified entries are compared by identity (see [`m4a5_keyed`]); a list
+/// without identities is one member.
+///
+/// Task 1 admits one enum value, so one schema member changes. The derived-identities scenario
+/// hashes the pack into every landing id, so the ids and lines built from a landing id change with
+/// it; [`m4bc1_basis_contract_changes_only_the_allowed_enum`] shows those changes are id text only.
+const M4BC_CHANGES: &[(&str, &str)] = &[
+    (
+        "changed /schema_packs/rdy_standard/block_types/decision/fields/authority_basis/values",
+        "m4bc1",
+    ),
+    (
+        "added /derived_identities/scenario/tensions/tn-31af126dccec",
+        "m4bc1",
+    ),
+    (
+        "removed /derived_identities/scenario/tensions/tn-b193a13b5413",
+        "m4bc1",
+    ),
+    (
+        "removed /derived_identities/scenario/tensions/tn-bc2501dbc52a",
+        "m4bc1",
+    ),
+    (
+        "added /derived_identities/scenario/tensions/tn-c7804141f02d",
+        "m4bc1",
+    ),
+    (
+        "changed /derived_identities/scenario/inboxes/agent:a/a",
+        "m4bc1",
+    ),
+    (
+        "changed /derived_identities/scenario/logged_tensions",
+        "m4bc1",
+    ),
+];
+
+/// `v` with every run of 12 to 64 lowercase hexadecimal digits, in strings and in keys, replaced
+/// by `#`: the shape of the value without its derived identifiers.
+fn m4bc1_without_ids(v: &Value) -> Value {
+    fn mask(s: &str) -> String {
+        let mut out = String::new();
+        let mut run = String::new();
+        let flush = |out: &mut String, run: &mut String| {
+            if (12..=64).contains(&run.len()) {
+                out.push('#');
+            } else {
+                out.push_str(run);
+            }
+            run.clear();
+        };
+        for c in s.chars() {
+            if c.is_ascii_digit() || ('a'..='f').contains(&c) {
+                run.push(c);
+            } else {
+                flush(&mut out, &mut run);
+                out.push(c);
+            }
+        }
+        flush(&mut out, &mut run);
+        out
+    }
+    match v {
+        Value::String(s) => Value::String(mask(s)),
+        Value::Array(a) => Value::Array(a.iter().map(m4bc1_without_ids).collect()),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .map(|(k, x)| (mask(k), m4bc1_without_ids(x)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn m4bc1_basis_contract_changes_only_the_allowed_enum() {
+    let (old_bytes, old) = m4a5_fixture("m4a-v1.json");
+    let (_, new) = m4a5_fixture("m4bc-v1.json");
+
+    // every changed member is listed, and none else moved
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    let mut want: Vec<String> = M4BC_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    found.sort();
+    want.sort();
+    assert_eq!(
+        found, want,
+        "every changed path of m4bc-v1.json is listed, and none else"
+    );
+
+    // the one schema change: the closed list gains `reconstructed` at its end, in that one pack
+    // member; the policy's own basis list and every other type are as they were
+    let at = "/schema_packs/rdy_standard/block_types/decision/fields/authority_basis/values";
+    let values = |v: &Value| -> Vec<String> {
+        v.pointer(at)
+            .and_then(Value::as_array)
+            .expect("the basis values")
+            .iter()
+            .map(|s| s.as_str().expect("a string").to_string())
+            .collect()
+    };
+    let mut expect = values(&old);
+    assert_eq!(
+        expect,
+        [
+            "direct_ruling",
+            "recorded_ruling",
+            "delegated",
+            "precedent",
+            "elimination",
+            "none"
+        ]
+    );
+    expect.push("reconstructed".to_string());
+    assert_eq!(values(&new), expect);
+
+    // the derived-identities change is id text only: with every derived hexadecimal identifier
+    // masked, the section is as it was (counts, event names, conflict sets, wording)
+    assert_eq!(
+        m4bc1_without_ids(&new["derived_identities"]),
+        m4bc1_without_ids(&old["derived_identities"]),
+        "the scenario changed beyond its derived identifiers"
+    );
+    for member in [
+        "conflict_id",
+        "consequence_id",
+        "domains",
+        "pair_key",
+        "scenario/conflicts",
+        "scenario/events",
+    ] {
+        let p = format!("/derived_identities/{member}");
+        assert_eq!(new.pointer(&p), old.pointer(&p), "{p} moved");
+    }
+
+    // nothing is removed from the predecessor outside the renamed tension ids, and the other
+    // predecessors keep their bytes
+    assert!(
+        found
+            .iter()
+            .filter(|f| f.starts_with("removed "))
+            .all(|f| f.starts_with("removed /derived_identities/scenario/tensions/tn-")),
+        "{found:#?}"
+    );
+    for member in [
+        "/cli",
+        "/config",
+        "/dump_load",
+        "/errors_warnings",
+        "/inventory_version",
+        "/markdown_exports",
+        "/mcp",
+        "/signatures",
+        "/site_urls",
+        "/store",
+        "/sync",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    let sha = |bytes: &[u8]| -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(sha(&old_bytes), M4A_V1_SHA, "m4a-v1.json is frozen");
 }
