@@ -157,9 +157,10 @@ pub(crate) fn export_print(
     Ok(to_json(&summary))
 }
 
-/// The import op: the engine's import reply (`run_import_with`, which the chat tool shares) for the
-/// session as it is, with the Markdown options `md`, `dry_run` and `expected_source`. A writer, a reviewer and a person's approver import under the role rule of
-/// every write (D-Y9DNZ); the engine refuses a reader and canon.
+/// The import op: the engine's import reply (`run_import_with`, which the chat tool shares) for
+/// the session as it is, with the Markdown options `md`, `dry_run` and `expected_source`. A
+/// writer, a reviewer and a person's approver import under the role rule of every write
+/// (D-Y9DNZ); the engine refuses a reader and canon.
 pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let view = view_of(cx.session, Some(a.view));
     let dir = resolve_path(cx.cwd, &a.dir);
