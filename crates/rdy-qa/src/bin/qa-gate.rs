@@ -1,8 +1,8 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
 use rdy_qa::gate_steps::{
-    ChildOutput, build_steps, cargo, discover_command, discovered, fail_tail, list_guarded,
-    run_bounded,
+    ChildOutput, build_steps, cargo, discover_command, discovered, fail_tail, fmt_step,
+    list_guarded, run_bounded,
 };
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report};
@@ -229,11 +229,9 @@ fn main() {
     };
 
     if plan.checks {
-        let (ok, out) = step("fmt", cargo(&["fmt", "--all", "--check"]));
-        gate("cargo fmt --all --check", ok, fail_tail(ok, &out));
-        if !ok {
-            eprintln!("{out}");
-        }
+        // one check per workspace member: a single command line is too long for Windows
+        let fmt = fmt_step(step);
+        gate(&fmt.name, fmt.pass, fmt.detail);
 
         let (ok, out) = step(
             "clippy",

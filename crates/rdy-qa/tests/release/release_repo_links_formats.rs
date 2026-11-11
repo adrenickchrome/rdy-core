@@ -39,7 +39,7 @@ const MEMBERS: [(&str, &str, &str); 4] = [
     (
         "dump",
         DUMP_EXPECT,
-        "d293339ba509481420ed4c8e5305e3c45b94c93de97273a65365061c8c817db9",
+        "1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
     ),
     (
         "sync",
@@ -49,7 +49,7 @@ const MEMBERS: [(&str, &str, &str); 4] = [
     (
         "sync",
         SYNC_EXPECT,
-        "39086987b327e970e423151b9c32c7f342f47fb020a30b8987ab57008a19de27",
+        "c42da926057a2f54c614520103b32592c0f3ac213d8dcfe53cbdfb4b05f250ae",
     ),
 ];
 

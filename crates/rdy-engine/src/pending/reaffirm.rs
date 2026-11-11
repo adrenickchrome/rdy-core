@@ -451,7 +451,9 @@ pub(crate) fn reaffirm_items(
     let mut suspects: BTreeMap<&BlockId, Vec<ReaffirmSuspect>> = BTreeMap::new();
     let mut groups: BTreeMap<&BlockId, BTreeSet<&BlockId>> = BTreeMap::new();
     for row in &rows {
-        let Some(target) = &row.target else { continue };
+        let Some(target) = row.target.as_ref().and_then(crate::RowTarget::block) else {
+            continue;
+        };
         suspects
             .entry(&row.block)
             .or_default()

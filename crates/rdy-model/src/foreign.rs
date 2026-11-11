@@ -271,7 +271,9 @@ pub enum ForeignEvent {
         #[serde(with = "hex_one")]
         prev: Hash,
     },
-    /// Reserved: a foreign removal and the versions it dropped.
+    /// A foreign removal and the versions it dropped: written by the take of a cited project's
+    /// portable removal proof (`take_foreign_removal`, D-CN4QJ), one entry per proof that erases
+    /// a held version.
     Removal {
         #[serde(with = "hex_one")]
         proof: Hash,

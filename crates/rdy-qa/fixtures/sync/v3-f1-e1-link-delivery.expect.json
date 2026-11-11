@@ -119,7 +119,7 @@
     ],
     "records": 6
   },
-  "published": false,
+  "published": true,
   "rdy": "0.47.0",
   "same_delivery_digest": "d8af5efe9ef1bc64aaeb1ccdd982257b4556a90f686295130daf1667be64138d",
   "selection": "1fc6ade81dacca74fdf430ca0d66c4ee52ac33d66ab66b0fe55ff97326f5f222",

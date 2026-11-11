@@ -496,3 +496,101 @@ fn rpl14_a_real_revoke_or_supersede_export_is_suspect_downstream() {
     want.sort();
     assert_eq!(got, want);
 }
+
+/// The suspect rows of `scope` as the read surface serializes them: (block, target, reason).
+fn detail_rows(r: &Rdy, scope: &Scope) -> Vec<(String, Value, String)> {
+    r.read()
+        .suspect_details(scope)
+        .unwrap()
+        .iter()
+        .map(|s| {
+            let v = serde_json::to_value(s).unwrap();
+            (
+                v["block"].as_str().unwrap().to_string(),
+                v["target"].clone(),
+                v["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// TASK-2069 (D-Y49PX): the suspect rows a read shows (`rdy_suspects`, `rdy suspects`) list the
+/// suspects on cited blocks too, the target as `<alias>:<id>`, after the block's local rows. A
+/// scope that does not hold the citing block lists none.
+#[test]
+fn fsus_suspect_details_lists_foreign_rows() {
+    let d = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(&d.path().join("p"), "rdy-standard").unwrap();
+    let seeded = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$k", "parent": "$s", "body": "Keep logs."},
+            {"op": "create", "type": "repo_link", "id": "$a", "parent": "$d",
+             "fields": {"alias": "core", "repo": cited().to_string(), "profile": AGENTS}}
+        ]),
+    );
+    land(&mut r, "seed");
+    let local = seeded.created["$k"].clone();
+    let src = ForeignSource::Link {
+        link: seeded.created["$a"].clone(),
+        site: "hub.example".into(),
+        at_ms: 1_760_000_000_000,
+    };
+    let x1 = block("d-FRGNX", "Use X.");
+    take_delivery(
+        &mut r,
+        &stream(files.path(), "v1", &[(&x1, accepted(&[]))]),
+        &src,
+        None,
+    )
+    .unwrap();
+    let cited_by = write(
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": seeded.created["$s"],
+                "body": format!("Follow {{{{core:d-FRGNX}}}} and {{{{{local}}}}}.")}]),
+    );
+    land(&mut r, "w");
+    let claim = cited_by.created["$c"].clone();
+    assert!(detail_rows(&r, &Scope::Canon).is_empty());
+
+    // the local target moves, then a delivery changes the cited one
+    write(
+        &mut r,
+        "k",
+        json!([{"op": "update", "id": local, "body": "Keep logs for a year."}]),
+    );
+    land(&mut r, "k");
+    let x2 = block("d-FRGNX", "Use X, version two.");
+    take_delivery(
+        &mut r,
+        &stream(files.path(), "v2", &[(&x2, accepted(&[]))]),
+        &src,
+        None,
+    )
+    .unwrap();
+    let rec = last_record(&r).expect("the delivery batch logs its moves");
+    assert_eq!(rec.new.len(), 1, "{rec:?}");
+    assert_eq!(rec.new[0].why.cause, Cause::Delivered);
+
+    // the local row first, then the cited row by its alias
+    let want = vec![
+        (claim.clone(), json!(local), "changed".to_string()),
+        (claim.clone(), json!("core:d-FRGNX"), "changed".to_string()),
+    ];
+    assert_eq!(detail_rows(&r, &Scope::Canon), want);
+    // a view reads canon's rows; a view that deletes the citing block lists none of them
+    assert_eq!(detail_rows(&r, &Scope::View("w".into())), want);
+    write(&mut r, "drop", json!([{"op": "delete", "id": claim}]));
+    assert!(
+        detail_rows(&r, &Scope::View("drop".into()))
+            .iter()
+            .all(|(b, _, _)| *b != claim),
+        "{:?}",
+        detail_rows(&r, &Scope::View("drop".into()))
+    );
+}

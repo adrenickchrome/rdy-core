@@ -407,6 +407,22 @@ fn rpl26_foreign_bytes_counts_live_revoked_and_residue() {
     let entry = taken.removals[0].entry.unwrap();
     let after = handle.snapshot().unwrap().foreign_bytes(&c.repo).unwrap();
     handle.close().unwrap();
+    // Windows: the snapshots from before the removal still hold the replaced index, whose
+    // database locks it against every other handle, so a reopen cannot zero the name that keeps
+    // it and is refused, naming it; once they drop, the file is zeroed and the name goes
+    #[cfg(windows)]
+    {
+        let e = Store::open(&store_dir(dir.path()))
+            .err()
+            .expect("refused while the snapshots live");
+        assert!(
+            e.to_string().contains(
+                "index.redb.erase is a replaced index file kept for zeroing, and it could not be zeroed and removed"
+            ),
+            "{e}"
+        );
+        drop((none, live, revoked));
+    }
     let s = Store::open(&store_dir(dir.path())).unwrap();
     let (_, payload) = s.reader().get_kind_raw(kinds::FOREIGN, &entry).unwrap();
     s.close().unwrap();
