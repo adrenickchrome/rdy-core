@@ -912,10 +912,6 @@ fn hpb7_missing_replies_are_sorted_unique_subsets() {
             r#"{{"kind":1,"hash":"{}"}}"#,
             keys[0].hash.to_string().to_uppercase()
         )],
-        vec![format!(
-            r#"{{"kind":1,"hash":"{}","size":1}}"#,
-            keys[0].hash
-        )],
         vec![k(&keys[0]), k(&keys[1]), k(&keys[2]), k(&keys[2])],
     ] {
         let reply = format!(r#"{{"missing":[{}]}}"#, missing.join(","));
@@ -2267,5 +2263,132 @@ fn np2_publish_known_member_faults_still_fail_beside_an_unknown_member() {
         assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{body}");
         assert!(!np2_error_text(&e).contains(NP2_MARKER));
     }
+    assert_eq!(s.finish(), 0);
+}
+
+/// The known reply naming every key in `keys`, each element with `member` added when given, and
+/// `pad` more zeros in an added top-level member when given.
+fn np2_known_reply(keys: &[ObjectKey], member: Option<&str>, pad: Option<usize>) -> String {
+    let extra = member.map(|m| format!(",{m}")).unwrap_or_default();
+    let all: Vec<String> = keys
+        .iter()
+        .map(|k| format!(r#"{{"kind":{},"hash":"{}"{extra}}}"#, k.kind, k.hash))
+        .collect();
+    let pad = pad
+        .map(|n| format!(r#","np2_pad":[{}]"#, vec!["0"; n].join(",")))
+        .unwrap_or_default();
+    format!(r#"{{"missing":[{}]{pad}}}"#, all.join(","))
+}
+
+/// The files/known reply naming every hash in `hashes`, with `pad` more zeros in an added
+/// top-level member when given.
+fn np2_files_reply(hashes: &[Hash], pad: Option<usize>) -> String {
+    let all: Vec<String> = hashes.iter().map(|h| format!("\"{h}\"")).collect();
+    let pad = pad
+        .map(|n| format!(r#","np2_pad":[{}]"#, vec!["0"; n].join(",")))
+        .unwrap_or_default();
+    format!(r#"{{"missing":[{}]{pad}}}"#, all.join(","))
+}
+
+/// D-N8PR2 (fix round 1): at the most keys a known request names, a reply that lists every key
+/// with an added member on every element is taken (the element is read through an open wire
+/// type, then built as the store's closed ObjectKey); the value budget is capped at the global
+/// 1,000,000 values, and a reply one value over it still fails.
+#[test]
+fn np2_known_takes_an_added_member_on_every_element_at_the_maximum_count() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let keys: Vec<ObjectKey> = (0..MAX_KNOWN_KEYS as u32)
+        .map(|i| ObjectKey {
+            kind: 1 + (i % 3) as u8,
+            hash: Hash::of(&i.to_le_bytes()),
+        })
+        .collect();
+    let keys = sorted(keys);
+    let member = r#""np2":"x""#;
+    let reply = np2_known_reply(&keys, Some(member), None);
+    assert!(reply.len() <= KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    assert_eq!(r.unwrap(), keys);
+    // `missing`, then per key one element and three members: 400,001 values. The budget is
+    // min(keys*12+64, 1,000,000) = 1,000,000; the pad member is one value more.
+    let used = 1 + 4 * MAX_KNOWN_KEYS + 1;
+    let fits = MAX_JSON_VALUES - used;
+    let reply = np2_known_reply(&keys, Some(member), Some(fits));
+    assert!(reply.len() <= KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    assert_eq!(r.unwrap(), keys);
+    let reply = np2_known_reply(&keys, Some(member), Some(fits + 1));
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    protocol(r);
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-N8PR2 (fix round 1): a known reply's budget is keys*12+64 values: a small reply with added
+/// members up to it is taken, one value over it fails.
+#[test]
+fn np2_known_reply_over_its_new_budget_fails() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let keys = np2_keys();
+    let budget = keys.len() * 12 + 64;
+    // `missing`, one element with two members, and the pad member: 5 values before the pad.
+    let fits = budget - 5;
+    let missing = &keys[..1];
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_known_reply(missing, None, Some(fits))),
+        || hub.wire.known(&cx, PUSH, &keys),
+    );
+    assert_eq!(r.unwrap(), missing.to_vec());
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_known_reply(missing, None, Some(fits + 1))),
+        || hub.wire.known(&cx, PUSH, &keys),
+    );
+    protocol(r);
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-N8PR2 (fix round 1): files/known elements are bare hash strings, so a member can only be
+/// added beside `missing`. At the most files a request names, the budget is files*4+64 values:
+/// a full reply with an added member up to it is taken, one value over it fails.
+#[test]
+fn np2_files_known_takes_added_members_at_the_maximum_count() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let files: Vec<FileIdentity> = (0..MAX_KNOWN_FILES as u32)
+        .map(|i| FileIdentity {
+            hash: Hash::of(&i.to_be_bytes()),
+            size: u64::from(i) + 1,
+        })
+        .collect();
+    let mut hashes: Vec<Hash> = files.iter().map(|f| f.hash).collect();
+    hashes.sort();
+    let budget = MAX_KNOWN_FILES * 4 + 64;
+    assert!(budget <= MAX_JSON_VALUES);
+    // `missing`, one element per hash, and the pad member.
+    let fits = budget - (1 + MAX_KNOWN_FILES + 1);
+    let reply = np2_files_reply(&hashes, Some(fits));
+    assert!(reply.len() <= FILES_KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known_files(&cx, PUSH, &files)
+    });
+    assert_eq!(r.unwrap(), hashes);
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_files_reply(&hashes, Some(fits + 1))),
+        || hub.wire.known_files(&cx, PUSH, &files),
+    );
+    protocol(r);
     assert_eq!(s.finish(), 0);
 }

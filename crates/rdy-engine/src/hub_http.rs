@@ -15,9 +15,11 @@
 //!   key and valid UTF-8. These bounds cover the whole reply. A member the client does not know
 //!   is ignored, in application objects and OAuth replies alike (D-N8PR2): it is never stored,
 //!   logged or quoted, while every member the client reads keeps its type and bounds checks.
-//! - **No token echo.** A `/me` reply, and every member of a token reply but its two tokens, is
-//!   scanned whole, ignored members included, for the bearer and the token prefixes, as given
-//!   and percent-decoded; an echo is a contract mismatch (D-N8PR2).
+//! - **No token echo.** Every key and string of a `/me` or key reply, ignored members included,
+//!   as given and percent-decoded, is scanned for the exact bearer: those replies carry names
+//!   people chose, so a token prefix alone is no echo there. Every member of a token reply but
+//!   its two tokens is scanned for the bearer and the token prefixes. An echo is a contract
+//!   mismatch (D-N8PR2).
 //! - **Nothing raw escapes.** No URL, request, reply, library error or hub message is logged or
 //!   returned: failures are the closed [`HubFailure`] values. The engine's `log` features
 //!   compile every dependency record out.
@@ -1207,10 +1209,21 @@ fn json<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, HubFailure> {
 // Token echoes
 // ---------------------------------------------------------------------------------------------
 
-/// Whether `text` holds `bearer` (when one is given and is not empty) or any hub token prefix.
-pub(crate) fn echoes_token(text: &str, bearer: Option<&Secret>) -> bool {
+/// Whether a token scan also refuses a bare hub token prefix, or only the exact bearer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Prefixes {
+    /// The bearer and every [`TOKEN_PREFIXES`] entry: replies that carry no chosen text.
+    Check,
+    /// The bearer alone: replies that carry names a person chose (a display name, an
+    /// organization name, a handle, a key label), where a prefix is no token.
+    Skip,
+}
+
+/// Whether `text` holds `bearer` (when one is given and is not empty) or, with
+/// [`Prefixes::Check`], any hub token prefix.
+pub(crate) fn echoes_token(text: &str, bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
     bearer.is_some_and(|b| !b.expose().is_empty() && text.contains(b.expose()))
-        || TOKEN_PREFIXES.iter().any(|p| text.contains(p))
+        || (prefixes == Prefixes::Check && TOKEN_PREFIXES.iter().any(|p| text.contains(p)))
 }
 
 /// `text` with each `%XX` escape decoded; a decoded byte that is not UTF-8 becomes U+FFFD.
@@ -1240,11 +1253,11 @@ pub(crate) fn percent_decoded(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Whether `text`, as given or percent-decoded, holds the bearer or a token prefix. Text with no
-/// `%` decodes to itself, so it is not copied.
-fn text_echoes(text: &str, bearer: Option<&Secret>) -> bool {
-    echoes_token(text, bearer)
-        || (text.contains('%') && echoes_token(&percent_decoded(text), bearer))
+/// Whether `text`, as given or percent-decoded, holds the bearer or (with [`Prefixes::Check`]) a
+/// token prefix. Text with no `%` decodes to itself, so it is not copied.
+fn text_echoes(text: &str, bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
+    echoes_token(text, bearer, prefixes)
+        || (text.contains('%') && echoes_token(&percent_decoded(text), bearer, prefixes))
 }
 
 /// Whether any key or string of `object`, at any depth, holds the bearer or a token prefix, as
@@ -1253,32 +1266,37 @@ fn text_echoes(text: &str, bearer: Option<&Secret>) -> bool {
 pub(crate) fn object_echoes(
     object: &serde_json::Map<String, serde_json::Value>,
     bearer: Option<&Secret>,
+    prefixes: Prefixes,
 ) -> bool {
     object
         .iter()
-        .any(|(k, v)| text_echoes(k, bearer) || value_echoes(v, bearer))
+        .any(|(k, v)| text_echoes(k, bearer, prefixes) || value_echoes(v, bearer, prefixes))
 }
 
 /// [`object_echoes`] for any JSON value: a string, an array, an object or a scalar.
-pub(crate) fn value_echoes(value: &serde_json::Value, bearer: Option<&Secret>) -> bool {
+pub(crate) fn value_echoes(
+    value: &serde_json::Value,
+    bearer: Option<&Secret>,
+    prefixes: Prefixes,
+) -> bool {
     match value {
-        serde_json::Value::String(s) => text_echoes(s, bearer),
-        serde_json::Value::Array(a) => a.iter().any(|v| value_echoes(v, bearer)),
-        serde_json::Value::Object(m) => object_echoes(m, bearer),
+        serde_json::Value::String(s) => text_echoes(s, bearer, prefixes),
+        serde_json::Value::Array(a) => a.iter().any(|v| value_echoes(v, bearer, prefixes)),
+        serde_json::Value::Object(m) => object_echoes(m, bearer, prefixes),
         _ => false,
     }
 }
 
-/// Whether a reply that [`check_json`] passed echoes the bearer or a token prefix: in its raw
-/// text, or in any key or string of the whole reply at any depth, ignored members included, as
-/// given or percent-decoded (D-N8PR2). A body that does not parse counts as an echo. Only the
+/// Whether a reply that [`check_json`] passed echoes the bearer or (with [`Prefixes::Check`]) a
+/// token prefix: in its raw text, or in any key or string of the whole reply at any depth,
+/// ignored members included, as given or percent-decoded (D-N8PR2). A body that does not parse counts as an echo. Only the
 /// answer is returned: the matched text is never kept.
-pub(crate) fn reply_echoes(body: &[u8], bearer: Option<&Secret>) -> bool {
-    if echoes_token(&String::from_utf8_lossy(body), bearer) {
+pub(crate) fn reply_echoes(body: &[u8], bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
+    if echoes_token(&String::from_utf8_lossy(body), bearer, prefixes) {
         return true;
     }
     match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(whole) => value_echoes(&whole, bearer),
+        Ok(whole) => value_echoes(&whole, bearer, prefixes),
         Err(_) => true,
     }
 }
@@ -1636,7 +1654,7 @@ fn tokens(body: &[u8], bearer: Option<&Secret>) -> Result<TokenPair, HubFailure>
             m.remove(member);
         }
     }
-    protocol_if(value_echoes(&rest, bearer))?;
+    protocol_if(value_echoes(&rest, bearer, Prefixes::Check))?;
     protocol_if(!dto.token_type.eq_ignore_ascii_case("Bearer"))?;
     let pair = TokenPair {
         access_token: Secret::new(dto.access_token),
@@ -1778,12 +1796,14 @@ fn decode_api(
         }
         return Err(api_error(status, body));
     }
+    // The whole reply is bounded, then no key or string of it, ignored members included, may
+    // hold the bearer (D-N8PR2). These replies carry names people chose, so a token prefix alone
+    // is no echo. An echo is a mismatch before the handle is judged.
+    check_json(body, EXCHANGE_JSON)?;
+    protocol_if(reply_echoes(body, bearer, Prefixes::Skip))?;
     match op {
         HubOperation::Me => {
             let dto: MeDto = json(body)?;
-            // No key or string of the whole reply holds a token (D-N8PR2); an echo is a
-            // mismatch before the handle is judged.
-            protocol_if(reply_echoes(body, bearer))?;
             let times_ok = time_ok(&dto.created_at)
                 && dto.away_until.as_deref().is_none_or(time_ok)
                 && dto.earlier_handles.iter().all(|h| time_ok(&h.until));

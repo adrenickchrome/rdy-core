@@ -4,14 +4,15 @@
 //! - **Fixed spellings.** Each request and reply is one fixed JSON object. Hashes and repo ids
 //!   are lowercase text; an object key is `{kind, hash}`. Every reply object refuses duplicate
 //!   keys and wrong types, and each nullable member must be present. A reply member the client
-//!   does not know is ignored, never stored, logged or quoted (D-N8PR2); an object key in a
-//!   known reply stays closed, since the store reads the same type. The one optional request
-//!   member is `keep_latest`, beside `record` in the publish body and absent when not given
-//!   (D-50JXR); core never computes its default.
+//!   does not know is ignored, never stored, logged or quoted (D-N8PR2), object keys in a known
+//!   reply included: they are read through an open wire type, then built as the store's closed
+//!   `ObjectKey`. The one optional request member is `keep_latest`, beside `record` in the
+//!   publish body and absent when not given (D-50JXR); core never computes its default.
 //! - **Bounds before allocation.** Each request is checked against its count bounds and
 //!   encoded through a capped writer. Each reply is read within its byte cap and walked by the
-//!   bounded JSON guard, whose value budget a known step sets from its own request, before it is
-//!   decoded. A list with a smaller bound of its own stops at that bound while it is decoded,
+//!   bounded JSON guard, whose value budget a known step sets from its own request (four times
+//!   the values of each element plus 64, for members the hub may add; never over
+//!   [`MAX_JSON_VALUES`]), before it is decoded. A list with a smaller bound of its own stops at that bound while it is decoded,
 //!   before a further element is built.
 //! - **Origins.** Discovery's sync base is a path on the install or an HTTPS URL the install's
 //!   origin fence admits, kept in the URL parser's canonical form; its raw path is checked for
@@ -35,7 +36,7 @@ use crate::error::{
 };
 use crate::formats::formats;
 use crate::hub_http::{
-    HttpHubTransport, JsonLimits, UploadHttpRequest, UploadMethod, api_error_entry,
+    HttpHubTransport, JsonLimits, Prefixes, UploadHttpRequest, UploadMethod, api_error_entry,
     decode_bounded_json, reply_echoes,
 };
 use crate::hub_types::{
@@ -550,7 +551,36 @@ struct DiscoveryDto {
 
 #[derive(Deserialize)]
 struct MissingKeys {
-    missing: Vec<ObjectKey>,
+    missing: Vec<KeyWire>,
+}
+
+/// One object key of a known reply, as the hub writes it: `ObjectKey`'s two members under the
+/// same spellings and checks (a `u8` kind and full lowercase hex). The store reads
+/// `ObjectKey` closed, so the reply reads this open type and an unknown member is ignored
+/// (D-N8PR2).
+#[derive(Deserialize)]
+struct KeyWire {
+    kind: u8,
+    #[serde(deserialize_with = "hex::deserialize")]
+    hash: Hash,
+}
+
+impl From<KeyWire> for ObjectKey {
+    fn from(k: KeyWire) -> ObjectKey {
+        ObjectKey {
+            kind: k.kind,
+            hash: k.hash,
+        }
+    }
+}
+
+/// The values the guard admits in a known reply: four times `per_element` for each of `n`
+/// elements, plus 64, for members the hub may add (D-N8PR2); never over [`MAX_JSON_VALUES`],
+/// which a full reply without added members stays well under.
+fn known_values(n: usize, per_element: usize) -> usize {
+    n.saturating_mul(per_element.saturating_mul(4))
+        .saturating_add(64)
+        .min(MAX_JSON_VALUES)
 }
 
 /// A hash in a files/known reply.
@@ -984,7 +1014,7 @@ fn reply<T: DeserializeOwned>(
     bearer: &Secret,
 ) -> Result<T, RdyError> {
     let value = decode_bounded_json(body, limits).map_err(|_| invalid_reply(effect))?;
-    if reply_echoes(body, Some(bearer)) {
+    if reply_echoes(body, Some(bearer), Prefixes::Check) {
         return Err(invalid_reply(effect));
     }
     Ok(value)
@@ -1077,7 +1107,7 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
     }
     // The raw body, and every key and string of the whole body at any depth: the decoded
     // members, `corrected` and ignored members alike, as given and percent-decoded.
-    if reply_echoes(body, Some(bearer)) {
+    if reply_echoes(body, Some(bearer), Prefixes::Check) {
         return None;
     }
     // The pair first, so a code with several statuses reaches each of its rows.
@@ -1279,20 +1309,21 @@ impl PublishWire for HttpPublishWire {
         let url = route(cx, &["known"], &[])?;
         let json = encode(&KnownBody { push, keys }, KNOWN_REQUEST_BYTES)?;
         let body = self.post_json(cx, Effect::Read, &url, json, KNOWN_REPLY_BYTES, &[200])?;
-        // `missing` and, per key, one element and two members.
-        let values = keys.len().saturating_mul(3).saturating_add(1);
+        // Per key, one element and two members: 3 values, with headroom for added members.
+        let values = known_values(keys.len(), 3);
         let dto: MissingKeys = reply(
             &body,
             limits(KNOWN_REPLY_BYTES, values),
             Effect::Read,
             &cx.bearer,
         )?;
-        let subset = dto.missing.windows(2).all(|w| w[0] < w[1])
-            && dto.missing.iter().all(|k| keys.binary_search(k).is_ok());
+        let missing: Vec<ObjectKey> = dto.missing.into_iter().map(ObjectKey::from).collect();
+        let subset = missing.windows(2).all(|w| w[0] < w[1])
+            && missing.iter().all(|k| keys.binary_search(k).is_ok());
         if !subset {
             return Err(upstream_protocol());
         }
-        Ok(dto.missing)
+        Ok(missing)
     }
 
     fn put_objects(
@@ -1348,8 +1379,8 @@ impl PublishWire for HttpPublishWire {
             FILES_KNOWN_REPLY_BYTES,
             &[200],
         )?;
-        // `missing` and one element per hash.
-        let values = files.len().saturating_add(1);
+        // One element per hash, with headroom for added members.
+        let values = known_values(files.len(), 1);
         let dto: MissingFiles = reply(
             &body,
             limits(FILES_KNOWN_REPLY_BYTES, values),

@@ -2880,38 +2880,132 @@ fn np2_hiding_members(t: &str) -> Vec<String> {
 /// The bearer, another install's token, and the bare prefixes with no token.
 const NP2_HIDDEN: [&str; 4] = [ACCESS, REFRESH_2, "rdyh_", "rdyx_"];
 
-/// D-N8PR2: a `/me` reply that holds the bearer, another token or a bare token prefix in any key
-/// or string, ignored members included (top level, deep, in an array, in a nested known object),
-/// as given, JSON-escaped or percent-encoded, is a protocol failure, not an invalid handle and not
-/// a sign-in; the reply's text never reaches the failure.
+/// D-N8PR2 (fix round 1): a `/me` reply that holds the exact bearer in any key or string,
+/// ignored members included (top level, deep, in an array, in a nested known object), as given,
+/// JSON-escaped or percent-encoded, is a protocol failure, not an invalid handle and not a
+/// sign-in; the reply's text never reaches the failure.
 #[test]
-fn np2_me_refuses_a_token_anywhere_in_the_reply() {
+fn np2_me_refuses_the_bearer_anywhere_in_the_reply() {
     let mut hub = Hub::start();
-    for text in NP2_HIDDEN {
-        for t in np2_spellings(text) {
-            let mut bodies: Vec<String> = np2_hiding_members(&t)
-                .iter()
-                .map(|m| np2_with(ME_REPLY, m))
-                .collect();
-            bodies.push(ME_REPLY.replace(
-                r#"{"id":"org_00000000000000000000000004""#,
-                &format!(r#"{{"np2":"{t}","id":"org_00000000000000000000000004""#),
-            ));
-            // A known member that holds it: the display name.
-            bodies.push(ME_REPLY.replace("Test Person", &format!("Test {t} Person")));
-            // With an invalid handle too: the echo wins, it is no handle failure.
-            bodies.push(
-                np2_with(ME_REPLY, &format!(r#""np2_extra":"{t}""#))
-                    .replace(r#""handle":"test-person""#, r#""handle":"Bad Handle""#),
-            );
-            for b in &bodies {
-                assert_ne!(b, ME_REPLY);
-                let (r, _) = hub.send(Reply::json(200, b), hub.call(HubOperation::Me));
+    for t in np2_spellings(ACCESS) {
+        let mut bodies: Vec<String> = np2_hiding_members(&t)
+            .iter()
+            .map(|m| np2_with(ME_REPLY, m))
+            .collect();
+        bodies.push(ME_REPLY.replace(
+            r#"{"id":"org_00000000000000000000000004""#,
+            &format!(r#"{{"np2":"{t}","id":"org_00000000000000000000000004""#),
+        ));
+        // A known member that holds it: the display name.
+        bodies.push(ME_REPLY.replace("Test Person", &format!("Test {t} Person")));
+        // With an invalid handle too: the echo wins, it is no handle failure.
+        bodies.push(
+            np2_with(ME_REPLY, &format!(r#""np2_extra":"{t}""#))
+                .replace(r#""handle":"test-person""#, r#""handle":"Bad Handle""#),
+        );
+        for b in &bodies {
+            assert_ne!(b, ME_REPLY);
+            let (r, _) = hub.send(Reply::json(200, b), hub.call(HubOperation::Me));
+            assert!(!format!("{r:?}").contains("np2hide"), "{b}");
+            assert_eq!(failure(r), "Protocol", "{b}");
+        }
+    }
+    hub.finish();
+}
+
+/// D-N8PR2 (fix round 1): `/me` carries names people chose, so a token prefix alone is no echo:
+/// a display name `rdyh_fan`, an organization `rdyx_team`, an earlier handle and an ignored
+/// member that look like prefixes all sign in with the same reply.
+#[test]
+fn np2_me_signs_in_with_names_that_look_like_token_prefixes() {
+    let mut hub = Hub::start();
+    let want = HubReply::Me(MeReply {
+        account: ACCOUNT.into(),
+        handle: "test-person".into(),
+    });
+    let bodies = [
+        ME_REPLY.replace("Test Person", "rdyh_fan"),
+        ME_REPLY.replace("test-org-a", "rdyx_team"),
+        ME_REPLY.replace("test-person-old", "rdyh_old"),
+        ME_REPLY.replace("Test Person", "rdyh%5Ffan"),
+        np2_with(ME_REPLY, r#""np2_extra":"rdyh_ and rdyx_""#),
+        ME_REPLY
+            .replace("Test Person", "rdyh_fan")
+            .replace("test-org-b", "rdyx_team"),
+    ];
+    for b in &bodies {
+        assert_ne!(b, ME_REPLY);
+        let (r, _) = hub.send(Reply::json(200, b), hub.call(HubOperation::Me));
+        assert_eq!(
+            r.unwrap_or_else(|f| panic!("{b}: {}", kind(&f))),
+            want,
+            "{b}"
+        );
+    }
+    hub.finish();
+}
+
+/// D-N8PR2 (fix round 1): every key reply (challenge, bind, list, retire, revoke) that holds the
+/// exact bearer in an ignored member, as given, JSON-escaped or percent-encoded, at the top
+/// level, as a key, deep or in an array, is a protocol failure.
+#[test]
+fn np2_key_replies_refuse_the_bearer_in_an_ignored_member() {
+    let mut hub = Hub::start();
+    let o = hub.origin();
+    for op in all_operations().into_iter().filter(is_key_route) {
+        let (status, body) = np2_success(&op, &o).unwrap();
+        for t in np2_spellings(ACCESS) {
+            for m in np2_hiding_members(&t) {
+                let b = np2_with(&body, &m);
+                let (r, _) = hub.send(Reply::json(status, &b), hub.call(op.clone()));
                 assert!(!format!("{r:?}").contains("np2hide"), "{b}");
-                assert_eq!(failure(r), "Protocol", "{b}");
+                assert_eq!(failure(r), "Protocol", "{op:?}: {b}");
             }
         }
     }
+    hub.finish();
+}
+
+/// D-N8PR2 (fix round 1): a key label is text the person chose, so a label `rdyh_x` that the
+/// key replies echo is no token: the challenge, the bind, the list and the retire succeed.
+#[test]
+fn np2_key_bind_with_a_prefix_label_succeeds() {
+    let mut hub = Hub::start();
+    let o = hub.origin();
+    let label = |body: &str| body.replace("laptop key", "rdyh_x");
+    let (r, _) = hub.send(
+        Reply::json(201, &label(CHALLENGE_REPLY)),
+        hub.call(HubOperation::BindChallenge {
+            kind: KeyKind::Person,
+            label: Some("rdyh_x".into()),
+        }),
+    );
+    let HubReply::BindChallenge(c) = r.unwrap_or_else(|f| panic!("{}", kind(&f))) else {
+        panic!("not a challenge");
+    };
+    assert_eq!(c.label, "rdyh_x");
+    let (r, _) = hub.send(
+        Reply::json(201, &label(&sub(BIND_REPLY, &o))),
+        hub.call(bind_with(PUBLIC_KEY, PROOF)),
+    );
+    let HubReply::Bind(b) = r.unwrap_or_else(|f| panic!("{}", kind(&f))) else {
+        panic!("not a bind");
+    };
+    assert_eq!(b.key.label, "rdyh_x");
+    let (r, _) = hub.send(
+        Reply::json(200, &label(LIST_REPLY)),
+        hub.call(HubOperation::FindKey {
+            fingerprint: FINGERPRINT.into(),
+        }),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    let (r, _) = hub.send(
+        Reply::json(200, &label(RETIRE_REPLY)),
+        hub.call(HubOperation::Retire {
+            key_id: KEY_ID.into(),
+        }),
+    );
+    assert!(r.is_ok(), "{r:?}");
     hub.finish();
 }
 
