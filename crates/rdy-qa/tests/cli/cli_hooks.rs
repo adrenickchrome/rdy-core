@@ -100,7 +100,7 @@ impl Hooked {
         let decision = seed_decision(project.path());
         let tmp = short_tempdir();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
-        std::fs::write(base.join("no-global"), "").unwrap();
+        std::fs::write(tmp.path().join("no-global"), "").unwrap();
         let app = base.join("app co");
         let fresh = base.join("fresh");
         let h = Hooked {
@@ -138,10 +138,10 @@ impl Hooked {
         h
     }
 
+    /// The empty global configuration. Not under the canonical root: on Windows that is a `\\?\`
+    /// path, which Git cannot open.
     fn global(&self) -> PathBuf {
-        std::fs::canonicalize(self.tmp.path())
-            .unwrap()
-            .join("no-global")
+        self.tmp.path().join("no-global")
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> String {
@@ -419,6 +419,7 @@ fn m4a3_git_runner_uses_the_actual_index() {
     let base_two = h.commit_all(&app, "feat: two more files");
     assert_ne!(base, base_two);
     let wt = std::fs::canonicalize(h.tmp.path()).unwrap().join("wt ü");
+    // Git makes the folder: it gets the path without a `\\?\` prefix, which Git cannot create
     h.git(
         &app,
         &[
@@ -427,7 +428,7 @@ fn m4a3_git_runner_uses_the_actual_index() {
             "-q",
             "-b",
             "feature",
-            wt.to_str().unwrap(),
+            &rdy_store::pio::display_path(&wt),
         ],
     );
     h.write(&wt, "src/feature.rs", "fn feature() { 1; }\n");
@@ -1084,8 +1085,8 @@ fn m4a3_bare_setup_keeps_meta_and_stub_contract() {
     assert_eq!(
         v["files"],
         json!([
-            {"path": root.join("CLAUDE.md").to_string_lossy(), "result": "written"},
-            {"path": root.join("AGENTS.md").to_string_lossy(), "result": "written"}
+            {"path": shown(&root.join("CLAUDE.md")), "result": "written"},
+            {"path": shown(&root.join("AGENTS.md")), "result": "written"}
         ]),
         "{v}"
     );
