@@ -6,7 +6,7 @@ use crate::error::{E_BAD_INPUT, E_NO_SESSION, ErrorReply};
 use crate::handler::Handler;
 use crate::layout::RunDir;
 use crate::mcp_token;
-use crate::ops::{OpContext, dispatch};
+use crate::ops::{OpContext, dispatch, dispatch_with};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
 use crate::site::guard::SiteTarget;
@@ -14,6 +14,7 @@ use crate::site::profiles::{self, TestEvent, say};
 use crate::site::{self, LanOverride, SiteInfo, SiteServer};
 use crate::sys;
 use crate::writer::panic_text;
+use rdy_engine::hooks::RunContext;
 use rdy_engine::publication::{ResolvedProfile, profile_at};
 use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
@@ -891,12 +892,15 @@ impl ServeHandler {
     }
 }
 
-impl Handler for ServeHandler {
-    fn ctl(
+impl ServeHandler {
+    /// One ctl request of the session `session`, under `run` when the connection gave one (the
+    /// `hook` op's deadline and cancellation, [`Handler::ctl_run`]).
+    fn serve_ctl(
         &self,
         session: &SessionInfo,
         request: CtlRequest,
         agent: Arc<dyn SigningAgent>,
+        run: Option<&RunContext>,
     ) -> Result<Value, ErrorReply> {
         if request.op == "session" {
             return self.open_session(session, request.args);
@@ -921,7 +925,11 @@ impl Handler for ServeHandler {
         // host's reader sends marks nothing
         let public_instructions =
             request.op == "instructions" && request.args.get("part") != Some(&Value::Bool(true));
-        let mut out = dispatch(&cx, &request.op, request.args).map_err(ErrorReply::from);
+        let mut out = match run {
+            Some(run) => dispatch_with(&cx, &request.op, request.args, run),
+            None => dispatch(&cx, &request.op, request.args),
+        }
+        .map_err(ErrorReply::from);
         let key = (cs.session.actor.clone(), cs.session.run.clone());
         if public_instructions && out.is_ok() {
             self.shared.hub.claims().mark_instructions_read(&key);
@@ -933,6 +941,27 @@ impl Handler for ServeHandler {
             crate::ops::with_reminder(&request.op, v, owed);
         }
         out
+    }
+}
+
+impl Handler for ServeHandler {
+    fn ctl(
+        &self,
+        session: &SessionInfo,
+        request: CtlRequest,
+        agent: Arc<dyn SigningAgent>,
+    ) -> Result<Value, ErrorReply> {
+        self.serve_ctl(session, request, agent, None)
+    }
+
+    fn ctl_run(
+        &self,
+        session: &SessionInfo,
+        request: CtlRequest,
+        agent: Arc<dyn SigningAgent>,
+        run: &RunContext,
+    ) -> Result<Value, ErrorReply> {
+        self.serve_ctl(session, request, agent, Some(run))
     }
 
     fn mcp(
