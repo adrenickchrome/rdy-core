@@ -357,10 +357,8 @@ fn mht7_profile_result_never_advertises_profile_mcp() {
     assert!(ok, "{status}");
     assert_eq!(status["mcp_http"]["url"], url, "{status}");
     assert!(!status.to_string().contains(&format!("{profile_port}/~mcp")));
-    eprintln!("STEP stop-1");
     let o = s.rdy(&["serve", "--stop"]);
     assert_eq!(out(&o), "stopped\n");
-    eprintln!("STEP stopped-1");
 
     // the foreground start prints the same: its profile-only result names the full endpoint
     let mut cmd = human_command(
@@ -372,8 +370,14 @@ fn mht7_profile_result_never_advertises_profile_mcp() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = cmd.spawn().expect("spawn rdy");
+    // the child is reaped on a thread of its own: a zombie still counts as a live daemon to the stop
+    let mut stdout = child.stdout.take().unwrap();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = exit_tx.send(child.wait().expect("the foreground daemon exits"));
+    });
     let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
+    BufReader::new(&mut stdout)
         .read_line(&mut line)
         .expect("the result line");
     let v: Value = serde_json::from_str(line.trim()).unwrap_or_else(|_| panic!("JSON in {line}"));
@@ -385,10 +389,12 @@ fn mht7_profile_result_never_advertises_profile_mcp() {
         profile_port_of(&v),
         "the foreground result names the full endpoint: {v}"
     );
-    eprintln!("STEP stop-2");
     let stop = s.rdy(&["serve", "--stop"]);
     assert_eq!(out(&stop), "stopped\n");
-    child.wait().expect("the foreground daemon exits");
+    let status = exit_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the foreground daemon exited");
+    assert!(status.success(), "{status:?}");
 }
 
 fn profile_port_of(v: &Value) -> u16 {
