@@ -2,6 +2,7 @@
 //! the pack watch and its generation, the hub of connected MCP sessions and its notifier, and
 //! the session-end hooks.
 use crate::daemon::HttpAdmission;
+use crate::mcp_token::Prepared;
 use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
 use crate::site::SiteInfo;
@@ -16,6 +17,7 @@ use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
+use rdy_mcp::http::TransportStats;
 use rdy_mcp::notify::NotifyHub;
 use rdy_mcp::server::DaemonBuildWarning;
 use serde_json::Value;
@@ -66,6 +68,13 @@ pub struct Shared {
     /// MCP over HTTP's admission into the daemon that serves this, and its activity: set once by
     /// the daemon's start, right after its bind. Unset for a `Shared` that no daemon serves.
     pub http: OnceLock<HttpAdmission>,
+    /// The project's MCP token as the daemon's start prepared it (mht6): set once, before the
+    /// site binds. Unset, or an error, and MCP over HTTP is unavailable.
+    pub mcp_token: OnceLock<Arc<Prepared>>,
+    /// Bumped by [`Self::recheck_mcp_http`].
+    mcp_recheck: tokio::sync::watch::Sender<u64>,
+    /// The full listener's MCP layer's transport counts, once it is made.
+    mcp_transports: OnceLock<TransportStats>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -120,6 +129,9 @@ impl Shared {
                 identity: OnceLock::new(),
                 profile_sites: Default::default(),
                 http: OnceLock::new(),
+                mcp_token: OnceLock::new(),
+                mcp_recheck: tokio::sync::watch::channel(0).0,
+                mcp_transports: OnceLock::new(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -159,6 +171,30 @@ impl Shared {
             daemon_build,
             client_build,
         })
+    }
+
+    /// Test probe: the transport services of the full listener's MCP over HTTP layer, as (live
+    /// now, made so far); `None` before its first request.
+    #[doc(hidden)]
+    pub fn mcp_http_transports(&self) -> Option<(usize, usize)> {
+        self.mcp_transports.get().map(|t| (t.live(), t.made()))
+    }
+
+    /// Test hook: every open MCP over HTTP event stream checks `serve.mcp_http` now, instead of
+    /// at its next periodic check.
+    #[doc(hidden)]
+    pub fn recheck_mcp_http(&self) {
+        self.mcp_recheck.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// The trigger [`Self::recheck_mcp_http`] bumps, for an open event stream to watch.
+    pub(crate) fn mcp_recheck(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.mcp_recheck.subscribe()
+    }
+
+    /// Keeps the full listener's MCP layer's transport counts for [`Self::mcp_http_transports`].
+    pub(crate) fn register_mcp_transports(&self, stats: TransportStats) {
+        let _ = self.mcp_transports.set(stats);
     }
 
     /// The engine over this daemon: reads from the published state, writes on the writer.

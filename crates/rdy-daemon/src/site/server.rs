@@ -15,17 +15,18 @@ use crate::site::http::{
 };
 use crate::site::live::{NoStream, label, resolve};
 use crate::site::profiles::{self, Availability, TestEvent};
-use crate::site::{LanOverride, SiteInfo, addr, sse, ui, ui_request};
+use crate::site::{LanOverride, SiteInfo, addr, mcp, sse, ui, ui_request};
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::publication::{IMPLICIT_ORG, profile_at};
 use rdy_engine::{E_NOT_FOUND, E_REDACTED_STATE, ReadState};
 use rdy_engine::{ServeConfig, serve_config};
+use rdy_mcp::http::HttpMcp;
 use rdy_render::NotFoundKind;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -56,7 +57,7 @@ const BUSY_HEAD_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a connection may take to send its request head; then it closes with no reply.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an answer may take to write; then the connection closes.
-const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Read past an answer at most this much before closing, so the close sends no reset.
 const DRAIN_BYTES: usize = 64 * 1024;
 
@@ -93,6 +94,9 @@ struct Ctx {
     limit: Arc<Semaphore>,
     /// The tasks that answer `Busy` past `limit`.
     busy: Arc<Semaphore>,
+    /// MCP over HTTP's admission layer on this listener, made at its first request (mht6). Only
+    /// a full listener's is ever made.
+    mcp: OnceLock<HttpMcp>,
 }
 
 /// What one bind opened: the listeners of one port (`127.0.0.1`, then `[::1]` and the LAN
@@ -408,6 +412,7 @@ impl SiteServer {
             handle,
             limit: limits.0,
             busy: limits.1,
+            mcp: OnceLock::new(),
         });
         let mut loops = JoinSet::new();
         for listener in self.listeners {
@@ -538,6 +543,8 @@ pub async fn read_head<R: AsyncRead + Unpin>(reader: &mut R) -> Head {
         buf.extend_from_slice(&chunk[..n]);
         if let Some(at) = buf[from..].windows(4).position(|w| w == b"\r\n\r\n") {
             let rest = buf.split_off(from + at + 4);
+            // the head keeps only its own bytes, not the capacity the rest was read into
+            buf.shrink_to_fit();
             return Head::Bytes { head: buf, rest };
         }
         if buf.len() > MAX_HEAD_BYTES {
@@ -620,6 +627,22 @@ async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
         }
     };
     let head_only = request.method == Method::Head;
+    // MCP over HTTP (mht6): exactly its route on a full loopback listener while it is enabled;
+    // otherwise the request goes on as an ordinary one
+    if let Some(local) = stream.local_addr().ok()
+        && mcp::is_route(&request, local, *ctx.guard.mode() == ListenerMode::Full)
+        && mcp::enabled(&sh).await
+    {
+        let port = local.port();
+        let http = ctx.mcp.get_or_init(|| mcp_layer(&sh, port));
+        let conn = mcp::Conn {
+            stream,
+            head: bytes,
+            rest,
+            port,
+        };
+        return mcp::serve(conn, &request, Arc::clone(&sh), ctx.handle.clone(), http).await;
+    }
     // the one entry check (D-CC90E): while the published state predates a removal
     // (E_REDACTED_STATE), no page, file or stream is served; the existing Busy answer stands until
     // the writer publishes the fresh state. The state is not held past the check.
@@ -690,6 +713,17 @@ async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
         }
     };
     send(stream, &response, head_only).await;
+}
+
+/// The MCP admission layer of the full listener of `port`, over `sh`'s engine and hub. The
+/// build warning reads `sh` weakly, so the layer holds no second path to it.
+fn mcp_layer(sh: &Arc<Shared>, port: u16) -> HttpMcp {
+    let weak = Arc::downgrade(sh);
+    let http = HttpMcp::new(sh.engine(), Arc::clone(&sh.hub))
+        .with_port(port)
+        .with_build_warning(Arc::new(move || weak.upgrade()?.http_build_warning()));
+    sh.register_mcp_transports(http.transport_stats());
+    http
 }
 
 /// The UI route of `request` on the listener bound to `local`, after its checks; `None` when the
@@ -956,7 +990,7 @@ fn missing(st: &ReadState, target: &SiteTarget) -> bool {
 
 /// Writes `r` (its head only for `HEAD`), then closes: the write side first, then what the peer
 /// sent past its head is read off, so the close sends no reset that could hide the answer.
-async fn send(mut stream: TcpStream, r: &Response, head_only: bool) {
+pub(crate) async fn send(mut stream: TcpStream, r: &Response, head_only: bool) {
     let bytes = to_bytes(r, head_only, now_secs());
     let sent = tokio::time::timeout(SEND_TIMEOUT, async {
         stream.write_all(&bytes).await?;
@@ -965,6 +999,17 @@ async fn send(mut stream: TcpStream, r: &Response, head_only: bool) {
     .await;
     if matches!(sent, Ok(Ok(()))) {
         drain_now(&stream);
+    }
+}
+
+/// Closes `stream` after an answer another writer sent: the write side first, then what the
+/// peer sent is read off, so the close sends no reset that could hide the answer.
+pub(crate) async fn close(stream: &mut TcpStream) {
+    if matches!(
+        tokio::time::timeout(SEND_TIMEOUT, stream.shutdown()).await,
+        Ok(Ok(()))
+    ) {
+        drain_now(stream);
     }
 }
 

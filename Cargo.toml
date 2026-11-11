@@ -84,6 +84,11 @@ getrandom = { version = "=0.4.3", default-features = false }
 # MCP over HTTP: the constant-time comparison of a presented bearer. The version the lock already
 # holds.
 subtle = { version = "=2.6.1", default-features = false }
+# MCP over HTTP: the daemon's HTTP/1 bridge behind the site's head guard (one request per
+# connection; chunked bodies and SSE framing). Server and HTTP/1 only.
+hyper = { version = "=1.11.1", default-features = false, features = ["server", "http1"] }
+# MCP over HTTP: the Tokio adapter for that bridge's socket. Its Tokio I/O adapter only.
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
 # Test-only: the local TLS fixture.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Test-only: the local TLS fixture's generated certificates.

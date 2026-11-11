@@ -291,6 +291,7 @@ fn start_checked(
     if let Err(e) = &*mcp_token {
         log(&format!("mcp http: unavailable: {e}"));
     }
+    let _ = shared.mcp_token.set(Arc::clone(&mcp_token));
     // (3b) the initial profile of a foreground profile-only start, in canon, before any port
     if let Some(name) = profile
         && let Err(e) = profile_at(&shared.state.load_full(), &Scope::Canon, name)

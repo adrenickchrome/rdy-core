@@ -17,10 +17,16 @@
 //! and the server's filter check ends it ([`ListenGate`]). The layer then answers with the
 //! refusal. The `Authorization` and `Cookie` headers never reach rmcp, which copies every header
 //! into the handler's extensions.
+//!
+//! mht6: the layer accepts exactly the three HTTP revisions of [`HTTP_REVISIONS`] on every
+//! request; rmcp's own fallback for a missing header (`2025-03-26`) is refused here. The serving
+//! daemon's activity permit rides the request ([`Activity`]) and stays with its worker: a call's
+//! until its handler returns, a listen's until the listen ends.
 use crate::claims::{self, Asked, Key};
 use crate::notify::NotifyHub;
 use crate::read_page::ReadRegistry;
 use crate::server::RdyServer;
+use crate::tools::DaemonBuildWarning;
 use crate::tools::{self, McpState};
 use bytes::{Buf, Bytes};
 use http_body_util::combinators::BoxBody;
@@ -35,7 +41,6 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::convert::Infallible;
-use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -53,6 +58,75 @@ pub const MAX_LISTEN_URIS: usize = 128;
 
 /// mht4: the longest resource URI a listen request may name, in bytes.
 pub const MAX_LISTEN_URI_BYTES: usize = 4096;
+
+/// mht6: the MCP revisions served over HTTP, exactly these (D-6M0AF). Stdio keeps its own.
+pub const HTTP_REVISIONS: [&str; 3] = ["2025-06-18", "2025-11-25", "2026-07-28"];
+
+/// The revision rmcp assumes for a request with no `MCP-Protocol-Version` header; HTTP refuses it.
+const SDK_FALLBACK_REVISION: &str = "2025-03-26";
+
+/// mht6: what the serving daemon counts one request as, put in the request's extensions by the
+/// transport. The admission layer keeps the held permit with the request's worker: a call's (or
+/// any other request's) until its handler returns and the request drops, an admitted listen's
+/// with its reservation until the listen ends. Before that it asks `listen` once to count an
+/// admitted listen as a stream; when that refuses, the held permit stays.
+#[derive(Clone)]
+pub struct Activity(Arc<Mutex<Option<ActivityParts>>>);
+
+/// A held activity permit, as the daemon gives it.
+pub type ActivityPermit = Box<dyn std::any::Any + Send + Sync>;
+
+/// Counts an admitted listen as a stream: its own permit, or `None` to keep the held one.
+pub type ToListen = Box<dyn FnOnce() -> Option<ActivityPermit> + Send + Sync>;
+
+struct ActivityParts {
+    held: ActivityPermit,
+    listen: Option<ToListen>,
+}
+
+impl Activity {
+    /// A request counted by `held`; an admitted listen is counted by what `listen` gives.
+    pub fn new(held: ActivityPermit, listen: Option<ToListen>) -> Activity {
+        Activity(Arc::new(Mutex::new(Some(ActivityParts { held, listen }))))
+    }
+
+    fn take(&self) -> Option<ActivityParts> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+}
+
+/// mht6: the transport services of one [`HttpMcp`]: how many live now and how many were made
+/// (each of rmcp's lookups of a tool makes one, so a cache shared across requests would show as
+/// fewer). Every request makes its own and drops it when its dispatch returns.
+#[derive(Clone, Default)]
+pub struct TransportStats {
+    live: Arc<AtomicUsize>,
+    made: Arc<AtomicUsize>,
+}
+
+impl TransportStats {
+    /// The transport services alive now.
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::SeqCst)
+    }
+
+    /// The services the requests' transports have asked for so far.
+    pub fn made(&self) -> usize {
+        self.made.load(Ordering::SeqCst)
+    }
+}
+
+/// One live transport service, counted until its factory drops with it.
+struct LiveService(Arc<AtomicUsize>);
+
+impl Drop for LiveService {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// mht6: the W_DAEMON_BUILD each HTTP request's replies may owe (the daemon's latched build).
+pub type BuildWarningSource = Arc<dyn Fn() -> Option<DaemonBuildWarning> + Send + Sync>;
 
 /// The wall clock lease times are read on, in milliseconds (a test sets it).
 pub type LeaseClock = Arc<dyn Fn() -> i64 + Send + Sync>;
@@ -203,6 +277,8 @@ struct Admitted {
     /// An admitted listen's reservation, until the listen takes it ([`listen_of`]); a refused
     /// or never-established listen drops it with its request.
     listen: Mutex<Option<ListenReservation>>,
+    /// mht6: the daemon's activity permit of this request, held with it.
+    _activity: Option<ActivityPermit>,
     #[cfg(test)]
     seen: Arc<Mutex<Vec<http::HeaderMap>>>,
 }
@@ -335,6 +411,12 @@ pub struct HttpMcp {
     listen: ListenCapacity,
     /// The listens the default capacity holds open.
     listens: Arc<AtomicUsize>,
+    /// mht6: the port of the loopback listener this serves, for rmcp's own Host allowlist.
+    port: Option<u16>,
+    /// mht6: the daemon's W_DAEMON_BUILD for each request, when one is owed.
+    build_warning: Option<BuildWarningSource>,
+    /// mht6: the requests' transport services.
+    transports: TransportStats,
     #[cfg(test)]
     seen: Arc<Mutex<Vec<http::HeaderMap>>>,
 }
@@ -355,6 +437,9 @@ impl HttpMcp {
             lease_clock: Arc::new(rdy_engine::now_ms),
             listen: Arc::new(move || reserve_listen(&open)),
             listens,
+            port: None,
+            build_warning: None,
+            transports: TransportStats::default(),
             #[cfg(test)]
             seen: Default::default(),
         }
@@ -372,6 +457,19 @@ impl HttpMcp {
         self
     }
 
+    /// mht6: this state serving the loopback listener of `port`: rmcp's own Host check then
+    /// accepts exactly the loopback names with that port, as the site's guard does.
+    pub fn with_port(mut self, port: u16) -> HttpMcp {
+        self.port = Some(port);
+        self
+    }
+
+    /// mht6: this state with `source` giving each request the build warning it may owe.
+    pub fn with_build_warning(mut self, source: BuildWarningSource) -> HttpMcp {
+        self.build_warning = Some(source);
+        self
+    }
+
     /// The transport configuration: stateless (no session, no event store), JSON replies where
     /// rmcp can give one, and rdy's request bound.
     fn transport_config() -> StreamableHttpServerConfig {
@@ -379,6 +477,21 @@ impl HttpMcp {
             .with_legacy_session_mode(false)
             .with_json_response(true)
             .with_max_request_body_bytes(tools::MAX_REQUEST_BYTES)
+    }
+
+    /// mht6: [`Self::transport_config`] with rmcp's Host and Origin policy matching the outer
+    /// guard: every Origin refused (an empty allowlist alone refuses none), and, on a bound
+    /// port, only its loopback names.
+    fn request_config(&self) -> StreamableHttpServerConfig {
+        let config = Self::transport_config().enforce_origin_validation();
+        match self.port {
+            Some(port) => config.with_allowed_hosts([
+                format!("localhost:{port}"),
+                format!("127.0.0.1:{port}"),
+                format!("[::1]:{port}"),
+            ]),
+            None => config,
+        }
     }
 
     /// A request state that serves MCP over HTTP: bound to `key` when the request acts for a
@@ -390,6 +503,7 @@ impl HttpMcp {
         st.kungfu_counts = self.kungfu_counts.clone();
         st.bound = key;
         st.http = true;
+        st.build_warning = self.build_warning.as_ref().and_then(|w| w());
         st
     }
 
@@ -422,6 +536,12 @@ impl HttpMcp {
             .map_or(0, |s| s.queued.load(Ordering::SeqCst))
     }
 
+    /// mht6: the requests' transport services, for their lifetime checks.
+    #[doc(hidden)]
+    pub fn transport_stats(&self) -> TransportStats {
+        self.transports.clone()
+    }
+
     /// The listens the default capacity holds now: admitted, open, or still ending.
     pub fn listen_streams(&self) -> usize {
         self.listens.load(Ordering::SeqCst)
@@ -442,9 +562,10 @@ impl HttpMcp {
     where
         B: BodyExt + Send + 'static,
         B::Data: Send,
-        B::Error: Display,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         let (mut parts, body) = request.into_parts();
+        let activity = parts.extensions.remove::<Activity>().and_then(|a| a.take());
         let bytes = match read_body(body, tools::MAX_REQUEST_BYTES).await {
             Ok(b) => b,
             Err(response) => return response,
@@ -453,6 +574,9 @@ impl HttpMcp {
         parts.headers.remove(http::header::AUTHORIZATION);
         parts.headers.remove(http::header::COOKIE);
         let message = serde_json::from_slice::<ClientJsonRpcMessage>(&bytes).ok();
+        if let Err(refused) = revision(&parts.headers, message.as_ref()) {
+            return refused;
+        }
         let (id, asks, meta) = match &message {
             Some(ClientJsonRpcMessage::Request(r)) => {
                 let asks = match &r.request {
@@ -475,6 +599,7 @@ impl HttpMcp {
             claim: Ok(None),
             _queued: None,
             listen: Mutex::new(None),
+            _activity: None,
             #[cfg(test)]
             seen: Arc::clone(&self.seen),
         };
@@ -544,6 +669,22 @@ impl HttpMcp {
                 }
             }
         }
+        // the activity permit stays with the worker: an admitted listen's with its reservation
+        if let Some(mut activity) = activity {
+            let mut reservation = admitted.listen.lock().unwrap_or_else(|p| p.into_inner());
+            match reservation.take() {
+                Some(r) => {
+                    if let Some(p) = activity.listen.take().and_then(|f| f()) {
+                        activity.held = p;
+                    }
+                    *reservation = Some(ListenReservation::new((r, activity.held)));
+                }
+                None => {
+                    drop(reservation);
+                    admitted._activity = Some(activity.held);
+                }
+            }
+        }
         let (key, slot) = slot.unzip();
         let lease_owner = slot
             .as_ref()
@@ -563,11 +704,18 @@ impl HttpMcp {
             gate.as_ref().map(|(g, _)| Arc::clone(g)),
         );
         parts.extensions.insert(Arc::new(admitted));
+        self.transports.live.fetch_add(1, Ordering::SeqCst);
+        let live = LiveService(Arc::clone(&self.transports.live));
+        let made = Arc::clone(&self.transports.made);
         let service: StreamableHttpService<RdyServer, NeverSessionManager> =
             StreamableHttpService::new(
-                move || Ok(server.clone()),
+                move || {
+                    let _live = &live;
+                    made.fetch_add(1, Ordering::SeqCst);
+                    Ok(server.clone())
+                },
                 Arc::new(NeverSessionManager::default()),
-                Self::transport_config(),
+                self.request_config(),
             );
         let response = service
             .handle(http::Request::from_parts(parts, Full::new(bytes)))
@@ -745,12 +893,23 @@ fn session_key(arguments: Option<&JsonObject>) -> Option<Key> {
 async fn read_body<B>(body: B, max: usize) -> Result<Bytes, Response>
 where
     B: BodyExt + Send + 'static,
-    B::Error: Display,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     let mut body = std::pin::pin!(body);
     let mut collected = bytes::BytesMut::new();
+    let over = || {
+        plain(
+            http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!("the MCP request body is over {max} bytes"),
+        )
+    };
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|e| {
+            let e: Box<dyn std::error::Error + Send + Sync> = e.into();
+            // a transport's own bound on the body (mht6: the daemon's `Limited`) is this bound
+            if e.is::<http_body_util::LengthLimitError>() {
+                return over();
+            }
             plain(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to read request body: {e}"),
@@ -760,10 +919,7 @@ where
             continue;
         };
         if data.remaining() > max.saturating_sub(collected.len()) {
-            return Err(plain(
-                http::StatusCode::PAYLOAD_TOO_LARGE,
-                format!("the MCP request body is over {max} bytes"),
-            ));
+            return Err(over());
         }
         while data.has_remaining() {
             let chunk = data.chunk();
@@ -773,6 +929,53 @@ where
         }
     }
     Ok(collected.freeze())
+}
+
+/// mht6: the HTTP revision rule, on every request: the `MCP-Protocol-Version` header names one
+/// of [`HTTP_REVISIONS`], once. Only `initialize` may omit it, and then its body names one. The
+/// refusal is rmcp's own for a revision it does not serve; a missing header is refused as the
+/// revision rmcp would assume for it. rmcp checks the header against the body's metadata after.
+fn revision(
+    headers: &http::HeaderMap,
+    message: Option<&ClientJsonRpcMessage>,
+) -> Result<(), Response> {
+    let unsupported = |v: &str| {
+        plain(
+            http::StatusCode::BAD_REQUEST,
+            format!("Bad Request: Unsupported MCP-Protocol-Version: {v}"),
+        )
+    };
+    let mut values = headers.get_all("mcp-protocol-version").iter();
+    match (values.next(), values.next()) {
+        (Some(_), Some(_)) => Err(plain(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: Invalid MCP-Protocol-Version header encoding".to_string(),
+        )),
+        (Some(v), None) => match v.to_str() {
+            Ok(v) if HTTP_REVISIONS.contains(&v) => Ok(()),
+            Ok(v) => Err(unsupported(v)),
+            Err(_) => Err(plain(
+                http::StatusCode::BAD_REQUEST,
+                "Bad Request: Invalid MCP-Protocol-Version header encoding".to_string(),
+            )),
+        },
+        (None, _) => match message {
+            Some(ClientJsonRpcMessage::Request(r)) => match &r.request {
+                ClientRequest::InitializeRequest(init) => {
+                    let asked = init.params.protocol_version.as_str();
+                    if HTTP_REVISIONS.contains(&asked) {
+                        Ok(())
+                    } else {
+                        Err(unsupported(asked))
+                    }
+                }
+                _ => Err(unsupported(SDK_FALLBACK_REVISION)),
+            },
+            // a body rmcp cannot read gets rmcp's own refusal
+            None => Ok(()),
+            Some(_) => Err(unsupported(SDK_FALLBACK_REVISION)),
+        },
+    }
 }
 
 /// A plain-text response.

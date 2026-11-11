@@ -19,6 +19,7 @@ pub mod invariants;
 pub mod landing_audit;
 pub mod m3_audit;
 pub mod mcp;
+pub mod mcp_http;
 pub mod packs;
 pub mod perf;
 pub mod platform;
