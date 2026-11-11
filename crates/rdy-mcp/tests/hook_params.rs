@@ -1,13 +1,15 @@
 //! m4a4 (FW-HOOK D-NNQ0A, D-GHR0Y; FW-L3 D-54CKQ refined by D-DC5D1): the input of `rdy_hook`.
 //! The tool's published schema and the engine's one parser, which the daemon's `hook` op and
 //! `rdy hook` also run, close the same four forms: the same keys, the same enums and the same
-//! bounds. The tool refuses before it touches a session or a host.
+//! bounds. The tool refuses before it touches a session or a host. A wrong top-level type is the
+//! one refusal the tool words as every tool does (mparm1); the engine names the invalid form.
+use rdy_engine::RdyError;
 use rdy_engine::hooks::{
     HOOK_KEYS, HookRequest, MAX_HOOK_CHECKOUT, MAX_HOOK_CITATIONS, MAX_HOOK_HEAD, MAX_HOOK_INPUT,
     MAX_HOOK_MESSAGE, MAX_HOOK_PATH, MAX_HOOK_PATHS,
 };
 use rdy_mcp::params::parse_params;
-use rdy_mcp::tools::{HOOK_DOC, HookParams};
+use rdy_mcp::tools::{HOOK_DOC, HookParams, checked_hook_request};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -15,13 +17,20 @@ fn schema() -> Value {
     serde_json::to_value(schemars::schema_for!(HookParams)).expect("a schema")
 }
 
-/// The refusal of `args` as the tool gives it: parameters first, then the request.
-fn refused(args: Value) -> (String, String, String) {
+/// The refusals of `args`: as the tool gives it (parameters first, then the request), and as the
+/// engine's parser gives it to the daemon and the command line.
+fn refusals(args: &Value) -> (RdyError, RdyError) {
     let e = parse_params::<HookParams>("rdy_hook", args.as_object().expect("an object").clone())
-        .and_then(|p| HookRequest::from_value(&Value::Object(p.0)))
+        .and_then(checked_hook_request)
         .expect_err("a refusal");
-    // the engine's parser gives the same refusal to the daemon and the command line
-    let direct = HookRequest::from_value(&args).expect_err("a refusal");
+    let direct = HookRequest::from_value(args).expect_err("a refusal");
+    (e, direct)
+}
+
+/// The refusal of `args` as the tool gives it, which the engine gives to the daemon and the
+/// command line too.
+fn refused(args: Value) -> (String, String, String) {
+    let (e, direct) = refusals(&args);
     assert_eq!(
         (&e.code, &e.message, &e.fix),
         (&direct.code, &direct.message, &direct.fix),
@@ -32,7 +41,7 @@ fn refused(args: Value) -> (String, String, String) {
 
 fn accepted(args: Value) -> HookRequest {
     parse_params::<HookParams>("rdy_hook", args.as_object().expect("an object").clone())
-        .and_then(|p| HookRequest::from_value(&Value::Object(p.0)))
+        .and_then(checked_hook_request)
         .unwrap_or_else(|e| panic!("{} {} ({args})", e.code, e.message))
 }
 
@@ -205,12 +214,66 @@ fn m4a4_hook_schema_is_closed_and_matches_the_cli() {
         ))
     );
 
-    // a wrong type is a form error, never a crash
+    // a wrong top-level type: the tool names the parameter and its shape, as every tool does
+    // (mparm1); the engine, which the daemon and the command line run, names the invalid form
+    for (args, param, shape, actual) in [
+        (
+            json!({"op": 1, "kind": "code"}),
+            "op",
+            "one of check, install, remove",
+            "a number",
+        ),
+        (
+            with(check_code(), "paths", json!("src/a.rs")),
+            "paths",
+            "a list of strings",
+            "a string",
+        ),
+        (
+            with(check_code(), "message", json!(7)),
+            "message",
+            "a string",
+            "a number",
+        ),
+        (
+            with(check_code(), "head", json!(7)),
+            "head",
+            "a string",
+            "a number",
+        ),
+        (
+            with(check_code(), "checkout", json!([1])),
+            "checkout",
+            "a string",
+            "a list",
+        ),
+    ] {
+        let (tool, engine) = refusals(&args);
+        assert_eq!(
+            (tool.code, tool.message.as_str(), tool.fix.as_str()),
+            (
+                "E_BAD_INPUT",
+                format!("rdy_hook: parameter \"{param}\" must be {shape}, not {actual}").as_str(),
+                format!("pass \"{param}\" as {shape}").as_str(),
+            ),
+            "{args}"
+        );
+        assert_eq!(engine.code, "E_BAD_INPUT", "{args}");
+        assert!(
+            engine.message.starts_with("Invalid rdy_hook form: "),
+            "{}",
+            engine.message
+        );
+        assert_eq!(engine.fix, FORM_FIX);
+    }
+    // an unknown key keeps the engine's words, whatever the other values are
+    assert_eq!(
+        refused(json!({"op": 1, "kind": "code", "pathz": []})).1,
+        form("unknown field \"pathz\" (did you mean \"paths\"?)")
+    );
+    // a wrong value of an accepted type is a form error, never a crash
     for args in [
-        json!({"op": 1, "kind": "code"}),
-        with(check_code(), "paths", json!("src/a.rs")),
         with(check_code(), "paths", json!([1])),
-        with(check_code(), "message", json!(7)),
         with(check_code(), "head", json!("not-a-hash")),
         with(check_code(), "head", json!("A".repeat(40))),
         with(check_code(), "checkout", json!("relative/app")),

@@ -6,7 +6,7 @@
 //! proposes or lands anything.
 
 use super::*;
-use rdy_engine::hooks::{HOOK_DEADLINE, HookRequest, RunContext};
+use rdy_engine::hooks::{HOOK_DEADLINE, HOOK_KEYS, HookRequest, RunContext};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -51,7 +51,8 @@ pub struct HookArgs {
 }
 
 /// rdy_hook's arguments as sent. The input schema is [`HookArgs`]'s; the engine's one parser
-/// reads them, so every refusal is the same on the server, the daemon and the CLI.
+/// reads them ([`checked_hook_request`]), so every refusal but a wrong type's is the same on the
+/// server, the daemon and the CLI.
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct HookParams(pub Map<String, Value>);
@@ -66,11 +67,30 @@ impl JsonSchema for HookParams {
     }
 }
 
+/// rdy_hook's request: the engine's one parser, which the daemon's `hook` op and `rdy hook`
+/// also run, before any session or host is touched. One refusal is the tool's own (mparm1): when
+/// every key is one of [`HOOK_KEYS`] and one has a JSON type the input schema does not accept,
+/// the tool names that parameter and its shape as every tool does, where the engine names the
+/// invalid form. An unknown key, a bound passed and every other fault keep the engine's refusal.
+pub fn checked_hook_request(p: HookParams) -> Result<HookRequest, RdyError> {
+    let args = Value::Object(p.0);
+    HookRequest::from_value(&args).map_err(|e| {
+        let Value::Object(map) = &args else {
+            return e;
+        };
+        let known = map.keys().all(|k| HOOK_KEYS.contains(&k.as_str()));
+        match crate::params::wrong_typed::<HookArgs>("rdy_hook", map) {
+            Some(typed) if known && e.code == E_BAD_INPUT => typed,
+            _ => e,
+        }
+    })
+}
+
 /// `rdy_hook`: one check, install or remove, under [`HOOK_DEADLINE`] from now. Any session may
 /// check; install and remove need a session that can write, and a host that has local hooks
 /// (an embedding without one refuses with `E_BAD_INPUT`).
 pub fn rdy_hook(st: &mut McpState, p: HookParams) -> Result<Value, RdyError> {
-    let req = HookRequest::from_value(&Value::Object(p.0))?;
+    let req = checked_hook_request(p)?;
     let s = session(st)?;
     let act = match &req {
         HookRequest::Install(_) => Some("install"),
