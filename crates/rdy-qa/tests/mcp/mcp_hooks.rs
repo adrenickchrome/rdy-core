@@ -448,6 +448,7 @@ fn m4a4_reader_checks_but_cannot_install() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     // a writer's install and remove reach the host, which decides the reply
+    drop(st);
     let mut st = state(Arc::clone(&with_host));
     open(&mut st, "writer");
     let v = hook(&mut st, install_code.clone()).unwrap();
@@ -739,11 +740,17 @@ async fn m4a4_http_and_stdio_keep_claims_and_projectless_scope() {
     assert_eq!(v["code"], "E_PERMISSION", "{v}");
     assert_eq!(v["message"], "role Reader cannot install hooks");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    // another run of the same actor inherits nothing
+    // another run of the same actor inherits no saved role: its claim has the default writer
+    // role of a claim, so its install reaches the host
     let (is_err, v) = http
-        .call("rdy_hook", outside_edit(), claim("agent:r", "r2"))
+        .call(
+            "rdy_hook",
+            json!({"op": "install", "kind": "code", "repo": "app"}),
+            claim("agent:r", "r2"),
+        )
         .await;
-    assert_eq!((is_err, v["code"].as_str().unwrap()), none, "{v}");
+    assert!(!is_err, "{v}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     // a writer's claim reaches the host
     http.call(
         "rdy_session",
