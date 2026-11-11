@@ -8508,13 +8508,19 @@ fn m4a5_contract_changes_only_hook_surfaces() {
             ["m4a1", "m4a3", "m4a4"].contains(owner),
             "{path}: owner {owner}"
         );
-        assert!(
-            path.contains("hook")
-                || path.contains("HOOK")
-                || path.contains("refusal_error_rows")
-                || path.contains("tool_names"),
-            "{path} is no hook surface"
-        );
+        // each owner's surface: m4a3 the CLI, m4a1 the warning codes and texts, m4a4 the tool
+        let at = path.split_once(' ').map_or(*path, |(_, p)| p);
+        let surface = match *owner {
+            "m4a3" => at.starts_with("/cli/"),
+            "m4a1" => {
+                at.starts_with("/errors_warnings/codes/")
+                    || at.starts_with("/errors_warnings/templates/HOOK_")
+            }
+            _ => {
+                at.starts_with("/mcp/") || at.starts_with("/errors_warnings/error_rows/row=W_HOOK_")
+            }
+        };
+        assert!(surface, "{path} is not a surface of {owner}");
     }
     // an addition is never a removal: nothing the predecessor records is gone
     assert!(
