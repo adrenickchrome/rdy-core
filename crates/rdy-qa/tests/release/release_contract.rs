@@ -8421,9 +8421,10 @@ const M4A_CHANGES: &[(&str, &str)] = &[
     ("added /mcp/tools/rdy_hook", "m4a4"),
 ];
 
-/// The sha256 of `m4a-v1.json`, frozen when M4a's last task closed its diff. A later contract
+/// The sha256 of `m4a-v1.json`, frozen when M4a's last task closed its diff, and taken again at
+/// the M4a end-gate fix (the four hook rows moved before `E_DUMP_CHAIN`). A later contract
 /// change is a successor fixture (`m4bc-v1.json`), never an edit of this file.
-const M4A_V1_SHA: &str = "3974e297320209c29f2a0f84421a1ffa4513eb666328167aaa6e83a4bedae989";
+const M4A_V1_SHA: &str = "49ca6b3f9cab4e97445c1de5df5a513fe97ceee3971d9ae17853307bc9922a71";
 
 fn m4a5_fixture(name: &str) -> (Vec<u8>, Value) {
     let path = qa_root().join("fixtures/contracts").join(name);
