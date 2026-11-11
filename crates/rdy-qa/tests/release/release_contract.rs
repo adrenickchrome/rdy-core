@@ -8573,11 +8573,10 @@ fn m4a5_contract_changes_only_hook_surfaces() {
         ]
     );
     assert!(codes(&old).is_subset(&codes(&new)));
-    let template = |name: &str| {
-        new["errors_warnings"]["templates"][name]
-            .as_str()
-            .unwrap()
-            .to_string()
+    // a template is stored as its own JSON text
+    let template = |name: &str| -> String {
+        let raw = new["errors_warnings"]["templates"][name].as_str().unwrap();
+        serde_json::from_str(raw).expect("a JSON string")
     };
     assert_eq!(
         template("HOOK_NO_CITATION_MESSAGE"),
