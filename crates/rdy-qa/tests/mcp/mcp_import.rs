@@ -1,5 +1,6 @@
 //! ui6 (D-Y9DNZ, D-KQ4CA, D-XR09R, D-ZWP7Q): `rdy_import {dir, view}` is the chat path of the
-//! import. Its schema is closed to the two keys and carries the exact words. A writer's import of
+//! import. Its schema is closed to the two keys and the three optional Markdown options (m4bc5),
+//! and carries the exact words. A writer's import of
 //! a decision recorded as accepted elsewhere reaches the person as a card that shows Imported
 //! after Policy, and `rdy_land` cannot land it: the person's relayed answer does.
 use rdy_engine::{Rdy, Scope, Session, WriteRequest};
@@ -14,9 +15,14 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 /// The tool description of `rdy_import`.
-const DESCRIPTION: &str = "Import a format-3 tree from dir into view. Needs a writer session. The tree's authors stay recorded, and imported_by names this session. Imported accepted or rejected decisions need a person's approval before they land.";
+const DESCRIPTION: &str = "Import a format-3 tree from dir into view. Needs a writer session. The tree's authors stay recorded, and imported_by names this session. Imported accepted or rejected decisions need a person's approval before they land. With md: true, dir is a Markdown source: dry_run previews it and writes nothing, and expected_source (the source_digest of a preview) refuses the import when the source changed.";
 const DIR_HELP: &str = "The import directory, absolute or relative to the project directory.";
 const VIEW_HELP: &str = "The view to import into. Import never writes canon.";
+const MD_HELP: &str = "Read dir as a Markdown source, not a format-3 tree. Default false.";
+const DRY_RUN_HELP: &str =
+    "Preview the Markdown import and write nothing. Needs md: true. Default false.";
+const EXPECTED_HELP: &str =
+    "The source_digest of a preview. The import refuses when the source changed. Needs md: true.";
 
 #[test]
 fn ui6_import_tool_has_the_exact_closed_schema() {
@@ -32,9 +38,16 @@ fn ui6_import_tool_has_the_exact_closed_schema() {
     let props = schema["properties"].as_object().unwrap();
     let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["dir", "view"], "no hidden relay key");
+    assert_eq!(
+        keys,
+        ["dir", "dry_run", "expected_source", "md", "view"],
+        "no hidden relay key"
+    );
     assert_eq!(props["dir"]["description"], DIR_HELP);
     assert_eq!(props["view"]["description"], VIEW_HELP);
+    assert_eq!(props["md"]["description"], MD_HELP);
+    assert_eq!(props["dry_run"]["description"], DRY_RUN_HELP);
+    assert_eq!(props["expected_source"]["description"], EXPECTED_HELP);
     let mut required: Vec<&str> = schema["required"]
         .as_array()
         .unwrap()
@@ -42,13 +55,18 @@ fn ui6_import_tool_has_the_exact_closed_schema() {
         .map(|r| r.as_str().unwrap())
         .collect();
     required.sort_unstable();
-    assert_eq!(required, ["dir", "view"], "both are required");
+    assert_eq!(required, ["dir", "view"], "only these two are required");
     assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
     // serde accepts each key the schema publishes, and refuses any other
     for key in &keys {
         let mut args = serde_json::Map::new();
         args.insert("dir".into(), json!("x"));
         args.insert("view".into(), json!("y"));
+        let value = match *key {
+            "md" | "dry_run" => json!(true),
+            _ => json!("0".repeat(64)),
+        };
+        args.insert((*key).into(), value);
         assert!(
             parse_params::<ImportParams>("rdy_import", args).is_ok(),
             "{key}"
