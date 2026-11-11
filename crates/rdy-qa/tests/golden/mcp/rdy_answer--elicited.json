@@ -1,7 +1,7 @@
 {
   "content": [
     {
-      "text": "{\"act\":\"reject_proposal\",\"answer\":\"77b767bff9e21ee1b15f5f81c6fae555633cc83ca439ca1cde519cf132efd289\",\"assurance\":\"local\",\"label\":\"Reject\",\"landing\":null,\"next\":null,\"option\":\"reject\",\"ref\":\"P-fda8caebd31c@1\",\"relayed_by\":null}",
+      "text": "{\"act\":\"reject_proposal\",\"answer\":\"77adc83ba83c5f99b5c4d071b5021bf5b0b055fe5c22f53f0ddc54c25819d9d9\",\"assurance\":\"local\",\"label\":\"Reject\",\"landing\":null,\"next\":null,\"option\":\"reject\",\"ref\":\"P-b5b224218e7c@1\",\"relayed_by\":null}",
       "type": "text"
     }
   ],

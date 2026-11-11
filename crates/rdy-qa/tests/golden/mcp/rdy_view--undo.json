@@ -32,7 +32,7 @@
       "conflict": "ad90a84506823d267f5362e2f14e5ad88515f2587cc24a9867ae63f04897f73f",
       "fix": "write the block from the version you want (rdy_context lists the sides), or exclude one side's change",
       "follow_up": "resolve",
-      "id": "cq-563413e24c9f3563",
+      "id": "cq-17469ace5ad25ea6",
       "kind": "conflict"
     },
     {
@@ -43,7 +43,7 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-92e4bd184f047c7d",
+      "id": "cq-3aad21310d0b04af",
       "kind": "tension",
       "tension": "tn-7ed8fe6e7017"
     },
@@ -58,7 +58,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-09c422ff701ac2d7",
+      "id": "cq-7d011948fc000637",
       "kind": "dependent"
     }
   ],
@@ -120,9 +120,9 @@
       }
     ]
   },
-  "op": "e99095ce7469f5b81015a271dd62ab9ac5df88f9c0c936be47405b8a4c52ae27",
+  "op": "2ad2cf6f33b50d63e67e952e036bf64e18eabaac5417032126b96c8c80207507",
   "rebased": false,
   "reopened": false,
-  "undone": "7ffb0033dc9b4dbb716ccf2b719865dd862c818b5fbf9868052aac4e9bd7b072",
+  "undone": "32a98e1b398ff6c7f5e8c9d55df23ad2bd56ac114366c52540f4f8463efa3dd2",
   "view": "a"
 }

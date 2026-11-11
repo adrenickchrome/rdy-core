@@ -237,23 +237,23 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "2b2942b261761332b735bf188a989a70591cb53fefdd56064003e08af185341f",
-        "3c463e38c30b971f78be38e1b8f41cfc60a4bbb5c565d0d819edbc16184f0465",
+        "d7cc2cd1f4d8d89129862129ec6167c357753cfaaa70ea3fddc990b95e1afe5b",
+        "40290db35d723b46a08d39c0b156bc9cef5d2cc4f443b89400b351e03d042823",
     ),
     (
         "tag",
-        "2205b4ba8bece7837fad454bcbe8410a7be8fbf6d1324251cc06f0ecb98a182c",
-        "ead4453ea1cb7fd967723f309e9aad91dae732c1acce4e1859ea218eb3f81d08",
+        "30204f754f4cc45428d58e559e680635db007d34ccb340aeb011e0b195b63e70",
+        "699863c23c1fa81e78514be6e6c277690925204fb6f46bab8e69e3fa36dbfec9",
     ),
     (
         "view",
-        "03339f715f5313e8e92f85f588e61af6d4686f4a5cad2b241d4f54a8f06634fc",
-        "eab91607e650409254e5d36707599e9a8f44cab79b148e021948278734c825a3",
+        "229adf5b033004e35dfb06e054ad3c7551f94394703034a921167119a601b4f5",
+        "4c4eff0e95f25c3c2e479d71a90b60b31bdcd4bffb170f62252fbde9e2133cb6",
     ),
     (
         "proposal",
-        "5d2645ccf00edc546df126872b458180c6b2adbadb5e9f9de679c057bd50f58a",
-        "e1927ce229b71dbf8ec9a9ff297dba139cf185f310b0898a612fc8d953d5daa8",
+        "4574d619541814c3ebf6aaefdf310a4cca4c97fb2823195acf78f498ea1ec47f",
+        "9f79b0a78d193e9430ffdd2fe07390ac02d31d9604c831f175a3c43dc0412c56",
     ),
 ];
 
@@ -325,11 +325,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "0bacff087b306a8ab2399aadd67be48b97255574928c6a1a806146eb158d105d",
-            "a5834533b3ccf57a77e82e2a7df4ef22343035727c5b1648fa41a72468fef813",
-            "e09a6a7c5bd1fc9d5d9563b9e2cee277b4a17ebc225e00e9b5773145b71a9b3f",
-            "7a70b3bdb38b7fad99aaeeb7e1f494b944c6ea28e0b49d8c611c2588368a829f",
-            "587c3ac40bd831c023f5ecc4058594664db0a5906475b0238c0fa4320c7680d9",
+            "4e5330534ae3f411cc1d97efa332f266f96e25ab7ccb180dd79c2d79ba3d0aeb",
+            "dbc96556bb27893f5f115f3ccda7d2f9a8662035e75605fa5aeca7073db8aa71",
+            "b8552585944c9a964f54dbd9b3fd155711fda4199d02c2a10bfc00fe678a6e49",
+            "8e137652ed0d1ce4d3c16ca336a90a114851257acdc218b024792745d7458d1d",
+            "6c66cdb1d92dcc28dfa136615f8c60685e0fb2d8c5fe4e9000f6a16c79b0e9f9",
         ],
     ),
 ];
