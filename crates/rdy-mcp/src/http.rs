@@ -1717,4 +1717,34 @@ mod tests {
             "no write came after call 4's"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsc1_a_cancelled_waiting_resource_read_is_withdrawn() {
+        let mut g = Gate::new();
+        let key = lsc1_key();
+        let one = lsc1_spawn(&g.mcp, lsc1_write(1, "one"), None);
+        g.write_comes("call 1 writes").await;
+        // a resource read of the same claim waits for the turn too
+        let (permit_tx, mut permit_released) = tokio::sync::mpsc::unbounded_channel();
+        let activity = Activity::new(Box::new(Permit(permit_tx)), None);
+        let read = json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read",
+            "params": {"uri": "rdy://project", "_meta": claim("agent:q", "q1")}});
+        let two = lsc1_spawn(&g.mcp, read, Some(activity));
+        lsc1_until("the read waits for its turn", || g.reached() == 2).await;
+        assert_eq!(g.mcp.queued(&key), 2);
+        lsc1_close(two).await;
+        lsc1_until("the closed read leaves the queue at once", || {
+            g.mcp.queued(&key) == 1
+        })
+        .await;
+        lsc1_within(
+            "the closed read releases its activity permit",
+            permit_released.recv(),
+        )
+        .await;
+        g.release();
+        assert!(!tool(&lsc1_within("call 1 ends", one).await.unwrap()).0);
+        settled(&g.mcp, &key).await;
+        assert_eq!(g.landed(), 1);
+    }
 }
