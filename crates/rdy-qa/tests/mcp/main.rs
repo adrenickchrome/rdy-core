@@ -30,6 +30,7 @@ mod mcp_grounded;
 mod mcp_history;
 mod mcp_http_claims;
 mod mcp_http_discovery;
+mod mcp_http_parity;
 mod mcp_http_streams;
 mod mcp_hub_auth;
 mod mcp_hub_keys;

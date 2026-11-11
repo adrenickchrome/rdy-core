@@ -2,7 +2,8 @@
 //! commands, flags, positional arguments and defaults). This test-only module walks the real clap
 //! `Command` tree, hidden commands and hidden flags included, and compares it with the `cli.tree`
 //! member of the current contract fixture (`rdy-qa/fixtures/contracts/mcp-http-v1.json`, the
-//! candidate over the released `release-1.json`, which stays frozen). It adds no command, flag or
+//! final fixture of the MCP over HTTP plan, frozen by the rdy-qa `release` area; the released
+//! `release-1.json` and `repo-links-v1.json` stay frozen). It adds no command, flag or
 //! production code path. The rest of the fixture, and the runtime facts of the
 //! `cli` member, belong to the rdy-qa `release` area (`release_contract.rs`).
 //!
