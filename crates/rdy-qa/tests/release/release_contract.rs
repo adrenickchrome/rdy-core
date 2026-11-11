@@ -2217,7 +2217,8 @@ impl HookWorld {
         let decision = hook_decision(&root);
         let tmp = rdy_qa::daemon::short_tempdir();
         let base = std::fs::canonicalize(tmp.path()).expect("the temporary root");
-        let global = base.join("no-global");
+        // Not under the canonical `base`: on Windows that is a `\\?\` path, which Git cannot open.
+        let global = tmp.path().join("no-global");
         std::fs::write(&global, "").expect("the empty global configuration");
         let app = rdy_qa::git_repo::GitRepo::at(&base.join("app"));
         app.write("src/plain.rs", "fn plain() {}\n");
