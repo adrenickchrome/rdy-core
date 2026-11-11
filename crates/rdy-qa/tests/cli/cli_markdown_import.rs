@@ -494,7 +494,7 @@ fn m4bc5_readers_canon_and_other_owners_refuse_before_reads() {
     }
     drop(op);
 
-    // the command line
+    // the command line: an agent there is a writer, so a reader is a chat and daemon case only
     for flags in [&["--md"][..], &["--md", "--dry-run"][..]] {
         let mut args = vec!["--json", "import", dir, "--view", "canon"];
         args.extend_from_slice(flags);
@@ -506,11 +506,6 @@ fn m4bc5_readers_canon_and_other_owners_refuse_before_reads() {
         let (ok, v) = s.json_as("agent:w", Some("w1"), &args);
         assert!(!ok);
         assert_eq!(v["code"], "E_VIEW_OWNER", "{v}");
-        let mut args = vec!["--json", "import", dir, "--view", "rd1"];
-        args.extend_from_slice(flags);
-        let (ok, v) = s.json_as("agent:rdr", Some("rd1"), &args);
-        assert!(!ok);
-        is(&cli_refused(&v), reader);
     }
 }
 

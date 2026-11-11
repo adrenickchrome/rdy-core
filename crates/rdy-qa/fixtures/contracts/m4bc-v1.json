@@ -626,6 +626,142 @@
             ]
           }
         },
+        "import md": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "briefing": {
+              "covers": "number",
+              "token": "string"
+            },
+            "change": "string",
+            "changes": [
+              "string"
+            ],
+            "consequences": [],
+            "coverage": {
+              "dimensions": {
+                "complete": "number",
+                "connected": "number",
+                "consistent": "number",
+                "current": "number",
+                "grounded": "number"
+              },
+              "pages": [
+                {
+                  "doc": "string",
+                  "path": "string",
+                  "score": "number"
+                }
+              ],
+              "score": "number"
+            },
+            "created": {
+              "op0": "string",
+              "op1": "string",
+              "op2": "string",
+              "op3": "string",
+              "op4": "string",
+              "op5": "string",
+              "op6": "string",
+              "op7": "string",
+              "op8": "string"
+            },
+            "files": [
+              {
+                "blocks": "number",
+                "doc_key": "string",
+                "path": "string"
+              }
+            ],
+            "keys": {
+              "<id>": "string"
+            },
+            "on_change": {
+              "checks": [],
+              "resolved": [],
+              "tensions": []
+            },
+            "onboarding": {
+              "done": "bool",
+              "next": "string",
+              "phases": [
+                {
+                  "dimension_issues": {
+                    "complete?": "number",
+                    "connected?": "number",
+                    "grounded?": "number"
+                  },
+                  "dimensions": [
+                    "string"
+                  ],
+                  "done": "bool",
+                  "issues": "number",
+                  "phase": "string",
+                  "score": "number"
+                }
+              ],
+              "score": "number",
+              "target": "number"
+            },
+            "source_digest": "string",
+            "suggestions": [],
+            "unmapped": [
+              {
+                "kind": "string",
+                "line": "number",
+                "path": "string"
+              }
+            ],
+            "warning_docs": {
+              "<id>": "string"
+            },
+            "warnings": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ]
+          }
+        },
+        "import md preview": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "blocks": "number",
+            "dry_run": "bool",
+            "files": [
+              {
+                "blocks": "number",
+                "doc_key": "string",
+                "path": "string"
+              }
+            ],
+            "source_digest": "string",
+            "unmapped": [
+              {
+                "kind": "string",
+                "line": "number",
+                "path": "string"
+              }
+            ]
+          }
+        },
+        "import md without flag": {
+          "exits": [
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          }
+        },
         "inbox": {
           "exits": [
             0
@@ -12438,6 +12574,39 @@
               "defaults": [
                 "false"
               ],
+              "id": "md",
+              "long": "md",
+              "num_args": "0",
+              "value_names": [
+                "MD"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "dry_run",
+              "long": "dry-run",
+              "num_args": "0",
+              "value_names": [
+                "DRY_RUN"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "expected_source",
+              "long": "expected-source",
+              "num_args": "1",
+              "value_names": [
+                "DIGEST"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
               "global": true,
               "id": "json",
               "long": "json",
@@ -12481,6 +12650,9 @@
             {
               "args": [
                 "dir",
+                "dry_run",
+                "expected_source",
+                "md",
                 "view"
               ],
               "id": "ImportArgs",
@@ -20683,6 +20855,141 @@
           ]
         }
       },
+      "rdy_import md": {
+        "ok": {
+          "briefing": {
+            "covers": "number",
+            "token": "string"
+          },
+          "change": "string",
+          "changes": [
+            "string"
+          ],
+          "consequences": [],
+          "coverage": {
+            "dimensions": {
+              "complete": "number",
+              "connected": "number",
+              "consistent": "number",
+              "current": "number",
+              "governed": "number",
+              "grounded": "number"
+            },
+            "pages": [
+              {
+                "doc": "string",
+                "path": "string",
+                "score": "number"
+              }
+            ],
+            "score": "number"
+          },
+          "created": {
+            "op0": "string",
+            "op1": "string",
+            "op2": "string",
+            "op3": "string",
+            "op4": "string",
+            "op5": "string",
+            "op6": "string",
+            "op7": "string",
+            "op8": "string"
+          },
+          "files": [
+            {
+              "blocks": "number",
+              "doc_key": "string",
+              "path": "string"
+            }
+          ],
+          "keys": {
+            "<id>": "string"
+          },
+          "on_change": {
+            "checks": [],
+            "resolved": [],
+            "tensions": []
+          },
+          "onboarding": {
+            "done": "bool",
+            "next": "string",
+            "phases": [
+              {
+                "dimension_issues": {
+                  "complete?": "number",
+                  "connected?": "number",
+                  "consistent?": "number",
+                  "current?": "number",
+                  "governed?": "number",
+                  "grounded?": "number"
+                },
+                "dimensions": [
+                  "string"
+                ],
+                "done": "bool",
+                "issues": "number",
+                "phase": "string",
+                "score": "number"
+              }
+            ],
+            "score": "number",
+            "target": "number"
+          },
+          "source_digest": "string",
+          "suggestions": [],
+          "unmapped": [
+            {
+              "kind": "string",
+              "line": "number",
+              "path": "string"
+            }
+          ],
+          "warning_docs": {
+            "<id>": "string"
+          },
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ]
+        }
+      },
+      "rdy_import md preview": {
+        "ok": {
+          "blocks": "number",
+          "dry_run": "bool",
+          "files": [
+            {
+              "blocks": "number",
+              "doc_key": "string",
+              "path": "string"
+            }
+          ],
+          "source_digest": "string",
+          "unmapped": [
+            {
+              "kind": "string",
+              "line": "number",
+              "path": "string"
+            }
+          ]
+        }
+      },
+      "rdy_import md without flag": {
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
       "rdy_import reader": {
         "refusal_codes": [
           "E_PERMISSION"
@@ -24865,6 +25172,30 @@
             "dir": {
               "description": "The import directory, absolute or relative to the project directory.",
               "type": "string"
+            },
+            "dry_run": {
+              "default": null,
+              "description": "Preview the Markdown import and write nothing. Needs md: true. Default false.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "expected_source": {
+              "default": null,
+              "description": "The source_digest of a preview. The import refuses when the source changed. Needs md: true.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "md": {
+              "default": null,
+              "description": "Read dir as a Markdown source, not a format-3 tree. Default false.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "view": {
               "description": "The view to import into. Import never writes canon.",
