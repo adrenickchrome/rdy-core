@@ -1324,6 +1324,9 @@ struct MeDto {
     _organizations: Vec<Organization>,
     #[serde(rename = "can_create_organization")]
     _can_create_organization: bool,
+    /// Discarded. The hub sends it since v0.10.0; an older hub sends none.
+    #[serde(default, rename = "product_analytics")]
+    _product_analytics: Option<bool>,
     /// Discarded, but still a time when it is given.
     #[serde(default)]
     away_until: Option<String>,

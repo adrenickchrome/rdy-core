@@ -2722,3 +2722,31 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
     assert_eq!(ok.state, AuthPhase::SignedIn);
     assert_eq!(saved, "ready");
 }
+
+/// The hub sends `product_analytics` on every `/me` since its v0.10.0; rdy discards it.
+#[test]
+fn me9_me_takes_the_hubs_product_analytics_bool() {
+    let mut hub = Hub::start();
+    for value in ["true", "false"] {
+        let body = ME_REPLY.replacen('{', &format!(r#"{{"product_analytics":{value},"#), 1);
+        let (r, _) = hub.send(Reply::json(200, &body), hub.call(HubOperation::Me));
+        assert_eq!(
+            r.unwrap(),
+            HubReply::Me(MeReply {
+                account: ACCOUNT.into(),
+                handle: "test-person".into(),
+            }),
+            "product_analytics: {value}"
+        );
+    }
+}
+
+#[test]
+fn me9_me_refuses_a_product_analytics_that_is_not_a_bool() {
+    let mut hub = Hub::start();
+    for value in [r#""yes""#, "1", r#"{"a":true}"#] {
+        let body = ME_REPLY.replacen('{', &format!(r#"{{"product_analytics":{value},"#), 1);
+        let (r, _) = hub.send(Reply::json(200, &body), hub.call(HubOperation::Me));
+        assert_eq!(failure(r), "Protocol", "product_analytics: {value}");
+    }
+}
