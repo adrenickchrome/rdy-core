@@ -118,6 +118,7 @@ fn block() -> Block {
         body: "Body text".into(),
         links,
         pins,
+        foreign: Default::default(),
         read_identity: None,
     }
 }

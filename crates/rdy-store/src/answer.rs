@@ -44,6 +44,12 @@
 //!   versions; AcceptDeferrals and RefuseDeferrals answer `defer:P-x@n`, and RejectReaffirm a
 //!   block version item (`<id>@<version12>`), each with no target. A break is `invalid plan
 //!   answer item`, `invalid plan answer targets` or `invalid plan answer note`.
+//! - The adopt acts (repo links, ANSWER encoding 1): Adopt and KeepPin answer an adopt item
+//!   (`adopt:<repo 32 hex>@<entry 12 hex>`). KeepPin has a note of 1 to 2000 trimmed characters
+//!   (its reason) and no target. Adopt has at most one target (the landing it rides in, written in
+//!   the same batch by [`Store::answer_adopt_landing`]) and, when it has a note, one of 1 to 2000
+//!   trimmed characters. A break is `invalid adopt answer item`, `invalid adopt answer note` or
+//!   `invalid adopt answer targets`.
 //! - A ref `answer/<item>` or `pending/<person>/<item>` names an `ANSWER` whose `item` is
 //!   `<item>` (and, for `pending/`, whose `person.actor` is `<person>`).
 //! - A `pending/` ref names act `later`; an `answer/` ref never does.
@@ -105,7 +111,54 @@ pub(crate) fn invalid(a: &Answer) -> Option<String> {
         Some(EvidenceKind::Card) if a.card_hash.is_none() => {
             Some("card evidence needs card_hash".into())
         }
-        _ => plan_act_invalid(a).map(str::to_string),
+        _ => plan_act_invalid(a)
+            .or_else(|| adopt_act_invalid(a))
+            .map(str::to_string),
+    }
+}
+
+/// The damage reason of an adopt act's item.
+pub(crate) const ADOPT_ITEM: &str = "invalid adopt answer item";
+/// The damage reason of an adopt act's note.
+pub(crate) const ADOPT_NOTE: &str = "invalid adopt answer note";
+/// The damage reason of an adopt act's targets.
+pub(crate) const ADOPT_TARGETS: &str = "invalid adopt answer targets";
+
+/// Whether `item` is an adopt item: `adopt:`, the repo's 32 lowercase hex digits, `@` and the
+/// first 12 lowercase hex digits of the delivery entry.
+fn adopt_item(item: &str) -> bool {
+    let hex = |s: &str, n: usize| {
+        s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    item.strip_prefix("adopt:")
+        .and_then(|p| p.split_once('@'))
+        .is_some_and(|(repo, entry)| hex(repo, 32) && hex(entry, 12))
+}
+
+/// The rule of the two adopt acts that `a` breaks, if any (repo links): both answer an adopt
+/// item; KeepPin records its reason (a note of 1 to 2000 trimmed characters) and no target;
+/// Adopt names at most its landing, and a note it gives holds 1 to 2000 trimmed characters.
+fn adopt_act_invalid(a: &Answer) -> Option<&'static str> {
+    if !a.act.is_foreign() {
+        return None;
+    }
+    if !adopt_item(&a.item) {
+        return Some(ADOPT_ITEM);
+    }
+    let note_ok = |n: Option<&str>| n.is_some_and(crate::plan::valid_reason);
+    match a.act {
+        AnswerAct::KeepPin => {
+            if !note_ok(a.note.as_deref()) {
+                return Some(ADOPT_NOTE);
+            }
+            (!a.targets.is_empty()).then_some(ADOPT_TARGETS)
+        }
+        _ => {
+            if a.note.is_some() && !note_ok(a.note.as_deref()) {
+                return Some(ADOPT_NOTE);
+            }
+            (a.targets.len() > 1).then_some(ADOPT_TARGETS)
+        }
     }
 }
 
@@ -285,6 +338,51 @@ impl Store {
         items.push((kind, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
         Ok((id, items))
+    }
+}
+
+impl Store {
+    /// Adds the Adopt answer `a` to the adopt landing `prepared` (repo links, D-8VJAZ), after its
+    /// view's close: the answer and its `answer/<item>` ref join the landing's batch, so the
+    /// landing and the person's answer are written together or not at all. `a` must be an Adopt
+    /// whose one target is the landing, by the landing's approver, through the landing's relay,
+    /// naming the card hash the landing's evidence names; and it keeps every rule of the record.
+    /// Refused (`Refused`, nothing changed) for any other landing, before its view is closed, or
+    /// twice. Writes nothing; returns the answer's id.
+    pub fn answer_adopt_landing(
+        &self,
+        prepared: &mut crate::PreparedLanding,
+        a: &Answer,
+    ) -> Result<Hash, StoreError> {
+        let ready = prepared
+            .fresh
+            .as_ref()
+            .is_some_and(|f| f.adopt && f.closed && !f.answered);
+        if !ready {
+            return Err(StoreError::Refused(
+                "only a closed adopt landing takes its Adopt answer, once".into(),
+            ));
+        }
+        let l = &prepared.landing;
+        let binds = a.act == AnswerAct::Adopt
+            && a.targets == [prepared.hash]
+            && a.person.actor == l.approved_by.actor
+            && a.relayed_by == l.relayed_by
+            && a.card_hash.is_some()
+            && a.card_hash == l.evidence.as_ref().and_then(|e| e.card_hash);
+        if !binds {
+            return Err(StoreError::Refused(
+                "an adopt landing's answer is an Adopt by its approver, through its relay, on its card"
+                    .into(),
+            ));
+        }
+        // a refusal leaves the prepared batch as it was
+        let (id, items) = self.answer_items(a, prepared.items.clone())?;
+        prepared.items = items;
+        if let Some(f) = prepared.fresh.as_mut() {
+            f.answered = true;
+        }
+        Ok(id)
     }
 }
 
@@ -508,5 +606,64 @@ mod tests {
         assert_eq!(r.value, id.0.to_vec());
         assert_eq!(s.answer_of("tag:v1").unwrap(), Some((id, a)));
         assert_eq!(s.check_objects().unwrap().answers, 1);
+    }
+
+    /// rpl20: the adopt acts answer an adopt item; KeepPin records its reason and no target;
+    /// Adopt names at most its landing, and any note it gives is a reason.
+    #[test]
+    fn rpl20_adopt_and_keep_pin_answers_keep_their_rules() {
+        let item = format!("adopt:{}@{}", "7".repeat(32), "a".repeat(12));
+        let answer = |act: AnswerAct, item: &str, note: Option<&str>, targets: usize| Answer {
+            item: item.into(),
+            act,
+            option: None,
+            label: None,
+            options: vec![],
+            card_hash: None,
+            targets: (0..targets)
+                .map(|n| Hash::of(&[u8::try_from(n).unwrap()]))
+                .collect(),
+            person: Provenance {
+                actor: "human:nick".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 7,
+            },
+            relayed_by: None,
+            relay_evidence: None,
+            evidence_kind: None,
+            note: note.map(str::to_string),
+        };
+        let reason = Some("Billing stays on UTC.");
+        let long = "x".repeat(2001);
+        let cases: [(Answer, Option<&str>); 9] = [
+            (answer(AnswerAct::KeepPin, &item, reason, 0), None),
+            (answer(AnswerAct::KeepPin, &item, None, 0), Some(ADOPT_NOTE)),
+            (
+                answer(AnswerAct::KeepPin, &item, Some("  "), 0),
+                Some(ADOPT_NOTE),
+            ),
+            (
+                answer(AnswerAct::KeepPin, &item, reason, 1),
+                Some(ADOPT_TARGETS),
+            ),
+            (answer(AnswerAct::Adopt, &item, None, 0), None),
+            (answer(AnswerAct::Adopt, &item, reason, 1), None),
+            (
+                answer(AnswerAct::Adopt, &item, None, 2),
+                Some(ADOPT_TARGETS),
+            ),
+            (
+                answer(AnswerAct::Adopt, &item, Some(&long), 1),
+                Some(ADOPT_NOTE),
+            ),
+            (
+                answer(AnswerAct::Adopt, "P-ABCDE@1", None, 0),
+                Some(ADOPT_ITEM),
+            ),
+        ];
+        for (n, (a, want)) in cases.iter().enumerate() {
+            assert_eq!(invalid(a).as_deref(), *want, "case {n}: {a:?}");
+        }
     }
 }

@@ -24,7 +24,7 @@
 </header>
 {% if review_bar %}{% include "partials/review_bar.html" %}{% endif %}
 <div class="app">
-  <aside class="sidenav" id="sidebar">{% block pages %}<details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details>{% endblock %}
+  <aside class="sidenav" id="sidebar" aria-label="Site">{% block pages %}<details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details>{% endblock %}
     <div class="theme theme-drawer" role="radiogroup" aria-label="Colour theme">
       <button type="button" role="radio" data-theme-choice="system" aria-checked="true">Auto</button>
       <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>

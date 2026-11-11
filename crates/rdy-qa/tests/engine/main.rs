@@ -4,12 +4,15 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod engine;
+mod engine_adopted_as;
 mod engine_alts;
 mod engine_autokey;
 mod engine_commute;
 mod engine_decision_home;
 mod engine_demo_write;
 mod engine_eff;
+mod engine_foreign_pull;
+mod engine_foreign_redaction;
 mod engine_gate;
 mod engine_gate_state;
 mod engine_instruction_write;

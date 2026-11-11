@@ -49,6 +49,7 @@ fn block(id: &str, ty: &str, parent: Option<&str>) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }
@@ -118,6 +119,7 @@ fn ain1_instruction_is_a_normative_doc_asset_in_every_pack() {
         vec![
             "chapter",
             "instruction",
+            "repo_link",
             "publication_profile",
             "authority_policy"
         ]

@@ -36,7 +36,7 @@
       "conflict": "ad90a84506823d267f5362e2f14e5ad88515f2587cc24a9867ae63f04897f73f",
       "fix": "write the block from the version you want (rdy_context lists the sides), or exclude one side's change",
       "follow_up": "resolve",
-      "id": "cq-2e2b463172f93d8c",
+      "id": "cq-7db4746c985c3d53",
       "kind": "conflict"
     },
     {
@@ -47,7 +47,7 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-e80c0935ff03c1cc",
+      "id": "cq-1bf65bb48941baf9",
       "kind": "tension",
       "tension": "tn-7ed8fe6e7017"
     },
@@ -62,11 +62,11 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-c90b7d1fe23d332f",
+      "id": "cq-8fc58737aca2806e",
       "kind": "dependent"
     }
   ],
-  "head": "2e88e9b39afd3ffe5bbec3e1e3eeb4e15dabe057240c2dbf4c87fc455b9db3c5",
+  "head": "3a39a4165e468528a57eb01b051ac0620dd13197a6a11c3659ef4d99a3740553",
   "on_change": {
     "checks": [],
     "resolved": [],

@@ -1,5 +1,6 @@
 use crate::Materialized;
 use crate::error::*;
+use crate::foreign_refs::{ForeignCite, ForeignShow};
 use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
@@ -7,9 +8,10 @@ use crate::write::{
     LinkInput, OpInput, ReflectsInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult,
 };
 use crate::{Rdy, ReadState, Scope, Session};
+use rdy_model::foreign::ForeignLink;
 use rdy_model::{
     ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
-    Link, Op, Provenance, Role, engine_fields, tree,
+    Link, Op, Provenance, RefMode, Role, engine_fields, tree,
 };
 use rdy_schema::{
     Issue, Pack, Severity, has_errors, skeleton_gaps, validate_block, validate_prefix,
@@ -25,6 +27,13 @@ pub(crate) struct LinkYaml {
     target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     part: Option<String>,
+}
+
+impl LinkYaml {
+    /// A link as a file or buffer shows it: its target text and part.
+    pub(crate) fn new(target: String, part: Option<String>) -> LinkYaml {
+        LinkYaml { target, part }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +89,11 @@ pub struct KeyedLink {
 }
 
 impl KeyedLink {
+    /// Whether it names a cited block (repo links): `alias:id` or `<repo>:<id>`, not a key.
+    pub(crate) fn is_cited(&self) -> bool {
+        rdy_model::reference::foreign_ref(&self.text).is_some()
+    }
+
     /// The text a keyed target was written as.
     pub(crate) fn text(&self) -> &str {
         &self.text
@@ -608,7 +622,7 @@ pub(crate) fn engine_field_message(id: &BlockId, field: &str) -> String {
 }
 
 pub(crate) fn engine_field_fix(field: &str) -> String {
-    format!("remove {field}; use reaffirm or repin with code: true")
+    engine_fields::input_fix(field)
 }
 
 /// The engine metadata fields a decoded entry names, by key and whatever the value is: the check
@@ -689,7 +703,10 @@ pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<(Block, Vec<KeyedLink>), 
                     target,
                     part: l.part,
                 });
-            } else if rdy_model::key::problem(&l.target).is_none() {
+            } else if rdy_model::key::problem(&l.target).is_none()
+                || rdy_model::reference::foreign_ref(&l.target).is_some()
+            {
+                // a key, or (repo links) a cited block as `alias:id` or `<repo>:<id>`
                 keyed.push(KeyedLink {
                     kind: kind.clone(),
                     at,
@@ -731,6 +748,7 @@ pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<(Block, Vec<KeyedLink>), 
             .into_iter()
             .map(|(k, v)| Ok((k, v.parse::<Hash>().map_err(|e| bad(e.to_string()))?)))
             .collect::<Result<_, RdyError>>()?,
+        foreign: Default::default(),
         read_identity: None,
     };
     Ok((block, keyed))
@@ -820,6 +838,40 @@ pub fn refuse_inflight_export(scope: &Scope) -> Result<(), RdyError> {
 }
 
 impl ReadState {
+    /// The edit buffer of `b` as read in `scope` (repo links): [`block_to_yaml`], with each cited
+    /// block written by the alias of a live repo link that shows it, and the block's cited links
+    /// listed under their kinds. [`Rdy::edit_yaml_at`] reads it back and keeps every stored byte
+    /// and pin the buffer left alone.
+    pub fn block_yaml(&self, scope: &Scope, b: &Block) -> Result<String, RdyError> {
+        let show = if self.foreign()?.is_empty() {
+            None
+        } else {
+            let m = self.materialized(scope)?;
+            ForeignShow::of(self, &m)?
+        };
+        let mut c = b.clone();
+        if let Some(show) = &show {
+            c.body = show.text(&b.body, RefMode::for_body(&b.block_type));
+            for v in c.fields.values_mut() {
+                *v = show.value(v);
+            }
+        }
+        let mut y = to_yaml_struct(&c);
+        for (kind, list) in &b.foreign.links {
+            for l in list {
+                let target = match &show {
+                    Some(show) => show.target_text(&l.target),
+                    None => rdy_model::reference::foreign_token(&l.target.repo, &l.target.id),
+                };
+                y.links
+                    .entry(kind.clone())
+                    .or_default()
+                    .push(LinkYaml::new(target, l.part.clone()));
+            }
+        }
+        Ok(serde_yaml_ng::to_string(&y).expect("block yaml"))
+    }
+
     pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
         refuse_inflight_export(scope)?;
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
@@ -1512,6 +1564,11 @@ impl Rdy {
             return Err(engine_field_refusal("edit", supplied));
         }
         let (mut edited, keyed) = from_yaml_struct(y)?;
+        // repo links: the buffer shows a cited block by its alias. A cited link target is read
+        // here; a body or field text the buffer left as it shows the block's own is the block's
+        // stored text again, so the edit sends only what it changed
+        let (cited, keyed): (Vec<_>, Vec<_>) = keyed.into_iter().partition(KeyedLink::is_cited);
+        let foreign = self.read_cited_edit(view, &mut edited, cited)?;
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
             let keys = Keys::of(m.iter());
@@ -1520,7 +1577,58 @@ impl Rdy {
                 crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
             })?;
         }
-        self.edit_block_at(s, view, edited, base, brief, reason, reflects)
+        self.edit_block_inner(s, view, edited, base, brief, reason, reflects, foreign)
+    }
+
+    /// The cited links of an edit buffer, as the foreign links they name, and `edited`'s body and
+    /// fields as the block stores them where the buffer kept what it showed. `None` when the
+    /// project has no delivery: the block's foreign parts then stay as they are.
+    fn read_cited_edit(
+        &self,
+        view: &str,
+        edited: &mut Block,
+        cited: Vec<KeyedLink>,
+    ) -> Result<Option<BTreeMap<String, Vec<ForeignLink>>>, RdyError> {
+        let st = self.read();
+        let has_foreign = !st.foreign()?.is_empty();
+        if !has_foreign && cited.is_empty() {
+            return Ok(None);
+        }
+        let scope = Scope::View(view.to_string());
+        let m = st.materialized(&scope)?;
+        if let Ok(cur) = st.block(&scope, &edited.id)
+            && let Some(show) = ForeignShow::of(&st, &m)?
+        {
+            if edited.body == show.text(&cur.body, RefMode::for_body(&cur.block_type)) {
+                edited.body = cur.body.clone();
+            }
+            for (k, v) in edited.fields.iter_mut() {
+                if cur.fields.get(k).is_some_and(|c| show.value(c) == *v) {
+                    *v = cur.fields[k].clone();
+                }
+            }
+        }
+        let cite = ForeignCite::new(&st, &m);
+        let mut links: BTreeMap<String, Vec<(usize, ForeignLink)>> = BTreeMap::new();
+        for k in cited {
+            let target = cite.link_target(k.text()).expect("a cited link target")?;
+            links.entry(k.kind().to_string()).or_default().push((
+                k.at(),
+                ForeignLink {
+                    target,
+                    part: k.part().map(str::to_string),
+                },
+            ));
+        }
+        Ok(Some(
+            links
+                .into_iter()
+                .map(|(kind, mut list)| {
+                    list.sort_by_key(|(at, _)| *at);
+                    (kind, list.into_iter().map(|(_, l)| l).collect())
+                })
+                .collect(),
+        ))
     }
 
     /// [`Rdy::edit_block_with`] with no reason.
@@ -1561,11 +1669,28 @@ impl Rdy {
         &mut self,
         s: &Session,
         view: &str,
+        edited: Block,
+        base: Option<EditBase<'_>>,
+        brief: Option<String>,
+        reason: Option<&str>,
+        reflects: Option<ReflectsInput>,
+    ) -> Result<WriteResult, RdyError> {
+        self.edit_block_inner(s, view, edited, base, brief, reason, reflects, None)
+    }
+
+    /// [`Rdy::edit_block_at`]. `foreign` (repo links) is the block's cited links as the edit
+    /// leaves them, per kind; `None` leaves the block's foreign links and pins as they are.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_block_inner(
+        &mut self,
+        s: &Session,
+        view: &str,
         mut edited: Block,
         base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
         reflects: Option<ReflectsInput>,
+        foreign: Option<BTreeMap<String, Vec<ForeignLink>>>,
     ) -> Result<WriteResult, RdyError> {
         one_edit_justification(reason, reflects.as_ref())?;
         let scope = Scope::View(view.to_string());
@@ -1627,6 +1752,12 @@ impl Rdy {
                 Err(_) => cur,
             }
         };
+        // repo links: a buffer carries cited links only; the pins are rdy's record
+        edited.foreign.pins = cur.foreign.pins.clone();
+        edited.foreign.links = match foreign {
+            Some(links) => links,
+            None => cur.foreign.links.clone(),
+        };
         // p-8YP1G: the buffer an editor reads leaves out the engine metadata, and leaving it out
         // is no request to unset it: the edit keeps what the version it was taken against held
         for f in engine_fields::ENGINE_FIELDS {
@@ -1681,28 +1812,41 @@ impl Rdy {
             .filter(|k| !edited.fields.contains_key(*k))
             .cloned()
             .collect();
-        let links = (cur.links != edited.links).then(|| {
-            let mut m: BTreeMap<String, Vec<LinkInput>> = edited
-                .links
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|l| LinkInput {
-                                target: l.target.to_string(),
-                                part: l.part.clone(),
-                            })
-                            .collect(),
-                    )
-                })
-                .collect();
-            // link1: an update merges link kinds, so a kind the edit removed is sent as []
-            for k in cur.links.keys() {
-                m.entry(k.clone()).or_default();
-            }
-            m
-        });
+        let links =
+            (cur.links != edited.links || cur.foreign.links != edited.foreign.links).then(|| {
+                let mut m: BTreeMap<String, Vec<LinkInput>> = edited
+                    .links
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.iter()
+                                .map(|l| LinkInput {
+                                    target: l.target.to_string(),
+                                    part: l.part.clone(),
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                // repo links: a kind's cited targets follow its local ones, in their stored form
+                for (k, v) in &edited.foreign.links {
+                    m.entry(k.clone())
+                        .or_default()
+                        .extend(v.iter().map(|l| LinkInput {
+                            target: rdy_model::reference::foreign_token(
+                                &l.target.repo,
+                                &l.target.id,
+                            ),
+                            part: l.part.clone(),
+                        }));
+                }
+                // link1: an update merges link kinds, so a kind the edit removed is sent as []
+                for k in cur.links.keys().chain(cur.foreign.links.keys()) {
+                    m.entry(k.clone()).or_default();
+                }
+                m
+            });
         let op = OpInput::Update {
             id: edited.id.to_string(),
             base: Some(base),

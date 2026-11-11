@@ -24,6 +24,15 @@
 //! semantic kind) says so with `Detector::stored` and may give its own severity with
 //! `Detector::own_severity`. A kind that a repin or a change of the usual kind does not resolve
 //! names what does with `Detector::resolve_hint`, which a landing refusal's fix reads.
+//!
+//! Across projects (repo links). A kind that applies across projects (duplicate definition,
+//! value disagreement, restatement drift, deprecated reference, premise shift) implements
+//! `Detector::across` with a reader of [`foreign`]; a foreign side is [`SideRef::Foreign`] (the
+//! cited repo and the FOREIGN entry that delivered the cited version). A foreign side has no local
+//! actor or landing and never goes through a local block lookup. A tension whose sides are all
+//! canon or foreign is in the canon scope; its severity is the citing pack's `tensions_across`
+//! severity of the kind. A live deviation resolves only the tensions whose every (local, cited)
+//! pair it covers; such a tension shows `deviated: <decision>`.
 pub mod api;
 pub mod collision;
 pub mod delta;
@@ -31,6 +40,7 @@ pub mod deprecated;
 pub mod dismiss;
 pub mod drift;
 pub mod duplicate;
+pub mod foreign;
 pub mod fork;
 pub mod index;
 pub mod info;
@@ -51,39 +61,60 @@ pub use rdy_schema::{TensionKind, TensionSeverity};
 pub use set::{TensionDelta, TensionSet, tension_delta};
 
 use crate::RdyError;
-use rdy_model::{BlockId, Hash};
+use rdy_model::{BlockId, Hash, RepoId};
 use rdy_schema::Pack;
 use std::collections::BTreeSet;
 
 /// One side of a tension: an in-flight change, canon (at the landing that carried the involved
-/// version, when known), or an open intent (read-time overlaps only). Ordered in declaration
-/// order.
+/// version, when known), an open intent (read-time overlaps only), or a block cited from a
+/// linked project: the cited repo and the FOREIGN entry that delivered the involved version
+/// (repo links, D-Y49PX). A foreign side has no local actor and no landing. Ordered in
+/// declaration order.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SideRef {
     Change(Hash),
     Canon { landing: Option<Hash> },
     Intent { stable: Hash, version: Hash },
+    Foreign { repo: RepoId, entry: Hash },
 }
 
 impl SideRef {
-    /// The full label: a change's 64 hex, `canon@<landing hex>` or `canon`, `intent:in-<12 hex>`.
+    /// The full label: a change's 64 hex, `canon@<landing hex>` or `canon`, `intent:in-<12 hex>`,
+    /// `foreign:<repo hex>@<entry hex>`. A tension's id hashes it, so it never reads an alias;
+    /// the surfaces show a foreign side by its alias ([`ReadState::side_label`]).
     pub fn label(&self) -> String {
         match self {
             SideRef::Change(h) => h.to_string(),
             SideRef::Canon { landing: Some(l) } => format!("canon@{l}"),
             SideRef::Canon { landing: None } => "canon".to_string(),
             SideRef::Intent { stable, .. } => format!("intent:in-{}", stable.short()),
+            SideRef::Foreign { repo, entry } => format!("foreign:{repo}@{entry}"),
         }
     }
 
-    /// The short label: `<12 hex>`, `canon@<12 hex>`, `canon`, `intent:in-<12 hex>`.
+    /// The short label: `<12 hex>`, `canon@<12 hex>`, `canon`, `intent:in-<12 hex>`,
+    /// `foreign:<12 hex of the repo>@<12 hex of the entry>`.
     pub fn short(&self) -> String {
         match self {
             SideRef::Change(h) => h.short(),
             SideRef::Canon { landing: Some(l) } => format!("canon@{}", l.short()),
             SideRef::Canon { landing: None } => "canon".to_string(),
             SideRef::Intent { stable, .. } => format!("intent:in-{}", stable.short()),
+            SideRef::Foreign { repo, entry } => {
+                format!("foreign:{}@{}", &repo.to_string()[..12], entry.short())
+            }
         }
+    }
+
+    /// Whether this is a foreign side (a block cited from a linked project).
+    pub fn is_foreign(&self) -> bool {
+        matches!(self, SideRef::Foreign { .. })
+    }
+
+    /// Whether a landing would leave this side standing: canon, or a cited block. The canon
+    /// scope keeps a tension whose every side is one (FW-CH6; repo links, D-Y49PX).
+    pub fn is_standing(&self) -> bool {
+        matches!(self, SideRef::Canon { .. } | SideRef::Foreign { .. })
     }
 }
 
@@ -127,13 +158,28 @@ pub struct Tension {
     pub summary: String,
     /// A read-time tension (an intent overlap): never in the event-derived set.
     pub read_time: bool,
+    /// A tension with a foreign side that a live deviation covers: the deviating decision
+    /// (repo links, D-8VJAZ). It is resolved, shown `deviated: <decision>`. Never in the id or
+    /// the vkey.
+    pub deviated: Option<BlockId>,
 }
 
 impl Tension {
-    /// The blocks involved, sorted and distinct.
+    /// The local blocks involved, sorted and distinct. A cited block is no local block: it is
+    /// never looked up here, so a foreign side's items are left out.
     pub fn blocks(&self) -> Vec<BlockId> {
-        let set: BTreeSet<&BlockId> = self.involved.iter().map(|i| &i.block).collect();
+        let set: BTreeSet<&BlockId> = self
+            .involved
+            .iter()
+            .filter(|i| !i.side.is_foreign())
+            .map(|i| &i.block)
+            .collect();
         set.into_iter().cloned().collect()
+    }
+
+    /// Whether a side is foreign (a block cited from a linked project).
+    pub fn has_foreign(&self) -> bool {
+        self.sides.iter().any(SideRef::is_foreign)
     }
 }
 
@@ -215,11 +261,19 @@ pub fn tension_label(id: &Hash) -> String {
     format!("tn-{}", id.short())
 }
 
-/// The severity of what `f` reports under `pack`, and whether the pack set it. A kind that
-/// softens in draft is advisory when the pack leaves it at its default and the content involved
-/// is not stable. A kind that blocks in stable content is blocking there whatever the pack says
-/// (D-ME2HD); `overridden` stays the pack's flag.
+/// The severity of what `f` reports under `pack`, and whether the pack set it. A tension with a
+/// foreign side is advisory unless the citing pack's `tensions_across` raises its kind; the
+/// cited pack's severity, the lifecycle and `tensions` have no force there (repo links,
+/// D-Y49PX). Otherwise: a kind that softens in draft is advisory when the pack leaves it at its
+/// default and the content involved is not stable. A kind that blocks in stable content is
+/// blocking there whatever the pack says (D-ME2HD); `overridden` stays the pack's flag.
 pub fn severity_of(pack: &Pack, f: &Found) -> (TensionSeverity, bool) {
+    if f.involved.iter().any(|i| i.side.is_foreign()) {
+        return (
+            pack.across_severity(f.kind),
+            pack.tensions_across.contains_key(&f.kind),
+        );
+    }
     let (severity, overridden) = pack.tension_severity(f.kind);
     if f.kind.blocks_in_stable() && f.stable {
         (TensionSeverity::Blocking, overridden)
@@ -239,7 +293,8 @@ pub enum DetectScope {
 }
 
 /// The tension `f` describes, or `None` when the scope does not keep it: in the in-flight scope a
-/// tension needs a change side; in the canon scope every side must be canon. Its involved items
+/// tension needs a change side; in the canon scope every side must be canon or foreign (a
+/// canon-or-foreign tension is a standing condition, D-Y49PX). Its involved items
 /// are sorted and deduplicated. Its severity is `own` when the detector gives one (never
 /// `overridden`), else the pack's or the kind's ([`severity_of`]).
 pub(crate) fn tension_from(
@@ -254,10 +309,7 @@ pub(crate) fn tension_from(
             .involved
             .iter()
             .any(|i| matches!(i.side, SideRef::Change(_))),
-        DetectScope::Canon => f
-            .involved
-            .iter()
-            .all(|i| matches!(i.side, SideRef::Canon { .. })),
+        DetectScope::Canon => f.involved.iter().all(|i| i.side.is_standing()),
     };
     if !keep || f.involved.is_empty() {
         return None;
@@ -280,6 +332,7 @@ pub(crate) fn tension_from(
         involved,
         summary: f.summary,
         read_time,
+        deviated: None,
     })
 }
 
@@ -297,6 +350,17 @@ pub trait Detector: Sync {
         _seeds: &BTreeSet<BlockId>,
     ) -> Result<BTreeSet<BlockId>, RdyError> {
         Ok(BTreeSet::new())
+    }
+    /// This kind's tensions across projects (Task 15): those of the scope of `cx` (with `seeds`,
+    /// of the local blocks among them) with a side in a cited project, appended to `out`. The
+    /// canon form runs it in the canon scope with no seeds. Default: none.
+    fn across(
+        &self,
+        _cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        _out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        Ok(())
     }
     /// Whether a proposal lists this kind only in its landing form: the proposal's net change is
     /// judged, never an in-flight form of another view or of changes the proposal leaves out

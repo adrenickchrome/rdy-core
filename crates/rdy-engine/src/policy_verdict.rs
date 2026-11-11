@@ -4,7 +4,9 @@
 //! the caller reads the store and gives the facts as [`VerdictInputs`]. The order:
 //!
 //! 1. no policy block, or a policy block whose fields do not read: a person;
-//! 2. the never-list, every item that applies, in its order: a person;
+//! 2. the never-list, every item that applies, in its order: a person. Repo links (D-8VJAZ) add
+//!    a repo link change and a written `adopted_as` by name; a deviation is an exception, so it
+//!    is on the list already;
 //! 3. a policy with no rule: a person;
 //! 4. the first rule, in policy order, that covers the whole version: accepted;
 //! 5. else a person, with one reason per rule: its first failed condition.
@@ -67,6 +69,10 @@ pub struct VerdictInputs {
     pub exceptions: Vec<(ExceptionKind, String)>,
     pub redaction: bool,
     pub changes_policy: bool,
+    /// Repo links (D-8VJAZ): each `repo_link` block the version creates, updates or deletes.
+    pub repo_links: Vec<BlockId>,
+    /// Repo links (D-8VJAZ): each decision whose `adopted_as` the version writes.
+    pub adopted_as: Vec<BlockId>,
     pub noncode_deferrals: usize,
     pub stable_docs: Vec<BlockId>,
     pub plan_items: usize,
@@ -167,6 +173,18 @@ fn never_list(i: &VerdictInputs, view: &Sorted<'_>) -> Vec<String> {
     }
     if i.changes_policy {
         out.push("it changes the authority policy".to_string());
+    }
+    let mut links: Vec<&BlockId> = i.repo_links.iter().collect();
+    links.sort();
+    links.dedup();
+    for id in links {
+        out.push(format!("it changes the repo link {id}"));
+    }
+    let mut adopted: Vec<&BlockId> = i.adopted_as.iter().collect();
+    adopted.sort();
+    adopted.dedup();
+    for id in adopted {
+        out.push(format!("it writes adopted_as on {id}"));
     }
     for (kind, reference) in &i.exceptions {
         out.push(format!(
@@ -988,5 +1006,55 @@ mod tests {
         );
         assert_eq!(a.validate(), Ok(()));
         assert!(fact_value(&a).contains(&format!("needs a person from {label}: ")));
+    }
+
+    #[test]
+    fn rpl18_repo_links_adopted_as_and_deviation_need_a_person() {
+        // repo links (D-8VJAZ): each is on the never-list by name; the rule would otherwise
+        // accept every one of these versions
+        let open = two_way_rule("open");
+        let base = || {
+            let mut v = version();
+            v.decisions = vec![decision("D-DDDDD")];
+            v
+        };
+        assert_eq!(accepted(&run(vec![open.clone()], &base())), "open");
+        let cases: Vec<(Alter, &str)> = vec![
+            (
+                |v| v.repo_links = vec![id("rl-00001")],
+                "it changes the repo link rl-00001",
+            ),
+            (
+                |v| v.adopted_as = vec![id("D-DDDDD")],
+                "it writes adopted_as on D-DDDDD",
+            ),
+            (
+                |v| v.exceptions = vec![(ExceptionKind::Deviation, "D-DDDDD@0123".to_string())],
+                "it has the exception deviation on D-DDDDD@0123",
+            ),
+        ];
+        for (alter, text) in cases {
+            let mut v = base();
+            alter(&mut v);
+            assert_eq!(
+                reasons(&run(vec![open.clone()], &v)),
+                vec![text.to_string()],
+                "case {text}"
+            );
+        }
+        // in the list's order, each block once, in id order
+        let mut v = base();
+        v.adopted_as = vec![id("D-DDDDD")];
+        v.repo_links = vec![id("rl-00002"), id("rl-00001"), id("rl-00002")];
+        v.changes_policy = true;
+        assert_eq!(
+            reasons(&run(vec![open], &v)),
+            vec![
+                "it changes the authority policy",
+                "it changes the repo link rl-00001",
+                "it changes the repo link rl-00002",
+                "it writes adopted_as on D-DDDDD",
+            ]
+        );
     }
 }

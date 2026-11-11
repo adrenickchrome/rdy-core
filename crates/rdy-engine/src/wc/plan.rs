@@ -705,7 +705,9 @@ fn shown_links(b: &WcBlock) -> BTreeMap<&str, Vec<Shown>> {
             Shown {
                 target: k.text().to_string(),
                 part: k.part().map(str::to_string),
-                keyed: true,
+                // a cited block (repo links) is a target the write resolves, as an id is: a
+                // kind that keeps it as it was is not named
+                keyed: rdy_model::reference::foreign_ref(k.text()).is_none(),
             },
         );
     }

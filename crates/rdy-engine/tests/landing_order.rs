@@ -181,6 +181,7 @@ fn raw_block(ty: &str, parent: &str, order: &str, body: &str) -> Block {
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

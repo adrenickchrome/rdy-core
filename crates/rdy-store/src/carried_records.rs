@@ -21,7 +21,7 @@ use crate::codec::{self, ObjectBytes};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::object_refs::ObjectKey;
-use rdy_model::assessment::Assessment;
+use rdy_model::assessment::AssessmentV2;
 use rdy_model::check_request::CheckRequest;
 use rdy_model::dispute::{Dispute, DisputeResolution};
 use rdy_model::plan::{Plan, PlanAct, PlanKind};
@@ -146,7 +146,7 @@ pub fn validate_local(raw: u8, payload: &[u8]) -> Result<(), &'static str> {
         return Ok(());
     };
     match o.kind {
-        kinds::ASSESSMENT => match decoded::<Assessment>(&o) {
+        kinds::ASSESSMENT => match decoded::<AssessmentV2>(&o) {
             Some(a) => a.validate(),
             None => Ok(()),
         },
@@ -340,7 +340,7 @@ pub fn validate_refs(
                 return Ok(Some(POLICY_BLOCK));
             }
             if let Some(h) = l.assessment
-                && let Some(a) = read::<Assessment>(source, key(kinds::ASSESSMENT, h))?
+                && let Some(a) = read::<AssessmentV2>(source, key(kinds::ASSESSMENT, h))?
             {
                 if a.proposal != l.approved_version.unwrap_or(l.proposal) {
                     return Ok(Some(ASSESSMENT_PROPOSAL));
@@ -354,7 +354,7 @@ pub fn validate_refs(
             Ok(None)
         }
         kinds::ASSESSMENT => {
-            let Some(a) = read::<Assessment>(source, k)? else {
+            let Some(a) = read::<AssessmentV2>(source, k)? else {
                 return Ok(None);
             };
             if let Some(p) = a.policy.as_ref().and_then(|p| p.policy.as_ref())

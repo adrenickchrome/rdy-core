@@ -238,6 +238,7 @@ mod tests {
             body: String::new(),
             links: Default::default(),
             pins: Default::default(),
+            foreign: Default::default(),
             read_identity: None,
         }
     }

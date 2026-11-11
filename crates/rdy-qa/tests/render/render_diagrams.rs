@@ -81,6 +81,12 @@ fn dia1_without_scripts_the_source_alt_and_caption_remain() {
         "<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>graph TD"
     ));
     assert!(!fig.contains("<script"));
+    // HTML allows a figcaption only first or last: the caption is the last child
+    assert!(fig.ends_with("</figcaption></figure>"), "{fig}");
+    assert!(
+        fig.find("<details class=\"diagram-source\">") < fig.find("<figcaption>"),
+        "{fig}"
+    );
 }
 
 #[test]

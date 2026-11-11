@@ -726,7 +726,7 @@ fn diagram_html(b: &Block, ctx: &BlockCtx) -> String {
     };
     let shown = match (ctx.diagram)(b, &diagram_source(&b.body, link, unavailable)) {
         DiagramView::Drawn { svg, href } => format!(
-            "<details class=\"diagram-canvas\"><summary aria-label=\"Expand diagram\"><span class=\"diagram-scroll\"><span class=\"diagram-svg\" aria-hidden=\"true\">{svg}</span></span></summary></details><p class=\"diagram-open\"><a href=\"{}\">open full size</a></p>{caption}{}",
+            "<details class=\"diagram-canvas\"><summary aria-label=\"Expand diagram\"><span class=\"diagram-scroll\"><span class=\"diagram-svg\" aria-hidden=\"true\">{svg}</span></span></summary></details><p class=\"diagram-open\"><a href=\"{}\">open full size</a></p>{}{caption}",
             escape(&href),
             source_details()
         ),
@@ -745,7 +745,7 @@ fn diagram_html(b: &Block, ctx: &BlockCtx) -> String {
                 escape(&human)
             )
         }
-        DiagramView::Source => format!("{caption}{}", source_details()),
+        DiagramView::Source => format!("{}{caption}", source_details()),
     };
     format!(
         "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{shown}</figure>",

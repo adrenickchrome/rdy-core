@@ -678,6 +678,7 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
     x.step("rdy_inbox", json!({}));
     x.step("rdy_coverage", json!({"scope": "canon"}));
     x.step("rdy_tags", json!({}));
+    x.step("rdy_links", json!({}));
 
     x.step(
         "rdy_publication_check",
@@ -850,7 +851,7 @@ fn kfu4_each_tool_keeps_its_action_for_all_values() {
 
     // the matrix accounts for every router name
     let names: BTreeSet<String> = kungfu::TOOLS.iter().map(|p| p.tool.to_string()).collect();
-    assert_eq!(names.len(), 60);
+    assert_eq!(names.len(), 61);
     assert_eq!(correct.called, names);
 
     same_steps(&correct, &absent, "absent");

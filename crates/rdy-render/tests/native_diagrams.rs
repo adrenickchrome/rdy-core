@@ -922,7 +922,7 @@ fn rdb6_all_surfaces_share_the_bound_and_original_source() {
     let (code, caption) = print_order(doc("Label page"), "L100 -->|y| L101", "Labelled");
     assert!(code < caption, "refused: the code block, then its caption");
     let (code, caption) = print_order(doc("At page"), "A199 --> A200", "At the bound");
-    assert!(caption < code, "drawn: the source after its caption");
+    assert!(code < caption, "drawn: the source, then its caption");
     // the cache: a refused source is never a key; the drawn one has its row
     assert_eq!(rdy_render::diagram_cache_key(&over), None);
     assert_eq!(rdy_render::diagram_cache_key(&label), None);

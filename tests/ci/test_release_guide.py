@@ -40,7 +40,7 @@ OWNER_TOOLS = {
               'rdy_write'),
     'after-write': ('rdy_plan', 'rdy_propose', 'rdy_resolve'),
     'approvals': ('rdy_answer', 'rdy_dispute', 'rdy_land', 'rdy_policy', 'rdy_tag'),
-    'read': ('rdy_coverage', 'rdy_diff', 'rdy_impact', 'rdy_inbox', 'rdy_log', 'rdy_tags', 'rdy_trace'),
+    'read': ('rdy_coverage', 'rdy_diff', 'rdy_impact', 'rdy_inbox', 'rdy_links', 'rdy_log', 'rdy_tags', 'rdy_trace'),
     'publish': ('rdy_auth', 'rdy_export', 'rdy_key_bind', 'rdy_key_retire', 'rdy_key_revoke', 'rdy_key_show',
                 'rdy_publication_check', 'rdy_publish', 'rdy_remote', 'rdy_render'),
     'review': ('rdy_review', 'rdy_review_next', 'rdy_review_submit'),
@@ -884,7 +884,7 @@ class Kfu1Binary(BinaryCase):
 
     def test_kfu1_checker_reads_the_table_by_the_builds_rules(self):
         good = json.loads(TABLE.read_text())
-        self.assertEqual(len(good), 60)
+        self.assertEqual(len(good), 61)
         table = GUIDE.read_table(TABLE)
         self.assertEqual({name: tuple(tools) for name, tools in table.items()}, OWNER_TOOLS)
         path = self.dir / 'table.json'

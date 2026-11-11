@@ -47,7 +47,10 @@ fn stored_name(b: &Block) -> Option<&str> {
 }
 
 /// One state's blocks and the maps derived from them, held in persistent maps so that a clone is
-/// cheap and `with` copies only the paths to the entries it changes.
+/// cheap and `with` copies only the paths to the entries it changes. It holds the project's own
+/// blocks only: blocks a repo link delivered live in the read state's foreign state
+/// (`crate::foreign`), beside this tree, and never enter its maps, its names or any index built
+/// from it.
 #[derive(Clone, Debug, Default)]
 pub struct Materialized {
     blocks: OrdMap<BlockId, Arc<Block>>,

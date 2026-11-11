@@ -19,6 +19,7 @@
 //! the version, its bound plan and every listed item with its kind, subject, cause, their full
 //! content identities and the complete plan answer. `card_hash` hashes it beside the rendered
 //! card ([`super::card::PLAN_CARD_DOMAIN`]).
+use super::adopt::{AdoptCleared, AdoptInstruction, AdoptPin, AdoptPlan, AdoptRebind, AdoptSet};
 use super::item::{Fact, Item, ItemKind};
 use super::queue::{item, later, option};
 use super::reaffirm::ReaffirmMember;
@@ -63,6 +64,25 @@ pub enum PlanCardBinding {
         version: Hash,
         retirements: Vec<BlockId>,
         members: Vec<ReaffirmMember>,
+    },
+    /// The adopt card of delivery `entry` from `repo`, for the repo link `link` (repo links,
+    /// D-8VJAZ): the answer `after` it settled (none for a link never answered), every pin row,
+    /// rebind row, cleared suspect, instruction row, the set change and every open proposal
+    /// version the delivery affects ([`super::adopt`]).
+    Adopt {
+        #[serde(with = "rdy_model::foreign::hex_repo")]
+        repo: rdy_model::RepoId,
+        link: BlockId,
+        #[serde(with = "rdy_store::transition::hex::one")]
+        entry: Hash,
+        #[serde(with = "rdy_store::transition::hex::opt")]
+        after: Option<Hash>,
+        pins: Vec<AdoptPin>,
+        rebinds: Vec<AdoptRebind>,
+        cleared: Vec<AdoptCleared>,
+        instructions: Vec<AdoptInstruction>,
+        set: AdoptSet,
+        plans: Vec<AdoptPlan>,
     },
 }
 

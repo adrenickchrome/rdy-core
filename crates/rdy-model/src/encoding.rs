@@ -14,7 +14,22 @@
 //! original declarations: a short old body is never decoded into the larger current struct. The
 //! conversions into the current types add absent options and a zero source encoding; the
 //! reverse conversions exist only while every newly added field is absent or zero.
+//!
+//! A block's foreign part (repo links) never enters a released layout. [`LegacyBlockV0`] freezes
+//! the encoding-0 block layout that `Block`'s own serde writes, so a BLOCK of encoding 0 and the
+//! blocks every CHANGE of encoding 0 or 1 embeds keep their bytes; neither has a form for a block
+//! with a foreign part. Such a block has its own explicit layouts: [`ForeignBlockV1`]
+//! ([`BLOCK_FOREIGN_ENCODING`]) and, embedded, [`ForeignChangeV2`] ([`CHANGE_FOREIGN_ENCODING`]).
+//!
+//! Repo links register optional encodings beside the released ones (D-FK58A, store feature
+//! `foreign_copy`). A value takes its kind's optional encoding only when it holds a shape the
+//! released encoding has no form for, and the released encoding otherwise, so every local value
+//! keeps its bytes and its hash: BLOCK 1 and CHANGE 2 above, [`TRANSITION_FOREIGN_ENCODING`],
+//! [`PAIR_FOREIGN_ENCODING`] (REVIEW and TENSION), [`ANSWER_FOREIGN_ENCODING`],
+//! [`ASSESSMENT_FOREIGN_ENCODING`] and [`REDACTION_FOREIGN_ENCODING`]. A FOREIGN entry starts at
+//! [`FOREIGN_ENCODING`].
 use crate::change::ChangeReadIdentity;
+use crate::foreign::ForeignParts;
 use crate::redaction::{BlockResidue, ChangeResidue, RedactionResidue, ResidualOp};
 use crate::{
     ActorRun, AltChoice, ApprovalEvidence, Assurance, Block, BlockId, Change, ChangeLinks,
@@ -30,6 +45,33 @@ pub const LANDING_ENCODING: u16 = 1;
 /// The latest encoding of a REDACTION_RESIDUE: a block residue's content hash is the content-2
 /// hash, and each residue ends with its removed object's `source_encoding`.
 pub const RESIDUE_ENCODING: u16 = 1;
+
+/// The encoding of a BLOCK with a foreign part (repo links): [`ForeignBlockV1`]. A block with an
+/// empty foreign part has encoding 0 alone, the released [`LegacyBlockV0`] layout.
+pub const BLOCK_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of a CHANGE that embeds a block with a foreign part: [`ForeignChangeV2`].
+/// Encodings 0 and 1 embed the frozen [`LegacyBlockV0`] layout and have no form for such a block.
+pub const CHANGE_FOREIGN_ENCODING: u16 = 2;
+/// The first and only encoding of a FOREIGN entry (`crate::foreign::ForeignEntry`, kind 29): the
+/// kind has no encoding 0.
+pub const FOREIGN_ENCODING: u16 = 1;
+/// The encoding of a TRANSITION that holds a foreign shape: a move of cause `Delivered`, a
+/// foreign tension side or a foreign suspect target (the store's `TransitionsV1`). Encoding 0
+/// has no form for any of them.
+pub const TRANSITION_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of a REVIEW or a TENSION with a foreign pair side
+/// ([`crate::review::ReviewV1`], [`crate::semantic::SemanticTensionV1`]). Encoding 0 keeps the
+/// released `PairItem` layout and every local pair key.
+pub const PAIR_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of an ANSWER whose act is [`crate::AnswerAct::Adopt`] or
+/// [`crate::AnswerAct::KeepPin`]: the encoding-0 body, whose act may then be one of those two.
+pub const ANSWER_FOREIGN_ENCODING: u16 = 1;
+/// The encoding of an ASSESSMENT with foreign reach or foreign tension evidence
+/// ([`crate::assessment::AssessmentV2`]). Encoding 1 stays the local layout.
+pub const ASSESSMENT_FOREIGN_ENCODING: u16 = 2;
+/// The encoding of a REDACTION with a `foreign_version` target: the encoding-0 body, whose
+/// target list may then hold one.
+pub const REDACTION_FOREIGN_ENCODING: u16 = 1;
 
 /// The identity of a stored object: the hash of its stored payload and its encoding version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -88,6 +130,188 @@ pub fn legacy_content_1_hash(block: &Block) -> Hash {
             .expect("postcard encoding of an in-memory value cannot fail"),
     );
     Hash::of(&bytes)
+}
+
+/// A block in encoding 0, the released layout: the eight fields it has had since the first
+/// store, and no foreign part. [`Block`]'s own serde reads and writes exactly this layout, so a
+/// BLOCK of encoding 0 and every block a CHANGE of encoding 0 or 1 embeds keep their bytes.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "Block")]
+pub struct LegacyBlockV0 {
+    pub id: BlockId,
+    pub block_type: String,
+    pub parent: Option<BlockId>,
+    pub order: String,
+    pub fields: BTreeMap<String, FieldValue>,
+    pub body: String,
+    pub links: BTreeMap<String, Vec<Link>>,
+    pub pins: BTreeMap<BlockId, Hash>,
+}
+
+impl LegacyBlockV0 {
+    /// The current block: an empty foreign part and no read identity.
+    pub fn into_current(self) -> Block {
+        Block {
+            id: self.id,
+            block_type: self.block_type,
+            parent: self.parent,
+            order: self.order,
+            fields: self.fields,
+            body: self.body,
+            links: self.links,
+            pins: self.pins,
+            foreign: ForeignParts::default(),
+            read_identity: None,
+        }
+    }
+
+    /// The encoding-0 body of `b`, while its foreign part is empty.
+    pub fn from_current(b: &Block) -> Option<LegacyBlockV0> {
+        if !b.foreign.is_empty() {
+            return None;
+        }
+        Some(LegacyBlockV0 {
+            id: b.id.clone(),
+            block_type: b.block_type.clone(),
+            parent: b.parent.clone(),
+            order: b.order.clone(),
+            fields: b.fields.clone(),
+            body: b.body.clone(),
+            links: b.links.clone(),
+            pins: b.pins.clone(),
+        })
+    }
+}
+
+/// A block in [`BLOCK_FOREIGN_ENCODING`]: the eight encoding-0 fields and then the foreign part,
+/// a new layout, never an option appended to the released one. A BLOCK object takes it only when
+/// its foreign part is not empty; a CHANGE of [`CHANGE_FOREIGN_ENCODING`] embeds every block in
+/// it, with its foreign part empty or not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignBlockV1 {
+    pub id: BlockId,
+    pub block_type: String,
+    pub parent: Option<BlockId>,
+    pub order: String,
+    pub fields: BTreeMap<String, FieldValue>,
+    pub body: String,
+    pub links: BTreeMap<String, Vec<Link>>,
+    pub pins: BTreeMap<BlockId, Hash>,
+    pub foreign: ForeignParts,
+}
+
+impl ForeignBlockV1 {
+    /// The layout of `b`, its foreign part as it is.
+    pub fn of(b: &Block) -> ForeignBlockV1 {
+        ForeignBlockV1 {
+            id: b.id.clone(),
+            block_type: b.block_type.clone(),
+            parent: b.parent.clone(),
+            order: b.order.clone(),
+            fields: b.fields.clone(),
+            body: b.body.clone(),
+            links: b.links.clone(),
+            pins: b.pins.clone(),
+            foreign: b.foreign.clone(),
+        }
+    }
+
+    /// The current block, with no read identity.
+    pub fn into_current(self) -> Block {
+        Block {
+            id: self.id,
+            block_type: self.block_type,
+            parent: self.parent,
+            order: self.order,
+            fields: self.fields,
+            body: self.body,
+            links: self.links,
+            pins: self.pins,
+            foreign: self.foreign,
+            read_identity: None,
+        }
+    }
+}
+
+/// An op of a change in [`CHANGE_FOREIGN_ENCODING`]: [`Op`]'s variants in their order, each block
+/// in the [`ForeignBlockV1`] layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForeignOpV2 {
+    Create { block: ForeignBlockV1 },
+    Update { base: Hash, block: ForeignBlockV1 },
+    Delete { base: Hash, id: BlockId },
+}
+
+/// A change in [`CHANGE_FOREIGN_ENCODING`]: the fields of encoding 1 in their order, its ops
+/// embedding [`ForeignBlockV1`] blocks. Encoding 1's body stays unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignChangeV2 {
+    pub view: String,
+    pub ops: Vec<ForeignOpV2>,
+    pub deps: Vec<Hash>,
+    pub provenance: Provenance,
+    pub justification: Option<Justification>,
+    pub message: String,
+    pub links: ChangeLinks,
+}
+
+impl ForeignChangeV2 {
+    /// The encoding-2 body of `c`.
+    pub fn of(c: &Change) -> ForeignChangeV2 {
+        ForeignChangeV2 {
+            view: c.view.clone(),
+            ops: c
+                .ops
+                .iter()
+                .map(|op| match op {
+                    Op::Create { block } => ForeignOpV2::Create {
+                        block: ForeignBlockV1::of(block),
+                    },
+                    Op::Update { base, block } => ForeignOpV2::Update {
+                        base: *base,
+                        block: ForeignBlockV1::of(block),
+                    },
+                    Op::Delete { base, id } => ForeignOpV2::Delete {
+                        base: *base,
+                        id: id.clone(),
+                    },
+                })
+                .collect(),
+            deps: c.deps.clone(),
+            provenance: c.provenance.clone(),
+            justification: c.justification.clone(),
+            message: c.message.clone(),
+            links: c.links.clone(),
+        }
+    }
+
+    /// The current change, with the stored read identity `identity` of the frame it came from.
+    pub fn into_current(self, identity: EncodedIdentity) -> Change {
+        Change {
+            view: self.view,
+            ops: self
+                .ops
+                .into_iter()
+                .map(|op| match op {
+                    ForeignOpV2::Create { block } => Op::Create {
+                        block: block.into_current(),
+                    },
+                    ForeignOpV2::Update { base, block } => Op::Update {
+                        base,
+                        block: block.into_current(),
+                    },
+                    ForeignOpV2::Delete { base, id } => Op::Delete { base, id },
+                })
+                .collect(),
+            deps: self.deps,
+            provenance: self.provenance,
+            justification: self.justification,
+            message: self.message,
+            links: self.links,
+            read_identity: Some(ChangeReadIdentity::Stored(identity)),
+        }
+    }
 }
 
 /// A change's links in encoding 0: the four options it had then.
@@ -155,8 +379,15 @@ impl LegacyChangeV0 {
         }
     }
 
-    /// The encoding-0 body of `c`, while its encoding-1 link options are absent.
+    /// The encoding-0 body of `c`, while its encoding-1 link options are absent and every block
+    /// it embeds has an empty foreign part.
     pub fn from_current(c: &Change) -> Option<LegacyChangeV0> {
+        if c.ops.iter().any(|op| match op {
+            Op::Create { block } | Op::Update { block, .. } => !block.foreign.is_empty(),
+            Op::Delete { .. } => false,
+        }) {
+            return None;
+        }
         Some(LegacyChangeV0 {
             view: c.view.clone(),
             ops: c.ops.clone(),

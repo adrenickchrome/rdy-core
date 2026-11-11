@@ -1,6 +1,6 @@
-//! The gate's prerequisite steps (the locked dependency fetch, then the release build) and its
-//! structured test discovery: Cargo's artifact record names each test executable, and the gate
-//! lists each one directly, with no shell.
+//! The gate's prerequisite steps (the locked dependency fetch, then the release build), its format
+//! check (one workspace member at a time) and its structured test discovery: Cargo's artifact
+//! record names each test executable, and the gate lists each one directly, with no shell.
 use crate::report::{self, Gate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -267,6 +267,89 @@ pub fn build_steps(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Vec<
     gates
 }
 
+/// The gate row of the format check. The row keeps the name of the one command it replaced.
+pub const FMT_GATE: &str = "cargo fmt --all --check";
+
+/// The names of the workspace members in `cargo metadata --no-deps --format-version 1` output,
+/// sorted. Lines that are not the metadata record (a warning on stderr) are skipped.
+pub fn workspace_members(out: &str) -> Result<Vec<String>, String> {
+    let v = out
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .find(|v| v["workspace_members"].is_array())
+        .ok_or_else(|| "cargo metadata printed no workspace record".to_string())?;
+    let ids: BTreeSet<&str> = v["workspace_members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str())
+        .collect();
+    let mut names: Vec<String> = v["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["id"].as_str().is_some_and(|id| ids.contains(id)))
+        .filter_map(|p| p["name"].as_str().map(String::from))
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err("cargo metadata listed no workspace members".into());
+    }
+    Ok(names)
+}
+
+/// Checks the format of every workspace member through `run` (label and command in, success and
+/// output back), one `cargo fmt --check -p <member>` each. `cargo fmt --all --check` passes every
+/// target root of the workspace to one rustfmt command, and Windows refuses a command line over
+/// 32767 characters. Every member is checked; the row fails when the member list cannot be read
+/// or any member fails, and its detail names each failing member with the tail of its output.
+pub fn fmt_step(mut run: impl FnMut(&str, Command) -> (bool, String)) -> Gate {
+    let fail = |detail: String| Gate {
+        name: FMT_GATE.into(),
+        pass: false,
+        detail,
+    };
+    let (ok, out) = run(
+        "workspace members",
+        cargo(&["metadata", "--no-deps", "--format-version", "1"]),
+    );
+    if !ok {
+        eprintln!("{out}");
+        return fail(format!(
+            "cargo metadata failed:\n{}",
+            report::tail(&out, 20)
+        ));
+    }
+    let members = match workspace_members(&out) {
+        Ok(m) => m,
+        Err(e) => return fail(e),
+    };
+    let mut failed = vec![];
+    for member in &members {
+        let (ok, out) = run(
+            &format!("fmt {member}"),
+            cargo(&["fmt", "--check", "-p", member]),
+        );
+        if !ok {
+            eprintln!("{out}");
+            failed.push(format!(
+                "`cargo fmt --check -p {member}` failed:\n{}",
+                report::tail(&out, 20)
+            ));
+        }
+    }
+    if failed.is_empty() {
+        Gate {
+            name: FMT_GATE.into(),
+            pass: true,
+            detail: String::new(),
+        }
+    } else {
+        fail(failed.join("\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +405,88 @@ mod tests {
         assert_eq!(gates[0].detail, "locked fetch failed");
         assert!(gates[1].pass);
         assert!(!report::overall(&gates, &[], true));
+    }
+
+    const METADATA: &str = r#"{"packages":[{"name":"rdy-store","id":"path+file:///w/crates/rdy-store#0.1.0"},{"name":"serde","id":"registry+https://x#serde@1.0.0"},{"name":"rdy-qa","id":"path+file:///w/crates/rdy-qa#0.1.0"}],"workspace_members":["path+file:///w/crates/rdy-store#0.1.0","path+file:///w/crates/rdy-qa#0.1.0"],"workspace_root":"/w"}"#;
+
+    #[test]
+    fn wx34_fmt_checks_one_member_at_a_time() {
+        // one `cargo fmt --check -p <member>` per workspace member, so no single rustfmt command
+        // carries every target root of the workspace (Windows refuses a command line over 32767
+        // characters)
+        let mut seen: Vec<(String, Vec<String>)> = vec![];
+        let gate = fmt_step(|label, cmd| {
+            seen.push((label.to_string(), args_of(&cmd)));
+            if label == "workspace members" {
+                (true, format!("{METADATA}\nwarning: a stray line\n"))
+            } else {
+                (true, String::new())
+            }
+        });
+        let want: Vec<(String, Vec<String>)> = vec![
+            (
+                "workspace members".into(),
+                ["metadata", "--no-deps", "--format-version", "1"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            (
+                "fmt rdy-qa".into(),
+                ["fmt", "--check", "-p", "rdy-qa"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            (
+                "fmt rdy-store".into(),
+                ["fmt", "--check", "-p", "rdy-store"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+        ];
+        assert_eq!(seen, want);
+        assert_eq!(gate.name, "cargo fmt --all --check");
+        assert!(gate.pass);
+        assert_eq!(gate.detail, "");
+    }
+
+    #[test]
+    fn wx34_fmt_names_each_failing_member_and_checks_the_rest() {
+        let mut labels: Vec<String> = vec![];
+        let gate = fmt_step(|label, _| {
+            labels.push(label.to_string());
+            match label {
+                "workspace members" => (true, METADATA.to_string()),
+                "fmt rdy-qa" => (
+                    false,
+                    "Diff in /w/crates/rdy-qa/src/lib.rs:1:\n".to_string(),
+                ),
+                _ => (true, String::new()),
+            }
+        });
+        // a failed member does not stop the others
+        assert_eq!(labels, ["workspace members", "fmt rdy-qa", "fmt rdy-store"]);
+        assert!(!gate.pass);
+        assert!(gate.detail.contains("rdy-qa"), "{}", gate.detail);
+        assert!(gate.detail.contains("Diff in"), "{}", gate.detail);
+        assert!(!gate.detail.contains("rdy-store"), "{}", gate.detail);
+    }
+
+    #[test]
+    fn wx34_fmt_fails_when_the_members_cannot_be_listed() {
+        let mut labels: Vec<String> = vec![];
+        let gate = fmt_step(|label, _| {
+            labels.push(label.to_string());
+            (false, "error: could not find Cargo.toml\n".to_string())
+        });
+        assert_eq!(labels, ["workspace members"]);
+        assert!(!gate.pass);
+        assert!(gate.detail.contains("could not find"), "{}", gate.detail);
+        // an answer with no members is a failure too: the step must check something
+        let gate = fmt_step(|_, _| (true, "not json\n".to_string()));
+        assert!(!gate.pass);
+        let empty = r#"{"packages":[],"workspace_members":[]}"#;
+        let gate = fmt_step(|_, _| (true, empty.to_string()));
+        assert!(!gate.pass);
     }
 
     const ARTIFACTS: &str = r#"{"reason":"compiler-message","message":{}}

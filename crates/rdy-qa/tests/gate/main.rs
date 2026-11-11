@@ -1,6 +1,8 @@
 //! The `gate` area of the rdy-qa suite: one test binary (`cargo qa --only gate`).
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
+mod gate_adopt_answer;
+mod gate_adopt_cards;
 mod gate_alts;
 mod gate_answer;
 mod gate_asbuilt_plan;
@@ -9,6 +11,8 @@ mod gate_check_verdicts;
 mod gate_considered_options;
 mod gate_coverage_lowered;
 mod gate_exceptions;
+mod gate_foreign;
+mod gate_foreign_locks;
 mod gate_freshness;
 mod gate_grounded;
 mod gate_identity;

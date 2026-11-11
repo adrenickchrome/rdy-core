@@ -1046,6 +1046,23 @@ impl McpClient {
         called.map_err(|failure| self.fail(failure))
     }
 
+    /// [`McpClient::try_call`] with `meta` as the request's `_meta`: a session stated on each
+    /// request (`rdy/actor` and `rdy/run`) instead of by `rdy_session`.
+    pub fn try_call_meta(
+        &mut self,
+        tool: &str,
+        args: Value,
+        meta: &Value,
+    ) -> Result<Reply, McpFailure> {
+        let extra = json!({"_meta": meta});
+        let called = (|| {
+            let id = self.take_call()?;
+            let v = self.try_request(&self.call_request(id, tool, args, Some(&extra)), id)?;
+            decode_reply(&v, true).ok_or(McpFailure::Protocol)
+        })();
+        called.map_err(|failure| self.fail(failure))
+    }
+
     /// Calls `tool` with `args` in an eliciting session and lets `person` act on each form the
     /// server asks, until the call ends: the strict final reply, or the failure, after which
     /// the session is stopped.

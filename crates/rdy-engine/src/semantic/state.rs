@@ -1,7 +1,9 @@
 //! The verdicts and semantic tensions of one published state, read from the store's pair/ and semantic/ refs. A function of the log: reindex rebuilds it.
 use crate::error::RdyError;
-use imbl::OrdMap;
-use rdy_model::{BlockId, Hash, PairItem, Review, ReviewSubject, SemanticTension, Verdict};
+use imbl::{OrdMap, OrdSet};
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::{PairTarget, SemanticTensionV1};
+use rdy_model::{BlockId, Hash, PairSide, Verdict};
 use rdy_store::review::{PAIR_REF, SEMANTIC_REF};
 use rdy_store::{StoreError, StoreReader};
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use std::sync::Arc;
 pub struct Settled {
     pub review: Hash,
     pub verdict: Verdict,
-    pub items: Vec<PairItem>,
+    pub items: Vec<PairSide>,
     /// The review's provenance actor.
     pub actor: String,
 }
@@ -20,12 +22,12 @@ pub struct Settled {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenTension {
     pub version: Hash,
-    pub record: SemanticTension,
+    pub record: SemanticTensionV1,
 }
 
-/// The semantic tensions one item takes part in: by the other item's block, then its content,
-/// the pair's key.
-pub type Partners = OrdMap<BlockId, OrdMap<Hash, Hash>>;
+/// The semantic tensions one item takes part in: by the other item's block (or cited block),
+/// then its content, the pair's key.
+pub type Partners = OrdMap<PairTarget, OrdMap<Hash, Hash>>;
 
 /// The verdicts and semantic tensions of one published state, by pair key.
 #[derive(Clone, Debug, Default)]
@@ -35,9 +37,12 @@ pub struct SemanticState {
     /// The semantic tensions by item (FW-SW3): a block at a content, then the other item. A
     /// reader that knows the contents each block holds now reaches only the records on them, so
     /// records on contents a block no longer holds cost nothing however many there are.
-    by_item: OrdMap<PairItem, Partners>,
-    /// How many semantic tensions each block takes part in.
+    by_item: OrdMap<PairSide, Partners>,
+    /// How many semantic tensions each local block takes part in (a cited side is no local block).
     blocks: OrdMap<BlockId, usize>,
+    /// The keys of the semantic tensions with no local side (a pair of two cited sides): no
+    /// local block reaches them, so a reader that finds tensions by block reads these apart.
+    foreign_only: OrdSet<Hash>,
 }
 
 impl SemanticState {
@@ -45,10 +50,10 @@ impl SemanticState {
     pub fn read(reader: &StoreReader) -> Result<SemanticState, RdyError> {
         let mut s = SemanticState::default();
         for (key, review) in reader.verdicts()? {
-            s.settle(key, review, reader.review(&review)?)?;
+            s.settle(key, review, reader.review_v1(&review)?)?;
         }
         for (key, version) in reader.semantic_tensions()? {
-            s.open(key, version, reader.semantic_tension(&version)?);
+            s.open(key, version, reader.semantic_tension_v1(&version)?);
         }
         Ok(s)
     }
@@ -64,10 +69,10 @@ impl SemanticState {
             s.settled.remove(key);
             s.close(key);
             if let Some(review) = ref_hash(reader, PAIR_REF, key, "verdict ref")? {
-                s.settle(*key, review, reader.review(&review)?)?;
+                s.settle(*key, review, reader.review_v1(&review)?)?;
             }
             if let Some(version) = ref_hash(reader, SEMANTIC_REF, key, "semantic tension ref")? {
-                s.open(*key, version, reader.semantic_tension(&version)?);
+                s.open(*key, version, reader.semantic_tension_v1(&version)?);
             }
         }
         Ok(s)
@@ -112,7 +117,7 @@ impl SemanticState {
     }
 
     /// The semantic tensions `item` takes part in, by the other item (see [`Partners`]).
-    pub fn partners(&self, item: &PairItem) -> Option<&Partners> {
+    pub fn partners(&self, item: &PairSide) -> Option<&Partners> {
         self.by_item.get(item)
     }
 
@@ -126,17 +131,25 @@ impl SemanticState {
         self.blocks.keys()
     }
 
+    /// The keys of the semantic tensions whose two sides are both cited, in key order.
+    pub fn foreign_only(&self) -> impl Iterator<Item = &Hash> {
+        self.foreign_only.iter()
+    }
+
     /// Whether any semantic tension exists.
     pub fn has_tensions(&self) -> bool {
         !self.tensions.is_empty()
     }
 
-    fn settle(&mut self, key: Hash, review: Hash, r: Review) -> Result<(), RdyError> {
-        let ReviewSubject::Pair { items, .. } = r.subject else {
-            return Err(StoreError::Decode(format!(
-                "verdict ref {PAIR_REF}{key} names review {review}, which is not a review of a pair"
-            ))
-            .into());
+    fn settle(&mut self, key: Hash, review: Hash, r: ReviewV1) -> Result<(), RdyError> {
+        let items = match r.subject {
+            ReviewSubjectV1::Pair { items, .. } => items,
+            _ => {
+                return Err(StoreError::Decode(format!(
+                    "verdict ref {PAIR_REF}{key} names review {review}, which is not a review of a pair"
+                ))
+                .into());
+            }
         };
         self.settled.insert(
             key,
@@ -150,19 +163,22 @@ impl SemanticState {
         Ok(())
     }
 
-    fn open(&mut self, key: Hash, version: Hash, record: SemanticTension) {
+    fn open(&mut self, key: Hash, version: Hash, record: SemanticTensionV1) {
         if let [a, b] = record.items.as_slice() {
             for (x, y) in [(a, b), (b, a)] {
                 self.by_item
                     .entry(x.clone())
                     .or_default()
-                    .entry(y.block.clone())
+                    .entry(y.target())
                     .or_default()
-                    .insert(y.content, key);
+                    .insert(y.content(), key);
             }
         }
-        for item in &record.items {
+        for item in record.items.iter().filter_map(PairSide::local) {
             *self.blocks.entry(item.block.clone()).or_default() += 1;
+        }
+        if record.items.iter().all(|i| i.local().is_none()) {
+            self.foreign_only.insert(key);
         }
         self.tensions
             .insert(key, Arc::new(OpenTension { version, record }));
@@ -178,10 +194,10 @@ impl SemanticState {
                 let Some(partners) = self.by_item.get_mut(x) else {
                     continue;
                 };
-                if let Some(by_content) = partners.get_mut(&y.block) {
-                    by_content.remove(&y.content);
+                if let Some(by_content) = partners.get_mut(&y.target()) {
+                    by_content.remove(&y.content());
                     if by_content.is_empty() {
-                        partners.remove(&y.block);
+                        partners.remove(&y.target());
                     }
                 }
                 if partners.is_empty() {
@@ -189,7 +205,8 @@ impl SemanticState {
                 }
             }
         }
-        for item in &old.record.items {
+        self.foreign_only.remove(key);
+        for item in old.record.items.iter().filter_map(PairSide::local) {
             if let Some(n) = self.blocks.get_mut(&item.block) {
                 *n -= 1;
                 if *n == 0 {
@@ -222,7 +239,7 @@ fn ref_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdy_model::{Provenance, Role};
+    use rdy_model::{PairItem, Provenance, Role, SemanticTension};
 
     fn settled() -> Arc<Settled> {
         Arc::new(Settled {
@@ -233,8 +250,8 @@ mod tests {
         })
     }
 
-    fn tension(key: Hash, a: &BlockId, b: &BlockId) -> SemanticTension {
-        SemanticTension {
+    fn tension(key: Hash, a: &BlockId, b: &BlockId) -> SemanticTensionV1 {
+        SemanticTensionV1::of(&SemanticTension {
             key,
             items: vec![
                 PairItem {
@@ -258,7 +275,7 @@ mod tests {
                 role: Role::Reviewer,
                 at_ms: 1,
             },
-        }
+        })
     }
 
     /// guard: a prefix is 6 to 64 lowercase hex digits and matches only the keys it starts.
@@ -291,18 +308,27 @@ mod tests {
             BlockId::new("blk"),
         );
         let key = Hash([7; 32]);
-        let item = |b: &BlockId, n: u8| PairItem {
-            block: b.clone(),
-            content: Hash([n; 32]),
+        let item = |b: &BlockId, n: u8| {
+            PairSide::Local(PairItem {
+                block: b.clone(),
+                content: Hash([n; 32]),
+            })
         };
+        let at = |b: &BlockId| PairTarget::Local(b.clone());
         let mut s = SemanticState::default();
         s.open(key, Hash([8; 32]), tension(key, &a, &b));
-        assert_eq!(s.partners(&item(&b, 3)).unwrap()[&a][&Hash([2; 32])], key);
+        assert_eq!(
+            s.partners(&item(&b, 3)).unwrap()[&at(&a)][&Hash([2; 32])],
+            key
+        );
         assert!(s.has_block(&b));
         s.close(&key);
         s.open(key, Hash([9; 32]), tension(key, &a, &c));
         assert!(s.partners(&item(&b, 3)).is_none() && !s.has_block(&b));
-        assert_eq!(s.partners(&item(&a, 2)).unwrap()[&c][&Hash([3; 32])], key);
+        assert_eq!(
+            s.partners(&item(&a, 2)).unwrap()[&at(&c)][&Hash([3; 32])],
+            key
+        );
         assert_eq!(s.blocks().count(), 2);
         s.close(&key);
         assert!(!s.has_tensions() && s.by_item.is_empty() && s.blocks.is_empty());

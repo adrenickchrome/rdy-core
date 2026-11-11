@@ -5,17 +5,26 @@ use crate::tensions::index::{
 };
 use crate::tensions::{DetectScope, SideRef};
 use crate::{E_LIMIT, Materialized, RdyError, ReadState, Scope};
-use rdy_graph::{EdgeKind, Graph, edges_of};
-use rdy_model::{Block, BlockId, FieldValue, Hash, PairItem, decision, pair_key};
+use rdy_graph::foreign::foreign_edges_of;
+use rdy_graph::{EdgeKind, Graph, SUSPECT_LINKS, edges_of};
+use rdy_model::foreign::{ForeignId, ForeignSet};
+use rdy_model::semantic::ForeignPairItem;
+use rdy_model::{
+    Block, BlockId, FieldValue, Hash, PairItem, PairSide, decision, pair_key, pair_key_sides,
+};
 use rdy_schema::Pack;
+use rdy_schema::instruction::INSTRUCTION;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
 /// The most requests one change makes.
 pub const MAX_CANDIDATES: usize = 20;
+/// The most cited instructions the team phase of the queue reads (a fixed judgement: the team
+/// pairs are a few, and a larger delivery is read in id order up to it).
+const MAX_TEAM_MEMBERS: usize = 1_000;
 /// The most live in-flight writes one cross-view context indexes (nb5, Review I2).
 const MAX_CROSS_VIEW_WRITES: usize = 100_000;
 /// The most candidate incidences one change's cross-view phase examines.
@@ -58,6 +67,9 @@ pub enum Rule {
     Section,
     /// Both blocks are in one area.
     Area,
+    /// Both blocks are cited instructions delivered by two different team sets. It names a pair
+    /// of two cited sides only; it is never one of [`Rule::ALL`].
+    Team,
 }
 
 impl Rule {
@@ -69,6 +81,7 @@ impl Rule {
             Rule::Entity => "entity",
             Rule::Section => "section",
             Rule::Area => "area",
+            Rule::Team => "team",
         }
     }
 }
@@ -82,13 +95,39 @@ pub struct Item {
     pub content: Hash,
 }
 
-/// One pair a change asks a reviewer to judge. `items` are sorted by block.
+impl Item {
+    /// The side this item is in a stored pair: a local block at its content, or a cited block
+    /// (a [`SideRef::Foreign`] item) at the delivered content identity, never its version hash.
+    pub fn pair_side(&self) -> PairSide {
+        match &self.side {
+            SideRef::Foreign { repo, .. } => PairSide::Foreign(ForeignPairItem {
+                target: ForeignId::new(*repo, self.block.clone()),
+                content: self.content,
+            }),
+            _ => PairSide::Local(PairItem {
+                block: self.block.clone(),
+                content: self.content,
+            }),
+        }
+    }
+}
+
+/// The key of the pair `items` form: [`pair_key`] when every item is local, so every released
+/// local key stays, else [`pair_key_sides`] with the cited repo in it.
+pub fn items_key(items: &[Item]) -> Hash {
+    pair_key_sides(&items.iter().map(Item::pair_side).collect::<Vec<_>>())
+}
+
+/// One pair a change asks a reviewer to judge. `items` are sorted by block; a pair with a cited
+/// block lists the local item first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub key: Hash,
     pub items: Vec<Item>,
     pub rule: Rule,
-    pub change: Hash,
+    /// The change that makes the request; `None` for a pair of two cited sides, which no change
+    /// writes.
+    pub change: Option<Hash>,
 }
 
 /// The label of a request: `rq-` and the first 12 hex digits of its key.
@@ -134,6 +173,150 @@ impl ReadState {
         pair_now_in(&cx, &SideScopes::default(), pair)
     }
 
+    /// [`Self::pair_now`] for a pair of any sides (repo links). A pair of local sides is
+    /// `pair_now`'s. A pair of a local block and a cited block is anchored on a live in-flight
+    /// write of the local block at its content (the first by change id) and the cited block's
+    /// current delivered version when it holds the judged content; the items list the local one
+    /// first. `None` when no write holds the content, the cited block moved, was redacted or
+    /// left every live source. A pair of two cited sides is a team pair ([`Rule::Team`]): two
+    /// cited instructions that two different team sets deliver, each at its judged content; it
+    /// has no change side, and its items are sorted as the sides sort.
+    pub fn pair_now_sides(&self, pair: &[PairSide]) -> Result<Option<Vec<Item>>, RdyError> {
+        let [x, y] = pair else {
+            return Ok(None);
+        };
+        let (local, cited) = match (x, y) {
+            (PairSide::Local(a), PairSide::Local(b)) => {
+                return self
+                    .pair_now(&[(a.block.clone(), a.content), (b.block.clone(), b.content)]);
+            }
+            (PairSide::Local(l), PairSide::Foreign(f))
+            | (PairSide::Foreign(f), PairSide::Local(l)) => (l, f),
+            (PairSide::Foreign(a), PairSide::Foreign(b)) => return self.team_pair_now(a, b),
+        };
+        let set = self.tensions()?;
+        let cx = DetectCx::new(
+            self,
+            set.writes(),
+            canon_index_of(self)?,
+            DetectScope::Inflight,
+        );
+        let mut on = writes_at(&cx, &local.block, local.content);
+        on.sort_by_key(|w| w.change);
+        let Some(mine) = on.iter().find_map(|w| write_item(w, local.content)) else {
+            return Ok(None);
+        };
+        let Some((theirs, _)) = cited_item(self, &cited.target)? else {
+            return Ok(None);
+        };
+        if theirs.content != cited.content {
+            return Ok(None);
+        }
+        Ok(Some(vec![mine, theirs]))
+    }
+
+    /// The items of the team pair of two cited sides, when both are current: each cited
+    /// instruction at its judged content, delivered by two different team sets.
+    fn team_pair_now(
+        &self,
+        x: &ForeignPairItem,
+        y: &ForeignPairItem,
+    ) -> Result<Option<Vec<Item>>, RdyError> {
+        if x.target == y.target || !team_pair(self, &x.target, &y.target)? {
+            return Ok(None);
+        }
+        let (Some((a, ba)), Some((b, bb))) =
+            (cited_item(self, &x.target)?, cited_item(self, &y.target)?)
+        else {
+            return Ok(None);
+        };
+        if a.content != x.content
+            || b.content != y.content
+            || ba.block_type != INSTRUCTION
+            || bb.block_type != INSTRUCTION
+        {
+            return Ok(None);
+        }
+        let mut items = vec![a, b];
+        items.sort_by_key(Item::pair_side);
+        Ok(Some(items))
+    }
+
+    /// The requests of the team pairs: two cited instructions that two different team sets
+    /// deliver, in no change. Pairs with the same normalized text come first, then the rest, by
+    /// the order of the sides; at most [`MAX_CANDIDATES`] unsettled pairs, each once (a settled
+    /// pair is left out before the limit counts, so it never hides a later pair). Reads at most
+    /// [`MAX_TEAM_MEMBERS`] cited instructions.
+    pub(super) fn team_requests(&self) -> Result<Vec<Request>, RdyError> {
+        let foreign = self.foreign()?;
+        let mut teams: BTreeMap<ForeignId, BTreeSet<String>> = BTreeMap::new();
+        for (_, view) in foreign.sources() {
+            let Some(ForeignSet::Team(team)) = &view.set else {
+                continue;
+            };
+            if view.revoked {
+                continue;
+            }
+            for id in view.members.keys() {
+                teams
+                    .entry(ForeignId::new(view.repo, id.clone()))
+                    .or_default()
+                    .insert(team.clone());
+            }
+        }
+        if teams.len() < 2 {
+            return Ok(vec![]);
+        }
+        let set = self.tensions()?;
+        let cx = DetectCx::new(
+            self,
+            set.writes(),
+            canon_index_of(self)?,
+            DetectScope::Inflight,
+        );
+        let mut cited: Vec<(BTreeSet<String>, Item, Option<Hash>)> = vec![];
+        for (target, of) in teams.into_iter().take(MAX_TEAM_MEMBERS) {
+            let Some((item, block)) = cited_item(self, &target)? else {
+                continue;
+            };
+            if block.block_type == INSTRUCTION {
+                cited.push((of, item, cx.text_key(&block)));
+            }
+        }
+        let differ =
+            |a: &BTreeSet<String>, b: &BTreeSet<String>| a.iter().any(|x| b.iter().any(|y| x != y));
+        let semantic = self.semantic();
+        let mut out: Vec<Request> = vec![];
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        for same_text in [true, false] {
+            'pairs: for (i, a) in cited.iter().enumerate() {
+                for b in &cited[i + 1..] {
+                    if out.len() >= MAX_CANDIDATES {
+                        break 'pairs;
+                    }
+                    let same = a.2.is_some() && a.2 == b.2;
+                    if same != same_text || !differ(&a.0, &b.0) {
+                        continue;
+                    }
+                    let mut items = vec![a.1.clone(), b.1.clone()];
+                    items.sort_by_key(Item::pair_side);
+                    let key = items_key(&items);
+                    // a settled pair takes no place: else the first pairs, once judged, would
+                    // hold the limit and hide the rest for good
+                    if semantic.settled(&key).is_none() && seen.insert(key) {
+                        out.push(Request {
+                            key,
+                            items,
+                            rule: Rule::Team,
+                            change: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The canon items of `pair` when canon holds both blocks at those contents, whatever an open
     /// view writes to them. A check's case reads one state, so another view's edit of a block
     /// does not take a canon pair away; [`Self::pair_now`] keeps its rule for derived requests.
@@ -174,6 +357,9 @@ impl ReadState {
         let [ia, ib] = items else {
             return Ok(None);
         };
+        if ia.side.is_foreign() || ib.side.is_foreign() {
+            return self.foreign_pair_rule(ia, ib);
+        }
         if ia.block == ib.block {
             return Ok(None);
         }
@@ -204,6 +390,45 @@ impl ReadState {
             }
         }
         Ok(None)
+    }
+
+    /// The rule that holds between a local item and a cited item: `Premise` when the local
+    /// block, at its item's version in the change that wrote it, points at the cited block
+    /// (a reference or a suspect link other than `reflects`); `None` otherwise. Two cited
+    /// items have no rule.
+    fn foreign_pair_rule(&self, ia: &Item, ib: &Item) -> Result<Option<Rule>, RdyError> {
+        if let (SideRef::Foreign { repo: ra, .. }, SideRef::Foreign { repo: rb, .. }) =
+            (&ia.side, &ib.side)
+        {
+            let (a, b) = (
+                ForeignId::new(*ra, ia.block.clone()),
+                ForeignId::new(*rb, ib.block.clone()),
+            );
+            return Ok(team_pair(self, &a, &b)?.then_some(Rule::Team));
+        }
+        let (local, cited) = match (ia.side.is_foreign(), ib.side.is_foreign()) {
+            (false, true) => (ia, ib),
+            (true, false) => (ib, ia),
+            _ => return Ok(None),
+        };
+        let SideRef::Foreign { repo, .. } = &cited.side else {
+            return Ok(None);
+        };
+        let target = ForeignId::new(*repo, cited.block.clone());
+        let set = self.tensions()?;
+        let cx = DetectCx::new(
+            self,
+            set.writes(),
+            canon_index_of(self)?,
+            DetectScope::Inflight,
+        );
+        let Some((block, _)) = item_block(&cx, local)? else {
+            return Ok(None);
+        };
+        Ok(foreign_edges_of(&block)
+            .iter()
+            .any(|e| e.to == target && foreign_premise(&e.kind))
+            .then_some(Rule::Premise))
     }
 
     /// The requests change `change` makes, in order: the pairs of each block it writes, by rule
@@ -270,6 +495,7 @@ impl ReadState {
                     Rule::Entity => b.entity(s)?,
                     Rule::Section => b.section(s)?,
                     Rule::Area => b.area(s)?,
+                    Rule::Team => {}
                 }
             }
         }
@@ -282,6 +508,7 @@ impl ReadState {
         } else {
             0
         };
+        b.across(&subjects)?;
         let out = b.out;
         #[cfg(test)]
         {
@@ -501,6 +728,7 @@ fn exact_holds(
             let aa = st.areas_in(&at.m, a);
             st.areas_in(&bt.m, b).iter().any(|x| aa.contains(x))
         }
+        Rule::Team => false,
     })
 }
 
@@ -533,7 +761,8 @@ fn item_block(cx: &DetectCx<'_>, item: &Item) -> Result<Option<ItemBlock>, RdyEr
                 .flatten()
                 .map(|b| (Arc::new(b), None))
         }
-        SideRef::Intent { .. } => None,
+        // a cited block's semantic pair is not read here
+        SideRef::Intent { .. } | SideRef::Foreign { .. } => None,
     })
 }
 
@@ -717,6 +946,72 @@ fn has_cross_change(writes: &Writes, change: &Hash) -> bool {
         .any(|g| g.id != *change && !g.views.iter().any(|v| f.views.contains(v)))
 }
 
+/// Whether a link of kind `kind` from a local block to a cited block is a premise: a reference,
+/// or a suspect link other than `reflects` (the rule the five triggers read across projects).
+fn foreign_premise(kind: &EdgeKind) -> bool {
+    match kind {
+        EdgeKind::References => true,
+        EdgeKind::Link(n) => n != "reflects" && SUSPECT_LINKS.contains(&n.as_str()),
+        EdgeKind::Contains => false,
+    }
+}
+
+/// A cited block at its current delivered version, as a pair item with the block it names: the
+/// version the current view of its repo holds. `None` when no live source holds the block, the
+/// version is redacted, or the delivered facts say it is deprecated, superseded or revoked
+/// (a deprecated block never takes part).
+fn cited_item(st: &ReadState, target: &ForeignId) -> Result<Option<(Item, Arc<Block>)>, RdyError> {
+    let Some(held) = st.foreign()?.current_version(target).cloned() else {
+        return Ok(None);
+    };
+    let v = &held.version;
+    let d = &v.derived;
+    if d.lifecycle.as_deref() == Some("deprecated")
+        || matches!(d.status.as_deref(), Some("superseded" | "revoked"))
+        || !d.superseded_by.is_empty()
+    {
+        return Ok(None);
+    }
+    let block = st.reader().get_block(&v.version)?;
+    if block.is_redacted() || block.id != v.id || !takes_part(st.pack(), &block) {
+        return Ok(None);
+    }
+    let item = Item {
+        block: target.id.clone(),
+        side: SideRef::Foreign {
+            repo: target.repo,
+            entry: held.entry,
+        },
+        version: v.version,
+        content: v.content,
+    };
+    Ok(Some((item, Arc::new(block))))
+}
+
+/// The teams of the live team-set sources that hold `target` as a member.
+fn teams_of(st: &ReadState, target: &ForeignId) -> Result<BTreeSet<String>, RdyError> {
+    let mut out = BTreeSet::new();
+    for (_, view) in st.foreign()?.sources() {
+        if let Some(ForeignSet::Team(team)) = &view.set
+            && !view.revoked
+            && view.repo == target.repo
+            && view.members.contains_key(&target.id)
+        {
+            out.insert(team.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether two different cited blocks are held by two different team sets.
+fn team_pair(st: &ReadState, a: &ForeignId, b: &ForeignId) -> Result<bool, RdyError> {
+    if a == b {
+        return Ok(false);
+    }
+    let (ta, tb) = (teams_of(st, a)?, teams_of(st, b)?);
+    Ok(ta.iter().any(|x| tb.iter().any(|y| x != y)))
+}
+
 /// The pair key of two blocks at two contents.
 fn key_of(pair: &[(BlockId, Hash); 2]) -> Hash {
     pair_key(
@@ -892,6 +1187,7 @@ impl<'a> Ctx<'a> {
                 let aa = self.areas(a);
                 self.areas(b).iter().any(|x| aa.contains(x))
             }
+            Rule::Team => false,
         }
     }
 
@@ -1003,22 +1299,65 @@ impl Builder<'_, '_> {
         if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
             return Ok(());
         }
-        let key = pair_key(
-            &items
-                .iter()
-                .map(|i| PairItem {
-                    block: i.block.clone(),
-                    content: i.content,
-                })
-                .collect::<Vec<_>>(),
-        );
+        let key = items_key(&items);
         self.seen.insert(ends(&s.block.id, x));
         self.out.push(Request {
             key,
             items,
             rule,
-            change: self.change,
+            change: Some(self.change),
         });
+        Ok(())
+    }
+
+    /// Phase 3 (repo links): the pairs of each subject with the cited blocks it points at (a
+    /// reference or a suspect link other than `reflects`, the `premise` rule), each at its
+    /// current delivered version, while there is room. Each subject's targets go in edge order,
+    /// each once. A pair key counts once over all phases. Nothing is read when no source
+    /// delivered.
+    fn across(&mut self, subjects: &[Subject]) -> Result<(), RdyError> {
+        let cx = &self.ctx.cx;
+        if cx.st.foreign()?.is_empty() {
+            return Ok(());
+        }
+        let mut keys: BTreeSet<Hash> = self.out.iter().map(|q| q.key).collect();
+        for s in subjects {
+            let mut targets: BTreeSet<ForeignId> = BTreeSet::new();
+            for e in foreign_edges_of(&s.block) {
+                if self.full() {
+                    return Ok(());
+                }
+                if !foreign_premise(&e.kind) || !targets.insert(e.to.clone()) {
+                    continue;
+                }
+                let Some((theirs, _)) = cited_item(cx.st, &e.to)? else {
+                    continue;
+                };
+                let sides = [
+                    PairSide::Local(PairItem {
+                        block: s.block.id.clone(),
+                        content: s.content,
+                    }),
+                    theirs.pair_side(),
+                ];
+                let Some(items) = cx.st.pair_now_sides(&sides)? else {
+                    continue;
+                };
+                if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+                    continue;
+                }
+                let key = items_key(&items);
+                if !keys.insert(key) {
+                    continue;
+                }
+                self.out.push(Request {
+                    key,
+                    items,
+                    rule: Rule::Premise,
+                    change: Some(self.change),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1102,7 +1441,7 @@ impl Builder<'_, '_> {
                             }
                         }
                     }
-                    Rule::Section | Rule::Area => {}
+                    Rule::Section | Rule::Area | Rule::Team => {}
                 }
                 let home = mine.at.m.doc_of(&s.block.id).map(|d| d.id.clone());
                 let mut ranked = vec![];
@@ -1157,7 +1496,7 @@ impl Builder<'_, '_> {
                         key,
                         items,
                         rule,
-                        change: self.change,
+                        change: Some(self.change),
                     });
                 }
             }

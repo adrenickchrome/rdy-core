@@ -16,6 +16,7 @@ use crate::error::*;
 use crate::keys::Keys;
 use crate::materialize::Materialized;
 use rdy_model::decision::DECISION;
+use rdy_model::reference::{ForeignRef, foreign_ref, foreign_token};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
 use rdy_schema::publication::Audience;
 use std::collections::{BTreeMap, BTreeSet};
@@ -330,6 +331,16 @@ fn walk_block<V: Visit>(v: &mut V, b: &Block) -> Result<(), RdyError> {
             })?;
         }
     }
+    // repo links: the cited blocks a kind links to, after its local targets
+    for (kind, links) in &b.foreign.links {
+        let local = b.links.get(kind).map_or(0, Vec::len);
+        for (i, l) in links.iter().enumerate() {
+            let token = foreign_token(&l.target.repo, &l.target.id);
+            v.occur(b, &token, true, &|| {
+                format!("/links/{}/{}", escape(kind), local + i)
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -377,6 +388,11 @@ impl Scan<'_> {
     fn classify(&mut self, token: &str) -> Option<Classification> {
         if let Ok(id) = BlockId::parse(token) {
             return self.by_id(&id);
+        }
+        // repo links: a cited block lives in the foreign log, outside every selection. Its
+        // delivered body is never part of a publication, so its reference is excluded.
+        if matches!(foreign_ref(token), Some(ForeignRef::Stored { .. })) {
+            return Some(Classification::Excluded);
         }
         if key::problem(token).is_some() {
             return Some(Classification::Missing);

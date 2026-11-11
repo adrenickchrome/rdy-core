@@ -10,7 +10,8 @@
 //! suspects, coverage, confidence, reach, card, scope, issues. For each list it checks the size
 //! limit, then the sort order and distinctness, then each row's fields in their declared order.
 
-use crate::{BlockId, Hash};
+use crate::foreign::ForeignId;
+use crate::{BlockId, Hash, RepoId};
 use serde::{Deserialize, Serialize};
 
 /// The most rows any stored list holds.
@@ -169,6 +170,9 @@ pub enum AssessmentExceptionKind {
     NotRecommended,
     BlockingTension,
     ReaffirmOneWay,
+    /// A decision departs from a cited or external block (repo links, D-8VJAZ). Only ASSESSMENT
+    /// encoding 2 ([`AssessmentV2`]) holds it: encoding 1, the released layout, has six kinds.
+    Deviation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +459,13 @@ impl AssessedPolicy {
 }
 
 impl AssessmentFacts {
+    /// Whether an exception row is a deviation: a shape only ASSESSMENT encoding 2 holds.
+    pub fn has_deviation(&self) -> bool {
+        self.exceptions
+            .iter()
+            .any(|e| e.kind == AssessmentExceptionKind::Deviation)
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         let plan = &self.plan;
         if plan.by_kind.len() > MAX_ROWS {
@@ -489,6 +500,13 @@ impl AssessmentFacts {
 }
 
 impl Assessment {
+    /// Whether the record holds a shape the released layout (encoding 1) has no form for: a
+    /// deviation exception (repo links, D-8VJAZ). Such a record is written in encoding 2, with an
+    /// empty foreign part when it has none.
+    pub fn has_foreign_shape(&self) -> bool {
+        self.facts.has_deviation()
+    }
+
     /// Checks the structure of a decoded snapshot. It never normalizes the record.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.method == 0 {
@@ -558,5 +576,181 @@ impl Assessment {
         }
         let corpus = &self.coverage.corpus;
         scores_valid(&[&corpus.before, &corpus.after])
+    }
+}
+
+/// One cited block a version's reach pins, with the held BLOCK version the pin resolved to when
+/// the version was assessed (repo links). Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeignReach {
+    pub target: ForeignId,
+    pub version: Hash,
+}
+
+/// One foreign side of a tension in a version's reach: the tension and the side's cited repo
+/// and FOREIGN entry (`SideRef::Foreign {repo, entry}`, D-Y49PX). Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeignTension {
+    pub tension: Hash,
+    #[serde(with = "crate::foreign::hex_repo")]
+    pub repo: RepoId,
+    pub entry: Hash,
+}
+
+/// One cited block of a version's foreign reach with the FOREIGN entry that delivered the
+/// version the current delivered view held of it when the version was assessed (repo links,
+/// D-Y49PX "Freshness"). A cited block that no live source selected then has no row. Field order
+/// is format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeignDelivered {
+    pub target: ForeignId,
+    pub entry: Hash,
+}
+
+/// What an assessment records across a repo link: the foreign reach, the foreign tension
+/// evidence, and the delivery in force for each cited block of the reach, which freshness
+/// compares (D-Y49PX). Field order is format.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentForeign {
+    pub reach: Vec<AssessmentForeignReach>,
+    pub tensions: Vec<AssessmentForeignTension>,
+    pub delivered: Vec<AssessmentForeignDelivered>,
+}
+
+impl AssessmentForeign {
+    /// No foreign reach, no foreign tension and no delivery row: the part of every local
+    /// assessment.
+    pub fn is_empty(&self) -> bool {
+        self.reach.is_empty() && self.tensions.is_empty() && self.delivered.is_empty()
+    }
+
+    /// Checks the structure of a decoded foreign part: each list is within [`MAX_ROWS`], sorted
+    /// and distinct. A delivery row names a cited block of the reach, one row per block. It
+    /// never normalizes the record.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.reach.len() > MAX_ROWS
+            || self.tensions.len() > MAX_ROWS
+            || self.delivered.len() > MAX_ROWS
+        {
+            return Err(LIMIT);
+        }
+        if !strictly_increasing(&self.reach, |r| r)
+            || !strictly_increasing(&self.tensions, |t| t)
+            || !strictly_increasing(&self.delivered, |d| &d.target)
+        {
+            return Err(ORDER);
+        }
+        // the reach rises by target first, so a target's rows are found by bisection
+        let in_reach = |t: &ForeignId| {
+            let at = self.reach.partition_point(|r| r.target < *t);
+            self.reach.get(at).is_some_and(|r| r.target == *t)
+        };
+        if self.delivered.iter().any(|d| !in_reach(&d.target)) {
+            return Err(SCOPE);
+        }
+        Ok(())
+    }
+}
+
+/// An assessment in ASSESSMENT encoding 2 ([`crate::encoding::ASSESSMENT_FOREIGN_ENCODING`], repo
+/// links): the fields of [`Assessment`] in their order, then its foreign part. An ASSESSMENT takes
+/// it only when the foreign part is not empty or an exception row is a deviation; encoding 1
+/// stays the local layout, with its six exception kinds. The engine builds it
+/// (`readiness::assessment::assess_wire`). Field order is format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentV2 {
+    pub proposal: Hash,
+    pub base: Option<Hash>,
+    pub method: u32,
+    pub pack: AssessmentPack,
+    pub config: Hash,
+    pub policy: Option<AssessedPolicy>,
+    pub facts: AssessmentFacts,
+    pub tensions: Vec<AssessmentTension>,
+    pub tensions_omitted: u64,
+    pub suspects: Vec<AssessmentSuspect>,
+    pub suspects_omitted: u64,
+    pub coverage: AssessmentCoverage,
+    pub confidence: AssessmentConfidence,
+    pub reach: Vec<BlockId>,
+    pub card: AssessmentCard,
+    pub scope: AssessmentScope,
+    pub issues: Vec<AssessmentIssue>,
+    pub foreign: AssessmentForeign,
+}
+
+impl AssessmentV2 {
+    /// The layout of `a`, with an empty foreign part.
+    pub fn of(a: &Assessment) -> AssessmentV2 {
+        AssessmentV2 {
+            proposal: a.proposal,
+            base: a.base,
+            method: a.method,
+            pack: a.pack.clone(),
+            config: a.config,
+            policy: a.policy.clone(),
+            facts: a.facts.clone(),
+            tensions: a.tensions.clone(),
+            tensions_omitted: a.tensions_omitted,
+            suspects: a.suspects.clone(),
+            suspects_omitted: a.suspects_omitted,
+            coverage: a.coverage.clone(),
+            confidence: a.confidence.clone(),
+            reach: a.reach.clone(),
+            card: a.card.clone(),
+            scope: a.scope.clone(),
+            issues: a.issues.clone(),
+            foreign: AssessmentForeign::default(),
+        }
+    }
+
+    /// Whether the record takes encoding 2: its foreign part is not empty, or an exception row
+    /// is a deviation ([`Assessment::has_foreign_shape`]).
+    pub fn has_foreign(&self) -> bool {
+        !self.foreign.is_empty() || self.facts.has_deviation()
+    }
+
+    /// The runtime assessment, when the foreign part is empty. A deviation row stays: the
+    /// runtime record holds it, and writes it in encoding 2.
+    pub fn into_local(self) -> Option<Assessment> {
+        if !self.foreign.is_empty() {
+            return None;
+        }
+        Some(self.local())
+    }
+
+    /// The local part: the fields of [`Assessment`], whatever the foreign part holds.
+    pub fn local(&self) -> Assessment {
+        Assessment {
+            proposal: self.proposal,
+            base: self.base,
+            method: self.method,
+            pack: self.pack.clone(),
+            config: self.config,
+            policy: self.policy.clone(),
+            facts: self.facts.clone(),
+            tensions: self.tensions.clone(),
+            tensions_omitted: self.tensions_omitted,
+            suspects: self.suspects.clone(),
+            suspects_omitted: self.suspects_omitted,
+            coverage: self.coverage.clone(),
+            confidence: self.confidence.clone(),
+            reach: self.reach.clone(),
+            card: self.card.clone(),
+            scope: self.scope.clone(),
+            issues: self.issues.clone(),
+        }
+    }
+
+    /// Checks the structure of a decoded record: the local part as [`Assessment::validate`]
+    /// does, then the foreign part.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.local().validate()?;
+        self.foreign.validate()
     }
 }

@@ -11,7 +11,7 @@ use crate::redaction_io::{RedactionCounts, VerifyReport};
 use crate::segment::{
     CrashPoint, HEADER, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
 };
-use crate::transition::Transitions;
+use crate::transition::{Transitions, TransitionsV1};
 use crate::view::ViewOp;
 use rdy_model::{
     Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, RepoId, StateSnapshot, Tracking,
@@ -686,7 +686,8 @@ pub(crate) fn assessment_entry(
     at: Location,
     o: &crate::codec::ObjectBytes<'_>,
 ) -> Result<IndexEntry, StoreError> {
-    let a: rdy_model::assessment::Assessment = crate::codec::decode_bounded_split(o)
+    // the wire layout reads both encodings (repo links: a foreign part or a deviation row)
+    let a: rdy_model::assessment::AssessmentV2 = crate::codec::decode_bounded_split(o)
         .map_err(|e| crate::carried_records::refusal(&hash, kinds::ASSESSMENT, &e.to_string()))?;
     Ok(IndexEntry::AssessmentProposal {
         proposal: a.proposal,
@@ -792,10 +793,16 @@ fn frame_entries(
                 signature: hash,
             });
         }
-        kinds::REDACTION => out.push(crate::redaction::request_entry(hash, payload)?),
+        kinds::REDACTION => {
+            // a request of any encoding: a cited version target has its own
+            let r: rdy_model::Redaction = crate::codec::decode_split(&o)?;
+            out.push(crate::redaction::request_entry_of(hash, &r));
+        }
         kinds::REDACTION_APPLY => out.push(crate::redaction::apply_entry(hash, loc, payload)?),
         kinds::TRANSITION => {
-            let rec: Transitions = decode(payload)?;
+            // through the codec's wire type, which reads every encoding: a delivered move or a
+            // cited target takes encoding 1 (`crate::codec`)
+            let rec: TransitionsV1 = crate::codec::decode_split(&o)?;
             out.extend(
                 rec.resolved
                     .iter()
@@ -1156,14 +1163,22 @@ fn replay_into(
                     .ok_or_else(|| StoreError::corrupt_at(loc))?,
             ],
             // a request's spans are the log's own: a holder's come from its approvals
-            Some(payload) if v.kind == kinds::REDACTION => vec![
+            // (a request of any encoding: a cited version target has its own)
+            Some(payload) if crate::codec::logical_kind(v.kind) == kinds::REDACTION => vec![
                 IndexEntry::Object {
-                    kind: v.kind,
+                    kind: kinds::REDACTION,
                     hash: v.hash,
                     loc,
                 },
-                auth.request_entry(v.hash, payload)?,
+                auth.request_entry(v.kind, v.hash, payload)?,
             ],
+            // a foreign removal's proof record is an object only: never local history
+            Some(_) if auth.foreign.is_proof_record(v.kind, loc) => {
+                r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
+                auth.foreign
+                    .frame_entries(v.kind, v.hash, loc)
+                    .unwrap_or_default()
+            }
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload, &mut r)?,
             None => {
                 r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
@@ -2521,6 +2536,49 @@ impl Store {
         Ok(())
     }
 
+    /// [`Store::placed_entries`] for a batch that `auth` (its validated authorization) reads:
+    /// a request's entry is the one `auth` gives it, and a foreign removal's proof record is an
+    /// object only (`crate::foreign_removal`). A foreign removal whose request an earlier batch
+    /// stored (an earlier take of another request of the same landing gave it no objects) gets
+    /// that request's entry again from `auth`, before its apply, so the apply activates the
+    /// versions it erases.
+    fn placed_entries_under(
+        &self,
+        frames: &[(u8, Vec<u8>)],
+        placed: &[(Location, Hash)],
+        auth: &crate::redaction_io::Authorization,
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        let reader = self.reader();
+        let mut r = Resolver::new(&reader);
+        let mut out = vec![];
+        for ((kind, payload), (at, hash)) in frames.iter().zip(placed) {
+            if crate::codec::logical_kind(*kind) == kinds::REDACTION_APPLY
+                && let Some(request) = auth.foreign.request_of_apply(*at)
+                && !frames.iter().any(|(k, p)| {
+                    crate::codec::logical_kind(*k) == kinds::REDACTION && Hash::of(p) == request
+                })
+            {
+                let (raw, stored) = reader.get_kind_raw(kinds::REDACTION, &request)?;
+                out.push(auth.request_entry(raw, request, &stored)?);
+            }
+            if let Some(e) = auth.foreign.frame_entries(*kind, *hash, *at) {
+                r.note(crate::codec::logical_kind(*kind), *hash, *at)?;
+                out.extend(e);
+            } else if crate::codec::logical_kind(*kind) == kinds::REDACTION {
+                r.note(kinds::REDACTION, *hash, *at)?;
+                out.push(IndexEntry::Object {
+                    kind: kinds::REDACTION,
+                    hash: *hash,
+                    loc: *at,
+                });
+                out.push(auth.request_entry(*kind, *hash, payload)?);
+            } else {
+                out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
+            }
+        }
+        Ok(out)
+    }
+
     /// The index entries of `frames`, appended at `placed`, in order: each read against the
     /// store and the frames before it.
     fn placed_entries(
@@ -2874,6 +2932,23 @@ impl Store {
         items: Vec<(u8, Vec<u8>)>,
     ) -> Result<Vec<Hash>, StoreError> {
         self.write_checked(items, RefWrite::Public)
+    }
+
+    /// `write` as one sealed batch of its own, held batches on or off (the foreign log,
+    /// `crate::foreign`): a held batch that is open refuses it, and nothing is written.
+    pub(crate) fn write_sealed(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        if self.open.is_some() {
+            return Err(StoreError::Refused(
+                "a held batch is open: seal it before this write, which seals its own batch".into(),
+            ));
+        }
+        let held = std::mem::replace(&mut self.held, false);
+        let result = self.write(items);
+        self.held = held;
+        result
     }
 
     /// `write_guarded` with the ref rules `how` names.
@@ -3380,7 +3455,8 @@ impl Store {
     /// `inbox/` ref is refused: only `put_inbox` writes one, after its checks (plan M2e2). An
     /// `answer/` or `pending/` ref is refused: only `put_answer` writes one, with its answer
     /// (plan Decision intake). A `meta/` ref is refused: only the store writes one (plan Export
-    /// and clone, `crate::meta`).
+    /// and clone, `crate::meta`). A `foreign/` ref is refused: only `put_foreign` writes one,
+    /// with its entry (repo links, `crate::foreign`).
     ///
     /// The mode and holder ref rules (`crate::holder`) come before those refusals, so their exact
     /// errors are the same here as through `write` and the seals: `meta/store_mode` is `store
@@ -3446,6 +3522,14 @@ impl Store {
         {
             return Err(StoreError::Decode(format!(
                 "ref {name:?} is project metadata: only the store writes meta/ refs"
+            )));
+        }
+        if let Some((name, _)) = refs
+            .iter()
+            .find(|(name, _)| name.starts_with(crate::foreign::FOREIGN_REF_PREFIX))
+        {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is a foreign source: only put_foreign writes one, with its entry"
             )));
         }
         self.write(items)?;
@@ -3809,6 +3893,11 @@ impl StoreReader {
     /// was sealed after that state. An index lookup that reads no frame.
     pub fn has_kind_before(&self, kind: u8, h: &Hash, end: Location) -> Result<bool, StoreError> {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
+    }
+
+    /// The place in the log of the object of `kind` with hash `h`, from the index alone.
+    pub fn kind_location(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+        self.index().typed(kind, h)
     }
 
     /// Log frames read so far by `visit_carried`.
@@ -4765,7 +4854,7 @@ impl Store {
                 return Err(e.into());
             }
         };
-        let placed_entries = match self.placed_entries(&batch, &placed) {
+        let placed_entries = match self.placed_entries_under(&batch, &placed, &auth) {
             Ok(e) => e,
             Err(e) => {
                 self.roll_back(before);

@@ -68,7 +68,7 @@ const HEX32: &str = "0123456789abcdef0123456789abcdef";
 
 const ACTOR_FIX: &str =
     "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
-const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}";
 
 fn actor_ok(v: &str) {
     assert!(is_actor(v), "{v:?} should be an actor");

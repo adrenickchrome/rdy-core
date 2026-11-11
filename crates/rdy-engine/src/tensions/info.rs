@@ -87,11 +87,13 @@ impl InfoCache {
     }
 }
 
-/// Whether a tension is open or dismissed (by the review named).
+/// Whether a tension is open, dismissed (by the review named), or resolved by a live deviation
+/// (the deviating decision named; repo links, D-8VJAZ).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TensionStatus {
     Open,
     Dismissed(Hash),
+    Deviated(BlockId),
 }
 
 /// A tension as the surfaces list it.
@@ -106,7 +108,7 @@ pub struct TensionInfo {
     pub severity: TensionSeverity,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub overridden: bool,
-    /// `open` or `dismissed`.
+    /// `open`, `dismissed`, or `deviated: <decision>` (a live deviation resolves it).
     pub status: String,
     pub summary: String,
     pub sides: Vec<SideInfo>,
@@ -216,10 +218,14 @@ pub struct AcceptanceInfo {
 }
 
 impl ReadState {
-    /// Whether `t` is open or dismissed in this state. A dismissal binds to the vkey, which
-    /// covers the content and the severity: a dismissal made while `t` was advisory does not
-    /// hold once it is blocking.
+    /// Whether `t` is open, dismissed or deviated in this state. A live deviation that covers
+    /// `t` resolves it, whatever its dismissals (repo links, D-8VJAZ). A dismissal binds to the
+    /// vkey, which covers the content and the severity: a dismissal made while `t` was advisory
+    /// does not hold once it is blocking.
     pub fn tension_status(&self, t: &Tension) -> TensionStatus {
+        if let Some(d) = &t.deviated {
+            return TensionStatus::Deviated(d.clone());
+        }
         match self.dismissals.get(&t.vkey) {
             Some(review) => TensionStatus::Dismissed(*review),
             None => TensionStatus::Open,
@@ -260,8 +266,11 @@ impl ReadState {
     pub fn tension_info_bare(&self, t: &Tension) -> TensionInfo {
         BARE_ROWS.with(|c| c.set(c.get() + 1));
         let (status, dismissal) = match self.tension_status(t) {
-            TensionStatus::Open => ("open", None),
-            TensionStatus::Dismissed(review) => ("dismissed", self.dismissal_info(&review)),
+            TensionStatus::Open => ("open".to_string(), None),
+            TensionStatus::Dismissed(review) => {
+                ("dismissed".to_string(), self.dismissal_info(&review))
+            }
+            TensionStatus::Deviated(d) => (format!("deviated: {d}"), None),
         };
         TensionInfo {
             id: tension_label(&t.id),
@@ -269,7 +278,7 @@ impl ReadState {
             kind: t.kind,
             severity: t.severity,
             overridden: t.overridden,
-            status: status.to_string(),
+            status,
             summary: t.summary.clone(),
             sides: vec![],
             blocks: t.blocks().iter().map(ToString::to_string).collect(),
@@ -288,7 +297,7 @@ impl ReadState {
         let key = pair_of(t)?;
         let open = self.semantic().tension(&key)?;
         let rec = &open.record;
-        let r = self.reader().review(&rec.review).ok()?;
+        let r = self.reader().review_v1(&rec.review).ok()?;
         let accepted = rec.blocking.then(|| {
             let p = &rec.provenance;
             let relay = rec.relay.as_ref();
@@ -337,7 +346,7 @@ impl ReadState {
     fn side_info(&self, t: &Tension, side: &SideRef, cache: &mut InfoCache) -> SideInfo {
         let items: Vec<_> = t.involved.iter().filter(|i| i.side == *side).collect();
         let mut info = SideInfo {
-            side: side.label(),
+            side: self.side_label(side),
             change: None,
             landing: None,
             intent: None,
@@ -385,7 +394,25 @@ impl ReadState {
                     (info.actor, info.run) = (Some(it.actor), it.run);
                 }
             }
+            // a cited block's side: delivery provenance, no local actor, view or landing
+            SideRef::Foreign { .. } => {}
         }
         info
+    }
+
+    /// How a surface shows `side`: its [`SideRef::label`], except a foreign side, shown
+    /// `foreign:<alias>@<12 hex of the entry>` with the cited repo's first live alias in sorted
+    /// order (else its first 12 hex digits; repo links, D-Y49PX).
+    pub fn side_label(&self, side: &SideRef) -> String {
+        match side {
+            SideRef::Foreign { repo, entry } => {
+                let shown = match self.materialized(&crate::Scope::Canon) {
+                    Ok(m) => crate::foreign_refs::RepoLinks::of_view(&m).shown(repo),
+                    Err(_) => repo.to_string()[..12].to_string(),
+                };
+                format!("foreign:{shown}@{}", entry.short())
+            }
+            _ => side.label(),
+        }
     }
 }

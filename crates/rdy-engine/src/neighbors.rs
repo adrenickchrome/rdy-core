@@ -466,6 +466,7 @@ mod tests {
             body: body.to_string(),
             links: Default::default(),
             pins: Default::default(),
+            foreign: Default::default(),
             read_identity: None,
         }
     }

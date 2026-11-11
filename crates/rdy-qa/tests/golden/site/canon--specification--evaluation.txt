@@ -128,8 +128,8 @@ content	-	Copy ref
 content	-	Copy
 content	-	The evaluation of a match statement as a flowchart
 content	-	open full size
-content	L	The evaluation of a match statement as a flowchart
 content	L	Diagram source
+content	L	The evaluation of a match statement as a flowchart
 content	-	Link
 content	-	Copy ref
 content	-	Copy
@@ -150,8 +150,8 @@ content	-	Copy ref
 content	-	Copy
 content	-	The grammar of a pattern as a tree
 content	-	open full size
-content	L	The grammar of a pattern as a tree
 content	L	Diagram source
+content	L	The grammar of a pattern as a tree
 content	L	Pattern kinds at a glance
 content	-	Link
 content	-	Copy ref

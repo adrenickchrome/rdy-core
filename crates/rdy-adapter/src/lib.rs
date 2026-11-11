@@ -11,10 +11,15 @@
 
 pub mod capabilities;
 mod follower;
+pub mod foreign_facts;
+pub mod foreign_removal;
 pub mod history;
+pub mod link_take;
+pub mod links;
 pub mod maintenance;
 pub mod publication;
 pub mod publication_take;
+pub mod reads;
 pub mod rendering;
 pub mod signatures;
 mod store;
@@ -23,6 +28,8 @@ pub mod take;
 mod value;
 
 pub use follower::Follower;
+pub use foreign_removal::{ForeignRemovalTaken, RemovalTaken};
+pub use link_take::{DeliverySource, DeliveryTaken, LinkRevoked, LinkSource};
 pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
     UpgradeReport, UpgradeStep,
@@ -33,12 +40,15 @@ pub use publication_take::{
 };
 pub use rdy_engine::follower::FollowReport;
 pub use rdy_engine::identity::{MAX_ACTOR_BYTES, is_actor};
+pub use rdy_engine::search::SearchFilters;
 pub use rdy_engine::{
     CarriedTargetIssue, CarriedWarning, CompactReport, KindBytes, RdyError, core_error_code,
 };
+pub use rdy_model::foreign::ForeignSet;
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;
+pub use reads::{ReadRequest, SearchRequest};
 pub use store::{Identity, Snapshot, StoreHandle};
 pub use take::{StorePosition, TakeOutcome, UploadTarget};
 pub use value::{encode_block, hash_bytes};

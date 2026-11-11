@@ -222,7 +222,7 @@ fn verdict_carries_advice(st: &ReadState, review: &Hash, pair: &Hash) -> Result<
     };
     let mut first = open.record.clone();
     while let Some(prev) = first.prev {
-        first = st.reader().semantic_tension(&prev)?;
+        first = st.reader().semantic_tension_v1(&prev)?;
     }
     Ok(first.review == *review && first.advice.is_some())
 }

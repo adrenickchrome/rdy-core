@@ -164,6 +164,9 @@ impl ReadState {
                 writers
             }
             SideRef::Intent { version, .. } => return Ok(vec![reader.intent(version)?.actor]),
+            // a cited block's text has no local author: its provenance is the delivery
+            // (repo links, D-Y49PX)
+            SideRef::Foreign { .. } => return Ok(vec![]),
         };
         let mut out: Vec<String> = vec![];
         let mut seen: BTreeSet<Hash> = BTreeSet::new();
@@ -529,6 +532,7 @@ mod tests {
             involved: vec![],
             summary: String::new(),
             read_time,
+            deviated: None,
         })
     }
 

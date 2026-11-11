@@ -117,6 +117,21 @@ pub(crate) fn walk(
     Ok(out)
 }
 
+/// A block as the quote search reads it: every string of it. A block with a foreign part (repo
+/// links) has no encoding-0 layout, so it is read through its foreign layout, whose foreign
+/// links and pins hold no text of their own.
+pub(crate) struct BlockText<'a>(pub(crate) &'a rdy_model::Block);
+
+impl Serialize for BlockText<'_> {
+    fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.0.foreign.is_empty() {
+            self.0.serialize(s)
+        } else {
+            rdy_model::encoding::ForeignBlockV1::of(self.0).serialize(s)
+        }
+    }
+}
+
 /// How the report reads the text of one kind of record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextPolicy {
@@ -131,7 +146,7 @@ pub enum TextPolicy {
 }
 
 /// The assigned kinds of the store's closed registry, in code order. Code 12 is unassigned.
-pub const ASSIGNED_KINDS: [u8; 27] = [
+pub const ASSIGNED_KINDS: [u8; 28] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -159,6 +174,7 @@ pub const ASSIGNED_KINDS: [u8; 27] = [
     kinds::DISPUTE,
     kinds::DISPUTE_RESOLUTION,
     kinds::CHECK_REQUEST,
+    kinds::FOREIGN,
 ];
 
 /// The text policy of `kind`; `None` for a kind the report has no visitor for. A new assigned
@@ -184,7 +200,8 @@ pub fn text_policy(kind: u8) -> Option<TextPolicy> {
         | kinds::ASSESSMENT
         | kinds::DISPUTE
         | kinds::DISPUTE_RESOLUTION
-        | kinds::CHECK_REQUEST => Some(TextPolicy::Strings),
+        | kinds::CHECK_REQUEST
+        | kinds::FOREIGN => Some(TextPolicy::Strings),
         kinds::REF_UPDATE => Some(TextPolicy::NameOnly),
         kinds::REDACTION_RESIDUE => Some(TextPolicy::OriginalIdentity),
         kinds::SNAPSHOT

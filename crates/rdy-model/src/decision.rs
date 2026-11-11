@@ -1,4 +1,6 @@
+use crate::foreign::{ForeignId, ForeignPin};
 use crate::{Block, Tracking};
+use std::collections::BTreeMap;
 
 pub const DECISION: &str = "decision";
 pub const QUESTION: &str = "question";
@@ -41,7 +43,8 @@ pub const RULING_FIELDS: [&str; 3] = ["statement", "options", "status"];
 
 /// trk1 (D-DZC1J): `new` differs from `old` in at least one tracking field of `old`'s type and in
 /// nothing else: the same id, type, parent, order, body and links, and every non-tracking field
-/// equal. Pins are compared.
+/// equal. Pins are compared, and so is the whole foreign part: no tracking edit moves a foreign
+/// link or pin.
 ///
 /// A redacted block's removed fields are unknown, so a write over one is never tracking-only.
 pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
@@ -58,6 +61,7 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
         || old.body != new.body
         || old.links != new.links
         || old.pins != new.pins
+        || old.foreign != new.foreign
     {
         return false;
     }
@@ -71,8 +75,9 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
 
 /// D-EJBPD (p-QMGB4, p-HF5W0): `new` re-affirms `old`. It differs from `old` only in the
 /// store-only `reaffirmed` field and in the hashes of pins `old` already holds: the same id,
-/// type, parent, order, body, links, pinned targets and every other field. A re-affirmation
-/// changes no content, so a frozen decision may take one.
+/// type, parent, order, body, links, pinned targets, foreign part (links and pins alike: a
+/// re-affirmation never moves a foreign pin) and every other field. A re-affirmation changes no
+/// content, so a frozen decision may take one.
 ///
 /// A redacted block's removed fields are unknown, so a write over one is never a re-affirmation.
 pub fn only_reaffirmation_changed(old: &Block, new: &Block) -> bool {
@@ -94,8 +99,99 @@ pub fn only_reaffirmation_changed(old: &Block, new: &Block) -> bool {
         && old.body == new.body
         && old.links == new.links
         && old.pins.keys().eq(new.pins.keys())
+        && old.foreign == new.foreign
         && rest(old) == rest(new)
         && new.fields.contains_key(REAFFIRMED)
+}
+
+/// The foreign pin moves one adopt answer binds on one block (repo links, D-8VJAZ): for each
+/// cited target, the pin the block holds and the pin the adoption moves it to.
+pub type PinMoves = BTreeMap<ForeignId, (ForeignPin, ForeignPin)>;
+
+/// Repo links (D-8VJAZ): `new` differs from `old` only by the foreign pin moves `moves`, each
+/// exactly: every target of `moves` is pinned by `old` with its `from` pin and by `new` with its
+/// `to` pin, which differs, and every other foreign pin is equal. The same id, type, parent,
+/// order, body, links, local pins, foreign links and every field, tracking, ruling and engine
+/// fields alike: a tracking edit or a re-affirmation never rides an adoption. An empty `moves`
+/// never matches.
+///
+/// It describes a shape only. A frozen decision takes such a write only with the authority of
+/// the person's adopt answer that bound these moves (the store's `PinAdoption`).
+///
+/// A redacted block's removed fields are unknown, so a write over one is never an adoption.
+pub fn only_foreign_pins_adopted(old: &Block, new: &Block, moves: &PinMoves) -> bool {
+    if old.is_redacted() || new.is_redacted() || moves.is_empty() {
+        return false;
+    }
+    if old.id != new.id
+        || old.block_type != new.block_type
+        || old.parent != new.parent
+        || old.order != new.order
+        || old.body != new.body
+        || old.links != new.links
+        || old.pins != new.pins
+        || old.fields != new.fields
+        || old.foreign.links != new.foreign.links
+        || !old.foreign.pins.keys().eq(new.foreign.pins.keys())
+    {
+        return false;
+    }
+    if moves
+        .iter()
+        .any(|(t, (from, to))| from == to || old.foreign.pins.get(t) != Some(from))
+    {
+        return false;
+    }
+    old.foreign
+        .pins
+        .iter()
+        .all(|(t, pin)| match (moves.get(t), new.foreign.pins.get(t)) {
+            (Some((_, to)), Some(now)) => now == to,
+            (None, Some(now)) => now == pin,
+            (_, None) => false,
+        })
+}
+
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `b` records, when it is an
+/// accepted decision with a valid `adopted_as` field. Its status is then superseded, by the cited
+/// decision; a field of any other block, or one that does not read as an adoption, records none.
+pub fn upstream_adoption(b: &Block) -> Option<crate::engine_fields::AdoptedAs> {
+    use crate::engine_fields::{ADOPTED_AS, decode_adopted_as};
+    if status(b) != Some(DecisionStatus::Accepted) {
+        return None;
+    }
+    decode_adopted_as(b.fields.get(ADOPTED_AS)?).ok()
+}
+
+/// Repo links (D-8VJAZ "Adopted upstream"): the upstream adoption `new` records over `old`, when
+/// `new` differs from `old` only by writing the store-only `adopted_as` field, which `old` does
+/// not hold and which reads as an adoption. The same id, type, parent, order, body, links, local
+/// pins, foreign part (links and pins alike) and every other field, tracking, ruling and engine
+/// fields alike: a tracking edit, a re-affirmation or a foreign pin move never rides an
+/// adoption, and an adoption is written once.
+///
+/// It describes a shape only. A frozen decision takes such a write only when it is an accepted
+/// decision and a delivery holds the adopted decision with the recorded content (the store's
+/// upstream-adoption exception).
+///
+/// A redacted block's removed fields are unknown, so a write over one is never an adoption.
+pub fn adopted_as_written(old: &Block, new: &Block) -> Option<crate::engine_fields::AdoptedAs> {
+    use crate::engine_fields::{ADOPTED_AS, decode_adopted_as};
+    if old.is_redacted() || new.is_redacted() || old.fields.contains_key(ADOPTED_AS) {
+        return None;
+    }
+    let written = decode_adopted_as(new.fields.get(ADOPTED_AS)?).ok()?;
+    let rest = new.fields.iter().filter(|(k, _)| k.as_str() != ADOPTED_AS);
+    let same = old.id == new.id
+        && old.block_type == new.block_type
+        && old.parent == new.parent
+        && old.order == new.order
+        && old.body == new.body
+        && old.links == new.links
+        && old.pins == new.pins
+        && old.foreign == new.foreign
+        && old.fields.iter().eq(rest);
+    same.then_some(written)
 }
 
 /// An accepted or rejected decision. A redacted block keeps the frozen fact its marker

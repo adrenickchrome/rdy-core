@@ -56,6 +56,7 @@ fn block(id: &str, body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }
@@ -819,8 +820,9 @@ fn ha5_changed_hash_and_trailer_are_refused() {
         refusal(check(&magic).unwrap_err()),
         bad(0, 0, "invalid header")
     );
+    // a stream format this rdy does not read (it reads 2 and 3)
     let mut format = bytes.clone();
-    format[8] = 3;
+    format[8] = 4;
     assert_eq!(
         refusal(check(&format).unwrap_err()),
         bad(0, 8, "invalid header")

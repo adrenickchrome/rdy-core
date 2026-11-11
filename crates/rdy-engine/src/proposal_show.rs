@@ -316,7 +316,7 @@ impl ReadState {
             .into_iter()
             .map(|a| {
                 let rec = &a.open.record;
-                let r = self.reader().review(&rec.review)?;
+                let r = self.reader().review_v1(&rec.review)?;
                 Ok(AdvisedRow {
                     tension: tension_label(&a.tension.id),
                     reviewer: r.provenance.actor,

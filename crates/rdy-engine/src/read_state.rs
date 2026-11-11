@@ -706,6 +706,9 @@ pub struct ReadState {
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.
     pub(crate) coord_heads: Arc<CoordHeads>,
+    /// What the foreign log delivered, beside canon and the views, as of this state's log end
+    /// (repo links). Never part of a scope's materialization.
+    pub(crate) foreign: Arc<crate::foreign::ForeignState>,
     /// The `plan/` refs as this state was published: each view's latest plan version. A
     /// structurally shared map: a plan write's publish replaces only its own views' entries.
     pub(crate) plan_heads: imbl::OrdMap<String, Hash>,

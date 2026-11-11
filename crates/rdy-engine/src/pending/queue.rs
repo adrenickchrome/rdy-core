@@ -120,8 +120,9 @@
 //!
 //! Blocking items first; then batches, each with its items directly after it (the `approve`
 //! item, its exceptions by ref, its deferral card, then its advice); then the re-affirmation
-//! cards ([`super::reaffirm`], D-CQMA4), each a group of its own; then the other items that stand
-//! alone (questions);
+//! cards ([`super::reaffirm`], D-CQMA4), each a group of its own; then the adopt cards
+//! ([`super::adopt`], D-8VJAZ), each a group of its own; then the other items that stand alone
+//! (questions);
 //! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
 //! listed, whole groups only; `omitted` counts the rest.
 //!
@@ -131,6 +132,13 @@
 //! ([`super::reaffirm`]). The latest open versions read here (a version a `reject_proposal`
 //! answer took out aside) name the decisions they re-affirm or fully retire, which no card
 //! lists.
+//!
+//! # Adopt cards (repo links, D-8VJAZ)
+//!
+//! Each live repo link whose newest delivery changes what canon cites, or the link's rules or
+//! set, is one `adopt` item ([`super::adopt`]). It never blocks. Its policy role covers the
+//! blocks whose pins it moves and the link block.
+use super::adopt::adopt_items;
 use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, removal_stale,
     render_checked,
@@ -165,12 +173,15 @@ use rdy_model::assessment::{
     AssessedPolicy, Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue,
     AssessmentPage, AssessmentScoreChange, MAX_TEXT_BYTES,
 };
+use rdy_model::block::ADOPTED_AS;
 use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
+use rdy_model::foreign::ForeignId;
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Justification, Op, Proposal};
 use rdy_schema::policy::{JustificationKind, POLICY_TYPE, PolicyFields};
-use rdy_schema::{Issue, Severity, supporting};
+use rdy_schema::repo_link::REPO_LINK;
+use rdy_schema::{DEVIATES_FROM, Issue, Severity, supporting};
 use rdy_store::redaction::limit;
 use serde::Serialize;
 use std::cell::OnceCell;
@@ -429,6 +440,14 @@ impl ReadState {
             }
             groups.push(Group { items: vec![item] });
         }
+        // D-8VJAZ: each adopt card is a group of its own
+        for item in adopt_items(self, now)? {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.adopt_facts(&item);
+                rt.note(self, &item, None, facts);
+            }
+            groups.push(Group { items: vec![item] });
+        }
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
         let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
@@ -514,6 +533,34 @@ impl Routing {
             }
             _ => vec![],
         };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(&self.canon, &blocks),
+            blocks,
+            decision: false,
+        }
+    }
+
+    /// The facts of adopt card `i` (O10): the blocks whose pins it moves or rebinds and the link
+    /// block, whose rules it moves; `one_way` when one of them is a decision declared `one_way`
+    /// in canon. It belongs to no version.
+    fn adopt_facts(&self, i: &Item) -> ItemFacts {
+        let mut blocks: Vec<BlockId> = match &i.plan_binding {
+            Some(PlanCardBinding::Adopt {
+                link,
+                pins,
+                rebinds,
+                ..
+            }) => pins
+                .iter()
+                .flat_map(|p| p.citers.iter().cloned())
+                .chain(rebinds.iter().map(|r| r.citer.clone()))
+                .chain(std::iter::once(link.clone()))
+                .collect(),
+            _ => vec![],
+        };
+        blocks.sort();
+        blocks.dedup();
         ItemFacts {
             kind: i.kind,
             one_way: one_way_among(&self.canon, &blocks),
@@ -976,6 +1023,7 @@ fn exception_record(k: ExceptionKind) -> AssessmentExceptionKind {
         ExceptionKind::NotRecommended => AssessmentExceptionKind::NotRecommended,
         ExceptionKind::BlockingTension => AssessmentExceptionKind::BlockingTension,
         ExceptionKind::ReaffirmOneWay => AssessmentExceptionKind::ReaffirmOneWay,
+        ExceptionKind::Deviation => AssessmentExceptionKind::Deviation,
     }
 }
 
@@ -1128,7 +1176,7 @@ pub(crate) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<boo
 
 /// `item` with its card cut to `max_tokens` and its card's hash (at full size, O7). A card whose
 /// mandatory removal lines do not fit is `E_REDACTION_BUDGET` ([`render_checked`]).
-fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
+pub(super) fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
     item.card = render_checked(&item, max_tokens)?;
     item.card_hash = card_hash(&item).to_string();
     Ok(item)
@@ -1228,14 +1276,15 @@ struct Group {
 }
 
 impl Group {
-    /// O5: blocking first, then batches, then re-affirmation cards (D-CQMA4), then the other
-    /// items, each by `raised_at`, then by ref (of the first item).
+    /// O5: blocking first, then batches, then re-affirmation cards (D-CQMA4), then adopt cards
+    /// (D-8VJAZ), then the other items, each by `raised_at`, then by ref (of the first item).
     fn key(&self) -> (bool, u8, String, String) {
         let head = &self.items[0];
         let rank = match head.kind {
             ItemKind::Approve => 0,
             ItemKind::Reaffirm => 1,
-            _ => 2,
+            ItemKind::Adopt => 2,
+            _ => 3,
         };
         (
             !head.blocking,
@@ -1472,6 +1521,13 @@ impl Version {
         let mut decisions = vec![];
         let mut reaffirms = vec![];
         let canon = st.materialized(&Scope::Canon)?;
+        // repo links (D-8VJAZ): a deviation's targets show by the prospective canon's aliases,
+        // read once and only for a version that records a deviation
+        let links = OnceCell::new();
+        let shown = |t: &ForeignId| {
+            let links = links.get_or_init(|| crate::foreign_refs::RepoLinks::of_view(&next));
+            format!("{}:{}", links.shown(&t.repo), t.id)
+        };
         for id in ids {
             let Some(b) = next.get(&id) else { continue };
             if decision::status(b) != Some(DecisionStatus::Proposed) {
@@ -1486,7 +1542,7 @@ impl Version {
                 }
                 continue;
             }
-            let kinds = exception_kinds(b, &live, &tensions, || {
+            let kinds = exception_kinds(b, &live, &shown, &tensions, || {
                 lands_unapplied(&next, &g, st.pack(), b)
             });
             decisions.push(Decision {
@@ -1995,6 +2051,29 @@ impl Version {
                 .map(|d| (ExceptionKind::ReaffirmOneWay, d.r#ref.clone())),
         );
         let redaction = !crate::redaction::requests_carried(st, &self.p.changes)?.is_empty();
+        // repo links (D-8VJAZ): the repo links it writes (a deleted one read in canon), and the
+        // decisions whose adopted_as it writes
+        let repo_links = self
+            .touched
+            .iter()
+            .filter(|id| {
+                [self.next.get(id), canon.get(id)]
+                    .into_iter()
+                    .flatten()
+                    .any(|b| b.block_type == REPO_LINK)
+            })
+            .cloned()
+            .collect();
+        let adopted_as = self
+            .touched
+            .iter()
+            .filter(|id| {
+                let field = |b: Option<&Block>| b.and_then(|b| b.fields.get(ADOPTED_AS)).cloned();
+                let now = field(self.next.get(id));
+                now.is_some() && now != field(canon.get(id))
+            })
+            .cloned()
+            .collect();
         let (noncode_deferrals, plan_items) = match &self.plan {
             Ok(plan) => (
                 if plan.bound.is_some() {
@@ -2022,6 +2101,8 @@ impl Version {
             exceptions,
             redaction,
             changes_policy: !self.policy_changes.is_empty(),
+            repo_links,
+            adopted_as,
             noncode_deferrals,
             stable_docs,
             plan_items,
@@ -2948,11 +3029,13 @@ pub(super) fn open_tensions(st: &ReadState, p: &Proposal) -> Result<Vec<Arc<Tens
 }
 
 /// The exception kinds decision `b` carries, in the closed order, each with its detail. `live`
-/// says whether a block is a decision live in canon; `unapplied` whether no content would apply
-/// `b` once it lands.
+/// says whether a block is a decision live in canon; `shown` how a cited or external block shows
+/// (`<alias>:<id>`); `unapplied` whether no content would apply `b` once it lands. A deviation
+/// (repo links, D-8VJAZ) comes right after `against`, whose case it widens.
 fn exception_kinds(
     b: &Block,
     live: &impl Fn(&BlockId) -> bool,
+    shown: &impl Fn(&ForeignId) -> String,
     tensions: &[Arc<Tension>],
     unapplied: impl FnOnce() -> bool,
 ) -> Vec<(ExceptionKind, String)> {
@@ -2975,6 +3058,17 @@ fn exception_kinds(
     against.extend(sides.iter().map(|o| format!("a tension with {o}")));
     if !against.is_empty() {
         kinds.push((ExceptionKind::Against, against.join("; ")));
+    }
+    let departs: Vec<String> = b
+        .foreign
+        .links
+        .get(DEVIATES_FROM)
+        .into_iter()
+        .flatten()
+        .map(|l| shown(&l.target))
+        .collect();
+    if !departs.is_empty() {
+        kinds.push((ExceptionKind::Deviation, departs.join(", ")));
     }
     if b.field_str("reversibility") == Some("one_way") {
         kinds.push((
@@ -3024,6 +3118,7 @@ fn fact_name(k: ExceptionKind) -> &'static str {
         ExceptionKind::NotRecommended => "Recommendation",
         ExceptionKind::BlockingTension => "Blocking",
         ExceptionKind::ReaffirmOneWay => "Re-affirms",
+        ExceptionKind::Deviation => "Deviates from",
     }
 }
 

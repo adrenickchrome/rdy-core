@@ -297,7 +297,8 @@ impl Filter {
         {
             return Ok(false);
         }
-        if self.canon && !t.sides.iter().all(|s| matches!(s, SideRef::Canon { .. })) {
+        // a canon-or-foreign tension is in canon scope (repo links, D-Y49PX)
+        if self.canon && !t.sides.iter().all(SideRef::is_standing) {
             return Ok(false);
         }
         if self.view.is_some()
@@ -540,7 +541,11 @@ pub fn run_tensions(
                 }
             }
             TensionStatus::Dismissed(_) => dismissed += 1,
+            // resolved by a live deviation: no dismissal, never open
+            TensionStatus::Deviated(_) => {}
         }
+        // a deviated tension is not open: the listing of resolved ones shows it, with its status
+        // `deviated: <decision>`
         if (status != TensionStatus::Open) == f.dismissed {
             if used > budget {
                 sizes.push(budget.saturating_add(1));

@@ -848,6 +848,11 @@ fn step_carry(
         }
         landed_blocks.extend(ops.iter().map(|op| op.block_id().clone()));
         seeds_of_ops(st, ops, &mut seeds)?;
+        // a landing can make a deviation live or end one (repo links, D-8VJAZ): the local
+        // blocks of every in-flight tension across projects are re-detected
+        for t in prev.tensions.values().filter(|t| t.has_foreign()) {
+            seeds.extend(t.blocks());
+        }
     } else if changed.is_empty() {
         return Ok(Some(prev.clone()));
     }
@@ -927,12 +932,20 @@ fn detect_kept(
 ) -> Result<Vec<Arc<Tension>>, RdyError> {
     let mut found = vec![];
     d.detect(cx, seeds, &mut found)?;
-    Ok(found
+    let devs = super::foreign::Deviations::cell();
+    found
         .into_iter()
         .filter_map(|f| tension_from(st.pack(), d.own_severity(cx, &f), f, false, cx.scope()))
-        .filter(|t| seeds.is_none_or(|s| t.involved.iter().any(|i| s.contains(&i.block))))
-        .map(Arc::new)
-        .collect())
+        .filter(|t| seeds.is_none_or(|s| involves_local(t, s)))
+        .map(|t| super::foreign::mark(st, &devs, t).map(Arc::new))
+        .collect()
+}
+
+/// Whether `t` involves a local block of `blocks` (a cited block is no local block).
+fn involves_local(t: &Tension, blocks: &BTreeSet<BlockId>) -> bool {
+    t.involved
+        .iter()
+        .any(|i| !i.side.is_foreign() && blocks.contains(&i.block))
 }
 
 /// The tensions `d` finds in a candidate's landing run `cx` ([`DetectCx::with_canon_groups`])
@@ -946,7 +959,8 @@ fn detect_candidate(
 ) -> Result<Vec<Arc<Tension>>, RdyError> {
     let mut found = vec![];
     d.detect(cx, Some(around), &mut found)?;
-    Ok(found
+    let devs = super::foreign::Deviations::cell();
+    found
         .into_iter()
         .filter_map(|f| {
             let own = d.own_severity(cx, &f);
@@ -961,9 +975,9 @@ fn detect_candidate(
             };
             tension_from(st.pack(), own, f, false, scope)
         })
-        .filter(|t| t.involved.iter().any(|i| around.contains(&i.block)))
-        .map(Arc::new)
-        .collect())
+        .filter(|t| involves_local(t, around))
+        .map(|t| super::foreign::mark(st, &devs, t).map(Arc::new))
+        .collect()
 }
 
 /// Whether `writes` were built from exactly the in-flight set `set`: the same changes, each in
@@ -999,8 +1013,13 @@ fn verdict_carry(
         .filter(|d| d.stored())
         .collect();
     let mut next = prev.clone();
-    if stored.is_empty() || blocks.is_empty() {
+    if stored.is_empty() {
         return Ok(Some(next));
+    }
+    // a pair of two cited sides names no block (its tension has no local block to start from),
+    // so the delta names none: the next read builds in full
+    if blocks.is_empty() {
+        return Ok(None);
     }
     let kinds: BTreeSet<_> = stored.iter().map(|d| d.kind()).collect();
     let seeds: BTreeSet<BlockId> = blocks.iter().cloned().collect();
@@ -1086,7 +1105,8 @@ fn canon_of_landing(
         .tension_canon
         .get_or_init(|| canon_carry(st, prev, seeds).map(Arc::new))
         .clone()?;
-    let stored = stored_canon(st, st.detectors)?;
+    let mut stored = stored_canon(st, st.detectors)?;
+    stored.extend(super::foreign::canon_tensions(st, st.detectors)?);
     Ok(if stored.is_empty() {
         part
     } else {
@@ -1111,10 +1131,11 @@ fn canon_carry(
         .filter(|d| d.stored())
         .map(|d| d.kind())
         .collect();
+    // so do the tensions across projects, which follow the foreign state (repo links, D-Y49PX)
     let mut gone: BTreeSet<Hash> = prev
         .tensions
         .values()
-        .filter(|t| stored.contains(&t.kind))
+        .filter(|t| stored.contains(&t.kind) || t.has_foreign())
         .map(|t| t.id)
         .collect();
     let mut found = vec![];
@@ -1162,7 +1183,8 @@ fn canon_of(
     } else {
         Arc::new(canon_part(st, detectors)?)
     };
-    let stored = stored_canon(st, detectors)?;
+    let mut stored = stored_canon(st, detectors)?;
+    stored.extend(super::foreign::canon_tensions(st, detectors)?);
     Ok(if stored.is_empty() {
         canon
     } else {

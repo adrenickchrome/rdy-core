@@ -71,7 +71,7 @@ pub const BOUNDS: Bounds = Bounds {
 };
 
 /// The refusal of a bound: `instructions exceed <limit> <unit> (found <count>)`.
-fn exceeded(limit: u64, unit: &str, found: u64) -> RdyError {
+pub(crate) fn exceeded(limit: u64, unit: &str, found: u64) -> RdyError {
     RdyError::new(
         E_LIMIT,
         format!("instructions exceed {limit} {unit} (found {found})"),
@@ -88,8 +88,8 @@ pub fn estimate_tokens(bytes: u64) -> u64 {
 /// A source's place in the layer order: rdy, organization, team sets, cited sets, project,
 /// person. A later layer overrides an earlier one, except that a locked rdy, organization or team
 /// rule wins. Delivery shows every layer's rules and removes none. Teams sort by name for display
-/// only: every team has one precedence. This build emits `rdy` (the built-in guide), `project`
-/// and `person`; the others are reserved.
+/// only: every team has one precedence. The built-in guide is `rdy`; a repo link delivers its
+/// adopted rules as `organization`, `team:<name>` or, with no set, `cited:<alias>`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Layer {
     Rdy,
@@ -132,15 +132,6 @@ impl Layer {
             },
         }
     }
-
-    /// The layer a load handle may name: `project` or `person`.
-    fn of_handle(s: &str) -> Option<Layer> {
-        match s {
-            "project" => Some(Layer::Project),
-            "person" => Some(Layer::Person),
-            _ => None,
-        }
-    }
 }
 
 impl fmt::Display for Layer {
@@ -172,14 +163,20 @@ impl<'de> Deserialize<'de> for Layer {
 /// What a load id names: a stored doc, or a built-in ruleset by name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LoadTarget {
-    /// A stored doc: its layer when the handle is qualified (`None` for a bare id) and its id.
-    Doc { layer: Option<Layer>, doc: BlockId },
+    /// A stored doc: its layer when the handle is qualified (`None` for a bare id), the alias of
+    /// its repo link when the handle names one (organization and team handles do), and its id.
+    Doc {
+        layer: Option<Layer>,
+        link: Option<String>,
+        doc: BlockId,
+    },
     /// A built-in ruleset: the name after `rdy:`.
     Builtin(String),
 }
 
-/// One requested ruleset: `project:<doc-id>`, `person:<doc-id>`, a bare doc id that loads only
-/// when one layer holds it (D-A8N0E), or `rdy:<name>` for a built-in ruleset.
+/// One requested ruleset: `project:<doc-id>`, `person:<doc-id>`, `cited:<alias>:<doc-id>`,
+/// `organization:<alias>:<doc-id>`, `team:<name>:<alias>:<doc-id>`, a bare doc id that loads
+/// only when one layer holds it (D-A8N0E), or `rdy:<name>` for a built-in ruleset.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LoadId {
     pub target: LoadTarget,
@@ -277,11 +274,18 @@ impl LoadRequest {
         self.ids.iter().map(|i| i.given.as_str()).collect()
     }
 
-    /// Whether this request loads doc `doc` of `layer`, qualified or bare.
-    fn names(&self, layer: &Layer, doc: &BlockId) -> bool {
+    /// Whether this request loads doc `doc` of `layer`, qualified or bare. `link` is the alias
+    /// of the repo link that holds the doc (none for a project or person doc).
+    pub(crate) fn names(&self, layer: &Layer, link: Option<&str>, doc: &BlockId) -> bool {
         self.ids.iter().any(|i| match &i.target {
-            LoadTarget::Doc { layer: l, doc: d } => {
-                d == doc && l.as_ref().is_none_or(|l| l == layer)
+            LoadTarget::Doc {
+                layer: l,
+                link: k,
+                doc: d,
+            } => {
+                d == doc
+                    && l.as_ref().is_none_or(|l| l == layer)
+                    && k.as_deref().is_none_or(|k| Some(k) == link)
             }
             LoadTarget::Builtin(_) => false,
         })
@@ -310,6 +314,29 @@ fn builtin_name(n: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
+/// The layer and link alias a handle's qualifier names: `project`, `person`, `cited:<alias>`,
+/// `organization:<alias>` or `team:<name>:<alias>`. An alias holds no colon, so a team name may.
+fn parse_qualifier(q: &str) -> Option<(Layer, Option<String>)> {
+    match q {
+        "project" => return Some((Layer::Project, None)),
+        "person" => return Some((Layer::Person, None)),
+        _ => {}
+    }
+    let alias = |a: &str| rdy_schema::repo_link::is_valid_alias(a).then(|| a.to_string());
+    match q.split_once(':')? {
+        ("cited", a) => Some((Layer::Cited(alias(a)?), None)),
+        ("organization", a) => Some((Layer::Organization, Some(alias(a)?))),
+        ("team", rest) => {
+            let (n, a) = rest.rsplit_once(':')?;
+            if n.is_empty() {
+                return None;
+            }
+            Some((Layer::Team(n.to_string()), Some(alias(a)?)))
+        }
+        _ => None,
+    }
+}
+
 fn parse_load_id(s: &str) -> Option<LoadId> {
     let target = match s.split_once(':') {
         Some(("rdy", name)) => {
@@ -318,12 +345,18 @@ fn parse_load_id(s: &str) -> Option<LoadId> {
             }
             LoadTarget::Builtin(name.to_string())
         }
-        Some((l, doc)) => LoadTarget::Doc {
-            layer: Some(Layer::of_handle(l)?),
-            doc: BlockId::parse(doc).ok()?,
-        },
+        Some(_) => {
+            let (q, doc) = s.rsplit_once(':')?;
+            let (layer, link) = parse_qualifier(q)?;
+            LoadTarget::Doc {
+                layer: Some(layer),
+                link,
+                doc: BlockId::parse(doc).ok()?,
+            }
+        }
         None => LoadTarget::Doc {
             layer: None,
+            link: None,
             doc: BlockId::parse(s).ok()?,
         },
     };
@@ -336,6 +369,24 @@ fn parse_load_id(s: &str) -> Option<LoadId> {
 /// The load handle of doc `doc` in `layer`: `<layer>:<doc-id>`.
 fn handle(layer: &Layer, doc: &BlockId) -> String {
     format!("{layer}:{doc}")
+}
+
+/// The load handle of doc `doc` that the repo link `alias` delivers in `layer`: a `cited` layer
+/// already names the link; an organization or team layer adds it, so two links of one layer, of
+/// one repo under two profiles included, never share a handle.
+pub(crate) fn link_handle(layer: &Layer, alias: &str, doc: &BlockId) -> String {
+    match layer {
+        Layer::Organization | Layer::Team(_) => format!("{layer}:{alias}:{doc}"),
+        _ => handle(layer, doc),
+    }
+}
+
+/// The alias of the repo link that a menu entry's handle names, for a layer that adds one.
+fn handle_link<'a>(layer: &Layer, id: &'a str) -> Option<&'a str> {
+    match layer {
+        Layer::Organization | Layer::Team(_) => id.rsplit(':').nth(1),
+        _ => None,
+    }
 }
 
 /// One reason of an instruction: a `decided_by` decision's id and its statement (the source
@@ -417,6 +468,28 @@ impl Contribution {
     /// The layer the source was collected as.
     pub fn layer(&self) -> &Layer {
         &self.layer
+    }
+
+    /// The contribution of `layer` with these entries and rows, once their JSON fits
+    /// `b.reply_bytes` (`E_LIMIT`). The foreign collector builds its parts here.
+    pub(crate) fn assemble(
+        layer: Layer,
+        menu: Vec<MenuEntry>,
+        instructions: Vec<InstructionRow>,
+        b: &Bounds,
+    ) -> Result<Contribution, RdyError> {
+        let n = json_len(&ReplyView {
+            instructions: &instructions,
+            menu: &menu,
+        });
+        if n > b.reply_bytes {
+            return Err(exceeded(b.reply_bytes, "bytes of reply JSON", n));
+        }
+        Ok(Contribution {
+            layer,
+            menu,
+            instructions,
+        })
     }
 }
 
@@ -573,7 +646,7 @@ pub fn collect_with(
     for set in &sets {
         let id = handle(&layer, &set.doc.id);
         let required = set.doc.fields.get(REQUIRED_FIELD) == Some(&FieldValue::Bool(true));
-        let whole = required || load.names(&layer, &set.doc.id);
+        let whole = required || load.names(&layer, None, &set.doc.id);
         let mut bytes: u64 = 0;
         let mut hints: Vec<Cow<str>> = vec![];
         let mut seen = BTreeSet::new();
@@ -625,7 +698,7 @@ pub fn collect_with(
 }
 
 /// A block's text as a source read shows it: its body, or the notice of removed content.
-fn text_of(b: &Block) -> Cow<'_, str> {
+pub(crate) fn text_of(b: &Block) -> Cow<'_, str> {
     if b.is_redacted() {
         Cow::Owned(source_body(b))
     } else {
@@ -634,7 +707,7 @@ fn text_of(b: &Block) -> Cow<'_, str> {
 }
 
 /// The string selectors of an instruction, in order.
-fn selectors(b: &Block) -> Vec<&str> {
+pub(crate) fn selectors(b: &Block) -> Vec<&str> {
     match b.fields.get(APPLIES_TO) {
         Some(FieldValue::List(items)) => items.iter().filter_map(FieldValue::as_str).collect(),
         _ => vec![],
@@ -769,12 +842,17 @@ pub fn merge_with(
                     s.layer != Layer::Rdy && layer.as_ref().is_none_or(|l| *l == s.layer)
                 }
             })
-            .filter(|s| {
-                let h = match &id.target {
-                    LoadTarget::Builtin(name) => format!("rdy:{name}"),
-                    LoadTarget::Doc { doc, .. } => handle(&s.layer, doc),
-                };
-                s.menu.iter().any(|m| m.id == h)
+            .filter(|s| match &id.target {
+                LoadTarget::Builtin(name) => {
+                    let h = format!("rdy:{name}");
+                    s.menu.iter().any(|m| m.id == h)
+                }
+                LoadTarget::Doc { link, doc, .. } => s.menu.iter().any(|m| {
+                    m.id.rsplit(':').next() == Some(doc.as_str())
+                        && link
+                            .as_deref()
+                            .is_none_or(|k| handle_link(&s.layer, &m.id) == Some(k))
+                }),
             })
             .map(|s| &s.layer)
             .collect();
@@ -1088,6 +1166,10 @@ pub fn deliver_with(
             hint = Some(h);
         }
     }
+    // the cited layers of the project: read once, from the one captured state
+    if let Some((state, _)) = project {
+        sources.extend(crate::foreign_instructions::collect(state, load, b)?);
+    }
     let mut reply = merge_with(sources, load, b)?;
     reply.warnings = source
         .warnings
@@ -1145,7 +1227,22 @@ mod tests {
             Layer::Team("b".into()).precedence()
         );
         assert_eq!(Layer::parse("team:"), None);
-        assert_eq!(Layer::of_handle("team"), None);
+        assert_eq!(parse_qualifier("team"), None);
+        assert_eq!(parse_qualifier("team:a"), None);
+        assert_eq!(
+            parse_qualifier("team:a:b:c"),
+            Some((Layer::Team("a:b".into()), Some("c".into())))
+        );
+        assert_eq!(
+            parse_qualifier("organization:org"),
+            Some((Layer::Organization, Some("org".into())))
+        );
+        assert_eq!(parse_qualifier("organization"), None);
+        assert_eq!(
+            parse_qualifier("cited:lib"),
+            Some((Layer::Cited("lib".into()), None))
+        );
+        assert_eq!(parse_qualifier("cited:Lib"), None);
     }
 
     #[test]

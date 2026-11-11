@@ -70,12 +70,4 @@ fn brief_reply(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     serialize_briefing(&b)
 }
 
-pub(crate) fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
-    serde_json::to_value(b).map_err(|e| {
-        RdyError::new(
-            E_INTERNAL,
-            format!("a briefing did not serialize: {e}"),
-            "report this as a bug in rdy",
-        )
-    })
-}
+pub(crate) use rdy_engine::tool_reads::serialize_briefing;

@@ -1,5 +1,6 @@
 //! Leases on review requests: in memory only, never stored (D-TF2W6). A restart drops them; the request is derived and is offered again.
-use rdy_model::{BlockId, Hash};
+use rdy_model::semantic::local_sides;
+use rdy_model::{BlockId, Hash, PairSide};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -12,8 +13,9 @@ pub struct Lease {
     pub owner: u64,
     /// The first millisecond at which the lease no longer holds.
     pub until_ms: i64,
-    /// The two blocks of the request, each with the version it was claimed at.
-    pub pair: Vec<(BlockId, Hash)>,
+    /// The two sides of the request, each at the content it was claimed at: local blocks, or a
+    /// local block and a cited block (repo links).
+    pub pair: Vec<PairSide>,
 }
 
 /// The live leases of one open project, by request key.
@@ -46,6 +48,22 @@ impl LeaseRegistry {
         &self,
         key: Hash,
         pair: Vec<(BlockId, Hash)>,
+        owner: u64,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> bool {
+        let items: Vec<rdy_model::PairItem> = pair
+            .into_iter()
+            .map(|(block, content)| rdy_model::PairItem { block, content })
+            .collect();
+        self.claim_sides(key, local_sides(&items), owner, now_ms, ttl_ms)
+    }
+
+    /// [`LeaseRegistry::claim`] for a pair of any sides (repo links).
+    pub fn claim_sides(
+        &self,
+        key: Hash,
+        pair: Vec<PairSide>,
         owner: u64,
         now_ms: i64,
         ttl_ms: i64,
@@ -132,7 +150,14 @@ mod tests {
         let other = vec![(BlockId::parse("c-BBBBB").unwrap(), Hash([2; 32]))];
         assert!(r.claim(k, other.clone(), 7, 1, 600_000));
         let renewed = r.get(&k, 1).unwrap();
-        assert_eq!((renewed.until_ms, renewed.pair), (600_001, other));
+        assert_eq!(renewed.until_ms, 600_001);
+        assert_eq!(
+            renewed.pair,
+            vec![PairSide::Local(rdy_model::PairItem {
+                block: other[0].0.clone(),
+                content: other[0].1
+            })]
+        );
         assert!(r.leased(600_000).contains(&k));
         assert!(r.leased(600_001).is_empty());
         assert!(r.claim(k, pair(), 8, 600_001, 600_000));

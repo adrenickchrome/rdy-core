@@ -59,9 +59,13 @@ pub const MAX_FEATURES: usize = 256;
 pub const MAX_RECEIPT_BYTES: usize = 65_536;
 /// The most steps of one upgrade receipt.
 pub const MAX_RECEIPT_STEPS: usize = 256;
-/// The first rdy that knows the registered features: the release that carries them. The
-/// workspace version of that release equals it.
+/// The first rdy that knows the seven features of O11 (D-1HDVA): the release that carries them.
+/// The workspace version of that release equals it. Each later feature has its own minimum
+/// ([`required_rdy`]); this one never moves.
 pub const FEATURE_REQUIRED_RDY: &str = "0.26.0";
+/// The first rdy that knows [`FEATURE_FOREIGN_COPY`] (R, repo links): the release that registers
+/// the shared foreign shapes. The release that carries them sets it to its own version.
+pub const FOREIGN_COPY_REQUIRED_RDY: &str = "0.48.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -77,27 +81,45 @@ pub const FEATURE_OBJECT_ENCODING: &str = "object_encoding";
 pub const FEATURE_PLAN_TENSION: &str = "plan_tension";
 /// A replayed change (`ChangeLinks::replayed_from`).
 pub const FEATURE_VIEW_REPLAY: &str = "view_replay";
+/// The foreign copy of repo links (D-FK58A, D-2WY7Y): a FOREIGN entry, a block with a foreign
+/// part or a `repo_link` block, and every record in a kind's optional repo-links encoding
+/// (`crate::codec::OPTIONAL`). A local instruction alone never uses it.
+pub const FEATURE_FOREIGN_COPY: &str = "foreign_copy";
 
-/// The features this rdy registers (O11, D-1HDVA), sorted by name. Each is `incompatible` and
-/// needs [`FEATURE_REQUIRED_RDY`].
-pub const REGISTERED_FEATURES: [&str; 7] = [
+/// The features this rdy registers (O11, D-1HDVA; repo links), sorted by name. Each is
+/// `incompatible` and needs its own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 8] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
     FEATURE_DISPUTE,
+    FEATURE_FOREIGN_COPY,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
     FEATURE_VIEW_REPLAY,
 ];
+
+/// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
+/// `foreign_copy`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+pub fn required_rdy(name: &str) -> &'static str {
+    if name == FEATURE_FOREIGN_COPY {
+        FOREIGN_COPY_REQUIRED_RDY
+    } else {
+        FEATURE_REQUIRED_RDY
+    }
+}
 
 /// The registered feature `name`, with its class and required version.
 pub(crate) fn registered(name: &str) -> StoreFeature {
     StoreFeature {
         name: name.into(),
         class: FeatureClass::Incompatible,
-        required_rdy: FEATURE_REQUIRED_RDY.into(),
+        required_rdy: required_rdy(name).into(),
     }
 }
+
+/// The block type of a repo link (repo links): its first write turns `foreign_copy` on.
+pub const REPO_LINK_TYPE: &str = "repo_link";
 
 /// The name of the feature tests inject ([`inject_test_feature`]); production never registers
 /// it.
@@ -870,7 +892,12 @@ pub fn registered_features() -> Vec<StoreFeature> {
 /// - `dispute`: a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or
 ///   ResolveDispute;
 /// - `check_request`: a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or
-///   Fail, or an ANSWER with act AcceptVerdict.
+///   Fail, or an ANSWER with act AcceptVerdict;
+/// - `foreign_copy`: a FOREIGN, any frame in its kind's optional encoding
+///   (`crate::codec::OPTIONAL`: a block with a foreign part, a change that embeds one, a
+///   delivered or foreign transition, a foreign pair side, an Adopt or KeepPin answer, a foreign
+///   assessment part or a `foreign_version` target), or a `repo_link` block, alone or in a
+///   change.
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -892,13 +919,38 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     ) -> Option<T> {
         crate::codec::decode_bounded_split(o).ok()
     }
-    // an encoding-0 change or landing has no carried field: it is not decoded
+    // a kind's optional encoding is the foreign copy's alone, by its version
+    if o.kind == kinds::FOREIGN || crate::codec::optional(o.kind) == Some(o.version) {
+        add(FEATURE_FOREIGN_COPY);
+    }
+    // a repo_link block, alone or in a change, turns the foreign copy on (D-2WY7Y); a change
+    // is decoded once, and an encoding-0 one has no carried field
+    let repo_link = |b: &rdy_model::Block| b.block_type == REPO_LINK_TYPE;
     match o.kind {
-        kinds::CHANGE if o.version >= 1 => {
-            if typed::<rdy_model::Change>(&o).is_some_and(|c| c.links.replayed_from.is_some()) {
-                add(FEATURE_VIEW_REPLAY);
+        kinds::BLOCK => {
+            if typed::<rdy_model::Block>(&o).is_some_and(|b| repo_link(&b)) {
+                add(FEATURE_FOREIGN_COPY);
             }
         }
+        kinds::CHANGE => {
+            if let Some(c) = typed::<rdy_model::Change>(&o) {
+                let links_repo = c.ops.iter().any(|op| match op {
+                    rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
+                        repo_link(block)
+                    }
+                    rdy_model::Op::Delete { .. } => false,
+                });
+                if links_repo {
+                    add(FEATURE_FOREIGN_COPY);
+                }
+                if o.version >= 1 && c.links.replayed_from.is_some() {
+                    add(FEATURE_VIEW_REPLAY);
+                }
+            }
+        }
+        _ => {}
+    }
+    match o.kind {
         kinds::LANDING if o.version >= 1 => {
             if typed::<rdy_model::LandingRecord>(&o).is_some_and(|l| l.assessment.is_some()) {
                 add(FEATURE_ASSESSMENT);
@@ -928,9 +980,11 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
         }
         kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
         kinds::REVIEW => {
-            use rdy_model::{ReviewSubject, Verdict};
-            if typed::<rdy_model::Review>(&o).is_some_and(|r| {
-                matches!(r.subject, ReviewSubject::Check { .. })
+            use rdy_model::Verdict;
+            use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+            // the wire type reads every encoding of the kind (`crate::codec`)
+            if typed::<ReviewV1>(&o).is_some_and(|r| {
+                matches!(r.subject, ReviewSubjectV1::Check { .. })
                     || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail)
             }) {
                 add(FEATURE_CHECK_REQUEST);

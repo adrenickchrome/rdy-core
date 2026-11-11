@@ -3,7 +3,7 @@ use crate::check::api::parse_check;
 use crate::check::catalogue::AgentCheck;
 use crate::check::requests::{durable_label, next_durable};
 use crate::engine::write_typed;
-use crate::semantic::candidates::request_label;
+use crate::semantic::candidates::{Item, request_label};
 use crate::semantic::case::case_hash;
 use crate::semantic::submit::{CheckedSubmit, ReviewSubmitRequest};
 use crate::{E_PERMISSION, Engine, RdyError, Session, now_ms, rfc3339};
@@ -98,12 +98,8 @@ pub fn run_review_next(
         };
         let case = st.case_of(&q.key, &q.items)?;
         let hash = case_hash(&case);
-        let pair = q
-            .items
-            .iter()
-            .map(|i| (i.block.clone(), i.content))
-            .collect();
-        if !leases.claim(q.key, pair, owner, now, ttl) {
+        let pair = q.items.iter().map(Item::pair_side).collect();
+        if !leases.claim_sides(q.key, pair, owner, now, ttl) {
             // another session took it first: the next one
             leased.insert(q.key);
             continue;

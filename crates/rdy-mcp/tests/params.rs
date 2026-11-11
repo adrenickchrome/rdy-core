@@ -466,6 +466,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         KeyRevokeParams,
         KeyShowParams,
         LandParams,
+        LinksParams,
         LoadParams,
         LogParams,
         MentionParams,
@@ -2025,7 +2026,7 @@ fn kfu3_other_unknown_keys_keep_their_errors() {
 #[test]
 fn kfu3_schemas_and_parameter_lists_do_not_disclose_it() {
     let tools = listed_tools();
-    assert_eq!(tools.len(), 60, "the registered tools");
+    assert_eq!(tools.len(), 61, "the registered tools");
     for t in &tools {
         let name = t["name"].as_str().unwrap();
         let schema = &t["inputSchema"];

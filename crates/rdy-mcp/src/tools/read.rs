@@ -2,16 +2,16 @@
 
 use super::*;
 use crate::read_page;
+use rdy_engine::tool_reads::{self, ReadEntries};
 use rdy_engine::*;
-use rdy_model::BlockId;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadParams {
-    /// A block id, key or path (wallets/transactions); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.
+    /// A block id, key or path (wallets/transactions); <alias>:<id> reads a block cited from a linked project, read-only (rdy_links lists the aliases); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.
     pub id: Option<String>,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
@@ -24,81 +24,38 @@ pub struct ReadParams {
     pub max_tokens: Option<usize>,
 }
 
-/// A read's blocks, one entry each in reading order (rpag1), after any pattern (rpat1).
-struct ReadEntries {
-    root: BlockId,
-    format: String,
-    entries: Vec<String>,
-    /// The block of each entry.
-    ids: Vec<BlockId>,
-    sep: &'static str,
-    conflict: Option<Value>,
-    warnings: Vec<Value>,
-    /// The entries kept, when a pattern is given.
-    matched: Option<usize>,
-    /// ab2: the as-built status of each entry's block, when it is a content block.
-    as_built: Vec<Option<rdy_engine::as_built::AsBuilt>>,
-    /// ab2: the as-built override warning of each entry's block, when it has one.
-    as_built_warnings: Vec<Option<Value>>,
-}
-
-impl ReadEntries {
-    /// The page token: the whole hash of the query and of every entry.
-    fn token(&self, q: &read_page::ReadQuery) -> String {
-        let mut bytes = b"rdy-read-1\0".to_vec();
-        bytes.extend(serde_json::to_vec(q).unwrap_or_default());
-        bytes.push(0);
-        bytes.extend(self.entries.join("\n\x1e").into_bytes());
-        // ab2: a built-only change moves a status but no entry text: the read moved too
-        bytes.push(0);
-        bytes.extend(serde_json::to_vec(&self.as_built).unwrap_or_default());
-        rdy_model::Hash::of(&bytes).to_string()
-    }
-
-    /// The bytes entry `i`'s page metadata takes: its `as_built` member and its warning, each
-    /// with a comma.
-    fn meta_bytes(&self, i: usize) -> usize {
-        let status = self.as_built[i].as_ref().map_or(0, |s| {
-            json_len(&json!(self.ids[i].to_string())) + 1 + json_len(&json!(s)) + 1
-        });
-        let warning = self.as_built_warnings[i]
-            .as_ref()
-            .map_or(0, |w| json_len(w) + 1);
-        status + warning
-    }
-}
-
-fn json_len(v: &Value) -> usize {
-    serde_json::to_string(v).map_or(0, |t| t.len())
-}
-
-/// rpag1 with ab2's metadata: the end (exclusive) of the page that starts at `from`, the most
-/// entries whose join with `sep`, JSON-escaped, plus their metadata bytes (`meta`) is at most
-/// `budget_bytes`; never less than one entry while any is left. With no metadata it is
-/// `read_page::page_entries`.
-fn page_end(
-    entries: &[String],
-    meta: &[usize],
+fn read_page_of(
+    st: &mut McpState,
+    q: read_page::ReadQuery,
+    read: ReadEntries,
+    token: &str,
     from: usize,
-    sep: &str,
-    budget_bytes: usize,
-) -> usize {
-    if from >= entries.len() {
-        return from;
+    max_tokens: Option<usize>,
+) -> Value {
+    let out = tool_reads::read_page(&read, token, from, max_tokens);
+    // a cut read carries `next` and is registered so that a page call can continue it
+    if out.get("next").is_some() {
+        st.reads.register(token, q);
     }
-    let escaped = |t: &str| json_len(&json!(t)).saturating_sub(2);
-    let sep_len = escaped(sep);
-    let mut total = escaped(&entries[from]) + meta[from];
-    let mut end = from + 1;
-    while end < entries.len() {
-        let next = total + sep_len + escaped(&entries[end]) + meta[end];
-        if next > budget_bytes {
-            break;
-        }
-        total = next;
-        end += 1;
-    }
-    end
+    out
+}
+
+/// The entries of a read as `q` gives it, on the state the engine publishes now.
+fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, RdyError> {
+    let st_ = st.engine.read();
+    tool_reads::read_entries(
+        &st_,
+        &q.id,
+        &q.view,
+        &q.scope,
+        &q.format,
+        q.pattern.as_deref(),
+    )
+}
+
+/// pshow1: a proposal version reads as its own compact text and the structured `proposal`.
+fn read_proposal(st: &mut McpState, id: &str, p: &ReadParams) -> Result<Value, RdyError> {
+    tool_reads::read_proposal(&st.engine.read(), id, p.format.as_deref(), p.max_tokens)
 }
 
 pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
@@ -179,350 +136,4 @@ pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
     let read = read_entries(st, &q)?;
     let token = read.token(&q);
     Ok(read_page_of(st, q, read, &token, 0, p.max_tokens))
-}
-
-/// One page of a read, from entry `from`: the whole blocks that fit `max_tokens`. A cut read
-/// carries `next` and is registered so that a page call can continue it.
-fn read_page_of(
-    st: &mut McpState,
-    q: read_page::ReadQuery,
-    read: ReadEntries,
-    token: &str,
-    from: usize,
-    max_tokens: Option<usize>,
-) -> Value {
-    let max = max_tokens.unwrap_or(4000);
-    let mut out = json!({
-        "id": read.root.to_string(),
-        "format": read.format,
-        "text": "",
-    });
-    if let Some(c) = read.conflict.clone() {
-        out["conflict"] = c;
-    }
-    if !read.warnings.is_empty() {
-        out["warnings"] = json!(read.warnings);
-    }
-    if let Some(n) = read.matched {
-        out["matched"] = json!(n);
-    }
-    // the page's text gets what the envelope leaves: measured with the longest next, truncated
-    // and omitted a page of this read can carry, so the whole page fits max_tokens
-    let all = read.entries.len();
-    let mut envelope = out.clone();
-    envelope["truncated"] = json!(true);
-    envelope["omitted"] = json!(all);
-    envelope["next"] = json!(format!("{token}:{all}"));
-    // ab2: a page's as-built metadata counts against its budget, entry by entry
-    if read.as_built.iter().any(Option::is_some) {
-        envelope["as_built"] = json!({});
-    }
-    if read.as_built_warnings.iter().any(Option::is_some) && envelope.get("warnings").is_none() {
-        envelope["warnings"] = json!([]);
-    }
-    let envelope_bytes = serde_json::to_string(&envelope).map_or(0, |e| e.len());
-    let meta: Vec<usize> = (0..all).map(|i| read.meta_bytes(i)).collect();
-    let end = page_end(
-        &read.entries,
-        &meta,
-        from,
-        read.sep,
-        (max * 4).saturating_sub(envelope_bytes).max(1),
-    );
-    out["text"] = json!(read.entries[from..end].join(read.sep));
-    // ab2: the as-built status of the content blocks this page shows, and their warnings
-    let statuses: serde_json::Map<String, Value> = (from..end)
-        .filter_map(|i| {
-            let s = read.as_built[i].as_ref()?;
-            Some((read.ids[i].to_string(), json!(s)))
-        })
-        .collect();
-    if !statuses.is_empty() {
-        out["as_built"] = Value::Object(statuses);
-    }
-    let warned: Vec<Value> = (from..end)
-        .filter_map(|i| read.as_built_warnings[i].clone())
-        .take(rdy_engine::as_built::MAX_AS_BUILT_WARNINGS)
-        .collect();
-    if !warned.is_empty() {
-        let mut all_warnings = out["warnings"].as_array().cloned().unwrap_or_default();
-        all_warnings.extend(warned);
-        out["warnings"] = json!(all_warnings);
-    }
-    if end < read.entries.len() {
-        out["truncated"] = json!(true);
-        out["omitted"] = json!(read.entries.len() - end);
-        out["next"] = json!(format!("{token}:{end}"));
-        st.reads.register(token, q);
-    }
-    // one block larger than the whole budget is shown alone and cut as budget cuts text; cut
-    // names the block and the bytes it lost (omitted always counts entries)
-    if end == from + 1
-        && tokens_of(&out) > max
-        && let Some(obj) = out.as_object_mut()
-    {
-        let id = read.ids[from].to_string();
-        cut_text(obj, "text", max, |o, n| {
-            o.insert("cut".into(), json!({"id": id, "omitted_bytes": n}));
-        });
-    }
-    out
-}
-
-/// Whether any line of a block's markdown is kept. A code block's body lines are matched
-/// elsewhere (`code_lines`), so only its id line, blank line and opening fence (with the
-/// language) are scanned here.
-fn markdown_hit(md: &str, b: &rdy_model::Block, keeps: &impl Fn(&str) -> bool) -> bool {
-    let n = if b.block_type == "code" {
-        3
-    } else {
-        usize::MAX
-    };
-    md.lines().take(n).any(keeps)
-}
-
-/// The entries of a read as `q` gives it, on the state the engine publishes now.
-fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, RdyError> {
-    let pattern = q
-        .pattern
-        .as_deref()
-        .map(read_page::Pattern::parse)
-        .transpose()?;
-    let (target, slug) = rdy_engine::section::split_address(&q.id)?;
-    let st_ = st.engine.read();
-    let (scope, id) = read_target(&q.view, &st_, target, &q.scope)?;
-    let suspects: std::collections::BTreeSet<BlockId> = st_
-        .suspect_details(&scope)?
-        .into_iter()
-        .map(|s| s.block)
-        .collect();
-    // the scope's recorded conflicts by block, for the marker on each conflicted block's line
-    let conflicts: std::collections::BTreeMap<BlockId, String> = st_
-        .conflicts(&scope)?
-        .iter()
-        .map(|c| (c.block.clone(), c.id.short()))
-        .collect();
-    let m = st_.materialized(&scope)?;
-    let g = st_.graph(&scope)?;
-    let mut root = m.get(&id).ok_or_else(|| {
-        RdyError::new(
-            E_UNKNOWN_BLOCK,
-            format!("no block {id}"),
-            "list docs with rdy_overview",
-        )
-    })?;
-    if let Some(slug) = slug {
-        let section = rdy_engine::section::section_by_slug(&m, root, slug)?;
-        root = m
-            .get(&section)
-            .expect("section_by_slug returns a block of m");
-    }
-    let format = q.format.as_str();
-    if !["compact", "markdown", "yaml"].contains(&format) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("unknown format {format:?}"),
-            "use compact, markdown or yaml",
-        ));
-    }
-    // compact lines mark the justification of the change that last wrote each block; a damaged
-    // producer index (status and fsck report it) costs the markers and a warning, not the read
-    let mut warnings = vec![];
-    let justified: std::collections::BTreeMap<BlockId, String> = if format == "compact" {
-        let mut ids = vec![];
-        let mut walk = vec![root];
-        while let Some(b) = walk.pop() {
-            ids.push(b.id.clone());
-            walk.extend(m.children(Some(&b.id)));
-        }
-        match st_.last_changes(&scope, &ids) {
-            Ok(last) => last
-                .into_iter()
-                .filter_map(|(id, e)| e.justification.map(|j| (id, j.label())))
-                .collect(),
-            Err(e) => {
-                warnings.push(json!({"code": e.code, "message": e.message, "fix": e.fix}));
-                Default::default()
-            }
-        }
-    } else {
-        Default::default()
-    };
-    // a /regex/ read is refused, before any regex runs, when the text it would match exceeds
-    // READ_REGEX_HAYSTACK_MAX. A first pass counts every candidate line (no short-circuit) and
-    // matches nothing; the second pass matches.
-    let is_regex = matches!(pattern, Some(read_page::Pattern::Regex(_)));
-    let haystack = std::cell::Cell::new(0usize);
-    let walk = |counting: bool| -> (Vec<String>, Vec<BlockId>) {
-        let keeps = |line: &str| {
-            let Some(p) = pattern.as_ref() else {
-                return true;
-            };
-            if counting {
-                haystack.set(haystack.get().saturating_add(line.len() + 1));
-                return false;
-            }
-            p.matches(line)
-        };
-        let (mut entries, mut ids) = (vec![], vec![]);
-        let mut stack = vec![(root, 0usize)];
-        while let Some((b, depth)) = stack.pop() {
-            let status = g.status(&b.id).map(|s| {
-                serde_json::to_value(s)
-                    .ok()
-                    .and_then(|v| v["status"].as_str().map(String::from))
-                    .unwrap_or_default()
-            });
-            // a source read: a stub of removed content reads as its id and the neutral source
-            // stub, `Content removed.` and then the line that names its redaction (rdx6, rdx12),
-            // before any type's own formatter (which reads fields a stub does not have)
-            let markdown = || {
-                if b.is_redacted() {
-                    return format!("`{}` {}", b.id, rdy_engine::source_body(b));
-                }
-                crate::markdown::block_markdown(
-                    b,
-                    &m,
-                    crate::markdown::doc_depth(&m, b),
-                    status.as_deref(),
-                )
-            };
-            let entry = match format {
-                "yaml" | "markdown" => {
-                    let text = if format == "yaml" {
-                        block_to_yaml(b)
-                    } else {
-                        markdown()
-                    };
-                    (pattern.is_none() || text.lines().any(keeps)).then_some(text)
-                }
-                _ => {
-                    let pad = "  ".repeat(depth);
-                    // the pattern sees the head without its indent, as it sees a code line
-                    let mut head = format!("{} {}: {}", b.id, b.block_type, compact_summary(b));
-                    if suspects.contains(&b.id) {
-                        head.push_str(" [suspect]");
-                    }
-                    if let Some(c) = conflicts.get(&b.id) {
-                        head.push_str(&format!(" [conflict {c}]"));
-                    }
-                    if let Some(s) = &status {
-                        head.push_str(&format!(" [{s}]"));
-                    }
-                    if let Some(j) = justified.get(&b.id) {
-                        head.push_str(&format!(" [{j}]"));
-                    }
-                    // a pattern matches the head line, a code line's own text, or any line of the
-                    // block's whole text (as markdown gives it: a prose body past its first sentence,
-                    // table rows, diagram source); a kept code block shows only the lines that match.
-                    // A code block's lines are matched once, so markdown does not repeat them.
-                    let body = code_lines(b);
-                    let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
-                    let hit = pattern.is_none()
-                        || keeps(&head)
-                        || !matching.is_empty()
-                        || markdown_hit(&markdown(), b, &keeps);
-                    hit.then(|| {
-                        let shown: Vec<&String> = if pattern.is_some() {
-                            matching
-                        } else {
-                            body.iter().collect()
-                        };
-                        let mut lines = vec![format!("{pad}{head}")];
-                        for l in shown {
-                            lines.push(if l.is_empty() {
-                                format!("{pad}  |")
-                            } else {
-                                format!("{pad}  | {l}")
-                            });
-                        }
-                        lines.join("\n")
-                    })
-                }
-            };
-            if let Some(e) = entry {
-                entries.push(e);
-                ids.push(b.id.clone());
-            }
-            for c in m.children(Some(&b.id)).into_iter().rev() {
-                stack.push((c, depth + 1));
-            }
-        }
-        (entries, ids)
-    };
-    if is_regex {
-        walk(true);
-        if haystack.get() > read_page::READ_REGEX_HAYSTACK_MAX {
-            return Err(RdyError::new(
-                E_LIMIT,
-                format!(
-                    "the read is too large to match a regex against ({} bytes; the limit is 4 MiB)",
-                    haystack.get()
-                ),
-                "narrow the read with #section, or use a plain-text pattern",
-            ));
-        }
-    }
-    let (entries, ids) = walk(false);
-    // ab2: each entry's as-built status and its override warning, from the one warning function
-    let statuses: std::collections::BTreeMap<BlockId, rdy_engine::as_built::AsBuilt> =
-        st_.as_built(&scope, &ids)?.into_iter().collect();
-    let mut as_built = Vec::with_capacity(ids.len());
-    let mut as_built_warnings = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let status = statuses.get(id).cloned();
-        let warning = match &status {
-            Some(s) => st_
-                .as_built_warnings(&scope, &[(id.clone(), s.clone())])?
-                .pop()
-                .map(|w| {
-                    json!({"code": w.code, "block": id.to_string(), "message": w.message, "fix": w.fix})
-                }),
-            None => None,
-        };
-        as_built.push(status);
-        as_built_warnings.push(warning);
-    }
-    let sep = match format {
-        "yaml" => "---\n",
-        "markdown" => "\n\n",
-        _ => "\n",
-    };
-    Ok(ReadEntries {
-        conflict: st_.conflict_info(&scope, &root.id)?.map(|c| json!(c)),
-        root: root.id.clone(),
-        format: format.to_string(),
-        matched: pattern.as_ref().map(|_| entries.len()),
-        entries,
-        ids,
-        sep,
-        warnings,
-        as_built,
-        as_built_warnings,
-    })
-}
-
-/// pshow1: a proposal version reads as its own compact text and the structured `proposal`.
-fn read_proposal(st: &mut McpState, id: &str, p: &ReadParams) -> Result<Value, RdyError> {
-    if let Some(f) = p.format.as_deref()
-        && f != "compact"
-    {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("a proposal version reads as compact only, not {f:?}"),
-            "omit format, or pass \"compact\"",
-        ));
-    }
-    let show = st.engine.read().proposal_show(id)?;
-    let v = serde_json::to_value(&show).map_err(|e| {
-        RdyError::new(
-            E_INTERNAL,
-            format!("a proposal did not serialize: {e}"),
-            "report this as a bug in rdy",
-        )
-    })?;
-    Ok(budget(
-        json!({"id": show.r#ref, "format": "compact", "text": proposal_text(&v), "proposal": v}),
-        p.max_tokens,
-    ))
 }

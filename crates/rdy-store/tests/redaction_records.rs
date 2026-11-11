@@ -31,6 +31,7 @@ fn block(id: &str, ty: &str, body: &str) -> Block {
         body: body.into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

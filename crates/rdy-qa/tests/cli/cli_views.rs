@@ -321,7 +321,7 @@ fn msw13_an_agent_session_whose_run_names_a_reserved_view_is_refused() {
         );
         assert_eq!(
             e.fix,
-            "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}"
+            "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight, reaffirm-\u{2026} or adopt-\u{2026}"
         );
     }
     assert!(

@@ -29,7 +29,7 @@ const OWNERS: [(&str, &str); 9] = [
     ),
     (
         "read",
-        "rdy_coverage, rdy_diff, rdy_impact, rdy_inbox, rdy_log, rdy_tags, rdy_trace",
+        "rdy_coverage, rdy_diff, rdy_impact, rdy_inbox, rdy_links, rdy_log, rdy_tags, rdy_trace",
     ),
     (
         "publish",
@@ -231,8 +231,8 @@ fn kfu1_owners_have_distinct_values() {
 fn kfu1_table_is_closed_and_all_rows_warn() {
     // the checked-in table passes and is what the binary holds
     let rows = build::validate(table_text().as_bytes()).expect("the checked-in table");
-    assert_eq!(rows.len(), 60);
-    assert_eq!(kungfu::TOOLS.len(), 60);
+    assert_eq!(rows.len(), 61);
+    assert_eq!(kungfu::TOOLS.len(), 61);
     for (row, compiled) in rows.iter().zip(kungfu::TOOLS) {
         assert_eq!(row.tool, compiled.tool);
         assert_eq!(row.ruleset.as_deref(), compiled.ruleset);
@@ -505,7 +505,7 @@ fn kfu1_table_is_closed_and_all_rows_warn() {
         "kungfu catalogue: table exceeds 32768 bytes"
     );
     std::fs::write(&path, &pretty).unwrap();
-    assert_eq!(build::load(big.path()).ok().map(|r| r.len()), Some(60));
+    assert_eq!(build::load(big.path()).ok().map(|r| r.len()), Some(61));
 }
 
 #[test]

@@ -41,6 +41,7 @@ fn blk(i: &str, ty: &str, parent: Option<&str>, body: &str) -> Block {
         body: body.to_string(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

@@ -14,11 +14,15 @@ use crate::kinds;
 use crate::redaction::StoredFrame;
 use crate::review::{DISMISS_REF, MENTION_REF, PAIR_REF, SEMANTIC_REF, mention_key};
 use crate::segment::Location;
-use crate::transition::Transitions;
+use crate::transition::TransitionsV1;
 use crate::view::{ViewHead, ViewOpKind, resolve};
+use rdy_model::foreign::ForeignEvent;
+use rdy_model::review::{ReviewSubjectV1, ReviewV1};
+use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
-    AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, Change, EvidenceKind, Hash, Intent,
-    LandingRecord, Review, ReviewSubject, SemanticTension, Verdict, pair_key,
+    AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, Block, BlockId, Change,
+    EvidenceKind, Hash, Intent, LandingRecord, Op, RepoId, Review, ReviewSubject, Verdict,
+    pair_key_sides,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -51,6 +55,9 @@ pub struct StoreCheck {
     /// The ANSWER records, each keeping the answer rules; the `answer/` and `pending/` refs each
     /// name an answer of their own item and family (`crate::answer`).
     pub answers: usize,
+    /// The FOREIGN entries, each keeping the foreign log rules (`StoreReader::check_foreign`).
+    /// A holder holds none.
+    pub foreign: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -160,6 +167,7 @@ impl StoreReader {
         self.check_carried_records()?;
         self.check_check_refs()?;
         self.check_meta()?;
+        let foreign = self.check_foreign()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -173,6 +181,7 @@ impl StoreReader {
             inboxes,
             transitions,
             answers,
+            foreign,
         })
     }
 
@@ -279,7 +288,7 @@ impl StoreReader {
 
     /// Folds every TRANSITION record, in log order from the origin to the end of what the index
     /// holds, into the open tensions and the open suspects (plan M2e2, D-Z0EMP): each record
-    /// decodes, keeps the record rules (`Transitions::invalid`) and moves only what it may (a
+    /// decodes, keeps the record rules (`TransitionsV1::invalid`) and moves only what it may (a
     /// tension opens only while it is shut, and so on). The fold must equal the index's
     /// open-tension and open-suspect tables. Returns how many records there are.
     fn check_transitions(&self) -> Result<usize, StoreError> {
@@ -292,21 +301,23 @@ impl StoreReader {
         let mut suspects: BTreeMap<Hash, Hash> = BTreeMap::new();
         let mut n = 0;
         self.for_each_record_from(origin, upto, |at, frame, _| {
-            let (hash, payload) = match frame {
+            // by the logical kind: a record of any encoding (`crate::codec`; a cited target or a
+            // delivered move takes encoding 1)
+            let is_transition = |raw: u8| crate::codec::logical_kind(raw) == kinds::TRANSITION;
+            let (raw, hash, payload) = match frame {
                 StoredFrame::Present {
-                    kind: kinds::TRANSITION,
+                    kind,
                     hash,
                     payload,
-                } => (hash, payload),
+                } if is_transition(kind) => (kind, hash, payload),
                 // a transition record is never removable: a dropped one is damage
-                StoredFrame::Dropped {
-                    kind: kinds::TRANSITION,
-                    ..
-                } => return Err(StoreError::corrupt_at(at)),
+                StoredFrame::Dropped { kind, .. } if is_transition(kind) => {
+                    return Err(StoreError::corrupt_at(at));
+                }
                 _ => return Ok(()),
             };
             let damage = |what: String| bad(format!("transition record {hash}: {what}"));
-            let rec: Transitions = crate::codec::decode_record(kinds::TRANSITION, payload)
+            let rec: TransitionsV1 = crate::codec::decode_record(raw, payload)
                 .map_err(|_| damage("its value does not decode".into()))?;
             if let Some(what) = rec.invalid() {
                 return Err(damage(what));
@@ -437,7 +448,7 @@ impl StoreReader {
         for (key, value) in self.refs_with_prefix(PAIR_REF)? {
             let key = key_hash(&key, PAIR_REF, "verdict")?;
             let h = crate::index::hash_from(&value, &format!("verdict ref {key}"))?;
-            let r: Review = match self.get_typed(kinds::REVIEW, &h) {
+            let r: ReviewV1 = match self.get_typed(kinds::REVIEW, &h) {
                 Err(StoreError::NotFound(_)) => {
                     return Err(bad(format!("pair {key}: {h} is not a stored review")));
                 }
@@ -445,11 +456,11 @@ impl StoreReader {
             };
             let on_this_pair = matches!(
                 &r.subject,
-                ReviewSubject::Pair { key: k, items }
+                ReviewSubjectV1::Pair { key: k, items }
                     if *k == key
                         && items.len() == 2
-                        && items[0].block != items[1].block
-                        && pair_key(items) == key
+                        && items[0].target() != items[1].target()
+                        && pair_key_sides(items) == key
             );
             if !on_this_pair || !matches!(r.verdict, Verdict::Tension | Verdict::NoTension) {
                 return Err(bad(format!(
@@ -477,7 +488,7 @@ impl StoreReader {
         for (key, value) in self.refs_with_prefix(SEMANTIC_REF)? {
             let key = key_hash(&key, SEMANTIC_REF, "semantic tension")?;
             let latest = crate::index::hash_from(&value, &format!("semantic tension ref {key}"))?;
-            let read = |h: &Hash| -> Result<SemanticTension, StoreError> {
+            let read = |h: &Hash| -> Result<SemanticTensionV1, StoreError> {
                 match self.get_typed(kinds::TENSION, h) {
                     Err(StoreError::NotFound(_)) => Err(bad(format!(
                         "semantic tension {key}: version {h} is not a stored semantic tension"
@@ -512,12 +523,12 @@ impl StoreReader {
                 && !first.blocking
                 && first.relay.is_none()
                 && first.relayed_by.is_none()
-                && match self.get_typed::<Review>(kinds::REVIEW, &first.review) {
+                && match self.get_typed::<ReviewV1>(kinds::REVIEW, &first.review) {
                     Err(StoreError::NotFound(_)) => false,
                     r => {
                         let r = r?;
                         r.verdict == Verdict::Tension
-                            && matches!(&r.subject, ReviewSubject::Pair { items, .. } if *items == first.items)
+                            && matches!(&r.subject, ReviewSubjectV1::Pair { items, .. } if *items == first.items)
                     }
                 };
             if !follows {
@@ -922,6 +933,502 @@ impl StoreReader {
             };
         }
         Ok(newer)
+    }
+}
+
+/// What a foreign entry is, for the chain checks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Delivery,
+    Revoked,
+    Removal,
+}
+
+/// One FOREIGN entry as the chain checks read it: its place in the log, its source's ref, its
+/// repo, its kind and the entry it names as `prev`.
+struct EntryMeta {
+    at: Location,
+    source: String,
+    repo: RepoId,
+    kind: EntryKind,
+    prev: Option<Hash>,
+}
+
+/// A delivered version: its repo, block id and BLOCK version.
+type HeldKey = (RepoId, BlockId, Hash);
+
+/// A Removal entry: its hash, its repo, its proof's apply and the versions it names.
+type RemovalOf = (Hash, RepoId, Hash, Vec<(BlockId, Hash)>);
+
+/// The Removal entries that are erasure authorities (D-CN4QJ): those whose proof's apply the
+/// store holds, each with what its proof, checked again, approves. A Removal whose apply is not
+/// stored authorizes nothing.
+struct Authorities {
+    /// The `(repo, id, version)` triples a Removal names and its verified proof approves.
+    erased: BTreeSet<HeldKey>,
+    /// The keys of the verified proofs' records: they stay outside canon, and the local edge
+    /// rules do not read them.
+    proof_keys: BTreeSet<crate::object_refs::ObjectKey>,
+}
+
+impl Authorities {
+    /// Whether a Removal authorizes the erasure of version `version` of `id` in `repo`.
+    fn removal_authorizes(&self, repo: &RepoId, id: &BlockId, version: &Hash) -> bool {
+        self.erased.contains(&(*repo, id.clone(), *version))
+    }
+}
+
+impl StoreReader {
+    /// The foreign log rules (D-FK58A), when the store has `foreign_copy`; returns how many
+    /// FOREIGN entries there are. The first failure is `StoreError::Decode`:
+    /// - an entry's repo is not the store's own;
+    /// - each `prev` names an earlier Delivery of the same source and repo, no two entries name
+    ///   the same `prev`, a Revoked entry ends its source, and each source's ref names its newest
+    ///   entry (and only a source's ref is under `foreign/`);
+    /// - each Delivery's `selection` is the digest of the selection its source's chain rebuilds,
+    ///   and its delta fits that selection;
+    /// - each delivered version names a stored BLOCK of its id and encoding. One that reads as
+    ///   removed is corruption unless it is also local content, an authorized Removal names it
+    ///   (one whose proof's apply is stored, whose proof checks again over the store's records
+    ///   and approves that version of that id), or the applied request that removed it is this
+    ///   project's own request with a cited version target of that version (D-CN4QJ); a stored
+    ///   proof that fails is corruption;
+    /// - no record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN
+    ///   entry or a BLOCK version that only a foreign entry holds (a verified proof's records
+    ///   are the cited project's, and are not read);
+    /// - each foreign pin of a local block names the content (never the version hash) of a
+    ///   version that a delivery of its repo holds;
+    /// - each version a Removal names is one a delivery of its repo holds.
+    pub(crate) fn check_foreign(&self) -> Result<usize, StoreError> {
+        if !self
+            .store_features()?
+            .has(crate::format::FEATURE_FOREIGN_COPY)
+        {
+            return Ok(0);
+        }
+        let own = self.repo_id()?;
+        let mut hashes = vec![];
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            hashes.push(h);
+            Ok(())
+        })?;
+        let mut metas: BTreeMap<Hash, EntryMeta> = BTreeMap::new();
+        // each delivered version, with the content and encoding the delivery states
+        let mut held: BTreeMap<HeldKey, (Hash, u16)> = BTreeMap::new();
+        let mut removals: Vec<RemovalOf> = vec![];
+        for h in &hashes {
+            let at = self
+                .index()
+                .typed(kinds::FOREIGN, h)?
+                .ok_or_else(|| bad(format!("foreign entry {h} has no place in the log")))?;
+            let e = self.foreign_entry(h)?;
+            if own == Some(e.repo) {
+                return Err(bad(format!(
+                    "foreign entry {h}: its repo {} is this store's own repo",
+                    e.repo
+                )));
+            }
+            let (kind, prev) = match &e.event {
+                ForeignEvent::Delivery {
+                    prev,
+                    added,
+                    changed,
+                    ..
+                } => {
+                    for v in added.iter().chain(changed) {
+                        held.entry((e.repo, v.id.clone(), v.version))
+                            .or_insert((v.content, v.encoding));
+                    }
+                    (EntryKind::Delivery, *prev)
+                }
+                ForeignEvent::Revoked { prev } => (EntryKind::Revoked, Some(*prev)),
+                ForeignEvent::Removal { proof, versions } => {
+                    removals.push((*h, e.repo, *proof, versions.clone()));
+                    (EntryKind::Removal, None)
+                }
+            };
+            metas.insert(
+                *h,
+                EntryMeta {
+                    at,
+                    source: crate::foreign::source_ref(&e.source),
+                    repo: e.repo,
+                    kind,
+                    prev,
+                },
+            );
+        }
+        self.check_foreign_chains(&metas)?;
+        let authorities = self.foreign_authorities(&removals)?;
+        let local = self.local_versions(!held.is_empty())?;
+        self.check_held_versions(&held, &local, &authorities)?;
+        let foreign_only: BTreeSet<Hash> = held
+            .keys()
+            .map(|(_, _, v)| *v)
+            .filter(|v| !local.contains(v))
+            .collect();
+        self.check_foreign_edges(&foreign_only, &authorities.proof_keys)?;
+        self.check_foreign_pins(&held, &foreign_only)?;
+        for (h, repo, _, versions) in &removals {
+            for (id, v) in versions {
+                if !held.contains_key(&(*repo, id.clone(), *v)) {
+                    return Err(bad(format!(
+                        "foreign removal {h}: version {v} of {id} is not a version a delivery of repo {repo} holds"
+                    )));
+                }
+            }
+        }
+        Ok(hashes.len())
+    }
+
+    /// The chain rules of every source, and its selection digests (see [`Self::check_foreign`]).
+    fn check_foreign_chains(&self, metas: &BTreeMap<Hash, EntryMeta>) -> Result<(), StoreError> {
+        // each source's first entry and each entry's successor
+        let mut first: BTreeMap<&str, Hash> = BTreeMap::new();
+        let mut next: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+        for (h, m) in metas {
+            if m.kind == EntryKind::Removal {
+                continue;
+            }
+            *count.entry(&m.source).or_default() += 1;
+            let Some(p) = m.prev else {
+                if let Some(other) = first.insert(&m.source, *h) {
+                    return Err(bad(format!(
+                        "source {}: entries {other} and {h} both start it",
+                        m.source
+                    )));
+                }
+                continue;
+            };
+            let earlier = metas.get(&p).filter(|pm| {
+                pm.kind != EntryKind::Removal
+                    && pm.source == m.source
+                    && pm.repo == m.repo
+                    && pm.at < m.at
+            });
+            match earlier {
+                None => {
+                    return Err(bad(format!(
+                        "foreign entry {h}: prev {p} is not an earlier entry of source {}",
+                        m.source
+                    )));
+                }
+                Some(pm) if pm.kind == EntryKind::Revoked => {
+                    return Err(bad(format!(
+                        "foreign entry {h}: prev {p} is the revocation that ends source {}",
+                        m.source
+                    )));
+                }
+                Some(_) => {}
+            }
+            if let Some(other) = next.insert(p, *h) {
+                return Err(bad(format!(
+                    "source {}: entries {other} and {h} both follow {p}",
+                    m.source
+                )));
+            }
+        }
+        let mut refs: BTreeMap<String, Hash> = BTreeMap::new();
+        for (name, value) in self.refs_with_prefix(crate::foreign::FOREIGN_REF_PREFIX)? {
+            let h = crate::index::hash_from(&value, &format!("{name} ref"))?;
+            refs.insert(name, h);
+        }
+        for name in refs.keys() {
+            if !first.contains_key(name.as_str()) {
+                return Err(bad(format!("ref {name} names no source with entries")));
+            }
+        }
+        for (name, start) in &first {
+            // the chain, first to newest: each entry has at most one successor
+            let mut sel: BTreeMap<BlockId, Hash> = BTreeMap::new();
+            let mut cur = *start;
+            let mut walked = 0;
+            loop {
+                walked += 1;
+                if walked > crate::foreign::MAX_CHAIN {
+                    return Err(bad(format!(
+                        "source {name} has more than {} entries",
+                        crate::foreign::MAX_CHAIN
+                    )));
+                }
+                if let ForeignEvent::Delivery {
+                    added,
+                    changed,
+                    removed,
+                    shells,
+                    selection,
+                    ..
+                } = self.foreign_entry(&cur)?.event
+                {
+                    crate::foreign::fold_delta(&mut sel, &added, &changed, &removed)
+                        .map_err(|e| bad(format!("foreign entry {cur}: {e}")))?;
+                    if sel.len() > crate::foreign::MAX_LIST {
+                        return Err(bad(format!(
+                            "foreign entry {cur}: a selection holds at most {} blocks",
+                            crate::foreign::MAX_LIST
+                        )));
+                    }
+                    let rebuilt = rdy_model::foreign::delivery_selection(sel.iter(), &shells)
+                        .map_err(|why| {
+                            bad(format!("foreign entry {cur}: no selection digest: {why}"))
+                        })?;
+                    if rebuilt != selection {
+                        return Err(bad(format!(
+                            "foreign entry {cur}: selection {selection} is not the digest {rebuilt} its source's entries rebuild"
+                        )));
+                    }
+                }
+                match next.get(&cur) {
+                    Some(n) => cur = *n,
+                    None => break,
+                }
+            }
+            if walked != count[*name] {
+                return Err(bad(format!(
+                    "source {name}: {} of its entries are not on its chain",
+                    count[*name] - walked
+                )));
+            }
+            match refs.get(*name) {
+                Some(r) if *r == cur => {}
+                Some(r) => {
+                    return Err(bad(format!(
+                        "source {name}: its ref names {r}, not its newest entry {cur}"
+                    )));
+                }
+                None => {
+                    return Err(bad(format!(
+                        "source {name}: no ref names its newest entry {cur}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The erasure authorities among `removals` (see [`Authorities`]): each Removal whose apply
+    /// is stored has its proof checked again over the store's records; one that fails is
+    /// `foreign removal <hash>: its proof does not verify: <reason>`.
+    fn foreign_authorities(&self, removals: &[RemovalOf]) -> Result<Authorities, StoreError> {
+        let mut out = Authorities {
+            erased: BTreeSet::new(),
+            proof_keys: BTreeSet::new(),
+        };
+        let mut checked: BTreeMap<Hash, BTreeSet<(BlockId, Hash)>> = BTreeMap::new();
+        for (h, repo, apply, versions) in removals {
+            if !self.has_kind(kinds::REDACTION_APPLY, apply)? {
+                continue;
+            }
+            if !checked.contains_key(apply) {
+                let proof = crate::foreign_removal::stored_proof(self, *apply).map_err(|e| {
+                    bad(format!(
+                        "foreign removal {h}: its proof does not verify: {e}"
+                    ))
+                })?;
+                out.proof_keys.extend(proof.keys);
+                checked.insert(*apply, proof.approved);
+            }
+            for (id, v) in versions {
+                if checked[apply].contains(&(id.clone(), *v)) {
+                    out.erased.insert((*repo, id.clone(), *v));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The BLOCK versions that local changes create or update to. Empty when `needed` is false.
+    fn local_versions(&self, needed: bool) -> Result<BTreeSet<Hash>, StoreError> {
+        let mut out = BTreeSet::new();
+        if !needed {
+            return Ok(out);
+        }
+        let mut changes = vec![];
+        self.for_each_object_of(kinds::CHANGE, |h| {
+            changes.push(h);
+            Ok(())
+        })?;
+        for c in changes {
+            for op in self.change(&c)?.ops {
+                match op {
+                    Op::Create { block } | Op::Update { block, .. } => {
+                        out.insert(block.version_hash());
+                    }
+                    Op::Delete { .. } => {}
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Each delivered version names a stored BLOCK of its id and encoding; a removed one is
+    /// local content or an authorized Removal names it.
+    fn check_held_versions(
+        &self,
+        held: &BTreeMap<HeldKey, (Hash, u16)>,
+        local: &BTreeSet<Hash>,
+        authorities: &Authorities,
+    ) -> Result<(), StoreError> {
+        for ((repo, id, v), (_, encoding)) in held {
+            let what = || format!("foreign version {v} of {repo}/{id}");
+            match self.get_kind_raw(kinds::BLOCK, v) {
+                Ok((raw, payload)) => {
+                    let found = crate::codec::split(raw, &payload)
+                        .map_err(|e| bad(format!("{}: {e}", what())))?
+                        .version;
+                    if found != *encoding {
+                        return Err(bad(format!(
+                            "{}: its BLOCK has encoding {found}, not {encoding}",
+                            what()
+                        )));
+                    }
+                    let b: Block = crate::codec::decode_record(raw, &payload)?;
+                    if b.id != *id {
+                        return Err(bad(format!("{}: its BLOCK is a block of {}", what(), b.id)));
+                    }
+                }
+                Err(StoreError::Redacted { .. }) => {
+                    if !local.contains(v)
+                        && !authorities.removal_authorizes(repo, id, v)
+                        && !self.cited_request_removed(repo, id, v)?
+                    {
+                        return Err(bad(format!(
+                            "{}: its BLOCK reads as removed, and no authorized Removal names it",
+                            what()
+                        )));
+                    }
+                }
+                Err(StoreError::NotFound(_)) => {
+                    return Err(bad(format!("{}: no BLOCK is stored", what())));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the applied request that removed BLOCK version `version` is a citing project's
+    /// own request (D-CN4QJ) whose cited version target names that version of `id` in `repo`.
+    fn cited_request_removed(
+        &self,
+        repo: &RepoId,
+        id: &BlockId,
+        version: &Hash,
+    ) -> Result<bool, StoreError> {
+        // a mask whose request is not stored names no request of this project
+        let Some(request) = self.redaction_of(kinds::BLOCK, version)? else {
+            return Ok(false);
+        };
+        if !self.has_kind(kinds::REDACTION, &request)? {
+            return Ok(false);
+        }
+        let target = rdy_model::redaction::RedactTarget::ForeignVersion {
+            repo: *repo,
+            id: id.clone(),
+            version: *version,
+        };
+        Ok(self.redaction_request(&request)?.targets.contains(&target))
+    }
+
+    /// No record of a kind outside [`crate::object_refs::MAY_NAME_FOREIGN`] names a FOREIGN
+    /// entry or a version in `foreign_only`. A removed record has no edge to read, and a
+    /// verified foreign removal's proof record (`proof_keys`) is the cited project's, outside
+    /// canon.
+    fn check_foreign_edges(
+        &self,
+        foreign_only: &BTreeSet<Hash>,
+        proof_keys: &BTreeSet<crate::object_refs::ObjectKey>,
+    ) -> Result<(), StoreError> {
+        let names_foreign = |kind: Option<u8>, h: &Hash| -> Result<Option<String>, StoreError> {
+            let entry = match kind {
+                Some(kinds::FOREIGN) => true,
+                None => self.has_kind(kinds::FOREIGN, h)?,
+                Some(_) => false,
+            };
+            if entry {
+                return Ok(Some(format!("foreign entry {h}")));
+            }
+            if matches!(kind, None | Some(kinds::BLOCK)) && foreign_only.contains(h) {
+                return Ok(Some(format!(
+                    "version {h}, which only a foreign entry holds"
+                )));
+            }
+            Ok(None)
+        };
+        for kind in crate::object_refs::PORTABLE_KINDS {
+            if crate::object_refs::may_name_foreign(kind) || kind == kinds::BLOB_CHUNK {
+                continue;
+            }
+            let mut hashes = vec![];
+            self.for_each_object_of(kind, |h| {
+                hashes.push(h);
+                Ok(())
+            })?;
+            for h in hashes {
+                let key = crate::object_refs::ObjectKey { kind, hash: h };
+                if proof_keys.contains(&key) {
+                    continue;
+                }
+                let (raw, payload) = match self.get_kind_raw(kind, &h) {
+                    Ok(f) => f,
+                    Err(StoreError::Redacted { .. }) => continue,
+                    Err(e) => return Err(e),
+                };
+                let refs = crate::object_refs::refs_of(raw, &payload)
+                    .map_err(|e| bad(format!("object {key}: {e}")))?;
+                for r in refs {
+                    if let Some(what) = names_foreign(r.kind, &r.hash)? {
+                        return Err(bad(format!("object {key} names {what}")));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Each foreign pin of a block that is not foreign-only names the content of a version that
+    /// a delivery of its repo holds: the pin's content is compared with the delivered content
+    /// hashes, never with a BLOCK version hash.
+    fn check_foreign_pins(
+        &self,
+        held: &BTreeMap<HeldKey, (Hash, u16)>,
+        foreign_only: &BTreeSet<Hash>,
+    ) -> Result<(), StoreError> {
+        let contents: BTreeSet<(RepoId, &BlockId, Hash)> = held
+            .iter()
+            .map(|((repo, id, _), (content, _))| (*repo, id, *content))
+            .collect();
+        let mut blocks = vec![];
+        self.for_each_object_of(kinds::BLOCK, |h| {
+            if !foreign_only.contains(&h) {
+                blocks.push(h);
+            }
+            Ok(())
+        })?;
+        for v in blocks {
+            let (raw, payload) = match self.get_kind_raw(kinds::BLOCK, &v) {
+                Ok(f) => f,
+                Err(StoreError::Redacted { .. }) => continue,
+                Err(e) => return Err(e),
+            };
+            let encoding = crate::codec::split(raw, &payload)
+                .map_err(|e| bad(format!("block {v}: {e}")))?
+                .version;
+            if encoding != rdy_model::encoding::BLOCK_FOREIGN_ENCODING {
+                continue;
+            }
+            let b: Block = crate::codec::decode_record(raw, &payload)?;
+            for (target, pin) in &b.foreign.pins {
+                if !contents.contains(&(target.repo, &target.id, pin.content)) {
+                    return Err(bad(format!(
+                        "block {v}: its pin of {target} names content {}, which no delivered version holds",
+                        pin.content
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

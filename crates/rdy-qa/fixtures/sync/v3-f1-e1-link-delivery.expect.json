@@ -1,0 +1,224 @@
+{
+  "delivery": {
+    "bytes": 1498,
+    "delivery": {
+      "publication": {
+        "profile": "pf-564NV",
+        "profile_version": "843da40181f2e0255cff1f527e656061aec340f6b1672611aafc1ab80d2c4efe",
+        "tag": "v1.0.0"
+      },
+      "selection": "1fc6ade81dacca74fdf430ca0d66c4ee52ac33d66ab66b0fe55ff97326f5f222",
+      "shells": [],
+      "versions": [
+        {
+          "content": "5782e51be122eb7ed93f6448e81ac33fcf1591e86a83835ec460eb3a94bdbc71",
+          "derived": {
+            "lifecycle": null,
+            "status": "accepted",
+            "superseded_by": []
+          },
+          "encoding": 0,
+          "id": "D-YTMBF",
+          "version": "425d6f8a6a5d042bfb356e2c6c7c36a8a6cf1746bace57e0c6151e6f8456805d"
+        },
+        {
+          "content": "4adce9438b1cd0274fd3e2147798fc9286b3bc68713e0c535623cd6d2d3032ff",
+          "derived": {
+            "lifecycle": null,
+            "status": null,
+            "superseded_by": []
+          },
+          "encoding": 0,
+          "id": "c-ECS34",
+          "version": "d94de8f430b042d47995c5d6d0f4cba7dcf1897abbedf8f57f31ab2b970e1de1"
+        },
+        {
+          "content": "7783f9eb12033207802b3683176ec1b542a90213dc1e29c23686644ce44f512b",
+          "derived": {
+            "lifecycle": null,
+            "status": null,
+            "superseded_by": []
+          },
+          "encoding": 0,
+          "id": "c-XBY8Y",
+          "version": "9b5549dceab87b7c944d6cb05015cb96845dbdc6402720d3f99ef7d91c5ea57c"
+        },
+        {
+          "content": "c7607ccacaac691f46b187d37a9c706b7d945a0382f9054dae1d53aff9235679",
+          "derived": {
+            "lifecycle": null,
+            "status": null,
+            "superseded_by": []
+          },
+          "encoding": 0,
+          "id": "d-ZS3WZ",
+          "version": "c1a0e25d836b403658abe00db04c0b7817a6228139279da21d4a3892b1590ceb"
+        },
+        {
+          "content": "bc26ed19d9ef93dc35fd1330891c4a3ee10f2effc70d121b57f73217ed44c2ff",
+          "derived": {
+            "lifecycle": null,
+            "status": null,
+            "superseded_by": []
+          },
+          "encoding": 0,
+          "id": "s-MF10N",
+          "version": "4f52af2cc4a6d7736821b4999e2d313c207520df984217eb1836eb447f0909bf"
+        }
+      ]
+    },
+    "digest": "bceaea937113907134cc81bfd10248f95b7a27599651f56288402d239dd59a5a",
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "content_hash_v2",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [],
+      "purpose": "link_delivery",
+      "repo_id": "74ee32602995f9e5523f51b62b2b5138",
+      "stream_format": 3,
+      "tag": "2b4ac8ef1e991e7bc37516ecb0e82796cb600b093def6f3891824d9fd45956ae"
+    },
+    "keys": [
+      {
+        "hash": "425d6f8a6a5d042bfb356e2c6c7c36a8a6cf1746bace57e0c6151e6f8456805d",
+        "kind": 1
+      },
+      {
+        "hash": "d94de8f430b042d47995c5d6d0f4cba7dcf1897abbedf8f57f31ab2b970e1de1",
+        "kind": 1
+      },
+      {
+        "hash": "9b5549dceab87b7c944d6cb05015cb96845dbdc6402720d3f99ef7d91c5ea57c",
+        "kind": 1
+      },
+      {
+        "hash": "c1a0e25d836b403658abe00db04c0b7817a6228139279da21d4a3892b1590ceb",
+        "kind": 1
+      },
+      {
+        "hash": "4f52af2cc4a6d7736821b4999e2d313c207520df984217eb1836eb447f0909bf",
+        "kind": 1
+      }
+    ],
+    "records": 6
+  },
+  "published": false,
+  "rdy": "0.47.0",
+  "same_delivery_digest": "d8af5efe9ef1bc64aaeb1ccdd982257b4556a90f686295130daf1667be64138d",
+  "selection": "1fc6ade81dacca74fdf430ca0d66c4ee52ac33d66ab66b0fe55ff97326f5f222",
+  "stream": {
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "content_hash_v2",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [],
+      "purpose": "link_delivery",
+      "repo_id": "74ee32602995f9e5523f51b62b2b5138",
+      "stream_format": 3,
+      "tag": "2b4ac8ef1e991e7bc37516ecb0e82796cb600b093def6f3891824d9fd45956ae"
+    },
+    "records": [
+      {
+        "form": "present",
+        "hash": "425d6f8a6a5d042bfb356e2c6c7c36a8a6cf1746bace57e0c6151e6f8456805d",
+        "kind": 1,
+        "len": 187,
+        "raw_kind": 1
+      },
+      {
+        "form": "present",
+        "hash": "d94de8f430b042d47995c5d6d0f4cba7dcf1897abbedf8f57f31ab2b970e1de1",
+        "kind": 1,
+        "len": 68,
+        "raw_kind": 1
+      },
+      {
+        "form": "present",
+        "hash": "9b5549dceab87b7c944d6cb05015cb96845dbdc6402720d3f99ef7d91c5ea57c",
+        "kind": 1,
+        "len": 56,
+        "raw_kind": 1
+      },
+      {
+        "form": "present",
+        "hash": "c1a0e25d836b403658abe00db04c0b7817a6228139279da21d4a3892b1590ceb",
+        "kind": 1,
+        "len": 82,
+        "raw_kind": 1
+      },
+      {
+        "form": "present",
+        "hash": "4f52af2cc4a6d7736821b4999e2d313c207520df984217eb1836eb447f0909bf",
+        "kind": 1,
+        "len": 53,
+        "raw_kind": 1
+      }
+    ],
+    "totals": {
+      "bytes": 1498,
+      "digest": "bceaea937113907134cc81bfd10248f95b7a27599651f56288402d239dd59a5a",
+      "records": 6
+    }
+  },
+  "taken": {
+    "added": 5,
+    "again_unchanged": true,
+    "blocks_taken": 5,
+    "changed": 0,
+    "held": [
+      "D-YTMBF",
+      "c-ECS34",
+      "c-XBY8Y",
+      "d-ZS3WZ",
+      "s-MF10N"
+    ],
+    "removed": 0,
+    "selection": "1fc6ade81dacca74fdf430ca0d66c4ee52ac33d66ab66b0fe55ff97326f5f222",
+    "unchanged": false
+  },
+  "world": {
+    "adopt_answer": "5261e9797400f83fb4b7bd63facfe655a9f664908fb1b7fd9a526e8891702ad2",
+    "claim": "c-7ZKM3",
+    "decision": "D-YTMBF",
+    "kept": "c-XBY8Y",
+    "live": "rl-6HQ55",
+    "removal_entry": "554b6ff355bf8874f28067f91390b7a9e319478bac4a44fe61e1d89ae077b30f",
+    "removed": "c-ECS34",
+    "repo": "74ee32602995f9e5523f51b62b2b5138",
+    "revoked": "rl-39PDM"
+  }
+}

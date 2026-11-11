@@ -938,9 +938,9 @@ impl ReadState {
     }
 
     /// The tensions that refuse landing `changes` (one version's changes, proposed from view
-    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, not
-    /// dismissed, and with every side canon or one of `changes`, so that landing them would put
-    /// it into canon. By id.
+    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, open (not
+    /// dismissed, not deviated), and with every side canon, cited from a linked project or one of
+    /// `changes`, so that landing them would put it into canon. By id.
     ///
     /// The gate judges what lands (tgat1): a change that another view also holds, or a write the
     /// view overwrites later but a subset leaves out, is read as the landing set has it, not as
@@ -955,7 +955,8 @@ impl ReadState {
                 t.severity == TensionSeverity::Blocking
                     && self.tension_status(t) == TensionStatus::Open
                     && t.sides.iter().all(|s| match s {
-                        SideRef::Canon { .. } => true,
+                        // a cited block stands as canon does (repo links, D-Y49PX)
+                        SideRef::Canon { .. } | SideRef::Foreign { .. } => true,
                         SideRef::Change(h) => mine.contains(h),
                         SideRef::Intent { .. } => false,
                     })
@@ -1104,6 +1105,80 @@ fn policy_acceptance(
         ));
     }
     Ok(live.reference())
+}
+
+/// Repo links (D-Y49PX "Freshness"): the refusal message when a delivery since the stored
+/// assessment `w` of version `pref` changed a cited block of its foreign reach: a block in its
+/// local reach pins it, or it is a foreign side of a tension in its reach
+/// (`foreign_facts::assessment_foreign` records each such side's cited block in the foreign
+/// reach, so one check covers both). The record holds, for each such block, the FOREIGN entry
+/// that delivered the version the current view held then; the block moved when the entry in
+/// force now differs, or one of the two is absent: a delivery added, changed or removed it, or a
+/// revocation took its source out of the current view. A delivery that carries it unchanged
+/// moves nothing. The message names the entry in force now (for a block no live source selects
+/// now, the newest entry of a source of its repo) and the blocks it moved, each shown
+/// `<alias>:<id>` by canon's repo links; of several entries, the first in log order. None when
+/// nothing moved. It reads the foreign state and computes nothing else; a fresh record carries
+/// the entries of now, so the next approval passes the check.
+fn foreign_moved(
+    st: &ReadState,
+    pref: &ProposalRef,
+    w: &rdy_model::assessment::AssessmentV2,
+) -> Result<Option<String>, RdyError> {
+    use rdy_model::foreign::ForeignId;
+    use rdy_store::segment::Location;
+    if w.foreign.reach.is_empty() {
+        return Ok(None);
+    }
+    let foreign = st.foreign()?;
+    let reader = st.reader();
+    let then: BTreeMap<&ForeignId, &Hash> = w
+        .foreign
+        .delivered
+        .iter()
+        .map(|d| (&d.target, &d.entry))
+        .collect();
+    let targets: BTreeSet<&ForeignId> = w.foreign.reach.iter().map(|r| &r.target).collect();
+    // per moved block, the entry that moved it and that entry's place in the log
+    let mut moved: BTreeMap<(Location, Hash), Vec<&ForeignId>> = BTreeMap::new();
+    for t in targets {
+        let now = foreign.current_version(t);
+        if now.map(|h| &h.entry) == then.get(t).copied() {
+            continue;
+        }
+        let by = match now {
+            Some(h) => Some((h.at, h.entry)),
+            None => {
+                // the newest entry of a source of the block's repo: the removal or revocation
+                let mut newest: Option<(Location, Hash)> = None;
+                for (_, v) in foreign.sources().filter(|(_, v)| v.repo == t.repo) {
+                    if let Some(at) = reader.kind_location(rdy_store::kinds::FOREIGN, &v.head)?
+                        && newest.is_none_or(|(n, _)| n < at)
+                    {
+                        newest = Some((at, v.head));
+                    }
+                }
+                newest
+            }
+        };
+        if let Some(key) = by {
+            moved.entry(key).or_default().push(t);
+        }
+    }
+    let Some(((_, entry), hit)) = moved.into_iter().next() else {
+        return Ok(None);
+    };
+    let canon = st.materialized(&crate::Scope::Canon)?;
+    let links = crate::foreign_refs::RepoLinks::of_view(&canon);
+    let shown: Vec<String> = hit
+        .iter()
+        .map(|t| format!("{}:{}", links.shown(&t.repo), t.id))
+        .collect();
+    Ok(Some(format!(
+        "proposal {pref} moved: delivery {} changed {} after its assessment",
+        entry.short(),
+        shown.join(", ")
+    )))
 }
 
 /// M3c O16's freshness checks of version `pref` (record `p`) against its assessment `a`, after
@@ -2887,10 +2962,11 @@ impl Rdy {
                 },
             };
             // a read error never fails the reply (as `tensions_error`): the version is stored,
-            // not ready, with the error as its one issue
-            crate::readiness::assess(&now, &c, &now.gate_config()).unwrap_or_else(|e| {
-                crate::readiness::Assessed {
-                    readiness: crate::readiness::Readiness {
+            // not ready, with the error as its one issue. Repo links (D-Y49PX): the record
+            // carries its foreign reach, which freshness compares at approval.
+            crate::readiness::assessment::assess_wire(&now, &c, &now.gate_config()).unwrap_or_else(
+                |e| {
+                    let readiness = crate::readiness::Readiness {
                         issues: vec![Issue {
                             severity: Severity::Error,
                             code: e.code,
@@ -2903,14 +2979,19 @@ impl Rdy {
                         policy: None,
                         warnings: vec![],
                         checks_omitted: (0, 0),
-                    },
-                    assessment: None,
-                }
-            })
+                    };
+                    (readiness, None)
+                },
+            )
         };
-        let assessment = match &assessed.assessment {
-            Some(a) => Some(self.store.bind_assessment(&mut prepared, a)?),
+        let (readiness, wire) = assessed;
+        let assessment = match &wire {
+            Some(w) => Some(self.store.bind_assessment_wire(&mut prepared, w)?),
             None => None,
+        };
+        let assessed = crate::readiness::Assessed {
+            readiness,
+            assessment: wire.map(|w| w.local()),
         };
         let written = self.store.commit_propose(prepared)?;
         let answer = written.answer;
@@ -3097,7 +3178,8 @@ impl Rdy {
             }
             return Err(proposal_not_ready(pref, issues));
         };
-        let a = st.reader().assessment(&h)?;
+        let wire = st.reader().assessment_wire(&h)?;
+        let a = wire.local();
         let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
         let since = Self::landings_since(st, a.base)?;
         for (l, rec) in since.iter().rev() {
@@ -3118,6 +3200,11 @@ impl Rdy {
                 );
                 return Err(self.moved_fresh(st, pref, p, message)?);
             }
+        }
+        // repo links (D-Y49PX "Freshness"): a delivery after the assessment that changed a
+        // cited block of its foreign reach, even when canon stayed still
+        if let Some(message) = foreign_moved(st, pref, &wire)? {
+            return Err(self.moved_fresh(st, pref, p, message)?);
         }
         if pack_digest(st.pack()) != a.pack.digest {
             let message = format!("proposal {pref} moved: the pack changed after its assessment");
@@ -3148,10 +3235,12 @@ impl Rdy {
         message: String,
     ) -> Result<RdyError, RdyError> {
         let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
-        let assessed = crate::readiness::assess(st, &c, &st.gate_config())?;
-        let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
+        // repo links (D-Y49PX): the fresh record carries the foreign reach of now
+        let (readiness, wire) =
+            crate::readiness::assessment::assess_wire(st, &c, &st.gate_config())?;
+        let (Some(mut a), Some(mut card)) = (wire, readiness.card) else {
             let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
-            e.issues = assessed.readiness.issues;
+            e.issues = readiness.issues;
             return Ok(e);
         };
         // the fresh record assesses the version on the canon it was computed on, so the next
@@ -3167,7 +3256,7 @@ impl Rdy {
         card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
         card.card_hash = crate::pending::card_hash(&card).to_string();
         self.store
-            .put_assessment(&a)
+            .put_assessment_wire(&a)
             .map_err(crate::answer::internal)?;
         self.publish(Delta::Seq)?;
         Ok(RdyError::new(
@@ -3341,6 +3430,9 @@ impl Rdy {
         });
         let changes = changes_of(&st, &p.changes)?;
         linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
+        // repo links (rpl23): a deviation written before its target's organization or team lock
+        // was adopted never lands
+        crate::foreign_locks::check_landing(&st, changes.iter().flat_map(|c| &c.ops))?;
         // FW-HB1, RULING F1's limit: --strict and reviews.require_up_to_date refuse any landing
         // since the version was proposed
         Self::check_base_moved(&st, &pref, &p, &opts)?;
@@ -3599,7 +3691,7 @@ impl Rdy {
             accept,
             chosen,
             keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
-            reaffirm: None,
+            card: None,
         })
     }
 
@@ -3731,8 +3823,190 @@ impl Rdy {
             accept: None,
             chosen: None,
             keys: BTreeMap::new(),
-            reaffirm: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
+            card: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
         })
+    }
+
+    /// The private request of an adopt card's isolated landing (repo links, D-8VJAZ; see
+    /// [`AdoptLanding`]), prepared under the writer and written by [`Rdy::commit_landing`] like
+    /// every approval, the re-affirmation card's path with the adoption's own frozen-decision
+    /// exception. On the canon the card was read on, in memory and in one batch: the fresh
+    /// internal view `adopt-<card hash, first 12 digits>`, its `Create` op, the adoption's one
+    /// change and its `Commit` op, the proposal (the card's title and summary), its bound plan,
+    /// the landing with the person as approver and the card as evidence, the seal when the plan
+    /// has an item, the view's `Close` op, and the person's `Adopt` answer, which names the
+    /// landing. It checks readiness (the plan's gate) and freshness only, and asks for no second
+    /// approval: the person answered this exact card. Nothing is appended here; a refusal leaves
+    /// no view, ref, proposal, landing or answer. An existing view of that name is
+    /// `E_BAD_INPUT`: an old internal view is never reused.
+    pub(crate) fn prepare_adopt_landing(
+        &mut self,
+        req: AdoptLanding<'_>,
+    ) -> Result<(PreparedApproval, Hash), RdyError> {
+        let AdoptLanding {
+            card,
+            approver,
+            relay,
+            evidence,
+            ops,
+            adoption,
+            answer,
+        } = req;
+        let bug = |what: &str| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("{}: {what}", card.r#ref),
+                "report this as a bug in rdy",
+            )
+        };
+        let card_hash: Hash = card
+            .card_hash
+            .parse()
+            .map_err(|_| bug("the card has no hash"))?;
+        let st = self.read();
+        let canon_at = st.canon_head();
+        let view = rdy_store::adopt_view(&card_hash);
+        if st.has_view(&view) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("reserved adopt view already exists: {view}"),
+                "read the fresh adopt card and answer it",
+            ));
+        }
+        let by = approver.provenance();
+        let summary = card.summary.clone().unwrap_or_default();
+        let change = Change {
+            view: view.clone(),
+            ops,
+            deps: vec![],
+            provenance: by.clone(),
+            justification: None,
+            message: card.title.clone(),
+            links: ChangeLinks::default(),
+            read_identity: None,
+        };
+        let mut prepared = self
+            .store
+            .prepare_adopt_propose(rdy_store::AdoptProposeRequest {
+                view: &view,
+                canon_at,
+                change,
+                title: &card.title,
+                summary: &summary,
+                by: by.clone(),
+                adoption: adoption.clone(),
+            })
+            .map_err(crate::answer::internal)?;
+        let version = prepared.version();
+        let committed = prepared
+            .fresh_change()
+            .cloned()
+            .ok_or_else(|| bug("the proposal has no change"))?;
+        // the one change this answer writes must fit one record; nothing is written yet
+        crate::reaffirm::change_fits(&committed, ADOPT_CHANGE, ADOPT_CHANGE_FIX)?;
+        // the order this landing applies its change in, merged with the adoption's authority:
+        // every read of the candidate below takes it from the state's memo, so none merges the
+        // change again without that authority (which would refuse the frozen decisions' moves)
+        let (_, applied) = st
+            .reader()
+            .merge_checked_adopting(
+                &*st.canon_snapshot()?,
+                std::slice::from_ref(&committed),
+                &adoption,
+            )
+            .map_err(crate::answer::internal)?;
+        st.memo
+            .order
+            .put(vec![committed.id()], std::sync::Arc::new(applied));
+        // readiness: the candidate's complete plan on canon, with no answer, and its gate
+        let pp = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            &view,
+            None,
+            Some(std::slice::from_ref(&committed)),
+            &[],
+        )?;
+        let gate = crate::plan::lifecycle::plan_issues(&pp.summary);
+        if gate.iter().any(|i| i.severity == Severity::Error) {
+            let mut e = RdyError::new(
+                E_PROPOSAL_NOT_READY,
+                format!("{} is not ready to land", card.r#ref),
+                "settle the open change-plan items of the adopted blocks, then answer the card again",
+            );
+            e.issues = gate;
+            return Err(e);
+        }
+        let bound = pp.plan(&view, version, by.clone());
+        let bound_id = self.store.bind_plan(&mut prepared, &bound)?;
+        let mut store = self
+            .store
+            .prepare_adopt_land(prepared, by.clone(), relay, evidence)
+            .map_err(crate::answer::internal)?;
+        let computed = match pp.computed.as_ref().and_then(|c| {
+            c.on(
+                &st,
+                &view,
+                &[committed.id()],
+                canon_at,
+                None,
+                &bound.heads,
+                &bound.heads,
+            )
+        }) {
+            Some(c) => c.clone(),
+            None => crate::plan::compute::compute_changes(
+                &st,
+                &view,
+                std::slice::from_ref(&committed),
+                canon_at,
+                &bound.heads,
+                &bound.heads,
+            )?,
+        };
+        let seal = adopt_seal(
+            &view,
+            version,
+            store.hash(),
+            bound_id,
+            &bound,
+            computed,
+            &by,
+        );
+        self.store.plan_landing(&mut store, None, seal.as_ref())?;
+        self.store
+            .close_adopt_view(&mut store, &by)
+            .map_err(crate::answer::internal)?;
+        let answer = Answer {
+            targets: vec![store.hash()],
+            ..answer
+        };
+        let answer_id = self
+            .store
+            .answer_adopt_landing(&mut store, &answer)
+            .map_err(crate::answer::internal)?;
+        Ok((
+            PreparedApproval {
+                store,
+                pref: ProposalRef {
+                    version,
+                    stable: version,
+                    n: 1,
+                },
+                title: card.title.clone(),
+                summary: Some(summary),
+                changes: 1,
+                view,
+                issues: vec![],
+                landed_ops: committed.ops,
+                requests: vec![],
+                accept: None,
+                chosen: None,
+                keys: BTreeMap::new(),
+                card: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
+            },
+            answer_id,
+        ))
     }
 
     /// The freshness check of the removal requests a prepared landing lands, run again under the
@@ -3769,12 +4043,12 @@ impl Rdy {
             requests,
             chosen,
             keys,
-            reaffirm,
+            card,
             ..
         } = prepared;
-        // D-CQMA4: a re-affirmation card's landing was built on the canon its card was read on;
-        // canon must stand there still
-        if let Some((card, canon_at, _)) = &reaffirm
+        // D-CQMA4, D-8VJAZ: a card's isolated landing (a re-affirmation card's or an adopt
+        // card's) was built on the canon its card was read on; canon must stand there still
+        if let Some((card, canon_at, _)) = &card
             && self.store.canon_head()? != *canon_at
         {
             return Err(RdyError::new(
@@ -3849,6 +4123,75 @@ pub(crate) struct ReaffirmLanding<'a> {
     pub(crate) reason: crate::reaffirm::Reason,
 }
 
+/// What [`change_fits`](crate::reaffirm::change_fits) calls an adopt card's one change.
+const ADOPT_CHANGE: &str = "adoption change";
+
+/// The fix of an adopt card's answer whose one change would exceed one record.
+const ADOPT_CHANGE_FIX: &str =
+    "Keep the approved pins, ask the source for a smaller selection, then adopt its next delivery.";
+
+/// The private request of an adopt card's isolated landing (repo links, D-8VJAZ): the bound card
+/// the person answered with `Adopt the delivery`, the person (the approver of the landing), the
+/// relay that carried the answer if any, the card evidence (every option label, the chosen one
+/// and the card's hash), the adoption's updates, the foreign pin moves they make (the frozen
+/// decision exception's authority) and the person's `Adopt` answer, whose target the landing
+/// fills in. Only the card's answer builds it; there is no public way to it.
+pub(crate) struct AdoptLanding<'a> {
+    pub(crate) card: &'a Item,
+    pub(crate) approver: Session,
+    pub(crate) relay: Option<Relay>,
+    pub(crate) evidence: ApprovalEvidence,
+    pub(crate) ops: Vec<Op>,
+    pub(crate) adoption: rdy_store::PinAdoption,
+    pub(crate) answer: Answer,
+}
+
+/// The seal of an adopt card's landing: each item of the adoption's plan with its computed
+/// outcome (the plan has no answer), or none when the plan has no item and re-affirms nothing,
+/// as every landing seals.
+fn adopt_seal(
+    view: &str,
+    version: Hash,
+    landing: Hash,
+    bound_id: Hash,
+    bound: &rdy_model::plan::Plan,
+    computed: crate::plan::compute::ComputedPlan,
+    by: &rdy_model::Provenance,
+) -> Option<rdy_model::plan::Plan> {
+    use rdy_model::plan::{Plan, PlanOutcome, PlanSeal, SealedItem};
+    if computed.items.is_empty() && !computed.reaffirms {
+        return None;
+    }
+    let items = computed
+        .items
+        .into_iter()
+        .map(|c| SealedItem {
+            id: c.id,
+            kind: c.kind,
+            subject: c.subject,
+            cause: c.cause,
+            edge: c.edge,
+            outcome: c.close.unwrap_or(PlanOutcome::Open),
+            answer: None,
+        })
+        .collect();
+    Some(Plan {
+        stable: Some(bound.stable.unwrap_or(bound_id)),
+        prev: Some(bound_id),
+        view: view.to_string(),
+        proposal: Some(version),
+        answers: bound.answers.clone(),
+        heads: bound.heads.clone(),
+        provenance: by.clone(),
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: computed.decisions,
+            items,
+        }),
+    })
+}
+
 /// A landing prepared under the writer by [`Rdy::prepare_landing`] and not yet written: the
 /// store's prepared batch, and what the commit publishes and reports. It holds no writer guard
 /// and no reference into the project.
@@ -3865,10 +4208,11 @@ pub(crate) struct PreparedApproval {
     accept: Option<Change>,
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
-    /// A re-affirmation card's isolated landing (D-CQMA4): the card's ref and the canon head it
-    /// was read on, checked again before the commit, and the card's hash, which binds every
-    /// retry of the answer. None for every other landing.
-    reaffirm: Option<(String, Option<Hash>, String)>,
+    /// A card's isolated landing, a re-affirmation card's (D-CQMA4) or an adopt card's
+    /// (D-8VJAZ): the card's ref and the canon head it was read on, checked again before the
+    /// commit, and the card's hash, which binds every retry of the answer. None for every other
+    /// landing.
+    card: Option<(String, Option<Hash>, String)>,
 }
 
 impl PreparedApproval {
@@ -3878,17 +4222,18 @@ impl PreparedApproval {
     }
 
     /// The proposal version a retry of this approval must approve again (pver1): this one's,
-    /// except for a re-affirmation card's landing, whose version is new in each preparation (the
-    /// card binds the retry instead).
+    /// except for a card's isolated landing (a re-affirmation or an adopt card's), whose version
+    /// is new in each preparation (the card binds the retry instead).
     pub(crate) fn pin(&self) -> Option<ProposalRef> {
-        self.reaffirm.is_none().then_some(self.pref)
+        self.card.is_none().then_some(self.pref)
     }
 
-    /// The hash of the re-affirmation card this landing answers: a retry of the answer binds
-    /// that card, also when the first request named no hash, so a card whose members or binding
-    /// moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other landing.
+    /// The hash of the re-affirmation or adopt card this landing answers: a retry of the answer
+    /// binds that card, also when the first request named no hash, so a card whose members or
+    /// binding moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other
+    /// landing.
     pub(crate) fn card_pin(&self) -> Option<&str> {
-        self.reaffirm.as_ref().map(|(_, _, h)| h.as_str())
+        self.card.as_ref().map(|(_, _, h)| h.as_str())
     }
 
     /// The refusal of this landing when it was prepared again for an approval first bound to

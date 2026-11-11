@@ -81,6 +81,7 @@ pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question", "finding"
 /// (`rdy_model::engine_fields::ENGINE_FIELDS`, p-8YP1G).
 pub const STORE_ONLY_FIELDS: &[&str] = &[
     rdy_model::key::AUTO_FIELD,
+    rdy_model::engine_fields::ADOPTED_AS,
     rdy_model::engine_fields::REAFFIRMED,
     rdy_model::engine_fields::REFLECTS_AT,
 ];
@@ -140,6 +141,21 @@ pub struct AreaDef {
     pub paths: Vec<String>,
 }
 
+/// The engine link kind of a decision that departs from a cited decision, a cited instruction or
+/// an external decision (repo links, D-8VJAZ). No pack declares it, and it is never among a pack's
+/// `link_types`: it is a foreign link, on a decision only.
+pub const DEVIATES_FROM: &str = "deviates_from";
+
+/// The issue message of a `deviates_from` link on a block of type `block_type`, not a decision.
+pub fn deviation_on_message(block_type: &str) -> String {
+    format!(
+        "type {block_type} cannot carry {DEVIATES_FROM}: only a decision departs from a cited block"
+    )
+}
+
+/// The fix of a `deviates_from` link on a block that is not a decision.
+pub const DEVIATION_ON_FIX: &str = "remove deviates_from; record the departure as a decision: rdy_decide with deviates_from / a decision with deviates_from in rdy edit";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pack {
@@ -159,6 +175,14 @@ pub struct Pack {
     /// Severity overrides per tension kind: only what the pack wrote.
     #[serde(default)]
     pub tensions: BTreeMap<TensionKind, TensionSeverity>,
+    /// Severity overrides for the five cross-project kinds ([`CROSS_PROJECT_KINDS`]): only what
+    /// the pack wrote. A key outside the five is ignored and warns when the pack loads.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "de_tensions_across"
+    )]
+    pub tensions_across: BTreeMap<TensionKind, TensionSeverity>,
     /// Normative text duplicates need at least this many words (default 3).
     #[serde(default)]
     pub duplicate_text_min_words: Option<usize>,
@@ -172,6 +196,53 @@ pub struct Pack {
     /// by [`crate::compile_rules`]; an empty list stays out of the pack's serialized form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<crate::rules::Rule>,
+}
+
+/// The five tension kinds a citing pack may raise for cross-project tensions, in table order.
+pub const CROSS_PROJECT_KINDS: [TensionKind; 5] = [
+    TensionKind::DuplicateDefinition,
+    TensionKind::ValueDisagreement,
+    TensionKind::RestatementDrift,
+    TensionKind::DeprecatedReference,
+    TensionKind::PremiseShift,
+];
+
+/// Reads `tensions_across`: a known kind needs a valid severity, any other key is skipped here
+/// (the pack set warns about it) and stays advisory.
+fn de_tensions_across<'de, D>(d: D) -> Result<BTreeMap<TensionKind, TensionSeverity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = BTreeMap<TensionKind, TensionSeverity>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a map of tension kind to severity")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some(key) = m.next_key::<String>()? {
+                match CROSS_PROJECT_KINDS.iter().find(|k| k.name() == key) {
+                    Some(kind) => {
+                        if out
+                            .insert(*kind, m.next_value::<TensionSeverity>()?)
+                            .is_some()
+                        {
+                            return Err(A::Error::custom(format!(
+                                "duplicate entry with key \"{key}\""
+                            )));
+                        }
+                    }
+                    None => {
+                        m.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(V)
 }
 
 /// The six dimensions a coverage score measures, in report order.
@@ -463,6 +534,15 @@ impl Pack {
             Some(s) => (*s, true),
             None => (kind.default_severity(), false),
         }
+    }
+
+    /// The severity a cross-project tension of `kind` has under this citing pack: what its
+    /// `tensions_across` set, else advisory. The cited pack's severity has no force.
+    pub fn across_severity(&self, kind: TensionKind) -> TensionSeverity {
+        self.tensions_across
+            .get(&kind)
+            .copied()
+            .unwrap_or(TensionSeverity::Advisory)
     }
 
     /// The fewest words a normative text needs before two equal texts are a duplicate

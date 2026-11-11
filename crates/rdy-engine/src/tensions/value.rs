@@ -228,8 +228,14 @@ fn participant(b: &Block) -> Option<Participant> {
     })
 }
 
+/// A value's unit, its `value` field as written and its normalized number, when it takes part
+/// (repo links: a cited value, D-Y49PX).
+pub(crate) fn value_parts(b: &Block) -> Option<(String, String, String)> {
+    participant(b).map(|p| (p.unit, p.written, p.number))
+}
+
 /// The first number `y` states in `unit` that differs from `number`.
-fn first_difference(y: &Block, unit: &str, number: &str) -> Option<String> {
+pub(crate) fn first_difference(y: &Block, unit: &str, number: &str) -> Option<String> {
     text_sources(y)
         .iter()
         .flat_map(|(_, text)| stated_numbers(text, unit))
@@ -273,6 +279,14 @@ impl ValueDisagreement {
 impl Detector for ValueDisagreement {
     fn kind(&self) -> TensionKind {
         TensionKind::ValueDisagreement
+    }
+    fn across(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        super::foreign::run(cx, self.kind(), seeds, out, super::foreign::values)
     }
 
     /// A change on a value reaches every block that ties to it; a change on a block reaches the
@@ -359,6 +373,11 @@ impl Detector for ValueDisagreement {
                 stable: cx.stable(&y)?,
                 involved: vec![cx.involved(ys, &y, yv)?, cx.involved(vs, &v, vv)?],
             });
+        }
+        // across projects (repo links, D-Y49PX): a cited value, in flight here; the canon form
+        // follows the foreign state and is joined per build
+        if cx.scope() == DetectScope::Inflight {
+            self.across(cx, seeds, out)?;
         }
         Ok(())
     }

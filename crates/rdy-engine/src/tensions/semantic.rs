@@ -14,7 +14,9 @@ use super::{
     DetectScope, Detector, Found, Involved, SideRef, Tension, TensionKind, TensionSeverity,
 };
 use crate::{Materialized, RdyError};
-use rdy_model::{BlockId, Hash, PairItem, pair_key};
+use rdy_model::foreign::ForeignId;
+use rdy_model::semantic::{ForeignPairItem, PairTarget};
+use rdy_model::{BlockId, Hash, PairItem, PairSide, pair_key_sides};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -32,19 +34,32 @@ pub fn records_visited() -> u64 {
     RECORDS_VISITED.with(std::cell::Cell::get)
 }
 
-/// The pair key of `involved`'s two blocks and their contents, when it has exactly two
-/// distinct blocks, each at one content.
-fn key_of(involved: &[Involved]) -> Option<Hash> {
-    let mut items: BTreeSet<PairItem> = BTreeSet::new();
-    for i in involved {
-        items.insert(PairItem {
+/// The side `i` is in a stored pair: a cited block (a foreign side) at its content identity, else
+/// a local block at its content.
+fn pair_side_of(i: &Involved, content: Hash) -> PairSide {
+    match &i.side {
+        SideRef::Foreign { repo, .. } => PairSide::Foreign(ForeignPairItem {
+            target: ForeignId::new(*repo, i.block.clone()),
+            content,
+        }),
+        _ => PairSide::Local(PairItem {
             block: i.block.clone(),
-            content: i.content?,
-        });
+            content,
+        }),
     }
-    let blocks: BTreeSet<&BlockId> = items.iter().map(|i| &i.block).collect();
-    (items.len() == 2 && blocks.len() == 2)
-        .then(|| pair_key(&items.into_iter().collect::<Vec<_>>()))
+}
+
+/// The pair key of `involved`'s two blocks and their contents, when it has exactly two
+/// distinct blocks (a cited block is distinct from a local one, and by repo), each at one
+/// content. With every side local it is the released local key.
+fn key_of(involved: &[Involved]) -> Option<Hash> {
+    let mut sides: BTreeSet<PairSide> = BTreeSet::new();
+    for i in involved {
+        sides.insert(pair_side_of(i, i.content?));
+    }
+    let targets: BTreeSet<PairTarget> = sides.iter().map(PairSide::target).collect();
+    (sides.len() == 2 && targets.len() == 2)
+        .then(|| pair_key_sides(&sides.into_iter().collect::<Vec<_>>()))
 }
 
 /// The pair key of semantic tension `t`: that of its two involved blocks and their contents.
@@ -120,6 +135,56 @@ impl<'c, 'a> Sides<'c, 'a> {
             out.push(c);
         }
         out
+    }
+
+    /// The cited block `f` names, at its current delivered version when that holds the judged
+    /// content: its foreign side. `None` when no live source holds it, it moved to other
+    /// content, or its version is redacted. A cited side stands in both scopes.
+    fn cited(&self, f: &ForeignPairItem) -> Result<Option<Involved>, RdyError> {
+        let st = self.cx.st;
+        let Some(held) = st.foreign()?.current_version(&f.target) else {
+            return Ok(None);
+        };
+        let v = &held.version;
+        if v.content != f.content || st.reader().get_block(&v.version)?.is_redacted() {
+            return Ok(None);
+        }
+        Ok(Some(Involved {
+            side: SideRef::Foreign {
+                repo: f.target.repo,
+                entry: held.entry,
+            },
+            block: f.target.id.clone(),
+            version: Some(v.version),
+            content: Some(f.content),
+        }))
+    }
+
+    /// The content the current delivered version of `target` holds, if a live source holds it.
+    fn cited_content(&self, target: &ForeignId) -> Result<Option<Hash>, RdyError> {
+        Ok(self
+            .cx
+            .st
+            .foreign()?
+            .current_version(target)
+            .map(|h| h.version.content))
+    }
+
+    /// The sides of `side` in the scope the run reads: a local item's ([`Sides::of`]), or a cited
+    /// block's one side, in the changes slot in flight (where a form pairs a change with it) and
+    /// the canon slot in canon (where every side stands).
+    #[allow(clippy::type_complexity)]
+    fn of_side(&mut self, side: &PairSide) -> Result<(Vec<Involved>, Option<Involved>), RdyError> {
+        match side {
+            PairSide::Local(item) => self.of(item),
+            PairSide::Foreign(f) => {
+                let cited = self.cited(f)?;
+                Ok(match self.cx.scope() {
+                    DetectScope::Inflight => (cited.into_iter().collect(), None),
+                    DetectScope::Canon => (vec![], cited),
+                })
+            }
+        }
     }
 
     /// The sides of `item` in the scope the run reads: every live in-flight write of the block
@@ -211,21 +276,30 @@ impl Detector for Semantic {
                 continue;
             }
             for content in sides.contents(b) {
-                let item = PairItem {
+                let item = PairSide::Local(PairItem {
                     block: b.clone(),
                     content,
-                };
+                });
                 let Some(partners) = state.partners(&item) else {
                     continue;
                 };
                 for (other, by_content) in partners {
-                    for oc in sides.contents(other) {
+                    let held: Vec<Hash> = match other {
+                        PairTarget::Local(ob) => sides.contents(ob),
+                        PairTarget::Foreign(f) => sides.cited_content(f)?.into_iter().collect(),
+                    };
+                    for oc in held {
                         if let Some(k) = by_content.get(&oc) {
                             keys.insert(*k);
                         }
                     }
                 }
             }
+        }
+        // a pair of two cited sides has no local block to start from: a standing condition, read
+        // in the canon scope on a full run, as the team collisions are
+        if seeds.is_none() && cx.scope() == DetectScope::Canon {
+            keys.extend(state.foreign_only().copied());
         }
         for key in keys {
             let Some(t) = state.tension(&key) else {
@@ -235,8 +309,8 @@ impl Detector for Semantic {
             let [a, b] = t.record.items.as_slice() else {
                 continue;
             };
-            let (a_changes, a_canon) = sides.of(a)?;
-            let (b_changes, b_canon) = sides.of(b)?;
+            let (a_changes, a_canon) = sides.of_side(a)?;
+            let (b_changes, b_canon) = sides.of_side(b)?;
             let mut forms: Vec<(&Involved, &Involved)> = vec![];
             if cx.scope() == DetectScope::Canon {
                 if let (Some(x), Some(y)) = (&a_canon, &b_canon) {
@@ -251,12 +325,12 @@ impl Detector for Semantic {
                 // final ruling 2: canon is a side of a block for every form whose other side is
                 // a change in a view that does not touch that block
                 if let Some(y) = &b_canon {
-                    for x in a_changes.iter().filter(|x| sees_canon(cx, x, &b.block)) {
+                    for x in a_changes.iter().filter(|x| sees_canon(cx, x, b.block())) {
                         forms.push((x, y));
                     }
                 }
                 if let Some(x) = &a_canon {
-                    for y in b_changes.iter().filter(|y| sees_canon(cx, y, &a.block)) {
+                    for y in b_changes.iter().filter(|y| sees_canon(cx, y, a.block())) {
                         forms.push((x, y));
                     }
                 }
@@ -264,10 +338,16 @@ impl Detector for Semantic {
             if forms.is_empty() {
                 continue;
             }
-            let (lo, hi) = if a.block <= b.block {
-                (&a.block, &b.block)
+            // a cited block shows as `<repo>/<id>`; a pair of local blocks sorts by id, a pair
+            // with a cited block names the local block first
+            let name = |s: &PairSide| match s {
+                PairSide::Local(i) => i.block.to_string(),
+                PairSide::Foreign(i) => i.target.to_string(),
+            };
+            let (lo, hi) = if a.target() <= b.target() {
+                (name(a), name(b))
             } else {
-                (&b.block, &a.block)
+                (name(b), name(a))
             };
             let summary = format!("a reviewer judged that {lo} and {hi} disagree");
             for (x, y) in forms {

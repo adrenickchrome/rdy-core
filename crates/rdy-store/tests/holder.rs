@@ -598,6 +598,7 @@ fn ha4_late_mode_cannot_reinterpret_native_redactions() {
         body: "canary alpha".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let change = Change {

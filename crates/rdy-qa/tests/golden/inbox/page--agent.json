@@ -12,9 +12,9 @@
     {
       "event": "pending_added",
       "ids": [
-        "f02f93785abc0a97a4aa1c75d68da5720088bd2ff9ef48c8b525e1a88c0132b3"
+        "1542283f56a0c544474d9cdc2fe90f32d7a054db3c3f0c01465f9dd1dffd3431"
       ],
-      "line": "P-f02f93785abc@1 waits for an answer; read rdy_pending"
+      "line": "P-1542283f56a0@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "intent_posted",
@@ -34,33 +34,33 @@
     {
       "event": "pending_added",
       "ids": [
-        "197ee677b25325a1f1cd18790501440f55ea559433abce93b8029bb1c665815d"
+        "5a75ae88fedc49cdb5f5de431a9acf608672608b2eb3b35b16a8a7b31d621d40"
       ],
-      "line": "P-197ee677b253@1 waits for an answer; read rdy_pending"
+      "line": "P-5a75ae88fedc@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "landed",
       "ids": [
-        "467a6d47cdfa139bb4519863675053bd6cc796e620ee0d986425a5d65c1a1abe",
-        "197ee677b25325a1f1cd18790501440f55ea559433abce93b8029bb1c665815d"
+        "b664d834b0da6cc9c282bc0054492403c68a4ab1bbf5295521944553b731c61c",
+        "5a75ae88fedc49cdb5f5de431a9acf608672608b2eb3b35b16a8a7b31d621d40"
       ],
-      "line": "landing 467a6d47cdfa of view work changed 1 blocks in your areas (payments)"
+      "line": "landing b664d834b0da of view work changed 1 blocks in your areas (payments)"
     },
     {
       "event": "view_rebased",
       "ids": [
-        "467a6d47cdfa139bb4519863675053bd6cc796e620ee0d986425a5d65c1a1abe",
+        "b664d834b0da6cc9c282bc0054492403c68a4ab1bbf5295521944553b731c61c",
         "bce2a3c98b506c9a23307517914f1779fb6df62c52f29ab08c43070f9feec506"
       ],
-      "line": "your view a rebased onto landing 467a6d47cdfa with 1 conflicts"
+      "line": "your view a rebased onto landing b664d834b0da with 1 conflicts"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "dce9a1538d2b2585db90ed70b7075a1f0b3edbde32fd159865f3423a4db9353a",
+        "38ba773558d9e00c5f2cd19dc4de760170c457bef4e2bb28381a54f3998f1fb9",
         "2efc20d1e3fd38179973d9fbedf4727321db175e658f9dd34a6dce32caf43040"
       ],
-      "line": "tension dce9a1538d2b replaces c2ee3f30f301 on your change 2efc20d1e3fd (edit_collision, blocking): landing 467a6d47cdfa"
+      "line": "tension 38ba773558d9 replaces c2ee3f30f301 on your change 2efc20d1e3fd (edit_collision, blocking): landing b664d834b0da"
     }
   ],
   "more": false

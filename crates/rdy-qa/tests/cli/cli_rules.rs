@@ -933,8 +933,8 @@ fn rtc6_cli_bad_forms_never_open_a_writer() {
 fn rtc6_cli_contract_lists_rule_and_every_flag() {
     let w = World::new();
     let dir = w.project();
-    // the fixture's tree, which rdy-cli compares with its clap tree
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts/release-1.json");
+    // the current fixture's tree, which rdy-cli compares with its clap tree
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts/repo-links-v1.json");
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("the fixture")).unwrap();
     let tree = &fixture["cli"]["tree"];

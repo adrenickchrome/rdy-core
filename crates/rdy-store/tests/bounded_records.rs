@@ -203,6 +203,7 @@ fn nested_field_block(n: usize) -> Vec<u8> {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     postcard::to_allocvec(&b).unwrap()
@@ -652,6 +653,7 @@ fn embedding_change(levels: usize, map: bool, update: bool) -> Vec<u8> {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     };
     assert!(!field_of_levels(levels, map).nests_deeper_than(levels));

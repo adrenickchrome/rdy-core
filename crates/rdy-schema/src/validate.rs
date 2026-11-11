@@ -1,8 +1,11 @@
 use crate::glob::Glob;
 use crate::instruction;
-use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
+use crate::pack::{
+    BodyRule, DEVIATES_FROM, DEVIATION_ON_FIX, FieldKind, Pack, TypeClass, deviation_on_message,
+};
 use crate::policy;
 use crate::publication;
+use crate::repo_link;
 use crate::supporting;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use rdy_model::{decision, engine_fields, tree};
@@ -190,6 +193,19 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             if block.block_type == instruction::INSTRUCTION {
                 continue;
             }
+            // rpl4: a repo link has no key; the message is the unknown-field template
+            if block.block_type == repo_link::REPO_LINK {
+                out.push(err(
+                    block,
+                    "E_FIELD_UNKNOWN",
+                    format!("type {} has no field {name:?}", block.block_type),
+                    format!(
+                        "remove it, or use one of: {}",
+                        def.fields.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+                continue;
+            }
             match v.as_str() {
                 None => out.push(err(
                     block,
@@ -232,8 +248,23 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             }
             continue;
         }
+        if name == engine_fields::ADOPTED_AS
+            && (block.block_type != decision::DECISION
+                || (!projection
+                    && decision::status(block) != Some(decision::DecisionStatus::Accepted)))
+        {
+            // repo links (D-8VJAZ): `adopted_as` is engine metadata on an accepted decision only;
+            // the message is the unknown-field template
+            out.push(err(
+                block,
+                "E_FIELD_UNKNOWN",
+                format!("type {} has no field {name:?}", block.block_type),
+                engine_fields::input_fix(name),
+            ));
+            continue;
+        }
         if let Some(shape) = engine_fields::check(name, v) {
-            // `reaffirmed` and `reflects_at` are engine metadata on every type (O22): only rdy's
+            // `reaffirmed`, `reflects_at` and `adopted_as` are engine metadata (O22): only rdy's
             // own writes set them, so a bad shape is damaged stored metadata.
             if shape.is_err() {
                 out.push(err(
@@ -348,7 +379,25 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         )),
         _ => {}
     }
-    for name in block.links.keys() {
+    // repo links: a foreign link's kind follows the pack as a local one's does; deviates_from is
+    // the engine's own foreign link kind, on a decision only (D-8VJAZ)
+    let foreign_kinds = block.foreign.links.keys().filter(|k| {
+        if k.as_str() != DEVIATES_FROM {
+            return true;
+        }
+        if block.block_type != decision::DECISION {
+            out.push(err(
+                block,
+                "E_LINK_TYPE",
+                deviation_on_message(&block.block_type),
+                DEVIATION_ON_FIX.to_string(),
+            ));
+        }
+        false
+    });
+    let kinds: std::collections::BTreeSet<&String> =
+        block.links.keys().chain(foreign_kinds).collect();
+    for name in kinds {
         if !pack.link_types.contains(name) {
             out.push(err(
                 block,
@@ -373,7 +422,8 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     // authority policy (D-ZWP7Q)
     let profile = block.block_type == publication::PROFILE_TYPE;
     let is_policy = block.block_type == policy::POLICY_TYPE;
-    let doc_only = profile || is_policy;
+    let is_link = block.block_type == repo_link::REPO_LINK;
+    let doc_only = profile || is_policy || is_link;
     match (parent, &block.parent) {
         (Some(p), Some(_)) => {
             // docs and folders have paths: they sit only in folders, whatever a pack lists
@@ -488,6 +538,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         policy::check_values(pack, block, &mut out);
     }
     instruction::check_values(block, projection, &mut out);
+    if !projection {
+        repo_link::check_values(block, &mut out);
+    }
     out
 }
 

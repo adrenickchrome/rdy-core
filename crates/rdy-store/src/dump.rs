@@ -122,7 +122,12 @@
 //!   not valid, or that names an unknown incompatible feature, is refused.
 //! - **Frames:** the raw frames, byte for byte, of every kind of the latest store
 //!   ([`current_frame_kinds`]). A versioned frame keeps its raw kind (`logical | 0x80`) and its
-//!   version prefix (`crate::codec`); its version must be one its kind registers.
+//!   version prefix (`crate::codec`); its version must be one its kind registers. A dump whose
+//!   manifest names `foreign_copy` (repo links, D-FK58A) also carries the kind that feature adds
+//!   ([`FEATURE_FRAME_KINDS`]: FOREIGN, the foreign log's entries) and the optional encodings it
+//!   registers (`crate::codec::OPTIONAL`); any other dump refuses them as frames that cannot
+//!   stand. The foreign log so travels as the log does: its entries, its held versions and its
+//!   source refs, byte for byte, beside canon and never in it.
 //! - **`DROPPED` payload (104 bytes):** `logical_kind: u8 || encoding: u16 || original_hash ||
 //!   original_len: u32 || apply_hash || has_residue: u8 || residue_hash`: format 3's proof with
 //!   the frame's encoding after its logical kind. The `BATCH` record's digests use the frame's
@@ -577,9 +582,13 @@ pub struct RemovalFacts {
 ///   record names (the earliest).
 ///
 /// So a hole that only a carried record explains is no span, and the authority a `DROPPED`
-/// record names is not the rule. [`RemovalTally::facts`] resolves from the batches alone (the
-/// reader's view of a file); [`RemovalTally::resolved`] asks the store's own authorization (the
-/// writer's). Growth is fallible.
+/// record names is not the rule. A project's foreign removal (an apply that a FOREIGN `Removal`
+/// entry of its own batch names, `crate::foreign_removal`) is no local removal: its request's
+/// manifest places are places of the cited log, never of this one. Its spans are the occurrences
+/// its entry erased in this log, which a dump holds as `DROPPED` records naming that apply.
+/// [`RemovalTally::facts`] resolves from the batches alone (the reader's view of a file);
+/// [`RemovalTally::resolved`] asks the store's own authorization (the writer's). Growth is
+/// fallible.
 #[derive(Clone, Debug, Default)]
 pub struct RemovalTally {
     /// The `REDACTION_APPLY` frames seen.
@@ -592,6 +601,13 @@ pub struct RemovalTally {
     manifests: HashMap<Hash, Vec<(Location, u8, Hash)>>,
     /// The lowest place of each key (kind, hash) of a dropped frame.
     dropped: HashMap<(u8, Hash), Location>,
+    /// The requests of the foreign removals seen, once each: their spans are this log's, in
+    /// the store's redaction rows, never their manifests' places.
+    foreign_requests: HashSet<Hash>,
+    /// The foreign removals' applies seen.
+    foreign_applies: HashSet<Hash>,
+    /// The lowest place of a dropped frame of each apply that a dropped frame names.
+    dropped_by_apply: HashMap<Hash, Location>,
     /// The mode the first batch sets, when the first batch seen starts at the origin.
     mode: Option<StoreMode>,
     /// Whether a batch was seen.
@@ -632,7 +648,7 @@ impl RemovalTally {
         upto: Location,
     ) -> Result<RemovalFacts, StoreError> {
         let mut first: Option<Location> = None;
-        for request in &self.requests {
+        for request in self.requests.iter().chain(&self.foreign_requests) {
             let (_, spans) = reader.index().redaction_request_items(request)?;
             for p in spans.iter().map(|s| s.loc).filter(|p| *p < upto) {
                 first = Some(first.map_or(p, |f| f.min(p)));
@@ -674,9 +690,17 @@ impl RemovalTally {
             .flatten()
     }
 
-    /// The lowest manifest place of the applies' requests (a project's resolution).
+    /// The lowest manifest place of the applies' requests, and the lowest dropped frame of each
+    /// foreign removal (a project's resolution).
     fn project_first(&self) -> Option<Location> {
-        self.manifest_spans().map(|(at, _, _)| *at).min()
+        let foreign = self
+            .foreign_applies
+            .iter()
+            .filter_map(|a| self.dropped_by_apply.get(a).copied());
+        self.manifest_spans()
+            .map(|(at, _, _)| *at)
+            .chain(foreign)
+            .min()
     }
 
     /// The lowest dropped frame of a key the applies' requests list (a holder's resolution).
@@ -695,6 +719,24 @@ impl RemovalTally {
         let origin = b.start.segment == 0 && b.start.offset == 0;
         // the first batch of the log sets its mode (as `crate::holder::FirstBatch` reads it)
         let mut mode = (first && origin).then_some(StoreMode::Project);
+        // the applies a FOREIGN `Removal` entry of this batch names (read only in a batch that
+        // holds an apply): foreign removals, no local ones
+        let mut proofs: Vec<Hash> = Vec::new();
+        let has_apply = b
+            .frames
+            .iter()
+            .any(|f| matches!(f, Frame::Present { kind, .. } if *kind == kinds::REDACTION_APPLY));
+        if has_apply {
+            for f in &b.frames {
+                if let Frame::Present { kind, payload, .. } = f
+                    && crate::codec::logical_kind(*kind) == kinds::FOREIGN
+                    && let Some(p) = crate::foreign_removal::removal_proof(*kind, payload)
+                {
+                    proofs.try_reserve(1).map_err(|_| drop_text::ALLOCATION)?;
+                    proofs.push(p);
+                }
+            }
+        }
         let mut at = b.start.offset;
         for f in &b.frames {
             let place = Location {
@@ -713,6 +755,23 @@ impl RemovalTally {
                         };
                     }
                 }
+                Frame::Present {
+                    kind,
+                    hash,
+                    payload,
+                } if *kind == kinds::REDACTION_APPLY && proofs.contains(hash) => {
+                    self.applies = self.applies.saturating_add(1);
+                    self.foreign_applies
+                        .try_reserve(1)
+                        .map_err(|_| drop_text::ALLOCATION)?;
+                    self.foreign_applies.insert(*hash);
+                    if let Some(request) = wire::apply_request(payload) {
+                        self.foreign_requests
+                            .try_reserve(1)
+                            .map_err(|_| drop_text::ALLOCATION)?;
+                        self.foreign_requests.insert(request);
+                    }
+                }
                 Frame::Present { kind, payload, .. } if *kind == kinds::REDACTION_APPLY => {
                     self.applies = self.applies.saturating_add(1);
                     match wire::apply_request(payload) {
@@ -729,9 +788,17 @@ impl RemovalTally {
                     kind,
                     hash,
                     payload,
-                } if *kind == kinds::REDACTION && !self.manifests.contains_key(hash) => {
+                } if crate::codec::logical_kind(*kind) == kinds::REDACTION
+                    && !self.manifests.contains_key(hash) =>
+                {
+                    // a request of any registered encoding (`crate::codec`): encoding 1 holds a
+                    // cited version target; a frame that does not split names nothing
                     let mut spans = Vec::new();
-                    if wire::request_spans(payload, &mut spans)? {
+                    let read = match crate::codec::split(*kind, payload) {
+                        Ok(o) => wire::request_spans(o.body, o.version, &mut spans)?,
+                        Err(_) => false,
+                    };
+                    if read {
                         self.manifests
                             .try_reserve(1)
                             .map_err(|_| drop_text::ALLOCATION)?;
@@ -739,15 +806,28 @@ impl RemovalTally {
                     }
                 }
                 Frame::Present { .. } => {}
-                Frame::Dropped { kind, hash, .. } => match self.dropped.get_mut(&(*kind, *hash)) {
-                    Some(low) => *low = (*low).min(place),
-                    None => {
-                        self.dropped
-                            .try_reserve(1)
-                            .map_err(|_| drop_text::ALLOCATION)?;
-                        self.dropped.insert((*kind, *hash), place);
+                Frame::Dropped {
+                    kind, hash, apply, ..
+                } => {
+                    match self.dropped.get_mut(&(*kind, *hash)) {
+                        Some(low) => *low = (*low).min(place),
+                        None => {
+                            self.dropped
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.dropped.insert((*kind, *hash), place);
+                        }
                     }
-                },
+                    match self.dropped_by_apply.get_mut(apply) {
+                        Some(low) => *low = (*low).min(place),
+                        None => {
+                            self.dropped_by_apply
+                                .try_reserve(1)
+                                .map_err(|_| drop_text::ALLOCATION)?;
+                            self.dropped_by_apply.insert(*apply, place);
+                        }
+                    }
+                }
             }
             at = at
                 .checked_add(FRAME_HEADER)
@@ -868,13 +948,16 @@ mod wire {
     /// `record allocation failed`. The layout: `carrier`, `actor` (`actor`, `run`, `role`,
     /// `at_ms`), `targets`, `reason_class`, `reason`, then the manifest's `versions`, `blobs`,
     /// `shared_blobs` and `spans` (each `place`, `kind`, `hash`, `len`, `residue`); the fields
-    /// after `spans` are not read.
+    /// after `spans` are not read. `version` is the record's encoding: encoding 1
+    /// (`REDACTION_FOREIGN_ENCODING`) appends the target variant `foreign_version` (index 3:
+    /// `repo`, 16 bytes, then `id` and `version`), which encoding 0 has no form for.
     pub(super) fn request_spans(
         payload: &[u8],
+        version: u16,
         out: &mut Vec<(Location, u8, Hash)>,
     ) -> Result<bool, &'static str> {
         let mut c = Cur(payload);
-        let Some(()) = head(&mut c) else {
+        let Some(()) = head(&mut c, version) else {
             return Ok(false);
         };
         // no count bound but the payload's own (the existing record limits): a count the
@@ -909,8 +992,9 @@ mod wire {
     /// length, the kind, the 32-byte hash and an absent residue.
     const MIN_SPAN_BYTES: usize = 1 + 1 + 1 + 32 + 1 + 1;
 
-    /// Reads a request's fields before its manifest's spans.
-    fn head(c: &mut Cur) -> Option<()> {
+    /// Reads a request's fields before its manifest's spans, of encoding `version`.
+    fn head(c: &mut Cur, version: u16) -> Option<()> {
+        let foreign = version == rdy_model::encoding::REDACTION_FOREIGN_ENCODING;
         c.hash()?; // carrier
         c.bytes()?; // actor.actor
         c.option(|c| c.bytes())?; // actor.run
@@ -925,6 +1009,11 @@ mod wire {
                 c.hash().map(|_| ())
             }
             2 => c.hash().map(|_| ()),
+            3 if foreign => {
+                c.take(16)?; // repo
+                c.bytes()?; // id
+                c.hash().map(|_| ())
+            }
             _ => None,
         })?; // targets
         if c.u32()? > 3 {
@@ -948,6 +1037,85 @@ mod wire {
             RedactionApply, RedactionManifest,
         };
         use rdy_model::{BlockId, Provenance, Role};
+
+        /// rpl25 (fix round 1): a request of REDACTION encoding 1 holds a cited version target
+        /// (variant 3). The in-place read takes it in encoding 1 and agrees with the record's own
+        /// spans; encoding 0 has no form for it, so the same body read as encoding 0 names
+        /// nothing.
+        #[test]
+        fn rpl25_in_place_read_takes_a_cited_version_target_in_encoding_1() {
+            let id = BlockId::parse("d-FRGNX").unwrap();
+            let span = DropSpan {
+                place: FramePlace {
+                    segment: 2,
+                    offset: 900,
+                },
+                kind: crate::kinds::BLOCK | crate::codec::VERSIONED,
+                hash: Hash([7; 32]),
+                len: 300,
+                residue: Some(Hash([8; 32])),
+            };
+            let r = Redaction {
+                carrier: Hash([1; 32]),
+                actor: Provenance {
+                    actor: "human:founder".into(),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 6_000_000,
+                },
+                targets: vec![
+                    RedactTarget::ForeignVersion {
+                        repo: rdy_model::RepoId([0xab; 16]),
+                        id: id.clone(),
+                        version: Hash([2; 32]),
+                    },
+                    RedactTarget::Version {
+                        id: id.clone(),
+                        version: Hash([3; 32]),
+                    },
+                ],
+                reason_class: ReasonClass::Personal,
+                reason: "a name".into(),
+                manifest: RedactionManifest {
+                    versions: vec![(id.clone(), Hash([2; 32]))],
+                    blobs: vec![],
+                    shared_blobs: vec![],
+                    spans: vec![span.clone()],
+                    inside: vec![],
+                    outside: vec![],
+                    quarantine: vec![],
+                    assessment: AssessmentSupport::NotImplemented,
+                },
+            };
+            assert_eq!(
+                r.encoding(),
+                rdy_model::encoding::REDACTION_FOREIGN_ENCODING
+            );
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let mut out = vec![];
+            assert_eq!(
+                request_spans(
+                    &bytes,
+                    rdy_model::encoding::REDACTION_FOREIGN_ENCODING,
+                    &mut out
+                ),
+                Ok(true)
+            );
+            assert_eq!(
+                out,
+                vec![(
+                    Location {
+                        segment: 2,
+                        offset: 900
+                    },
+                    span.kind,
+                    span.hash
+                )]
+            );
+            let mut out = vec![];
+            assert_eq!(request_spans(&bytes, 0, &mut out), Ok(false));
+            assert!(out.is_empty());
+        }
 
         /// hc1: the in-place reads agree with the records' own decoding, for every variant and
         /// option the read layout walks, and a cut record reads as nothing.
@@ -1007,7 +1175,7 @@ mod wire {
             };
             let bytes = postcard::to_allocvec(&r).unwrap();
             let mut out = vec![];
-            assert_eq!(request_spans(&bytes, &mut out), Ok(true));
+            assert_eq!(request_spans(&bytes, 0, &mut out), Ok(true));
             let want: Vec<(Location, u8, Hash)> = spans
                 .iter()
                 .map(|s| {
@@ -1024,19 +1192,22 @@ mod wire {
             assert_eq!(out, want);
             // a span count the remaining bytes cannot hold reads as nothing, and reserves nothing
             let mut c = Cur(&bytes);
-            head(&mut c).unwrap();
+            head(&mut c, 0).unwrap();
             let at = bytes.len() - c.0.len();
             assert_eq!(bytes[at], 2, "the span count");
             let mut forged = bytes[..at].to_vec();
             forged.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]); // 2^35
             forged.extend_from_slice(&bytes[at + 1..]);
             let mut out = vec![];
-            assert_eq!(request_spans(&forged, &mut out), Ok(false));
+            assert_eq!(request_spans(&forged, 0, &mut out), Ok(false));
             assert_eq!(out.capacity(), 0);
             // a record cut inside its spans reads as nothing
             let spans_at = bytes.len() - 6;
             let mut out = vec![];
-            assert_eq!(request_spans(&bytes[..spans_at / 2], &mut out), Ok(false));
+            assert_eq!(
+                request_spans(&bytes[..spans_at / 2], 0, &mut out),
+                Ok(false)
+            );
             let apply = RedactionApply {
                 request: Hash([6; 32]),
                 landing: Hash([2; 32]),
@@ -1320,9 +1491,10 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
         .map(|(_, k)| *k)
 }
 
-/// The logical kinds of the latest store: every assigned kind but the batch marker, the kinds a
-/// dump-4 frame may have (a versioned frame's logical kind among them). Ascending: the kinds of
-/// store format 18 and the four carried kinds.
+/// The logical kinds of the latest store: every assigned kind but the batch marker and the
+/// kinds a feature adds ([`FEATURE_FRAME_KINDS`]), the kinds a dump-4 frame may have (a versioned
+/// frame's logical kind among them). Ascending: the kinds of store format 18 and the four carried
+/// kinds.
 pub const CURRENT_FRAME_KINDS: [u8; 26] = [
     kinds::BLOCK,
     kinds::CHANGE,
@@ -1357,12 +1529,21 @@ pub fn current_frame_kinds() -> &'static [u8] {
     &CURRENT_FRAME_KINDS
 }
 
+/// The kinds a store feature adds to a dump-4 batch's frames, each with its feature: a frame of
+/// one stands only in a dump whose manifest names the feature. Repo links (D-FK58A): FOREIGN,
+/// with `foreign_copy`, which also lets a frame take its kind's optional encoding
+/// (`crate::codec::OPTIONAL`).
+pub const FEATURE_FRAME_KINDS: [(&str, u8); 1] =
+    [(crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN)];
+
 /// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
-/// store's kinds, where a marked raw kind needs a kind that registers versioned encodings.
+/// store's kinds, where a marked raw kind needs a kind that registers versioned encodings. In a
+/// dump of the latest store whose manifest names `foreign_copy` (`foreign`), the kinds and the
+/// optional encodings that feature adds may stand too.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FrameKinds {
     Legacy(&'static [u8]),
-    Current,
+    Current { foreign: bool },
 }
 
 impl FrameKinds {
@@ -1373,8 +1554,15 @@ impl FrameKinds {
             DumpStore::Legacy(n) if READS.contains(&(format, *n)) => {
                 frame_kinds(format, *n).map(FrameKinds::Legacy)
             }
-            DumpStore::Features(_) if format == DUMP_FORMAT => Some(FrameKinds::Current),
+            DumpStore::Features(m) if format == DUMP_FORMAT => Some(FrameKinds::current(m)),
             _ => None,
+        }
+    }
+
+    /// The frame kinds of a dump of the latest store whose manifest is `m`.
+    pub(crate) fn current(m: &crate::format::StoreFeatures) -> FrameKinds {
+        FrameKinds::Current {
+            foreign: m.has(crate::format::FEATURE_FOREIGN_COPY),
         }
     }
 
@@ -1382,10 +1570,13 @@ impl FrameKinds {
     pub(crate) fn allows(self, raw: u8) -> bool {
         match self {
             FrameKinds::Legacy(k) => k.contains(&raw),
-            FrameKinds::Current => {
+            FrameKinds::Current { foreign } => {
                 let kind = crate::codec::logical_kind(raw);
-                current_frame_kinds().contains(&kind)
-                    && (raw == kind || crate::codec::latest(kind) > 0)
+                let featured = FEATURE_FRAME_KINDS.iter().any(|(_, k)| *k == kind);
+                let known = current_frame_kinds().contains(&kind) || (foreign && featured);
+                let versioned = crate::codec::latest(kind) > 0
+                    || (foreign && crate::codec::optional(kind).is_some());
+                known && (raw == kind || versioned)
             }
         }
     }
@@ -1395,7 +1586,7 @@ impl FrameKinds {
     pub(crate) fn check_payload(self, raw: u8, payload: &[u8]) -> Result<(), String> {
         match self {
             FrameKinds::Legacy(_) => Ok(()),
-            FrameKinds::Current => crate::codec::split(raw, payload)
+            FrameKinds::Current { .. } => crate::codec::split(raw, payload)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
         }
@@ -1727,7 +1918,7 @@ impl<W: Write> DumpWriter<W> {
             }
         };
         crate::format::check_features(features)?;
-        let kinds = FrameKinds::Current;
+        let kinds = FrameKinds::current(features);
         let mut me = DumpWriter {
             w,
             phase: Phase::Files,

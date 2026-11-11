@@ -52,3 +52,8 @@ crates/rdy-qa/fixtures/release-keys/** -text
 # The compiled agent guide is pinned by the hash of its bytes: never convert line endings.
 release/agent-guide.json -text
 release/agent-guide.sha256 -text
+# The frozen Tally sample is pinned by the hashes in its freeze record, and the record pins the
+# build list's hash: never convert line endings.
+samples/tally/tally.rdydump -text
+samples/tally/freeze.json -text
+samples/tally/build.json -text

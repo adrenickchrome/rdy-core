@@ -43,7 +43,7 @@ impl ReadState {
 
     /// The actors who wrote the text item `i` carries (Review Focus 4, D-TF2W6): the walk
     /// [`ReadState::text_authors`] makes, which the dismissal gate shares. A canon item that
-    /// names no writer fails closed (`E_SELF_REVIEW`).
+    /// names no writer fails closed (`E_SELF_REVIEW`). A cited item has no author here.
     /// The refusal names the item's pair as `its pair`, so a caller that knows the request uses
     /// [`ReadState::item_authors_of`].
     pub fn item_authors(&self, i: &Item) -> Result<Vec<String>, RdyError> {
@@ -57,6 +57,11 @@ impl ReadState {
     }
 
     fn authors_of(&self, i: &Item, label: &str) -> Result<Vec<String>, RdyError> {
+        // a cited block has no local author: its writer is another project's, so no actor of
+        // this project wrote it
+        if i.side.is_foreign() {
+            return Ok(vec![]);
+        }
         self.text_authors(
             &i.side,
             &i.block,
@@ -88,6 +93,15 @@ impl ReadState {
                 if visit(q)?.is_break() {
                     return Ok(());
                 }
+            }
+        }
+        // the pairs of two cited sides, which no change writes: after every change's
+        for q in self.team_requests()? {
+            if !seen.insert(q.key) || semantic.settled(&q.key).is_some() {
+                continue;
+            }
+            if visit(q)?.is_break() {
+                return Ok(());
             }
         }
         Ok(())

@@ -1034,6 +1034,7 @@ fn blk(id: &str, ty: &str, blob: Option<&Hash>) -> Block {
         body: "text".into(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

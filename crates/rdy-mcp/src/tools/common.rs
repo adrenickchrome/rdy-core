@@ -4,7 +4,6 @@ use crate::read_page;
 use rdy_engine::engine::Engine;
 use rdy_engine::signing_crypto::{SigningAgent, UnavailableAgent};
 use rdy_engine::*;
-use rdy_model::BlockId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,22 +36,13 @@ pub const MAX_ASSET_BYTES_STDIO: usize = (MAX_REQUEST_BYTES - REQUEST_ENVELOPE_M
 /// `rdy_schema`'s note on the request-line limit, the same on both transports.
 pub const TRANSPORT_NOTE: &str = "one request is one JSON line of at most 16 MiB (request_bytes); the daemon's socket carries the same line limit as stdio (socket_line_bytes), so asset_bytes_stdio, the largest asset whose base64 fits in one line, binds on both";
 
-/// The largest `max_tokens` any read may ask for.
-pub const MAX_TOKENS_LIMIT: usize = 100_000;
+pub use rdy_engine::tool_reads::MAX_TOKENS_LIMIT;
 
 pub(super) fn limit(what: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_LIMIT, what, fix)
 }
 
-pub(crate) fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
-    match max_tokens {
-        Some(n) if n > MAX_TOKENS_LIMIT => Err(limit(
-            format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
-            format!("ask for at most {MAX_TOKENS_LIMIT} tokens and page through the rest"),
-        )),
-        _ => Ok(()),
-    }
-}
+pub(crate) use rdy_engine::tool_reads::check_tokens;
 
 /// Warning codes that are advisory: reported once per doc per MCP session (adv1).
 pub const ADVISORY_ONCE: [&str; 1] = ["W_SKELETON_MISSING"];
@@ -161,7 +151,7 @@ pub struct ScopeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdParams {
-    /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.
+    /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version; it also takes `<alias>:<id>`, a block cited from a linked project, which it reads without history.
     pub id: String,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>", "proposal:P-<id>@<n>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
@@ -220,37 +210,6 @@ pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
 /// by a later publish is never accepted here and then read on a state without it. `view` is the
 /// session view `s` resolves against, and the scope when `s` is none.
-pub(crate) fn scope_of(
-    view: &str,
-    read: &ReadState,
-    s: &Option<String>,
-) -> Result<Scope, RdyError> {
-    match s {
-        // scope1: an unknown view is not found, unless it is this session's own view
-        Some(text) => read.resolve_read_scope(text, Some(view)),
-        // ses1: a reader session whose view is canon reads canon by default
-        None if view == "canon" => Ok(Scope::Canon),
-        None => Ok(Scope::View(view.to_string())),
-    }
-}
+pub(crate) use rdy_engine::tool_reads::scope_of;
 
-/// refv1: the scope and the block id of a read call whose `id` may be `id@version` or a ref line.
-/// A pinned version reads under `tag:<version>`; an explicit scope that differs is refused.
-pub(super) fn read_target(
-    view: &str,
-    read: &ReadState,
-    id: &str,
-    scope: &Option<String>,
-) -> Result<(Scope, BlockId), RdyError> {
-    let t = rdy_model::reference::parse_target(id)
-        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
-    let pinned = t
-        .scope_text(scope.as_deref())
-        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
-    let scope = match pinned {
-        Some(text) => read.resolve_read_scope(&text, Some(view))?,
-        None => scope_of(view, read, scope)?,
-    };
-    let bid = read.resolve_id(&scope, &t.id)?;
-    Ok((scope, bid))
-}
+pub(super) use rdy_engine::tool_reads::read_target;

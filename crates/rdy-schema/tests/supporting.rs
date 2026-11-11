@@ -67,6 +67,7 @@ fn block(id: &str, ty: &str, parent: Option<&str>) -> Block {
         body: String::new(),
         links: BTreeMap::new(),
         pins: BTreeMap::new(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }
@@ -208,6 +209,7 @@ fn rf1_children_and_optional_extensions_are_closed() {
             "chapter",
             "memo",
             "instruction",
+            "repo_link",
             "publication_profile",
             "authority_policy"
         ],
@@ -215,7 +217,12 @@ fn rf1_children_and_optional_extensions_are_closed() {
     );
     assert_eq!(
         bare().block_types["doc"].children,
-        vec!["instruction", "publication_profile", "authority_policy"]
+        vec![
+            "instruction",
+            "repo_link",
+            "publication_profile",
+            "authority_policy"
+        ]
     );
     for pack in [bare(), custom()] {
         for (name, t) in &pack.block_types {
@@ -535,7 +542,7 @@ fn rf1_reflects_and_supporting_links_are_store_only() {
     );
     assert_eq!(
         STORE_ONLY_FIELDS,
-        &["key_auto", "reaffirmed", "reflects_at"]
+        &["key_auto", "adopted_as", "reaffirmed", "reflects_at"]
     );
 
     // a pack cannot declare the reflects link kind, alone or beside its own

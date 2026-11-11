@@ -2072,7 +2072,7 @@ mod tests {
             })
             .collect();
         let mut want: Vec<String> = (0..10)
-            .flat_map(|k| [format!("para Place {k}"), "code mermaid true".to_string()])
+            .flat_map(|k| ["code mermaid true".to_string(), format!("para Place {k}")])
             .collect();
         want.extend([
             "para Mermaid".to_string(),
@@ -2082,7 +2082,7 @@ mod tests {
         assert_eq!(read, want, "the print");
         // and the site's llms words come in the print's order, less the source's summary line
         let llms = String::from_utf8_lossy(&site.files["llms-full.txt"]).into_owned();
-        let start = llms.find("\nPlace 0\n").expect("the doc's words") + 1;
+        let start = llms.find("\ngraph TD\n").expect("the doc's words") + 1;
         let end = llms.find("\nPlace 10\n").expect("the last caption") + "\nPlace 10".len();
         let llms_words: Vec<&str> = llms[start..end]
             .lines()

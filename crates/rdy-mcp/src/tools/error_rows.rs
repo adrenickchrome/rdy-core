@@ -452,6 +452,26 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "use the holder for the stream's repo",
     ),
     (
+        E_FOREIGN_VERSION,
+        "a write cites a version of a linked project's block that no delivery holds: <alias>:<id> has no delivered version <12 hex>",
+        "wait for the delivery that holds it, or pin a delivered version: rdy_links {op: \"show\", alias} / rdy links show <alias>",
+    ),
+    (
+        E_FOREIGN_READ_ONLY,
+        "a write changes content cited from a linked project or an external decision (edit, move, delete, supersede, refine or revoke): <ref> is cited from <alias> and is read-only here",
+        "change it in its home project; to depart from it here, record a deviation: rdy_decide with deviates_from / a decision with deviates_from in rdy edit",
+    ),
+    (
+        E_INSTRUCTION_LOCKED,
+        "a deviation or an adoption would depart from an instruction that its organization or team set locks: <alias>:<id> is locked by its <organization | team <name>> set",
+        "add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction",
+    ),
+    (
+        E_RESERVED_VIEW,
+        "a write names a view that starts with reaffirm- or adopt- (reserved for re-affirmation and adopt cards), or names canon or inflight",
+        "pick a view name that does not start with reaffirm- or adopt-, and write to a view, not canon",
+    ),
+    (
         E_DUMP_CHAIN,
         "The dump files do not form a chain, or the predecessor does not match this store.",
         "Pass a full dump and its increments in order, or start a new chain.",

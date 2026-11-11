@@ -201,6 +201,7 @@ fn orphan_prose_landing(r: &mut Rdy) -> Hash {
         body: "Loose words.".into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     };
     let hash = r.store_mut().put(rdy_store::kinds::BLOCK, &prose).unwrap();

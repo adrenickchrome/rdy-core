@@ -60,13 +60,16 @@
 //! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch. The answers to a
 //! re-affirmation card are in [`reaffirm`]: `Keep them suspect` writes one `ANSWER`; `They still
 //! hold` lands the card's members alone, in an isolated landing that records the answer
-//! (D-CQMA4).
+//! (D-CQMA4). The answers to an adopt card are in [`adopt`] (D-8VJAZ): `Keep the approved pins`
+//! writes one `ANSWER` with the person's reason; `Adopt the delivery` lands the delivery's pin
+//! moves alone, in an isolated landing, with the person's `Adopt` `ANSWER` in its batch.
 //!
 //! # Presented answers
 //!
 //! A card the person answers in the local approver UI, or one an MCP client elicited from them,
 //! goes through the same binding and dispatch as the person's own answer ([`presented`],
 //! D-6M0AF): `local`, with evidence `card` or `elicited` and no relay.
+pub mod adopt;
 pub mod batch;
 pub mod presented;
 pub mod question;
@@ -81,6 +84,7 @@ use crate::gate::{
     withdrawn_error,
 };
 use crate::pending::PendingQuery;
+use crate::pending::adopt::{ADOPT_REF_PREFIX, is_adopt_ref};
 use crate::pending::queue::{Eligible, deferral_card, deferral_role};
 use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
@@ -404,7 +408,10 @@ impl Rdy {
         // D-AAQ9Z, D-CQMA4: a deferral card and a re-affirmation card have no recommended
         // option, so a list that names one is refused as a whole, before anything is answered
         if let Some(r) = refs.iter().find(|r| {
-            (r.starts_with("defer:") || r.starts_with(REAFFIRM_REF_PREFIX)) && is_item_ref(r)
+            (r.starts_with("defer:")
+                || r.starts_with(REAFFIRM_REF_PREFIX)
+                || r.starts_with(ADOPT_REF_PREFIX))
+                && is_item_ref(r)
         }) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -492,6 +499,7 @@ impl Rdy {
             (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, by, bound, note)
             }
+            (ItemKind::Adopt, _) => adopt::act(self, by, bound, note),
             (ItemKind::Answer, _) => {
                 question::act(self, by, person, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
             }
@@ -800,8 +808,9 @@ fn bind(
 /// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
 /// block's version), `advice:P-<id>@<n>` (a version's advised tensions), `defer:P-<id>@<n>` (a
 /// version's deferral card, an explicit version only), `reaffirm:<block id>@<version short>` (a
-/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version)
-/// or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
+/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version),
+/// `adopt:<repo>@<entry short>` (an adopt card: the repo's 32 hex digits and the entry's first
+/// 12) or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
 /// that are not items (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
 pub fn is_item_ref(r: &str) -> bool {
     let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
@@ -817,6 +826,9 @@ pub fn is_item_ref(r: &str) -> bool {
     }
     if let Some(p) = r.strip_prefix(REAFFIRM_REF_PREFIX) {
         return block_version(p);
+    }
+    if r.starts_with(ADOPT_REF_PREFIX) {
+        return is_adopt_ref(r);
     }
     match r.strip_prefix("advice:") {
         Some(p) => proposal_version(p),
@@ -953,4 +965,85 @@ fn next_in(st: &ReadState, person: &str, session_ref: Option<String>) -> Option<
         })
         .ok()?;
     q.items.first().map(|i| i.r#ref.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pending::{ItemKind, ItemOption};
+    use rdy_model::Role;
+    use std::collections::BTreeMap;
+
+    /// An adopt item as the queue will hold it, and its `option`.
+    fn adopt_bound(option: &str) -> Bound {
+        let card_option = |id: &str| ItemOption {
+            id: id.to_string(),
+            label: id.to_string(),
+            consequences: vec![],
+            recommended: None,
+        };
+        Bound {
+            item: Item {
+                r#ref: format!("adopt:{}@{}", "7".repeat(32), "a".repeat(12)),
+                kind: ItemKind::Adopt,
+                title: "Adopt the delivery".into(),
+                why: String::new(),
+                blocking: false,
+                summary: None,
+                summary_by: None,
+                facts: vec![],
+                members: vec![],
+                options: vec![
+                    card_option("adopt"),
+                    card_option("keep"),
+                    card_option("later"),
+                ],
+                raised_by: String::new(),
+                raised_at: String::new(),
+                age: String::new(),
+                batch: None,
+                exception: None,
+                card: String::new(),
+                card_hash: String::new(),
+                removal: None,
+                removal_reports: BTreeMap::new(),
+                plan_binding: None,
+                check_verdicts: vec![],
+            },
+            option: card_option(option),
+            card_hash: None,
+        }
+    }
+
+    /// rpl20: the answers to an adopt card go to its own acts. A keep with no reason, and an
+    /// adopt of a card that binds no delivery, are refused with no write.
+    #[test]
+    fn rpl20_adopt_answers_dispatch_to_their_own_acts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session::human("human:qa".into(), Role::Approver).unwrap();
+        let by = answerer(&s, "human:qa", &RelayInput::default()).unwrap();
+        let before = r.read().seq();
+        let refused = |r: &mut Rdy, option: &str, note: Option<&str>| match r.dispatch(
+            &by,
+            "human:qa",
+            adopt_bound(option),
+            note.map(str::to_string),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("{option} wrote"),
+        };
+        let e = refused(&mut r, "keep", None);
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "Keep the approved pins needs a note",
+                "pass note with a reason of 1 to 2000 characters"
+            )
+        );
+        let e = refused(&mut r, "adopt", None);
+        assert_eq!(e.code, crate::error::E_INTERNAL, "{e:?}");
+        assert_eq!(r.read().seq(), before, "nothing was written");
+    }
 }

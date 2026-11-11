@@ -1,3 +1,4 @@
+use crate::foreign::ForeignParts;
 use crate::{BlockId, FieldValue, Hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +12,14 @@ pub fn hash_of<T: Serialize>(t: &T) -> Hash {
 /// The domain prefix of [`Block::content_hash`], so a content hash never equals a version hash.
 /// Content-2 leaves out the order key: a move within its parent keeps the content hash.
 pub const CONTENT_DOMAIN: &[u8] = b"rdy-content-2\0";
+
+/// The domain prefix of the content hash of a block with a foreign part (repo links): content-2's
+/// fields and the foreign links.
+pub const FOREIGN_CONTENT_DOMAIN: &[u8] = b"rdy-content-foreign-1\0";
+
+/// The store-only field an upstream adoption writes on a local accepted decision (reserved for
+/// repo links). The foreign content hash leaves it out.
+pub const ADOPTED_AS: &str = "adopted_as";
 
 /// Fields rdy derives from other state (a decision's status and date, a section's lifecycle).
 /// They are not part of a block's content, so a pin does not see them change.
@@ -65,7 +74,11 @@ pub struct Link {
     pub part: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A block. Its serde form is the released encoding-0 layout
+/// ([`crate::encoding::LegacyBlockV0`]): the eight fields before `foreign`. A block with a
+/// foreign part has no encoding-0 form, so serializing one is an error, never a silent cut; its
+/// own layout is [`crate::encoding::ForeignBlockV1`]. Reading gives an empty foreign part.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub id: BlockId,
     pub block_type: String,
@@ -75,19 +88,85 @@ pub struct Block {
     pub body: String,
     pub links: BTreeMap<String, Vec<Link>>,
     pub pins: BTreeMap<BlockId, Hash>,
+    /// The foreign links and pins (repo links). Empty on every local block.
+    pub foreign: ForeignParts,
     /// The transient read identity of a removed version (redaction): never serialized, `None`
     /// on every normal block and after decoding. Built only by [`Block::redacted`].
-    #[serde(skip)]
     pub read_identity: Option<crate::redaction::RedactedBlockIdentity>,
 }
 
-impl Block {
-    /// The hash of the block's encoding. A redacted projection returns its recorded version.
-    pub fn version_hash(&self) -> Hash {
-        match &self.read_identity {
-            Some(r) => r.version,
-            None => hash_of(self),
+/// The released encoding-0 layout of a borrowed block: the field order and names of
+/// [`crate::encoding::LegacyBlockV0`], so a write needs no copy.
+#[derive(Serialize)]
+#[serde(rename = "Block")]
+struct LocalLayout<'a> {
+    id: &'a BlockId,
+    block_type: &'a String,
+    parent: &'a Option<BlockId>,
+    order: &'a String,
+    fields: &'a BTreeMap<String, FieldValue>,
+    body: &'a String,
+    links: &'a BTreeMap<String, Vec<Link>>,
+    pins: &'a BTreeMap<BlockId, Hash>,
+}
+
+/// The refusal of a block with a foreign part where only the encoding-0 layout fits.
+pub const NO_LOCAL_LAYOUT: &str =
+    "a block with a foreign part has no encoding-0 layout; write it in its foreign encoding";
+
+impl Serialize for Block {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if !self.foreign.is_empty() {
+            return Err(serde::ser::Error::custom(NO_LOCAL_LAYOUT));
         }
+        LocalLayout {
+            id: &self.id,
+            block_type: &self.block_type,
+            parent: &self.parent,
+            order: &self.order,
+            fields: &self.fields,
+            body: &self.body,
+            links: &self.links,
+            pins: &self.pins,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Block, D::Error> {
+        crate::encoding::LegacyBlockV0::deserialize(d)
+            .map(crate::encoding::LegacyBlockV0::into_current)
+    }
+}
+
+impl Block {
+    /// The encoding of this block's BLOCK object: 0 with an empty foreign part, else
+    /// [`crate::encoding::BLOCK_FOREIGN_ENCODING`].
+    pub fn encoding(&self) -> u16 {
+        if self.foreign.is_empty() {
+            0
+        } else {
+            crate::encoding::BLOCK_FOREIGN_ENCODING
+        }
+    }
+
+    /// The hash of the block's encoding. A redacted projection returns its recorded version.
+    /// A local block hashes its encoding-0 body, as it always has; a block with a foreign part
+    /// hashes its [`crate::encoding::ForeignBlockV1`] body with the encoding prefix
+    /// ([`crate::encoding::encoded_hash`]).
+    pub fn version_hash(&self) -> Hash {
+        if let Some(r) = &self.read_identity {
+            return r.version;
+        }
+        if self.foreign.is_empty() {
+            return hash_of(self);
+        }
+        crate::encoding::encoded_hash(
+            crate::encoding::BLOCK_FOREIGN_ENCODING,
+            &postcard::to_allocvec(&crate::encoding::ForeignBlockV1::of(self))
+                .expect("postcard encoding of an in-memory value cannot fail"),
+        )
     }
 
     /// lpin1 (FW-LP1): the hash a pin records. It covers the block's id, type, parent, fields
@@ -104,6 +183,11 @@ impl Block {
     /// type, so a change to a tracking field makes no pin stale. With an empty [`Tracking`] it
     /// equals [`Block::content_hash`] byte for byte.
     ///
+    /// A block with a foreign part (repo links) hashes under [`FOREIGN_CONTENT_DOMAIN`]: the same
+    /// content and then its foreign links. Its foreign pins and [`ADOPTED_AS`] stay out, as its
+    /// local pins, order, derived, engine and tracking fields do. A local block keeps its
+    /// content-2 hash.
+    ///
     /// A redacted projection returns its recorded default content hash for any [`Tracking`]: a
     /// tracking hash of removed content cannot be recomputed, so a tracking-sensitive comparison
     /// must check [`Block::is_redacted`] first and report removed content.
@@ -112,6 +196,7 @@ impl Block {
             return r.content_hash;
         }
         let tracking = t.fields(&self.block_type);
+        let local = self.foreign.is_empty();
         let content = Content {
             id: &self.id,
             block_type: &self.block_type,
@@ -121,16 +206,28 @@ impl Block {
                 .iter()
                 .filter(|(k, _)| !DERIVED_FIELDS.contains(&k.as_str()))
                 .filter(|(k, _)| !crate::engine_fields::is_engine_field(k))
+                .filter(|(k, _)| local || k.as_str() != ADOPTED_AS)
                 .filter(|(k, _)| !tracking.is_some_and(|f| f.contains(k.as_str())))
                 .collect(),
             body: &self.body,
             links: &self.links,
         };
-        let mut bytes = CONTENT_DOMAIN.to_vec();
+        let mut bytes = if local {
+            CONTENT_DOMAIN
+        } else {
+            FOREIGN_CONTENT_DOMAIN
+        }
+        .to_vec();
         bytes.extend(
             postcard::to_allocvec(&content)
                 .expect("postcard encoding of an in-memory value cannot fail"),
         );
+        if !local {
+            bytes.extend(
+                postcard::to_allocvec(&self.foreign.links)
+                    .expect("postcard encoding of an in-memory value cannot fail"),
+            );
+        }
         Hash::of(&bytes)
     }
 

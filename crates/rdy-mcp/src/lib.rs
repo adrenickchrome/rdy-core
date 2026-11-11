@@ -5,7 +5,6 @@ pub mod elicitation;
 pub mod entity_tools;
 pub mod intent_tools;
 pub mod kungfu;
-pub mod markdown;
 pub mod notify;
 pub mod order;
 pub mod params;

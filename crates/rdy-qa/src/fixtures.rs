@@ -250,6 +250,7 @@ pub fn raw(
         body: body.into(),
         links: Default::default(),
         pins: Default::default(),
+        foreign: Default::default(),
         read_identity: None,
     }
 }

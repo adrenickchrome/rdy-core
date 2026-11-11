@@ -48,6 +48,14 @@ pub enum AnswerAct {
     /// The person accepts a concern or fail check verdict (index 16). Item
     /// `verdict:<review hex>`; no targets. Carried only: no writer yet.
     AcceptVerdict,
+    /// The person adopts a delivered change of cited content (repo links, index 17). Item
+    /// `adopt:<repo>@<entry>`. Its answer takes ANSWER encoding 1
+    /// ([`crate::encoding::ANSWER_FOREIGN_ENCODING`]). The adopt landing writes it in its batch,
+    /// with the landing as its one target, or alone when the card moves no pin.
+    Adopt,
+    /// The person keeps the approved pins of an adopt item (index 18), with a reason. ANSWER
+    /// encoding 1, as [`AnswerAct::Adopt`]. Written alone, with the reason as its note.
+    KeepPin,
 }
 
 impl AnswerAct {
@@ -71,7 +79,15 @@ impl AnswerAct {
             AnswerAct::Dispute => "dispute",
             AnswerAct::ResolveDispute => "resolve_dispute",
             AnswerAct::AcceptVerdict => "accept_verdict",
+            AnswerAct::Adopt => "adopt",
+            AnswerAct::KeepPin => "keep_pin",
         }
+    }
+
+    /// Whether the act is one of repo links' acts ([`AnswerAct::Adopt`], [`AnswerAct::KeepPin`]):
+    /// an answer with one takes ANSWER encoding 1, which ANSWER encoding 0 has no form for.
+    pub fn is_foreign(self) -> bool {
+        matches!(self, AnswerAct::Adopt | AnswerAct::KeepPin)
     }
 }
 
@@ -107,8 +123,27 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// `Hash::of` over the answer's encoding.
+    /// The answer's identity: the hash of its stored frame in the encoding it is written in
+    /// ([`Answer::encoding`]). For an answer of encoding 0 that is `Hash::of` over its body, as
+    /// before encodings; an Adopt or KeepPin answer's hash covers the version prefix too.
     pub fn id(&self) -> Hash {
-        hash_of(self)
+        match self.encoding() {
+            0 => hash_of(self),
+            v => crate::encoding::encoded_hash(
+                v,
+                &postcard::to_allocvec(self)
+                    .expect("postcard encoding of an in-memory value cannot fail"),
+            ),
+        }
+    }
+
+    /// The encoding the answer is written in: [`crate::encoding::ANSWER_FOREIGN_ENCODING`] for a
+    /// repo-links act ([`AnswerAct::is_foreign`]), else 0.
+    pub fn encoding(&self) -> u16 {
+        if self.act.is_foreign() {
+            crate::encoding::ANSWER_FOREIGN_ENCODING
+        } else {
+            0
+        }
     }
 }
