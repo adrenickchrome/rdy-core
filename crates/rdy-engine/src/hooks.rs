@@ -1054,7 +1054,9 @@ fn locate(path: &Path, copies: &[WcCopy]) -> Located {
     let mut found: Option<(usize, PathBuf, Vec<String>)> = None;
     for c in path.components() {
         cur.push(c);
-        if !cur.has_root() {
+        // a Windows prefix alone (`\\?\C:`, `\\server\share`) is no directory to resolve: a
+        // verbatim prefix counts as rooted, but its canonical form fails until the root follows
+        if !cur.has_root() || matches!(c, Component::Prefix(_)) {
             continue;
         }
         match &mut found {

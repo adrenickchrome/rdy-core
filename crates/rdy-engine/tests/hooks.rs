@@ -1016,10 +1016,21 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             if m.is_dir() {
                 walk(&p, base, out);
             } else if m.is_file() {
-                out.insert(
-                    p.strip_prefix(base).unwrap().to_path_buf(),
-                    std::fs::read(&p).unwrap(),
-                );
+                // on Windows a file an open store locks (its `lock`, its live index) cannot be
+                // read (ERROR_LOCK_VIOLATION, 33): its length, identity and last write time
+                // stand for its bytes, so a change to any of them still shows
+                let bytes = match std::fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => format!(
+                        "locked: {} bytes, {}, written {:?}",
+                        m.len(),
+                        rdy_store::fileid::FileId::lstat(&p).unwrap(),
+                        m.modified().unwrap()
+                    )
+                    .into_bytes(),
+                    Err(e) => panic!("{}: {e}", p.display()),
+                };
+                out.insert(p.strip_prefix(base).unwrap().to_path_buf(), bytes);
             }
         }
     }
