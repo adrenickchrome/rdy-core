@@ -444,11 +444,10 @@ fn mht6_rebinding_host_cannot_act() {
         format!("POST /~mcp HTTP/1.1\r\nHost: {lan_ip}:{port}\r\n\r\n").as_bytes(),
     )
     .unwrap();
-    assert_eq!(
+    assert!(
         rdy_daemon::site::guard::Guard::full(port, Some(lan_ip))
             .hosts()
-            .contains(&format!("{lan_ip}:{port}")),
-        true
+            .contains(&format!("{lan_ip}:{port}"))
     );
     assert_eq!(mcp::host(&parsed, port), Err(Refusal::Host));
 }
