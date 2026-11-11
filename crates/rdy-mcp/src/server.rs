@@ -222,10 +222,23 @@ impl RdyServer {
     /// mht3: waits for the HTTP claim's turn: one call of an actor and run at a time, with the
     /// claim's saved state in this request's state until the turn ends. Nothing to wait for on
     /// stdio, whose calls are ordered at the transport, or with no claim.
-    async fn turn(&self) -> Option<crate::http::Turn> {
-        match &self.slot {
-            Some(slot) => Some(crate::http::Turn::take(slot, &self.state).await),
-            None => None,
+    ///
+    /// D-52A2G: a request whose client cancels it (`cancelled` ends) before it has the turn is
+    /// withdrawn: `Err` with the call's cancel, and the wait for the turn is dropped, so the
+    /// turn passes to the next request in order. The caller returns at once, which releases the
+    /// request's place in the queue and its activity permit. A cancel that comes with the turn
+    /// wins. A request that has the turn runs to its end, cancelled or not.
+    async fn turn(
+        &self,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> Result<Option<crate::http::Turn>, RdyError> {
+        let Some(slot) = &self.slot else {
+            return Ok(None);
+        };
+        tokio::select! {
+            biased;
+            () = cancelled => Err(rdy_engine::no_agent(rdy_engine::NoAgentCause::Cancelled)),
+            turn = crate::http::Turn::take(slot, &self.state) => Ok(Some(turn)),
         }
     }
 
@@ -525,13 +538,17 @@ impl ServerHandler for RdyServer {
         };
         // D-Y18E1: the value leaves the arguments here, so no route below sees it
         let kungfu = Check::of(&request.name, &mut request.arguments);
-        // the HTTP claim's calls run one at a time, in its turn (mht3)
-        let _turn = self.turn().await;
+        // the HTTP claim's calls run one at a time, in its turn (mht3); a call cancelled before
+        // its turn is withdrawn and never runs (D-52A2G)
+        let ct = context.ct.clone();
+        let _turn = match self.turn(ct.cancelled()).await {
+            Ok(turn) => turn,
+            Err(withdrawn) => return Ok(result(Err(withdrawn)).into()),
+        };
         let request = self.reserve_warning(request, claim.as_ref());
         // the call's body signs through a signer that names this request and stops at its
         // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
         // cancels every request's token then), reaches an ask of the agent in progress
-        let ct = context.ct.clone();
         let cancel = Arc::new(CallCancel::new());
         // a call cancelled before it got here (while it waited for its turn) is cancelled
         // before its body is first polled, so the body never asks the agent
@@ -604,7 +621,10 @@ impl ServerHandler for RdyServer {
             None => (crate::claims::parse(Some(&context.meta.0.0)), None),
         };
         let claim = claim.map_err(resources::refuse)?;
-        let _turn = self.turn().await;
+        let _turn = self
+            .turn(context.ct.cancelled())
+            .await
+            .map_err(resources::refuse)?;
         Ok(self.resources_read(request.uri, claim).await?.into())
     }
 
