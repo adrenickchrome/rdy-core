@@ -2,13 +2,13 @@
 //!
 //! # Lock force
 //!
-//! A cited instruction is locked here when a live, unrevoked repo link pins it in its instruction
-//! baseline at a version whose `locked` is true, and the link's last adopt answer served an
-//! organization or team set: the same foreign identity and adopted baseline that
-//! `rdy_instructions` reads ([`crate::foreign_instructions`]). A lock that a delivery only offers
-//! has no force until an adopt answer puts it in the baseline, and a no-set cited lock never has
-//! force. Of two links that pin one instruction, a link with a set gives the lock its force; the
-//! first such link in alias order names it.
+//! A cited instruction is locked here when a repo link pins it in its instruction baseline at a
+//! version whose `locked` is true, and the link's last adopt answer served an organization or team
+//! set: the same foreign identity and adopted baseline that `rdy_instructions` reads
+//! ([`crate::foreign_instructions`]). A revoked link counts too, because a revocation is no adopt
+//! answer. A lock that a delivery only offers has no force until an adopt answer puts it in the
+//! baseline, and a no-set cited lock never has force. Of two links that pin one instruction, a
+//! link with a set gives the lock its force; the first such link in alias order names it.
 //!
 //! # Refusals
 //!
@@ -89,12 +89,10 @@ fn locked_in_force(st: &ReadState) -> Result<BTreeMap<ForeignId, LockedRule>, Rd
     let m = st.materialized(&Scope::Canon)?;
     let links = RepoLinks::of_view(&m);
     for (alias, row) in links.rows() {
+        // a revocation is no adopt answer: a revoked link's locks keep their force (D-MEMMQ)
         let Some(view) = foreign.link_source(&row.link) else {
             continue;
         };
-        if view.revoked {
-            continue;
-        }
         let Some(link) = m.get(&row.link) else {
             continue;
         };
