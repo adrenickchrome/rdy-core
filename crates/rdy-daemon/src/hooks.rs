@@ -52,11 +52,14 @@ pub const EDIT_MATCHER: &str = "Edit|Write";
 /// How often a waiting install tries the lock again.
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
+/// A test's last-moment change: run with the target's path right before a file is published.
+type BeforePublish = Box<dyn FnMut(&Path) + Send>;
+
 /// What a test makes the next publication do.
 #[derive(Default)]
 struct Faults {
     /// Run with the target's path right before a file is published.
-    before_publish: Mutex<Option<Box<dyn FnMut(&Path) + Send>>>,
+    before_publish: Mutex<Option<BeforePublish>>,
     /// The next publication fails after its bytes are durable, and is cleaned up.
     fail_publish: AtomicBool,
 }
