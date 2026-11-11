@@ -1763,6 +1763,7 @@ mod tests {
             entered: Mutex::new(Some(entered)),
             release: Mutex::new(Some(released)),
         });
+        started(&run);
         let mut daemon = Daemon::new(DaemonConfig::new(run.clone(), VERSION.to_string()), handler);
         daemon.bind().await.unwrap();
         let handle = daemon.handle();
@@ -1868,7 +1869,13 @@ mod tests {
         store
     }
 
-    /// A daemon of `run` with `handler` and `start_timeout`, bound, ready and running.
+    /// The start lock a real start makes in `run` before its daemon binds (`serve`'s own start, a
+    /// client's start), then lets go once the daemon owns the project.
+    fn started(run: &RunDir) {
+        drop(StartGuard::try_take(run.rdy_dir()).unwrap().unwrap());
+    }
+
+    /// A daemon of `run` with `handler` and `start_timeout`, started, bound, ready and running.
     async fn serving(
         run: &RunDir,
         handler: Arc<dyn Handler>,
@@ -1877,6 +1884,7 @@ mod tests {
         DaemonHandle,
         tokio::task::JoinHandle<io::Result<ExitReason>>,
     ) {
+        started(run);
         let mut config = DaemonConfig::new(run.clone(), VERSION.to_string());
         config.start_timeout = start_timeout;
         let mut daemon = Daemon::new(config, handler);
