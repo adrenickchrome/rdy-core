@@ -115,7 +115,7 @@ fn guide_site() -> (tempfile::TempDir, rdy_engine::Rdy, tempfile::TempDir) {
 fn rvm2_the_changes_group_lists_each_change_in_page_order() {
     let (_d, _r, _ids, out) = draft();
     let h = html(out.path(), "intro.html");
-    assert!(h.contains("<aside class=\"index chg\">"), "{}", index(&h));
+    assert!(h.contains("<aside class=\"index chg\" aria-label=\"On this page\">"), "{}", index(&h));
     let ix = index(&h);
     assert!(!ix.contains("<nav aria-label=\"On this page\">"), "{ix}");
     let got: Vec<(String, String)> = entries(&h).into_iter().map(|e| (e.word, e.label)).collect();
@@ -222,7 +222,7 @@ fn rvm2_a_new_doc_lists_itself_once() {
 fn rvm2_section_entries_carry_the_word_of_their_changes() {
     let (_d, _r, out) = guide_site();
     let h = html(out.path(), "guide.html");
-    assert!(h.contains("<aside class=\"index\">"), "{}", index(&h));
+    assert!(h.contains("<aside class=\"index\" aria-label=\"On this page\">"), "{}", index(&h));
     let ix = index(&h);
     for (anchor, label, word) in [
         ("alpha", "Alpha", "removed"),

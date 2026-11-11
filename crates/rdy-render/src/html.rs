@@ -581,7 +581,8 @@ fn block_body_html(b: &Block, ctx: &BlockCtx) -> String {
                 display_name(t)
             };
             format!(
-                "<aside class=\"callout callout-{t}\">{}<div>{}</div></aside>",
+                "<aside class=\"callout callout-{t}\" aria-label=\"{}\">{}<div>{}</div></aside>",
+                escape(&eyebrow),
                 marker(ctx, t, &eyebrow),
                 body()
             )
@@ -672,7 +673,7 @@ fn block_body_html(b: &Block, ctx: &BlockCtx) -> String {
             )
         }
         "question" => format!(
-            "<aside class=\"callout callout-question\">{}<p>{}</p>{}</aside>",
+            "<aside class=\"callout callout-question\" aria-label=\"Open question\">{}<p>{}</p>{}</aside>",
             marker(ctx, t, "Open question"),
             inline::spans_html(b.field_str("prompt").unwrap_or(""), &ictx),
             body()

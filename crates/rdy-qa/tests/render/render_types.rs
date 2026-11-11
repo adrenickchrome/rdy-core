@@ -17,9 +17,9 @@ fn type1_each_type_renders_its_markup_and_no_type_label() {
             && h.contains("<span class=\"marker\">Constraint</span>")
     );
     assert!(h.contains(
-        "<aside class=\"callout callout-example\"><span class=\"marker\">Example</span>"
+        "<aside class=\"callout callout-example\" aria-label=\"Example\"><span class=\"marker\">Example</span>"
     ));
-    assert!(h.contains("<aside class=\"callout callout-note\"><span class=\"marker\">Note</span>"));
+    assert!(h.contains("<aside class=\"callout callout-note\" aria-label=\"Note\"><span class=\"marker\">Note</span>"));
     assert!(!h.contains("Because reasons."), "rationale is off the site");
     assert!(h.contains("<dl class=\"term\"><dt id=\"ledger\">Ledger</dt><dd>Balances.</dd></dl>"));
     assert!(h.contains("<div class=\"entity entity-component\"><span class=\"marker\">Component</span><h3 class=\"entity-name\">Core</h3>"));
@@ -39,7 +39,7 @@ fn type1_each_type_renders_its_markup_and_no_type_label() {
     );
     assert!(h.contains("<span class=\"lang\">Python</span>") && h.contains("<button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button>"));
     assert!(h.contains(
-        "<aside class=\"callout callout-question\"><span class=\"marker\">Open question</span>"
+        "<aside class=\"callout callout-question\" aria-label=\"Open question\"><span class=\"marker\">Open question</span>"
     ));
     assert!(!h.contains("class=\"decision\"") && !h.contains("class=\"badge"));
     assert!(
@@ -313,14 +313,14 @@ fn plan1_a_planned_note_shows_the_planned_marker_and_a_plain_note_does_not() {
     let h = std::fs::read_to_string(out.path().join("plans.html")).unwrap();
     assert!(
         h.contains(
-            "<aside class=\"callout callout-note\"><span class=\"marker\">Planned</span><div><p>Coming later.</p></div></aside>"
+            "<aside class=\"callout callout-note\" aria-label=\"Planned\"><span class=\"marker\">Planned</span><div><p>Coming later.</p></div></aside>"
         ),
         "{h}"
     );
     for plain in ["Explicitly not planned.", "Plain words."] {
         assert!(
             h.contains(&format!(
-                "<aside class=\"callout callout-note\"><span class=\"marker\">Note</span><div><p>{plain}</p></div></aside>"
+                "<aside class=\"callout callout-note\" aria-label=\"Note\"><span class=\"marker\">Note</span><div><p>{plain}</p></div></aside>"
             )),
             "{h}"
         );
