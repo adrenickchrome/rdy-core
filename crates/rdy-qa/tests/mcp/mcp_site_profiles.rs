@@ -532,7 +532,7 @@ fn spv9_mcp_schema_and_error_rows_describe_the_same_contract() {
         *row("E_SITE"),
         (
             "E_SITE",
-            "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping",
+            "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
             "follow the error's fix"
         )
     );

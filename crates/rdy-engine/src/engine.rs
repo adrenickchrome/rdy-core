@@ -63,6 +63,11 @@ pub trait Engine: Send + Sync {
     fn site(&self, _target: &SiteTarget) -> Result<SiteLink, RdyError> {
         Err(no_daemon_site())
     }
+    /// The facts of MCP over HTTP at the site this engine's daemon serves, or `None` for an engine
+    /// that runs without a daemon (and so has no endpoint). It reads, and starts nothing.
+    fn mcp_http(&self) -> Option<McpHttpFacts> {
+        None
+    }
     /// The facts of the build that serves `target`, all from one captured build (the target is
     /// built first when the site has no build of it). An engine with no site has none.
     fn site_facts(&self, _target: &SiteTarget) -> Result<SiteFacts, RdyError> {
@@ -231,7 +236,8 @@ pub fn profile_only_lan_warning(
 /// The reply is `{url, scope}`, plus `profile` (`{key, title, audience}`, the folded key in the
 /// URL) for a profile, `profile_only: true` in the profile-only mode, `lan_url` and a
 /// `W_SITE_LAN` `warning` while the site is open to the network (or could not be), the build's
-/// `warnings` (as `rdy render` gives them; the scope is built first when it has no build), and
+/// `warnings` (as `rdy render` gives them; the scope is built first when it has no build),
+/// `mcp_url` (the full loopback endpoint of MCP over HTTP, only while it serves), and
 /// `changes` (and `lan_changes` beside `lan_url`): the link to the page that summarizes what the
 /// scope changes. A view or proposal version opens in review mode. The link and the scope are
 /// spelled as the site reads them ([`ScopeRef`]): one spelling per scope. A tag
@@ -338,7 +344,46 @@ pub fn site_reply(
     };
     let link = engine.site(&target)?;
     let facts = engine.site_facts(&target)?;
-    site_reply_value(&target, link, facts)
+    let mut v = site_reply_value(&target, link, facts)?;
+    attach_mcp_url(&mut v, engine.mcp_http().and_then(|h| h.url).as_deref());
+    Ok(v)
+}
+
+/// What a daemon says about MCP over HTTP (`mcp_http` in the status and the overview). It holds
+/// no token, token path, peer uid or peer SID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpHttpFacts {
+    /// `serve.mcp_http`, read now.
+    pub enabled: bool,
+    /// The full loopback endpoint (`http://127.0.0.1:<port>/~mcp`) while it serves: the setting
+    /// is on, the project's token is usable and the full site is bound. `None` otherwise.
+    pub url: Option<String>,
+    /// The HTTP calls admitted now.
+    pub active_calls: usize,
+    /// The `subscriptions/listen` streams open now.
+    pub listen_streams: usize,
+}
+
+impl McpHttpFacts {
+    /// The `mcp_http` object: `enabled`, `url` (null when unavailable), `active_calls` and
+    /// `listen_streams`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "url": self.url,
+            "active_calls": self.active_calls,
+            "listen_streams": self.listen_streams,
+        })
+    }
+}
+
+/// Adds `mcp_url` to a site reply when the full loopback endpoint is available: the one place
+/// every caller of [`site_reply_value`] names it. A profile reply names the full endpoint too,
+/// never its own port.
+pub fn attach_mcp_url(reply: &mut serde_json::Value, url: Option<&str>) {
+    if let Some(url) = url {
+        reply["mcp_url"] = serde_json::json!(url);
+    }
 }
 
 /// The reply of [`site_reply`] for a link and the facts of the build behind it: the one

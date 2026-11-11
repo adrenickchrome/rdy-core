@@ -167,7 +167,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_SITE",
-        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping",
+        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
         "follow the error's fix",
     ),
     (

@@ -1,4 +1,4 @@
-use crate::conn::{Env, VERSION, io_error, require_project, runtime, start_options};
+use crate::conn::{Conn, Env, VERSION, io_error, require_project, runtime, start_options};
 use crate::output::{print_error, text};
 use crate::site_cmd::lan_warning;
 use rdy_daemon::signing_agent::CallerAgent;
@@ -7,9 +7,9 @@ use rdy_daemon::{
     RunDir, STOP_GRACE, ServeError, ServeOptions, StopRequest, connect, connect_backoff,
     connect_or_start, not_ready, process_alive, request_stop, serve, serve_with_profile,
 };
-use rdy_engine::engine::{SiteFacts, SiteLink, site_reply_value};
+use rdy_engine::engine::{SiteFacts, SiteLink, attach_mcp_url, site_reply_value};
 use rdy_engine::site_target::SiteTarget;
-use rdy_engine::{E_IO, E_SITE, RdyError, serve_config};
+use rdy_engine::{E_BAD_INPUT, E_IO, E_SITE, RdyError, serve_config};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
@@ -43,7 +43,106 @@ pub(crate) struct ServeArgs {
     pub(crate) profile: Option<String>,
 }
 
-pub(crate) fn mcp(env: &Env, projectless: bool) -> Result<(Value, String), ErrorReply> {
+#[derive(clap::Args)]
+pub(crate) struct McpArgs {
+    // the help is given in full: a doc comment would lose its closing period
+    #[arg(
+        long,
+        help = "Print the project's MCP over HTTP endpoint and its bearer for a client's configuration, then exit. The bearer is a secret. Needs the project daemon and serve.mcp_http set to true."
+    )]
+    pub(crate) http_config: bool,
+}
+
+/// `rdy mcp --http-config` (D-6M0AF): the live endpoint and the project's bearer, the one place
+/// the token is shown. The daemon (started if need be) gives the URL in its status. The token is
+/// read from its private file in this process, after the project's identity is checked; no daemon
+/// op returns it. It never enables the setting: a disabled or unavailable endpoint is an error.
+/// Text is `url: <url>` then `Authorization: Bearer <token>`; `--json` is exactly
+/// `{"url":"<url>","headers":{"Authorization":"Bearer <token>"}}`.
+fn mcp_http_config(env: &Env, as_json: bool) -> Result<(Value, String), ErrorReply> {
+    require_project(&env.project)?;
+    if env.no_daemon {
+        return Err(ErrorReply::new(
+            E_BAD_INPUT,
+            "MCP over HTTP needs the project daemon",
+            "drop --no-daemon and run rdy mcp --http-config",
+        ));
+    }
+    let mut conn = Conn::open(env)?;
+    let found = http_config_from(env, &mut conn);
+    conn.close();
+    let (url, token) = found?;
+    let out = if as_json {
+        // the key order is part of the contract, so the object is written by hand
+        format!(
+            "{{\"url\":{},\"headers\":{{\"Authorization\":{}}}}}\n",
+            Value::String(url),
+            Value::String(format!("Bearer {token}"))
+        )
+    } else {
+        format!("url: {url}\nAuthorization: Bearer {token}\n")
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(out.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|e| {
+            ErrorReply::new(
+                E_IO,
+                format!("could not print the MCP configuration: {e}"),
+                "check where the standard output goes, then run rdy mcp --http-config again",
+            )
+        })?;
+    Ok((Value::Null, String::new()))
+}
+
+/// The endpoint and the bearer, or the error that says why there is none.
+fn http_config_from(env: &Env, conn: &mut Conn) -> Result<(String, String), ErrorReply> {
+    let status = conn.op("status", json!({}))?;
+    let facts = &status["mcp_http"];
+    if facts["enabled"] == json!(false) {
+        return Err(ErrorReply::new(
+            E_SITE,
+            "MCP over HTTP is disabled for this project",
+            "set serve.mcp_http to true in user or local config",
+        ));
+    }
+    let run = RunDir::of_project(&env.project);
+    // the project's identity is checked before its private file is read
+    run.project_id()
+        .map_err(|e| io_error(e, "check that the project directory is intact"))?;
+    let token = rdy_daemon::mcp_token::read(&run).map_err(|e| match e {
+        rdy_daemon::mcp_token::TokenError::Invalid => ErrorReply::new(
+            E_SITE,
+            e.to_string(),
+            "stop rdy, remove .rdy/run/mcp-token, then run rdy mcp --http-config",
+        ),
+        rdy_daemon::mcp_token::TokenError::Io(e) => io_error(e, "check .rdy/run/mcp-token"),
+    })?;
+    match facts["url"].as_str() {
+        Some(url) => Ok((url.to_string(), token.reveal())),
+        None => {
+            // the site is off: the site's own error says why
+            conn.op("site_url", json!({}))?;
+            // the site is on, so the daemon could not use the token it holds
+            Err(ErrorReply::new(
+                E_SITE,
+                "the project's MCP token is not a valid private token file",
+                "stop rdy, remove .rdy/run/mcp-token, then run rdy mcp --http-config",
+            ))
+        }
+    }
+}
+
+pub(crate) fn mcp(
+    env: &Env,
+    projectless: bool,
+    http_config: bool,
+    as_json: bool,
+) -> Result<(Value, String), ErrorReply> {
+    if http_config {
+        return mcp_http_config(env, as_json);
+    }
     if projectless {
         return mcp_projectless(env);
     }
@@ -371,6 +470,7 @@ fn print_ready(ready: ProfileSiteReady, as_json: bool) -> Result<(), RdyError> {
         info,
         profile,
         warnings,
+        mcp_url,
     } = ready;
     let url = info.url.map_err(|reason| {
         RdyError::new(
@@ -389,7 +489,8 @@ fn print_ready(ready: ProfileSiteReady, as_json: bool) -> Result<(), RdyError> {
         changes: None,
         warnings,
     };
-    let v = site_reply_value(&SiteTarget::ProfileOnly { key }, link, facts)?;
+    let mut v = site_reply_value(&SiteTarget::ProfileOnly { key }, link, facts)?;
+    attach_mcp_url(&mut v, mcp_url.as_deref());
     print_profile_site(&v, as_json).map_err(print_failed)
 }
 

@@ -545,6 +545,9 @@ pub struct ProfileSiteReady {
     pub info: SiteInfo,
     pub profile: ResolvedProfile,
     pub warnings: Vec<String>,
+    /// The full loopback endpoint of MCP over HTTP, while it serves (`Engine::mcp_http`): the
+    /// profile-only listener serves none, and its result names this one.
+    pub mcp_url: Option<String>,
 }
 
 /// [`serve`] with the profile-only listener of `key` (D-DK03K): the same signals and start;
@@ -598,6 +601,7 @@ fn profile_ready(sh: &Arc<Shared>, key: &str) -> Result<ProfileSiteReady, RdyErr
         info,
         profile,
         warnings: build.live.warnings.clone(),
+        mcp_url: sh.engine().mcp_http().and_then(|h| h.url),
     })
 }
 

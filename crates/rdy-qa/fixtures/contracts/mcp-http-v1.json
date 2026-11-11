@@ -12921,6 +12921,18 @@
               "defaults": [
                 "false"
               ],
+              "id": "http_config",
+              "long": "http-config",
+              "num_args": "0",
+              "value_names": [
+                "HTTP_CONFIG"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
               "global": true,
               "id": "json",
               "long": "json",
@@ -12958,6 +12970,16 @@
               "long": "help",
               "num_args": "0",
               "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "http_config"
+              ],
+              "id": "McpArgs",
+              "multiple": true,
+              "required": false
             }
           ],
           "name": "mcp",
@@ -18081,7 +18103,7 @@
       ],
       [
         "E_SITE",
-        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping",
+        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
         "follow the error's fix"
       ],
       [

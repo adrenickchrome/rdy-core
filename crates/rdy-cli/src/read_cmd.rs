@@ -301,9 +301,10 @@ fn status_text(v: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let mut out = format!(
-        "pack {}\ndaemon: {}\n{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
+        "pack {}\ndaemon: {}\n{}{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
         text(&v["pack"]),
         v["daemon"].as_str().unwrap_or("none"),
+        mcp_http_lines(&v["mcp_http"]),
         repo_lines(v),
         text(&v["version_position"]["label"]),
         num(&v["landings"]),
@@ -333,6 +334,23 @@ fn status_text(v: &Value) -> String {
     ));
     out.push_str(&open_warnings(v));
     out
+}
+
+/// The `mcp http:` line of a status, and its activity line while the endpoint serves; each ends
+/// in a newline. A status with no `mcp_http` member (a run with no daemon) has none.
+fn mcp_http_lines(h: &Value) -> String {
+    if !h.is_object() {
+        return String::new();
+    }
+    match (h["enabled"].as_bool(), h["url"].as_str()) {
+        (Some(false), _) => "mcp http: disabled\n".to_string(),
+        (_, None) => "mcp http: unavailable\n".to_string(),
+        (_, Some(url)) => format!(
+            "mcp http: {url}\nmcp http activity: {} calls, {} streams\n",
+            num(&h["active_calls"]),
+            num(&h["listen_streams"])
+        ),
+    }
 }
 
 /// The warning lines, each carried-removal warning followed by its targets. The carried

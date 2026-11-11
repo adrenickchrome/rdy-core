@@ -11,7 +11,7 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{
-    Engine, ExportRequest, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
+    Engine, ExportRequest, McpHttpFacts, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
 };
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
@@ -285,6 +285,27 @@ impl Engine for DaemonEngine {
 
     fn pack_error(&self) -> Option<String> {
         self.0.pack_error_lock().clone()
+    }
+
+    /// MCP over HTTP as this daemon serves it. The endpoint is the full site's loopback address
+    /// plus `/~mcp`, named only while the setting is on, the project's token is usable and the
+    /// site is bound. Nothing here holds the token. A `Shared` no daemon serves has none.
+    fn mcp_http(&self) -> Option<McpHttpFacts> {
+        let admission = self.0.http.get()?;
+        let enabled = rdy_engine::serve_config(&self.0.root).mcp_http;
+        let token_ok = self.0.mcp_token.get().is_some_and(|t| t.is_ok());
+        let url = (enabled && token_ok)
+            .then(|| self.0.site_info.get())
+            .flatten()
+            .and_then(|i| i.url.as_ref().ok())
+            .map(|u| format!("{}/~mcp", u.trim_end_matches('/')));
+        let activity = admission.activity();
+        Some(McpHttpFacts {
+            enabled,
+            url,
+            active_calls: activity.calls,
+            listen_streams: activity.streams,
+        })
     }
 
     /// The person layer through the meta project's own daemon (ain4), as this daemon's version.

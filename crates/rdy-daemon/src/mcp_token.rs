@@ -51,6 +51,15 @@ impl McpToken {
     }
 }
 
+impl McpToken {
+    /// The token as the file holds it, without the LF: 52 characters of uppercase RFC 4648
+    /// base32. Only `rdy mcp --http-config` calls this. No daemon op, tool, error or log line
+    /// does, and there is no `Display`.
+    pub fn reveal(&self) -> String {
+        encode(&self.0)
+    }
+}
+
 impl fmt::Debug for McpToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("McpToken(<redacted>)")
