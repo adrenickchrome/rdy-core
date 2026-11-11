@@ -19318,6 +19318,26 @@
         "pick a view name that does not start with reaffirm- or adopt-, and write to a view, not canon"
       ],
       [
+        "W_HOOK_DIRECT_EDIT",
+        "a hook check finds that an agent edited rdy working-copy files directly (rdy_hook check, kind edit)",
+        "Read and write through rdy's tools. Call rdy_instructions and load rdy:write."
+      ],
+      [
+        "W_HOOK_NO_CITATION",
+        "a hook check finds staged code paths anchored to a decision and a commit message with no Implements value (rdy_hook check, kind code)",
+        "Review the design with rdy_brief on the changed code paths, then cite the blocks this commit implements."
+      ],
+      [
+        "W_HOOK_UNAVAILABLE",
+        "a hook check could not finish (project, checkout or history unavailable, an unsafe path, an invalid event, an input limit, the deadline or an I/O failure); checked is false, never clean",
+        "Continue your work. Run the hook check again when rdy and the project are available."
+      ],
+      [
+        "W_HOOK_CONFLICT",
+        "a hook install or remove left a file unchanged (an existing hook, a changed owned file, an external hooks path, invalid settings, an unsafe path, a file changed meanwhile or a busy installer)",
+        "Review the existing file, then install or remove the rdy hook explicitly."
+      ],
+      [
         "E_DUMP_CHAIN",
         "The dump files do not form a chain, or the predecessor does not match this store.",
         "Pass a full dump and its increments in order, or start a new chain."
@@ -19401,26 +19421,6 @@
         "W_PUBLICATION_REFERENCE",
         "an org profile has references outside its selection, or a live public profile has blocked references",
         "follow the warning's own fix"
-      ],
-      [
-        "W_HOOK_DIRECT_EDIT",
-        "a hook check finds that an agent edited rdy working-copy files directly (rdy_hook check, kind edit)",
-        "Read and write through rdy's tools. Call rdy_instructions and load rdy:write."
-      ],
-      [
-        "W_HOOK_NO_CITATION",
-        "a hook check finds staged code paths anchored to a decision and a commit message with no Implements value (rdy_hook check, kind code)",
-        "Review the design with rdy_brief on the changed code paths, then cite the blocks this commit implements."
-      ],
-      [
-        "W_HOOK_UNAVAILABLE",
-        "a hook check could not finish (project, checkout or history unavailable, an unsafe path, an invalid event, an input limit, the deadline or an I/O failure); checked is false, never clean",
-        "Continue your work. Run the hook check again when rdy and the project are available."
-      ],
-      [
-        "W_HOOK_CONFLICT",
-        "a hook install or remove left a file unchanged (an existing hook, a changed owned file, an external hooks path, invalid settings, an unsafe path, a file changed meanwhile or a busy installer)",
-        "Review the existing file, then install or remove the rdy hook explicitly."
       ]
     ],
     "follower_refusal": {
@@ -20079,6 +20079,10 @@
       "E_FOREIGN_READ_ONLY",
       "E_INSTRUCTION_LOCKED",
       "E_RESERVED_VIEW",
+      "W_HOOK_DIRECT_EDIT",
+      "W_HOOK_NO_CITATION",
+      "W_HOOK_UNAVAILABLE",
+      "W_HOOK_CONFLICT",
       "E_DUMP_CHAIN",
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
@@ -20095,11 +20099,7 @@
       "E_FROZEN",
       "E_HELD_BY_READER",
       "E_PUBLICATION_REFERENCE",
-      "W_PUBLICATION_REFERENCE",
-      "W_HOOK_DIRECT_EDIT",
-      "W_HOOK_NO_CITATION",
-      "W_HOOK_UNAVAILABLE",
-      "W_HOOK_CONFLICT"
+      "W_PUBLICATION_REFERENCE"
     ],
     "result_fields": {
       "rdy_alternatives list": {
