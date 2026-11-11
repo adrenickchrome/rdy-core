@@ -300,16 +300,18 @@ fn status_text(v: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // the repo line follows the daemon line and the canon line the repo lines (O34, ec10); the
+    // mcp http lines come after the canon and coverage lines, before the views
     let mut out = format!(
-        "pack {}\ndaemon: {}\n{}{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
+        "pack {}\ndaemon: {}\n{}canon: {} ({} landings, {} suspects){}\n{}views:\n{views}",
         text(&v["pack"]),
         v["daemon"].as_str().unwrap_or("none"),
-        mcp_http_lines(&v["mcp_http"]),
         repo_lines(v),
         text(&v["version_position"]["label"]),
         num(&v["landings"]),
         num(&v["suspects"]),
         coverage_lines(&v["coverage"]),
+        mcp_http_lines(&v["mcp_http"]),
     );
     if let Some(e) = v["coverage_error"].as_str() {
         out.push_str(&format!("\ncoverage not read: {e}"));

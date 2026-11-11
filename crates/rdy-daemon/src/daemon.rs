@@ -10,7 +10,7 @@ use crate::socket;
 use crate::sys;
 use rdy_store::fileid::FileId;
 use rdy_store::layout::STORE_DIR;
-use rdy_store::start_lock::StartGuard;
+use rdy_store::start_lock::{ExistingLock, StartGuard};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1102,8 +1102,8 @@ impl ProjectCheck {
     /// socket record and endpoint while they still name it (`RunFiles::remove_endpoint_under`),
     /// then stops with `ProjectGone`. The lock and `daemon.pid` stay until the host's writes in
     /// flight have drained (`DaemonHandle::drained`). When the lock cannot be had within the start
-    /// timeout, every file stays until then (`RunFiles::keep_until_drained`). True when the
-    /// project is gone; false before the bind.
+    /// timeout, or no lock stands in a project being deleted, every file stays until then
+    /// (`RunFiles::keep_until_drained`). True when the project is gone; false before the bind.
     fn check(&self) -> bool {
         let Some(project) = self.project.get().copied() else {
             return false;
@@ -1123,7 +1123,7 @@ impl ProjectCheck {
             ));
         }
         // before any reply: a client's retry may start a successor at once, and waits at the lock
-        match self.take_start() {
+        match self.take_start(project) {
             Ok(start) => self.files.remove_endpoint_under(start, &self.run),
             Err(why) => {
                 log(&format!(
@@ -1140,10 +1140,30 @@ impl ProjectCheck {
     /// The start lock of the `.rdy` that stands at the project's root now, which a load or a
     /// successor would take, tried until the start timeout. Why not, when another holder keeps it
     /// that long or it cannot be taken at all (no `.rdy` stands).
-    fn take_start(&self) -> Result<StartGuard, String> {
+    ///
+    /// While the `.rdy` this daemon bound with (`project`) still stands, its store or run state
+    /// went: the project is being deleted or taken apart. Its start lock is then taken only where
+    /// it stands, and nothing is made in the project, so a delete finishes (df3). With no lock
+    /// left there it cannot be taken, as with no `.rdy`. A `.rdy` that replaced it gets its lock
+    /// made, as a load or a successor would make it.
+    fn take_start(&self, project: ProjectId) -> Result<StartGuard, String> {
+        let rdy_dir = self.run.rdy_dir();
+        let same = FileId::lstat(rdy_dir).is_ok_and(|id| id == project);
         let until = Instant::now() + self.start_timeout;
         loop {
-            match StartGuard::try_take(self.run.rdy_dir()) {
+            let taken = if same {
+                match StartGuard::try_take_existing(rdy_dir) {
+                    Ok(ExistingLock::Held(start)) => Ok(Some(start)),
+                    Ok(ExistingLock::Busy) => Ok(None),
+                    Ok(ExistingLock::Absent) => {
+                        return Err("the project is being deleted".to_string());
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                StartGuard::try_take(rdy_dir)
+            };
+            match taken {
                 Ok(Some(start)) => return Ok(start),
                 Ok(None) if Instant::now() < until => std::thread::sleep(START_LOCK_RETRY),
                 Ok(None) => {
