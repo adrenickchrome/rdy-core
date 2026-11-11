@@ -102,7 +102,7 @@ fn nav1_the_toc_appears_at_three_sections_and_follows_depth() {
         !one.contains("<aside class=\"index\""),
         "no toc: no empty index column above the page on a phone (FF-F)"
     );
-    assert!(three.contains("<aside class=\"index\">"));
+    assert!(three.contains("<aside class=\"index\" aria-label=\"On this page\">"));
 }
 
 /// FF-E: the sidebar's way home is "Home", never a doc's title such as "Overview".
