@@ -300,7 +300,8 @@ fn ui6_reader_import_and_canon_are_refused_on_every_surface() {
         (
             "E_BAD_INPUT".into(),
             "rdy_import: unknown parameter \"dri\"".into(),
-            "did you mean \"dir\"? the parameters here are dir, view".into()
+            "did you mean \"dir\"? the parameters here are dir, dry_run, expected_source, md, view"
+                .into()
         )
     );
     assert_eq!(
@@ -308,7 +309,7 @@ fn ui6_reader_import_and_canon_are_refused_on_every_surface() {
         (
             "E_BAD_INPUT".into(),
             "rdy_import: unknown parameter \"veiw\"".into(),
-            "did you mean \"view\"? the parameters here are dir, view".into()
+            "did you mean \"view\"? the parameters here are dir, dry_run, expected_source, md, view".into()
         )
     );
     drop(c);
