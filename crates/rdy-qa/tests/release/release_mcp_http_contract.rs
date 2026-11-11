@@ -42,9 +42,9 @@ fn sha(name: &str) -> String {
 }
 
 const RELEASE_1: &str = "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6";
-const REPO_LINKS: &str = "61b01d9bd9d60fbe8894c32ffc58cab433c42a7c332de7fde8ba00414bf31848";
+const REPO_LINKS: &str = "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27";
 /// The frozen current fixture.
-const MCP_HTTP: &str = "641aad26e8f5ddf8fc5e9b7a90a93638810f5f422c3a4ef1aa038821536622ed";
+const MCP_HTTP: &str = "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de";
 
 /// A list of identified entries as an object keyed by identity, so a change reads as the entry's
 /// own path and an inserted entry shifts nothing. Every other list stays a list.

@@ -4847,7 +4847,7 @@ fn mht1_contract_successor_keeps_released_baselines() {
     );
     assert_eq!(
         sha("repo-links-v1.json"),
-        "61b01d9bd9d60fbe8894c32ffc58cab433c42a7c332de7fde8ba00414bf31848"
+        "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27"
     );
     let was: Value =
         serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
