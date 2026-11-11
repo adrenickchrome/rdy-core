@@ -128,11 +128,35 @@ fn link_repos(project: &Path, repos: &[(&str, &Path)]) {
     yaml.push_str(&format!("code_repos: [{}]\n", names.join(", ")));
     std::fs::write(project.join(".rdy.yaml"), yaml).unwrap();
     std::fs::create_dir_all(project.join(".rdy")).unwrap();
-    let mut local = String::from("code_paths:\n");
-    for (n, p) in repos {
-        local.push_str(&format!("  {n}: \"{}\"\n", p.display()));
-    }
-    std::fs::write(project.join(".rdy/local.yaml"), local).unwrap();
+    std::fs::write(project.join(".rdy/local.yaml"), code_paths_yaml(repos)).unwrap();
+}
+
+/// `.rdy/local.yaml` text naming each checkout. Serialized, not interpolated: a native Windows
+/// path (`C:\Users\...`) inside a double-quoted YAML scalar reads as escapes and fails to parse.
+fn code_paths_yaml(repos: &[(&str, &Path)]) -> String {
+    let paths: serde_json::Map<String, Value> = repos
+        .iter()
+        .map(|(n, p)| (n.to_string(), Value::String(p.display().to_string())))
+        .collect();
+    serde_yaml_ng::to_string(&json!({ "code_paths": paths })).unwrap()
+}
+
+/// `.rdy-worktree` pointer text for worktree `name` of `project`, serialized like
+/// [`code_paths_yaml`].
+fn worktree_pointer_yaml(project: &Path, name: &str) -> String {
+    serde_yaml_ng::to_string(&json!({ "project": project.display().to_string(), "name": name }))
+        .unwrap()
+}
+
+#[test]
+fn m4a1_fixture_yaml_keeps_native_windows_paths() {
+    // the fixtures above must survive a Windows temp path; checked here on every platform
+    let p = Path::new(r#"C:\Users\qa\AppData\Local\Temp\.tmpabc\x "q" 'y'"#);
+    let local: Value = serde_yaml_ng::from_str(&code_paths_yaml(&[("app", p)])).unwrap();
+    assert_eq!(local["code_paths"]["app"], p.display().to_string());
+    let ptr: Value = serde_yaml_ng::from_str(&worktree_pointer_yaml(p, "wt")).unwrap();
+    assert_eq!(ptr["project"], p.display().to_string());
+    assert_eq!(ptr["name"], "wt");
 }
 
 /// A landed canon and a linked checkout `app`. Canon: doc `spec` with section `s` (live decision
@@ -498,7 +522,7 @@ fn m4a1_code_validates_the_callers_checkout_and_head() {
     git(fresh.path(), &["init", "-q", "--initial-branch=main"]);
     std::fs::write(
         w.r.root().join(".rdy/local.yaml"),
-        format!("code_paths:\n  app: \"{}\"\n", fresh.path().display()),
+        code_paths_yaml(&[("app", fresh.path())]),
     )
     .unwrap();
     let req = CodeCheck {
@@ -552,11 +576,7 @@ fn wc_world() -> Wc {
     // a registered worktree: its pointer names the project, its state names its directory
     let wt_dir = tempfile::tempdir().unwrap();
     let wt = std::fs::canonicalize(wt_dir.path()).unwrap();
-    std::fs::write(
-        wt.join(".rdy-worktree"),
-        format!("project: \"{}\"\nname: wt\n", root.display()),
-    )
-    .unwrap();
+    std::fs::write(wt.join(".rdy-worktree"), worktree_pointer_yaml(&root, "wt")).unwrap();
     let state_dir = root.join(".rdy/worktrees/wt");
     std::fs::create_dir_all(&state_dir).unwrap();
     std::fs::write(state_dir.join("dir.txt"), wt.display().to_string()).unwrap();
