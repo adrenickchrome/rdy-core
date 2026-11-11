@@ -55,6 +55,7 @@ pub use handle::{CompletionPhase, read_only_feature_for_tests, with_completion_h
 mod history;
 pub mod history_facts;
 mod holder;
+pub mod hooks;
 pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;

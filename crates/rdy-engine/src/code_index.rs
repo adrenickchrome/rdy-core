@@ -7,6 +7,7 @@
 //! checkout's HEAD moves (cached per process while it stays). Core only reads git: it runs
 //! `git rev-parse`, `git log` and `git ls-tree`, always through [`git_command`] (FW-C2). Counts
 //! are reported as they are; nothing here ranks or cuts (FW-C6).
+use crate::hooks::{RunContext, Signal, Stop};
 use crate::{E_CONFIG, E_IO, E_LIMIT, RdyError};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -247,7 +248,7 @@ pub(crate) fn is_hash(h: &[u8]) -> bool {
 
 /// The trailer values: split on `,`, trimmed, empties, values holding a control character and
 /// repeats dropped.
-fn implements_of(trailers: &str) -> Vec<String> {
+pub(crate) fn implements_of(trailers: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in trailers.split(',').map(str::trim) {
         if !v.is_empty() && !v.chars().any(char::is_control) && !out.iter().any(|x| x == v) {
@@ -468,11 +469,51 @@ fn run(c: Command) -> Result<Output, RdyError> {
     run_with(c, Limits::GIT)
 }
 
+/// [`run`] observing the run context `ctx` (a hook check's deadline and cancellation), when one
+/// is given.
+fn run_in(c: Command, ctx: Option<&RunContext>) -> Result<Output, RdyError> {
+    run_ctx(c, Limits::GIT, ctx, None)
+}
+
 /// [`run`] with the output kept to `lim`. Both pipes are read while the child runs, each by its
 /// own thread. When either passes its bound the child is killed, and the threads and the child
 /// are joined before the `E_LIMIT` returns.
-pub(crate) fn run_with(mut c: Command, lim: Limits) -> Result<Output, RdyError> {
+pub(crate) fn run_with(c: Command, lim: Limits) -> Result<Output, RdyError> {
+    run_ctx(c, lim, None, None)
+}
+
+/// The refusal of a git run that its run context stopped: no git command starts after it, and a
+/// running one is killed and reaped before it returns.
+fn stopped_error(why: Stop) -> RdyError {
+    let what = match why {
+        Stop::Cancelled => "the hook run was cancelled",
+        Stop::Deadline => "the hook run passed its deadline",
+    };
+    RdyError::new(
+        E_IO,
+        format!("git stopped: {what}"),
+        "run the hook check again",
+    )
+}
+
+/// [`run_with`] observing `ctx` and, with `input`, writing those bytes to the child's stdin from
+/// a thread of its own (then closing it). With a context, no child starts once it has stopped;
+/// while the child runs, a cancellation or the deadline kills it. Every path joins both output
+/// readers (and the input writer) and reaps the child before it returns. Without a context it
+/// waits exactly as [`run_with`] always did.
+pub(crate) fn run_ctx(
+    mut c: Command,
+    lim: Limits,
+    ctx: Option<&RunContext>,
+    input: Option<&[u8]>,
+) -> Result<Output, RdyError> {
+    if let Some(why) = ctx.and_then(RunContext::stopped) {
+        return Err(stopped_error(why));
+    }
     c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if input.is_some() {
+        c.stdin(Stdio::piped());
+    }
     let mut child = c.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             RdyError::new(
@@ -484,7 +525,9 @@ pub(crate) fn run_with(mut c: Command, lim: Limits) -> Result<Output, RdyError> 
             RdyError::new(E_IO, format!("running git: {e}"), "check that git runs")
         }
     })?;
+    let stdin = child.stdin.take();
     let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
         return Err(RdyError::new(
@@ -493,35 +536,88 @@ pub(crate) fn run_with(mut c: Command, lim: Limits) -> Result<Output, RdyError> 
             "check that git runs",
         ));
     };
-    let (tx, rx) = mpsc::channel::<bool>();
+    let writer = match (stdin, input) {
+        (Some(mut w), Some(bytes)) => {
+            let bytes = bytes.to_vec();
+            Some(std::thread::spawn(move || {
+                use std::io::Write;
+                // a child that exits or is killed first ends the write with an error: its
+                // output, status or the run context decides the result, not this write
+                let _ = w.write_all(&bytes);
+            }))
+        }
+        _ => None,
+    };
+    let (tx, rx) = mpsc::channel::<Signal>();
     let spawn = |r: Box<dyn Read + Send>, limit: usize| {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let got = drain(r, limit);
             let over = !matches!(got, Ok(Drained::Done(_)));
-            let _ = tx.send(over);
+            let _ = tx.send(Signal::Read { over });
             got
         })
     };
     let out_thread = spawn(Box::new(out), lim.stdout);
     let err_thread = spawn(Box::new(err), lim.stderr);
+    if let Some(ctx) = ctx {
+        ctx.watch(tx.clone());
+    }
     drop(tx);
-    for _ in 0..2 {
-        match rx.recv() {
-            Ok(false) => {}
-            Ok(true) => {
+    let mut stopped = None;
+    if let Some(ctx) = ctx {
+        ctx.spawned();
+        // a cancellation that came before `watch` sent no signal
+        stopped = ctx.stopped();
+    }
+    let mut read = 0;
+    while stopped.is_none() && read < 2 {
+        let deadline = ctx.and_then(RunContext::deadline);
+        let got = match deadline {
+            None => rx.recv().map_err(|_| ()),
+            Some(at) => match at.checked_duration_since(std::time::Instant::now()) {
+                Some(left) if !left.is_zero() => match rx.recv_timeout(left) {
+                    Ok(signal) => Ok(signal),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        stopped = ctx.and_then(RunContext::stopped);
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+                },
+                _ => {
+                    stopped = Some(Stop::Deadline);
+                    break;
+                }
+            },
+        };
+        match got {
+            Ok(Signal::Read { over: false }) => read += 1,
+            Ok(Signal::Read { over: true }) => {
                 // The child may be blocked writing to a pipe nobody reads any more.
                 let _ = child.kill();
                 break;
             }
-            Err(_) => break,
+            Ok(Signal::Wake) => stopped = ctx.and_then(RunContext::stopped),
+            Err(()) => break,
         }
+    }
+    if stopped.is_some() {
+        let _ = child.kill();
     }
     let out = out_thread.join();
     let err = err_thread.join();
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
     let status = child.wait();
+    if let Some(ctx) = ctx {
+        ctx.unwatch();
+    }
     #[cfg(test)]
     REAPED.with(|n| n.set(n.get() + 1));
+    if let Some(why) = stopped {
+        return Err(stopped_error(why));
+    }
     let joined = |r: std::thread::Result<std::io::Result<Drained>>| {
         r.unwrap_or_else(|_| Err(std::io::Error::other("reader panicked")))
     };
@@ -554,12 +650,17 @@ fn git_failed(repo: &CodeRepo, what: &str, out: &Output, fix: &str) -> RdyError 
 /// `repo.root` is a git checkout's top folder and not a partial clone (checked once per process
 /// per root, and again after a read of HEAD fails). The shallow check is in `build_at`.
 pub(crate) fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
+    check_top_in(repo, None)
+}
+
+/// [`check_top`] observing the run context `ctx`.
+pub(crate) fn check_top_in(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<(), RdyError> {
     if lock(&TOPS).contains(&repo.root) {
         return Ok(());
     }
     let mut c = git_command(&repo.root);
     c.args(["rev-parse", "--show-toplevel"]);
-    let out = run(c)?;
+    let out = run_in(c, ctx)?;
     if !out.status.success() {
         return Err(RdyError::new(
             E_CONFIG,
@@ -581,7 +682,7 @@ pub(crate) fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
             format!("set code_paths.{} to {}", repo.configured, top.display()),
         ));
     }
-    if is_partial_clone(repo)? {
+    if is_partial_clone(repo, ctx)? {
         // An older git ignores GIT_NO_LAZY_FETCH and would fetch into the repository.
         return Err(RdyError::new(
             E_CONFIG,
@@ -595,10 +696,10 @@ pub(crate) fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
 
 /// The repository's config names a promisor remote (`remote.<name>.promisor`) or a partial
 /// clone filter (`extensions.partialClone`): a partial clone, missing objects it would fetch.
-fn is_partial_clone(repo: &CodeRepo) -> Result<bool, RdyError> {
+fn is_partial_clone(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<bool, RdyError> {
     let mut c = git_command(&repo.root);
     c.args(["rev-parse", "--git-common-dir"]);
-    let out = run(c)?;
+    let out = run_in(c, ctx)?;
     if !out.status.success() {
         return Err(git_failed(
             repo,
@@ -638,18 +739,26 @@ fn is_partial_clone(repo: &CodeRepo) -> Result<bool, RdyError> {
 /// The commit HEAD names; `None` while HEAD is unborn. Any other failure is an error, and the
 /// root's top-level check runs again on the next read (the repository may have gone).
 pub(crate) fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
-    let head = read_head(repo);
+    head_of_in(repo, None)
+}
+
+/// [`head_of`] observing the run context `ctx`.
+pub(crate) fn head_of_in(
+    repo: &CodeRepo,
+    ctx: Option<&RunContext>,
+) -> Result<Option<String>, RdyError> {
+    let head = read_head(repo, ctx);
     if head.is_err() {
         lock(&TOPS).remove(&repo.root);
     }
     head
 }
 
-fn read_head(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
+fn read_head(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<Option<String>, RdyError> {
     let verify = |what: &str| -> Result<Output, RdyError> {
         let mut c = git_command(&repo.root);
         c.args(["rev-parse", "-q", "--verify", what]);
-        run(c)
+        run_in(c, ctx)
     };
     let printed = |out: &Output| String::from_utf8_lossy(&out.stdout).trim().to_string();
     let fix = "check the repository with git fsck";
@@ -686,10 +795,10 @@ fn read_head(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
 /// `repo.root` is not a shallow clone. Checked on every build, not once per root: a full
 /// checkout can become shallow later (`git fetch --depth=1`), and an index from shallow
 /// history attributes every file to its oldest commit.
-fn check_not_shallow(repo: &CodeRepo) -> Result<(), RdyError> {
+fn check_not_shallow(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<(), RdyError> {
     let mut c = git_command(&repo.root);
     c.args(["rev-parse", "--is-shallow-repository"]);
-    let out = run(c)?;
+    let out = run_in(c, ctx)?;
     if !out.status.success() {
         return Err(git_failed(
             repo,
@@ -712,9 +821,18 @@ fn check_not_shallow(repo: &CodeRepo) -> Result<(), RdyError> {
 /// from `git ls-tree -rz --full-tree`. Directories and submodule entries are left out, and so is
 /// a path that is not UTF-8. Worktree and index changes play no part.
 pub(crate) fn read_tree(repo: &CodeRepo, head: &str) -> Result<BTreeMap<String, String>, RdyError> {
+    read_tree_in(repo, head, None)
+}
+
+/// [`read_tree`] observing the run context `ctx`.
+pub(crate) fn read_tree_in(
+    repo: &CodeRepo,
+    head: &str,
+    ctx: Option<&RunContext>,
+) -> Result<BTreeMap<String, String>, RdyError> {
     let mut c = git_command(&repo.root);
     c.args(["ls-tree", "-rz", "--full-tree"]).arg(head);
-    let tree = run(c)?;
+    let tree = run_in(c, ctx)?;
     if !tree.status.success() {
         return Err(git_failed(
             repo,
@@ -768,11 +886,13 @@ fn build_from(
     repo: &CodeRepo,
     head: String,
     at_head: &BTreeSet<String>,
+    ctx: Option<&RunContext>,
 ) -> Result<CodeIndex, RdyError> {
-    build_from_bounded(repo, head, at_head, MAX_TREE_PATHS, MAX_TREE_PATH)
+    build_from_ctx(repo, head, at_head, MAX_TREE_PATHS, MAX_TREE_PATH, ctx)
 }
 
 /// `build_from` with the history path bounds named, so a test can use small ones.
+#[cfg(test)]
 pub(crate) fn build_from_bounded(
     repo: &CodeRepo,
     head: String,
@@ -780,7 +900,19 @@ pub(crate) fn build_from_bounded(
     max_paths: usize,
     max_path: usize,
 ) -> Result<CodeIndex, RdyError> {
-    check_not_shallow(repo)?;
+    build_from_ctx(repo, head, at_head, max_paths, max_path, None)
+}
+
+/// `build_from` with the history path bounds named, observing the run context `ctx`.
+fn build_from_ctx(
+    repo: &CodeRepo,
+    head: String,
+    at_head: &BTreeSet<String>,
+    max_paths: usize,
+    max_path: usize,
+    ctx: Option<&RunContext>,
+) -> Result<CodeIndex, RdyError> {
+    check_not_shallow(repo, ctx)?;
     let nonce = crate::wc::state::new_nonce();
     let mut c = git_command(&repo.root);
     c.args([
@@ -794,7 +926,7 @@ pub(crate) fn build_from_bounded(
     ])
     .arg(format!("--format={}", log_format(&nonce)))
     .args([head.as_str(), "--"]);
-    let log = run(c)?;
+    let log = run_in(c, ctx)?;
     if !log.status.success() {
         return Err(git_failed(
             repo,
@@ -813,9 +945,9 @@ pub(crate) fn build_from_bounded(
 /// The index of `head` (which HEAD named when it was read), read at that hash rather than at
 /// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
 fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
-    check_not_shallow(repo)?;
+    check_not_shallow(repo, None)?;
     let tree = read_tree(repo, &head)?;
-    build_from(repo, head, &tree.keys().cloned().collect())
+    build_from(repo, head, &tree.keys().cloned().collect(), None)
 }
 
 /// The index of the commit `head` whose files are `at_head`, from the cache while it holds that
@@ -825,12 +957,23 @@ pub(crate) fn index_at(
     head: &str,
     at_head: &BTreeSet<String>,
 ) -> Result<Arc<CodeIndex>, RdyError> {
+    index_at_in(repo, head, at_head, None)
+}
+
+/// [`index_at`] observing the run context `ctx`. A stopped or failed build publishes no cache
+/// entry: only a complete index is kept.
+pub(crate) fn index_at_in(
+    repo: &CodeRepo,
+    head: &str,
+    at_head: &BTreeSet<String>,
+    ctx: Option<&RunContext>,
+) -> Result<Arc<CodeIndex>, RdyError> {
     if let Some(idx) = lock(&CACHE).get(&repo.root)
         && idx.head.as_deref() == Some(head)
     {
         return Ok(Arc::clone(idx));
     }
-    let idx = Arc::new(build_from(repo, head.to_string(), at_head)?);
+    let idx = Arc::new(build_from(repo, head.to_string(), at_head, ctx)?);
     lock(&CACHE).insert(repo.root.clone(), Arc::clone(&idx));
     Ok(idx)
 }
@@ -922,6 +1065,117 @@ pub fn index_of(repo: &CodeRepo) -> Result<Arc<CodeIndex>, RdyError> {
     Ok(idx)
 }
 
+/// The Git administration paths of the worktree at `repo.root`, each canonical: its own Git
+/// directory and the common Git directory its worktrees share.
+struct GitAdmin {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+/// [`GitAdmin`] of `repo`, read with `git rev-parse` (whose relative output is relative to the
+/// root). Any other output is `E_IO`.
+fn git_admin(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<GitAdmin, RdyError> {
+    let mut c = git_command(&repo.root);
+    c.args(["rev-parse", "--absolute-git-dir", "--git-common-dir"]);
+    let out = run_in(c, ctx)?;
+    let fix = "check the repository with git status";
+    if !out.status.success() {
+        return Err(git_failed(repo, "rev-parse", &out, fix));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    let canon = |line: &str| std::fs::canonicalize(repo.root.join(line)).ok();
+    match lines.as_slice() {
+        [git_dir, common_dir] => match (canon(git_dir), canon(common_dir)) {
+            (Some(git_dir), Some(common_dir)) => Ok(GitAdmin {
+                git_dir,
+                common_dir,
+            }),
+            _ => Err(RdyError::new(
+                E_IO,
+                format!(
+                    "code repo {}: its git directories do not resolve",
+                    repo.configured
+                ),
+                fix,
+            )),
+        },
+        _ => Err(RdyError::new(
+            E_IO,
+            format!(
+                "code repo {}: git rev-parse printed no git directories",
+                repo.configured
+            ),
+            fix,
+        )),
+    }
+}
+
+/// Whether `checkout` (canonical) is the configured checkout `configured`, or a Git worktree of
+/// the same repository: its top folder is its root, it is no partial clone, and it shares
+/// `configured`'s common Git directory, as the main worktree (its Git directory is the common
+/// one) or a registered worktree (its Git directory is under the common one's `worktrees`).
+/// `Ok(false)` for any other folder; `Err` when git cannot read one of them.
+pub(crate) fn same_repository(
+    configured: &CodeRepo,
+    checkout: &CodeRepo,
+    ctx: Option<&RunContext>,
+) -> Result<bool, RdyError> {
+    match check_top_in(checkout, ctx) {
+        Ok(()) => {}
+        Err(e) if e.code == E_CONFIG => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if checkout.root == configured.root {
+        return Ok(true);
+    }
+    let theirs = git_admin(configured, ctx)?;
+    let ours = git_admin(checkout, ctx)?;
+    let registered = ours.git_dir == ours.common_dir
+        || ours.git_dir.parent() == Some(ours.common_dir.join("worktrees").as_path());
+    Ok(ours.common_dir == theirs.common_dir && registered)
+}
+
+/// The `Implements:` values of the commit message `message`, read by git's own trailer parser
+/// (`git interpret-trailers --parse`, run in `repo` so its trailer and comment settings apply):
+/// repeated trailers, keys in any case and folded values, each value split on `,` by
+/// [`implements_of`]. More than `max` values in all is `E_LIMIT`, counted before any is kept.
+pub(crate) fn message_citations(
+    repo: &CodeRepo,
+    message: &str,
+    max: usize,
+    ctx: Option<&RunContext>,
+) -> Result<Vec<String>, RdyError> {
+    let mut c = git_command(&repo.root);
+    c.args(["interpret-trailers", "--parse"]);
+    let out = run_ctx(c, Limits::GIT, ctx, Some(message.as_bytes()))?;
+    if !out.status.success() {
+        return Err(git_failed(
+            repo,
+            "interpret-trailers",
+            &out,
+            "check that git runs",
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut values: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("implements") {
+            continue;
+        }
+        for v in value.split(',').filter(|v| !v.trim().is_empty()) {
+            if values.len() == max {
+                return Err(crate::hooks::limit(max, "citation values"));
+            }
+            values.push(v);
+        }
+    }
+    Ok(implements_of(&values.join(",")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1217,83 @@ mod tests {
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "--no-verify", "-m", message]);
         git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// `git cat-file --batch` reading a pipe whose write end the test holds open: it waits on
+    /// its stdin until the run is stopped.
+    fn waiting_git(dir: &Path) -> (Command, std::io::PipeWriter) {
+        let (r, w) = std::io::pipe().expect("a pipe");
+        let mut c = git_command(dir);
+        c.args(["cat-file", "--batch"]).stdin(r);
+        (c, w)
+    }
+
+    #[test]
+    fn m4a1_a_cancelled_git_child_is_killed_reaped_and_joined() {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q", "--initial-branch=main"]);
+        let reaped = || REAPED.with(std::cell::Cell::get);
+        // cancelled from another thread while the run waits on its child
+        let (c, held) = waiting_git(tmp.path());
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let ctx = RunContext::new().on_spawn(move || {
+            let _ = started_tx.send(());
+        });
+        let canceller = ctx.clone();
+        let t = std::thread::spawn(move || {
+            started_rx.recv().unwrap();
+            canceller.cancel();
+        });
+        let before = reaped();
+        let err = run_ctx(c, Limits::GIT, Some(&ctx), None).unwrap_err();
+        t.join().unwrap();
+        assert_eq!(err.code, E_IO);
+        assert_eq!(err.message, "git stopped: the hook run was cancelled");
+        assert_eq!(
+            reaped(),
+            before + 1,
+            "the child was reaped before the return"
+        );
+        drop(held);
+        // no git command starts once the context has stopped
+        let (c, _held) = waiting_git(tmp.path());
+        let err = run_ctx(c, Limits::GIT, Some(&ctx), None).unwrap_err();
+        assert_eq!(err.message, "git stopped: the hook run was cancelled");
+        assert_eq!(reaped(), before + 1, "nothing was started");
+        // a deadline already passed starts nothing
+        let (c, _held) = waiting_git(tmp.path());
+        let past = RunContext::new().with_deadline(std::time::Instant::now());
+        let err = run_ctx(c, Limits::GIT, Some(&past), None).unwrap_err();
+        assert_eq!(err.message, "git stopped: the hook run passed its deadline");
+        assert_eq!(reaped(), before + 1, "nothing was started");
+        // a deadline that passes while the child waits kills it: the spawn observer holds the
+        // run until the deadline has passed (a condition, not a measured time)
+        let (c, _held) = waiting_git(tmp.path());
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        let late = RunContext::new().with_deadline(at).on_spawn(move || {
+            while std::time::Instant::now() < at {
+                std::thread::yield_now();
+            }
+        });
+        let err = run_ctx(c, Limits::GIT, Some(&late), None).unwrap_err();
+        assert_eq!(err.message, "git stopped: the hook run passed its deadline");
+        assert_eq!(
+            reaped(),
+            before + 2,
+            "the child was reaped before the return"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        // an ordinary run, and a run under a context that never stops, finish as before
+        let ok = RunContext::new().with_deadline(deadline);
+        let mut c = git_command(tmp.path());
+        c.args(["rev-parse", "--is-inside-work-tree"]);
+        let out = run_ctx(c, Limits::GIT, Some(&ok), None).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+        // input reaches the child's stdin and is closed after it
+        let mut c = git_command(tmp.path());
+        c.args(["interpret-trailers", "--parse"]);
+        let out = run_ctx(c, Limits::GIT, Some(&ok), Some(b"x\n\nImplements: a\n")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Implements: a\n");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/mcp-http-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4a-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -97,12 +97,12 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baselines (`release-1.json` and `repo-links-v1.json`,
-/// both frozen) with the additions since. A capture writes this file, never a baseline. The MCP over
-/// HTTP plan freezes it (`mht8_http_contract_capture_is_complete` pins its bytes); a later contract
-/// change is a successor fixture.
+/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json` and
+/// `mcp-http-v1.json`, all frozen) with the additions since. A capture writes this file, never a
+/// baseline. It starts as a byte copy of `mcp-http-v1.json`, whose bytes
+/// `mht8_http_contract_capture_is_complete` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/mcp-http-v1.json")
+    qa_root().join("fixtures/contracts/m4a-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -4851,7 +4851,9 @@ fn mht1_contract_successor_keeps_released_baselines() {
     );
     let was: Value =
         serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
-    let now = read_fixture();
+    // the frozen MCP over HTTP fixture by name: the current fixture is its successor (m4a1)
+    let now: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("mcp-http-v1.json")).unwrap()).unwrap();
     // the successor equals the baseline but for the three config members
     let (mut was_rest, mut now_rest) = (was.clone(), now.clone());
     for doc in [&mut was_rest, &mut now_rest] {
@@ -4908,7 +4910,9 @@ fn mht7_public_contract_additions_are_explicit() {
     let dir = qa_root().join("fixtures/contracts");
     let was: Value =
         serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
-    let now = read_fixture();
+    // the frozen MCP over HTTP fixture by name: the current fixture is its successor (m4a1)
+    let now: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("mcp-http-v1.json")).unwrap()).unwrap();
 
     // the command tree: `rdy mcp` has one more flag, first, and its argument group
     let mcp_of = |doc: &Value| -> Value {

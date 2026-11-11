@@ -811,6 +811,50 @@ pub const W_WC_UNSTAGED_MOVE: &str = "W_WC_UNSTAGED_MOVE";
 /// did not record (a file rdy does not track, or later edits).
 pub const W_WC_KEPT: &str = "W_WC_KEPT";
 
+/// A local hook (D-NNQ0A, D-GHR0Y): an agent edited working-copy files directly instead of
+/// writing through rdy's tools. A warning only; the edit stands.
+pub const W_HOOK_DIRECT_EDIT: &str = "W_HOOK_DIRECT_EDIT";
+/// A local hook (D-54CKQ, D-DC5D1): a commit touches code anchored to a decision and its message
+/// has no `Implements:` value. A warning only; the commit goes ahead.
+pub const W_HOOK_NO_CITATION: &str = "W_HOOK_NO_CITATION";
+/// A local hook could not check its action; the check is incomplete, never clean.
+pub const W_HOOK_UNAVAILABLE: &str = "W_HOOK_UNAVAILABLE";
+/// A hook install or remove left a file as it was.
+pub const W_HOOK_CONFLICT: &str = "W_HOOK_CONFLICT";
+/// `W_HOOK_DIRECT_EDIT`'s message.
+pub const HOOK_DIRECT_EDIT_MESSAGE: &str = "An agent edited rdy working-copy files directly.";
+/// `W_HOOK_DIRECT_EDIT`'s fix.
+pub const HOOK_DIRECT_EDIT_FIX: &str =
+    "Read and write through rdy's tools. Call rdy_instructions and load rdy:write.";
+/// `W_HOOK_NO_CITATION`'s message.
+pub const HOOK_NO_CITATION_MESSAGE: &str =
+    "This commit touches code anchored to a decision and has no Implements trailer.";
+/// `W_HOOK_NO_CITATION`'s fix.
+pub const HOOK_NO_CITATION_FIX: &str = "Review the design with rdy_brief on the changed code paths, then cite the blocks this commit implements.";
+/// `W_HOOK_UNAVAILABLE`'s message; `<reason>` is one of the fixed unavailable reasons.
+pub const HOOK_UNAVAILABLE_MESSAGE: &str = "The rdy hook could not check this action: <reason>.";
+/// `W_HOOK_UNAVAILABLE`'s fix.
+pub const HOOK_UNAVAILABLE_FIX: &str =
+    "Continue your work. Run the hook check again when rdy and the project are available.";
+/// `W_HOOK_CONFLICT`'s message; `<path>` is the file left as it was, `<reason>` one of the fixed
+/// conflict reasons.
+pub const HOOK_CONFLICT_MESSAGE: &str = "The rdy hook left <path> unchanged: <reason>.";
+/// `W_HOOK_CONFLICT`'s fix.
+pub const HOOK_CONFLICT_FIX: &str =
+    "Review the existing file, then install or remove the rdy hook explicitly.";
+/// The `E_BAD_INPUT` message of a hook install or remove on a host that has no local hooks.
+pub const HOOK_HOST_ABSENT_MESSAGE: &str = "This host cannot install local hooks.";
+/// The fix of a hook install or remove on a host that has no local hooks.
+pub const HOOK_HOST_ABSENT_FIX: &str = "Use rdy setup on the machine that holds the checkout.";
+/// The `E_BAD_INPUT` message of a hook request that is no documented form; `<reason>` says why.
+pub const HOOK_FORM_MESSAGE: &str = "Invalid rdy_hook form: <reason>.";
+/// The fix of a hook request that is no documented form.
+pub const HOOK_FORM_FIX: &str = "Use one documented check, install or remove form.";
+/// The `E_LIMIT` message of a hook input over a bound; `<limit>` and `<unit>` name the bound.
+pub const HOOK_LIMIT_MESSAGE: &str = "The hook input exceeds <limit> <unit>.";
+/// The fix of a hook input over a bound.
+pub const HOOK_LIMIT_FIX: &str = "Pass a smaller hook input.";
+
 /// The live site is not available to this session: it runs without a daemon, or the daemon's
 /// site is off.
 pub const E_SITE: &str = "E_SITE";
