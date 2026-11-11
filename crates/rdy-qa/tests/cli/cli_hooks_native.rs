@@ -227,7 +227,8 @@ impl Native {
     fn commit(&self, message: &str, direct: bool) -> Output {
         let file = self.app.join(".git").join("MSG-m4a5");
         std::fs::write(&file, message).unwrap();
-        let mut cmd = self.git_command(&self.app, &["commit", "-q", "-F", file.to_str().unwrap()]);
+        // Relative to the checkout (Git runs there): the canonical path is `\\?\` on Windows.
+        let mut cmd = self.git_command(&self.app, &["commit", "-q", "-F", ".git/MSG-m4a5"]);
         self.w.isolate(&mut cmd);
         cmd.env_remove("RDY_ACTOR").env_remove("RDY_RUN");
         if direct {
