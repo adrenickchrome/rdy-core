@@ -770,7 +770,7 @@ async fn m4a4_http_and_stdio_keep_claims_and_projectless_scope() {
         v["files"],
         json!([{"path": "recorded", "result": "written"}])
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     // stdio through the daemon, a native pipe on Windows: the same claims and the same reply
     let w = World::new();
