@@ -1437,7 +1437,7 @@ mod tests {
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
 
     /// The crates.io packages the Windows release binary links (measured).
-    const WINDOWS_CRATES: usize = 190;
+    const WINDOWS_CRATES: usize = 193;
 
     #[cfg(unix)]
     mod unix_tests;
@@ -1708,8 +1708,9 @@ mod tests {
         for target in TARGETS {
             let (notices, crates) = inventory(target, &release).expect("inventory");
             let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
-            // measured with rmcp 3.9.0 and its HTTP server feature: macOS 190, Linux 189
-            let linked = if target == TARGETS[0] { 190 } else { 189 };
+            // measured with rmcp 3.9.0 and its HTTP server feature, plus the daemon's hyper
+            // bridge (hyper, hyper-util, atomic-waker, httpdate): macOS 194, Linux 193
+            let linked = if target == TARGETS[0] { 194 } else { 193 };
             assert_eq!(crates.len(), linked, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
