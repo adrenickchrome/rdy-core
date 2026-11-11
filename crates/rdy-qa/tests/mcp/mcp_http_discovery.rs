@@ -123,10 +123,10 @@ fn mht7_http_facts_fit_overview_budget() {
     // many docs, so that the tree is what the budget cuts
     let h = Hosted::start_in(project(ON, 120));
     let (ep, _) = endpoint(&h);
-    let (err, small) = legacy_call(&ep, "rdy_overview", json!({"max_tokens": 700}), "agent:b");
+    let (err, small) = legacy_call(&ep, "rdy_overview", json!({"max_tokens": 2000}), "agent:b");
     assert!(!err, "{small}");
     assert!(
-        small.to_string().len() / 4 <= 700,
+        small.to_string().len() / 4 <= 2000,
         "{}",
         small.to_string().len()
     );

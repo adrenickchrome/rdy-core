@@ -272,7 +272,8 @@ fn mht7_status_and_site_show_endpoint_without_secret() {
     assert!(ok, "{site}");
     assert!(site.get("mcp_url").is_none(), "{site}");
 
-    // without a daemon there is no endpoint to name
+    // without a daemon there is no endpoint to name (the store is free once the daemon stops)
+    assert_eq!(out(&off.rdy(&["serve", "--stop"])), "stopped\n");
     let (ok, status) = off.json(&["--json", "--no-daemon", "status"]);
     assert!(ok, "{status}");
     assert!(status.get("mcp_http").is_none(), "{status}");
@@ -356,8 +357,10 @@ fn mht7_profile_result_never_advertises_profile_mcp() {
     assert!(ok, "{status}");
     assert_eq!(status["mcp_http"]["url"], url, "{status}");
     assert!(!status.to_string().contains(&format!("{profile_port}/~mcp")));
+    eprintln!("STEP stop-1");
     let o = s.rdy(&["serve", "--stop"]);
     assert_eq!(out(&o), "stopped\n");
+    eprintln!("STEP stopped-1");
 
     // the foreground start prints the same: its profile-only result names the full endpoint
     let mut cmd = human_command(
@@ -382,6 +385,7 @@ fn mht7_profile_result_never_advertises_profile_mcp() {
         profile_port_of(&v),
         "the foreground result names the full endpoint: {v}"
     );
+    eprintln!("STEP stop-2");
     let stop = s.rdy(&["serve", "--stop"]);
     assert_eq!(out(&stop), "stopped\n");
     child.wait().expect("the foreground daemon exits");
