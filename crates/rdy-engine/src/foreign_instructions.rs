@@ -6,8 +6,9 @@
 //! rule that a delivery only offers is not delivered here, and a rule shows at its pinned version
 //! (its text and its lock). A link delivers into the layer of the set its last adopt answer
 //! served: `organization`, `team:<name>`, or, with no set, `cited:<alias>`. A no-set cited rule
-//! shows its stored lock and has no force ([`Layer::locks_have_force`]). A revoked link delivers
-//! nothing.
+//! shows its stored lock and has no force ([`Layer::locks_have_force`]). A revocation is no adopt
+//! answer: a revoked link still delivers the rules its pins hold, in the layer of its last adopt
+//! answer, and reads their docs and reasons from its last view, which stays frozen (D-FK58A).
 //!
 //! The ruleset of a cited rule is the doc above it in the delivered content. Its handle names the
 //! link, so two links of one layer (one repo under two profiles included) never share one:
@@ -76,12 +77,11 @@ pub(crate) fn collect(
     let mut parts: Vec<Part<'_>> = vec![];
     let mut rulesets = 0usize;
     for (alias, row) in links.rows() {
+        // a revoked source keeps its last view, and a revocation is no adopt answer: its pins
+        // stay in force (D-MEMMQ, D-FK58A)
         let Some(view) = foreign.link_source(&row.link) else {
             continue;
         };
-        if view.revoked {
-            continue;
-        }
         let Some(link) = m.get(&row.link) else {
             continue;
         };

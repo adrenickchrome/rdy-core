@@ -4,6 +4,7 @@ pub mod addr;
 pub mod guard;
 pub mod http;
 pub mod live;
+pub mod mcp;
 pub mod profiles;
 pub mod server;
 pub mod sse;

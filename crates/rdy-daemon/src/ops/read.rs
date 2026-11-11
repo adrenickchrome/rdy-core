@@ -153,6 +153,11 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
         "open_report": open_report_json(&cx.engine.open_report()),
         "quarantine": quarantine(&cx.engine.root()),
     });
+    // MCP over HTTP: the setting, the endpoint while it serves, and what it does now; never the
+    // token. Left out of a run with no daemon.
+    if let Some(h) = cx.engine.mcp_http() {
+        v["mcp_http"] = h.to_json();
+    }
     // ec10 (D-DAGNB): the repo id, and the origin of a clone or a fork
     if let Some(o) = v.as_object_mut() {
         o.extend(rdy_engine::repo::repo_json(&st)?);

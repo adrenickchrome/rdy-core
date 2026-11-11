@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/repo-links-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/mcp-http-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -97,10 +97,12 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baseline (`release-1.json`, frozen) with the
-/// additions since. A capture writes this file, never the baseline.
+/// The current contract fixture: the released baselines (`release-1.json` and `repo-links-v1.json`,
+/// both frozen) with the additions since. A capture writes this file, never a baseline. The MCP over
+/// HTTP plan freezes it (`mht8_http_contract_capture_is_complete` pins its bytes); a later contract
+/// change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/repo-links-v1.json")
+    qa_root().join("fixtures/contracts/mcp-http-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -4822,6 +4824,174 @@ fn ok14_release_contract_matches_all_surfaces() {
             "row {name} changed: a public contract change needs an upgrade or deprecation path (D-TXFHR)"
         );
     }
+}
+
+/// mht1: the successor fixture holds the two released baselines unchanged. `release-1.json` and
+/// `repo-links-v1.json` keep their bytes, and `mcp-http-v1.json` differs from `repo-links-v1.json`
+/// in exactly the `serve.mcp_http` rows: its key row, its listing line and its probe rows. mht7
+/// adds two more members to the allowance, each pinned by [`mht7_public_contract_additions_are_explicit`]:
+/// `cli.tree` (the flag of `rdy mcp`) and `errors_warnings.error_rows` (the `E_SITE` row).
+#[test]
+fn mht1_contract_successor_keeps_released_baselines() {
+    let dir = qa_root().join("fixtures/contracts");
+    let sha = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).expect("a fixture");
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(
+        sha("release-1.json"),
+        "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6"
+    );
+    assert_eq!(
+        sha("repo-links-v1.json"),
+        "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27"
+    );
+    let was: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
+    let now = read_fixture();
+    // the successor equals the baseline but for the three config members
+    let (mut was_rest, mut now_rest) = (was.clone(), now.clone());
+    for doc in [&mut was_rest, &mut now_rest] {
+        doc["config"]["keys"] = Value::Null;
+        doc["config"]["listing"] = Value::Null;
+        doc["cli"]["runtime"]["probes"]["config"] = Value::Null;
+        // mht7: the command tree and the error rows, pinned by their own test
+        doc["cli"]["tree"] = Value::Null;
+        doc["errors_warnings"]["error_rows"] = Value::Null;
+    }
+    assert_eq!(
+        was_rest, now_rest,
+        "only the serve.mcp_http rows and mht7's rows may move"
+    );
+    // the key row: one more, right after serve.ui
+    let keys = |v: &Value| -> Vec<Value> { v["config"]["keys"].as_array().expect("keys").clone() };
+    let (old_keys, new_keys) = (keys(&was), keys(&now));
+    assert_eq!(new_keys.len(), old_keys.len() + 1);
+    let at = new_keys
+        .iter()
+        .position(|k| k["key"] == "serve.mcp_http")
+        .expect("the new key row");
+    assert_eq!(new_keys[at - 1]["key"], "serve.ui");
+    assert_eq!(
+        new_keys[at],
+        json!({"default": "false", "key": "serve.mcp_http", "levels": ["local", "user"], "type": "Bool"})
+    );
+    let mut without = new_keys.clone();
+    without.remove(at);
+    assert_eq!(without, old_keys, "every released key row keeps its bytes");
+    // the listing: one more line, in the text of both captures
+    for capture in ["configured", "defaults"] {
+        let listing = now["config"]["listing"][capture]["text"]
+            .as_str()
+            .expect("listing text");
+        assert!(
+            listing.contains("serve.ui = true  # set at: local, user\nserve.mcp_http = false  # set at: local, user\n"),
+            "{capture}: {listing}"
+        );
+    }
+    // the baseline still reads
+    let released = read_released();
+    assert!(released["config"]["keys"].is_array());
+}
+
+/// mht7: what the successor fixture adds to `repo-links-v1.json` for the connection aid and the
+/// discovery fields, and nothing else. The command tree gains one flag on `rdy mcp` and its
+/// argument group. The `E_SITE` row of the error table names the two new cases of MCP over HTTP.
+/// The MCP row is the baseline's: no tool was added, so the tool inventory and every captured
+/// result field keep their bytes (`mcp_url` and `mcp_http` appear only through a daemon, which no
+/// probe uses; `rdy mcp` and `rdy site` are in `CLI_NOT_CAPTURED`).
+#[test]
+fn mht7_public_contract_additions_are_explicit() {
+    let dir = qa_root().join("fixtures/contracts");
+    let was: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
+    let now = read_fixture();
+
+    // the command tree: `rdy mcp` has one more flag, first, and its argument group
+    let mcp_of = |doc: &Value| -> Value {
+        doc["cli"]["tree"]["subcommands"]
+            .as_array()
+            .expect("subcommands")
+            .iter()
+            .find(|c| c["name"] == "mcp")
+            .expect("the mcp command")
+            .clone()
+    };
+    let (old_mcp, new_mcp) = (mcp_of(&was), mcp_of(&now));
+    assert!(old_mcp["groups"].is_null(), "{old_mcp}");
+    assert_eq!(
+        new_mcp["groups"],
+        json!([{"args": ["http_config"], "id": "McpArgs", "multiple": true, "required": false}])
+    );
+    let new_args = new_mcp["args"].as_array().expect("args");
+    assert_eq!(
+        new_args.len(),
+        old_mcp["args"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(
+        new_args[0],
+        json!({
+            "action": "set_true", "defaults": ["false"], "id": "http_config",
+            "long": "http-config", "num_args": "0", "value_names": ["HTTP_CONFIG"]
+        })
+    );
+    assert_eq!(&new_args[1..], &old_mcp["args"].as_array().unwrap()[..]);
+    // every other command keeps its bytes
+    let (mut was_tree, mut now_tree) = (was["cli"]["tree"].clone(), now["cli"]["tree"].clone());
+    for tree in [&mut was_tree, &mut now_tree] {
+        let subs = tree["subcommands"].as_array_mut().unwrap();
+        subs.retain(|c| c["name"] != "mcp");
+    }
+    assert_eq!(
+        was_tree, now_tree,
+        "only rdy mcp changed in the command tree"
+    );
+
+    // the error table: the E_SITE row, and no other row
+    let rows = |doc: &Value| -> Vec<Value> {
+        doc["errors_warnings"]["error_rows"]
+            .as_array()
+            .expect("error rows")
+            .clone()
+    };
+    let (old_rows, new_rows) = (rows(&was), rows(&now));
+    assert_eq!(old_rows.len(), new_rows.len(), "no code was added");
+    let moved: Vec<(&Value, &Value)> = old_rows
+        .iter()
+        .zip(&new_rows)
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].0[0], "E_SITE");
+    assert_eq!(
+        moved[0].1,
+        &json!([
+            "E_SITE",
+            "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
+            "follow the error's fix"
+        ])
+    );
+
+    // the MCP row, the runtime row but for the config probes, and the inventory keep their bytes
+    assert_eq!(
+        now["mcp"], was["mcp"],
+        "no tool and no captured reply field moved"
+    );
+    let (mut was_rt, mut now_rt) = (was["cli"]["runtime"].clone(), now["cli"]["runtime"].clone());
+    for rt in [&mut was_rt, &mut now_rt] {
+        rt["probes"]["config"] = Value::Null;
+    }
+    assert_eq!(was_rt, now_rt);
+    assert_eq!(
+        now["errors_warnings"]["codes"], was["errors_warnings"]["codes"],
+        "the error and warning codes are the baseline's"
+    );
+    // a baseline's contract still reads as a released one
+    let released = read_released();
+    assert!(released["errors_warnings"]["error_rows"].is_array());
 }
 
 /// Every member typed by hand is listed in [`DESCRIPTIVE`], and each listed member is in the

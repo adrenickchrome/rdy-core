@@ -5,6 +5,7 @@ mod release_contract;
 mod release_install;
 mod release_install_unix;
 mod release_keys;
+mod release_mcp_http_contract;
 mod release_notices;
 mod release_notices_unix;
 mod release_one;

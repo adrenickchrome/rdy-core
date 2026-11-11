@@ -20,8 +20,10 @@
 //!   may be asked of a name without connecting to it (`endpoint_is_link`, `endpoint_identity`),
 //!   how a bind can fail (`BIND_REFUSED`, `name_is_held`), the
 //!   exact grammars of `daemon.sock` and `daemon.pid` (`parse_endpoint_record`, `parse_pid_record`,
-//!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`)
-//!   and whether a run file may be believed (`run_file_is_private`);
+//!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`),
+//!   whether a run file may be believed (`run_file_is_private`), and whether it may hold a secret
+//!   of this account, the MCP token (`token_file_is_private`: on Unix its owner and exact mode,
+//!   on Windows its protected DACL and owner, both read on the open handle);
 //! - process lifecycle: a new session on spawn, where a started daemon runs (`daemon_start_dir`),
 //!   exit codes, liveness and leaving the caller's session (`detach`). `SIGTERM` by pid is Unix
 //!   only: Windows never ends a process by its pid;

@@ -13,7 +13,7 @@
 //! The set is closed. A read needs a claim: `rdy/actor` and `rdy/run` in its `_meta`, or the
 //! connection's (D-4PHYQ). `subscribe` and the `subscriptions/listen` filter accept the same
 //! URIs and nothing else.
-use crate::notify::Sink;
+use crate::notify::{Sink, StreamQueue};
 use crate::server::RdyServer;
 use crate::tools::{self, McpState, session};
 use rdy_engine::{E_INTERNAL, E_NOT_FOUND, RdyError, ReadState, Scope};
@@ -24,7 +24,7 @@ use rmcp::{
         ListResourceTemplatesResult, ListResourcesResult, ReadResourceResult, Resource,
         ResourceContents, ResourceTemplate, SubscriptionFilter,
     },
-    service::SubscriptionContext,
+    service::{SubscriptionContext, SubscriptionSendError},
 };
 use serde_json::{Value, json};
 
@@ -293,7 +293,12 @@ impl RdyServer {
     /// `subscriptions/listen`: records the accepted URIs and the stream's sink, waits for the
     /// client to cancel, then undoes what the stream changed: the URIs it added and its sink (the
     /// sink before it, such as the legacy peer, is back).
+    ///
+    /// mht4: an MCP-over-HTTP listen is a session of its own in the hub, under its claim, with a
+    /// bounded queue its own task drains ([`deliver`]); it ends at the client's cancel, the
+    /// queue's overflow or a failed send, and holds its reservation until then.
     pub(crate) async fn resources_listen(&self, context: SubscriptionContext) {
+        let http = crate::http::listen_of(&context.request_context().extensions);
         let accepted = context
             .accepted()
             .resource_subscriptions
@@ -311,11 +316,48 @@ impl RdyServer {
                 _ => uris.push((uri, None)),
             }
         }
-        let listening = self
+        let Some(((actor, run), _reservation)) = http else {
+            let listening =
+                self.hub
+                    .listen(self.hub_sid, Sink::Listen(context.sink().clone()), uris);
+            context.cancelled().await;
+            self.hub.end_listen(self.hub_sid, listening);
+            return;
+        };
+        let queue = self
             .hub
-            .listen(self.hub_sid, Sink::Listen(context.sink().clone()), uris);
-        context.cancelled().await;
-        self.hub.end_listen(self.hub_sid, listening);
+            .listen_stream(self.hub_sid, &actor, run.as_deref(), uris);
+        deliver(&queue, &context).await;
+        self.hub.disconnect(self.hub_sid);
+    }
+}
+
+/// mht4: sends what `queue` holds on the listen's stream, one URI at a time, until the client
+/// cancels, the queue closes (its overflow) or a send fails. A send waits while rmcp's bounded
+/// channel is full, so a slow client holds the queue, never a spawned task.
+async fn deliver(queue: &StreamQueue, context: &SubscriptionContext) {
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = context.cancelled() => return,
+            uri = queue.next() => uri,
+        };
+        let Some(uri) = next else { return };
+        let sent = tokio::select! {
+            biased;
+            () = context.cancelled() => return,
+            () = queue.closed() => return,
+            sent = context.sink().notify_resource_updated(uri) => sent,
+        };
+        match sent {
+            // the stream's own filter keeps a URI it never accepted: nothing to send
+            Ok(())
+            | Err(
+                SubscriptionSendError::NotificationNotAccepted(_)
+                | SubscriptionSendError::UnsupportedNotification(_),
+            ) => {}
+            Err(_) => return,
+        }
     }
 }
 

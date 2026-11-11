@@ -9,8 +9,104 @@ use rdy_model::BlockId;
 use rmcp::model::ResourceUpdatedNotificationParam;
 use rmcp::service::SubscriptionSink;
 use rmcp::{Peer, RoleServer};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+
+/// mht4: the resource invalidations one HTTP listen keeps queued for its stream.
+pub const MAX_QUEUED: usize = 64;
+
+/// mht4: the queue of one MCP-over-HTTP listen. A notification only queues its URI; the
+/// listen's own task sends it on its stream, one at a time, so a slow client holds at most
+/// [`MAX_QUEUED`] URIs here and spawns nothing. A URI already queued is not queued twice. When
+/// [`MAX_QUEUED`] distinct URIs wait, the next one closes the queue, and its stream ends: the
+/// client reads the resources again when it listens again.
+#[derive(Debug, Default)]
+pub struct StreamQueue {
+    state: Mutex<Queued>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct Queued {
+    uris: VecDeque<String>,
+    closed: bool,
+}
+
+impl StreamQueue {
+    fn state(&self) -> std::sync::MutexGuard<'_, Queued> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Queues `uri`, unless it waits already. A full queue closes instead.
+    pub fn push(&self, uri: &str) {
+        let mut q = self.state();
+        if q.closed || q.uris.iter().any(|u| u == uri) {
+            return;
+        }
+        if q.uris.len() >= MAX_QUEUED {
+            q.closed = true;
+            q.uris.clear();
+        } else {
+            q.uris.push_back(uri.to_string());
+        }
+        drop(q);
+        self.wake.notify_waiters();
+    }
+
+    /// Closes the queue: its stream ends at its next step.
+    pub fn close(&self) {
+        let mut q = self.state();
+        q.closed = true;
+        q.uris.clear();
+        drop(q);
+        self.wake.notify_waiters();
+    }
+
+    /// The URIs waiting now.
+    pub fn len(&self) -> usize {
+        self.state().uris.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.state().closed
+    }
+
+    /// The next URI to send, once one waits; `None` once the queue is closed.
+    pub async fn next(&self) -> Option<String> {
+        loop {
+            let woken = self.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            {
+                let mut q = self.state();
+                if q.closed {
+                    return None;
+                }
+                if let Some(uri) = q.uris.pop_front() {
+                    return Some(uri);
+                }
+            }
+            woken.await;
+        }
+    }
+
+    /// Returns once the queue is closed.
+    pub async fn closed(&self) {
+        loop {
+            let woken = self.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.is_closed() {
+                return;
+            }
+            woken.await;
+        }
+    }
+}
 
 /// Where a session's notifications go.
 #[derive(Clone, Debug)]
@@ -19,6 +115,8 @@ pub enum Sink {
     Legacy(Peer<RoleServer>),
     /// A client on `subscriptions/listen`: the stream's filter-enforcing sink.
     Listen(SubscriptionSink),
+    /// mht4: one MCP-over-HTTP listen: its bounded queue, which its own stream drains.
+    Stream(Arc<StreamQueue>),
     /// No way to reach the session (yet).
     None,
     /// A sink the hub's unit tests tell apart; it sends nothing.
@@ -196,9 +294,48 @@ impl NotifyHub {
         }
     }
 
-    /// Forgets session `sid`: its identity, subscriptions and sink.
+    /// mht4: makes the MCP-over-HTTP listen `sid` known, as one session of its own: the claim
+    /// `actor` and `run`, the accepted `uris` (each with the block a doc URI follows) and a new
+    /// bounded queue as its sink. The listen's own task drains the queue, and `disconnect`
+    /// ends it. Two listens of one claim are two sessions; neither replaces the other.
+    pub fn listen_stream(
+        &self,
+        sid: u64,
+        actor: &str,
+        run: Option<&str>,
+        uris: Vec<(String, Option<BlockId>)>,
+    ) -> Arc<StreamQueue> {
+        let queue = Arc::new(StreamQueue::default());
+        let mut c = Conn::new();
+        c.sink = Sink::Stream(Arc::clone(&queue));
+        c.actor = Some(actor.to_string());
+        c.run = run.map(str::to_string);
+        for (uri, block) in uris {
+            if let Some(b) = block {
+                c.docs.insert(uri.clone(), b);
+            }
+            c.uris.insert(uri);
+        }
+        if let Some(old) = self.conns().insert(sid, c) {
+            close(&old.sink);
+        }
+        queue
+    }
+
+    /// The invalidations HTTP listen `sid` holds queued, while its stream is open.
+    pub fn queued(&self, sid: u64) -> Option<usize> {
+        match self.conns().get(&sid).map(|c| &c.sink) {
+            Some(Sink::Stream(q)) if !q.is_closed() => Some(q.len()),
+            _ => None,
+        }
+    }
+
+    /// Forgets session `sid`: its identity, subscriptions and sink. An HTTP listen's queue
+    /// closes with it.
     pub fn disconnect(&self, sid: u64) {
-        self.conns().remove(&sid);
+        if let Some(c) = self.conns().remove(&sid) {
+            close(&c.sink);
+        }
     }
 
     /// The (actor, run) of every identified session subscribed to `uri`, sorted and distinct:
@@ -229,12 +366,16 @@ impl NotifyHub {
             .collect()
     }
 
-    /// Tells session `sid` that `uri` changed. It sends nothing to a session with no sink or no
-    /// runtime, spawns the send and ignores its result.
+    /// Tells session `sid` that `uri` changed. An HTTP listen queues it (mht4); any other sink
+    /// gets nothing with no runtime, else a spawned send whose result is ignored.
     pub fn notify(&self, sid: u64, uri: &str) {
         let (sink, runtime) = {
             let conns = self.conns();
             let Some(c) = conns.get(&sid) else { return };
+            if let Sink::Stream(q) = &c.sink {
+                q.push(uri);
+                return;
+            }
             let Some(rt) = c.runtime.clone() else { return };
             (c.sink.clone(), rt)
         };
@@ -249,11 +390,23 @@ impl NotifyHub {
                 Sink::Listen(sink) => {
                     let _ = sink.notify_resource_updated(uri).await;
                 }
+                // queued above, never spawned
+                Sink::Stream(_) => {}
                 Sink::None => {}
                 #[cfg(test)]
                 Sink::Test(_) => {}
             }
         });
+    }
+}
+
+/// Closes `sink` when it is an HTTP listen's queue: its stream ends.
+fn close(sink: &Sink) {
+    match sink {
+        Sink::Stream(q) => q.close(),
+        Sink::Legacy(_) | Sink::Listen(_) | Sink::None => {}
+        #[cfg(test)]
+        Sink::Test(_) => {}
     }
 }
 
@@ -342,6 +495,35 @@ mod tests {
             "the legacy subscription stays"
         );
         assert!(t[0].docs.is_empty());
+    }
+
+    /// mht4: an HTTP listen's queue keeps each waiting URI once, and a distinct URI past
+    /// [`MAX_QUEUED`] closes it; a listen is its own session and ends with `disconnect`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mht4_a_stream_queue_coalesces_and_closes_when_full() {
+        let hub = NotifyHub::new();
+        let q = hub.listen_stream(9, "agent:a", Some("a1"), vec![("rdy://inbox".into(), None)]);
+        assert_eq!(
+            hub.subscribers("rdy://inbox"),
+            vec![("agent:a".into(), Some("a1".into()))]
+        );
+        for _ in 0..10 {
+            hub.notify(9, "rdy://inbox");
+        }
+        assert_eq!(hub.queued(9), Some(1));
+        assert_eq!(q.next().await.as_deref(), Some("rdy://inbox"));
+        for n in 0..MAX_QUEUED {
+            hub.notify(9, &format!("rdy://view/v{n}"));
+        }
+        assert_eq!(hub.queued(9), Some(MAX_QUEUED));
+        hub.notify(9, "rdy://view/v0");
+        assert_eq!(hub.queued(9), Some(MAX_QUEUED), "a repeat still coalesces");
+        hub.notify(9, "rdy://view/over");
+        assert_eq!(hub.queued(9), None, "the next distinct URI closes it");
+        assert_eq!(q.next().await, None);
+        q.closed().await;
+        hub.disconnect(9);
+        assert!(hub.targets().is_empty());
     }
 
     #[test]

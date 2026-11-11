@@ -415,13 +415,15 @@ fn pin_rows(
 
 /// The set that the link's last `adopt` answer served, at the source whose newest entry is
 /// `head`: `None` when no adopt answer exists or that answer served no set (D-MEMMQ). Deliveries
-/// after it do not change it, and a cleared set mark takes effect at its own adopt answer.
+/// after it do not change it, and a cleared set mark takes effect at its own adopt answer. A
+/// revoked source reads from its last delivery, so a revocation keeps the set
+/// ([`ReadState::adopted_delivery`]).
 pub(crate) fn adopted_set(
     st: &ReadState,
     repo: &RepoId,
     head: Hash,
 ) -> Result<Option<ForeignSet>, RdyError> {
-    Ok(walk(st, repo, head)?.baseline.and_then(|(_, set)| set))
+    Ok(st.adopted_delivery(repo, head)?.and_then(|(_, set)| set))
 }
 
 /// The instructions in force for a link: the versions its `repo_link` block pins (D-MEMMQ). An

@@ -127,6 +127,16 @@ impl LeaseRegistry {
         before - leases.len()
     }
 
+    /// When the last live lease `owner` holds lapses: the latest `until_ms` of its leases that
+    /// still hold at `now_ms`, or `None` when it holds none. It drops nothing.
+    pub fn owner_expiry(&self, owner: u64, now_ms: i64) -> Option<i64> {
+        self.lock()
+            .values()
+            .filter(|l| l.owner == owner && l.until_ms > now_ms)
+            .map(|l| l.until_ms)
+            .max()
+    }
+
     fn drop_expired(leases: &mut BTreeMap<Hash, Lease>, now_ms: i64) {
         leases.retain(|_, l| l.until_ms > now_ms);
     }
@@ -199,6 +209,24 @@ mod tests {
         assert_eq!(found[0].1.owner, 7);
         assert!(r.with_prefix("00", 1).is_empty());
         assert!(r.with_prefix(&hex[..8], 1000).is_empty());
+    }
+
+    #[test]
+    fn mht3_owner_expiry_is_the_last_live_lease_of_its_owner() {
+        let r = LeaseRegistry::new();
+        let (a, b, c) = (Hash([1; 32]), Hash([2; 32]), Hash([3; 32]));
+        assert_eq!(r.owner_expiry(7, 0), None);
+        assert!(r.claim(a, pair(), 7, 0, 1000));
+        assert!(r.claim(b, pair(), 7, 0, 3000));
+        assert!(r.claim(c, pair(), 8, 0, 9000));
+        assert_eq!(r.owner_expiry(7, 0), Some(3000));
+        assert_eq!(r.owner_expiry(7, 2999), Some(3000));
+        assert_eq!(r.owner_expiry(7, 3000), None, "a lease ends at until_ms");
+        assert_eq!(r.owner_expiry(8, 3000), Some(9000));
+        // the query drops nothing: the expired lease is still there for `get` to drop
+        assert_eq!(r.lock().len(), 3);
+        r.release(&b);
+        assert_eq!(r.owner_expiry(7, 0), Some(1000));
     }
 
     #[test]

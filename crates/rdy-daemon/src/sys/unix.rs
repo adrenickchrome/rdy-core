@@ -211,6 +211,14 @@ pub fn run_file_is_private(_f: &fs::File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Whether the open file `f` may hold a secret of this account, judged on its handle: a regular
+/// file that this account owns with mode exactly 0o600 (`pio::is_private_file`, and its owner,
+/// `pio::owner`).
+pub fn token_file_is_private(f: &fs::File) -> io::Result<bool> {
+    let meta = f.metadata()?;
+    Ok(rdy_store::pio::is_private_file(&meta) && owner(&meta) == own_uid())
+}
+
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
 pub fn no_hard_links(e: &io::Error) -> bool {
     matches!(

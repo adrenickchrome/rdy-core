@@ -231,7 +231,7 @@ enum Cmd {
     Upgrade(upgrade_cmd::UpgradeArgs),
     /// Run the MCP server over stdio. With no project and no working-copy pointer, it serves the
     /// meta project; with no meta project either, only rdy_session and rdy_instructions.
-    Mcp,
+    Mcp(serve_cmd::McpArgs),
     /// Print the instructions for agents, as rdy_instructions gives them: the required rules of
     /// the project and the meta project in full, the rulesets you load, and the menu of every
     /// ruleset with its estimated tokens. Only landed rules are given. The chat path is
@@ -300,7 +300,7 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         }
         Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init(a) => project_cmd::init(env, a, cli.project),
-        Cmd::Mcp => serve_cmd::mcp(env, projectless),
+        Cmd::Mcp(a) => serve_cmd::mcp(env, projectless, a.http_config, as_json),
         Cmd::Instructions(a) => instructions_cmd::run(env, a, projectless),
         Cmd::Pack { cmd } => project_cmd::pack(env, cmd),
         Cmd::Keys { cmd } => project_cmd::keys(env, cmd),
@@ -456,7 +456,7 @@ fn main() -> ExitCode {
     // the meta project, else none; an explicit project and every other command are as before
     let mut projectless = false;
     let project = match &cli.cmd {
-        Cmd::Mcp | Cmd::Instructions(_) if cli.project.is_none() => {
+        Cmd::Mcp(_) | Cmd::Instructions(_) if cli.project.is_none() => {
             match instructions_cmd::select(&cwd) {
                 Ok(instructions_cmd::Selected::Project(p)) => p,
                 Ok(instructions_cmd::Selected::Projectless) => {
@@ -504,7 +504,7 @@ fn main() -> ExitCode {
     // the config warnings print once per process on stderr; `rdy config --show-origin` and
     // `rdy status` carry them in their own output
     let own_warnings = match &cli.cmd {
-        Cmd::Status | Cmd::Mcp | Cmd::Instructions(_) => true,
+        Cmd::Status | Cmd::Mcp(_) | Cmd::Instructions(_) => true,
         Cmd::Config(a) => a.show_origin && !as_json,
         // key show prints them after its three lines; bind, retire and revoke print them as
         // every other command does

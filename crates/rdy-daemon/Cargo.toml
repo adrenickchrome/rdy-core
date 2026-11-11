@@ -17,6 +17,13 @@ rdy-model.workspace = true
 rdy-store.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
 
 [build-dependencies]
 blake3.workspace = true

@@ -38,6 +38,7 @@ mod engine_instructions;
 mod engine_intents;
 mod engine_lexicon;
 mod engine_links;
+mod engine_mcp_http_config;
 mod engine_mention_reviews;
 mod engine_name_matcher;
 mod engine_neighbors;

@@ -154,6 +154,12 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     set_dacl(path, &mode_sddl(mode, path.is_dir(), &own_sid()?))
 }
 
+/// Makes the file `path` readable by every account: its protected DACL gives this account full
+/// control and Everyone read. A file that is no longer private.
+pub fn open_to_everyone(path: &Path) -> io::Result<()> {
+    set_dacl(path, &format!("D:P(A;;FA;;;{})(A;;FR;;;WD)", own_sid()?))
+}
+
 /// A directory that a standard account cannot write in while this value lives. No entry gives
 /// a write right; the owner can still change the DACL, and does when the value is dropped. Only the directory's own DACL changes, never what it holds.
 pub struct ReadOnlyDir {

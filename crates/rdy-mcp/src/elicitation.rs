@@ -293,6 +293,14 @@ pub fn route(
     }
 }
 
+/// mht4: whether a request of revision `version` reaches the person over MCP-over-HTTP. Only
+/// the 2026-07-28 retry does: a stateless HTTP request cannot carry the client's reply to an
+/// `elicitation/create` inside the call, so the older revisions get [`unavailable`], for a
+/// first ask and for a retry alike.
+pub fn reaches_over_http(version: Option<&ProtocolVersion>) -> bool {
+    version == Some(&ProtocolVersion::V_2026_07_28)
+}
+
 /// The title of one option: its label, and the mark on a recommended option only.
 fn title(o: &rdy_engine::pending::ItemOption) -> String {
     match o.recommended {

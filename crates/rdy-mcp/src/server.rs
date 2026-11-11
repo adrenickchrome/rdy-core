@@ -32,6 +32,7 @@ mod views;
 mod write;
 pub use crate::tools::DaemonBuildWarning;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
+pub(crate) use resources::refuse as refuse_resource;
 pub use resources::{RESOURCES, TEMPLATES};
 
 use crate::kungfu::{self, Check};
@@ -48,7 +49,8 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
         ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
-        SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
+        SubscribeRequestMethod, SubscribeRequestParams, SubscriptionFilter,
+        UnsubscribeRequestMethod, UnsubscribeRequestParams,
     },
     service::{RequestContext, SubscriptionContext},
     tool_handler,
@@ -72,6 +74,12 @@ pub struct RdyServer {
     /// The engine `state` holds, for the `subscriptions/listen` filter, which resolves doc URIs
     /// without the state lock.
     engine: Arc<dyn Engine>,
+    /// mht3: the HTTP claim this request acts for; its turn serializes the claim's calls and
+    /// lends `state` the claim's saved state. `None` on stdio and on a claimless HTTP request.
+    slot: Option<Arc<crate::http::Slot>>,
+    /// mht3: an HTTP listen refused before the SDK acknowledges it. The filter check ends the
+    /// request there, and the admission layer answers with the refusal.
+    listen_gate: Option<Arc<crate::http::ListenGate>>,
 }
 
 tokio::task_local! {
@@ -176,7 +184,54 @@ impl RdyServer {
             tool_router: Self::family_routers()
                 .into_iter()
                 .fold(ToolRouter::new(), |a, b| a + b),
+            slot: None,
+            listen_gate: None,
         }
+    }
+
+    /// mht3: this server for one HTTP request: the same engine, hub and tools, over `state`, the
+    /// request's own (`hub_sid` is its id in the hub). `slot` is the HTTP claim `state` belongs
+    /// to; `gate` refuses a listen before its acknowledgement.
+    pub(crate) fn for_http(
+        &self,
+        state: Arc<Mutex<McpState>>,
+        hub_sid: u64,
+        slot: Option<Arc<crate::http::Slot>>,
+        gate: Option<Arc<crate::http::ListenGate>>,
+    ) -> RdyServer {
+        RdyServer {
+            state,
+            tool_router: self.tool_router.clone(),
+            hub: Arc::clone(&self.hub),
+            hub_sid,
+            engine: Arc::clone(&self.engine),
+            slot,
+            listen_gate: gate,
+        }
+    }
+
+    /// The kungfu recorder of this server's state, shared by HTTP request states.
+    pub(crate) fn kungfu_counts(&self) -> Option<rdy_engine::kungfu_counts::Recorder> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .kungfu_counts
+            .clone()
+    }
+
+    /// mht3: waits for the HTTP claim's turn: one call of an actor and run at a time, with the
+    /// claim's saved state in this request's state until the turn ends. Nothing to wait for on
+    /// stdio, whose calls are ordered at the transport, or with no claim.
+    async fn turn(&self) -> Option<crate::http::Turn> {
+        match &self.slot {
+            Some(slot) => Some(crate::http::Turn::take(slot, &self.state).await),
+            None => None,
+        }
+    }
+
+    /// mht4: whether this server answers one MCP-over-HTTP request.
+    pub(crate) fn over_http(&self) -> bool {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).http
     }
 
     /// This server with `agent` as its session's signer: the caller's own SSH agent.
@@ -457,13 +512,21 @@ impl ServerHandler for RdyServer {
             .into());
         }
         // D-4PHYQ: who acts, as the request's `_meta` states it (rmcp moves `_meta` into the
-        // context); a bad claim is the reply
-        let claim = match crate::claims::parse(Some(&context.meta.0.0)) {
+        // context); a bad claim is the reply. Over HTTP the admission layer parsed it already,
+        // with the claim's capacity and queue (mht3); its place in the queue lasts until the
+        // call returns.
+        let (claim, _admission) = match crate::http::claim_of(&context.extensions) {
+            Some((claim, held)) => (claim, Some(held)),
+            None => (crate::claims::parse(Some(&context.meta.0.0)), None),
+        };
+        let claim = match claim {
             Ok(c) => c,
             Err(e) => return Ok(result(Err(e)).into()),
         };
         // D-Y18E1: the value leaves the arguments here, so no route below sees it
         let kungfu = Check::of(&request.name, &mut request.arguments);
+        // the HTTP claim's calls run one at a time, in its turn (mht3)
+        let _turn = self.turn().await;
         let request = self.reserve_warning(request, claim.as_ref());
         // the call's body signs through a signer that names this request and stops at its
         // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
@@ -536,7 +599,12 @@ impl ServerHandler for RdyServer {
         let state = self.engine.read();
         state.ensure_current_epoch().map_err(resources::refuse)?;
         drop(state);
-        let claim = crate::claims::parse(Some(&context.meta.0.0)).map_err(resources::refuse)?;
+        let (claim, _admission) = match crate::http::claim_of(&context.extensions) {
+            Some((claim, held)) => (claim, Some(held)),
+            None => (crate::claims::parse(Some(&context.meta.0.0)), None),
+        };
+        let claim = claim.map_err(resources::refuse)?;
+        let _turn = self.turn().await;
         Ok(self.resources_read(request.uri, claim).await?.into())
     }
 
@@ -546,6 +614,10 @@ impl ServerHandler for RdyServer {
         request: SubscribeRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
+        // mht4: a stateless HTTP request has no peer to push to later: no hidden channel
+        if self.over_http() {
+            return Err(rmcp::ErrorData::method_not_found::<SubscribeRequestMethod>());
+        }
         self.resources_subscribe(&request.uri, context.peer).await
     }
 
@@ -555,6 +627,9 @@ impl ServerHandler for RdyServer {
         request: UnsubscribeRequestParams,
         _context: RequestContext<rmcp::RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
+        if self.over_http() {
+            return Err(rmcp::ErrorData::method_not_found::<UnsubscribeRequestMethod>());
+        }
         self.resources_unsubscribe(&request.uri)
     }
 
@@ -562,6 +637,12 @@ impl ServerHandler for RdyServer {
         &self,
         requested: &SubscriptionFilter,
     ) -> Option<SubscriptionFilter> {
+        // mht3: an HTTP listen the admission layer refused ends here, before the SDK
+        // acknowledges it; the layer answers with the refusal
+        if let Some(gate) = &self.listen_gate {
+            gate.reach();
+            return None;
+        }
         // read once, and only when a doc URI asks
         let read = std::cell::OnceCell::new();
         Some(Self::resources_filter(requested, |text| {

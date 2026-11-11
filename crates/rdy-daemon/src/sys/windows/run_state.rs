@@ -189,6 +189,13 @@ pub fn run_file_is_private(f: &File) -> io::Result<bool> {
     Ok(pio::privacy(f)?.private)
 }
 
+/// Whether the open file `f` may hold a secret of this account, judged on its handle: a run file
+/// that may be believed ([`run_file_is_private`]: its protected DACL lets only this account in)
+/// and that this account owns.
+pub fn token_file_is_private(f: &File) -> io::Result<bool> {
+    Ok(run_file_is_private(f)? && pio::privacy(f)?.mine)
+}
+
 /// Whether `e` says the file system has no hard links: `CreateHardLinkW` fails so on FAT and exFAT,
 /// and on a share that does not offer them.
 pub fn no_hard_links(e: &io::Error) -> bool {
