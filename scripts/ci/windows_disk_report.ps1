@@ -5,6 +5,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Root,
     [Parameter(Mandatory = $true)][string]$Label,
+    # The private home's parent, when it is not the CI root (8.3 fallback in windows_gate.ps1).
+    [string]$HomeRoot = $Root,
     [switch]$Leftovers
 )
 $ErrorActionPreference = 'Continue'
@@ -25,10 +27,13 @@ Write-Output "Disk report ($Label) at $((Get-Date).ToUniversalTime().ToString('u
 foreach ($disk in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3')) {
     Write-Output ("  drive {0} {1}: {2} free of {3}" -f $disk.DeviceID, $disk.FileSystem,
         (Format-Gb $disk.FreeSpace), (Format-Gb $disk.Size))
+    # The volume's 8.3 short-name state: tests compare a path's short and long spellings.
+    $state = (& fsutil 8dot3name query $disk.DeviceID 2>&1 | Where-Object { $_ -match 'Based on' }) -join ' '
+    if ($state) { Write-Output "    $state" }
 }
 $folders = [ordered]@{
     'target' = (Join-Path $Root 'work\target')
-    'home\temp' = (Join-Path $Root 'home\temp')
+    'home\temp' = (Join-Path $HomeRoot 'home\temp')
     'cargo home' = (Join-Path $Root 'cargo')
     'rustup home' = (Join-Path $Root 'rustup')
 }

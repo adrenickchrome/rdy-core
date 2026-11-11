@@ -1367,7 +1367,7 @@ class WindowsPlatformMatrix(unittest.TestCase):
             text = (ROOT / path).read_text()
             self.assertNotIn('C:\\rdy-ci', text, path)
             self.assertNotIn('C:/rdy-ci', text, path)
-        self.assertEqual(gate.count("'rdy-ci'"), 1)
+        self.assertEqual(gate.count("'rdy-ci'"), 2)
         platform = self.workflow()
         self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', platform)
         self.assertIn("$work = Join-Path $env:RDY_CI_ROOT 'work'", platform)
@@ -1376,7 +1376,8 @@ class WindowsPlatformMatrix(unittest.TestCase):
         # The root's ACL is set, not inherited from whichever drive holds it: the account, the
         # administrators and SYSTEM only. Grant first, then drop inheritance (wx35 order); no /C.
         gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
-        lines = [l for l in gate.splitlines() if 'icacls' in l and '@($root' in l]
+        self.assertIn('foreach ($r in $roots) {', gate)
+        lines = [l for l in gate.splitlines() if 'icacls' in l and '@($r,' in l]
         grant = next(i for i, l in enumerate(lines) if '/grant:r' in l)
         strip = next(i for i, l in enumerate(lines) if '/inheritance:r' in l)
         self.assertLess(grant, strip)
@@ -1384,11 +1385,31 @@ class WindowsPlatformMatrix(unittest.TestCase):
             self.assertIn(sid, lines[grant])
         for line in lines:
             self.assertNotIn("'/C'", line)
-        self.assertLess(gate.index('New-LocalUser'), gate.index("icacls' @($root"))
-        self.assertLess(gate.index("icacls' @($root"), gate.index('robocopy'))
+        self.assertLess(gate.index('New-LocalUser'), gate.index("icacls' @($r,"))
+        self.assertLess(gate.index("icacls' @($r,"), gate.index('robocopy'))
         # the private home and work folder steps are unchanged
         self.assertIn("Invoke-Native 'icacls' @($home_, '/inheritance:r', '/Q')", gate)
         self.assertIn("Invoke-Native 'icacls' @($dir, '/setowner', $account, '/T', '/C', '/Q')", gate)
+
+    def test_windows_ci_root_has_8dot3_short_names(self):
+        # Run 42982134149: the hosted D: has 8.3 names off (C: has them on), so wx24, wx25b and ain4
+        # saw no short spelling. The gate turns them on for the chosen volume before the root
+        # exists, proves it with a probe folder, and else keeps the private home on the system drive.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        enable = gate.index('fsutil 8dot3name set $volume 0')
+        self.assertLess(gate.index('$volume = $drive.DeviceID'), enable)
+        self.assertLess(enable, gate.index('New-Item -ItemType Directory -Force -Path $root'))
+        self.assertIn('fsutil 8dot3name set 2', gate)
+        self.assertIn('.ShortPath', gate)
+        self.assertLess(gate.index('$shortNames = Test-ShortNames $root'), gate.index("$home_ = Join-Path $homeRoot 'home'"))
+        self.assertIn("$homeRoot = Join-Path ($env:SystemDrive + '\\') 'rdy-ci'", gate)
+        self.assertNotIn("$work = Join-Path $homeRoot", gate)
+        self.assertIn("$cargoHome = Join-Path $root 'cargo'", gate)
+        self.assertIn("$rustupHome = Join-Path $root 'rustup'", gate)
+        report = (ROOT / 'scripts/ci/windows_disk_report.ps1').read_text()
+        self.assertIn('fsutil 8dot3name query', report)
+        self.assertIn('[string]$HomeRoot = $Root', report)
+        self.assertEqual(gate.count('-HomeRoot $homeRoot -Label'), 3)
 
     def test_windows_gate_prints_disk_reports(self):
         # A disk report at the start, every 15 minutes while the gate runs, and at the end with the
