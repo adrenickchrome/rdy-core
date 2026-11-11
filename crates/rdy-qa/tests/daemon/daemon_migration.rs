@@ -164,14 +164,13 @@ impl<'a> Transports<'a> {
     /// `rdy_import` over HTTP, with the claim `ACTOR` in run `run`.
     fn http(&mut self, run: &str, args: Value) -> Result<Value, Value> {
         self.next += 1;
+        // a chat client states the kungfu value of the ruleset it loaded; the test supplies the
+        // fixture's, as the stdio client does, so the reply carries no kungfu warning
+        let mut a = import_args(run, &args);
+        rdy_qa::mcp::supply_kungfu("rdy_import", &mut a);
         let r = self.ep.post(
             &pairs(&legacy(LEGACY[1])),
-            &call(
-                self.next,
-                "rdy_import",
-                import_args(run, &args),
-                claim(ACTOR, run),
-            ),
+            &call(self.next, "rdy_import", a, claim(ACTOR, run)),
         );
         let (is_error, v) = r.tool();
         if is_error { Err(v) } else { Ok(v) }
