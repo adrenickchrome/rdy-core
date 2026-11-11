@@ -6,7 +6,21 @@
 # masked, and it is never written to a file, an argument list or the environment.
 $ErrorActionPreference = 'Stop'
 
-$root = 'C:\rdy-ci'
+# The CI root goes on the fixed NTFS drive with the most free space. On run 42959710193 the gate
+# filled C: (os error 112 in about 60 tests), while the runner's workspace drive had room. Later
+# steps read the same value from RDY_CI_ROOT, so no step names a drive.
+$drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' |
+    Where-Object { $_.FileSystem -eq 'NTFS' } | Sort-Object -Property FreeSpace -Descending |
+    Select-Object -First 1
+if (-not $drive) { throw 'No fixed NTFS drive for the CI root' }
+$root = Join-Path ($drive.DeviceID + '\') 'rdy-ci'
+Add-Content -Path $env:GITHUB_ENV -Value "RDY_CI_ROOT=$root"
+Write-Output "CI root: $root"
+$diskReport = Join-Path $PSScriptRoot 'windows_disk_report.ps1'
+# A failed report is printed and never stops the gate.
+function Write-DiskReport {
+    try { & $diskReport @args } catch { Write-Output "Disk report failed: $_" }
+}
 $work = Join-Path $root 'work'
 $cargoHome = Join-Path $root 'cargo'
 $rustupHome = Join-Path $root 'rustup'
@@ -46,6 +60,14 @@ New-LocalUser -Name $account -Password $secure -AccountNeverExpires -PasswordNev
     -Description 'Temporary standard account for one CI run' | Out-Null
 Add-Content -Path $env:GITHUB_ENV -Value "RDY_CI_ACCOUNT=$account"
 Add-LocalGroupMember -Group 'Users' -Member $account
+
+# The root's ACL does not depend on the drive it is on: only the account, the administrators and
+# SYSTEM can open it, and the folders under it inherit that. Same order as for the private home
+# below: the explicit, inheritable grants first, then the inherited entries go.
+Invoke-Native 'icacls' @($root, '/grant:r', "${account}:(OI)(CI)F", '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '/Q')
+Invoke-Native 'icacls' @($root, '/inheritance:r', '/Q')
+Invoke-Native 'icacls' @($root)
+Write-DiskReport -Root $root -Label 'start'
 
 # The toolchain goes into the private homes as the administrator. The account then owns them.
 $env:CARGO_HOME = $cargoHome
@@ -93,8 +115,16 @@ $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-
 if ($env:RDY_QA_HOSTED_CI -eq '1') { $arguments += '-HostedCi' }
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `
-    -Wait -PassThru
+    -PassThru
+# Reading the handle keeps ExitCode available after the process exits.
+$null = $process.Handle
+# A disk report every 15 minutes while the gate runs (build, then tests), and one at the end.
+while (-not $process.WaitForExit(900000)) {
+    Write-DiskReport -Root $root -Label 'during the gate'
+}
+$process.WaitForExit()
 $status = $process.ExitCode
+Write-DiskReport -Root $root -Label 'end' -Leftovers
 $secure.Dispose()
 
 Get-Content -LiteralPath $out

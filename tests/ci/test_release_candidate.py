@@ -416,7 +416,10 @@ class rsig4_Candidate(Fixture):
         self.assertLess(windows.index('windows_gate.ps1'), windows.index('candidate.py gate-counts'))
         self.assertLess(windows.index('candidate.py gate-counts'), windows.index('candidate.py build'))
         self.assertIn('--target x86_64-pc-windows-msvc', windows)
-        self.assertIn('candidate.py gate-counts --report C:\\rdy-ci\\work\\target\\qa\\report.json', windows)
+        # the CI root is the one the gate chose (run 42959710193 filled C:); no step names a drive
+        self.assertIn('candidate.py gate-counts --report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.json"', windows)
+        self.assertIn("$work = Join-Path $env:RDY_CI_ROOT 'work'", windows)
+        self.assertNotIn('rdy-ci', windows)
         self.assertIn('--fast-gate', windows)
         self.assertIn('persist-credentials: false', windows)
         self.assertIn('fetch-depth: 0', windows)

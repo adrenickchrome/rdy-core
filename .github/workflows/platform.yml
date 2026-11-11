@@ -90,15 +90,15 @@ jobs:
       - name: Qa report, failing tests and counts
         if: always() && runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/ci/windows_report.ps1 -Report 'C:\rdy-ci\work\target\qa\report.md'
+        run: ./scripts/ci/windows_report.ps1 -Report "$env:RDY_CI_ROOT\work\target\qa\report.md"
       - name: Upload the qa report and gate logs
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-report-${{ runner.os }}
           path: |
-            C:\rdy-ci\work\target\qa\report.*
-            C:\rdy-ci\logs\gate.*
+            ${{ env.RDY_CI_ROOT }}\work\target\qa\report.*
+            ${{ env.RDY_CI_ROOT }}\logs\gate.*
           if-no-files-found: warn
           retention-days: 14
       - name: No tracked file changed
@@ -106,7 +106,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git -c safe.directory='C:/rdy-ci/work' -C 'C:\rdy-ci\work' diff --exit-code
+          $work = Join-Path $env:RDY_CI_ROOT 'work'
+          git -c "safe.directory=$($work -replace '\\', '/')" -C $work diff --exit-code
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Remove the temporary account
         if: always() && runner.os == 'Windows'

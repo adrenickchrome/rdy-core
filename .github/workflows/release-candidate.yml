@@ -212,13 +212,14 @@ jobs:
       - name: Fast gate counts
         shell: pwsh
         run: >-
-          python -B scripts/release/candidate.py gate-counts --report C:\rdy-ci\work\target\qa\report.json
+          python -B scripts/release/candidate.py gate-counts --report "$env:RDY_CI_ROOT\work\target\qa\report.json"
           --commit $env:COMMIT --out "$env:RUNNER_TEMP\fast-gate.json"
       - name: No tracked file changed
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git -c safe.directory='C:/rdy-ci/work' -C 'C:\rdy-ci\work' diff --exit-code
+          $work = Join-Path $env:RDY_CI_ROOT 'work'
+          git -c "safe.directory=$($work -replace '\\', '/')" -C $work diff --exit-code
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Toolchain
         shell: pwsh
