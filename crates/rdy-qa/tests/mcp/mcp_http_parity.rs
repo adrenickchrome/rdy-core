@@ -933,14 +933,6 @@ impl Run<'_> {
         let v = self.sut.call_raw(tool, args, meta).await;
         self.record(tool, kind, v)
     }
-
-    /// The code of the last row, when it is a refusal.
-    fn last_code(&self) -> Option<String> {
-        let r = self.rows.last()?;
-        r.reply["result"]["content"][0]["text"]["code"]
-            .as_str()
-            .map(str::to_string)
-    }
 }
 
 fn agent_claim(actor: &str, run: &str) -> Value {
