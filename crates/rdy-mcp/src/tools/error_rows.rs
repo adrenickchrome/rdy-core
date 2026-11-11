@@ -167,7 +167,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_SITE",
-        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping",
+        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
         "follow the error's fix",
     ),
     (
@@ -555,5 +555,25 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         W_PUBLICATION_REFERENCE,
         "an org profile has references outside its selection, or a live public profile has blocked references",
         "follow the warning's own fix",
+    ),
+    (
+        W_HOOK_DIRECT_EDIT,
+        "a hook check finds that an agent edited rdy working-copy files directly (rdy_hook check, kind edit)",
+        HOOK_DIRECT_EDIT_FIX,
+    ),
+    (
+        W_HOOK_NO_CITATION,
+        "a hook check finds staged code paths anchored to a decision and a commit message with no Implements value (rdy_hook check, kind code)",
+        HOOK_NO_CITATION_FIX,
+    ),
+    (
+        W_HOOK_UNAVAILABLE,
+        "a hook check could not finish (project, checkout or history unavailable, an unsafe path, an invalid event, an input limit, the deadline or an I/O failure); checked is false, never clean",
+        HOOK_UNAVAILABLE_FIX,
+    ),
+    (
+        W_HOOK_CONFLICT,
+        "a hook install or remove left a file unchanged (an existing hook, a changed owned file, an external hooks path, invalid settings, an unsafe path, a file changed meanwhile or a busy installer)",
+        HOOK_CONFLICT_FIX,
     ),
 ];

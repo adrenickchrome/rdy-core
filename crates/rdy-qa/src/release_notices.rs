@@ -85,6 +85,7 @@ pub const RELEASED: &[(&str, u32, u32)] = &[
     ("0.35.0", 4, 19),
     ("0.41.0", 4, 19),
     ("0.46.0", 4, 19),
+    ("0.47.0", 4, 19),
 ];
 /// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
 pub const CHANGES_GROUPS: [&str; 5] = [
@@ -432,19 +433,9 @@ struct Override {
     text: &'static [u8],
 }
 
-/// rmcp 3.5.0 ships no license file; this is the complete upstream LICENSE at the commit its
-/// crate was published from.
-const RMCP_URL: &str = "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/0cde3c5cf3e6aff0cc852ce6045f107e95991f48/LICENSE";
-
 /// The checked-in license texts. An override that no package uses fails, so an upgrade cannot
-/// keep an old text.
-const OVERRIDES: [Override; 1] = [Override {
-    name: "rmcp",
-    version: "3.5.0",
-    license: "Apache-2.0",
-    url: RMCP_URL,
-    text: include_bytes!("../licenses/rmcp-3.5.0.txt"),
-}];
+/// keep an old text. rmcp 3.9.0 ships its own LICENSE file, so no package needs an override now.
+const OVERRIDES: [Override; 0] = [];
 
 /// Whether the declared `expression` is MPL-2.0 only: at least one requirement, and every
 /// requirement MPL-2.0 (with or without `+`) with no exception. Strict SPDX, with `/` read as
@@ -993,7 +984,7 @@ pub fn release_format_move_line(version: &str) -> Result<Option<String>, String>
 /// feature-move line; a feature not listed is "first uses it".
 const FEATURE_FIRST_USE: &[(&str, &str)] = &[(
     rdy_store::format::FEATURE_FOREIGN_COPY,
-    "takes its first repo link delivery",
+    "first writes a repo link (in any view, even before a delivery)",
 )];
 
 /// The sync stream formats added after Release 1, each with the first rdy that writes it and
@@ -1447,7 +1438,7 @@ mod tests {
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
 
     /// The crates.io packages the Windows release binary links (measured).
-    const WINDOWS_CRATES: usize = 180;
+    const WINDOWS_CRATES: usize = 195;
 
     #[cfg(unix)]
     mod unix_tests;
@@ -1718,7 +1709,11 @@ mod tests {
         for target in TARGETS {
             let (notices, crates) = inventory(target, &release).expect("inventory");
             let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
-            assert_eq!(crates.len(), 180, "{target}: linked crates.io packages");
+            // measured with rmcp 3.9.0 and its HTTP server feature, plus the daemon's hyper
+            // bridge (hyper, hyper-util, atomic-waker, httpdate), plus the Markdown parser
+            // (pulldown-cmark, unicase): macOS 196, Linux 195
+            let linked = if target == TARGETS[0] { 196 } else { 195 };
+            assert_eq!(crates.len(), linked, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
                 "autocfg",
@@ -1754,7 +1749,7 @@ mod tests {
             assert_eq!(notices.mpl, locked_mpl(), "{target}");
             assert_eq!(
                 headings(&notices.bytes).len(),
-                180,
+                linked,
                 "{target}: one entry each"
             );
             let text = String::from_utf8(notices.bytes.clone()).expect("utf-8");
@@ -1926,13 +1921,25 @@ mod tests {
         package_dir(&alpha, "src", &[("LICENSE", b"nested\n")]);
         let mpl = package_dir(dir.path(), "mplpkg-2.0.0", &[("LICENSE", b"MPL text\n")]);
         let rmcp = package_dir(dir.path(), "rmcp-3.5.0", &[("README.md", b"rmcp\n")]);
+        // The shipped table is empty (rmcp 3.9.0 carries its own LICENSE), so the mechanism is
+        // pinned with an override of the test's own.
+        const TEST_URL: &str = "https://example.test/rmcp/LICENSE";
+        const TEST_TEXT: &[u8] = b"override license text\n";
+        let overrides = [Override {
+            name: "rmcp",
+            version: "3.5.0",
+            license: "Apache-2.0",
+            url: TEST_URL,
+            text: TEST_TEXT,
+        }];
+        assert!(OVERRIDES.is_empty(), "no shipped crate needs an override");
         let crates = [
             krate("rmcp", "3.5.0", "Apache-2.0", &rmcp),
             krate("alpha", "1.0.0", "MIT OR Apache-2.0", &alpha),
             krate("mplpkg", "2.0.0", "MPL-2.0", &mpl),
         ];
         // no crate file exists anywhere here: the generator never needs one
-        let notices = notices_of(&crates, &OVERRIDES).expect("notices");
+        let notices = notices_of(&crates, &overrides).expect("notices");
         let hash = "ab".repeat(32);
         let mut want = Vec::new();
         want.extend_from_slice(b"Third-party notices for rdy\n\n");
@@ -1948,9 +1955,9 @@ mod tests {
         want.extend_from_slice(b"\n--- LICENSE ---\nMPL text\n");
         want.extend_from_slice(b"\n");
         want.extend_from_slice(b"rmcp 3.5.0\nLicense: Apache-2.0\n");
-        want.extend_from_slice(b"Source URL: https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/0cde3c5cf3e6aff0cc852ce6045f107e95991f48/LICENSE\n");
+        want.extend_from_slice(format!("Source URL: {TEST_URL}\n").as_bytes());
         want.extend_from_slice(b"\n--- LICENSE ---\n");
-        want.extend_from_slice(OVERRIDES[0].text);
+        want.extend_from_slice(TEST_TEXT);
         want.extend_from_slice(b"\n");
         assert_eq!(
             String::from_utf8_lossy(&notices.bytes),
@@ -1966,26 +1973,6 @@ mod tests {
                 sha256: hash.clone(),
             }]
         );
-
-        // rmcp's checked-in text: the complete upstream LICENSE at the published commit.
-        let o = &OVERRIDES[0];
-        assert_eq!(
-            (o.name, o.version, o.license),
-            ("rmcp", "3.5.0", "Apache-2.0")
-        );
-        assert_eq!(
-            o.url,
-            "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/0cde3c5cf3e6aff0cc852ce6045f107e95991f48/LICENSE"
-        );
-        assert_eq!(o.text.len(), 12_227);
-        assert_eq!(
-            sha256_hex(o.text),
-            "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a"
-        );
-        let text = std::str::from_utf8(o.text).expect("utf-8");
-        assert!(text.starts_with("The MCP project is undergoing a licensing transition"));
-        assert!(text.contains("                                 Apache License\n"));
-        assert!(text.ends_with('\n'));
 
         // No license text and no override; an override for another version; one left unused;
         // one whose package ships a file; one whose package declares another license.
@@ -2021,7 +2008,7 @@ mod tests {
         ];
         for (what, crates, at) in cases {
             assert_eq!(
-                notices_of(&crates, &OVERRIDES),
+                notices_of(&crates, &overrides),
                 Err(refused(Kind::Notices, at)),
                 "{what}"
             );
@@ -2683,7 +2670,7 @@ mod tests {
         assert_eq!(FOREIGN_COPY_REQUIRED_RDY, "0.48.0");
         let features = registered_features();
         let want = [
-            "- **Breaking for older rdy: rdy 0.48.0 adds the store feature `foreign_copy` (class incompatible, minimum rdy 0.48.0); store format 19 and dump format 4 stay.** A store starts to use `foreign_copy` only when its project takes its first repo link delivery, and only a store or dump that uses it needs rdy 0.48.0: rdy 0.47.0 refuses one with `E_STORE_FORMAT` and names rdy 0.48.0. rdy 0.48.0 opens a store made by rdy 0.47.0 as it is, and loads every earlier dump.",
+            "- **Breaking for older rdy: rdy 0.48.0 adds the store feature `foreign_copy` (class incompatible, minimum rdy 0.48.0); store format 19 and dump format 4 stay.** A store starts to use `foreign_copy` only when its project first writes a repo link (in any view, even before a delivery), and only a store or dump that uses it needs rdy 0.48.0: rdy 0.47.0 refuses one with `E_STORE_FORMAT` and names rdy 0.48.0. rdy 0.48.0 opens a store made by rdy 0.47.0 as it is, and loads every earlier dump.",
             "- **Breaking for older rdy: rdy 0.48.0 adds sync stream format 3 (purpose `link_delivery`); a tag history stays sync stream format 2.** rdy 0.48.0 reads sync stream formats 2 and 3. rdy 0.47.0 reads sync stream format 2 only and refuses a format 3 file.",
         ];
         let got = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);

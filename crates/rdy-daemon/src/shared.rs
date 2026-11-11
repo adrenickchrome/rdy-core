@@ -1,6 +1,8 @@
 //! What every connection of the daemon shares: the published state, the writer, the open report,
 //! the pack watch and its generation, the hub of connected MCP sessions and its notifier, and
 //! the session-end hooks.
+use crate::daemon::HttpAdmission;
+use crate::mcp_token::Prepared;
 use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
 use crate::site::SiteInfo;
@@ -9,13 +11,15 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{
-    Engine, ExportRequest, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
+    Engine, ExportRequest, McpHttpFacts, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
 };
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{BriefRegistry, E_SITE, OpenReport, Rdy, RdyError, ReadState, Session};
+use rdy_mcp::http::TransportStats;
 use rdy_mcp::notify::NotifyHub;
+use rdy_mcp::server::DaemonBuildWarning;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +65,16 @@ pub struct Shared {
     /// The profile-only listeners this daemon owns (D-DK03K) and the HTTP limits every listener
     /// shares; filled in by the daemon's start, closed and joined at its stop.
     pub profile_sites: crate::site::profiles::ProfileSites,
+    /// MCP over HTTP's admission into the daemon that serves this, and its activity: set once by
+    /// the daemon's start, right after its bind. Unset for a `Shared` that no daemon serves.
+    pub http: OnceLock<HttpAdmission>,
+    /// The project's MCP token as the daemon's start prepared it (mht6): set once, before the
+    /// site binds. Unset, or an error, and MCP over HTTP is unavailable.
+    pub mcp_token: OnceLock<Arc<Prepared>>,
+    /// Bumped by [`Self::recheck_mcp_http`].
+    mcp_recheck: tokio::sync::watch::Sender<u64>,
+    /// The full listener's MCP layer's transport counts, once it is made.
+    mcp_transports: OnceLock<TransportStats>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -114,6 +128,10 @@ impl Shared {
                 site_info: OnceLock::new(),
                 identity: OnceLock::new(),
                 profile_sites: Default::default(),
+                http: OnceLock::new(),
+                mcp_token: OnceLock::new(),
+                mcp_recheck: tokio::sync::watch::channel(0).0,
+                mcp_transports: OnceLock::new(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
                         owned.release_owner(id.0);
@@ -139,6 +157,44 @@ impl Shared {
     /// Records the version and build this daemon serves as. Set once, before it serves.
     pub fn set_daemon_identity(&self, version: &str, build: &str) {
         let _ = self.identity.set((version.to_string(), build.to_string()));
+    }
+
+    /// W_DAEMON_BUILD for this daemon's MCP over HTTP replies: once a client of another build has
+    /// latched its replacement (D-CCC6E), the warning that names that build. HTTP carries no
+    /// client build, so this is the only way an HTTP client hears of it; the claim registry's
+    /// mark hands it out once per actor and run (D-PBXS5).
+    pub fn http_build_warning(&self) -> Option<DaemonBuildWarning> {
+        let (version, daemon_build) = self.identity.get()?.clone();
+        let client_build = self.http.get()?.newer_build()?;
+        Some(DaemonBuildWarning {
+            version,
+            daemon_build,
+            client_build,
+        })
+    }
+
+    /// Test probe: the transport services of the full listener's MCP over HTTP layer, as (live
+    /// now, made so far); `None` before its first request.
+    #[doc(hidden)]
+    pub fn mcp_http_transports(&self) -> Option<(usize, usize)> {
+        self.mcp_transports.get().map(|t| (t.live(), t.made()))
+    }
+
+    /// Test hook: every open MCP over HTTP event stream checks `serve.mcp_http` now, instead of
+    /// at its next periodic check.
+    #[doc(hidden)]
+    pub fn recheck_mcp_http(&self) {
+        self.mcp_recheck.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// The trigger [`Self::recheck_mcp_http`] bumps, for an open event stream to watch.
+    pub(crate) fn mcp_recheck(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.mcp_recheck.subscribe()
+    }
+
+    /// Keeps the full listener's MCP layer's transport counts for [`Self::mcp_http_transports`].
+    pub(crate) fn register_mcp_transports(&self, stats: TransportStats) {
+        let _ = self.mcp_transports.set(stats);
     }
 
     /// The engine over this daemon: reads from the published state, writes on the writer.
@@ -231,6 +287,27 @@ impl Engine for DaemonEngine {
         self.0.pack_error_lock().clone()
     }
 
+    /// MCP over HTTP as this daemon serves it. The endpoint is the full site's loopback address
+    /// plus `/~mcp`, named only while the setting is on, the project's token is usable and the
+    /// site is bound. Nothing here holds the token. A `Shared` no daemon serves has none.
+    fn mcp_http(&self) -> Option<McpHttpFacts> {
+        let admission = self.0.http.get()?;
+        let enabled = rdy_engine::serve_config(&self.0.root).mcp_http;
+        let token_ok = self.0.mcp_token.get().is_some_and(|t| t.is_ok());
+        let url = (enabled && token_ok)
+            .then(|| self.0.site_info.get())
+            .flatten()
+            .and_then(|i| i.url.as_ref().ok())
+            .map(|u| format!("{}/~mcp", u.trim_end_matches('/')));
+        let activity = admission.activity();
+        Some(McpHttpFacts {
+            enabled,
+            url,
+            active_calls: activity.calls,
+            listen_streams: activity.streams,
+        })
+    }
+
     /// The person layer through the meta project's own daemon (ain4), as this daemon's version.
     fn person_host(&self) -> Option<Arc<dyn rdy_engine::instructions::PersonHost>> {
         let version = self
@@ -239,6 +316,13 @@ impl Engine for DaemonEngine {
             .get()
             .map_or(env!("CARGO_PKG_VERSION"), |(v, _)| v.as_str());
         Some(Arc::new(crate::instructions::PersonReader::daemon(version)))
+    }
+
+    /// The local hook host (FW-HOOK, FW-L3): this project, run by this daemon's own binary
+    /// (the one `rdy serve` started). None when the binary cannot be named.
+    fn hook_host(&self) -> Option<Arc<dyn rdy_engine::hooks::HookHost>> {
+        let host = crate::hooks::LocalHooks::for_process(&self.0.root).ok()?;
+        Some(Arc::new(host))
     }
 
     /// The full site's link for a source or profile target, and the profile-only listener's

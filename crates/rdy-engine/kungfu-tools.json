@@ -14,6 +14,7 @@
 {"tool": "rdy_dispute", "ruleset": "rdy:approvals", "response": "warn"},
 {"tool": "rdy_dump", "ruleset": "rdy:project-ops", "response": "warn"},
 {"tool": "rdy_export", "ruleset": "rdy:publish", "response": "warn"},
+{"tool": "rdy_hook", "ruleset": "rdy:project-ops", "response": "warn"},
 {"tool": "rdy_impact", "ruleset": "rdy:read", "response": "warn"},
 {"tool": "rdy_import", "ruleset": "rdy:project-ops", "response": "warn"},
 {"tool": "rdy_inbox", "ruleset": "rdy:read", "response": "warn"},

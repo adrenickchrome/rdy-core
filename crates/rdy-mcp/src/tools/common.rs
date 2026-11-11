@@ -83,6 +83,9 @@ pub struct McpState {
     /// The project's local count of kungfu misses (D-Y18E1). `RdyServer::new` sets it; a session
     /// with no recorder counts nothing and works the same.
     pub kungfu_counts: Option<rdy_engine::kungfu_counts::Recorder>,
+    /// mht3: this state serves MCP over HTTP: one actor and run's state, or one claimless
+    /// request's. An HTTP request binds no connection, so a claim disagreement has its own words.
+    pub http: bool,
 }
 
 /// What W_DAEMON_BUILD names; the daemon gives it to the session it serves.
@@ -131,6 +134,7 @@ impl McpState {
             build_warning: None,
             build_warning_due: None,
             kungfu_counts: None,
+            http: false,
         }
     }
 

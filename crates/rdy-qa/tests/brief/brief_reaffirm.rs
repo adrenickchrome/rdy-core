@@ -202,7 +202,10 @@ fn suspect_on_a_landed_change(blocking: bool) -> (tempfile::TempDir, Rdy, Spec, 
         .into_iter()
         .map(|x| (x.target, x.reason))
         .collect();
-    assert_eq!(suspects, vec![(Some(s.a.clone()), "changed".to_string())]);
+    assert_eq!(
+        suspects,
+        vec![(Some(RowTarget::Block(s.a.clone())), "changed".to_string())]
+    );
     (dir, r, s, d)
 }
 

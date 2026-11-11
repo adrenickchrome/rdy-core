@@ -1347,9 +1347,90 @@ class WindowsPlatformMatrix(unittest.TestCase):
         text = (ROOT / '.github/workflows/platform.yml').read_text()
         self.assertEqual(text.count('actions/upload-artifact@'), 2)
         self.assertIn('path: target/qa/report.*', text)
-        self.assertIn('C:\\rdy-ci\\work\\target\\qa\\report.*', text)
+        self.assertIn('${{ env.RDY_CI_ROOT }}\\work\\target\\qa\\report.*', text)
+        self.assertIn('${{ env.RDY_CI_ROOT }}\\logs\\gate.*', text)
         self.assertIn('cat target/qa/report.md', text)
         self.assertIn('| FAIL', (ROOT / 'scripts/ci/windows_report.ps1').read_text())
+
+    def test_windows_ci_root_is_on_the_drive_with_most_free_space(self):
+        # Run 42959710193: the gate filled C: (os error 112 in about 60 tests). The root goes on the
+        # fixed NTFS drive with the most free space, and every later step reads RDY_CI_ROOT.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        self.assertIn("Win32_LogicalDisk -Filter 'DriveType = 3'", gate)
+        self.assertIn("$_.FileSystem -eq 'NTFS'", gate)
+        self.assertIn('Sort-Object -Property FreeSpace -Descending', gate)
+        self.assertIn('"RDY_CI_ROOT=$root"', gate)
+        self.assertLess(gate.index('RDY_CI_ROOT=$root'), gate.index('New-LocalUser'))
+        for path in ('.github/workflows/platform.yml', '.github/workflows/release-candidate.yml',
+                     'scripts/ci/windows_gate_inner.ps1', 'scripts/ci/windows_report.ps1',
+                     'scripts/ci/windows_gate_cleanup.ps1', 'scripts/ci/windows_disk_report.ps1'):
+            text = (ROOT / path).read_text()
+            self.assertNotIn('C:\\rdy-ci', text, path)
+            self.assertNotIn('C:/rdy-ci', text, path)
+        self.assertEqual(gate.count("'rdy-ci'"), 2)
+        platform = self.workflow()
+        self.assertIn('-Report "$env:RDY_CI_ROOT\\work\\target\\qa\\report.md"', platform)
+        self.assertIn("$work = Join-Path $env:RDY_CI_ROOT 'work'", platform)
+
+    def test_windows_ci_root_acl_does_not_depend_on_the_drive(self):
+        # The root's ACL is set, not inherited from whichever drive holds it: the account, the
+        # administrators and SYSTEM only. Grant first, then drop inheritance (wx35 order); no /C.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        self.assertIn('foreach ($r in $roots) {', gate)
+        lines = [l for l in gate.splitlines() if 'icacls' in l and '@($r,' in l]
+        grant = next(i for i, l in enumerate(lines) if '/grant:r' in l)
+        strip = next(i for i, l in enumerate(lines) if '/inheritance:r' in l)
+        self.assertLess(grant, strip)
+        for sid in ('${account}:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'):
+            self.assertIn(sid, lines[grant])
+        for line in lines:
+            self.assertNotIn("'/C'", line)
+        self.assertLess(gate.index('New-LocalUser'), gate.index("icacls' @($r,"))
+        self.assertLess(gate.index("icacls' @($r,"), gate.index('robocopy'))
+        # the private home and work folder steps are unchanged
+        self.assertIn("Invoke-Native 'icacls' @($home_, '/inheritance:r', '/Q')", gate)
+        self.assertIn("Invoke-Native 'icacls' @($dir, '/setowner', $account, '/T', '/C', '/Q')", gate)
+
+    def test_windows_ci_root_has_8dot3_short_names(self):
+        # Run 42982134149: the hosted D: has 8.3 names off (C: has them on), so wx24, wx25b and ain4
+        # saw no short spelling. The gate turns them on for the chosen volume before the root
+        # exists, proves it with a probe folder, and else keeps the private home on the system drive.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        enable = gate.index('fsutil 8dot3name set $volume 0')
+        self.assertLess(gate.index('$volume = $drive.DeviceID'), enable)
+        self.assertLess(enable, gate.index('New-Item -ItemType Directory -Force -Path $root'))
+        self.assertIn('fsutil 8dot3name set 2', gate)
+        self.assertIn('.ShortPath', gate)
+        self.assertLess(gate.index('$shortNames = Test-ShortNames $root'), gate.index("$home_ = Join-Path $homeRoot 'home'"))
+        self.assertIn("$homeRoot = Join-Path ($env:SystemDrive + '\\') 'rdy-ci'", gate)
+        self.assertNotIn("$work = Join-Path $homeRoot", gate)
+        self.assertIn("$cargoHome = Join-Path $root 'cargo'", gate)
+        self.assertIn("$rustupHome = Join-Path $root 'rustup'", gate)
+        report = (ROOT / 'scripts/ci/windows_disk_report.ps1').read_text()
+        self.assertIn('fsutil 8dot3name query', report)
+        self.assertIn('[string]$HomeRoot = $Root', report)
+        self.assertEqual(gate.count('-HomeRoot $homeRoot -Label'), 3)
+
+    def test_windows_gate_prints_disk_reports(self):
+        # A disk report at the start, every 15 minutes while the gate runs, and at the end with the
+        # largest leftovers in home\temp, so a full disk can be read from the job log.
+        gate = (ROOT / 'scripts/ci/windows_gate.ps1').read_text()
+        report = (ROOT / 'scripts/ci/windows_disk_report.ps1').read_text()
+        self.assertIn("Join-Path $PSScriptRoot 'windows_disk_report.ps1'", gate)
+        start = gate.index("-Label 'start'")
+        during = gate.index("-Label 'during the gate'")
+        end = gate.index("-Label 'end' -Leftovers")
+        self.assertLess(start, gate.index('$process = Start-Process'))
+        self.assertLess(gate.index('$process = Start-Process'), during)
+        self.assertLess(during, end)
+        self.assertIn('WaitForExit(900000)', gate)
+        self.assertNotIn('-Wait -PassThru', gate)
+        self.assertIn('$null = $process.Handle', gate)
+        self.assertLess(gate.index('$status = $process.ExitCode'), end)
+        for word in ('DriveType = 3', 'FreeSpace', "'work\\target'", "'home\\temp'", "'cargo'",
+                     "'rustup'", '[switch]$Leftovers'):
+            self.assertIn(word, report)
+        self.assertTrue(report.rstrip().endswith('exit 0'))
 
     def test_platform_time_limits_fit_the_full_gate(self):
         # Run f17ab534: the Windows gate was still in the rdy-qa areas when the 90-minute limit

@@ -6,12 +6,61 @@
 # masked, and it is never written to a file, an argument list or the environment.
 $ErrorActionPreference = 'Stop'
 
-$root = 'C:\rdy-ci'
+# The CI root goes on the fixed NTFS drive with the most free space. On run 42959710193 the gate
+# filled C: (os error 112 in about 60 tests), while the runner's workspace drive had room. Later
+# steps read the same value from RDY_CI_ROOT, so no step names a drive.
+$drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' |
+    Where-Object { $_.FileSystem -eq 'NTFS' } | Sort-Object -Property FreeSpace -Descending |
+    Select-Object -First 1
+if (-not $drive) { throw 'No fixed NTFS drive for the CI root' }
+$root = Join-Path ($drive.DeviceID + '\') 'rdy-ci'
+Add-Content -Path $env:GITHUB_ENV -Value "RDY_CI_ROOT=$root"
+Write-Output "CI root: $root"
+$diskReport = Join-Path $PSScriptRoot 'windows_disk_report.ps1'
+# A failed report is printed and never stops the gate.
+function Write-DiskReport {
+    try { & $diskReport @args } catch { Write-Output "Disk report failed: $_" }
+}
+
+# Tests compare the 8.3 short spelling of a project path with its long one (wx24, wx25b, ain4).
+# Run 42982134149: the hosted D: has 8.3 names off and C: has them on. Turn them on for the chosen
+# volume before the root exists, so the root and everything below it get short names. The volume
+# setting counts only while the system setting is 2 (per volume). A probe folder proves it.
+function Test-ShortNames([string]$Parent) {
+    $probe = Join-Path $Parent 'rdy-short-name-probe-folder'
+    New-Item -ItemType Directory -Force -Path $probe | Out-Null
+    $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($probe).ShortPath
+    Remove-Item -LiteralPath $probe -Force
+    return ($short -ne $probe)
+}
+$volume = $drive.DeviceID
+& fsutil 8dot3name query $volume
+& fsutil 8dot3name set $volume 0
+if ($LASTEXITCODE -ne 0) { Write-Output "fsutil 8dot3name set $volume 0 exited with status $LASTEXITCODE" }
+$state = (& fsutil 8dot3name query $volume) -join ' '
+if ($state -match 'registry state is: [13]\b') {
+    & fsutil 8dot3name set 2
+    if ($LASTEXITCODE -ne 0) { Write-Output "fsutil 8dot3name set 2 exited with status $LASTEXITCODE" }
+}
+& fsutil 8dot3name query $volume
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+$shortNames = Test-ShortNames $root
+Write-Output "8.3 short names under ${root}: $shortNames"
+# Fallback: when 8.3 names stay off there, home (TEMP, TMP, APPDATA) stays on the system drive,
+# which has them; work, target and the Cargo and rustup homes stay on the chosen drive.
+$homeRoot = $root
+if (-not $shortNames) {
+    $homeRoot = Join-Path ($env:SystemDrive + '\') 'rdy-ci'
+    New-Item -ItemType Directory -Force -Path $homeRoot | Out-Null
+    Write-Output "8.3 names are off on ${volume}: the private home goes under $homeRoot (short names: $(Test-ShortNames $homeRoot))"
+}
+$roots = @(@($root, $homeRoot) | Select-Object -Unique)
+
 $work = Join-Path $root 'work'
 $cargoHome = Join-Path $root 'cargo'
 $rustupHome = Join-Path $root 'rustup'
 $logs = Join-Path $root 'logs'
-$home_ = Join-Path $root 'home'
+$home_ = Join-Path $homeRoot 'home'
 $channel = '1.99.0'
 
 function Invoke-Native {
@@ -28,7 +77,7 @@ function Quote-Arg {
 }
 
 $homeDirs = @((Join-Path $home_ 'temp'), (Join-Path $home_ 'appdata'), (Join-Path $home_ 'localappdata'))
-New-Item -ItemType Directory -Force -Path (@($root, $cargoHome, $rustupHome, $logs) + $homeDirs) | Out-Null
+New-Item -ItemType Directory -Force -Path (@($cargoHome, $rustupHome, $logs) + $roots + $homeDirs) | Out-Null
 
 # The credential: random bytes, masked before first use, held in memory only.
 $bytes = New-Object byte[] 24
@@ -46,6 +95,16 @@ New-LocalUser -Name $account -Password $secure -AccountNeverExpires -PasswordNev
     -Description 'Temporary standard account for one CI run' | Out-Null
 Add-Content -Path $env:GITHUB_ENV -Value "RDY_CI_ACCOUNT=$account"
 Add-LocalGroupMember -Group 'Users' -Member $account
+
+# The root's ACL does not depend on the drive it is on: only the account, the administrators and
+# SYSTEM can open it, and the folders under it inherit that. Same order as for the private home
+# below: the explicit, inheritable grants first, then the inherited entries go.
+foreach ($r in $roots) {
+    Invoke-Native 'icacls' @($r, '/grant:r', "${account}:(OI)(CI)F", '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '/Q')
+    Invoke-Native 'icacls' @($r, '/inheritance:r', '/Q')
+    Invoke-Native 'icacls' @($r)
+}
+Write-DiskReport -Root $root -HomeRoot $homeRoot -Label 'start'
 
 # The toolchain goes into the private homes as the administrator. The account then owns them.
 $env:CARGO_HOME = $cargoHome
@@ -93,8 +152,16 @@ $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-
 if ($env:RDY_QA_HOSTED_CI -eq '1') { $arguments += '-HostedCi' }
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Credential $credential `
     -LoadUserProfile -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err `
-    -Wait -PassThru
+    -PassThru
+# Reading the handle keeps ExitCode available after the process exits.
+$null = $process.Handle
+# A disk report every 15 minutes while the gate runs (build, then tests), and one at the end.
+while (-not $process.WaitForExit(900000)) {
+    Write-DiskReport -Root $root -HomeRoot $homeRoot -Label 'during the gate'
+}
+$process.WaitForExit()
 $status = $process.ExitCode
+Write-DiskReport -Root $root -HomeRoot $homeRoot -Label 'end' -Leftovers
 $secure.Dispose()
 
 Get-Content -LiteralPath $out

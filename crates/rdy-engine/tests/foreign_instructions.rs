@@ -9,12 +9,15 @@ mod common;
 
 use rdy_engine::foreign_delivery::{DeliveryTaken, take_delivery};
 use rdy_engine::instructions::{
-    self, BOUNDS, Caller, Contribution, Layer, LoadRequest, PersonHost, Reply,
+    self, BOUNDS, Caller, Contribution, InstructionRow, Layer, LoadRequest, MenuEntry, PersonHost,
+    Reply,
 };
 use rdy_engine::instructions_config::{PersonPath, PersonSource};
+use rdy_engine::links::LinkState;
+use rdy_engine::pending::adopt::AdoptChange;
 use rdy_engine::*;
 use rdy_model::foreign::{
-    ForeignDerived, ForeignPublication, ForeignSet, ForeignSource, ForeignVersion,
+    ForeignDerived, ForeignId, ForeignPublication, ForeignSet, ForeignSource, ForeignVersion,
     selection_identity,
 };
 use rdy_model::*;
@@ -290,6 +293,35 @@ impl Fx {
         self.r.store_mut().put_answer(&a).expect("put_answer");
         self.r.invalidate();
         self.r.seal_open().unwrap();
+    }
+
+    /// The hub revokes link `alias`.
+    fn revoke(&mut self, alias: &str) {
+        let source = ForeignSource::Link {
+            link: self.ids[alias].to_string(),
+            site: "hub.example".into(),
+            at_ms: 1_760_000_000_000,
+        };
+        let gone = rdy_engine::foreign_delivery::revoke_link(&mut self.r, &source)
+            .unwrap_or_else(|e| panic!("revoke {alias}: {e:?}"));
+        assert!(!gone.unchanged, "{alias} was live");
+    }
+
+    /// Writes into view `view` a decision that departs from `target`, as rdy_decide does.
+    fn deviate(&mut self, view: &str, target: &str) {
+        self.r
+            .decide(
+                &writer(),
+                view,
+                DecisionInput {
+                    parent: self.section.clone(),
+                    statement: format!("Here we depart from {target}."),
+                    title: Some(format!("Depart from {target}")),
+                    deviates_from: vec![target.into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("deviate from {target}: {e:?}"));
     }
 
     fn reply(&self, load: &[&str]) -> Reply {
@@ -831,20 +863,431 @@ fn rpl22_unadopted_rules_are_pending_not_delivered() {
     );
 }
 
+/// The rows and menu entries of `reply` that a repo link adds: every layer but the built-in one.
+fn linked(reply: &Reply) -> (Vec<InstructionRow>, Vec<MenuEntry>) {
+    (
+        reply
+            .instructions
+            .iter()
+            .filter(|i| i.layer != Layer::Rdy)
+            .cloned()
+            .collect(),
+        reply
+            .menu
+            .iter()
+            .filter(|m| m.layer != Layer::Rdy)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Proposes and lands view `view`, as the person, and gives the landing's refusal.
+fn try_land(r: &mut Rdy, view: &str) -> Result<(), RdyError> {
+    common::answer_open_items(r, &writer(), view);
+    let p = r.propose(&writer(), view, view, Some(common::TEST_SUMMARY))?;
+    common::confirm_exceptions(r, &founder(), &p);
+    r.land(&founder(), &p.id).map(|_| ())
+}
+
+/// TASK-2126 (D-MEMMQ, D-FK58A, D-BSNKM): a revocation is no adopt answer, so a revoked link's
+/// adopted rules stay in force. They keep the versions the pins hold, the layer of the link's
+/// last adopt answer and their locks; a rule the link only offered stays out. `show` still lists
+/// the link's frozen view, and no pending rule, as before.
 #[test]
-fn rpl22_a_revoked_link_delivers_nothing() {
+fn rpl22_a_revoked_link_keeps_its_adopted_rules() {
+    let org = repo(7);
+    let team = repo(8);
     let lib = repo(9);
-    let mut fx = fixture(&[("lib", lib, "pf-AGNT1")]);
-    let c = content("KBX", &[("ai-KBX01", "Cited rule.", false)], false);
-    fx.deliver("lib", "c1", lib, None, &refs(&c));
+    let mut fx = fixture(&[
+        ("org", org, "pf-AGNT1"),
+        ("ops", team, "pf-AGNT1"),
+        ("lib", lib, "pf-AGNT1"),
+    ]);
+    let o = content(
+        "GRP",
+        &[
+            ("ai-GRP01", "Organization rule.", true),
+            ("ai-GRP02", "Never adopted.", false),
+        ],
+        false,
+    );
+    let t = content("TEA", &[("ai-TEA01", "Team rule.", true)], false);
+    let c = content("KBX", &[("ai-KBX01", "Cited rule.", true)], false);
+    let eo = fx.deliver("org", "o1", org, Some(ForeignSet::Organization), &refs(&o));
+    let et = fx.deliver(
+        "ops",
+        "t1",
+        team,
+        Some(ForeignSet::Team("platform".into())),
+        &refs(&t),
+    );
+    let ec = fx.deliver("lib", "c1", lib, None, &refs(&c));
+    fx.pin("org", &["ai-GRP01"]);
+    fx.pin("ops", &["ai-TEA01"]);
     fx.pin("lib", &["ai-KBX01"]);
-    assert!(ids(&fx.reply(&[])).contains(&"ai-KBX01"));
+    fx.adopt(org, &eo.entry);
+    fx.adopt(team, &et.entry);
+    fx.adopt(lib, &ec.entry);
+    // a later delivery changes the adopted rule, and nobody adopts it
+    let o2 = content(
+        "GRP",
+        &[
+            ("ai-GRP01", "Organization rule, changed.", true),
+            ("ai-GRP02", "Never adopted.", false),
+        ],
+        false,
+    );
+    fx.deliver("org", "o2", org, Some(ForeignSet::Organization), &refs(&o2));
+    let before = fx.reply(&[]);
+    let shown_before = fx.r.read().link_show("org").unwrap();
+    assert_eq!(shown_before.link.state, LinkState::Delivered);
+    let pending: Vec<(&str, AdoptChange)> = shown_before
+        .pending
+        .iter()
+        .map(|p| (p.id.as_str(), p.change))
+        .collect();
+    assert_eq!(
+        pending,
+        [
+            ("ai-GRP01", AdoptChange::Changed),
+            ("ai-GRP02", AdoptChange::Added)
+        ]
+    );
+    for alias in ["org", "ops", "lib"] {
+        fx.revoke(alias);
+    }
+    // `show` reads the frozen view as before; a revoked link takes no adopt item (D-BSNKM) and
+    // lists no pending rule
+    let shown = fx.r.read().link_show("org").unwrap();
+    assert_eq!(shown.link.state, LinkState::Revoked);
+    assert_eq!(shown.link.last, shown_before.link.last);
+    assert_eq!(shown.blocks, shown_before.blocks);
+    assert!(shown.pending.is_empty(), "{:?}", shown.pending);
+    let after = fx.reply(&[]);
+    assert_eq!(
+        linked(&after),
+        linked(&before),
+        "a revocation changes no rule in force"
+    );
+    let row = |i: &str| {
+        after
+            .instructions
+            .iter()
+            .find(|r| r.id == i)
+            .unwrap_or_else(|| panic!("{i} in {:?}", ids(&after)))
+            .clone()
+    };
+    // the pinned version, in the layer of the last adopt answer, with its lock in force
+    let grp = row("ai-GRP01");
+    assert_eq!(grp.text, "Organization rule.");
+    assert_eq!(grp.layer, Layer::Organization);
+    assert_eq!(grp.ruleset, "organization:org:d-GRPDC");
+    assert!(grp.locked && grp.layer.locks_have_force());
+    assert_eq!(grp.reason[0].id, "D-GRPWH");
+    assert_eq!(grp.reason[0].statement, "Because.");
+    let tea = row("ai-TEA01");
+    assert_eq!(tea.layer, Layer::Team("platform".into()));
+    assert!(tea.locked && tea.layer.locks_have_force());
+    // a no-set cited rule shows its stored lock, with no force
+    let kbx = row("ai-KBX01");
+    assert_eq!(kbx.layer, Layer::Cited("lib".into()));
+    assert!(kbx.locked && !kbx.layer.locks_have_force());
+    let all = serde_json::to_string(&after).unwrap();
+    assert!(
+        !all.contains("Never adopted") && !all.contains("changed."),
+        "{all}"
+    );
+}
+
+/// TASK-2126 (D-MEMMQ 4): after a revocation, an organization or team lock still refuses a
+/// deviation, and the hub's lock facts still name it. A no-set cited lock still has no force.
+#[test]
+fn rpl22_a_revoked_link_keeps_its_locks_in_force() {
+    let org = repo(7);
+    let team = repo(8);
+    let lib = repo(9);
+    let mut fx = fixture(&[
+        ("org", org, "pf-AGNT1"),
+        ("ops", team, "pf-AGNT1"),
+        ("lib", lib, "pf-AGNT1"),
+    ]);
+    let o = content("GRP", &[("ai-GRP01", "Organization rule.", true)], false);
+    let t = content("TEA", &[("ai-TEA01", "Team rule.", true)], false);
+    let c = content("KBX", &[("ai-KBX01", "Cited rule.", true)], false);
+    let eo = fx.deliver("org", "o1", org, Some(ForeignSet::Organization), &refs(&o));
+    let et = fx.deliver(
+        "ops",
+        "t1",
+        team,
+        Some(ForeignSet::Team("platform".into())),
+        &refs(&t),
+    );
+    let ec = fx.deliver("lib", "c1", lib, None, &refs(&c));
+    // the deviations are written while no lock has force yet
+    fx.deviate("dev-org", "org:ai-GRP01");
+    fx.deviate("dev-ops", "ops:ai-TEA01");
+    fx.deviate("dev-lib", "lib:ai-KBX01");
+    fx.pin("org", &["ai-GRP01"]);
+    fx.pin("ops", &["ai-TEA01"]);
+    fx.pin("lib", &["ai-KBX01"]);
+    fx.adopt(org, &eo.entry);
+    fx.adopt(team, &et.entry);
+    fx.adopt(lib, &ec.entry);
+    for alias in ["org", "ops", "lib"] {
+        fx.revoke(alias);
+    }
+    // the organization and team locks refuse the landing, as before the revocation
+    let head = fx.r.read().canon_head();
+    for (view, shown, set) in [
+        ("dev-org", "org:ai-GRP01", "organization"),
+        ("dev-ops", "ops:ai-TEA01", "team platform"),
+    ] {
+        let e = try_land(&mut fx.r, view).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (
+                "E_INSTRUCTION_LOCKED",
+                format!("{shown} is locked by its {set} set").as_str()
+            ),
+            "{e:#?}"
+        );
+        assert_eq!(fx.r.read().canon_head(), head, "{view} is not landed");
+    }
+    // the hub's lock facts name the organization lock in force
+    let st = fx.r.read();
+    let facts = st.lock_facts(&st.included("dev-org")).unwrap();
+    assert_eq!(facts.len(), 1, "{facts:#?}");
+    assert_eq!(facts[0].target, ForeignId::new(org, id("ai-GRP01")));
+    assert_eq!(
+        (facts[0].alias.as_str(), &facts[0].set),
+        ("org", &ForeignSet::Organization)
+    );
+    assert_eq!(facts[0].version, o[2].version_hash());
+    drop(st);
+    // the no-set cited lock has no force
+    try_land(&mut fx.r, "dev-lib").unwrap_or_else(|e| panic!("a no-set cited lock: {e:?}"));
+}
+
+/// The tag `name` of `r`: its hash and landing.
+fn tag_of(r: &Rdy, name: &str) -> (Hash, Hash) {
+    let (_, h, t) = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, ..)| n == name)
+        .unwrap_or_else(|| panic!("tag {name}"));
+    (h, t.landing)
+}
+
+/// A real cited project, tagged v1.0.0: the doc `rules` with two locked rules (`kept` and
+/// `erased`, selector `all`) and their reason, and the profile `agents` (org) that selects it.
+struct CitedRules {
+    dir: tempfile::TempDir,
+    repo: RepoId,
+    profile: String,
+    kept: String,
+    erased: String,
+}
+
+fn cited_rules() -> CitedRules {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut c,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d",
+             "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d",
+             "fields": {"title": "Reasons"}},
+            {"op": "create", "type": "doc", "id": "$admin",
+             "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    let (d, s, admin) = (
+        w.created["$d"].clone(),
+        w.created["$s"].clone(),
+        w.created["$admin"].clone(),
+    );
+    let reason = c
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: s,
+                statement: "Rules are kept.".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let w = write(
+        &mut c,
+        "work",
+        json!([
+            {"op": "create", "type": "instruction", "id": "$k", "parent": d,
+             "fields": {"applies_to": ["all"], "locked": true}, "body": "Kept rule.",
+             "links": {"decided_by": [{"target": reason}]}},
+            {"op": "create", "type": "instruction", "id": "$x", "parent": d,
+             "fields": {"applies_to": ["all"], "locked": true}, "body": "Erased rule.",
+             "links": {"decided_by": [{"target": reason}]}},
+            {"op": "create", "type": "publication_profile", "id": "$p", "parent": admin,
+             "fields": {"key": "agents", "title": "Agents", "audience": "org", "select": [d]}}
+        ]),
+    );
+    land(&mut c, "work");
+    c.tag(&founder(), "v1.0.0", None, None).unwrap();
+    let repo = c.store().reader().repo_id().unwrap().unwrap();
+    c.close().unwrap();
+    CitedRules {
+        dir,
+        repo,
+        profile: w.created["$p"].clone(),
+        kept: w.created["$k"].clone(),
+        erased: w.created["$x"].clone(),
+    }
+}
+
+impl CitedRules {
+    /// The `agents` link delivery at v1.0.0, written to `files/delivery`.
+    fn delivery(&self, files: &Path) -> File {
+        let c = Rdy::open(self.dir.path()).unwrap();
+        let (h, landing) = tag_of(&c, "v1.0.0");
+        let mut out = vec![];
+        rdy_engine::link_export::write(&c.read(), "v1.0.0", h, landing, "agents", &mut out)
+            .unwrap_or_else(|e| panic!("delivery: {e:?}"));
+        c.close().unwrap();
+        let path = files.join("delivery");
+        std::fs::write(&path, out).unwrap();
+        File::open(path).unwrap()
+    }
+
+    /// Removes the content of `erased` with a person's approval, and writes the history at
+    /// v1.0.0, which carries the removal's portable proof, to `files/history`.
+    fn erase(&self, files: &Path) -> File {
+        let mut c = Rdy::open(self.dir.path()).unwrap();
+        c.redact_in(
+            &writer(),
+            "redact",
+            rdy_engine::redaction::RedactInput {
+                targets: vec![self.erased.clone()],
+                reason_class: "secret".into(),
+                reason: "an internal rule".into(),
+                dry_run: false,
+            },
+        )
+        .unwrap_or_else(|e| panic!("redact: {e:?}"));
+        land(&mut c, "redact");
+        let (h, _) = tag_of(&c, "v1.0.0");
+        let mut out = vec![];
+        rdy_engine::stream_export::write(&c.read(), h, &Default::default(), &mut out)
+            .unwrap_or_else(|e| panic!("history: {e:?}"));
+        c.close().unwrap();
+        let path = files.join("history");
+        std::fs::write(&path, out).unwrap();
+        File::open(path).unwrap()
+    }
+}
+
+/// What a project that adopted both rules of [`cited_rules`] through link `org` of the
+/// organization set reads: its reply once adopted, then once revoked (when `revoke`); once the
+/// cited project's removal of `erased` is taken, its reply and its reply with the ruleset loaded.
+struct Erasure {
+    cited: CitedRules,
+    adopted: Reply,
+    revoked: Reply,
+    erased: Reply,
+    loaded: Reply,
+}
+
+fn erasure(revoke: bool) -> Erasure {
+    let cited = cited_rules();
+    let mut fx = fixture(&[("org", cited.repo, cited.profile.as_str())]);
+    let files = fx.files.path().to_path_buf();
     let source = ForeignSource::Link {
-        link: fx.ids["lib"].to_string(),
+        link: fx.ids["org"].to_string(),
         site: "hub.example".into(),
         at_ms: 1_760_000_000_000,
     };
-    rdy_engine::foreign_delivery::revoke_link(&mut fx.r, &source).unwrap();
-    assert!(!ids(&fx.reply(&[])).contains(&"ai-KBX01"));
-    let _ = &fx.section;
+    let taken = take_delivery(
+        &mut fx.r,
+        &cited.delivery(&files),
+        &source,
+        Some(ForeignSet::Organization),
+    )
+    .unwrap_or_else(|e| panic!("take: {e:?}"));
+    fx.pin("org", &[cited.kept.as_str(), cited.erased.as_str()]);
+    fx.adopt(cited.repo, &taken.entry);
+    let adopted = fx.reply(&[]);
+    if revoke {
+        fx.revoke("org");
+    }
+    let revoked = fx.reply(&[]);
+    let removed = rdy_engine::foreign_removal::take_foreign_removal(
+        &mut fx.r,
+        &cited.erase(&files),
+        &cited.repo,
+    )
+    .unwrap_or_else(|e| panic!("take the removal: {e:?}"));
+    let applied: Vec<String> = removed
+        .removals
+        .iter()
+        .flat_map(|r| r.applied.iter().map(|(id, _)| id.to_string()))
+        .collect();
+    assert_eq!(applied, std::slice::from_ref(&cited.erased), "{removed:?}");
+    let erased = fx.reply(&[]);
+    let handle = erased
+        .menu
+        .iter()
+        .find(|m| m.layer == Layer::Organization)
+        .map(|m| m.id.clone())
+        .expect("the ruleset stays on the menu");
+    let loaded = fx.reply(&[handle.as_str()]);
+    Erasure {
+        cited,
+        adopted,
+        revoked,
+        erased,
+        loaded,
+    }
+}
+
+/// TASK-2126: a rule whose content a cited project's removal erased (`take_foreign_removal`) is
+/// left out of a revoked link's reply, as it is out of a live link's. Its residue keeps no
+/// selector and no lock, so only a loaded ruleset shows it, as the removal notice.
+#[test]
+fn rpl22_a_revoked_link_leaves_out_an_erased_rule() {
+    for revoke in [false, true] {
+        let what = if revoke { "revoked" } else { "live" };
+        let Erasure {
+            cited,
+            adopted,
+            revoked,
+            erased,
+            loaded,
+        } = erasure(revoke);
+        let rows = |r: &Reply| -> Vec<String> { linked(r).0.into_iter().map(|i| i.id).collect() };
+        let mut both = vec![cited.kept.clone(), cited.erased.clone()];
+        both.sort();
+        assert_eq!(rows(&adopted), both, "{what}");
+        assert_eq!(
+            linked(&revoked),
+            linked(&adopted),
+            "{what}: before the removal"
+        );
+        assert_eq!(rows(&erased), std::slice::from_ref(&cited.kept), "{what}");
+        let row = linked(&loaded)
+            .0
+            .into_iter()
+            .find(|i| i.id == cited.erased)
+            .unwrap_or_else(|| panic!("{what}: {:?}", rows(&loaded)));
+        assert!(row.text.starts_with("Content removed."), "{what}: {row:?}");
+        assert!(!row.locked && row.reason.is_empty(), "{what}: {row:?}");
+        for r in [&erased, &loaded] {
+            let all = serde_json::to_string(r).unwrap();
+            assert!(!all.contains("Erased rule."), "{what}: {all}");
+        }
+    }
 }

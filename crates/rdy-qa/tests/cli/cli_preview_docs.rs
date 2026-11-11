@@ -27,7 +27,7 @@ const ALL_TARGETS: [&str; 3] = [
 /// The "About Release 1" block of the README, after its summary line: the compatibility promise
 /// (D-TXFHR) and Release 1 below 1.0 (D-E30RA), with the dump route and the report sentence.
 const RELEASE_NOTE: &str = "\
-This is Release 1, the first release of rdy with a compatibility promise.
+Release 1 (rdy 0.47.0) is the first release of rdy with a compatibility promise.
 rdy stays below 1.0 during the beta, and the promise holds anyway.
 
 From this release on, a change that breaks a contract surface ships with its upgrade path, in the same release. The contract surfaces are:
@@ -1756,7 +1756,7 @@ fn pre2_preview_readme_preserves_the_dump_route() {
     assert!(at("See \"About Release 1\"") < at("## Install"));
     assert!(
         readme.contains(
-            "Release 1 has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
+            "Each release has three archives: macOS arm64, Windows amd64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
         ),
         "the archive sentence is missing"
     );

@@ -846,6 +846,56 @@ fn hsa8_cli_auth_works_without_a_project_or_daemon() {
     assert_eq!(transcripts[0][6], json!({"installs": [], "warnings": []}));
 }
 
+/// The hub sends `product_analytics` on every `/me`; the sign-in must still complete.
+#[test]
+fn me9_cli_sign_in_completes_when_me_carries_product_analytics() {
+    let home = Home::new();
+    let mut hub = Server::start();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let run = |args: &[&str]| {
+        let (ok, v) = home.json(c, args);
+        assert!(ok, "{args:?}: {v}");
+        v
+    };
+    let card_reply = run(&[
+        "auth",
+        "sign-in",
+        "--install",
+        &o,
+        "--machine-name",
+        MACHINE,
+    ]);
+    let hash = card_reply["card_hash"].as_str().unwrap().to_string();
+    queue_start(&mut hub);
+    run(&[
+        "auth",
+        "sign-in",
+        "--install",
+        &o,
+        "--machine-name",
+        MACHINE,
+        "--card-hash",
+        &hash,
+        "--answer",
+        "confirm",
+    ]);
+    home.make_not_due(&o);
+    assert_eq!(run(&["auth", "state", "--install", &o])["state"], "pending");
+    home.make_due(&o);
+    hub.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
+    hub.reply(Reply::json(200, TOKEN_REPLY));
+    let me = ME_REPLY.replacen('{', r#"{"product_analytics":true,"#, 1);
+    hub.reply(Reply::json(200, &me));
+    hub.accept_n(3);
+    let v = run(&["auth", "state", "--install", &o]);
+    assert_eq!(v["state"], "signed_in", "{v}");
+    assert_eq!(v["account"], ACCOUNT);
+    assert_eq!(v["human_actor"], "human:test-person");
+}
+
 /// Every path under `dir`, sorted.
 fn listing(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

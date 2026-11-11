@@ -382,3 +382,56 @@ fn df3_a_daemon_exits_when_its_project_is_deleted() {
     assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
     wait_endpoint_gone(&endpoint);
 }
+
+/// D-122E5 with df3: a project check that runs while the project is being deleted makes nothing in
+/// it, so the delete finishes. The delete is stopped part way, where the gate saw the race: the
+/// store and the start lock gone, `.rdy/run` still standing. The check sees the store gone, finds
+/// no start lock to take, and keeps its files until the drain ends instead of making one.
+#[test]
+fn df3_a_project_check_during_a_delete_makes_nothing_in_the_project() {
+    // the start lock gone, `.rdy/run` standing: no start lock is made
+    let base = short_tempdir();
+    let (run, project, endpoint) = served_long(base.path());
+    std::fs::remove_dir_all(project.join(".rdy/store")).unwrap();
+    std::fs::remove_file(endpoint.start_lock()).unwrap();
+    assert!(endpoint.path().is_dir());
+    assert!(run.handle().check_project(), "its store is gone");
+    assert!(
+        !endpoint.start_lock().exists(),
+        "the check made a start lock in a project being deleted"
+    );
+    std::fs::remove_dir_all(&project).unwrap();
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+    wait_endpoint_gone(&endpoint);
+
+    // `.rdy/run` gone too: no run directory is made
+    let base = short_tempdir();
+    let (run, project, endpoint) = served_long(base.path());
+    std::fs::remove_dir_all(project.join(".rdy/store")).unwrap();
+    std::fs::remove_dir_all(endpoint.path()).unwrap();
+    assert!(run.handle().check_project(), "its store is gone");
+    assert!(
+        !endpoint.path().exists(),
+        "the check made a run directory in a project being deleted"
+    );
+    std::fs::remove_dir_all(&project).unwrap();
+    assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
+    wait_endpoint_gone(&endpoint);
+}
+
+/// A foreground daemon of a [`long_project`] under `base`, its project, and its run directory.
+fn served_long(base: &Path) -> (rdy_daemon::ServeRun, PathBuf, RunDir) {
+    let project = long_project(base);
+    let run = rdy_daemon::start(rdy_daemon::ServeOptions {
+        project: project.clone(),
+        version: "t".into(),
+        detach: false,
+        idle_timeout: None,
+        human_actor: None,
+        site_lan_override: None,
+    })
+    .unwrap();
+    let endpoint = RunDir::of_project(&project);
+    assert!(endpoint_live(&endpoint));
+    (run, project, endpoint)
+}

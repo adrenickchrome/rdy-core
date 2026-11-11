@@ -3,7 +3,7 @@
 //! null target (D-01QX5). Acceptance rows are written as typed records through
 //! `write_guarded_for_tests`, then checked by the production fsck.
 use rdy_engine::engine::Local;
-use rdy_engine::{Rdy, Scope, SuspectReply};
+use rdy_engine::{Rdy, RowTarget, Scope, SuspectReply};
 use rdy_model::plan::{
     Plan, PlanAct, PlanAnswer, PlanKind, PlanOutcome, PlanSeal, SealedItem, item_hash,
 };
@@ -312,7 +312,7 @@ fn canon(r: &Rdy) -> Vec<SuspectReply> {
 
 fn row<'a>(rows: &'a [SuspectReply], block: &BlockId, target: &BlockId) -> &'a SuspectReply {
     rows.iter()
-        .find(|s| &s.block == block && s.target.as_ref() == Some(target))
+        .find(|s| &s.block == block && s.target.as_ref().and_then(RowTarget::block) == Some(target))
         .unwrap_or_else(|| panic!("no row {block} -> {target}: {rows:?}"))
 }
 
@@ -654,8 +654,14 @@ fn cp13_code_suspect_has_null_target_and_sorted_paths() {
     assert_eq!(b.len(), 3, "{rows:?}");
     let mut targets = [ids.a.clone(), ids.x.clone()];
     targets.sort();
-    assert_eq!(b[0].target.as_ref(), Some(&targets[0]));
-    assert_eq!(b[1].target.as_ref(), Some(&targets[1]));
+    assert_eq!(
+        b[0].target.as_ref().and_then(RowTarget::block),
+        Some(&targets[0])
+    );
+    assert_eq!(
+        b[1].target.as_ref().and_then(RowTarget::block),
+        Some(&targets[1])
+    );
     let code = b[2];
     assert_eq!(code.target, None);
     assert_eq!(code.reason, "code_changed");

@@ -287,14 +287,14 @@ impl ProcessGroup {
     }
 }
 
-/// Where [`tcp_listen_ports`] reads: the TCP listener tables of `iphlpapi`, with their owning
-/// process ids. It starts no process.
+/// Where [`tcp_listen_ports`] and [`tcp_listener_pids`] read: the TCP listener tables of
+/// `iphlpapi`, with their owning process ids. They start no process.
 pub const LISTENER_CENSUS: &str = "iphlpapi";
 
-/// The TCP ports that a listening socket of this process is bound to, on any address, from the
+/// Every listening TCP socket of the machine as (local port, owning process id), from the
 /// extended TCP tables of both address families. Panics if the tables cannot be read.
 #[allow(unsafe_code)]
-pub fn tcp_listen_ports() -> BTreeSet<u16> {
+fn tcp_listeners() -> Vec<(u16, u32)> {
     // the address families, and the table class that lists listeners with their owner
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
@@ -302,8 +302,7 @@ pub fn tcp_listen_ports() -> BTreeSet<u16> {
     // the row sizes of MIB_TCPROW_OWNER_PID and MIB_TCP6ROW_OWNER_PID, and where each holds the
     // local port and the owner
     const ROWS: [(u32, usize, usize, usize); 2] = [(AF_INET, 24, 8, 20), (AF_INET6, 56, 20, 52)];
-    let me = std::process::id();
-    let mut ports = BTreeSet::new();
+    let mut rows = Vec::new();
     for (family, row, port_at, pid_at) in ROWS {
         let mut buf: Vec<u8> = vec![0; 4096];
         loop {
@@ -330,13 +329,34 @@ pub fn tcp_listen_ports() -> BTreeSet<u16> {
             |at: usize| u32::from_ne_bytes(buf[at..at + 4].try_into().expect("a four byte field"));
         for i in 0..word(0) as usize {
             let at = 4 + i * row;
-            if word(at + pid_at) == me {
-                // the port is in network order, in the low half of its field
-                ports.insert(u16::from_be((word(at + port_at) & 0xffff) as u16));
-            }
+            // the port is in network order, in the low half of its field
+            let port = u16::from_be((word(at + port_at) & 0xffff) as u16);
+            rows.push((port, word(at + pid_at)));
         }
     }
-    ports
+    rows
+}
+
+/// The TCP ports that a listening socket of this process is bound to, on any address, from the
+/// extended TCP tables of both address families. Panics if the tables cannot be read.
+pub fn tcp_listen_ports() -> BTreeSet<u16> {
+    let me = std::process::id();
+    tcp_listeners()
+        .into_iter()
+        .filter(|&(_, pid)| pid == me)
+        .map(|(port, _)| port)
+        .collect()
+}
+
+/// The processes that hold a listening TCP socket bound to `port`, on any address: this
+/// process, its children and any other process the tables list (the Unix version's contract).
+/// Panics if the tables cannot be read.
+pub fn tcp_listener_pids(port: u16) -> BTreeSet<u32> {
+    tcp_listeners()
+        .into_iter()
+        .filter(|&(at, _)| at == port)
+        .map(|(_, pid)| pid)
+        .collect()
 }
 
 /// A running child and the job that holds it. Dropping this ends the child and all it started.

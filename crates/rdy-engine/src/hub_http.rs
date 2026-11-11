@@ -12,8 +12,14 @@
 //!   loss is `Transport {may_have_sent: true}`. A redirect is a contract mismatch.
 //! - **Bounded replies.** At most 64 header fields and 32768 header bytes, a body of at most
 //!   1048576 bytes, and JSON of depth 32 with 4096 members and elements in total, no duplicate
-//!   key and valid UTF-8. Application objects deny unknown members; OAuth replies ignore their
-//!   extension members within the same bounds.
+//!   key and valid UTF-8. These bounds cover the whole reply. A member the client does not know
+//!   is ignored, in application objects and OAuth replies alike (D-N8PR2): it is never stored,
+//!   logged or quoted, while every member the client reads keeps its type and bounds checks.
+//! - **No token echo.** Every key and string of a `/me` or key reply, ignored members included,
+//!   as given and percent-decoded, is scanned for the exact bearer: those replies carry names
+//!   people chose, so a token prefix alone is no echo there. Every member of a token reply but
+//!   its two tokens is scanned for the bearer and the token prefixes. An echo is a contract
+//!   mismatch (D-N8PR2).
 //! - **Nothing raw escapes.** No URL, request, reply, library error or hub message is logged or
 //!   returned: failures are the closed [`HubFailure`] values. The engine's `log` features
 //!   compile every dependency record out.
@@ -35,8 +41,8 @@ use crate::hub_types::{
     MAX_DEPTH, MAX_DEVICE_CODE_BYTES, MAX_HEADER_BYTES, MAX_HEADERS, MAX_ID_BYTES, MAX_JSON_BYTES,
     MAX_MEMBERS, MAX_SCALAR_BYTES, MAX_SIG_KEY_BYTES, MAX_SIG_PROOF_BYTES, MAX_TIMESTAMP_BYTES,
     MAX_URL_BYTES, MeReply, Origin, OriginFence, REFRESH_GRANT, RefreshReply, RequestClaim, Secret,
-    TokenPair, check_count, check_label, check_machine_name, hub_limit, is_device_page,
-    parse_compromised_since, token_form,
+    TOKEN_PREFIXES, TokenPair, check_count, check_label, check_machine_name, hub_limit,
+    is_device_page, parse_compromised_since, token_form,
 };
 use crate::identity;
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1200,6 +1206,102 @@ fn json<'a, T: Deserialize<'a>>(body: &'a [u8]) -> Result<T, HubFailure> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Token echoes
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a token scan also refuses a bare hub token prefix, or only the exact bearer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Prefixes {
+    /// The bearer and every [`TOKEN_PREFIXES`] entry: replies that carry no chosen text.
+    Check,
+    /// The bearer alone: replies that carry names a person chose (a display name, an
+    /// organization name, a handle, a key label), where a prefix is no token.
+    Skip,
+}
+
+/// Whether `text` holds `bearer` (when one is given and is not empty) or, with
+/// [`Prefixes::Check`], any hub token prefix.
+pub(crate) fn echoes_token(text: &str, bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
+    bearer.is_some_and(|b| !b.expose().is_empty() && text.contains(b.expose()))
+        || (prefixes == Prefixes::Check && TOKEN_PREFIXES.iter().any(|p| text.contains(p)))
+}
+
+/// `text` with each `%XX` escape decoded; a decoded byte that is not UTF-8 becomes U+FFFD.
+pub(crate) fn percent_decoded(text: &str) -> String {
+    let b = text.as_bytes();
+    let hex = |c: u8| char::from(c).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let pair = b
+            .get(i + 1)
+            .copied()
+            .and_then(hex)
+            .zip(b.get(i + 2).copied().and_then(hex));
+        match (b[i], pair) {
+            (b'%', Some((hi, lo))) => {
+                // Two hex digits are at most 255.
+                out.push(u8::try_from(hi * 16 + lo).unwrap_or(u8::MAX));
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether `text`, as given or percent-decoded, holds the bearer or (with [`Prefixes::Check`]) a
+/// token prefix. Text with no `%` decodes to itself, so it is not copied.
+fn text_echoes(text: &str, bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
+    echoes_token(text, bearer, prefixes)
+        || (text.contains('%') && echoes_token(&percent_decoded(text), bearer, prefixes))
+}
+
+/// Whether any key or string of `object`, at any depth, holds the bearer or a token prefix, as
+/// given or percent-decoded. The parser has resolved every JSON escape, so a `\u` escape is no
+/// cover. The JSON guard bounds the depth to 32, so the recursion is bounded too.
+pub(crate) fn object_echoes(
+    object: &serde_json::Map<String, serde_json::Value>,
+    bearer: Option<&Secret>,
+    prefixes: Prefixes,
+) -> bool {
+    object
+        .iter()
+        .any(|(k, v)| text_echoes(k, bearer, prefixes) || value_echoes(v, bearer, prefixes))
+}
+
+/// [`object_echoes`] for any JSON value: a string, an array, an object or a scalar.
+pub(crate) fn value_echoes(
+    value: &serde_json::Value,
+    bearer: Option<&Secret>,
+    prefixes: Prefixes,
+) -> bool {
+    match value {
+        serde_json::Value::String(s) => text_echoes(s, bearer, prefixes),
+        serde_json::Value::Array(a) => a.iter().any(|v| value_echoes(v, bearer, prefixes)),
+        serde_json::Value::Object(m) => object_echoes(m, bearer, prefixes),
+        _ => false,
+    }
+}
+
+/// Whether a reply that [`check_json`] passed echoes the bearer or (with [`Prefixes::Check`]) a
+/// token prefix: in its raw text, or in any key or string of the whole reply at any depth,
+/// ignored members included, as given or percent-decoded (D-N8PR2). A body that does not parse counts as an echo. Only the
+/// answer is returned: the matched text is never kept.
+pub(crate) fn reply_echoes(body: &[u8], bearer: Option<&Secret>, prefixes: Prefixes) -> bool {
+    if echoes_token(&String::from_utf8_lossy(body), bearer, prefixes) {
+        return true;
+    }
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(whole) => value_echoes(&whole, bearer, prefixes),
+        Err(_) => true,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Reply objects
 // ---------------------------------------------------------------------------------------------
 
@@ -1279,8 +1381,8 @@ enum AccountState {
     Deleted,
 }
 
+/// An earlier handle. Unknown members are ignored (D-N8PR2).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct EarlierHandle {
     #[serde(rename = "handle")]
     _handle: String,
@@ -1288,8 +1390,8 @@ struct EarlierHandle {
     until: String,
 }
 
+/// An organization of `/me`. Unknown members are ignored (D-N8PR2).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Organization {
     #[serde(rename = "id")]
     _id: String,
@@ -1301,9 +1403,10 @@ struct Organization {
     _role: String,
 }
 
-/// The closed `/me` object. Only `id` and `handle` are kept.
+/// The `/me` object. Only `id` and `handle` are kept; every member here is still required and
+/// type-checked. Unknown members (`product_analytics` since the hub's v0.10.0) are ignored
+/// (D-N8PR2).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct MeDto {
     id: String,
     handle: String,
@@ -1333,9 +1436,8 @@ struct MeDto {
     created_at: String,
 }
 
-/// A key list: `next` may be absent or null.
+/// A key list: `next` may be absent or null. Unknown members are ignored (D-N8PR2).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct KeyListDto {
     items: Vec<HubKey>,
     #[serde(default, deserialize_with = "present_value")]
@@ -1536,9 +1638,23 @@ fn api_error(status: u16, body: &[u8]) -> HubFailure {
     }
 }
 
-/// A token reply: both token forms, a Bearer type (any case) and a 1-3600 second life.
-fn tokens(body: &[u8]) -> Result<TokenPair, HubFailure> {
+/// The members of a token reply that carry the issued tokens: exempt from its token scan.
+const TOKEN_MEMBERS: [&str; 2] = ["access_token", "refresh_token"];
+
+/// A token reply: both token forms, a Bearer type (any case) and a 1-3600 second life. Every key
+/// and string of the reply but the values of [`TOKEN_MEMBERS`], ignored members included, is
+/// scanned for `bearer` and the token prefixes (D-N8PR2). The raw body holds the tokens, so the
+/// scan reads the parsed reply alone; the parser has resolved every JSON escape.
+fn tokens(body: &[u8], bearer: Option<&Secret>) -> Result<TokenPair, HubFailure> {
     let dto: TokenDto = json(body)?;
+    let mut rest: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| HubFailure::Protocol)?;
+    if let serde_json::Value::Object(m) = &mut rest {
+        for member in TOKEN_MEMBERS {
+            m.remove(member);
+        }
+    }
+    protocol_if(value_echoes(&rest, bearer, Prefixes::Check))?;
     protocol_if(!dto.token_type.eq_ignore_ascii_case("Bearer"))?;
     let pair = TokenPair {
         access_token: Secret::new(dto.access_token),
@@ -1571,6 +1687,7 @@ fn key_ok(key: &HubKey) -> bool {
 /// Reads the reply of `call` from its status and bounded body.
 fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailure> {
     let install = &call.install;
+    let bearer = call.bearer.as_ref();
     match &call.operation {
         HubOperation::Metadata => {
             protocol_if(status != 200)?;
@@ -1621,7 +1738,9 @@ fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailu
         }
         HubOperation::DevicePoll { .. } => {
             if status == 200 {
-                return Ok(HubReply::DevicePoll(DevicePollReply::Tokens(tokens(body)?)));
+                return Ok(HubReply::DevicePoll(DevicePollReply::Tokens(tokens(
+                    body, bearer,
+                )?)));
             }
             let reply = match oauth_error(status, body, &TOKEN_ERRORS)?.as_str() {
                 "authorization_pending" => DevicePollReply::Pending,
@@ -1634,7 +1753,9 @@ fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailu
         }
         HubOperation::Refresh { .. } => {
             if status == 200 {
-                return Ok(HubReply::Refresh(RefreshReply::Tokens(tokens(body)?)));
+                return Ok(HubReply::Refresh(RefreshReply::Tokens(tokens(
+                    body, bearer,
+                )?)));
             }
             match oauth_error(status, body, &TOKEN_ERRORS)?.as_str() {
                 "invalid_grant" => Ok(HubReply::Refresh(RefreshReply::AuthRequired)),
@@ -1653,13 +1774,14 @@ fn decode(call: &HubCall, status: u16, body: &[u8]) -> Result<HubReply, HubFailu
             oauth_error(status, body, &REVOCATION_ERRORS)?;
             Err(HubFailure::Refused)
         }
-        op => decode_api(install, op, status, body),
+        op => decode_api(install, bearer, op, status, body),
     }
 }
 
 /// Reads an account or key route's reply.
 fn decode_api(
     install: &Origin,
+    bearer: Option<&Secret>,
     op: &HubOperation,
     status: u16,
     body: &[u8],
@@ -1674,6 +1796,11 @@ fn decode_api(
         }
         return Err(api_error(status, body));
     }
+    // The whole reply is bounded, then no key or string of it, ignored members included, may
+    // hold the bearer (D-N8PR2). These replies carry names people chose, so a token prefix alone
+    // is no echo. An echo is a mismatch before the handle is judged.
+    check_json(body, EXCHANGE_JSON)?;
+    protocol_if(reply_echoes(body, bearer, Prefixes::Skip))?;
     match op {
         HubOperation::Me => {
             let dto: MeDto = json(body)?;

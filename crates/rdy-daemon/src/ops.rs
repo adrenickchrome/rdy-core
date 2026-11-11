@@ -24,6 +24,7 @@ mod diff;
 mod dispute;
 mod dump;
 mod edit;
+pub mod hook;
 mod instructions;
 mod intake;
 mod land;
@@ -180,6 +181,7 @@ pub const OPS: &[&str] = &[
     "key_retire",
     "key_revoke",
     "publish",
+    "hook",
 ];
 
 /// ain5: the ops whose successful replies carry the reminder while it is owed, the CLI's
@@ -409,7 +411,8 @@ pub(crate) fn scope_of(
     }
 }
 
-/// Runs the ctl op `op` with `args`. An unknown op is `E_BAD_INPUT` naming every op.
+/// Runs the ctl op `op` with `args`. An unknown op is `E_BAD_INPUT` naming every op. The `hook`
+/// op runs under its own [`hook::default_run`]; [`dispatch_with`] gives it the caller's.
 ///
 /// Every op is a new response, so it first checks the state the engine serves now: a state
 /// read before a content removal refuses with `E_REDACTED_STATE`, before any op parses or reads
@@ -417,6 +420,17 @@ pub(crate) fn scope_of(
 /// this function too. The acquired state marks where the response starts; an op may read a
 /// newer one.
 pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError> {
+    dispatch_with(cx, op, args, &hook::default_run())
+}
+
+/// [`dispatch`], with `run` as the `hook` op's run context: its deadline and cancellation
+/// signal reach the shared check and its Git children (FW-HOOK). Every other op ignores it.
+pub fn dispatch_with(
+    cx: &OpContext,
+    op: &str,
+    args: Value,
+    run: &rdy_engine::hooks::RunContext,
+) -> Result<Value, RdyError> {
     let state = cx.engine.read();
     state.ensure_current_epoch()?;
     drop(state);
@@ -664,6 +678,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         }
         "instructions" => instructions(cx, parse(op, args, "{full?, load?, part?}")?),
         "links" => links(cx, parse(op, args, "{op?, alias?}")?),
+        "hook" => hook::hook(cx, &args, run),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

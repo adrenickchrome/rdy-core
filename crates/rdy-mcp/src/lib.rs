@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod claims;
 pub mod elicitation;
 pub mod entity_tools;
+pub mod http;
 pub mod intent_tools;
 pub mod kungfu;
 pub mod notify;

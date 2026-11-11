@@ -20,8 +20,10 @@
 //!   may be asked of a name without connecting to it (`endpoint_is_link`, `endpoint_identity`),
 //!   how a bind can fail (`BIND_REFUSED`, `name_is_held`), the
 //!   exact grammars of `daemon.sock` and `daemon.pid` (`parse_endpoint_record`, `parse_pid_record`,
-//!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`)
-//!   and whether a run file may be believed (`run_file_is_private`);
+//!   and [`records`] for the Windows forms), what stands at a run directory's path (`dir_state`),
+//!   whether a run file may be believed (`run_file_is_private`), and whether it may hold a secret
+//!   of this account, the MCP token (`token_file_is_private`: on Unix its owner and exact mode,
+//!   on Windows its protected DACL and owner, both read on the open handle);
 //! - process lifecycle: a new session on spawn, where a started daemon runs (`daemon_start_dir`),
 //!   exit codes, liveness and leaving the caller's session (`detach`). `SIGTERM` by pid is Unix
 //!   only: Windows never ends a process by its pid;
@@ -46,6 +48,11 @@
 //! - the site socket's option before its bind (D-FPKPS, `configure_site_socket`): `SO_REUSEADDR`
 //!   on Unix, `SO_EXCLUSIVEADDRUSE` on Windows (built and tested on its own by the isolated probe
 //!   in `probes/site-socket`).
+//! - local hooks (FW-HOOK, FW-L3): the text a Git launcher and a harness's exec-form settings
+//!   name a path by (`hook_sh_path`, `hook_exec_path`), the launcher itself with every value
+//!   quoted as data ([`code_launcher`]), and the launcher's executable bit
+//!   (`make_launcher_executable`, `launcher_is_executable`; Windows has none: Git for Windows runs
+//!   an extensionless `commit-msg` through its own shell).
 
 pub mod records;
 mod site_socket;
@@ -81,6 +88,43 @@ pub fn path_hash_bytes(p: &std::path::Path) -> std::borrow::Cow<'_, [u8]> {
             .encode_wide()
             .flat_map(u16::to_le_bytes)
             .collect(),
+    )
+}
+
+/// The first two lines of every `commit-msg` launcher rdy writes: what marks a hook file as
+/// rdy's own.
+pub const LAUNCHER_HEAD: &str =
+    "#!/bin/sh\n# rdy commit citation hook: warns when a commit has no Implements trailer.\n";
+
+/// `text` as one single-quoted POSIX shell word: every byte is data, an apostrophe included.
+pub fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The Git `commit-msg` launcher for the code repo `repo` of the project at `project`, run by
+/// the rdy binary `exe` (D-DC5D1): `sh` on Unix and Git for Windows' own `sh` on Windows, which
+/// starts the native `rdy.exe`. It names the binary by its absolute path and the project
+/// explicitly, passes Git's message file on, and always exits 0, so it never fails a commit,
+/// whatever becomes of rdy. `None` when a path is not one the shell can name
+/// ([`hook_sh_path`]), or a value holds a NUL or a line break.
+pub fn code_launcher(
+    exe: &std::path::Path,
+    project: &std::path::Path,
+    repo: &str,
+) -> Option<Vec<u8>> {
+    let plain = |t: &str| !t.contains(['\0', '\n', '\r']);
+    let (exe, project) = (hook_sh_path(exe)?, hook_sh_path(project)?);
+    if !(plain(&exe) && plain(&project) && plain(repo)) {
+        return None;
+    }
+    Some(
+        format!(
+            "{LAUNCHER_HEAD}# rdy owns this file: rdy hook remove --kind code --repo <name> removes it.\n{} --project {} hook run-code --repo {} --message-file \"$1\"\nexit 0\n",
+            sh_quote(&exe),
+            sh_quote(&project),
+            sh_quote(repo),
+        )
+        .into_bytes(),
     )
 }
 

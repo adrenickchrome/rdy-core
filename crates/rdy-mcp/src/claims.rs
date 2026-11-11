@@ -142,7 +142,37 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// is purged before any capacity check.
 pub struct Registry {
     clock: Clock,
-    entries: Mutex<BTreeMap<Key, Settings>>,
+    entries: Mutex<Entries>,
+}
+
+/// What one registry holds: the saved settings, and the per-claim state of MCP over HTTP
+/// ([`crate::http::Slot`]). Both count against one capacity of [`MAX_SETTINGS`] actors and runs.
+#[derive(Default)]
+struct Entries {
+    settings: BTreeMap<Key, Settings>,
+    http: BTreeMap<Key, HttpEntry>,
+}
+
+/// One HTTP claim's state, with the last call that used it.
+struct HttpEntry {
+    touched: Instant,
+    slot: Arc<crate::http::Slot>,
+}
+
+impl Entries {
+    /// The actors and runs held: settings, HTTP state, or both.
+    fn count(&self) -> usize {
+        self.settings.len()
+            + self
+                .http
+                .keys()
+                .filter(|k| !self.settings.contains_key(*k))
+                .count()
+    }
+
+    fn holds(&self, key: &Key) -> bool {
+        self.settings.contains_key(key) || self.http.contains_key(key)
+    }
 }
 
 impl Default for Registry {
@@ -160,26 +190,66 @@ impl Registry {
     pub fn with_clock(clock: Clock) -> Registry {
         Registry {
             clock,
-            entries: Mutex::new(BTreeMap::new()),
+            entries: Mutex::new(Entries::default()),
         }
     }
 
-    /// The entries, with every expired one purged, and the time now.
-    fn live(&self) -> (MutexGuard<'_, BTreeMap<Key, Settings>>, Instant) {
+    /// The entries, with every expired one purged, and the time now. An HTTP claim's state past
+    /// its idle time stays while a call holds it or its lease owner holds a live lease; it is then
+    /// reset ([`crate::http::Slot::expire`]), so only the owner outlives the settings.
+    fn live(&self) -> (MutexGuard<'_, Entries>, Instant) {
         let now = (self.clock)();
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-        entries.retain(|_, s| now.saturating_duration_since(s.touched) < SETTINGS_IDLE);
+        let idle = |touched: Instant| now.saturating_duration_since(touched) >= SETTINGS_IDLE;
+        entries.settings.retain(|_, s| !idle(s.touched));
+        entries
+            .http
+            .retain(|_, h| !idle(h.touched) || h.slot.expire());
         (entries, now)
     }
 
     /// The settings saved for `key`, unless they expired.
     pub fn get(&self, key: &Key) -> Option<Settings> {
-        self.live().0.get(key).cloned()
+        self.live().0.settings.get(key).cloned()
     }
 
-    /// The number of live entries.
+    /// The number of live settings entries.
     pub fn len(&self) -> usize {
-        self.live().0.len()
+        self.live().0.settings.len()
+    }
+
+    /// The number of HTTP claims whose state is held.
+    pub fn http_len(&self) -> usize {
+        self.live().0.http.len()
+    }
+
+    /// The state of HTTP claim `key`, made by `make` when it has none, and touched: a call uses
+    /// it now. A new key takes the capacity its settings would take, under the same refusal.
+    pub(crate) fn http_slot(
+        &self,
+        key: &Key,
+        make: impl FnOnce() -> crate::http::Slot,
+    ) -> Result<Arc<crate::http::Slot>, RdyError> {
+        let (mut entries, now) = self.live();
+        if let Some(h) = entries.http.get_mut(key) {
+            h.touched = now;
+            return Ok(Arc::clone(&h.slot));
+        }
+        room(&mut entries, key)?;
+        let slot = Arc::new(make());
+        entries.http.insert(
+            key.clone(),
+            HttpEntry {
+                touched: now,
+                slot: Arc::clone(&slot),
+            },
+        );
+        Ok(slot)
+    }
+
+    /// The held state of HTTP claim `key`, if any. It touches nothing.
+    pub(crate) fn http_slot_of(&self, key: &Key) -> Option<Arc<crate::http::Slot>> {
+        self.live().0.http.get(key).map(|h| Arc::clone(&h.slot))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -189,7 +259,7 @@ impl Registry {
     /// Refreshes the settings of `key`, if they live: a call used them now.
     pub fn touch(&self, key: &Key) {
         let (mut entries, now) = self.live();
-        if let Some(s) = entries.get_mut(key) {
+        if let Some(s) = entries.settings.get_mut(key) {
             s.touched = now;
         }
     }
@@ -212,6 +282,7 @@ impl Registry {
     ) -> Result<(), RdyError> {
         let (mut entries, now) = self.live();
         room(&mut entries, key)?;
+        let entries = &mut entries.settings;
         let dedupe = dedupe
             .or_else(|| entries.get(key).map(|s| s.dedupe))
             .unwrap_or(false);
@@ -245,7 +316,7 @@ impl Registry {
         view: impl FnOnce() -> String,
     ) -> Result<(), RdyError> {
         let (mut entries, now) = self.live();
-        if let Some(s) = entries.get_mut(key) {
+        if let Some(s) = entries.settings.get_mut(key) {
             if s.kungfu_only() {
                 s.view = Some(view());
                 s.role = Some(Role::Writer);
@@ -255,7 +326,7 @@ impl Registry {
             return Ok(());
         }
         room(&mut entries, key)?;
-        entries.insert(
+        entries.settings.insert(
             key.clone(),
             Settings {
                 view: Some(view()),
@@ -277,12 +348,12 @@ impl Registry {
     /// the warning then repeats, and it never refuses.
     pub fn take_build_warning(&self, key: &Key) -> bool {
         let (mut entries, now) = self.live();
-        if let Some(s) = entries.get_mut(key) {
+        if let Some(s) = entries.settings.get_mut(key) {
             s.touched = now;
             return !std::mem::replace(&mut s.daemon_build_warned, true);
         }
         if room(&mut entries, key).is_ok() {
-            entries.insert(
+            entries.settings.insert(
                 key.clone(),
                 Settings {
                     view: None,
@@ -301,7 +372,11 @@ impl Registry {
 
     /// Whether a complete instructions reply went out for `key` while its settings live.
     pub fn instructions_read(&self, key: &Key) -> bool {
-        self.live().0.get(key).is_some_and(|s| s.instructions_read)
+        self.live()
+            .0
+            .settings
+            .get(key)
+            .is_some_and(|s| s.instructions_read)
     }
 
     /// Records that a complete instructions reply went out for `key`, with no role or view when
@@ -309,13 +384,13 @@ impl Registry {
     /// reminder then stays, and the reply is never refused for it.
     pub fn mark_instructions_read(&self, key: &Key) {
         let (mut entries, now) = self.live();
-        if let Some(s) = entries.get_mut(key) {
+        if let Some(s) = entries.settings.get_mut(key) {
             s.touched = now;
             s.instructions_read = true;
             return;
         }
         if room(&mut entries, key).is_ok() {
-            entries.insert(
+            entries.settings.insert(
                 key.clone(),
                 Settings {
                     view: None,
@@ -333,13 +408,14 @@ impl Registry {
 
     /// The entries as they stand, with no purge: the kungfu check runs after the call's claim, which
     /// purged them and refreshed this key's, so it adds no scan of the registry.
-    fn entries(&self) -> MutexGuard<'_, BTreeMap<Key, Settings>> {
+    fn entries(&self) -> MutexGuard<'_, Entries> {
         self.entries.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// What the kungfu check reads for `key`.
     pub fn kungfu_marks(&self, key: &Key) -> KungfuMarks {
         self.entries()
+            .settings
             .get(key)
             .map_or_else(Default::default, |s| KungfuMarks {
                 received: s.kungfu_received,
@@ -350,7 +426,7 @@ impl Registry {
 
     /// Clears `bit` from `key`'s warned set: a correct value rearms that owner. It makes no entry.
     pub fn clear_kungfu_warned(&self, key: &Key, bit: u16) {
-        if let Some(s) = self.entries().get_mut(key) {
+        if let Some(s) = self.entries().settings.get_mut(key) {
             s.kungfu_warned &= !bit;
         }
     }
@@ -362,13 +438,13 @@ impl Registry {
     pub fn mark_kungfu_warned(&self, key: &Key, bit: u16) -> bool {
         let now = (self.clock)();
         let mut entries = self.entries();
-        if let Some(s) = entries.get_mut(key) {
+        if let Some(s) = entries.settings.get_mut(key) {
             let fresh = s.kungfu_warned & bit == 0;
             s.kungfu_warned |= bit;
             return fresh;
         }
-        if entries.len() < MAX_SETTINGS {
-            entries.insert(
+        if entries.holds(key) || entries.count() < MAX_SETTINGS {
+            entries.settings.insert(
                 key.clone(),
                 Settings {
                     view: None,
@@ -388,25 +464,28 @@ impl Registry {
     /// Adds `bits` to `key`'s received set and clears them from its warned set. An actor and run
     /// with no entry have no room for one: the bits are skipped.
     pub fn mark_kungfu_received(&self, key: &Key, bits: u16) {
-        if let Some(s) = self.entries().get_mut(key) {
+        if let Some(s) = self.entries().settings.get_mut(key) {
             s.kungfu_received |= bits;
             s.kungfu_warned &= !bits;
         }
     }
 }
 
-/// Room for `key`: it has an entry, or the registry has a free slot, or the first kungfu-only entry
-/// in map order gives way. Else the registry's own refusal.
-fn room(entries: &mut BTreeMap<Key, Settings>, key: &Key) -> Result<(), RdyError> {
-    if entries.contains_key(key) || entries.len() < MAX_SETTINGS {
+/// Room for `key`: it holds settings or HTTP state, or the registry has a free slot, or the first
+/// kungfu-only entry in map order gives way. An entry whose actor and run hold HTTP state never
+/// gives way: removing it frees no slot, and HTTP state (a live lease owner too) is never evicted
+/// to admit another actor and run. Else the registry's own refusal.
+fn room(entries: &mut Entries, key: &Key) -> Result<(), RdyError> {
+    if entries.holds(key) || entries.count() < MAX_SETTINGS {
         return Ok(());
     }
     let reclaim = entries
+        .settings
         .iter()
-        .find(|(k, s)| *k != key && s.kungfu_only())
+        .find(|(k, s)| *k != key && s.kungfu_only() && !entries.http.contains_key(*k))
         .map(|(k, _)| k.clone());
     if let Some(k) = reclaim {
-        entries.remove(&k);
+        entries.settings.remove(&k);
         return Ok(());
     }
     Err(RdyError::new(
@@ -422,6 +501,16 @@ pub fn mismatch() -> RdyError {
         E_BAD_INPUT,
         "this stdio connection is bound to another actor or run",
         "use the connection's actor and run, or open another stdio connection",
+    )
+}
+
+/// The refusal of an HTTP `rdy_session` whose arguments and `_meta` claim name different actors
+/// or runs. An HTTP request binds no connection, so the stdio wording does not apply.
+pub fn http_mismatch() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "rdy_session and _meta name different actors or runs",
+        "use the same actor and run in rdy_session and _meta",
     )
 }
 
@@ -616,8 +705,13 @@ pub fn saved_role(st: &McpState, s: &Session) -> Role {
 
 /// `rdy_session`'s claim check, once its session is valid: the actor and run of a `_meta` claim
 /// on the same call, and the connection's claim, are those of `key`.
+/// Over HTTP the refusal is [`http_mismatch`].
 pub fn check_session_claim(st: &McpState, key: &Key) -> Result<(), RdyError> {
-    check_claim(st.bound.as_ref(), st.claim.as_ref(), key)
+    let checked = check_claim(st.bound.as_ref(), st.claim.as_ref(), key);
+    if st.http {
+        return checked.map_err(|_| http_mismatch());
+    }
+    checked
 }
 
 /// [`check_session_claim`] over a connection's `bound` claim and a call's `stated` one.

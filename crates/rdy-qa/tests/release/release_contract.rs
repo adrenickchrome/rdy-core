@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/repo-links-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4a-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -97,10 +97,12 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baseline (`release-1.json`, frozen) with the
-/// additions since. A capture writes this file, never the baseline.
+/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json` and
+/// `mcp-http-v1.json`, all frozen) with the additions since. A capture writes this file, never a
+/// baseline. It starts as a byte copy of `mcp-http-v1.json`, whose bytes
+/// `mht8_http_contract_capture_is_complete` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/repo-links-v1.json")
+    qa_root().join("fixtures/contracts/m4a-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -1741,6 +1743,12 @@ fn cli_probe(
     let mut a = vec!["--json"];
     a.extend_from_slice(args);
     let (code, out, err) = rdy_in(dir, env, &a);
+    note_cli(seen, label, code, &out, &err)
+}
+
+/// One finished CLI call, noted under `label`: its exit value, and the shape of the JSON body of
+/// stdout (else of stderr); the parsed body, or null.
+fn note_cli(seen: &mut Seen, label: &str, code: i32, out: &str, err: &str) -> Value {
     seen.add_to_set(label, "exits", json!(code));
     let (slot, body) = if out.trim().is_empty() {
         ("stderr", err.trim())
@@ -2185,6 +2193,288 @@ fn cli_links_probes(seen: &mut Seen, env: &[(String, String)]) {
     }
 }
 
+/// m4a3: the world of the `rdy hook` probes (C29): a project with a landed decision and the
+/// linked code repo `app`, whose local checkout anchors `src/anchored.rs` to the decision and
+/// leaves `src/plain.rs` unanchored. Every run is direct, so no daemon holds the store, and
+/// reads no Git configuration of the machine.
+struct HookWorld {
+    w: rdy_qa::instructions::World,
+    project: rdy_qa::instructions::Dir,
+    /// The canonical root of the project.
+    root: PathBuf,
+    app: rdy_qa::git_repo::GitRepo,
+    /// The empty global Git configuration.
+    global: PathBuf,
+    decision: String,
+    tmp: tempfile::TempDir,
+}
+
+impl HookWorld {
+    fn new() -> HookWorld {
+        let w = rdy_qa::instructions::World::new();
+        let project = w.project();
+        let root = std::fs::canonicalize(project.path()).expect("the project root");
+        let decision = hook_decision(&root);
+        let tmp = rdy_qa::daemon::short_tempdir();
+        let base = std::fs::canonicalize(tmp.path()).expect("the temporary root");
+        let global = base.join("no-global");
+        std::fs::write(&global, "").expect("the empty global configuration");
+        let app = rdy_qa::git_repo::GitRepo::at(&base.join("app"));
+        app.write("src/plain.rs", "fn plain() {}\n");
+        app.commit("feat: plain");
+        app.write("src/anchored.rs", "fn anchored() {}\n");
+        app.commit(&format!("feat: anchored\n\nImplements: {decision}"));
+        let checkout = app.path().to_string_lossy().into_owned();
+        rdy_qa::git_repo::link_repos(&root, &[("app", &checkout)]);
+        HookWorld {
+            w,
+            project,
+            root,
+            app,
+            global,
+            decision,
+            tmp,
+        }
+    }
+
+    /// `rdy --project <project> --json <args>` in `cwd` with `stdin`: its exit value, stdout and
+    /// stderr.
+    fn run(&self, cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let mut cmd = self.w.command(self.project.path(), &all);
+        cmd.current_dir(cwd)
+            .env("RDY_NO_DAEMON", "1")
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &self.global);
+        let o = rdy_qa::fixtures::output_within_stdin(&mut cmd, stdin, Duration::from_secs(120))
+            .expect("run rdy");
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    }
+
+    /// [`HookWorld::run`], noted under `label`.
+    fn probe(
+        &self,
+        seen: &mut Seen,
+        cwd: &Path,
+        label: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Value {
+        let (code, out, err) = self.run(cwd, args, stdin);
+        note_cli(seen, label, code, &out, &err)
+    }
+
+    /// A file named `name` in the temporary root holding `text`; its path.
+    fn file(&self, name: &str, text: &str) -> PathBuf {
+        let p = std::fs::canonicalize(self.tmp.path())
+            .expect("the temporary root")
+            .join(name);
+        std::fs::write(&p, text).expect("write the file");
+        p
+    }
+}
+
+/// Lands a doc `spec` with one section holding one decision in the project at `dir`; returns
+/// the decision's id.
+fn hook_decision(dir: &Path) -> String {
+    use rdy_qa::fixtures::{land, write, writer};
+    let mut r = rdy_engine::Rdy::open(dir).expect("open the project");
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+        ]),
+    )
+    .expect("seed the doc");
+    let d = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: w.created["$s"].clone(),
+                statement: "Anchored code cites its decision".into(),
+                ..Default::default()
+            },
+        )
+        .expect("decide");
+    let decision = d.created["$decision"].clone();
+    land(&mut r, "work").expect("land the seed");
+    r.close().expect("close");
+    decision
+}
+
+/// m4a3: `rdy hook` and setup's hook options over the command line, each with populated
+/// warnings and skipped files: checks that warn, pass and cannot finish, a refused form, installs
+/// and removes that write, keep, remove and skip a file, the two host entry points, and setup
+/// with both options and with a repo that is not linked.
+fn cli_hook_probes(seen: &mut Seen) {
+    let h = HookWorld::new();
+    let root = h.root.clone();
+    let app = h.app.path().to_path_buf();
+    let checkout = app.to_string_lossy().into_owned();
+    let head = h.app.run(&["rev-parse", "HEAD"]);
+    let (code, _, err) = h.run(&root, &["checkout"], None);
+    assert_eq!(code, 0, "rdy checkout: {err}");
+    let doc = root.join("spec.yaml");
+    assert!(doc.is_file(), "the checkout wrote the doc");
+    let doc_text = doc.to_string_lossy().into_owned();
+
+    // checks: a warned code check, a cited one, one at a HEAD the checkout no longer has, a
+    // warned edit check, and a refused form
+    let message = "feat: change\n";
+    let cited = format!("feat: change\n\nImplements: {}\n", h.decision);
+    let inputs = [
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": head,
+                   "paths": ["src/anchored.rs", "src/plain.rs"], "message": message}),
+        ),
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": head,
+                   "paths": ["src/anchored.rs"], "message": cited}),
+        ),
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": "0".repeat(40),
+                   "paths": ["src/anchored.rs"], "message": message}),
+        ),
+        ("edit", json!({"paths": [doc_text]})),
+        ("edit", json!({"pathz": [doc_text]})),
+    ];
+    for (i, (kind, input)) in inputs.iter().enumerate() {
+        let file = h.file(&format!("check {i}.json"), &input.to_string());
+        let file = file.to_string_lossy().into_owned();
+        h.probe(
+            seen,
+            &root,
+            "hook check",
+            &["hook", "check", "--kind", kind, "--input", &file],
+            None,
+        );
+    }
+
+    // installs and removes: written, kept and removed, then skipped beside a person's own hook
+    // and a settings file that is not JSON
+    let code_hook = ["--kind", "code", "--repo", "app"];
+    let edit_hook = ["--kind", "edit", "--harness", "claude-code"];
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "install", "remove"] {
+            let mut args = vec!["hook", op];
+            args.extend_from_slice(target);
+            h.probe(seen, &root, &format!("hook {op}"), &args, None);
+        }
+    }
+    let own = app.join(".git").join("hooks").join("commit-msg");
+    std::fs::create_dir_all(own.parent().unwrap()).expect("the hooks folder");
+    std::fs::write(&own, "#!/bin/sh\nexit 0\n").expect("the person's own hook");
+    let settings = root.join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("the settings folder");
+    std::fs::write(&settings, "not json").expect("a settings file that is not JSON");
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "remove"] {
+            let mut args = vec!["hook", op];
+            args.extend_from_slice(target);
+            let v = h.probe(seen, &root, &format!("hook {op}"), &args, None);
+            assert_eq!(v["warnings"][0]["code"], "W_HOOK_CONFLICT", "{v}");
+        }
+    }
+    std::fs::remove_file(&own).expect("drop the person's hook");
+    std::fs::remove_file(&settings).expect("drop the settings file");
+
+    // the code host: a staged anchored change without and with a citation, and a message file
+    // it cannot read
+    h.app.write("src/anchored.rs", "fn anchored() { 1; }\n");
+    h.app.run(&["add", "src/anchored.rs"]);
+    for (name, text) in [
+        ("plain message", message),
+        ("cited message", cited.as_str()),
+    ] {
+        let file = h.file(name, text);
+        let file = file.to_string_lossy().into_owned();
+        h.probe(
+            seen,
+            &app,
+            "hook run-code",
+            &["hook", "run-code", "--repo", "app", "--message-file", &file],
+            None,
+        );
+    }
+    let missing = h.tmp.path().join("no such message");
+    let missing = missing.to_string_lossy().into_owned();
+    h.probe(
+        seen,
+        &app,
+        "hook run-code",
+        &[
+            "hook",
+            "run-code",
+            "--repo",
+            "app",
+            "--message-file",
+            &missing,
+        ],
+        None,
+    );
+    h.app.run(&["reset", "-q", "--hard"]);
+
+    // the edit host: an edit of the checked-out doc, and an event that is no edit result
+    let events = [
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Edit",
+               "tool_input": {"file_path": doc_text, "old_string": "a", "new_string": "b"},
+               "tool_response": {"filePath": doc_text, "success": true}}),
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+               "tool_input": {"command": "true"}}),
+    ];
+    for event in &events {
+        let v = h.probe(
+            seen,
+            &root,
+            "hook run-edit",
+            &["hook", "run-edit", "--harness", "claude-code"],
+            Some(event.to_string().as_bytes()),
+        );
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"].is_string(),
+            "{v}"
+        );
+    }
+
+    // setup: both hooks installed after the stub, then a code hook for a repo that is not linked
+    let v = h.probe(
+        seen,
+        &root,
+        "setup hooks",
+        &["setup", "--code-hook", "app", "--edit-hook", "claude-code"],
+        None,
+    );
+    assert_eq!(v["hooks"][1]["files"][0]["result"], "written", "{v}");
+    let v = h.probe(
+        seen,
+        &root,
+        "setup hooks",
+        &["setup", "--code-hook", "nope"],
+        None,
+    );
+    assert_eq!(
+        v["hooks"][0]["warnings"][0]["code"], "W_HOOK_UNAVAILABLE",
+        "{v}"
+    );
+}
+
 /// The facts of the release binary: exit values and the merged JSON field sets of read, write,
 /// answer and review commands run against the seeded project.
 fn cli_runtime() -> Value {
@@ -2368,6 +2658,7 @@ fn cli_runtime() -> Value {
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
     cli_links_probes(&mut seen, &env);
+    cli_hook_probes(&mut seen);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -3896,6 +4187,126 @@ fn mcp_links_probes(seen: &mut Seen) {
     }
 }
 
+/// m4a4: the `rdy_hook` tool over a daemon-backed stdio session, each reply with populated
+/// warnings and files: checks that warn, pass and cannot finish, a refused form, installs and
+/// removes that write, keep, remove and skip a file, and a reader that may check and not install.
+fn mcp_hook_probes(seen: &mut Seen) {
+    let h = HookWorld::new();
+    let hooks = h.app.path().join(".git").join("hooks");
+    h.app
+        .run(&["config", "core.hooksPath", &hooks.to_string_lossy()]);
+    let root = h.root.clone();
+    let app = h.app.path().to_path_buf();
+    let checkout = app.to_string_lossy().into_owned();
+    let head = h.app.run(&["rev-parse", "HEAD"]);
+    let (code, _, err) = h.run(&root, &["checkout"], None);
+    assert_eq!(code, 0, "rdy checkout: {err}");
+    let doc = root.join("spec.yaml");
+    assert!(doc.is_file(), "the checkout wrote the doc");
+    let doc_text = doc.to_string_lossy().into_owned();
+    // the checkout command ran direct and left no daemon; the probes start their own
+    h.w.stop(h.project.path());
+
+    let session =
+        |who: &str, role: &str| json!({"actor": format!("agent:{who}"), "run": who, "role": role});
+    let mut r = h.w.mcp(h.project.path());
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_session",
+        "rdy_session",
+        session("hook-r", "reader"),
+    );
+    let mut w = h.w.mcp(h.project.path());
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_session",
+        "rdy_session",
+        session("hook-w", "writer"),
+    );
+
+    // checks: a warned code check, a cited one, one at a HEAD the checkout no longer has, a
+    // warned edit check, a refused form, and a reader's check
+    let message = "feat: change\n";
+    let cited = format!("feat: change\n\nImplements: {}\n", h.decision);
+    let code_check = |head: &str, paths: Value, message: &str| {
+        json!({"op": "check", "kind": "code", "repo": "app", "checkout": checkout,
+               "head": head, "paths": paths, "message": message})
+    };
+    let zero = "0".repeat(40);
+    for args in [
+        code_check(&head, json!(["src/anchored.rs", "src/plain.rs"]), message),
+        code_check(&head, json!(["src/anchored.rs"]), &cited),
+        code_check(&zero, json!(["src/anchored.rs"]), message),
+        json!({"op": "check", "kind": "edit", "paths": [doc_text]}),
+        json!({"op": "check", "kind": "edit", "pathz": [doc_text]}),
+    ] {
+        mcp_probe(seen, &mut w, "rdy_hook", "rdy_hook check", args);
+    }
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_hook",
+        "rdy_hook check",
+        json!({"op": "check", "kind": "edit", "paths": [doc_text]}),
+    );
+
+    // installs and removes: written, kept and removed, then skipped beside a person's own hook
+    // and a settings file that is not JSON; a reader's install is refused
+    let code_hook = json!({"kind": "code", "repo": "app"});
+    let edit_hook = json!({"kind": "edit", "harness": "claude-code"});
+    let with_op = |op: &str, target: &Value| {
+        let mut v = target.clone();
+        v["op"] = json!(op);
+        v
+    };
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "install", "remove"] {
+            mcp_probe(
+                seen,
+                &mut w,
+                "rdy_hook",
+                &format!("rdy_hook {op}"),
+                with_op(op, target),
+            );
+        }
+    }
+    mcp_probe(
+        seen,
+        &mut r,
+        "rdy_hook",
+        "rdy_hook install",
+        with_op("install", &code_hook),
+    );
+    let own = hooks.join("commit-msg");
+    std::fs::create_dir_all(&hooks).expect("the hooks folder");
+    std::fs::write(&own, "#!/bin/sh\nexit 0\n").expect("the person's own hook");
+    let settings = root.join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("the settings folder");
+    std::fs::write(&settings, "not json").expect("a settings file that is not JSON");
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "remove"] {
+            let reply = mcp_probe(
+                seen,
+                &mut w,
+                "rdy_hook",
+                &format!("rdy_hook {op}"),
+                with_op(op, target),
+            );
+            assert_eq!(
+                ok_of(&reply)["warnings"][0]["code"],
+                "W_HOOK_CONFLICT",
+                "{reply:?}"
+            );
+        }
+    }
+    std::fs::remove_file(&own).expect("drop the person's hook");
+    std::fs::remove_file(&settings).expect("drop the settings file");
+    drop((r, w));
+    h.w.stop(h.project.path());
+}
+
 fn mcp_row() -> Value {
     use rdy_qa::mcp::Reply;
     let rich = rich_project();
@@ -3903,6 +4314,7 @@ fn mcp_row() -> Value {
     mcp_probes(&rich, &mut seen);
     mcp_publication_probes(&mut seen);
     mcp_links_probes(&mut seen);
+    mcp_hook_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -4822,6 +5234,178 @@ fn ok14_release_contract_matches_all_surfaces() {
             "row {name} changed: a public contract change needs an upgrade or deprecation path (D-TXFHR)"
         );
     }
+}
+
+/// mht1: the successor fixture holds the two released baselines unchanged. `release-1.json` and
+/// `repo-links-v1.json` keep their bytes, and `mcp-http-v1.json` differs from `repo-links-v1.json`
+/// in exactly the `serve.mcp_http` rows: its key row, its listing line and its probe rows. mht7
+/// adds two more members to the allowance, each pinned by [`mht7_public_contract_additions_are_explicit`]:
+/// `cli.tree` (the flag of `rdy mcp`) and `errors_warnings.error_rows` (the `E_SITE` row).
+#[test]
+fn mht1_contract_successor_keeps_released_baselines() {
+    let dir = qa_root().join("fixtures/contracts");
+    let sha = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).expect("a fixture");
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(
+        sha("release-1.json"),
+        "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6"
+    );
+    assert_eq!(
+        sha("repo-links-v1.json"),
+        "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27"
+    );
+    let was: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
+    // the frozen MCP over HTTP fixture by name: the current fixture is its successor (m4a1)
+    let now: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("mcp-http-v1.json")).unwrap()).unwrap();
+    // the successor equals the baseline but for the three config members
+    let (mut was_rest, mut now_rest) = (was.clone(), now.clone());
+    for doc in [&mut was_rest, &mut now_rest] {
+        doc["config"]["keys"] = Value::Null;
+        doc["config"]["listing"] = Value::Null;
+        doc["cli"]["runtime"]["probes"]["config"] = Value::Null;
+        // mht7: the command tree and the error rows, pinned by their own test
+        doc["cli"]["tree"] = Value::Null;
+        doc["errors_warnings"]["error_rows"] = Value::Null;
+    }
+    assert_eq!(
+        was_rest, now_rest,
+        "only the serve.mcp_http rows and mht7's rows may move"
+    );
+    // the key row: one more, right after serve.ui
+    let keys = |v: &Value| -> Vec<Value> { v["config"]["keys"].as_array().expect("keys").clone() };
+    let (old_keys, new_keys) = (keys(&was), keys(&now));
+    assert_eq!(new_keys.len(), old_keys.len() + 1);
+    let at = new_keys
+        .iter()
+        .position(|k| k["key"] == "serve.mcp_http")
+        .expect("the new key row");
+    assert_eq!(new_keys[at - 1]["key"], "serve.ui");
+    assert_eq!(
+        new_keys[at],
+        json!({"default": "false", "key": "serve.mcp_http", "levels": ["local", "user"], "type": "Bool"})
+    );
+    let mut without = new_keys.clone();
+    without.remove(at);
+    assert_eq!(without, old_keys, "every released key row keeps its bytes");
+    // the listing: one more line, in the text of both captures
+    for capture in ["configured", "defaults"] {
+        let listing = now["config"]["listing"][capture]["text"]
+            .as_str()
+            .expect("listing text");
+        assert!(
+            listing.contains("serve.ui = true  # set at: local, user\nserve.mcp_http = false  # set at: local, user\n"),
+            "{capture}: {listing}"
+        );
+    }
+    // the baseline still reads
+    let released = read_released();
+    assert!(released["config"]["keys"].is_array());
+}
+
+/// mht7: what the successor fixture adds to `repo-links-v1.json` for the connection aid and the
+/// discovery fields, and nothing else. The command tree gains one flag on `rdy mcp` and its
+/// argument group. The `E_SITE` row of the error table names the two new cases of MCP over HTTP.
+/// The MCP row is the baseline's: no tool was added, so the tool inventory and every captured
+/// result field keep their bytes (`mcp_url` and `mcp_http` appear only through a daemon, which no
+/// probe uses; `rdy mcp` and `rdy site` are in `CLI_NOT_CAPTURED`).
+#[test]
+fn mht7_public_contract_additions_are_explicit() {
+    let dir = qa_root().join("fixtures/contracts");
+    let was: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("repo-links-v1.json")).unwrap()).unwrap();
+    // the frozen MCP over HTTP fixture by name: the current fixture is its successor (m4a1)
+    let now: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("mcp-http-v1.json")).unwrap()).unwrap();
+
+    // the command tree: `rdy mcp` has one more flag, first, and its argument group
+    let mcp_of = |doc: &Value| -> Value {
+        doc["cli"]["tree"]["subcommands"]
+            .as_array()
+            .expect("subcommands")
+            .iter()
+            .find(|c| c["name"] == "mcp")
+            .expect("the mcp command")
+            .clone()
+    };
+    let (old_mcp, new_mcp) = (mcp_of(&was), mcp_of(&now));
+    assert!(old_mcp["groups"].is_null(), "{old_mcp}");
+    assert_eq!(
+        new_mcp["groups"],
+        json!([{"args": ["http_config"], "id": "McpArgs", "multiple": true, "required": false}])
+    );
+    let new_args = new_mcp["args"].as_array().expect("args");
+    assert_eq!(
+        new_args.len(),
+        old_mcp["args"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(
+        new_args[0],
+        json!({
+            "action": "set_true", "defaults": ["false"], "id": "http_config",
+            "long": "http-config", "num_args": "0", "value_names": ["HTTP_CONFIG"]
+        })
+    );
+    assert_eq!(&new_args[1..], &old_mcp["args"].as_array().unwrap()[..]);
+    // every other command keeps its bytes
+    let (mut was_tree, mut now_tree) = (was["cli"]["tree"].clone(), now["cli"]["tree"].clone());
+    for tree in [&mut was_tree, &mut now_tree] {
+        let subs = tree["subcommands"].as_array_mut().unwrap();
+        subs.retain(|c| c["name"] != "mcp");
+    }
+    assert_eq!(
+        was_tree, now_tree,
+        "only rdy mcp changed in the command tree"
+    );
+
+    // the error table: the E_SITE row, and no other row
+    let rows = |doc: &Value| -> Vec<Value> {
+        doc["errors_warnings"]["error_rows"]
+            .as_array()
+            .expect("error rows")
+            .clone()
+    };
+    let (old_rows, new_rows) = (rows(&was), rows(&now));
+    assert_eq!(old_rows.len(), new_rows.len(), "no code was added");
+    let moved: Vec<(&Value, &Value)> = old_rows
+        .iter()
+        .zip(&new_rows)
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].0[0], "E_SITE");
+    assert_eq!(
+        moved[0].1,
+        &json!([
+            "E_SITE",
+            "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping; or MCP over HTTP is off or has no valid token file",
+            "follow the error's fix"
+        ])
+    );
+
+    // the MCP row, the runtime row but for the config probes, and the inventory keep their bytes
+    assert_eq!(
+        now["mcp"], was["mcp"],
+        "no tool and no captured reply field moved"
+    );
+    let (mut was_rt, mut now_rt) = (was["cli"]["runtime"].clone(), now["cli"]["runtime"].clone());
+    for rt in [&mut was_rt, &mut now_rt] {
+        rt["probes"]["config"] = Value::Null;
+    }
+    assert_eq!(was_rt, now_rt);
+    assert_eq!(
+        now["errors_warnings"]["codes"], was["errors_warnings"]["codes"],
+        "the error and warning codes are the baseline's"
+    );
+    // a baseline's contract still reads as a released one
+    let released = read_released();
+    assert!(released["errors_warnings"]["error_rows"].is_array());
 }
 
 /// Every member typed by hand is listed in [`DESCRIPTIVE`], and each listed member is in the
@@ -5809,7 +6393,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// ain4/ain5: the unknown load refusal states no issue rows. agi6: the instruction probes run
 /// with a home of their own and a project with no instruction set, so every row and menu entry
 /// is built in, and those store no reason and name no selector; setup in a clean home warns of
-/// nothing.
+/// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
+/// empty; the warnings of its hooks are in `hooks`.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -5897,6 +6482,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/rule remove/stdout/landing/consequences",
     "cli/rule remove/stdout/landing/signatures",
     "cli/rule remove/stdout/landing/warnings",
+    "cli/setup hooks/stdout/warnings",
     "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
@@ -5956,6 +6542,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/fields",
     "mcp/rdy_diff/ok/entries[]/links",
     "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_hook check/refused/issues",
+    "mcp/rdy_hook install/refused/issues",
     "mcp/rdy_import reader/refused/issues",
     "mcp/rdy_import unknown key/refused/issues",
     "mcp/rdy_import/ok/consequences",
@@ -7720,4 +8308,335 @@ fn relc5_contract_captures_complete_config_listing() {
             );
         }
     }
+}
+
+/// m4a5: the members of `m4a-v1.json` that differ from its predecessor `mcp-http-v1.json`, as
+/// `added|removed|changed <path>`, each with the task that owns it. Closed: a member that is not
+/// here is byte-identical. The fixtures' lists of identified entries are compared by identity.
+const M4A_CHANGES: &[(&str, &str)] = &[
+    // m4a3: the `rdy hook` command family and the two setup options
+    ("added /cli/runtime/probes/hook check", "m4a3"),
+    ("added /cli/runtime/probes/hook install", "m4a3"),
+    ("added /cli/runtime/probes/hook remove", "m4a3"),
+    ("added /cli/runtime/probes/hook run-code", "m4a3"),
+    ("added /cli/runtime/probes/hook run-edit", "m4a3"),
+    ("added /cli/runtime/probes/setup hooks", "m4a3"),
+    ("added /cli/tree/subcommands/name=hook", "m4a3"),
+    (
+        "added /cli/tree/subcommands/name=setup/args/id=code_hook",
+        "m4a3",
+    ),
+    (
+        "added /cli/tree/subcommands/name=setup/args/id=edit_hook",
+        "m4a3",
+    ),
+    ("added /cli/tree/subcommands/name=setup/groups", "m4a3"),
+    // m4a1: the four warnings and the texts of the hook forms
+    ("added /errors_warnings/codes/W_HOOK_CONFLICT", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_DIRECT_EDIT", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_NO_CITATION", "m4a1"),
+    ("added /errors_warnings/codes/W_HOOK_UNAVAILABLE", "m4a1"),
+    ("added /errors_warnings/templates/HOOK_CONFLICT_FIX", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_CONFLICT_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_DIRECT_EDIT_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_DIRECT_EDIT_MESSAGE",
+        "m4a1",
+    ),
+    ("added /errors_warnings/templates/HOOK_FORM_FIX", "m4a1"),
+    ("added /errors_warnings/templates/HOOK_FORM_MESSAGE", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_HOST_ABSENT_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_HOST_ABSENT_MESSAGE",
+        "m4a1",
+    ),
+    ("added /errors_warnings/templates/HOOK_LIMIT_FIX", "m4a1"),
+    (
+        "added /errors_warnings/templates/HOOK_LIMIT_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_NO_CITATION_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_NO_CITATION_MESSAGE",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_UNAVAILABLE_FIX",
+        "m4a1",
+    ),
+    (
+        "added /errors_warnings/templates/HOOK_UNAVAILABLE_MESSAGE",
+        "m4a1",
+    ),
+    // m4a4: the tool, its results, and the rows that say which tool refuses with which code
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_CONFLICT",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_DIRECT_EDIT",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_NO_CITATION",
+        "m4a4",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=W_HOOK_UNAVAILABLE",
+        "m4a4",
+    ),
+    ("changed /mcp/refusal_error_rows", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook check", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook install", "m4a4"),
+    ("added /mcp/result_fields/rdy_hook remove", "m4a4"),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_CONFLICT",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_DIRECT_EDIT",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_NO_CITATION",
+        "m4a4",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/W_HOOK_UNAVAILABLE",
+        "m4a4",
+    ),
+    ("changed /mcp/tool_names", "m4a4"),
+    ("added /mcp/tools/rdy_hook", "m4a4"),
+];
+
+/// The sha256 of `m4a-v1.json`, frozen when M4a's last task closed its diff. A later contract
+/// change is a successor fixture (`m4bc-v1.json`), never an edit of this file.
+const M4A_V1_SHA: &str = "3974e297320209c29f2a0f84421a1ffa4513eb666328167aaa6e83a4bedae989";
+
+fn m4a5_fixture(name: &str) -> (Vec<u8>, Value) {
+    let path = qa_root().join("fixtures/contracts").join(name);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+    (bytes, value)
+}
+
+/// A list of identified entries as an object keyed by identity (`key=`, `name=`, `id=` or the
+/// first string of a row), so a change reads as the entry's own path. Other lists stay lists.
+fn m4a5_keyed(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), m4a5_keyed(x))).collect())
+        }
+        Value::Array(a) => {
+            let identity = |e: &Value| -> Option<String> {
+                for k in ["key", "name", "id"] {
+                    if let Some(s) = e.get(k).and_then(Value::as_str) {
+                        return Some(format!("{k}={s}"));
+                    }
+                }
+                e.as_array()?.first()?.as_str().map(|s| format!("row={s}"))
+            };
+            let ids: Option<Vec<String>> = a.iter().map(identity).collect();
+            match ids {
+                Some(ids)
+                    if !a.is_empty()
+                        && ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+                            == ids.len() =>
+                {
+                    let mut m = Map::new();
+                    for (id, e) in ids.into_iter().zip(a) {
+                        m.insert(id, m4a5_keyed(e));
+                    }
+                    Value::Object(m)
+                }
+                _ => Value::Array(a.iter().map(m4a5_keyed).collect()),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// Every member where `now` differs from `was`, as `added|removed|changed <path>`.
+fn m4a5_leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
+    match (was, now) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for k in keys {
+                let at = format!("{path}/{k}");
+                match (a.get(k), b.get(k)) {
+                    (None, Some(_)) => out.push(format!("added {at}")),
+                    (Some(_), None) => out.push(format!("removed {at}")),
+                    (Some(x), Some(y)) => m4a5_leaves(x, y, &at, out),
+                    (None, None) => unreachable!("the key is in one of the objects"),
+                }
+            }
+        }
+        _ if was != now => out.push(format!("changed {path}")),
+        _ => {}
+    }
+}
+
+#[test]
+fn m4a5_contract_changes_only_hook_surfaces() {
+    let (_, old) = m4a5_fixture("mcp-http-v1.json");
+    let (new_bytes, new) = m4a5_fixture("m4a-v1.json");
+
+    // every changed member is listed with its owner, and none else moved
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    let mut want: Vec<String> = M4A_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    found.sort();
+    want.sort();
+    assert_eq!(
+        found, want,
+        "every changed path of m4a-v1.json is listed with its task, and none else"
+    );
+    for (path, owner) in M4A_CHANGES {
+        assert!(
+            ["m4a1", "m4a3", "m4a4"].contains(owner),
+            "{path}: owner {owner}"
+        );
+        // each owner's surface: m4a3 the CLI, m4a1 the warning codes and texts, m4a4 the tool
+        let at = path.split_once(' ').map_or(*path, |(_, p)| p);
+        let surface = match *owner {
+            "m4a3" => at.starts_with("/cli/"),
+            "m4a1" => {
+                at.starts_with("/errors_warnings/codes/")
+                    || at.starts_with("/errors_warnings/templates/HOOK_")
+            }
+            _ => {
+                at.starts_with("/mcp/") || at.starts_with("/errors_warnings/error_rows/row=W_HOOK_")
+            }
+        };
+        assert!(surface, "{path} is not a surface of {owner}");
+    }
+    // an addition is never a removal: nothing the predecessor records is gone
+    assert!(
+        found.iter().all(|f| !f.starts_with("removed ")),
+        "{found:#?}"
+    );
+
+    // the storage and format vectors of the predecessor are untouched
+    for member in [
+        "/config",
+        "/derived_identities",
+        "/dump_load",
+        "/inventory_version",
+        "/markdown_exports",
+        "/schema_packs",
+        "/signatures",
+        "/site_urls",
+        "/store",
+        "/sync",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    assert_eq!(
+        new.pointer("/errors_warnings/envelope"),
+        old.pointer("/errors_warnings/envelope")
+    );
+    assert_eq!(
+        new["cli"]["runtime"]["probes"].as_object().unwrap().len(),
+        { old["cli"]["runtime"]["probes"].as_object().unwrap().len() + 6 }
+    );
+
+    // the warning inventory: four warnings, exactly
+    let codes = |v: &Value| -> std::collections::BTreeSet<String> {
+        v.pointer("/errors_warnings/codes")
+            .and_then(Value::as_object)
+            .expect("codes")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let added: Vec<String> = codes(&new).difference(&codes(&old)).cloned().collect();
+    assert_eq!(
+        added,
+        [
+            "W_HOOK_CONFLICT",
+            "W_HOOK_DIRECT_EDIT",
+            "W_HOOK_NO_CITATION",
+            "W_HOOK_UNAVAILABLE"
+        ]
+    );
+    assert!(codes(&old).is_subset(&codes(&new)));
+    // a template is stored as its own JSON text
+    let template = |name: &str| -> String {
+        let raw = new["errors_warnings"]["templates"][name].as_str().unwrap();
+        serde_json::from_str(raw).expect("a JSON string")
+    };
+    assert_eq!(
+        template("HOOK_NO_CITATION_MESSAGE"),
+        "This commit touches code anchored to a decision and has no Implements trailer."
+    );
+    assert_eq!(
+        template("HOOK_DIRECT_EDIT_MESSAGE"),
+        "An agent edited rdy working-copy files directly."
+    );
+    assert_eq!(
+        template("HOOK_DIRECT_EDIT_FIX"),
+        "Read and write through rdy's tools. Call rdy_instructions and load rdy:write."
+    );
+
+    // the MCP inventory: one tool added, every other tool as it was
+    let tools = |v: &Value| v["mcp"]["tools"].as_object().expect("tools").clone();
+    let (was, now) = (tools(&old), tools(&new));
+    assert_eq!(was.len(), 61);
+    assert_eq!(now.len(), 62);
+    let extra: Vec<&String> = now.keys().filter(|k| !was.contains_key(*k)).collect();
+    assert_eq!(extra, ["rdy_hook"]);
+    for (name, spec) in &was {
+        assert_eq!(&now[name], spec, "{name} moved");
+    }
+    let names = |v: &Value| -> Vec<String> {
+        v["mcp"]["tool_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut expect = names(&old);
+    expect.push("rdy_hook".to_string());
+    expect.sort();
+    let mut got = names(&new);
+    got.sort();
+    assert_eq!(got, expect);
+
+    // the generated kungfu delivery: the tool has its row in the table and its ruleset's line
+    let policy = rdy_engine::kungfu::policy("rdy_hook").expect("a kungfu row for rdy_hook");
+    assert_eq!(policy.ruleset, Some("rdy:project-ops"));
+    assert_eq!(rdy_engine::kungfu::TOOLS.len(), 62);
+    let owner = rdy_engine::kungfu::owner("project-ops").expect("the project-ops value");
+    assert!(
+        owner.suffix.contains("rdy_hook"),
+        "the ruleset's delivery line names the tool: {}",
+        owner.suffix
+    );
+
+    // frozen: a later change is a successor fixture, and the predecessors keep their bytes
+    let sha = |bytes: &[u8]| -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(sha(&new_bytes), M4A_V1_SHA, "m4a-v1.json is frozen");
+    assert_eq!(
+        sha(&m4a5_fixture("mcp-http-v1.json").0),
+        "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de"
+    );
 }

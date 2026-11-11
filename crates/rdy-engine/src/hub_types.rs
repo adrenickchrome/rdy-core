@@ -810,9 +810,9 @@ pub enum KeyState {
 
 /// The hub's key object: the twelve members of every reply that holds a key, under their wire
 /// names. `id` is the hub id (`skey_…`) that key routes take. Every member must be present; the
-/// five times may be null.
+/// five times may be null. It is decoded only from hub replies, so an unknown member is ignored
+/// (D-N8PR2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HubKey {
     pub id: String,
     pub account: String,
@@ -839,9 +839,8 @@ fn nullable<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error>
     Option::<String>::deserialize(d)
 }
 
-/// A key-binding challenge (HTTP 201).
+/// A key-binding challenge (HTTP 201). Unknown members are ignored (D-N8PR2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct KeyChallenge {
     pub id: String,
     pub account: String,
@@ -852,9 +851,9 @@ pub struct KeyChallenge {
     pub expires_at: String,
 }
 
-/// A bind reply (HTTP 201): the pending key and the link a person opens to confirm it.
+/// A bind reply (HTTP 201): the pending key and the link a person opens to confirm it. Unknown
+/// members are ignored (D-N8PR2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BindResult {
     pub key: HubKey,
     pub confirm_url: String,

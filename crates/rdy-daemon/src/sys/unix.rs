@@ -211,6 +211,14 @@ pub fn run_file_is_private(_f: &fs::File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Whether the open file `f` may hold a secret of this account, judged on its handle: a regular
+/// file that this account owns with mode exactly 0o600 (`pio::is_private_file`, and its owner,
+/// `pio::owner`).
+pub fn token_file_is_private(f: &fs::File) -> io::Result<bool> {
+    let meta = f.metadata()?;
+    Ok(rdy_store::pio::is_private_file(&meta) && owner(&meta) == own_uid())
+}
+
 /// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
 pub fn no_hard_links(e: &io::Error) -> bool {
     matches!(
@@ -1046,6 +1054,32 @@ pub fn catch_interrupt() -> io::Result<InterruptGuard> {
     }
     st.holders += 1;
     Ok(InterruptGuard { seen })
+}
+
+// 9. Local hooks
+
+/// The text a hook launcher's shell line names `path` by: its own text here. `None` for a path
+/// that is not UTF-8, which no launcher or settings file can hold as data.
+pub fn hook_sh_path(path: &Path) -> Option<String> {
+    path.to_str().map(str::to_string)
+}
+
+/// The text a harness's exec-form settings name `path` by: its own text here (see
+/// [`hook_sh_path`]).
+pub fn hook_exec_path(path: &Path) -> Option<String> {
+    path.to_str().map(str::to_string)
+}
+
+/// Makes the hook launcher `name` in the open directory `dir` runnable (mode 0o755), never
+/// through a link at `name` (`pio::set_mode_at`): Git runs `commit-msg` only when it is
+/// executable.
+pub fn make_launcher_executable(dir: &fs::File, name: &OsStr) -> io::Result<()> {
+    rdy_store::pio::set_mode_at(dir, name, 0o755)
+}
+
+/// Whether a launcher with metadata `meta` may be run by its owner.
+pub fn launcher_is_executable(meta: &fs::Metadata) -> bool {
+    meta.permissions().mode() & 0o100 != 0
 }
 
 #[cfg(test)]

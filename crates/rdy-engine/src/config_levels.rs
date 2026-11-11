@@ -358,6 +358,16 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::Bool,
         default: Some("true"),
     },
+    // serve.mcp_http (D-44NVC), its meaning:
+    // Enable MCP over HTTP on the local site listener.
+    //
+    // Default: false. User and local config only.
+    KeyRule {
+        key: "serve.mcp_http",
+        levels: PERSON,
+        ty: Ty::Bool,
+        default: Some("false"),
+    },
     KeyRule {
         key: "propose.cadence",
         levels: ANY,

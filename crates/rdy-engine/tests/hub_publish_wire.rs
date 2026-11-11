@@ -380,7 +380,6 @@ fn hpb7_discovery_follows_only_configured_origins() {
         format!(r#"{{"sync_base":"{BASE}","protocols":[]}}"#),
         format!(r#"{{"sync_base":"{BASE}","protocols":[1,1]}}"#),
         format!(r#"{{"sync_base":"{BASE}"}}"#),
-        format!(r#"{{"sync_base":"{BASE}","protocols":[1],"origins":["x"]}}"#),
         format!(r#"{{"sync_base":"{BASE}","protocols":[1],"protocols":[1]}}"#),
     ] {
         let (r, _) = served(&mut a, Reply::json(200, &reply), || {
@@ -509,8 +508,8 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
         (2_147_483_648, 1_000_000, 31_536_000, 2_147_483_648, 32_000)
     );
 
-    // Each nullable member must be present; wrong types, zero caps, upper-case hex, unknown and
-    // duplicate members are refused.
+    // Each nullable member must be present; wrong types, zero caps, upper-case hex and duplicate
+    // members are refused. Unknown members are ignored (D-N8PR2, the np2_ tests).
     let base = state_reply("[]", "null");
     let bad_states = [
         base.replace(r#""canon":null,"#, ""),
@@ -537,14 +536,6 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
             r#""profile":null"#,
             r#""profile":{"id":"PUB-0A1B2","version":"x"}"#,
         ),
-        base.replace(
-            r#""profile":null"#,
-            &format!(
-                r#""profile":{{"id":"PUB-0A1B2","version":"{}","audience":"org"}}"#,
-                h(1)
-            ),
-        ),
-        base.replace('}', r#","extra":1}"#),
         base.replace(r#""canon":null"#, r#""canon":null,"canon":null"#),
     ];
     for body in &bad_states {
@@ -921,10 +912,6 @@ fn hpb7_missing_replies_are_sorted_unique_subsets() {
             r#"{{"kind":1,"hash":"{}"}}"#,
             keys[0].hash.to_string().to_uppercase()
         )],
-        vec![format!(
-            r#"{{"kind":1,"hash":"{}","size":1}}"#,
-            keys[0].hash
-        )],
         vec![k(&keys[0]), k(&keys[1]), k(&keys[2]), k(&keys[2])],
     ] {
         let reply = format!(r#"{{"missing":[{}]}}"#, missing.join(","));
@@ -1247,7 +1234,6 @@ fn hpb7_hub_errors_keep_codes_fixes_and_hide_unknown_bodies() {
             r#"[{"severity":"error","code":"E_HUB_VALIDATION","message":"m","fix":"f"}]"#,
             "",
         ),
-        error_body("E_HUB_VALIDATION", "m", "f", "[]", r#","detail":"x""#),
         error_body(
             "E_HUB_VALIDATION",
             "m",
@@ -1429,7 +1415,6 @@ fn hpb7_feature_compatibility_is_not_an_empty_set_guard() {
         format!(r#"[{{"name":"{}","class":"compatible"}}]"#, "n".repeat(129)),
         r#"[{"name":"a","class":"readonly"}]"#.to_string(),
         r#"[{"name":"a"}]"#.to_string(),
-        r#"[{"name":"a","class":"compatible","since":1}]"#.to_string(),
         r#"["a"]"#.to_string(),
     ];
     for features in &refused {
@@ -1710,7 +1695,8 @@ fn hpb7_error_issues_stop_at_their_bound_before_allocation() {
         );
         format!("[{}]", vec![one; n].join(","))
     };
-    // 200 issues: kept, each message built once.
+    // 200 issues: kept, each message built once by the decoder and once by the whole-reply token
+    // scan (D-N8PR2), which parses the bounded body.
     let body = error_body("E_HUB_VALIDATION", "m", "f", &issues(200), "");
     let ((r, _), n) = sized_alloc::count(LEN, || {
         served(&mut s, Reply::json(422, &body), || {
@@ -1719,7 +1705,7 @@ fn hpb7_error_issues_stop_at_their_bound_before_allocation() {
     });
     let e = err(r);
     assert_eq!((e.code, e.issues.len()), ("E_HUB_VALIDATION", 201));
-    assert_eq!(n, 200, "each kept message once");
+    assert_eq!(n, 400, "each kept message once, and once in the token scan");
     // 10,000 issues, within the known reply's byte and value caps: refused, and no message past
     // the 200th is built.
     let body = error_body("E_HUB_VALIDATION", "m", "f", &issues(10_000), "");
@@ -1951,4 +1937,458 @@ fn hpb7_discovery_takes_harmless_spellings_of_an_admitted_base() {
         protocol(r);
     }
     assert_eq!(a.finish(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// np2: hub replies ignore unknown members; the token scan covers the whole reply (D-N8PR2)
+// ---------------------------------------------------------------------------------------------
+
+/// A marker an ignored member carries: no result or error may hold it.
+const NP2_MARKER: &str = "np2-marker-7Kq";
+
+/// One upload step, run against one queued reply: its status, the reply it takes, and whether a
+/// lost reply makes the step uncertain (a write) or a protocol failure (a read).
+struct Np2Step {
+    name: &'static str,
+    status: u16,
+    body: String,
+    write: bool,
+}
+
+fn np2_files() -> Vec<FileIdentity> {
+    (1..=8)
+        .map(|n| FileIdentity {
+            hash: h(n),
+            size: u64::from(n),
+        })
+        .collect()
+}
+
+fn np2_keys() -> Vec<ObjectKey> {
+    sorted(vec![key(1, 1), key(1, 2), key(3, 3)])
+}
+
+/// Every success reply the upload client decodes, and a refusal on a read and on a write.
+fn np2_steps() -> Vec<Np2Step> {
+    let keys = np2_keys();
+    let mut files: Vec<Hash> = np2_files().iter().map(|f| f.hash).collect();
+    files.sort();
+    let features = r#"[{"name":"f-one","class":"compatible"}]"#;
+    let profile = format!(r#"{{"id":"PUB-0A1B2","version":"{}"}}"#, h(8));
+    let issues = r#"[{"severity":"error","code":"E_HUB_VALIDATION","block":null,"message":"im","fix":"if"}]"#;
+    let refusal = error_body("E_HUB_VALIDATION", "hub says", "hub fix", issues, "");
+    let step = |name, status, body: String, write| Np2Step {
+        name,
+        status,
+        body,
+        write,
+    };
+    vec![
+        step(
+            "discovery",
+            200,
+            r#"{"sync_base":"/sync/v1/acme/designs","protocols":[1]}"#.into(),
+            false,
+        ),
+        step("state", 200, state_reply(features, &profile), false),
+        step(
+            "known",
+            200,
+            format!(r#"{{"missing":[{{"kind":1,"hash":"{}"}}]}}"#, keys[0].hash),
+            false,
+        ),
+        step("objects", 201, r#"{"records":3,"bytes":11}"#.into(), true),
+        step(
+            "files_known",
+            200,
+            format!(r#"{{"missing":["{}"]}}"#, files[0]),
+            false,
+        ),
+        step(
+            "files_put",
+            201,
+            format!(r#"{{"hash":"{}","size":4}}"#, h(2)),
+            true,
+        ),
+        step("publish", 201, CANDIDATE.into(), true),
+        step("refusal_read", 422, refusal.clone(), false),
+        step("refusal_write", 422, refusal, true),
+    ]
+}
+
+/// Runs `step` with `body` queued: the result's Debug text, or the error.
+fn np2_run(s: &mut Server, hub: &Hub, step: &Np2Step, body: &str) -> Result<String, RdyError> {
+    let cx = hub.cx();
+    let fresh = hub.cx_with(None, Some("r7"));
+    let remote = format!("{}{REMOTE}", s.origin());
+    let reply = Reply::json(step.status, body);
+    let m = manifest();
+    let rec = record(Some(profile(h(8))), &m);
+    let dbg = |r: Result<String, RdyError>| r;
+    let (r, _) = served(s, reply, || match step.name {
+        "discovery" => dbg(hub
+            .wire
+            .discovery(&fresh, &remote)
+            .map(|v| format!("{v:?}"))),
+        "state" | "refusal_read" => dbg(hub
+            .wire
+            .state(&cx, &state_request())
+            .map(|v| format!("{v:?}"))),
+        "known" => dbg(hub
+            .wire
+            .known(&cx, PUSH, &np2_keys())
+            .map(|v| format!("{v:?}"))),
+        "objects" => {
+            let mut batch = Cursor::new(b"batch-bytes".to_vec());
+            dbg(hub
+                .wire
+                .put_objects(&cx, PUSH, &mut batch, 11)
+                .map(|v| format!("{v:?}")))
+        }
+        "files_known" => dbg(hub
+            .wire
+            .known_files(&cx, PUSH, &np2_files())
+            .map(|v| format!("{v:?}"))),
+        "files_put" => {
+            let file = FileIdentity {
+                hash: h(2),
+                size: 4,
+            };
+            let mut bytes = Cursor::new(b"\x89PNG".to_vec());
+            dbg(hub
+                .wire
+                .put_file(&cx, PUSH, &file, "image/png", &mut bytes)
+                .map(|v| format!("{v:?}")))
+        }
+        "publish" | "refusal_write" => dbg(hub
+            .wire
+            .publish(&cx, PUSH, SITE, &rec, &m, None)
+            .map(|v| format!("{v:?}"))),
+        other => panic!("no step {other}"),
+    });
+    r
+}
+
+/// `body` with `member` as its first top-level member.
+fn np2_with(body: &str, member: &str) -> String {
+    body.replacen('{', &format!("{{{member},"), 1)
+}
+
+/// An error's whole text: code, message, fix and every issue.
+fn np2_error_text(e: &RdyError) -> String {
+    let mut out = format!("{} {} {}", e.code, e.message, e.fix);
+    for i in &e.issues {
+        out.push_str(&format!(" {} {} {}", i.code, i.message, i.fix));
+    }
+    out.push_str(&format!(" {e:?}"));
+    out
+}
+
+/// The results, compared: an Ok result's text, or an error's code, message and fix.
+fn np2_outcome(r: &Result<String, RdyError>) -> String {
+    match r {
+        Ok(v) => format!("ok {v}"),
+        Err(e) => format!("err {}", np2_error_text(e)),
+    }
+}
+
+/// The unknown members each reply kind must ignore, of every JSON type, at the top level.
+fn np2_ignored_members() -> Vec<String> {
+    let m = NP2_MARKER;
+    vec![
+        format!(r#""np2_extra":"{m}""#),
+        r#""np2_extra":42"#.into(),
+        r#""np2_extra":-1.5"#.into(),
+        r#""np2_extra":true"#.into(),
+        r#""np2_extra":null"#.into(),
+        format!(r#""np2_extra":{{"a":{{"b":["{m}",null]}}}}"#),
+        format!(r#""np2_extra":[1,["{m}"]]"#),
+        format!(r#""{m}":1"#),
+    ]
+}
+
+/// D-N8PR2: an unknown member of any type, in any reply the upload client decodes (success or
+/// refusal), is ignored: the step gives the same result as without it, and nothing of the member
+/// reaches the result or the error.
+#[test]
+fn np2_publish_replies_ignore_unknown_members() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    for step in np2_steps() {
+        let want = np2_outcome(&np2_run(&mut s, &hub, &step, &step.body));
+        assert!(
+            !want.contains(E_UPSTREAM_PROTOCOL) && !want.contains(E_UPSTREAM_UNCERTAIN),
+            "{}: {want}",
+            step.name
+        );
+        for member in np2_ignored_members() {
+            let body = np2_with(&step.body, &member);
+            let got = np2_outcome(&np2_run(&mut s, &hub, &step, &body));
+            assert_eq!(got, want, "{}: {member}", step.name);
+            assert!(!got.contains(NP2_MARKER), "{}: {got}", step.name);
+        }
+    }
+    // Unknown members inside known nested objects: a state feature, its profile, an issue.
+    let nested = [
+        (
+            "state",
+            state_reply(
+                &format!(r#"[{{"name":"f-one","class":"compatible","np2":"{NP2_MARKER}"}}]"#),
+                &format!(
+                    r#"{{"id":"PUB-0A1B2","version":"{}","audience":"org","np2":{{"a":1}}}}"#,
+                    h(8)
+                ),
+            ),
+        ),
+        (
+            "refusal_read",
+            error_body(
+                "E_HUB_VALIDATION",
+                "hub says",
+                "hub fix",
+                &format!(
+                    r#"[{{"severity":"error","code":"E_HUB_VALIDATION","block":null,"message":"im","fix":"if","np2":"{NP2_MARKER}"}}]"#
+                ),
+                "",
+            ),
+        ),
+    ];
+    for (name, body) in nested {
+        let step = np2_steps().into_iter().find(|x| x.name == name).unwrap();
+        let want = np2_outcome(&np2_run(&mut s, &hub, &step, &step.body));
+        let got = np2_outcome(&np2_run(&mut s, &hub, &step, &body));
+        assert_eq!(got, want, "{name}: nested");
+        assert!(!got.contains(NP2_MARKER), "{name}: {got}");
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// The spellings of `text` a hostile reply can hide it in: as given, its first `r` or `_` as a
+/// JSON `\u` escape, and its first `_` percent-encoded.
+fn np2_spellings(text: &str) -> Vec<String> {
+    let u = |c: char| format!("\\u{:04x}", u32::from(c));
+    vec![
+        text.to_string(),
+        text.replacen('r', &u('r'), 1),
+        text.replacen('_', &u('_'), 1),
+        text.replacen('_', "%5F", 1),
+    ]
+}
+
+/// The members that hide `t` in an ignored member: as its value, its key, deep in an object and
+/// inside an array.
+fn np2_hiding_members(t: &str) -> Vec<String> {
+    vec![
+        format!(r#""np2_extra":"np2hide {t} np2hide""#),
+        format!(r#""{t}":1"#),
+        format!(r#""np2_extra":{{"a":{{"b":{{"c":"{t}"}}}}}}"#),
+        format!(r#""np2_extra":[1,["{t}"]]"#),
+    ]
+}
+
+/// D-N8PR2: the token scan covers every key and string of the whole reply, ignored members
+/// included, as given, JSON-escaped and percent-decoded: an ignored member that holds the bearer,
+/// another token or a bare token prefix makes the reply invalid (a protocol failure on a read, an
+/// uncertain result on a write), and its text never reaches the error.
+#[test]
+fn np2_publish_replies_refuse_a_token_in_an_ignored_member() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    // The bearer, another install's token, and the bare prefixes with no token.
+    let hidden = [ACCESS, REFRESH_X, "rdyh_", "rdyx_"];
+    for step in np2_steps() {
+        for text in hidden {
+            for t in np2_spellings(text) {
+                for member in np2_hiding_members(&t) {
+                    let body = np2_with(&step.body, &member);
+                    let r = np2_run(&mut s, &hub, &step, &body);
+                    let e = match r {
+                        Err(e) => e,
+                        Ok(v) => panic!("{}: {member} was taken: {v}", step.name),
+                    };
+                    let want = if step.write {
+                        E_UPSTREAM_UNCERTAIN
+                    } else {
+                        E_UPSTREAM_PROTOCOL
+                    };
+                    assert_eq!(e.code, want, "{}: {member}", step.name);
+                    let all = np2_error_text(&e);
+                    assert!(!all.contains("np2hide"), "{}: {all}", step.name);
+                    if text.len() > 5 {
+                        assert!(!all.contains(secret_of(text)), "{}: {all}", step.name);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-N8PR2: a known member a reply needs, missing or of the wrong type, still breaks the contract
+/// when an unknown member is beside it: ignoring one member never masks another fault.
+#[test]
+fn np2_publish_known_member_faults_still_fail_beside_an_unknown_member() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let extra = format!(r#""np2_extra":"{NP2_MARKER}""#);
+    let state = np2_steps().into_iter().find(|x| x.name == "state").unwrap();
+    let faults = [
+        state.body.replace(r#""canon":null,"#, ""),
+        state
+            .body
+            .replace(r#""batch_records":100000"#, r#""batch_records":"100000""#),
+        state.body.replace(
+            r#""quarantine_seconds":86400"#,
+            r#""quarantine_hours":86400"#,
+        ),
+    ];
+    for body in &faults {
+        let r = np2_run(&mut s, &hub, &state, &np2_with(body, &extra));
+        let e = err(r);
+        assert_eq!(e.code, E_UPSTREAM_PROTOCOL, "{body}");
+        assert!(!np2_error_text(&e).contains(NP2_MARKER));
+    }
+    let publish = np2_steps()
+        .into_iter()
+        .find(|x| x.name == "publish")
+        .unwrap();
+    for body in [
+        publish.body.replace(r#""state":"candidate","#, ""),
+        publish
+            .body
+            .replace(r#""state":"candidate""#, r#""state":1"#),
+    ] {
+        let r = np2_run(&mut s, &hub, &publish, &np2_with(&body, &extra));
+        let e = err(r);
+        assert_eq!(e.code, E_UPSTREAM_UNCERTAIN, "{body}");
+        assert!(!np2_error_text(&e).contains(NP2_MARKER));
+    }
+    assert_eq!(s.finish(), 0);
+}
+
+/// The known reply naming every key in `keys`, each element with `member` added when given, and
+/// `pad` more zeros in an added top-level member when given.
+fn np2_known_reply(keys: &[ObjectKey], member: Option<&str>, pad: Option<usize>) -> String {
+    let extra = member.map(|m| format!(",{m}")).unwrap_or_default();
+    let all: Vec<String> = keys
+        .iter()
+        .map(|k| format!(r#"{{"kind":{},"hash":"{}"{extra}}}"#, k.kind, k.hash))
+        .collect();
+    let pad = pad
+        .map(|n| format!(r#","np2_pad":[{}]"#, vec!["0"; n].join(",")))
+        .unwrap_or_default();
+    format!(r#"{{"missing":[{}]{pad}}}"#, all.join(","))
+}
+
+/// The files/known reply naming every hash in `hashes`, with `pad` more zeros in an added
+/// top-level member when given.
+fn np2_files_reply(hashes: &[Hash], pad: Option<usize>) -> String {
+    let all: Vec<String> = hashes.iter().map(|h| format!("\"{h}\"")).collect();
+    let pad = pad
+        .map(|n| format!(r#","np2_pad":[{}]"#, vec!["0"; n].join(",")))
+        .unwrap_or_default();
+    format!(r#"{{"missing":[{}]{pad}}}"#, all.join(","))
+}
+
+/// D-N8PR2 (fix round 1): at the most keys a known request names, a reply that lists every key
+/// with an added member on every element is taken (the element is read through an open wire
+/// type, then built as the store's closed ObjectKey); the value budget is capped at the global
+/// 1,000,000 values, and a reply one value over it still fails.
+#[test]
+fn np2_known_takes_an_added_member_on_every_element_at_the_maximum_count() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let keys: Vec<ObjectKey> = (0..MAX_KNOWN_KEYS as u32)
+        .map(|i| ObjectKey {
+            kind: 1 + (i % 3) as u8,
+            hash: Hash::of(&i.to_le_bytes()),
+        })
+        .collect();
+    let keys = sorted(keys);
+    let member = r#""np2":"x""#;
+    let reply = np2_known_reply(&keys, Some(member), None);
+    assert!(reply.len() <= KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    assert_eq!(r.unwrap(), keys);
+    // `missing`, then per key one element and three members: 400,001 values. The budget is
+    // min(keys*12+64, 1,000,000) = 1,000,000; the pad member is one value more.
+    let used = 1 + 4 * MAX_KNOWN_KEYS + 1;
+    let fits = MAX_JSON_VALUES - used;
+    let reply = np2_known_reply(&keys, Some(member), Some(fits));
+    assert!(reply.len() <= KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    assert_eq!(r.unwrap(), keys);
+    let reply = np2_known_reply(&keys, Some(member), Some(fits + 1));
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known(&cx, PUSH, &keys)
+    });
+    protocol(r);
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-N8PR2 (fix round 1): a known reply's budget is keys*12+64 values: a small reply with added
+/// members up to it is taken, one value over it fails.
+#[test]
+fn np2_known_reply_over_its_new_budget_fails() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let keys = np2_keys();
+    let budget = keys.len() * 12 + 64;
+    // `missing`, one element with two members, and the pad member: 5 values before the pad.
+    let fits = budget - 5;
+    let missing = &keys[..1];
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_known_reply(missing, None, Some(fits))),
+        || hub.wire.known(&cx, PUSH, &keys),
+    );
+    assert_eq!(r.unwrap(), missing.to_vec());
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_known_reply(missing, None, Some(fits + 1))),
+        || hub.wire.known(&cx, PUSH, &keys),
+    );
+    protocol(r);
+    assert_eq!(s.finish(), 0);
+}
+
+/// D-N8PR2 (fix round 1): files/known elements are bare hash strings, so a member can only be
+/// added beside `missing`. At the most files a request names, the budget is files*4+64 values:
+/// a full reply with an added member up to it is taken, one value over it fails.
+#[test]
+fn np2_files_known_takes_added_members_at_the_maximum_count() {
+    let mut s = Server::start();
+    let hub = Hub::new(&s, &[], &[]);
+    let cx = hub.cx();
+    let files: Vec<FileIdentity> = (0..MAX_KNOWN_FILES as u32)
+        .map(|i| FileIdentity {
+            hash: Hash::of(&i.to_be_bytes()),
+            size: u64::from(i) + 1,
+        })
+        .collect();
+    let mut hashes: Vec<Hash> = files.iter().map(|f| f.hash).collect();
+    hashes.sort();
+    let budget = MAX_KNOWN_FILES * 4 + 64;
+    assert!(budget <= MAX_JSON_VALUES);
+    // `missing`, one element per hash, and the pad member.
+    let fits = budget - (1 + MAX_KNOWN_FILES + 1);
+    let reply = np2_files_reply(&hashes, Some(fits));
+    assert!(reply.len() <= FILES_KNOWN_REPLY_BYTES);
+    let (r, _) = served(&mut s, Reply::json(200, &reply), || {
+        hub.wire.known_files(&cx, PUSH, &files)
+    });
+    assert_eq!(r.unwrap(), hashes);
+    let (r, _) = served(
+        &mut s,
+        Reply::json(200, &np2_files_reply(&hashes, Some(fits + 1))),
+        || hub.wire.known_files(&cx, PUSH, &files),
+    );
+    protocol(r);
+    assert_eq!(s.finish(), 0);
 }

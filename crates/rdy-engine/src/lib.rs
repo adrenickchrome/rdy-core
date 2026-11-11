@@ -55,6 +55,7 @@ pub use handle::{CompletionPhase, read_only_feature_for_tests, with_completion_h
 mod history;
 pub mod history_facts;
 mod holder;
+pub mod hooks;
 pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;
@@ -196,7 +197,7 @@ pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
-pub use suspect_reply::{DeferredReply, SuspectReply};
+pub use suspect_reply::{DeferredReply, RowTarget, SuspectReply};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, TagInfo, VersionInfo, VersionPosition, VersionRef,
@@ -227,7 +228,7 @@ pub use pack_load::{
 pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
-pub use rdy_store::pio::display_path;
+pub use rdy_store::pio::{display_path, no_console_window};
 pub use rdy_store::{CachedDrawing, DiagramCache};
 /// The notice channel of the library crates: stderr, unless a test captures the notice it
 /// provokes ([`capture_notices_for_tests`]).
