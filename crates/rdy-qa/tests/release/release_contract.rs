@@ -6542,6 +6542,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/fields",
     "mcp/rdy_diff/ok/entries[]/links",
     "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_hook check/refused/issues",
+    "mcp/rdy_hook install/refused/issues",
     "mcp/rdy_import reader/refused/issues",
     "mcp/rdy_import unknown key/refused/issues",
     "mcp/rdy_import/ok/consequences",
