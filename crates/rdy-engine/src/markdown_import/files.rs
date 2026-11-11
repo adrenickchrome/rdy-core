@@ -153,11 +153,14 @@ pub fn capture(root: &Path) -> Result<Capture, RdyError> {
     })
 }
 
+/// The root `.rdyignore`'s identity and size, when there is one.
+type IgnoreSeen = Option<(FileId, u64)>;
+
 /// The root `.rdyignore` of the open directory `dir`: its bytes (when `read`) and its identity
 /// and size; no bytes and `None` when there is none. A link, a directory or any other
 /// non-regular file there is the working copy's `E_CONFIG` refusal, as are a failed read and a
 /// file over 65,536 bytes.
-fn read_ignore(dir: &File, read: bool) -> Result<(Vec<u8>, Option<(FileId, u64)>), RdyError> {
+fn read_ignore(dir: &File, read: bool) -> Result<(Vec<u8>, IgnoreSeen), RdyError> {
     let name = OsStr::new(IGNORE_FILE);
     match pio::entry_kind_at(dir, name) {
         Ok(EntryKind::File) => {}
