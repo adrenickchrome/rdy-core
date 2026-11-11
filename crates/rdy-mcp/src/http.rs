@@ -1398,4 +1398,323 @@ mod tests {
             "no secret in a Debug print of what the SDK holds"
         );
     }
+
+    // lsc1 (D-52A2G): a call that has not taken its claim's turn is withdrawn when its client
+    // closes its response; a call that has started runs to its end, once.
+
+    /// A hang guard for what an lsc1 test waits on: a failure message, never a measure.
+    const LSC1_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// An engine whose every write stops at a gate: it says that a write came, and the write
+    /// goes on only when the test releases it. `landed` counts the writes that landed.
+    struct GatedWrites {
+        inner: Local,
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        landed: AtomicUsize,
+    }
+
+    impl Engine for GatedWrites {
+        fn read(&self) -> Arc<rdy_engine::ReadState> {
+            self.inner.read()
+        }
+        fn read_serialized(&self, f: rdy_engine::engine::ReadFn) -> Result<Value, RdyError> {
+            self.inner.read_serialized(f)
+        }
+        fn republish(&self) -> Result<(), RdyError> {
+            self.inner.republish()
+        }
+        fn write(&self, f: rdy_engine::engine::WriteFn) -> Result<Value, RdyError> {
+            let _ = self.entered.send(());
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(LSC1_GUARD)
+                .expect("the test releases the write");
+            let out = self.inner.write(f);
+            if out.is_ok() {
+                self.landed.fetch_add(1, Ordering::SeqCst);
+            }
+            out
+        }
+        fn open_report(&self) -> rdy_engine::OpenReport {
+            self.inner.open_report()
+        }
+        fn root(&self) -> std::path::PathBuf {
+            self.inner.root()
+        }
+        fn briefs(&self) -> Arc<rdy_engine::BriefRegistry> {
+            self.inner.briefs()
+        }
+        fn leases(&self) -> Arc<LeaseRegistry> {
+            self.inner.leases()
+        }
+    }
+
+    /// The test's side of a [`GatedWrites`] engine served over HTTP.
+    struct Gate {
+        _dir: tempfile::TempDir,
+        mcp: Arc<HttpMcp>,
+        engine: Arc<GatedWrites>,
+        entered: tokio::sync::mpsc::UnboundedReceiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Gate {
+        fn new() -> Gate {
+            let dir = tempfile::tempdir().unwrap();
+            let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+            let (entered_tx, entered) = tokio::sync::mpsc::unbounded_channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let engine = Arc::new(GatedWrites {
+                inner: Local::new(rdy),
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+                landed: AtomicUsize::new(0),
+            });
+            let mcp = Arc::new(HttpMcp::new(
+                Arc::clone(&engine) as Arc<dyn Engine>,
+                NotifyHub::new(),
+            ));
+            Gate {
+                _dir: dir,
+                mcp,
+                engine,
+                entered,
+                release,
+            }
+        }
+
+        /// Waits for the next write at the gate.
+        async fn write_comes(&mut self, what: &str) {
+            lsc1_within(what, self.entered.recv())
+                .await
+                .expect("the engine is alive");
+        }
+
+        /// Lets the write at the gate go on.
+        fn release(&self) {
+            self.release.send(()).unwrap();
+        }
+
+        fn landed(&self) -> usize {
+            self.engine.landed.load(Ordering::SeqCst)
+        }
+
+        /// How many calls reached their claim's turn: the handler reads its admission just
+        /// before it waits for the turn, with no await between.
+        fn reached(&self) -> usize {
+            self.mcp.seen.lock().unwrap().len()
+        }
+    }
+
+    async fn lsc1_within<T>(what: &str, f: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(LSC1_GUARD, f)
+            .await
+            .unwrap_or_else(|_| panic!("{what}"))
+    }
+
+    async fn lsc1_until(what: &str, mut f: impl FnMut() -> bool) {
+        lsc1_within(what, async {
+            while !f() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    }
+
+    fn lsc1_key() -> Key {
+        ("agent:q".to_string(), Some("q1".to_string()))
+    }
+
+    /// An `rdy_write` of claim agent:q/q1 that makes one folder, `name`.
+    fn lsc1_write(id: u64, name: &str) -> Value {
+        let mut args = json!({"ops": [{"op": "create", "type": "folder", "id": "$f",
+            "fields": {"name": name, "title": name}}]});
+        let owner = rdy_engine::kungfu::policy("rdy_write")
+            .and_then(|p| p.ruleset)
+            .and_then(|r| r.strip_prefix("rdy:"))
+            .and_then(rdy_engine::kungfu::owner);
+        if let Some(o) = owner {
+            args["kungfu"] = json!(o.value);
+        }
+        call(id, "rdy_write", args, claim("agent:q", "q1"))
+    }
+
+    /// One request through the admission layer, as `post` sends it, counted by `activity`
+    /// when given; its task is the client, and aborting it closes the response.
+    fn lsc1_spawn(
+        mcp: &Arc<HttpMcp>,
+        body: Value,
+        activity: Option<Activity>,
+    ) -> tokio::task::JoinHandle<Posted> {
+        let mcp = Arc::clone(mcp);
+        tokio::spawn(async move {
+            let mut request = http::Request::builder().method("POST").uri("/~mcp");
+            for (k, v) in headers(LEGACY) {
+                request = request.header(k, v);
+            }
+            let mut request = request
+                .body(Full::new(Bytes::from(body.to_string().into_bytes())))
+                .unwrap();
+            if let Some(a) = activity {
+                request.extensions_mut().insert(a);
+            }
+            let response = mcp.handle(request).await;
+            let status = response.status().as_u16();
+            let body = match response.into_body().collect().await {
+                Ok(c) => c.to_bytes().to_vec(),
+                Err(never) => match never {},
+            };
+            Posted {
+                status,
+                headers: Vec::new(),
+                body,
+            }
+        })
+    }
+
+    /// The client closes `call`'s response, and its task is gone.
+    async fn lsc1_close(call: tokio::task::JoinHandle<Posted>) {
+        call.abort();
+        let gone = lsc1_within("the client's task ends", call).await;
+        assert!(gone.unwrap_err().is_cancelled(), "the client closed first");
+    }
+
+    /// A daemon activity permit that says when it is released.
+    struct Permit(tokio::sync::mpsc::UnboundedSender<()>);
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    // a single thread: once the test runs again, a call that reached its turn waits in it
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsc1_a_cancelled_waiting_call_is_withdrawn_and_frees_its_admission() {
+        let mut g = Gate::new();
+        let key = lsc1_key();
+        // call 1 takes the turn and stops in its write
+        let one = lsc1_spawn(&g.mcp, lsc1_write(1, "one"), None);
+        g.write_comes("call 1 writes").await;
+        // call 2 waits for the turn, counted by the daemon
+        let (permit_tx, mut permit_released) = tokio::sync::mpsc::unbounded_channel();
+        let activity = Activity::new(Box::new(Permit(permit_tx)), None);
+        let two = lsc1_spawn(&g.mcp, lsc1_write(2, "two"), Some(activity));
+        lsc1_until("call 2 waits for its turn", || g.reached() == 2).await;
+        assert_eq!(g.mcp.queued(&key), 2);
+        // its client closes the response while call 1 still holds the turn
+        lsc1_close(two).await;
+        lsc1_until("the closed call leaves the queue at once", || {
+            g.mcp.queued(&key) == 1
+        })
+        .await;
+        lsc1_within(
+            "the closed call releases its activity permit",
+            permit_released.recv(),
+        )
+        .await;
+        // its place is free: eight new calls are admitted beside call 1, and none is E_LIMIT
+        let mut waiting = Vec::new();
+        for i in 0..MAX_WAITING_CALLS as u64 {
+            waiting.push(lsc1_spawn(
+                &g.mcp,
+                lsc1_write(10 + i, &format!("w{i}")),
+                None,
+            ));
+            lsc1_until("the new call waits for its turn", || {
+                g.reached() == 3 + i as usize
+            })
+            .await;
+        }
+        assert_eq!(g.mcp.queued(&key), MAX_WAITING_CALLS + 1);
+        assert!(waiting.iter().all(|w| !w.is_finished()), "none was refused");
+        // every admitted call writes once; the closed call never runs
+        for n in 0..=MAX_WAITING_CALLS {
+            if n > 0 {
+                g.write_comes("the next waiting call writes").await;
+            }
+            g.release();
+        }
+        let (err, v) = tool(&lsc1_within("call 1 ends", one).await.unwrap());
+        assert!(!err, "{v}");
+        for w in waiting {
+            let (err, v) = tool(&lsc1_within("a waiting call ends", w).await.unwrap());
+            assert!(!err, "{v}");
+        }
+        settled(&g.mcp, &key).await;
+        assert_eq!(g.landed(), MAX_WAITING_CALLS + 1, "call 2 wrote nothing");
+        assert!(
+            g.entered.try_recv().is_err(),
+            "no write came after the last"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsc1_a_cancelled_started_call_completes_its_write_once() {
+        let mut g = Gate::new();
+        let key = lsc1_key();
+        // call 1 holds the turn and stops in its write; call 2 waits behind it
+        let one = lsc1_spawn(&g.mcp, lsc1_write(1, "one"), None);
+        g.write_comes("call 1 writes").await;
+        let two = lsc1_spawn(&g.mcp, lsc1_write(2, "two"), None);
+        lsc1_until("call 2 waits for its turn", || g.reached() == 2).await;
+        // both clients close their responses: the started call first
+        lsc1_close(one).await;
+        lsc1_close(two).await;
+        // call 1's write goes on and lands; call 2 never starts
+        g.release();
+        let ended = async {
+            while g.mcp.queued(&key) > 0 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            () = lsc1_within("every call ends", ended) => {}
+            _ = g.entered.recv() => panic!("the closed waiting call ran a write"),
+        }
+        assert_eq!(
+            g.landed(),
+            1,
+            "the started call's write landed exactly once"
+        );
+        assert!(g.entered.try_recv().is_err(), "rdy never ran it again");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsc1_waiting_calls_keep_their_order_past_a_withdrawn_call() {
+        let mut g = Gate::new();
+        let key = lsc1_key();
+        // call 1 holds the turn; calls 2, 3 and 4 wait in that order
+        let one = lsc1_spawn(&g.mcp, lsc1_write(1, "one"), None);
+        g.write_comes("call 1 writes").await;
+        let two = lsc1_spawn(&g.mcp, lsc1_write(2, "two"), None);
+        lsc1_until("call 2 waits", || g.reached() == 2).await;
+        let three = lsc1_spawn(&g.mcp, lsc1_write(3, "three"), None);
+        lsc1_until("call 3 waits", || g.reached() == 3).await;
+        let four = lsc1_spawn(&g.mcp, lsc1_write(4, "four"), None);
+        lsc1_until("call 4 waits", || g.reached() == 4).await;
+        // call 3's client goes
+        lsc1_close(three).await;
+        // call 1 ends, then call 2 has the turn
+        g.release();
+        assert!(!tool(&lsc1_within("call 1 ends", one).await.unwrap()).0);
+        g.write_comes("call 2 writes").await;
+        assert!(!four.is_finished());
+        g.release();
+        assert!(!tool(&lsc1_within("call 2 ends", two).await.unwrap()).0);
+        // the next write is call 4's: call 3 was withdrawn, and the queue goes on
+        g.write_comes("the next waiting call writes").await;
+        g.release();
+        tokio::select! {
+            r = lsc1_within("call 4 ends", four) => assert!(!tool(&r.unwrap()).0),
+            _ = g.entered.recv() => panic!("the withdrawn call 3 took a turn before call 4"),
+        }
+        settled(&g.mcp, &key).await;
+        assert_eq!(g.landed(), 3);
+        assert!(
+            g.entered.try_recv().is_err(),
+            "no write came after call 4's"
+        );
+    }
 }
