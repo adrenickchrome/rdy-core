@@ -35,13 +35,14 @@ const DESIGNED_DIFFERENCES: [&str; 2] = [
 /// identity reads `<kind:n>`, where `n` counts the distinct values of that kind in order of first
 /// appearance in one world: two replies agree only if the same identity recurs in the same
 /// places, so a swapped or merged identity is a difference.
-const NORMALIZATIONS: [&str; 8] = [
+const NORMALIZATIONS: [&str; 9] = [
     "protocol envelope: the modern revision's own `result.resultType: \"complete\"` member is dropped; it is not part of the tool's reply",
     "request ids: the JSON-RPC `id` and `jsonrpc` members are dropped",
     "fixture paths: each world's project, scratch, home and config folders read `<root>`",
     "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; hex of 8 or more reads `<hex:n>`; a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp:n>`",
     "the order of the records of one kind in a redaction dry run's `text`: the engine lists them by hash, so each run of one kind compares in the order of the names its JSON part gave them",
     "the pending card an answer leads to (`next` in an `rdy_answer` reply): the engine picks it by a generated id, so it reads `<next>`",
+    "the allocation of the log file in an `rdy_compact` reply (`on_disk_bytes`): the filesystem rounds it to its block size, so it reads `<disk>`; `log_bytes` and every other size are kept",
     "ports: the digits after a loopback host and `:` read `<port>`",
     "known timestamps: `YYYY-MM-DDTHH:MM:SS...` in text reads `<time>`, and a number in a member whose name ends `_ms`, over a billion reads `<time>`",
 ];
@@ -551,6 +552,8 @@ impl Norm<'_> {
                 Value::String(self.text(&self.records(s)))
             }
             Value::String(s) => Value::String(self.text(&self.listed(s))),
+            // the filesystem's allocation for the log file, which rounds up to its block size
+            Value::Number(_) if path.ends_with("/text/on_disk_bytes") => json!("<disk>"),
             Value::Number(n)
                 if key.ends_with("_ms") && n.as_u64().is_some_and(|n| n > 1_000_000_000) =>
             {
@@ -1037,7 +1040,7 @@ async fn mht8_every_tool_has_stdio_http_parity() {
         }
     }
     assert_eq!(DESIGNED_DIFFERENCES.len(), 2);
-    assert_eq!(NORMALIZATIONS.len(), 8);
+    assert_eq!(NORMALIZATIONS.len(), 9);
 }
 
 // ------------------------------------------------------------------------ shared drivers
