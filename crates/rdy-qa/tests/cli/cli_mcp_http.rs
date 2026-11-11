@@ -229,15 +229,19 @@ fn mht7_status_and_site_show_endpoint_without_secret() {
         )),
         "{text}"
     );
-    // the daemon line stays where it was, and the mcp lines follow it
-    let daemon = text
-        .lines()
-        .position(|l| l.starts_with("daemon: rdy "))
+    // the pack, daemon, repo and canon lines keep their places (O34, ec10); the mcp lines follow
+    // the canon and coverage lines and end right before the views
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("pack "), "{text}");
+    assert!(lines[1].starts_with("daemon: rdy "), "{text}");
+    assert!(lines[2].starts_with("repo "), "{text}");
+    assert!(lines[3].starts_with("canon: "), "{text}");
+    let mcp = lines
+        .iter()
+        .position(|l| *l == format!("mcp http: {url}"))
         .unwrap();
-    assert_eq!(
-        text.lines().nth(daemon + 1),
-        Some(format!("mcp http: {url}").as_str())
-    );
+    assert!(mcp > 3, "{text}");
+    assert_eq!(lines.get(mcp + 2), Some(&"views:"), "{text}");
     // the site names the endpoint beside its own link; the text of `rdy site` stays one link
     let (ok, site) = s.json(&["--json", "site"]);
     assert!(ok, "{site}");
@@ -266,7 +270,7 @@ fn mht7_status_and_site_show_endpoint_without_secret() {
         "{status}"
     );
     let text = out(&off.rdy(&["status"]));
-    assert!(text.contains("\nmcp http: disabled\n"), "{text}");
+    assert!(text.contains("\nmcp http: disabled\nviews:\n"), "{text}");
     assert!(!text.contains("mcp http activity"), "{text}");
     let (ok, site) = off.json(&["--json", "site"]);
     assert!(ok, "{site}");
