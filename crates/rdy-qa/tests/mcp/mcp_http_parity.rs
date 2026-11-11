@@ -31,18 +31,19 @@ const DESIGNED_DIFFERENCES: [&str; 2] = [
 ];
 
 /// What the comparison masks, and nothing more. Error codes, messages, fixes, `isError`, warning
-/// counts, token budgets and claims are never masked.
-const NORMALIZATIONS: [&str; 10] = [
+/// counts, token budgets, sizes, claims and the order of every list are never masked. A generated
+/// identity reads `<kind:n>`, where `n` counts the distinct values of that kind in order of first
+/// appearance in one world: two replies agree only if the same identity recurs in the same
+/// places, so a swapped or merged identity is a difference.
+const NORMALIZATIONS: [&str; 8] = [
     "protocol envelope: the modern revision's own `result.resultType: \"complete\"` member is dropped; it is not part of the tool's reply",
-    "word order: a text that holds two or more masked ids (a card's decision list) compares as a bag of words, except a refusal's `code`, `message` and `fix`",
-    "list order: a list whose entries hold a masked random value (`<id>`, `<hex>`, `<tmp>`) is ordered by that value, so it compares sorted; every other list keeps its order",
     "request ids: the JSON-RPC `id` and `jsonrpc` members are dropped",
     "fixture paths: each world's project, scratch, home and config folders read `<root>`",
-    "random values: ids of blocks, landings and proposals read `<id>`, hex of 8 or more reads `<hex>`",
-    "a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp>`",
-    "ports and sizes: a number of five digits or more reads `<num>`, over a billion `<big>`",
-    "known timestamps: `YYYY-MM-DDTHH:MM:SS...` reads `<time>`",
-    "a member whose name has `bytes` and whose value is a number reads `<bytes>`",
+    "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; hex of 8 or more reads `<hex:n>`; a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp:n>`",
+    "the order of the records of one kind in a redaction dry run's `text`: the engine lists them by hash, so each run of one kind compares in the order of the names its JSON part gave them",
+    "the pending card an answer leads to (`next` in an `rdy_answer` reply): the engine picks it by a generated id, so it reads `<next>`",
+    "ports: the digits after a loopback host and `:` read `<port>`",
+    "known timestamps: `YYYY-MM-DDTHH:MM:SS...` in text reads `<time>`, and a number in a member whose name ends `_ms`, over a billion reads `<time>`",
 ];
 
 const ACTOR: &str = "agent:m";
@@ -148,6 +149,8 @@ struct Sut {
     next: u64,
     /// HTTP requests this world sent, for the activity check.
     sent: usize,
+    /// Generated identities this world's replies held so far.
+    seen: Seen,
 }
 
 impl Sut {
@@ -194,6 +197,7 @@ impl Sut {
                 (Some(Arc::new(h)), None)
             }
         };
+        let seen = name_fixture(&spec);
         Sut {
             via,
             world,
@@ -204,6 +208,7 @@ impl Sut {
             stdio,
             next: 0,
             sent: 0,
+            seen,
         }
     }
 
@@ -302,7 +307,7 @@ impl Sut {
     }
 
     fn norm(&self, v: &Value) -> Value {
-        normalized(v, &self.roots(), &masks())
+        normalized(v, &self.roots(), &masks(), &self.seen)
     }
 }
 
@@ -339,75 +344,237 @@ fn body(v: &Value) -> Value {
     }
 }
 
-fn masks() -> Vec<regex::Regex> {
+/// The generated-identity patterns, with the kind each one reads as. Order matters: the folder
+/// name first, since it contains digits and letters of the other kinds.
+fn masks() -> Vec<(&'static str, regex::Regex)> {
     [
-        r"(?i)[^\s\x22']*rdyd[0-9a-z]+",
-        r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}\b",
-        r"[0-9a-f]{8,}",
-        r"\d{4}-\d{2}-\d{2}[T ][0-9:.]+Z?",
-        r"\b\d{5,}\b",
+        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]+"),
+        ("id", r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}\b"),
+        ("hex", r"[0-9a-f]{8,}"),
     ]
     .iter()
-    .map(|m| regex::Regex::new(m).unwrap())
+    .map(|(k, m)| (*k, regex::Regex::new(m).unwrap()))
     .collect()
 }
 
-/// [`NORMALIZATIONS`], applied. Nothing else is masked.
-fn normalized(v: &Value, roots: &[String], masks: &[regex::Regex]) -> Value {
-    norm_at(v, roots, masks, true)
+/// Identities of one world: the names of its fixture blocks, and the numbers of the other values
+/// seen so far, kind by kind.
+#[derive(Default)]
+struct Names {
+    of: std::collections::BTreeMap<(&'static str, String), String>,
+    count: std::collections::BTreeMap<&'static str, usize>,
 }
 
-/// `words`: a text of several masked ids compares as a bag of words. A refusal's `code`,
-/// `message` and `fix` never do.
-fn norm_at(v: &Value, roots: &[String], masks: &[regex::Regex], words: bool) -> Value {
-    match v {
-        Value::String(s) => {
-            let mut s = s.clone();
-            for r in roots {
-                s = s.replace(r, "<root>");
-            }
-            for (i, m) in masks.iter().enumerate() {
-                let to = ["<tmp>", "<id>", "<hex>", "<time>", "<num>"][i];
-                s = m.replace_all(&s, to).into_owned();
-            }
-            // a card lists its decisions in the order of their random ids
-            if words && s.matches("<id>").count() > 1 {
-                let mut w: Vec<&str> = s
-                    .split_whitespace()
-                    .map(|w| w.trim_matches(|c: char| ",;.\"".contains(c)))
+type Seen = std::cell::RefCell<Names>;
+
+fn identity(seen: &Seen, kind: &'static str, value: &str) -> String {
+    let mut n = seen.borrow_mut();
+    if let Some(name) = n.of.get(&(kind, value.to_string())) {
+        return format!("<{kind}:{name}>");
+    }
+    let c = n.count.entry(kind).or_insert(0);
+    *c += 1;
+    let name = c.to_string();
+    n.of.insert((kind, value.to_string()), name.clone());
+    format!("<{kind}:{name}>")
+}
+
+/// The fixture's blocks, named: their generated ids read the same in every world.
+fn name_fixture(spec: &Spec) -> Seen {
+    let n = Names {
+        of: [
+            ("doc", &spec.doc),
+            ("section", &spec.section),
+            ("a", &spec.a),
+            ("b", &spec.b),
+            ("c", &spec.c),
+            ("decision", &spec.decision),
+        ]
+        .iter()
+        .map(|(name, id)| (("id", id.to_string()), name.to_string()))
+        .collect(),
+        count: Default::default(),
+    };
+    Seen::new(n)
+}
+
+/// The lists the engine sorts by a generated id, as the last member names of their path. Their
+/// entries compare in the order of their fixture names. Every other list keeps its order.
+const ID_ORDERED: [&str; 13] = [
+    "/neighbors",
+    "/plan/items",
+    "/consequences",
+    "/incoming",
+    "/base/blocks",
+    "/coverage/issues",
+    "/coverage/reasons",
+    "/neighbors/of",
+    "/items",
+    "/text/issues",
+    "/corrected/exceptions",
+    "/selection/entries",
+    "/report/inside",
+];
+
+/// One world's normalizer.
+struct Norm<'a> {
+    roots: &'a [String],
+    masks: &'a [(&'static str, regex::Regex)],
+    seen: &'a Seen,
+    time: regex::Regex,
+    port: regex::Regex,
+    list_start: regex::Regex,
+}
+
+/// [`NORMALIZATIONS`], applied. Nothing else is masked.
+fn normalized(
+    v: &Value,
+    roots: &[String],
+    masks: &[(&'static str, regex::Regex)],
+    seen: &Seen,
+) -> Value {
+    let n = Norm {
+        roots,
+        masks,
+        seen,
+        time: regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ][0-9:.]+Z?").unwrap(),
+        list_start: regex::Regex::new(r"(?:, |; )[A-Za-z]{1,3}-[0-9A-Z]{5}\b").unwrap(),
+        port: regex::Regex::new(r"((?:127\.0\.0\.1|localhost|\[::1\]):)\d+").unwrap(),
+    };
+    n.walk(v, "")
+}
+
+impl Norm<'_> {
+    fn text(&self, s: &str) -> String {
+        let mut s = s.to_string();
+        for r in self.roots {
+            s = s.replace(r, "<root>");
+        }
+        for (kind, m) in self.masks {
+            s = m
+                .replace_all(&s, |c: &regex::Captures| identity(self.seen, kind, &c[0]))
+                .into_owned();
+        }
+        s = self.time.replace_all(&s, "<time>").into_owned();
+        self.port.replace_all(&s, "${1}<port>").into_owned()
+    }
+
+    /// A card lists its decisions, and each one's related decisions, in the order of their
+    /// generated ids, and a refusal lists the cards to answer so. Only those lists are put in the order of their fixture names; the rest
+    /// of the text, and the entries themselves, are kept.
+    fn listed(&self, s: &str) -> String {
+        const MARKERS: [(&str, &str); 3] = [
+            (" new: ", ", "),
+            (" omitted: ", "; "),
+            (" card first: ", ", "),
+        ];
+        s.split('\n')
+            .map(|line| {
+                let Some((marker, sep)) = MARKERS.iter().find(|(m, _)| line.contains(m)) else {
+                    return line.to_string();
+                };
+                let at = line.find(marker).unwrap() + marker.len();
+                let (head, list) = line.split_at(at);
+                let starts: Vec<usize> = std::iter::once(0)
+                    .chain(self.list_start.captures_iter(list).filter_map(|c| {
+                        let m = c.get(0).unwrap();
+                        (m.as_str().starts_with(sep)).then(|| m.start() + sep.len())
+                    }))
                     .collect();
-                w.sort_unstable();
-                s = w.join(" ");
+                let mut entries: Vec<&str> = starts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &a)| {
+                        let end = starts.get(i + 1).map_or(list.len(), |&b| b - sep.len());
+                        &list[a..end]
+                    })
+                    .collect();
+                entries.sort_by_cached_key(|e| self.sort_key(e));
+                format!("{head}{}", entries.join(sep))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A redaction report's text lists the records of one kind in the order of their ids (hashes
+    /// of generated content). Each run of lines of one kind is put in the order of the names the
+    /// JSON part of the same reply gave those records; the order of the kinds is kept.
+    fn records(&self, s: &str) -> String {
+        let kind = |l: &str| l.split_once(": ").map(|(k, _)| k.to_string());
+        let lines: Vec<&str> = s.split('\n').collect();
+        let mut out: Vec<&str> = vec![];
+        let mut i = 0;
+        while i < lines.len() {
+            let k = kind(lines[i]).filter(|_| lines[i].ends_with(')'));
+            let mut j = i + 1;
+            while k.is_some() && j < lines.len() && kind(lines[j]) == k && lines[j].ends_with(')') {
+                j += 1;
             }
-            Value::String(s)
+            let mut run: Vec<&str> = lines[i..j].to_vec();
+            run.sort_by_cached_key(|l| self.sort_key(l));
+            out.extend(run);
+            i = j;
         }
-        Value::Number(n) if n.as_u64().is_some_and(|n| n > 1_000_000_000) => json!("<big>"),
-        Value::Array(a) => {
-            let mut a: Vec<Value> = a.iter().map(|x| norm_at(x, roots, masks, words)).collect();
-            // a list whose entries hold a random value is ordered by it: compared as a set
-            if a.iter().any(|x| {
-                let t = x.to_string();
-                ["<id>", "<hex>", "<tmp>"].iter().any(|m| t.contains(m))
-            }) {
-                a.sort_by_key(|x| x.to_string());
-            }
-            Value::Array(a)
+        out.join("\n")
+    }
+
+    /// A text with the fixture's blocks named and every other generated value reduced to its kind:
+    /// the order of a list the engine sorts by generated id.
+    fn sort_key(&self, s: &str) -> String {
+        let mut s = s.to_string();
+        for r in self.roots {
+            s = s.replace(r, "<root>");
         }
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .map(|(k, x)| {
-                    let Value::String(k2) = norm_at(&json!(k), roots, masks, false) else {
-                        unreachable!()
-                    };
-                    if k.contains("bytes") && x.is_number() {
-                        return (k2, json!("<bytes>"));
+        for (kind, m) in self.masks {
+            s = m
+                .replace_all(&s, |c: &regex::Captures| {
+                    match self.seen.borrow().of.get(&(*kind, c[0].to_string())) {
+                        Some(name) => format!("<{kind}:{name}>"),
+                        None => format!("<{kind}>"),
                     }
-                    let own = words && !["code", "message", "fix"].contains(&k.as_str());
-                    (k2, norm_at(x, roots, masks, own))
                 })
-                .collect(),
-        ),
-        other => other.clone(),
+                .into_owned();
+        }
+        s
+    }
+
+    /// `path` is the member names from the root, joined by `/`.
+    fn walk(&self, v: &Value, path: &str) -> Value {
+        let key = path.rsplit('/').next().unwrap_or("");
+        match v {
+            // the card an answer leads to is the first of the pending ones, which the engine
+            // orders by a generated id
+            Value::String(_) if path.ends_with("/text/next") => json!("<next>"),
+            Value::String(s)
+                if path.ends_with("/text/text") && s.starts_with("Redaction dry run") =>
+            {
+                Value::String(self.text(&self.records(s)))
+            }
+            Value::String(s) => Value::String(self.text(&self.listed(s))),
+            Value::Number(n)
+                if key.ends_with("_ms") && n.as_u64().is_some_and(|n| n > 1_000_000_000) =>
+            {
+                json!("<time>")
+            }
+            Value::Array(a) => {
+                let mut a: Vec<&Value> = a.iter().collect();
+                if ID_ORDERED.iter().any(|p| path.ends_with(p)) {
+                    a.sort_by_cached_key(|x| self.sort_key(&x.to_string()));
+                }
+                Value::Array(a.into_iter().map(|x| self.walk(x, path)).collect())
+            }
+            // an object has no order; its members are visited by name so that numbers are stable
+            Value::Object(m) => {
+                let mut m: Vec<(&String, &Value)> = m.iter().collect();
+                m.sort_by_cached_key(|(k, _)| self.sort_key(k));
+                Value::Object(
+                    m.into_iter()
+                        .map(|(k, x)| (self.text(k), self.walk(x, &format!("{path}/{k}"))))
+                        .collect(),
+                )
+            }
+            other => other.clone(),
+        }
     }
 }
 
@@ -870,7 +1037,7 @@ async fn mht8_every_tool_has_stdio_http_parity() {
         }
     }
     assert_eq!(DESIGNED_DIFFERENCES.len(), 2);
-    assert_eq!(NORMALIZATIONS.len(), 10);
+    assert_eq!(NORMALIZATIONS.len(), 8);
 }
 
 // ------------------------------------------------------------------------ shared drivers
@@ -1495,4 +1662,77 @@ async fn mht8_http_signing_uses_no_daemon_agent_fallback() {
             "{e}"
         );
     }
+}
+
+// ------------------------------------------------------------ the normalizer itself
+
+fn norm_with(v: Value, known: &[(&str, &str)]) -> Value {
+    let seen: Seen = Seen::default();
+    for (id, name) in known {
+        seen.borrow_mut()
+            .of
+            .insert(("id", id.to_string()), name.to_string());
+    }
+    normalized(&v, &[], &masks(), &seen)
+}
+
+#[test]
+fn mht8_normalization_keeps_what_is_not_generated() {
+    let wrap = |t: Value| json!({"result": {"content": [{"text": t}]}});
+    // generated values of the same shape agree; a changed meaning does not
+    let same = |a: Value, b: Value| norm_with(wrap(a), &[]) == norm_with(wrap(b), &[]);
+    assert!(same(
+        json!({"id": "d-AAAAA", "at": "2026-01-01T00:00:00Z"}),
+        json!({"id": "d-BBBBB", "at": "2027-02-02T01:01:01Z"})
+    ));
+    // sizes, counts, other digit strings and claims are kept
+    assert!(!same(
+        json!({"drop_bytes": 393}),
+        json!({"drop_bytes": 394})
+    ));
+    assert!(!same(json!({"total": 123456}), json!({"total": 123457})));
+    assert!(!same(
+        json!({"message": "over 16777216 bytes"}),
+        json!({"message": "over 4194304 bytes"})
+    ));
+    assert!(!same(
+        json!({"claim": "A holds 12345"}),
+        json!({"claim": "A holds 12346"})
+    ));
+    assert!(!same(json!({"code": "E_A"}), json!({"code": "E_B"})));
+    // an identity is one value: two ids that swap places, or merge, differ
+    assert!(!same(
+        json!({"x": "d-AAAAA", "y": "d-BBBBB", "z": "d-AAAAA"}),
+        json!({"x": "d-AAAAA", "y": "d-BBBBB", "z": "d-BBBBB"})
+    ));
+    // a list that is not named as id-ordered keeps its order, even with ids in it
+    assert!(!same(
+        json!({"rows": ["d-AAAAA x", "d-BBBBB y"]}),
+        json!({"rows": ["d-BBBBB y", "d-AAAAA x"]})
+    ));
+    assert!(!same(
+        json!({"steps": ["b", "a"]}),
+        json!({"steps": ["a", "b"]})
+    ));
+    // a list the engine orders by id compares in the order of the fixture's names
+    let known = [("d-AAAAA", "a"), ("d-BBBBB", "b")];
+    assert_eq!(
+        norm_with(
+            wrap(json!({"consequences": [{"block": "d-BBBBB"}, {"block": "d-AAAAA"}]})),
+            &known
+        ),
+        norm_with(
+            wrap(json!({"consequences": [{"block": "d-AAAAA"}, {"block": "d-BBBBB"}]})),
+            &known
+        )
+    );
+    // a port is masked, a size next to it is not
+    assert!(same(
+        json!({"url": "http://127.0.0.1:41234/x", "n": 7}),
+        json!({"url": "http://127.0.0.1:51234/x", "n": 7})
+    ));
+    assert!(!same(
+        json!({"url": "http://127.0.0.1:41234/x", "n": 7}),
+        json!({"url": "http://127.0.0.1:51234/x", "n": 8})
+    ));
 }
