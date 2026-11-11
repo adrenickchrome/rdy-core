@@ -1346,7 +1346,7 @@ fn hsa1_key_replies_hold_every_member() {
             "a key without {member} was accepted"
         );
     }
-    // A null where a value is required, and an unknown member, are refusals too.
+    // A null where a value is required is a refusal too.
     for member in KEY_MEMBERS {
         if NULLABLE_KEY_MEMBERS.contains(&member) {
             continue;
@@ -1358,9 +1358,13 @@ fn hsa1_key_replies_hold_every_member() {
             "{member}: null"
         );
     }
+    // An unknown member is ignored (D-N8PR2): the key is the same as without it.
     let mut v = full.clone();
-    v["extra"] = serde_json::Value::Null;
-    assert!(serde_json::from_value::<HubKey>(v).is_err());
+    v["extra"] = serde_json::json!({"a": [1, "x"]});
+    assert_eq!(
+        serde_json::from_value::<HubKey>(v).unwrap(),
+        serde_json::from_value::<HubKey>(full.clone()).unwrap()
+    );
 
     // The same holds for the key nested in a bind reply.
     let bind = |key: serde_json::Value| {

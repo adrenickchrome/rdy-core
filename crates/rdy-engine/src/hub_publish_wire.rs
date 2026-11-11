@@ -1,11 +1,13 @@
 //! The typed publication upload protocol (D-Q0AVZ; hub D-6BXJY, i-6ZXW0): discovery, state,
 //! known, objects, files and publish, over HA2a's HTTPS sender ([`HttpHubTransport::upload`]).
 //!
-//! - **Closed spellings.** Each request and reply is one fixed JSON object. Hashes and repo ids
-//!   are lowercase text; an object key is `{kind, hash}`. Every reply object refuses unknown
-//!   members, duplicate keys and wrong types, and each nullable member must be present. The one
-//!   optional request member is `keep_latest`, beside `record` in the publish body and absent
-//!   when not given (D-50JXR); core never computes its default.
+//! - **Fixed spellings.** Each request and reply is one fixed JSON object. Hashes and repo ids
+//!   are lowercase text; an object key is `{kind, hash}`. Every reply object refuses duplicate
+//!   keys and wrong types, and each nullable member must be present. A reply member the client
+//!   does not know is ignored, never stored, logged or quoted (D-N8PR2); an object key in a
+//!   known reply stays closed, since the store reads the same type. The one optional request
+//!   member is `keep_latest`, beside `record` in the publish body and absent when not given
+//!   (D-50JXR); core never computes its default.
 //! - **Bounds before allocation.** Each request is checked against its count bounds and
 //!   encoded through a capped writer. Each reply is read within its byte cap and walked by the
 //!   bounded JSON guard, whose value budget a known step sets from its own request, before it is
@@ -19,9 +21,10 @@
 //!   message and fix, its valid issues and a request-id issue. Any other code is the generic
 //!   refusal. A body that echoes the bearer or a token prefix, or that breaks the object's
 //!   bounds, is discarded.
-//! - **Secrets in success replies.** A discovery or state reply whose raw body or decoded text
-//!   (also percent-decoded) holds the bearer or a token prefix is invalid. Debug prints a sync
-//!   base only as its origin and a feature only by its class.
+//! - **Secrets in replies.** Every reply, success or refusal, is scanned whole for the bearer
+//!   and the token prefixes: its raw body, and every key and string at any depth, ignored
+//!   members included, as given and percent-decoded (D-N8PR2). A reply that holds one is
+//!   invalid. Debug prints a sync base only as its origin and a feature only by its class.
 //! - **Effects.** Discovery, state and both known steps are reads: a failed exchange is
 //!   `E_UPSTREAM_TRANSPORT` and an invalid reply `E_UPSTREAM_PROTOCOL`. Objects, file and publish
 //!   are writes: once the request may have been sent, a lost or invalid reply is
@@ -33,11 +36,11 @@ use crate::error::{
 use crate::formats::formats;
 use crate::hub_http::{
     HttpHubTransport, JsonLimits, UploadHttpRequest, UploadMethod, api_error_entry,
-    decode_bounded_json,
+    decode_bounded_json, reply_echoes,
 };
 use crate::hub_types::{
     HubFailure, LimitUnit, MAX_ID_BYTES, MAX_URL_BYTES, Origin, OriginFence, RemoteUrl,
-    RequestClaim, Secret, TOKEN_PREFIXES, check_count, hub_limit,
+    RequestClaim, Secret, check_count, hub_limit,
 };
 use crate::publication::{Audience, SelectionEntry};
 use crate::publication_manifest::{Manifest, ManifestEntry, manifest_hash};
@@ -207,9 +210,9 @@ impl StateRequest {
 }
 
 /// A profile revision: its block id and version (hub D-6BXJY). In the state reply it is hub
-/// metadata; in the record it is the revision the tag pins.
+/// metadata; in the record it is the revision the tag pins. It is decoded only from the state
+/// reply, so an unknown member is ignored there (D-N8PR2); the record only serializes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProfileIdentity {
     pub id: BlockId,
     #[serde(with = "hex")]
@@ -227,7 +230,6 @@ pub enum FeatureClass {
 
 /// A feature the hub repo's records use. Debug prints only its class: the name is hub text.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FeatureUse {
     pub name: String,
     pub class: FeatureClass,
@@ -244,7 +246,6 @@ impl fmt::Debug for FeatureUse {
 /// The state reply, validated: limits are positive and clamped to core's caps. `min_rdy` is
 /// null in H1 (hub i-DETA1). Debug prints each feature by its class only.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PublishState {
     #[serde(deserialize_with = "nullable_hash")]
     pub canon: Option<Hash>,
@@ -272,15 +273,14 @@ pub struct PublishState {
 
 /// An objects/put reply: the push quarantine's distinct records and bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ObjectPut {
     pub records: u64,
     pub bytes: u64,
 }
 
-/// One artifact file by content: its hash and size.
+/// One artifact file by content: its hash and size. It is decoded only from a file reply, so an
+/// unknown member is ignored there (D-N8PR2); requests only serialize it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FileIdentity {
     #[serde(with = "hex")]
     pub hash: Hash,
@@ -289,7 +289,6 @@ pub struct FileIdentity {
 
 /// A publish reply: the candidate's hub id, its state and its page link.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub id: String,
     pub state: String,
@@ -543,7 +542,6 @@ struct PublishBody<'a> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DiscoveryDto {
     sync_base: String,
     #[serde(deserialize_with = "at_most::<_, _, MAX_PROTOCOLS>")]
@@ -551,7 +549,6 @@ struct DiscoveryDto {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct MissingKeys {
     missing: Vec<ObjectKey>,
 }
@@ -566,7 +563,6 @@ impl<'de> Deserialize<'de> for HexHash {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct MissingFiles {
     missing: Vec<HexHash>,
 }
@@ -580,7 +576,6 @@ enum SeverityDto {
 
 /// One entry of a hub error's `issues`: an Issue's shape.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct IssueDto {
     severity: SeverityDto,
     code: String,
@@ -590,11 +585,11 @@ struct IssueDto {
     fix: String,
 }
 
-/// The hub's error object (hub tb-68J50). `corrected` is bounded, checked for tokens and then
-/// discarded: the upload has no payload to send again. `issues` stops at its 200-issue bound
-/// before a further issue is built.
+/// The hub's error object (hub tb-68J50). `corrected` must be an object when given; it is
+/// bounded, scanned for tokens with the whole body and then discarded: the upload has no payload
+/// to send again. `issues` stops at its 200-issue bound before a further issue is built. Unknown
+/// members are ignored (D-N8PR2).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ErrorDto {
     code: String,
     message: String,
@@ -604,8 +599,8 @@ struct ErrorDto {
     issues: Vec<IssueDto>,
     #[serde(default, deserialize_with = "present_u64")]
     retry_after: Option<u64>,
-    #[serde(default, deserialize_with = "present_object")]
-    corrected: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, rename = "corrected", deserialize_with = "present_object")]
+    _corrected: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -980,77 +975,19 @@ fn limits(bytes: usize, values: usize) -> JsonLimits {
     }
 }
 
-/// `body` read as `T` within `limits`; anything else is an invalid reply.
+/// `body` read as `T` within `limits`, then scanned whole for `bearer` and the token prefixes
+/// (D-N8PR2); anything else is an invalid reply.
 fn reply<T: DeserializeOwned>(
     body: &[u8],
     limits: JsonLimits,
     effect: Effect,
-) -> Result<T, RdyError> {
-    decode_bounded_json(body, limits).map_err(|_| invalid_reply(effect))
-}
-
-/// Whether `text` holds the bearer or any hub token prefix.
-fn echoes_token(text: &str, bearer: &Secret) -> bool {
-    let b = bearer.expose();
-    (!b.is_empty() && text.contains(b)) || TOKEN_PREFIXES.iter().any(|p| text.contains(p))
-}
-
-/// `text` with each `%XX` escape decoded; a decoded byte that is not UTF-8 becomes U+FFFD.
-fn percent_decoded(text: &str) -> String {
-    let b = text.as_bytes();
-    let hex = |c: u8| char::from(c).to_digit(16);
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let pair = b
-            .get(i + 1)
-            .copied()
-            .and_then(hex)
-            .zip(b.get(i + 2).copied().and_then(hex));
-        match (b[i], pair) {
-            (b'%', Some((hi, lo))) => {
-                // Two hex digits are at most 255.
-                out.push(u8::try_from(hi * 16 + lo).unwrap_or(u8::MAX));
-                i += 3;
-            }
-            (c, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Whether a success reply echoes the bearer or a token prefix: in its raw body, or in one of
-/// its decoded strings (so a JSON `\u` escape is no cover) as given or percent-decoded. Such a
-/// reply is invalid, and its text never reaches the caller.
-fn success_echoes<'a>(
-    body: &[u8],
-    texts: impl IntoIterator<Item = &'a str>,
     bearer: &Secret,
-) -> bool {
-    echoes_token(&String::from_utf8_lossy(body), bearer)
-        || texts
-            .into_iter()
-            .any(|t| echoes_token(t, bearer) || echoes_token(&percent_decoded(t), bearer))
-}
-
-/// Whether any key or string of `object`, at any depth, holds the bearer or a token prefix. The
-/// JSON guard bounds the depth to 32, so the recursion is bounded too.
-fn object_echoes(object: &serde_json::Map<String, serde_json::Value>, bearer: &Secret) -> bool {
-    object
-        .iter()
-        .any(|(k, v)| echoes_token(k, bearer) || value_echoes(v, bearer))
-}
-
-fn value_echoes(value: &serde_json::Value, bearer: &Secret) -> bool {
-    match value {
-        serde_json::Value::String(s) => echoes_token(s, bearer),
-        serde_json::Value::Array(a) => a.iter().any(|v| value_echoes(v, bearer)),
-        serde_json::Value::Object(m) => object_echoes(m, bearer),
-        _ => false,
+) -> Result<T, RdyError> {
+    let value = decode_bounded_json(body, limits).map_err(|_| invalid_reply(effect))?;
+    if reply_echoes(body, Some(bearer)) {
+        return Err(invalid_reply(effect));
     }
+    Ok(value)
 }
 
 /// 1 to 64 upper-case ASCII letters, digits and underscores.
@@ -1118,10 +1055,10 @@ fn notice(message: String, fix: &str) -> Issue {
 
 /// A hub error object at a refusal `status`, as the caller's error. `None` for a body outside
 /// the object's grammar or bounds, a known code at another status, a retry code without its
-/// wait, or a body that echoes the bearer or a token prefix: the body is then discarded whole.
+/// wait, or a body that echoes the bearer or a token prefix anywhere (ignored members included,
+/// D-N8PR2): the body is then discarded whole.
 fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyError> {
     let dto: ErrorDto = decode_bounded_json(body, limits(cap, MAX_JSON_VALUES)).ok()?;
-    let raw = std::str::from_utf8(body).ok()?;
     // The decoder stopped `issues` at its bound; each issue's text is checked here.
     let issues_ok = dto
         .issues
@@ -1138,26 +1075,9 @@ fn refusal(status: u16, body: &[u8], cap: usize, bearer: &Secret) -> Option<RdyE
     if !shape_ok {
         return None;
     }
-    // Every decoded string, `corrected`'s strings and keys at any depth included, and the raw
-    // body.
-    let texts_echo = [&dto.code, &dto.message, &dto.fix, &dto.request_id]
-        .into_iter()
-        .chain(
-            dto.issues
-                .iter()
-                .flat_map(|i| [&i.code, &i.message, &i.fix]),
-        )
-        .any(|t| echoes_token(t, bearer));
-    let block_echo = dto
-        .issues
-        .iter()
-        .filter_map(|i| i.block.as_ref())
-        .any(|b| echoes_token(b.as_str(), bearer));
-    let corrected_echo = dto
-        .corrected
-        .as_ref()
-        .is_some_and(|m| object_echoes(m, bearer));
-    if texts_echo || block_echo || corrected_echo || echoes_token(raw, bearer) {
+    // The raw body, and every key and string of the whole body at any depth: the decoded
+    // members, `corrected` and ignored members alike, as given and percent-decoded.
+    if reply_echoes(body, Some(bearer)) {
         return None;
     }
     // The pair first, so a code with several statuses reaches each of its rows.
@@ -1306,10 +1226,12 @@ impl PublishWire for HttpPublishWire {
                 success: &[200],
             },
         )?;
-        let dto: DiscoveryDto = reply(&body, limits(REPLY_BYTES, MAX_JSON_VALUES), Effect::Read)?;
-        if success_echoes(&body, [dto.sync_base.as_str()], &cx.bearer) {
-            return Err(upstream_protocol());
-        }
+        let dto: DiscoveryDto = reply(
+            &body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Read,
+            &cx.bearer,
+        )?;
         let p = &dto.protocols;
         let protocols_ok = !p.is_empty()
             && p.len() <= MAX_PROTOCOLS
@@ -1331,13 +1253,13 @@ impl PublishWire for HttpPublishWire {
         let url = route(cx, &["state"], &[])?;
         let json = encode(request, STATE_REQUEST_BYTES)?;
         let body = self.post_json(cx, Effect::Read, &url, json, REPLY_BYTES, &[200])?;
-        let mut st: PublishState =
-            reply(&body, limits(REPLY_BYTES, MAX_JSON_VALUES), Effect::Read)?;
-        let texts = [st.rdy.as_str()]
-            .into_iter()
-            .chain(st.min_rdy.as_deref())
-            .chain(st.features.iter().map(|f| f.name.as_str()));
-        if success_echoes(&body, texts, &cx.bearer) || !check_state(&mut st) {
+        let mut st: PublishState = reply(
+            &body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Read,
+            &cx.bearer,
+        )?;
+        if !check_state(&mut st) {
             return Err(upstream_protocol());
         }
         Ok(st)
@@ -1359,7 +1281,12 @@ impl PublishWire for HttpPublishWire {
         let body = self.post_json(cx, Effect::Read, &url, json, KNOWN_REPLY_BYTES, &[200])?;
         // `missing` and, per key, one element and two members.
         let values = keys.len().saturating_mul(3).saturating_add(1);
-        let dto: MissingKeys = reply(&body, limits(KNOWN_REPLY_BYTES, values), Effect::Read)?;
+        let dto: MissingKeys = reply(
+            &body,
+            limits(KNOWN_REPLY_BYTES, values),
+            Effect::Read,
+            &cx.bearer,
+        )?;
         let subset = dto.missing.windows(2).all(|w| w[0] < w[1])
             && dto.missing.iter().all(|k| keys.binary_search(k).is_ok());
         if !subset {
@@ -1394,6 +1321,7 @@ impl PublishWire for HttpPublishWire {
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),
             Effect::Write,
+            &cx.bearer,
         )
     }
 
@@ -1422,8 +1350,12 @@ impl PublishWire for HttpPublishWire {
         )?;
         // `missing` and one element per hash.
         let values = files.len().saturating_add(1);
-        let dto: MissingFiles =
-            reply(&body, limits(FILES_KNOWN_REPLY_BYTES, values), Effect::Read)?;
+        let dto: MissingFiles = reply(
+            &body,
+            limits(FILES_KNOWN_REPLY_BYTES, values),
+            Effect::Read,
+            &cx.bearer,
+        )?;
         let missing: Vec<Hash> = dto.missing.into_iter().map(|h| h.0).collect();
         let subset = missing.windows(2).all(|w| w[0] < w[1])
             && missing.iter().all(|h| held.binary_search(h).is_ok());
@@ -1461,6 +1393,7 @@ impl PublishWire for HttpPublishWire {
             &reply_body,
             limits(REPLY_BYTES, MAX_JSON_VALUES),
             Effect::Write,
+            &cx.bearer,
         )?;
         if held != *file {
             return Err(upstream_uncertain());
@@ -1480,13 +1413,14 @@ impl PublishWire for HttpPublishWire {
         let json = encode_publish(push, site, record, manifest, keep_latest)?;
         let url = route(cx, &["publish"], &[])?;
         let body = self.post_json(cx, Effect::Write, &url, json, REPLY_BYTES, &[200, 201])?;
-        let c: Candidate = reply(&body, limits(REPLY_BYTES, MAX_JSON_VALUES), Effect::Write)?;
-        let ok = id_ok(&c.id)
-            && c.state == "candidate"
-            && c.url.len() <= MAX_URL_BYTES
-            && id_ok(&c.url)
-            && !echoes_token(&c.id, &cx.bearer)
-            && !echoes_token(&c.url, &cx.bearer);
+        let c: Candidate = reply(
+            &body,
+            limits(REPLY_BYTES, MAX_JSON_VALUES),
+            Effect::Write,
+            &cx.bearer,
+        )?;
+        let ok =
+            id_ok(&c.id) && c.state == "candidate" && c.url.len() <= MAX_URL_BYTES && id_ok(&c.url);
         if !ok {
             return Err(upstream_uncertain());
         }

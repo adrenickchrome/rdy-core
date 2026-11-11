@@ -1723,12 +1723,12 @@ fn hsa4_bodies_headers_and_json_are_bounded() {
         hub.call(me()),
     );
     assert_eq!(failure(r), "Protocol", "trailing bytes");
-    // Closed application objects deny unknown members; OAuth replies ignore extensions.
+    // Application objects and OAuth replies alike ignore unknown members (D-N8PR2).
     let (r, _) = hub.send(
         Reply::json(200, &ME_REPLY.replacen('{', r#"{"extra":1,"#, 1)),
         hub.call(me()),
     );
-    assert_eq!(failure(r), "Protocol", "unknown /me member");
+    assert!(r.is_ok(), "unknown /me member: {r:?}");
     let (r, _) = hub.send(
         Reply::json(200, &ME_REPLY.replacen('{', r#"{"away_until":null,"#, 1)),
         hub.call(me()),
@@ -1740,7 +1740,7 @@ fn hsa4_bodies_headers_and_json_are_bounded() {
             key_id: KEY_ID.into(),
         }),
     );
-    assert_eq!(failure(r), "Protocol", "unknown key member");
+    assert!(r.is_ok(), "unknown key member: {r:?}");
     let (r, _) = hub.send(
         Reply::json(
             200,
@@ -2182,7 +2182,8 @@ fn hsa4_hub_fixtures_round_trip() {
         assert_eq!(r.expect("reply"), c.want, "{name}");
     }
 
-    // An empty list is no key; a list with another key, two keys or a cursor is refused.
+    // An empty list is no key; a list with another key, two keys or a cursor is refused. An
+    // unknown member (`total`) is ignored (D-N8PR2).
     let find = || HubOperation::FindKey {
         fingerprint: FINGERPRINT.into(),
     };
@@ -2206,8 +2207,10 @@ fn hsa4_hub_fixtures_round_trip() {
         LIST_REPLY.replace(r#","next":null"#, ""),
     ] {
         let (r, _) = hub.send(Reply::json(200, &body), hub.call(find()));
-        if body == LIST_REPLY.replace(r#","next":null"#, "") {
-            assert!(r.is_ok(), "an absent next: {r:?}");
+        if body == LIST_REPLY.replace(r#","next":null"#, "")
+            || body == LIST_REPLY.replace(r#""next":null"#, r#""next":null,"total":1"#)
+        {
+            assert!(r.is_ok(), "an absent next or an unknown member: {r:?}");
         } else {
             assert_eq!(failure(r), "Protocol", "{body}");
         }
@@ -2741,12 +2744,332 @@ fn me9_me_takes_the_hubs_product_analytics_bool() {
     }
 }
 
+/// D-N8PR2: `product_analytics` is an ignored member, so `/me` takes it whatever its type.
 #[test]
-fn me9_me_refuses_a_product_analytics_that_is_not_a_bool() {
+fn me9_me_ignores_a_product_analytics_that_is_not_a_bool() {
     let mut hub = Hub::start();
     for value in [r#""yes""#, "1", r#"{"a":true}"#] {
         let body = ME_REPLY.replacen('{', &format!(r#"{{"product_analytics":{value},"#), 1);
         let (r, _) = hub.send(Reply::json(200, &body), hub.call(HubOperation::Me));
-        assert_eq!(failure(r), "Protocol", "product_analytics: {value}");
+        assert_eq!(
+            r.unwrap(),
+            HubReply::Me(MeReply {
+                account: ACCOUNT.into(),
+                handle: "test-person".into(),
+            }),
+            "product_analytics: {value}"
+        );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// np2: hub replies ignore unknown members; the token scan covers the whole reply (D-N8PR2)
+// ---------------------------------------------------------------------------------------------
+
+/// A marker an ignored member carries: no reply or error may hold it.
+const NP2_MARKER: &str = "np2-marker-7Kq";
+
+/// `body` with `member` as its first member (the first `{` is the top-level object's).
+fn np2_with(body: &str, member: &str) -> String {
+    body.replacen('{', &format!("{{{member},"), 1)
+}
+
+/// The status and body of `op`'s settled success reply (SignOut's empty reply has none).
+fn np2_success(op: &HubOperation, origin: &str) -> Option<(u16, String)> {
+    let r = match op {
+        HubOperation::Metadata => (200, sub(METADATA_REPLY, origin)),
+        HubOperation::DeviceStart { .. } => (200, sub(DEVICE_REPLY, origin)),
+        HubOperation::DevicePoll { .. } | HubOperation::Refresh { .. } => {
+            (200, TOKEN_REPLY.to_string())
+        }
+        HubOperation::Me => (200, ME_REPLY.to_string()),
+        HubOperation::SignOut { .. } => return None,
+        HubOperation::BindChallenge { .. } => (201, CHALLENGE_REPLY.to_string()),
+        HubOperation::Bind { .. } => (201, sub(BIND_REPLY, origin)),
+        HubOperation::FindKey { .. } => (200, LIST_REPLY.to_string()),
+        HubOperation::Retire { .. } => (200, RETIRE_REPLY.to_string()),
+        HubOperation::Revoke { .. } => (200, REVOKE_REPLY.to_string()),
+    };
+    Some(r)
+}
+
+/// The unknown members each reply must ignore, of every JSON type.
+fn np2_ignored_members() -> Vec<String> {
+    let m = NP2_MARKER;
+    vec![
+        format!(r#""np2_extra":"{m}""#),
+        r#""np2_extra":42"#.into(),
+        r#""np2_extra":-1.5"#.into(),
+        r#""np2_extra":true"#.into(),
+        r#""np2_extra":null"#.into(),
+        format!(r#""np2_extra":{{"a":{{"b":["{m}",null]}}}}"#),
+        format!(r#""np2_extra":[1,["{m}"]]"#),
+        format!(r#""{m}":1"#),
+    ]
+}
+
+/// D-N8PR2: every sign-in, `/me` and key reply ignores an unknown member of any type, at its top
+/// level and inside its known nested objects (a `/me` earlier handle and organization, a bind
+/// reply's key, a key list's item): the call gives the same reply as without it, and the reply
+/// never holds the member.
+#[test]
+fn np2_sign_in_me_and_key_replies_ignore_unknown_members() {
+    let mut hub = Hub::start();
+    let o = hub.origin();
+    for op in all_operations() {
+        let Some((status, body)) = np2_success(&op, &o) else {
+            continue;
+        };
+        let (want, _) = hub.send(Reply::json(status, &body), hub.call(op.clone()));
+        let want = want.unwrap_or_else(|f| panic!("{op:?}: {}", kind(&f)));
+        let mut bodies: Vec<String> = np2_ignored_members()
+            .iter()
+            .map(|m| np2_with(&body, m))
+            .collect();
+        let nested = format!(r#""np2":"{NP2_MARKER}","#);
+        match &op {
+            HubOperation::Me => {
+                bodies.push(body.replace(
+                    r#"{"handle":"test-person-old""#,
+                    &format!(r#"{{{nested}"handle":"test-person-old""#),
+                ));
+                bodies.push(body.replace(r#"{"id":"org_"#, &format!(r#"{{{nested}"id":"org_"#)));
+            }
+            HubOperation::Bind { .. } => {
+                bodies.push(body.replace(r#""key":{"#, &format!(r#""key":{{{nested}"#)));
+            }
+            HubOperation::FindKey { .. } => {
+                bodies.push(body.replace(r#""items":[{"#, &format!(r#""items":[{{{nested}"#)));
+            }
+            _ => {}
+        }
+        for b in &bodies {
+            assert_ne!(b, &body);
+            let (got, _) = hub.send(Reply::json(status, b), hub.call(op.clone()));
+            let got = got.unwrap_or_else(|f| panic!("{op:?}: {b}: {}", kind(&f)));
+            assert_eq!(got, want, "{op:?}: {b}");
+            assert!(!format!("{got:?}").contains(NP2_MARKER), "{op:?}");
+        }
+    }
+    hub.finish();
+}
+
+/// The spellings of `text` a hostile reply can hide it in: as given, its first `r` or `_` as a
+/// JSON `\u` escape, and its first `_` percent-encoded.
+fn np2_spellings(text: &str) -> Vec<String> {
+    let u = |c: char| format!("\\u{:04x}", u32::from(c));
+    vec![
+        text.to_string(),
+        text.replacen('r', &u('r'), 1),
+        text.replacen('_', &u('_'), 1),
+        text.replacen('_', "%5F", 1),
+    ]
+}
+
+/// The members that hide `t` in an ignored member: as its value, its key, deep in an object and
+/// inside an array.
+fn np2_hiding_members(t: &str) -> Vec<String> {
+    vec![
+        format!(r#""np2_extra":"np2hide {t} np2hide""#),
+        format!(r#""{t}":1"#),
+        format!(r#""np2_extra":{{"a":{{"b":{{"c":"{t}"}}}}}}"#),
+        format!(r#""np2_extra":[1,["{t}"]]"#),
+    ]
+}
+
+/// The bearer, another install's token, and the bare prefixes with no token.
+const NP2_HIDDEN: [&str; 4] = [ACCESS, REFRESH_2, "rdyh_", "rdyx_"];
+
+/// D-N8PR2: a `/me` reply that holds the bearer, another token or a bare token prefix in any key
+/// or string, ignored members included (top level, deep, in an array, in a nested known object),
+/// as given, JSON-escaped or percent-encoded, is a protocol failure, not an invalid handle and not
+/// a sign-in; the reply's text never reaches the failure.
+#[test]
+fn np2_me_refuses_a_token_anywhere_in_the_reply() {
+    let mut hub = Hub::start();
+    for text in NP2_HIDDEN {
+        for t in np2_spellings(text) {
+            let mut bodies: Vec<String> = np2_hiding_members(&t)
+                .iter()
+                .map(|m| np2_with(ME_REPLY, m))
+                .collect();
+            bodies.push(ME_REPLY.replace(
+                r#"{"id":"org_00000000000000000000000004""#,
+                &format!(r#"{{"np2":"{t}","id":"org_00000000000000000000000004""#),
+            ));
+            // A known member that holds it: the display name.
+            bodies.push(ME_REPLY.replace("Test Person", &format!("Test {t} Person")));
+            // With an invalid handle too: the echo wins, it is no handle failure.
+            bodies.push(
+                np2_with(ME_REPLY, &format!(r#""np2_extra":"{t}""#))
+                    .replace(r#""handle":"test-person""#, r#""handle":"Bad Handle""#),
+            );
+            for b in &bodies {
+                assert_ne!(b, ME_REPLY);
+                let (r, _) = hub.send(Reply::json(200, b), hub.call(HubOperation::Me));
+                assert!(!format!("{r:?}").contains("np2hide"), "{b}");
+                assert_eq!(failure(r), "Protocol", "{b}");
+            }
+        }
+    }
+    hub.finish();
+}
+
+/// D-N8PR2: the token reply delivers tokens, so its `access_token` and `refresh_token` values are
+/// exempt by design; every other key and string, ignored members included, is scanned for the
+/// token prefixes in every spelling, on the device poll and on a refresh.
+#[test]
+fn np2_token_reply_scans_every_member_but_its_tokens() {
+    let mut hub = Hub::start();
+    let ops = [
+        HubOperation::DevicePoll {
+            device_code: Secret::new(DEVICE_CODE),
+        },
+        HubOperation::Refresh {
+            refresh_token: Secret::new(REFRESH),
+        },
+    ];
+    for op in &ops {
+        // The settled reply, with its two tokens, is taken.
+        let (r, _) = hub.send(Reply::json(200, TOKEN_REPLY), hub.call(op.clone()));
+        r.unwrap();
+        for text in NP2_HIDDEN {
+            for t in np2_spellings(text) {
+                let mut bodies: Vec<String> = np2_hiding_members(&t)
+                    .iter()
+                    .map(|m| np2_with(TOKEN_REPLY, m))
+                    .collect();
+                // A known member that carries no token.
+                bodies.push(TOKEN_REPLY.replace("pull push", &format!("pull {t} push")));
+                for b in &bodies {
+                    assert_ne!(b, TOKEN_REPLY);
+                    let (r, _) = hub.send(Reply::json(200, b), hub.call(op.clone()));
+                    assert!(!format!("{r:?}").contains("np2hide"), "{b}");
+                    assert_eq!(failure(r), "Protocol", "{op:?}: {b}");
+                }
+            }
+        }
+    }
+    hub.finish();
+}
+
+/// D-N8PR2: an ignored member still counts toward the whole reply's byte bound.
+#[test]
+fn np2_an_ignored_member_over_the_size_bound_fails() {
+    let mut hub = Hub::start();
+    // Strings within the scalar bound whose total passes the 1 MiB body bound.
+    let piece = format!(r#""{}""#, "a".repeat(MAX_SCALAR_BYTES));
+    let n = MAX_JSON_BYTES / MAX_SCALAR_BYTES + 1;
+    let big = np2_with(
+        ME_REPLY,
+        &format!(r#""np2_extra":[{}]"#, vec![piece.as_str(); n].join(",")),
+    );
+    assert!(big.len() > MAX_JSON_BYTES);
+    let (r, _) = hub.send(Reply::json(200, &big), hub.call(HubOperation::Me));
+    assert_eq!(failure(r), "Protocol");
+    // The same member within the bound is ignored.
+    let small = np2_with(ME_REPLY, &format!(r#""np2_extra":[{piece}]"#));
+    let (r, _) = hub.send(Reply::json(200, &small), hub.call(HubOperation::Me));
+    r.unwrap();
+    hub.finish();
+}
+
+/// D-N8PR2: an ignored member still counts toward the reply's JSON depth bound.
+#[test]
+fn np2_an_ignored_member_over_the_depth_bound_fails() {
+    let mut hub = Hub::start();
+    // The top-level object is depth 1, so `n` nested arrays inside it reach depth n + 1.
+    let nested = |n: usize| format!(r#""np2_extra":{}{}"#, "[".repeat(n), "]".repeat(n));
+    let (r, _) = hub.send(
+        Reply::json(200, &np2_with(ME_REPLY, &nested(MAX_DEPTH))),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "Protocol");
+    let (r, _) = hub.send(
+        Reply::json(200, &np2_with(ME_REPLY, &nested(MAX_DEPTH - 1))),
+        hub.call(HubOperation::Me),
+    );
+    r.unwrap();
+    hub.finish();
+}
+
+/// D-N8PR2: an ignored member still counts toward the reply's total of members and elements.
+#[test]
+fn np2_an_ignored_member_over_the_member_bound_fails() {
+    let mut hub = Hub::start();
+    let used = members(&serde_json::from_str(ME_REPLY).unwrap());
+    // The member itself counts one; each element one more.
+    let with_elements = |n: usize| {
+        np2_with(
+            ME_REPLY,
+            &format!(r#""np2_extra":[{}]"#, vec!["0"; n].join(",")),
+        )
+    };
+    let fits = MAX_MEMBERS - used - 1;
+    let (r, _) = hub.send(
+        Reply::json(200, &with_elements(fits + 1)),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "Protocol");
+    let (r, _) = hub.send(
+        Reply::json(200, &with_elements(fits)),
+        hub.call(HubOperation::Me),
+    );
+    r.unwrap();
+    hub.finish();
+}
+
+/// D-N8PR2: a known member that is missing, of the wrong type or out of its bounds still breaks
+/// the contract beside an unknown member, and the failure (and its error) holds nothing of the
+/// ignored member. A wrong status still fails too.
+#[test]
+fn np2_known_member_faults_still_fail_beside_an_unknown_member() {
+    let mut hub = Hub::start();
+    let install = hub.install.clone();
+    let extra = format!(r#""np2_extra":"{NP2_MARKER}""#);
+    let faults = [
+        ME_REPLY.replace(r#","created_at":"2026-08-01T08:00:00Z""#, ""),
+        ME_REPLY.replace(r#""two_factor":true"#, r#""two_factor":"yes""#),
+        ME_REPLY.replace(r#""kind":"person""#, r#""kind":"robot""#),
+        ME_REPLY.replace("acc_00000000000000000000000001", "bad"),
+        ME_REPLY.replace(r#""until":"2026-09-01T08:00:00Z""#, r#""until":"soon""#),
+    ];
+    for body in &faults {
+        let (r, _) = hub.send(
+            Reply::json(200, &np2_with(body, &extra)),
+            hub.call(HubOperation::Me),
+        );
+        let f = r.expect_err(body);
+        assert_eq!(kind(&f), "Protocol", "{body}");
+        let e = f.into_error(&install);
+        let text = format!("{} {} {} {e:?}", e.code, e.message, e.fix);
+        assert!(!text.contains(NP2_MARKER), "{text}");
+    }
+    // A key reply whose known member is of the wrong type.
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &np2_with(RETIRE_REPLY, &extra).replace(r#""state":"retired""#, r#""state":3"#),
+        ),
+        hub.call(HubOperation::Retire {
+            key_id: KEY_ID.into(),
+        }),
+    );
+    assert_eq!(failure(r), "Protocol");
+    // A wrong success status with a good body.
+    let (r, _) = hub.send(
+        Reply::json(201, &np2_with(ME_REPLY, &extra)),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "Protocol");
+    // An invalid handle beside an ignored member keeps its own failure.
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &np2_with(ME_REPLY, &extra).replace(r#""handle":"test-person""#, r#""handle":"Bad""#),
+        ),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "InvalidHandle");
+    hub.finish();
 }
