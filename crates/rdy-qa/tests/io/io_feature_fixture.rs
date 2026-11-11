@@ -475,7 +475,7 @@ const FIRST_USE: &[FirstUse] = &[FirstUse {
         ),
         (
             "v4-f1-e1-foreign-copy.expect.json",
-            "d293339ba509481420ed4c8e5305e3c45b94c93de97273a65365061c8c817db9",
+            "1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
         ),
     ],
     native: "fixtures/store/foreign-copy-1/expect.json",
