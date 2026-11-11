@@ -23,6 +23,7 @@ mod dispute_cmd;
 mod dump_cmd;
 mod edit_cmd;
 mod history_text;
+mod hook_cmd;
 mod inbox_cmd;
 mod instructions_cmd;
 mod intake_cmd;
@@ -238,10 +239,19 @@ enum Cmd {
     /// rdy_instructions.
     Instructions(instructions_cmd::InstructionsArgs),
     /// Create your own empty rules project if none exists, then write the three-line stub that
-    /// tells agents to call rdy_instructions into CLAUDE.md and AGENTS.md of the project root,
-    /// before your own text. Outside a project, and in your rules project, it writes no stub. A
-    /// file that has the stub is left alone.
-    Setup,
+    /// tells agents to call rdy_session and rdy_instructions into CLAUDE.md and AGENTS.md of the
+    /// project root, before your own text. Outside a project, and in your rules project, it
+    /// writes no stub. A file that has the stub is left alone, and the stub of rdy 0.43.0 to
+    /// 0.45.0 is replaced in place. With --code-hook <repo> or --edit-hook claude-code it then
+    /// installs that optional warning hook; it installs no hook unless asked.
+    Setup(setup_cmd::SetupArgs),
+    /// The two optional local warning hooks: check an action with the shared check, install or
+    /// remove a hook, and the entry points the installed hooks run. A hook warns and never
+    /// refuses a commit or an edit. The chat path is rdy_hook.
+    Hook {
+        #[command(subcommand)]
+        cmd: hook_cmd::HookCmd,
+    },
     /// Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a
     /// checkout, with no path or a path in the working tree, it lints the working copy against
     /// the bound view; the working copy carries no format number. A new entry needs no id, and a
@@ -357,7 +367,8 @@ fn run(cli: Cli, env: &Env, projectless: bool) -> Result<(Value, String), ErrorR
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
         Cmd::Compact(a) => compact_cmd::compact(env, a),
-        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) | Cmd::Setup => {
+        Cmd::Hook { cmd } => hook_cmd::run(env, cmd),
+        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) | Cmd::Setup(_) => {
             unreachable!("handled in main")
         }
     }
@@ -405,6 +416,13 @@ fn main() -> ExitCode {
         } => return auth_cmd::run(cmd, json),
         cli => cli,
     };
+    // m4a3: a hook's host entry point runs before every step that can fail the command: it
+    // warns about its own failures and exits 0, so the commit or the edit goes ahead
+    if let Cmd::Hook { cmd } = &cli.cmd
+        && hook_cmd::is_host(cmd)
+    {
+        return hook_cmd::host(cmd, cli.json, cli.project.as_deref(), cli.no_daemon);
+    }
     let as_json = cli.json;
     // ha15: a batch check opens no project, store, config or daemon, so it runs first
     if let Cmd::Stream { cmd } = cli.cmd {
@@ -435,8 +453,9 @@ fn main() -> ExitCode {
         }
     };
     // ain5: `rdy setup` writes in the project root, or here outside every project
-    if let Cmd::Setup = cli.cmd {
-        let out = setup_cmd::choose(cli.project.as_deref(), &cwd).and_then(setup_cmd::setup);
+    if let Cmd::Setup(a) = &cli.cmd {
+        let out = setup_cmd::choose(cli.project.as_deref(), &cwd)
+            .and_then(|chosen| setup_cmd::setup(chosen, a));
         return match out {
             Ok((v, text)) => {
                 if as_json {

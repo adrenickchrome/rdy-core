@@ -1743,6 +1743,12 @@ fn cli_probe(
     let mut a = vec!["--json"];
     a.extend_from_slice(args);
     let (code, out, err) = rdy_in(dir, env, &a);
+    note_cli(seen, label, code, &out, &err)
+}
+
+/// One finished CLI call, noted under `label`: its exit value, and the shape of the JSON body of
+/// stdout (else of stderr); the parsed body, or null.
+fn note_cli(seen: &mut Seen, label: &str, code: i32, out: &str, err: &str) -> Value {
     seen.add_to_set(label, "exits", json!(code));
     let (slot, body) = if out.trim().is_empty() {
         ("stderr", err.trim())
@@ -2187,6 +2193,288 @@ fn cli_links_probes(seen: &mut Seen, env: &[(String, String)]) {
     }
 }
 
+/// m4a3: the world of the `rdy hook` probes (C29): a project with a landed decision and the
+/// linked code repo `app`, whose local checkout anchors `src/anchored.rs` to the decision and
+/// leaves `src/plain.rs` unanchored. Every run is direct, so no daemon holds the store, and
+/// reads no Git configuration of the machine.
+struct HookWorld {
+    w: rdy_qa::instructions::World,
+    project: rdy_qa::instructions::Dir,
+    /// The canonical root of the project.
+    root: PathBuf,
+    app: rdy_qa::git_repo::GitRepo,
+    /// The empty global Git configuration.
+    global: PathBuf,
+    decision: String,
+    tmp: tempfile::TempDir,
+}
+
+impl HookWorld {
+    fn new() -> HookWorld {
+        let w = rdy_qa::instructions::World::new();
+        let project = w.project();
+        let root = std::fs::canonicalize(project.path()).expect("the project root");
+        let decision = hook_decision(&root);
+        let tmp = rdy_qa::daemon::short_tempdir();
+        let base = std::fs::canonicalize(tmp.path()).expect("the temporary root");
+        let global = base.join("no-global");
+        std::fs::write(&global, "").expect("the empty global configuration");
+        let app = rdy_qa::git_repo::GitRepo::at(&base.join("app"));
+        app.write("src/plain.rs", "fn plain() {}\n");
+        app.commit("feat: plain");
+        app.write("src/anchored.rs", "fn anchored() {}\n");
+        app.commit(&format!("feat: anchored\n\nImplements: {decision}"));
+        let checkout = app.path().to_string_lossy().into_owned();
+        rdy_qa::git_repo::link_repos(&root, &[("app", &checkout)]);
+        HookWorld {
+            w,
+            project,
+            root,
+            app,
+            global,
+            decision,
+            tmp,
+        }
+    }
+
+    /// `rdy --project <project> --json <args>` in `cwd` with `stdin`: its exit value, stdout and
+    /// stderr.
+    fn run(&self, cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> (i32, String, String) {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let mut cmd = self.w.command(self.project.path(), &all);
+        cmd.current_dir(cwd)
+            .env("RDY_NO_DAEMON", "1")
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &self.global);
+        let o = rdy_qa::fixtures::output_within_stdin(&mut cmd, stdin, Duration::from_secs(120))
+            .expect("run rdy");
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    }
+
+    /// [`HookWorld::run`], noted under `label`.
+    fn probe(
+        &self,
+        seen: &mut Seen,
+        cwd: &Path,
+        label: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Value {
+        let (code, out, err) = self.run(cwd, args, stdin);
+        note_cli(seen, label, code, &out, &err)
+    }
+
+    /// A file named `name` in the temporary root holding `text`; its path.
+    fn file(&self, name: &str, text: &str) -> PathBuf {
+        let p = std::fs::canonicalize(self.tmp.path())
+            .expect("the temporary root")
+            .join(name);
+        std::fs::write(&p, text).expect("write the file");
+        p
+    }
+}
+
+/// Lands a doc `spec` with one section holding one decision in the project at `dir`; returns
+/// the decision's id.
+fn hook_decision(dir: &Path) -> String {
+    use rdy_qa::fixtures::{land, write, writer};
+    let mut r = rdy_engine::Rdy::open(dir).expect("open the project");
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+        ]),
+    )
+    .expect("seed the doc");
+    let d = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: w.created["$s"].clone(),
+                statement: "Anchored code cites its decision".into(),
+                ..Default::default()
+            },
+        )
+        .expect("decide");
+    let decision = d.created["$decision"].clone();
+    land(&mut r, "work").expect("land the seed");
+    r.close().expect("close");
+    decision
+}
+
+/// m4a3: `rdy hook` and setup's hook options over the command line, each with populated
+/// warnings and skipped files: checks that warn, pass and cannot finish, a refused form, installs
+/// and removes that write, keep, remove and skip a file, the two host entry points, and setup
+/// with both options and with a repo that is not linked.
+fn cli_hook_probes(seen: &mut Seen) {
+    let h = HookWorld::new();
+    let root = h.root.clone();
+    let app = h.app.path().to_path_buf();
+    let checkout = app.to_string_lossy().into_owned();
+    let head = h.app.run(&["rev-parse", "HEAD"]);
+    let (code, _, err) = h.run(&root, &["checkout"], None);
+    assert_eq!(code, 0, "rdy checkout: {err}");
+    let doc = root.join("spec.yaml");
+    assert!(doc.is_file(), "the checkout wrote the doc");
+    let doc_text = doc.to_string_lossy().into_owned();
+
+    // checks: a warned code check, a cited one, one at a HEAD the checkout no longer has, a
+    // warned edit check, and a refused form
+    let message = "feat: change\n";
+    let cited = format!("feat: change\n\nImplements: {}\n", h.decision);
+    let inputs = [
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": head,
+                   "paths": ["src/anchored.rs", "src/plain.rs"], "message": message}),
+        ),
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": head,
+                   "paths": ["src/anchored.rs"], "message": cited}),
+        ),
+        (
+            "code",
+            json!({"repo": "app", "checkout": checkout, "head": "0".repeat(40),
+                   "paths": ["src/anchored.rs"], "message": message}),
+        ),
+        ("edit", json!({"paths": [doc_text]})),
+        ("edit", json!({"pathz": [doc_text]})),
+    ];
+    for (i, (kind, input)) in inputs.iter().enumerate() {
+        let file = h.file(&format!("check {i}.json"), &input.to_string());
+        let file = file.to_string_lossy().into_owned();
+        h.probe(
+            seen,
+            &root,
+            "hook check",
+            &["hook", "check", "--kind", kind, "--input", &file],
+            None,
+        );
+    }
+
+    // installs and removes: written, kept and removed, then skipped beside a person's own hook
+    // and a settings file that is not JSON
+    let code_hook = ["--kind", "code", "--repo", "app"];
+    let edit_hook = ["--kind", "edit", "--harness", "claude-code"];
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "install", "remove"] {
+            let mut args = vec!["hook", op];
+            args.extend_from_slice(target);
+            h.probe(seen, &root, &format!("hook {op}"), &args, None);
+        }
+    }
+    let own = app.join(".git").join("hooks").join("commit-msg");
+    std::fs::create_dir_all(own.parent().unwrap()).expect("the hooks folder");
+    std::fs::write(&own, "#!/bin/sh\nexit 0\n").expect("the person's own hook");
+    let settings = root.join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("the settings folder");
+    std::fs::write(&settings, "not json").expect("a settings file that is not JSON");
+    for target in [&code_hook, &edit_hook] {
+        for op in ["install", "remove"] {
+            let mut args = vec!["hook", op];
+            args.extend_from_slice(target);
+            let v = h.probe(seen, &root, &format!("hook {op}"), &args, None);
+            assert_eq!(v["warnings"][0]["code"], "W_HOOK_CONFLICT", "{v}");
+        }
+    }
+    std::fs::remove_file(&own).expect("drop the person's hook");
+    std::fs::remove_file(&settings).expect("drop the settings file");
+
+    // the code host: a staged anchored change without and with a citation, and a message file
+    // it cannot read
+    h.app.write("src/anchored.rs", "fn anchored() { 1; }\n");
+    h.app.run(&["add", "src/anchored.rs"]);
+    for (name, text) in [
+        ("plain message", message),
+        ("cited message", cited.as_str()),
+    ] {
+        let file = h.file(name, text);
+        let file = file.to_string_lossy().into_owned();
+        h.probe(
+            seen,
+            &app,
+            "hook run-code",
+            &["hook", "run-code", "--repo", "app", "--message-file", &file],
+            None,
+        );
+    }
+    let missing = h.tmp.path().join("no such message");
+    let missing = missing.to_string_lossy().into_owned();
+    h.probe(
+        seen,
+        &app,
+        "hook run-code",
+        &[
+            "hook",
+            "run-code",
+            "--repo",
+            "app",
+            "--message-file",
+            &missing,
+        ],
+        None,
+    );
+    h.app.run(&["reset", "-q", "--hard"]);
+
+    // the edit host: an edit of the checked-out doc, and an event that is no edit result
+    let events = [
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Edit",
+               "tool_input": {"file_path": doc_text, "old_string": "a", "new_string": "b"},
+               "tool_response": {"filePath": doc_text, "success": true}}),
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+               "tool_input": {"command": "true"}}),
+    ];
+    for event in &events {
+        let v = h.probe(
+            seen,
+            &root,
+            "hook run-edit",
+            &["hook", "run-edit", "--harness", "claude-code"],
+            Some(event.to_string().as_bytes()),
+        );
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"].is_string(),
+            "{v}"
+        );
+    }
+
+    // setup: both hooks installed after the stub, then a code hook for a repo that is not linked
+    let v = h.probe(
+        seen,
+        &root,
+        "setup hooks",
+        &["setup", "--code-hook", "app", "--edit-hook", "claude-code"],
+        None,
+    );
+    assert_eq!(v["hooks"][1]["files"][0]["result"], "written", "{v}");
+    let v = h.probe(
+        seen,
+        &root,
+        "setup hooks",
+        &["setup", "--code-hook", "nope"],
+        None,
+    );
+    assert_eq!(
+        v["hooks"][0]["warnings"][0]["code"], "W_HOOK_UNAVAILABLE",
+        "{v}"
+    );
+}
+
 /// The facts of the release binary: exit values and the merged JSON field sets of read, write,
 /// answer and review commands run against the seeded project.
 fn cli_runtime() -> Value {
@@ -2370,6 +2658,7 @@ fn cli_runtime() -> Value {
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
     cli_links_probes(&mut seen, &env);
+    cli_hook_probes(&mut seen);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -5983,7 +6272,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// ain4/ain5: the unknown load refusal states no issue rows. agi6: the instruction probes run
 /// with a home of their own and a project with no instruction set, so every row and menu entry
 /// is built in, and those store no reason and name no selector; setup in a clean home warns of
-/// nothing.
+/// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
+/// empty; the warnings of its hooks are in `hooks`.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -6071,6 +6361,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/rule remove/stdout/landing/consequences",
     "cli/rule remove/stdout/landing/signatures",
     "cli/rule remove/stdout/landing/warnings",
+    "cli/setup hooks/stdout/warnings",
     "cli/setup/stdout/warnings",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",

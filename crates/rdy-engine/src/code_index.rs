@@ -1067,14 +1067,15 @@ pub fn index_of(repo: &CodeRepo) -> Result<Arc<CodeIndex>, RdyError> {
 
 /// The Git administration paths of the worktree at `repo.root`, each canonical: its own Git
 /// directory and the common Git directory its worktrees share.
-struct GitAdmin {
-    git_dir: PathBuf,
-    common_dir: PathBuf,
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct GitAdmin {
+    pub(crate) git_dir: PathBuf,
+    pub(crate) common_dir: PathBuf,
 }
 
 /// [`GitAdmin`] of `repo`, read with `git rev-parse` (whose relative output is relative to the
 /// root). Any other output is `E_IO`.
-fn git_admin(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<GitAdmin, RdyError> {
+pub(crate) fn git_admin(repo: &CodeRepo, ctx: Option<&RunContext>) -> Result<GitAdmin, RdyError> {
     let mut c = git_command(&repo.root);
     c.args(["rev-parse", "--absolute-git-dir", "--git-common-dir"]);
     let out = run_in(c, ctx)?;

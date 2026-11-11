@@ -1,21 +1,45 @@
-//! `rdy setup` (ain5, D-8X04F; agi4, D-PHH2Q): the person's empty rules project, then the stub.
-//! It creates the meta project at the configured place when nothing stands there, and writes
-//! three lines into `CLAUDE.md` and `AGENTS.md` of the chosen project root. Outside a project, or
-//! inside the meta project, it writes no stub. The stub goes first, before the person's own text,
-//! which stays byte for byte; a file that already holds the stub is left alone, and a file that holds the 0.43.0 to 0.45.0
-//! stub gets the new one in its place. A target that is
-//! not a regular file is refused before either file is written, and a link is never followed.
-//! The meta project never gets rules, a copy of the guide, a policy or a stub. A failed meta step
-//! is a warning: the project's stubs still go in. No harness detection, MCP registration, skill,
-//! hook, download or rule import is part of it.
+//! `rdy setup` (ain5, D-8X04F; agi4, D-PHH2Q; m4a3, D-DC5D1, D-KG0V6, D-EKGN9): the person's
+//! empty rules project, then the stub, then the hooks asked for. It creates the meta project at
+//! the configured place when nothing stands there, and writes three lines into `CLAUDE.md` and
+//! `AGENTS.md` of the chosen project root. Outside a project, or inside the meta project, it
+//! writes no stub. The stub goes first, before the person's own text, which stays byte for byte;
+//! a file that already holds the stub is left alone, and a file that holds the 0.43.0 to 0.45.0
+//! stub gets the new one in its place. A target that is not a regular file is refused before
+//! either file is written, and a link is never followed. The meta project never gets rules, a
+//! copy of the guide, a policy or a stub. A failed meta step is a warning: the project's stubs
+//! still go in.
+//!
+//! After those steps, and only when asked, it installs the optional warning hooks through the
+//! local hook host: `--code-hook <repo>` the Git `commit-msg` warning of a linked code repo, and
+//! `--edit-hook claude-code` Claude Code's `PostToolUse` warning in the project root. Their
+//! results go in a `hooks` member, which bare setup does not have. A hook with no project to go
+//! in (outside a project, in the meta project, or a repo that is not linked) is skipped with a
+//! warning; nothing is written elsewhere. No harness detection, MCP registration, skill,
+//! capture or wrap-up guidance, Stop hook, download or rule import is part of it.
 use crate::conn::{is_project, require_project};
 use crate::instructions_cmd::discover;
+use clap::Args;
 use rdy_daemon::ErrorReply;
+use rdy_engine::hooks::{
+    HOOK_DEADLINE, HookHost, HookInstall, HookKind, HookRequest, HookWarning, RunContext,
+    Unavailable,
+};
 use rdy_engine::instructions::{PersonPlace, place_person};
 use rdy_engine::instructions_config::{PersonPath, PersonSource, resolve_person_from_env};
-use rdy_engine::{E_IO, E_NO_PROJECT, Rdy, RdyError};
+use rdy_engine::{E_BAD_INPUT, E_IO, E_LIMIT, E_NO_PROJECT, Rdy, RdyError};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+
+/// The optional hooks `rdy setup` installs after its own steps; none unless asked.
+#[derive(Args, Default)]
+pub(crate) struct SetupArgs {
+    /// Also install the Git commit-msg warning in this linked code repo's checkout.
+    #[arg(long, value_name = "REPO")]
+    code_hook: Option<String>,
+    /// Also install the edit warning for this harness in the project root.
+    #[arg(long, value_name = "HARNESS", value_parser = ["claude-code"])]
+    edit_hook: Option<String>,
+}
 
 /// The stub, with its final newline.
 pub(crate) const STUB: &str = "This project keeps its agent instructions in rdy.\nAt the start of every task, call rdy_session, then rdy_instructions, and load the rulesets your task needs.\nRequired rules arrive without asking.\n";
@@ -325,8 +349,13 @@ fn is_meta(project: &Path, meta: Option<&Path>) -> bool {
 
 /// `rdy setup`: the meta step, then the stubs of the chosen project (none outside a project and
 /// none in the meta project). A failure in the stubs keeps the finished meta step and says so.
-pub(crate) fn setup(chosen: Option<Chosen>) -> Result<(Value, String), ErrorReply> {
+pub(crate) fn setup(
+    chosen: Option<Chosen>,
+    args: &SetupArgs,
+) -> Result<(Value, String), ErrorReply> {
     let (meta, warnings, meta_path) = meta_step();
+    // the project a hook goes in: only one whose stubs were processed
+    let mut target: Option<&Path> = None;
     let (files, mut text, stub) = match &chosen {
         None => (
             vec![],
@@ -347,6 +376,7 @@ pub(crate) fn setup(chosen: Option<Chosen>) -> Result<(Value, String), ErrorRepl
                 }
                 e
             })?;
+            target = Some(&c.project);
             (files, text, json!({"result": "processed"}))
         }
     };
@@ -360,8 +390,74 @@ pub(crate) fn setup(chosen: Option<Chosen>) -> Result<(Value, String), ErrorRepl
             w["fix"].as_str().unwrap_or_default()
         ));
     }
-    let v = json!({"files": files, "meta": meta.json(), "stub": stub, "warnings": warnings});
+    let mut v = json!({"files": files, "meta": meta.json(), "stub": stub, "warnings": warnings});
+    let hooks = hooks(target, args);
+    if !hooks.is_empty() {
+        for h in &hooks {
+            let t = crate::hook_cmd::install_text(h);
+            if !t.is_empty() {
+                lines.push(t);
+            }
+        }
+        v["hooks"] = Value::Array(hooks);
+    }
     Ok((v, lines.join("\n")))
+}
+
+/// The hooks asked for, each installed in `project` through the local hook host, the code hook
+/// first: one install result per hook. With no project, or a target the host refuses, the hook
+/// is skipped with a `W_HOOK_UNAVAILABLE` warning and no file.
+fn hooks(project: Option<&Path>, args: &SetupArgs) -> Vec<Value> {
+    let mut asked: Vec<(HookKind, Value)> = vec![];
+    if let Some(repo) = &args.code_hook {
+        asked.push((
+            HookKind::Code,
+            json!({"op": "install", "kind": "code", "repo": repo}),
+        ));
+    }
+    if let Some(harness) = &args.edit_hook {
+        asked.push((
+            HookKind::Edit,
+            json!({"op": "install", "kind": "edit", "harness": harness}),
+        ));
+    }
+    asked
+        .into_iter()
+        .map(|(kind, req)| {
+            let installed = match project {
+                None => Err(None),
+                Some(p) => install(p, &req).map_err(Some),
+            };
+            let result = installed.unwrap_or_else(|e| {
+                let reason = match e.as_ref().map(|e| e.code) {
+                    None => Unavailable::Project,
+                    // the one target a bare form can miss: a repo that is not linked
+                    Some(E_BAD_INPUT) => Unavailable::Checkout,
+                    Some(E_LIMIT) => Unavailable::InputLimit,
+                    Some(E_IO) => Unavailable::Io,
+                    Some(_) => Unavailable::Project,
+                };
+                HookInstall {
+                    kind,
+                    files: vec![],
+                    warnings: vec![HookWarning::unavailable(reason, e.as_ref())],
+                }
+            });
+            serde_json::to_value(result).unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+/// One install request through the local hook host of `project`, run by this binary, under the
+/// host deadline.
+fn install(project: &Path, req: &Value) -> Result<HookInstall, RdyError> {
+    let HookRequest::Install(target) = HookRequest::from_value(req)? else {
+        unreachable!("setup asks only for installs");
+    };
+    let host = rdy_daemon::hooks::LocalHooks::for_process(project)
+        .map_err(|e| RdyError::new(E_IO, e.to_string(), "run rdy setup again"))?;
+    let ctx = RunContext::new().with_deadline(std::time::Instant::now() + HOOK_DEADLINE);
+    host.install(&target, &ctx)
 }
 
 /// The prompt of `rdy init` in `dir` (agi4), or none: a project that is the meta project, or one

@@ -490,6 +490,117 @@
             "views": "number"
           }
         },
+        "hook check": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "checked": "bool",
+            "kind": "string",
+            "warnings": [
+              {
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "paths?": [
+                  "string"
+                ],
+                "reason?": "string"
+              }
+            ]
+          }
+        },
+        "hook install": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "files": [
+              {
+                "path": "string",
+                "result": "string"
+              }
+            ],
+            "kind": "string",
+            "warnings": [
+              {
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "paths": [
+                  "string"
+                ],
+                "reason": "string"
+              }
+            ]
+          }
+        },
+        "hook remove": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "files": [
+              {
+                "path": "string",
+                "result": "string"
+              }
+            ],
+            "kind": "string",
+            "warnings": [
+              {
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "paths": [
+                  "string"
+                ],
+                "reason": "string"
+              }
+            ]
+          }
+        },
+        "hook run-code": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "checked": "bool",
+            "kind": "string",
+            "warnings": [
+              {
+                "code": "string",
+                "diagnostic?": {
+                  "code": "string",
+                  "message": "string"
+                },
+                "fix": "string",
+                "message": "string",
+                "paths?": [
+                  "string"
+                ],
+                "reason?": "string"
+              }
+            ]
+          }
+        },
+        "hook run-edit": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "hookSpecificOutput": {
+              "additionalContext": "string",
+              "hookEventName": "string"
+            }
+          }
+        },
         "impact": {
           "exits": [
             0
@@ -2159,6 +2270,51 @@
               {
                 "path": "string",
                 "result": "string"
+              }
+            ],
+            "meta": {
+              "message": "string",
+              "path": "string",
+              "result": "string"
+            },
+            "stub": {
+              "result": "string"
+            },
+            "warnings": []
+          }
+        },
+        "setup hooks": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "files": [
+              {
+                "path": "string",
+                "result": "string"
+              }
+            ],
+            "hooks": [
+              {
+                "files": [
+                  {
+                    "path": "string",
+                    "result": "string"
+                  }
+                ],
+                "kind": "string",
+                "warnings": [
+                  {
+                    "code": "string",
+                    "diagnostic": {
+                      "code": "string",
+                      "message": "string"
+                    },
+                    "fix": "string",
+                    "message": "string",
+                    "reason": "string"
+                  }
+                ]
               }
             ],
             "meta": {
@@ -13069,6 +13225,27 @@
         {
           "args": [
             {
+              "action": "set",
+              "id": "code_hook",
+              "long": "code-hook",
+              "num_args": "1",
+              "value_names": [
+                "REPO"
+              ]
+            },
+            {
+              "action": "set",
+              "choices": [
+                "claude-code"
+              ],
+              "id": "edit_hook",
+              "long": "edit-hook",
+              "num_args": "1",
+              "value_names": [
+                "HARNESS"
+              ]
+            },
+            {
               "action": "set_true",
               "defaults": [
                 "false"
@@ -13112,8 +13289,526 @@
               "short": "h"
             }
           ],
+          "groups": [
+            {
+              "args": [
+                "code_hook",
+                "edit_hook"
+              ],
+              "id": "SetupArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
           "name": "setup",
           "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Hook",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "hook",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "choices": [
+                    "code",
+                    "edit"
+                  ],
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "input",
+                  "long": "input",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "INPUT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "input",
+                    "kind"
+                  ],
+                  "id": "CheckArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "check",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "choices": [
+                    "code",
+                    "edit"
+                  ],
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "repo",
+                  "long": "repo",
+                  "num_args": "1",
+                  "value_names": [
+                    "REPO"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "choices": [
+                    "claude-code"
+                  ],
+                  "id": "harness",
+                  "long": "harness",
+                  "num_args": "1",
+                  "value_names": [
+                    "HARNESS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "worktree",
+                  "long": "worktree",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORKTREE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "harness",
+                    "kind",
+                    "repo",
+                    "worktree"
+                  ],
+                  "id": "TargetArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "install",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "choices": [
+                    "code",
+                    "edit"
+                  ],
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "repo",
+                  "long": "repo",
+                  "num_args": "1",
+                  "value_names": [
+                    "REPO"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "choices": [
+                    "claude-code"
+                  ],
+                  "id": "harness",
+                  "long": "harness",
+                  "num_args": "1",
+                  "value_names": [
+                    "HARNESS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "worktree",
+                  "long": "worktree",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORKTREE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "harness",
+                    "kind",
+                    "repo",
+                    "worktree"
+                  ],
+                  "id": "TargetArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "remove",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "repo",
+                  "long": "repo",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REPO"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "message_file",
+                  "long": "message-file",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "MESSAGE_FILE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "message_file",
+                    "repo"
+                  ],
+                  "id": "RunCodeArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "run-code",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "choices": [
+                    "claude-code"
+                  ],
+                  "id": "harness",
+                  "long": "harness",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "HARNESS"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "harness"
+                  ],
+                  "id": "RunEditArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "run-edit",
+              "subcommands": []
+            }
+          ]
         },
         {
           "args": [

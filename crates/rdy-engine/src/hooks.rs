@@ -975,6 +975,151 @@ impl<'a> Anchors<'a> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The local collector of the code hook
+// ---------------------------------------------------------------------------------------------
+
+/// What the code hook's local runner collected from the caller's checkout: its canonical root,
+/// its HEAD (`None` while unborn) and the staged paths, each read under one run context. These,
+/// with the message, are the code check's `checkout`, `head` and `paths`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Staged {
+    pub checkout: String,
+    pub head: Option<String>,
+    pub paths: Vec<String>,
+}
+
+/// The local collector of the code hook (D-DC5D1), run by the process Git started, never by the
+/// daemon: the checkout that holds `cwd` (its top folder and its Git directories), its HEAD, then
+/// the paths of the actual staged diff against that HEAD, read from the index Git names in
+/// `index_file` (`GIT_INDEX_FILE`; relative to `cwd`) or else the checkout's own. Deleted paths
+/// and both sides of a rename are included; unstaged changes play no part. The checkout's
+/// identity and HEAD are read again after the diff: a changed identity is `checkout
+/// unavailable` and a changed HEAD `history unavailable`. More than [`MAX_HOOK_PATHS`] paths,
+/// or a path past [`MAX_HOOK_PATH`] bytes, is `input limit`; a path that is not UTF-8 is `unsafe
+/// path`. Every failure is the code check's unavailable result, and a stopped `ctx` gives
+/// `deadline`. Nothing here writes to Git.
+pub fn collect_staged(
+    cwd: &Path,
+    index_file: Option<&std::ffi::OsStr>,
+    ctx: &RunContext,
+) -> Result<Staged, HookCheck> {
+    let kind = HookKind::Code;
+    if ctx.stopped().is_some() {
+        return Err(HookCheck::unavailable(kind, Unavailable::Deadline, None));
+    }
+    let failed = |what: &str, out: &std::process::Output| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        RdyError::new(
+            E_IO,
+            format!("git {what} failed: {}", err.trim()),
+            "check the checkout with git status",
+        )
+    };
+    // the caller's checkout: the top folder of the worktree that holds `cwd`
+    let mut c = code_index::git_command(cwd);
+    c.args(["rev-parse", "--show-toplevel"]);
+    let out = code_index::run_ctx(c, code_index::Limits::GIT, Some(ctx), None)
+        .map_err(|e| git_unavailable(ctx, Unavailable::Checkout, &e))?;
+    if !out.status.success() {
+        let e = failed("rev-parse", &out);
+        return Err(HookCheck::unavailable(
+            kind,
+            Unavailable::Checkout,
+            Some(&e),
+        ));
+    }
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed.trim_end_matches(['\n', '\r']);
+    let root = std::fs::canonicalize(printed).map_err(|e| {
+        let e = RdyError::new(E_IO, e.to_string(), "check the checkout");
+        HookCheck::unavailable(kind, Unavailable::Checkout, Some(&e))
+    })?;
+    let Some(checkout) = root.to_str().map(String::from) else {
+        return Err(HookCheck::unavailable(kind, Unavailable::UnsafePath, None));
+    };
+    let repo = CodeRepo {
+        configured: checkout.clone(),
+        root,
+    };
+    let identity = || {
+        code_index::git_admin(&repo, Some(ctx))
+            .map_err(|e| git_unavailable(ctx, Unavailable::Checkout, &e))
+    };
+    let head_now = || {
+        code_index::head_of_in(&repo, Some(ctx))
+            .map_err(|e| git_unavailable(ctx, Unavailable::History, &e))
+    };
+    let before = identity()?;
+    let head = head_now()?;
+    // the staged diff of the index Git names, never the daemon's or this process's guess
+    let mut c = code_index::git_command(&repo.root);
+    if let Some(index) = index_file {
+        c.env("GIT_INDEX_FILE", cwd.join(index));
+    }
+    c.args([
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--ignore-submodules=none",
+    ]);
+    // at most the paths a check takes, each with its separator: bounded before it is kept
+    let lim = code_index::Limits {
+        stdout: MAX_HOOK_PATHS * (MAX_HOOK_PATH + 1),
+        stderr: code_index::MAX_GIT_ERROR,
+    };
+    let out = code_index::run_ctx(c, lim, Some(ctx), None).map_err(|e| {
+        let reason = if e.code == E_LIMIT {
+            Unavailable::InputLimit
+        } else {
+            Unavailable::Io
+        };
+        git_unavailable(ctx, reason, &e)
+    })?;
+    if !out.status.success() {
+        let e = failed("diff", &out);
+        return Err(HookCheck::unavailable(kind, Unavailable::Io, Some(&e)));
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for raw in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        if paths.len() == MAX_HOOK_PATHS {
+            let e = limit(MAX_HOOK_PATHS, "paths");
+            return Err(HookCheck::unavailable(
+                kind,
+                Unavailable::InputLimit,
+                Some(&e),
+            ));
+        }
+        if raw.len() > MAX_HOOK_PATH {
+            let e = limit(MAX_HOOK_PATH, "path bytes");
+            return Err(HookCheck::unavailable(
+                kind,
+                Unavailable::InputLimit,
+                Some(&e),
+            ));
+        }
+        let Ok(p) = std::str::from_utf8(raw) else {
+            return Err(HookCheck::unavailable(kind, Unavailable::UnsafePath, None));
+        };
+        paths.push(p.to_string());
+    }
+    // the checkout and its HEAD are still the ones the paths were collected under
+    if identity()? != before {
+        return Err(HookCheck::unavailable(kind, Unavailable::Checkout, None));
+    }
+    if head_now()? != head {
+        return Err(HookCheck::unavailable(kind, Unavailable::History, None));
+    }
+    Ok(Staged {
+        checkout,
+        head,
+        paths,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
 // The edit check
 // ---------------------------------------------------------------------------------------------
 
