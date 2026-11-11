@@ -39,7 +39,7 @@ const NORMALIZATIONS: [&str; 9] = [
     "protocol envelope: the modern revision's own `result.resultType: \"complete\"` member is dropped; it is not part of the tool's reply",
     "request ids: the JSON-RPC `id` and `jsonrpc` members are dropped",
     "fixture paths: each world's project, scratch, home and config folders read `<root>`",
-    "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; hex of 8 or more reads `<hex:n>`; a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp:n>`",
+    "generated identities: a block, landing or proposal id (`d-XXXXX`) reads `<id:n>`; a hash reads `<hex:n>` only where a named member holds it whole (`HASH_MEMBERS`, 64 or 32 hex digits) or where a text anchors it (`P-<hex>@n`, `D-XXXXX@<hex>`, `cq-`, `pi-`, `in-` and `rule-` ids, `canon at <hex>`, `for` or `fit` and a 64-digit hash, a redaction record line); a number of any length is never a hash; a temporary folder's own name (`rdyd...`), which is also the project's name, reads `<tmp:n>`",
     "the order of the records of one kind in a redaction dry run's `text`: the engine lists them by hash, so each run of one kind compares in the order of the names its JSON part gave them",
     "the pending card an answer leads to (`next` in an `rdy_answer` reply): the engine picks it by a generated id, so it reads `<next>`",
     "the allocation of the log file in an `rdy_compact` reply (`on_disk_bytes`): the filesystem rounds it to its block size, so it reads `<disk>`; `log_bytes` and every other size are kept",
@@ -345,17 +345,95 @@ fn body(v: &Value) -> Value {
     }
 }
 
-/// The generated-identity patterns, with the kind each one reads as. Order matters: the folder
-/// name first, since it contains digits and letters of the other kinds.
-fn masks() -> Vec<(&'static str, regex::Regex)> {
+/// A generated-identity pattern: the kind it reads as, and the capture group that holds the
+/// generated value (the rest of the match is kept as written).
+struct Mask {
+    kind: &'static str,
+    re: regex::Regex,
+    group: usize,
+}
+
+/// The generated-identity patterns found inside texts. Each hash is named by the text that
+/// carries it (a proposal ref, a card line, a `canon at`, a signing refusal), never by its
+/// digits alone: a number of eight or more digits is not a hash. Order matters: the folder name
+/// first, since it contains digits and letters of the other kinds; the hashes before the block
+/// ids, since a card line holds both (`D-XXXXX@<hash>`).
+fn masks() -> Vec<Mask> {
     [
-        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]+"),
-        ("id", r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}\b"),
-        ("hex", r"[0-9a-f]{8,}"),
+        ("tmp", r"(?i)[^\s\x22']*rdyd[0-9a-z]+", 0),
+        // a proposal ref: `P-<12 hex>@n`
+        ("hex", r"\bP-([0-9a-f]{12})@\d+", 1),
+        // a pinned block ref: `D-XXXXX@<hash>`
+        ("hex", r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}@([0-9a-f]{12,64})\b", 1),
+        // a consequence, plan item, intent or rule id
+        ("hex", r"\b(?:cq|pi|in|rule)-([0-9a-f]{12,64})\b", 1),
+        ("hex", r"\bcanon at ([0-9a-f]{12})\b", 1),
+        ("hex", r"\b(?:for|fit) ([0-9a-f]{64})\b", 1),
+        // a record line of a redaction dry run: `<kind>: <hash> (<relation>)`
+        ("hex", r"(?m)^[a-z_]+: ([0-9a-f]{64}) \([a-z]+\)$", 1),
+        ("id", r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}\b", 0),
     ]
     .iter()
-    .map(|(k, m)| (*k, regex::Regex::new(m).unwrap()))
+    .map(|(kind, m, group)| Mask {
+        kind,
+        re: regex::Regex::new(m).unwrap(),
+        group: *group,
+    })
     .collect()
+}
+
+/// The members that hold one hash or repository id as their whole text (64 or 32 lowercase hex
+/// digits). A value of that shape at any other member is kept as it is.
+const HASH_MEMBERS: [&str; 31] = [
+    "answer",
+    "approved_version",
+    "assessment",
+    "base",
+    "canon_at",
+    "card_hash",
+    "change",
+    "changes",
+    "digest",
+    "effective_base",
+    "from",
+    "hash",
+    "head",
+    "id",
+    "identity",
+    "ids",
+    "intent",
+    "landing",
+    "pin",
+    "prev",
+    "proposal",
+    "record",
+    "report_hash",
+    "repo_id",
+    "stable",
+    "tag",
+    "to",
+    "to_version",
+    "token",
+    "version",
+    "versions",
+];
+
+/// `s` with the `mask.group` span of every match of `mask` replaced by `f(value)`.
+fn replace_group(mask: &Mask, s: &str, f: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    for c in mask.re.captures_iter(s) {
+        let g = c.get(mask.group).unwrap();
+        out.push_str(&s[at..g.start()]);
+        out.push_str(&f(g.as_str()));
+        at = g.end();
+    }
+    out.push_str(&s[at..]);
+    out
+}
+
+fn is_hash(s: &str) -> bool {
+    matches!(s.len(), 32 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Identities of one world: the names of its fixture blocks, and the numbers of the other values
@@ -420,41 +498,38 @@ const ID_ORDERED: [&str; 13] = [
 /// One world's normalizer.
 struct Norm<'a> {
     roots: &'a [String],
-    masks: &'a [(&'static str, regex::Regex)],
+    masks: &'a [Mask],
     seen: &'a Seen,
     time: regex::Regex,
     port: regex::Regex,
     list_start: regex::Regex,
+    whole_hash: regex::Regex,
 }
 
 /// [`NORMALIZATIONS`], applied. Nothing else is masked.
-fn normalized(
-    v: &Value,
-    roots: &[String],
-    masks: &[(&'static str, regex::Regex)],
-    seen: &Seen,
-) -> Value {
+fn normalized(v: &Value, roots: &[String], masks: &[Mask], seen: &Seen) -> Value {
     let n = Norm {
         roots,
         masks,
         seen,
         time: regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ][0-9:.]+Z?").unwrap(),
         list_start: regex::Regex::new(r"(?:, |; )[A-Za-z]{1,3}-[0-9A-Z]{5}\b").unwrap(),
+        whole_hash: regex::Regex::new(r#""([0-9a-f]{64}|[0-9a-f]{32})""#).unwrap(),
         port: regex::Regex::new(r"((?:127\.0\.0\.1|localhost|\[::1\]):)\d+").unwrap(),
     };
     n.walk(v, "")
 }
 
 impl Norm<'_> {
-    fn text(&self, s: &str) -> String {
+    /// A text with its roots, generated identities, times and ports masked. `hashes` is false
+    /// where the text is documentation, whose example values are the same in every world.
+    fn text(&self, s: &str, hashes: bool) -> String {
         let mut s = s.to_string();
         for r in self.roots {
             s = s.replace(r, "<root>");
         }
-        for (kind, m) in self.masks {
-            s = m
-                .replace_all(&s, |c: &regex::Captures| identity(self.seen, kind, &c[0]))
-                .into_owned();
+        for m in self.masks.iter().filter(|m| hashes || m.kind != "hex") {
+            s = replace_group(m, &s, &|v| identity(self.seen, m.kind, v));
         }
         s = self.time.replace_all(&s, "<time>").into_owned();
         self.port.replace_all(&s, "${1}<port>").into_owned()
@@ -526,17 +601,26 @@ impl Norm<'_> {
         for r in self.roots {
             s = s.replace(r, "<root>");
         }
-        for (kind, m) in self.masks {
-            s = m
-                .replace_all(&s, |c: &regex::Captures| {
-                    match self.seen.borrow().of.get(&(*kind, c[0].to_string())) {
-                        Some(name) => format!("<{kind}:{name}>"),
-                        None => format!("<{kind}>"),
-                    }
-                })
-                .into_owned();
+        for m in self.masks {
+            s = replace_group(
+                m,
+                &s,
+                &|v| match self.seen.borrow().of.get(&(m.kind, v.to_string())) {
+                    Some(name) => format!("<{}:{name}>", m.kind),
+                    None => format!("<{}>", m.kind),
+                },
+            );
         }
-        s
+        // a hash held whole by a member has no anchor in the text of its list: only the order of
+        // a list the engine sorts by it is read through this, so any hash shape serves
+        self.whole_hash
+            .replace_all(&s, |c: &regex::Captures| {
+                match self.seen.borrow().of.get(&("hex", c[1].to_string())) {
+                    Some(name) => format!("\"<hex:{name}>\""),
+                    None => "\"<hex>\"".to_string(),
+                }
+            })
+            .into_owned()
     }
 
     /// `path` is the member names from the root, joined by `/`.
@@ -549,9 +633,16 @@ impl Norm<'_> {
             Value::String(s)
                 if path.ends_with("/text/text") && s.starts_with("Redaction dry run") =>
             {
-                Value::String(self.text(&self.records(s)))
+                Value::String(self.text(&self.records(s), true))
             }
-            Value::String(s) => Value::String(self.text(&self.listed(s))),
+            // a hash held whole by an identity member
+            Value::String(s) if HASH_MEMBERS.contains(&key) && is_hash(s) => {
+                Value::String(identity(self.seen, "hex", s))
+            }
+            // the schema's examples are documentation: the same text in every world
+            Value::String(s) => {
+                Value::String(self.text(&self.listed(s), !path.contains("/examples/")))
+            }
             // the filesystem's allocation for the log file, which rounds up to its block size
             Value::Number(_) if path.ends_with("/text/on_disk_bytes") => json!("<disk>"),
             Value::Number(n)
@@ -572,7 +663,7 @@ impl Norm<'_> {
                 m.sort_by_cached_key(|(k, _)| self.sort_key(k));
                 Value::Object(
                     m.into_iter()
-                        .map(|(k, x)| (self.text(k), self.walk(x, &format!("{path}/{k}"))))
+                        .map(|(k, x)| (self.text(k, true), self.walk(x, &format!("{path}/{k}"))))
                         .collect(),
                 )
             }
@@ -1702,7 +1793,53 @@ fn mht8_normalization_keeps_what_is_not_generated() {
         json!({"claim": "A holds 12345"}),
         json!({"claim": "A holds 12346"})
     ));
+    // two numbers of eight or more digits are not hashes: in a message, a claim, a fix, or on
+    // their own, they stay different
+    assert!(!same(
+        json!({"message": "over 16777216 bytes"}),
+        json!({"message": "over 33554432 bytes"})
+    ));
+    assert!(!same(
+        json!({"claim": "A holds 16777216"}),
+        json!({"claim": "A holds 33554432"})
+    ));
+    assert!(!same(
+        json!({"fix": "send at most 16777216 bytes"}),
+        json!({"fix": "send at most 33554432 bytes"})
+    ));
+    assert!(!same(
+        json!({"hash": "1234567890123456"}),
+        json!({"hash": "6543210987654321"})
+    ));
     assert!(!same(json!({"code": "E_A"}), json!({"code": "E_B"})));
+    // hashes and proposal refs at the members and in the texts that carry them read as names
+    let h = |c: char, n: usize| c.to_string().repeat(n);
+    assert!(same(
+        json!({"hash": h('a', 64), "repo_id": h('b', 32),
+            "message": format!("this session cannot sign relay for {}", h('c', 64)),
+            "line": format!("P-{}@1 waits", h('d', 12)),
+            "card": format!("D-AAAAA@{}", h('e', 12)),
+            "id": format!("cq-{}", h('f', 16))}),
+        json!({"hash": h('1', 64), "repo_id": h('2', 32),
+            "message": format!("this session cannot sign relay for {}", h('3', 64)),
+            "line": format!("P-{}@1 waits", h('4', 12)),
+            "card": format!("D-BBBBB@{}", h('5', 12)),
+            "id": format!("cq-{}", h('9', 16))})
+    ));
+    // a hash is one value: two members that held one hash, and then two, differ
+    assert!(!same(
+        json!({"hash": h('a', 64), "to": h('a', 64)}),
+        json!({"hash": h('a', 64), "to": h('b', 64)})
+    ));
+    // a hash at a member that is not an identity member, or in an unanchored text, is kept
+    assert!(!same(
+        json!({"note": h('a', 64)}),
+        json!({"note": h('b', 64)})
+    ));
+    assert!(!same(
+        json!({"message": format!("see {}", h('a', 64))}),
+        json!({"message": format!("see {}", h('b', 64))})
+    ));
     // an identity is one value: two ids that swap places, or merge, differ
     assert!(!same(
         json!({"x": "d-AAAAA", "y": "d-BBBBB", "z": "d-AAAAA"}),
