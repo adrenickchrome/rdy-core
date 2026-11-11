@@ -1447,7 +1447,7 @@ mod tests {
     use crate::release_install::{MANIFEST_FILE, SIGNATURE_FILE, archive_name};
 
     /// The crates.io packages the Windows release binary links (measured).
-    const WINDOWS_CRATES: usize = 178;
+    const WINDOWS_CRATES: usize = 180;
 
     #[cfg(unix)]
     mod unix_tests;
@@ -1718,7 +1718,7 @@ mod tests {
         for target in TARGETS {
             let (notices, crates) = inventory(target, &release).expect("inventory");
             let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
-            assert_eq!(crates.len(), 178, "{target}: linked crates.io packages");
+            assert_eq!(crates.len(), 180, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
                 "autocfg",
@@ -1754,7 +1754,7 @@ mod tests {
             assert_eq!(notices.mpl, locked_mpl(), "{target}");
             assert_eq!(
                 headings(&notices.bytes).len(),
-                178,
+                180,
                 "{target}: one entry each"
             );
             let text = String::from_utf8(notices.bytes.clone()).expect("utf-8");
