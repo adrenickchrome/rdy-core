@@ -37,6 +37,12 @@ async fn fixture(idle: Option<Duration>, store: bool) -> Fixture {
         let store = dir.path().join(".rdy").join("store");
         std::fs::create_dir(&store).unwrap();
         std::fs::write(store.join("lock"), b"").unwrap();
+        // and the start lock a real start makes before the bind, where the check takes it
+        drop(
+            StartGuard::try_take(&dir.path().join(".rdy"))
+                .unwrap()
+                .unwrap(),
+        );
     }
     let run = RunDir::of_project(dir.path());
     let mut config = DaemonConfig::new(run.clone(), VERSION.into());
