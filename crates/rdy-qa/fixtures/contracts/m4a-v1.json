@@ -19229,6 +19229,26 @@
         "W_PUBLICATION_REFERENCE",
         "an org profile has references outside its selection, or a live public profile has blocked references",
         "follow the warning's own fix"
+      ],
+      [
+        "W_HOOK_DIRECT_EDIT",
+        "a hook check finds that an agent edited rdy working-copy files directly (rdy_hook check, kind edit)",
+        "Read and write through rdy's tools. Call rdy_instructions and load rdy:write."
+      ],
+      [
+        "W_HOOK_NO_CITATION",
+        "a hook check finds staged code paths anchored to a decision and a commit message with no Implements value (rdy_hook check, kind code)",
+        "Review the design with rdy_brief on the changed code paths, then cite the blocks this commit implements."
+      ],
+      [
+        "W_HOOK_UNAVAILABLE",
+        "a hook check could not finish (project, checkout or history unavailable, an unsafe path, an invalid event, an input limit, the deadline or an I/O failure); checked is false, never clean",
+        "Continue your work. Run the hook check again when rdy and the project are available."
+      ],
+      [
+        "W_HOOK_CONFLICT",
+        "a hook install or remove left a file unchanged (an existing hook, a changed owned file, an external hooks path, invalid settings, an unsafe path, a file changed meanwhile or a busy installer)",
+        "Review the existing file, then install or remove the rdy hook explicitly."
       ]
     ],
     "follower_refusal": {
@@ -19903,7 +19923,11 @@
       "E_FROZEN",
       "E_HELD_BY_READER",
       "E_PUBLICATION_REFERENCE",
-      "W_PUBLICATION_REFERENCE"
+      "W_PUBLICATION_REFERENCE",
+      "W_HOOK_DIRECT_EDIT",
+      "W_HOOK_NO_CITATION",
+      "W_HOOK_UNAVAILABLE",
+      "W_HOOK_CONFLICT"
     ],
     "result_fields": {
       "rdy_alternatives list": {
@@ -20475,6 +20499,85 @@
             "kind": "string",
             "name": "string"
           }
+        }
+      },
+      "rdy_hook check": {
+        "ok": {
+          "checked": "bool",
+          "kind": "string",
+          "warnings": [
+            {
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "paths?": [
+                "string"
+              ],
+              "reason?": "string"
+            }
+          ]
+        },
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_hook install": {
+        "ok": {
+          "files": [
+            {
+              "path": "string",
+              "result": "string"
+            }
+          ],
+          "kind": "string",
+          "warnings": [
+            {
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "paths": [
+                "string"
+              ],
+              "reason": "string"
+            }
+          ]
+        },
+        "refusal_codes": [
+          "E_PERMISSION"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_hook remove": {
+        "ok": {
+          "files": [
+            {
+              "path": "string",
+              "result": "string"
+            }
+          ],
+          "kind": "string",
+          "warnings": [
+            {
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "paths": [
+                "string"
+              ],
+              "reason": "string"
+            }
+          ]
         }
       },
       "rdy_impact": {
@@ -22809,6 +22912,22 @@
               "fix": "string",
               "when": "string"
             },
+            "W_HOOK_CONFLICT": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_HOOK_DIRECT_EDIT": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_HOOK_NO_CITATION": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_HOOK_UNAVAILABLE": {
+              "fix": "string",
+              "when": "string"
+            },
             "W_INSTRUCTION_SELECTOR": {
               "fix": "string",
               "when": "string"
@@ -23592,6 +23711,7 @@
       "rdy_dispute",
       "rdy_dump",
       "rdy_export",
+      "rdy_hook",
       "rdy_impact",
       "rdy_import",
       "rdy_inbox",
@@ -24604,6 +24724,95 @@
           "required": [
             "format",
             "out"
+          ],
+          "type": "object"
+        }
+      },
+      "rdy_hook": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "checkout": {
+              "description": "Check, kind code: the native absolute root of your Git worktree, at most 4096 bytes.",
+              "maxLength": 4096,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "harness": {
+              "description": "Install and remove, kind edit: the agent harness, claude-code.",
+              "enum": [
+                "claude-code"
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Check, kind code: the worktree's full HEAD commit hash (40 or 64 lowercase hexadecimal characters), or null for an unborn HEAD.",
+              "maxLength": 64,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "Which hook: code (the Git commit-msg hook) or edit (the agent's direct-edit hook).",
+              "enum": [
+                "code",
+                "edit"
+              ],
+              "type": "string"
+            },
+            "message": {
+              "description": "Check, kind code: the commit message, at most 65536 bytes.",
+              "maxLength": 65536,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "The action: check, install or remove.",
+              "enum": [
+                "check",
+                "install",
+                "remove"
+              ],
+              "type": "string"
+            },
+            "paths": {
+              "description": "Check: at most 256 paths of at most 4096 bytes each. Kind code: repo-relative logical paths, deleted paths and both sides of renames included. Kind edit: native absolute paths.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 256,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "repo": {
+              "description": "A code_repos name with a local code_paths checkout; not a repo link alias. Kind code only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "worktree": {
+              "description": "Install and remove, kind edit: a registered rdy worktree. Without it the main project root is the target.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "op"
           ],
           "type": "object"
         }
