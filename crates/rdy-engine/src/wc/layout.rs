@@ -113,3 +113,22 @@ pub fn read_tree(root: &Path, ignore: &Ignore, pack: &Pack) -> WcTree {
         diags: r.diags,
     }
 }
+
+/// Whether one path is the working copy's, decided for that path alone ([`membership_of`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// A tracked member, a new member file, a folder file or a managed asset.
+    Yes,
+    /// A code file, an ignored or hidden path, or anything the reader does not read.
+    No,
+    /// A link (or reparse point) between the root and the file, or as the file: never followed,
+    /// so the path cannot be classified.
+    Unsafe,
+}
+
+/// Whether the logical path `rel` under `root` is a working-copy member by the reader's rules,
+/// read for that one path (no walk of the tree, no other file parsed). `tracked` says the
+/// working copy's base tracks `rel`; `ignore` is the root's `.rdyignore`.
+pub fn membership_of(root: &Path, rel: &str, ignore: &Ignore, tracked: bool) -> Membership {
+    tree_io::membership(root, rel, ignore, tracked)
+}

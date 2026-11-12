@@ -122,6 +122,13 @@ pub trait Engine: Send + Sync {
     fn person_host(&self) -> Option<Arc<dyn crate::instructions::PersonHost>> {
         None
     }
+    /// The host's installer of local hooks (`rdy_hook` install and remove, an input seam like
+    /// [`Engine::person_host`]): the daemon supplies the local one. An engine with none refuses
+    /// both with `E_BAD_INPUT` ([`crate::hooks::host_absent`]) and gains no filesystem authority;
+    /// a hook check needs no host.
+    fn hook_host(&self) -> Option<Arc<dyn crate::hooks::HookHost>> {
+        None
+    }
 }
 
 /// `E_SITE` for an engine that runs without a daemon: the live site is the daemon's.
@@ -525,6 +532,8 @@ pub struct Local {
     rdy: Mutex<Rdy>,
     /// The host's reader of the person layer, when the host gave one ([`Local::with_person_host`]).
     person: Option<Arc<dyn crate::instructions::PersonHost>>,
+    /// The host's installer of local hooks, when the host gave one ([`Local::with_hook_host`]).
+    hooks: Option<Arc<dyn crate::hooks::HookHost>>,
 }
 
 impl Local {
@@ -532,12 +541,19 @@ impl Local {
         Local {
             rdy: Mutex::new(rdy),
             person: None,
+            hooks: None,
         }
     }
 
     /// This engine with `host` as its reader of the person layer ([`Engine::person_host`]).
     pub fn with_person_host(mut self, host: Arc<dyn crate::instructions::PersonHost>) -> Local {
         self.person = Some(host);
+        self
+    }
+
+    /// This engine with `host` as its installer of local hooks ([`Engine::hook_host`]).
+    pub fn with_hook_host(mut self, host: Arc<dyn crate::hooks::HookHost>) -> Local {
+        self.hooks = Some(host);
         self
     }
 
@@ -649,6 +665,10 @@ impl Engine for Local {
 
     fn person_host(&self) -> Option<Arc<dyn crate::instructions::PersonHost>> {
         self.person.clone()
+    }
+
+    fn hook_host(&self) -> Option<Arc<dyn crate::hooks::HookHost>> {
+        self.hooks.clone()
     }
 }
 

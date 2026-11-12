@@ -360,6 +360,137 @@ fn hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
+/// Whether a parsed `*.yaml` file is a doc member: a YAML list whose first entry has
+/// `type: doc`.
+fn is_doc_list(value: &serde_yaml_ng::Value) -> bool {
+    value
+        .as_sequence()
+        .and_then(|items| items.first())
+        .and_then(|e| e.get("type"))
+        .and_then(serde_yaml_ng::Value::as_str)
+        == Some(tree::DOC)
+}
+
+/// Whether a parsed `_folder.yaml` is one folder entry by its shape: a mapping with
+/// `type: folder`.
+fn is_folder_entry(value: &serde_yaml_ng::Value) -> bool {
+    value.is_mapping()
+        && value.get("type").and_then(serde_yaml_ng::Value::as_str) == Some(tree::FOLDER)
+}
+
+/// The YAML value of the regular file at `path`, read through a bound of
+/// [`MAX_MEMBER_BYTES`] (one byte more is refused before it is parsed); `None` when it cannot be
+/// read, is over the bound or does not parse. CR LF reads as LF, as the reader reads it.
+fn bounded_yaml(path: &Path) -> Option<serde_yaml_ng::Value> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MEMBER_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_MEMBER_BYTES {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let text = text.replace("\r\n", "\n");
+    serde_yaml_ng::from_str(&text).ok()
+}
+
+/// What one path under a working tree's root is, by the working-copy reader's membership rules,
+/// decided for that path alone: nothing else in the tree is listed or parsed (`read_wc` walks
+/// all of it). `rel` is the logical path under `root`; `tracked` says the working copy's base
+/// tracks it. Every directory between the root and the file is read with `symlink_metadata` and
+/// never followed: a link there, or a link as the file itself, is [`Membership::Unsafe`]. A
+/// hidden name or an ignored path is no member.
+///
+/// - A tracked path is a member while it stays in the tree, whatever its bytes now hold: an
+///   edit that makes its YAML invalid, or deletes it, still edits a member.
+/// - A regular file directly in `_blobs/` at the root is a managed asset.
+/// - Any other path needs each directory above it to be a folder (a regular `_folder.yaml` that
+///   is not ignored, at most `MAX_FOLDER_DEPTH` deep). Then a new `_folder.yaml` that is one
+///   folder entry, or a new `*.yaml` (not `*.theirs.yaml`) that is a doc list, is a member; each
+///   is parsed through the member bound and its value dropped at once.
+///
+/// [`Membership::Unsafe`]: crate::wc::layout::Membership::Unsafe
+pub(crate) fn membership(
+    root: &Path,
+    rel: &str,
+    ignore: &Ignore,
+    tracked: bool,
+) -> crate::wc::layout::Membership {
+    use crate::wc::layout::Membership;
+    let segs: Vec<&str> = rel.split('/').collect();
+    if segs.iter().any(|s| s.is_empty() || hidden(s)) {
+        return Membership::No;
+    }
+    let (dirs, name) = segs.split_at(segs.len() - 1);
+    let name = name[0];
+    let mut at = ignore.root();
+    let mut cur = root.to_path_buf();
+    let mut folders_ok = true;
+    let in_blobs = dirs.len() == 1 && dirs[0] == BLOBS_DIR;
+    for (depth, dir) in dirs.iter().enumerate() {
+        cur.push(dir);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return Membership::Unsafe,
+            Ok(m) if m.is_dir() => {}
+            // a file in a directory's place: nothing under it is the tree's
+            Ok(_) => return Membership::No,
+            // gone: only a tracked path stays a member (it was deleted)
+            Err(_) if tracked => return Membership::Yes,
+            Err(_) => return Membership::No,
+        }
+        if ignore.ignores(&at, dir, true) {
+            return Membership::No;
+        }
+        let inner = ignore.enter(&at, dir);
+        if !(depth == 0 && *dir == BLOBS_DIR) {
+            let ff = cur.join(FOLDER_FILE);
+            let folder = match std::fs::symlink_metadata(&ff) {
+                Ok(m) if m.file_type().is_symlink() => return Membership::Unsafe,
+                Ok(m) => m.is_file() && !ignore.ignores(&inner, FOLDER_FILE, false),
+                Err(_) => false,
+            };
+            folders_ok &= folder && depth < tree::MAX_FOLDER_DEPTH;
+        }
+        at = inner;
+    }
+    let file = cur.join(name);
+    let meta = match std::fs::symlink_metadata(&file) {
+        Ok(m) if m.file_type().is_symlink() => return Membership::Unsafe,
+        Ok(m) => Some(m),
+        Err(_) => None,
+    };
+    let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+    if ignore.ignores(&at, name, is_dir) {
+        return Membership::No;
+    }
+    if tracked {
+        return Membership::Yes;
+    }
+    let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
+        return Membership::No;
+    };
+    if in_blobs {
+        return Membership::Yes;
+    }
+    if !folders_ok || dirs.first() == Some(&BLOBS_DIR) || meta.len() > MAX_MEMBER_BYTES as u64 {
+        return Membership::No;
+    }
+    let member = if name == FOLDER_FILE {
+        !dirs.is_empty() && bounded_yaml(&file).is_some_and(|v| is_folder_entry(&v))
+    } else if name.ends_with(THEIRS_SUFFIX) || !name.ends_with(".yaml") {
+        false
+    } else {
+        bounded_yaml(&file).is_some_and(|v| is_doc_list(&v))
+    };
+    if member {
+        Membership::Yes
+    } else {
+        Membership::No
+    }
+}
+
 pub(crate) fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
@@ -1300,16 +1431,9 @@ impl Reader<'_> {
             self.untrack_for(here.to_string(), before, "cannot read the file");
             return;
         };
+        let doc = is_doc_list(&value);
         let items = match value {
-            serde_yaml_ng::Value::Sequence(items)
-                if items
-                    .first()
-                    .and_then(|e| e.get("type"))
-                    .and_then(serde_yaml_ng::Value::as_str)
-                    == Some(tree::DOC) =>
-            {
-                items
-            }
+            serde_yaml_ng::Value::Sequence(items) if doc => items,
             _ => {
                 self.untrack(here.to_string(), NOT_DOC);
                 return;

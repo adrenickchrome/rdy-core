@@ -1,10 +1,11 @@
 use rdy_daemon::ops::with_direct_context;
 use rdy_daemon::signing_agent::CallerAgent;
 use rdy_daemon::{
-    Client, ErrorReply, Proto, RunDir, StartOptions, connect_or_start, dispatch, serve_command,
-    spawn_serve,
+    Client, ErrorReply, Proto, RunDir, StartOptions, connect_or_start, dispatch, dispatch_with,
+    serve_command, spawn_serve,
 };
 use rdy_engine::engine::Local;
+use rdy_engine::hooks::RunContext;
 use rdy_engine::identity::{env_actor, env_run};
 use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
 use rdy_engine::{
@@ -222,6 +223,12 @@ impl Conn {
             let local = Local::open(&env.project)?.with_person_host(Arc::new(
                 rdy_daemon::instructions::PersonReader::direct(VERSION),
             ));
+            // m4a3: the same local hook host the daemon supplies, run by this binary; with no
+            // binary path the engine refuses installs as a host without one
+            let local = match rdy_daemon::hooks::LocalHooks::for_process(&env.project) {
+                Ok(host) => local.with_hook_host(Arc::new(host)),
+                Err(_) => local,
+            };
             Ok(Conn::Direct {
                 local: Box::new(local),
                 session,
@@ -284,6 +291,44 @@ impl Conn {
                     eprintln!("notice: {t}");
                 }
                 out
+            }
+        }
+    }
+
+    /// [`Conn::op`] under the hook run context `run` (m4a3): a direct process passes it to the
+    /// shared check and its Git children; through the daemon, the reply is awaited only until
+    /// `run`'s deadline, and the connection then closes when this session drops, which cancels
+    /// the daemon's run. `Ok(None)` when the deadline passed first.
+    pub(crate) fn op_within(
+        &mut self,
+        op: &str,
+        args: Value,
+        run: &RunContext,
+    ) -> Result<Option<Value>, ErrorReply> {
+        match self {
+            Conn::Direct {
+                local,
+                session,
+                human,
+                cwd,
+            } => with_direct_context(&**local, session, human, cwd, |cx| {
+                dispatch_with(cx, op, args, run)
+            })
+            .map(Some)
+            .map_err(ErrorReply::from),
+            Conn::Daemon { rt, client, .. } => {
+                let call = client.ctl(op, args);
+                match run.deadline() {
+                    None => rt.block_on(call).map(Some),
+                    Some(at) => rt.block_on(async {
+                        match tokio::time::timeout_at(tokio::time::Instant::from_std(at), call)
+                            .await
+                        {
+                            Ok(out) => out.map(Some),
+                            Err(_) => Ok(None),
+                        }
+                    }),
+                }
             }
         }
     }

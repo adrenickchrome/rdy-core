@@ -968,6 +968,12 @@ async fn script(x: &mut Run<'_>, tools: &[String]) {
     )
     .await;
 
+    // m4a4: a check outside the project and its worktrees, the same on every wire
+    x.ok(
+        "rdy_hook",
+        json!({"op": "check", "kind": "edit", "paths": [s("outside.txt")]}),
+    )
+    .await;
     x.ok("rdy_dump", json!({"out": s("dump.rdy")})).await;
     x.ok("rdy_stream_check", json!({"file": s("dump.rdy")}))
         .await;

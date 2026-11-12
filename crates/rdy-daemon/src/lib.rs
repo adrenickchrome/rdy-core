@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod error;
 pub mod handler;
 pub mod hello;
+pub mod hooks;
 pub mod instructions;
 pub mod layout;
 pub mod mcp_token;
@@ -54,7 +55,9 @@ pub use shared::{DaemonEngine, Shared};
 pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
 pub mod ops;
 
-pub use ops::{Cleaned, OPS, OpContext, clean_quarantine, dispatch, quarantine, wc_in_flight};
+pub use ops::{
+    Cleaned, OPS, OpContext, clean_quarantine, dispatch, dispatch_with, quarantine, wc_in_flight,
+};
 pub mod serve;
 
 pub use serve::{

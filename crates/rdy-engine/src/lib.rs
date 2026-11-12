@@ -55,6 +55,7 @@ pub use handle::{CompletionPhase, read_only_feature_for_tests, with_completion_h
 mod history;
 pub mod history_facts;
 mod holder;
+pub mod hooks;
 pub mod hub_config;
 pub mod hub_credentials;
 pub mod hub_http;
@@ -225,7 +226,7 @@ pub use pack_load::{
 pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
-pub use rdy_store::pio::display_path;
+pub use rdy_store::pio::{display_path, no_console_window};
 pub use rdy_store::{CachedDrawing, DiagramCache};
 /// The notice channel of the library crates: stderr, unless a test captures the notice it
 /// provokes ([`capture_notices_for_tests`]).

@@ -472,6 +472,26 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "pick a view name that does not start with reaffirm- or adopt-, and write to a view, not canon",
     ),
     (
+        W_HOOK_DIRECT_EDIT,
+        "a hook check finds that an agent edited rdy working-copy files directly (rdy_hook check, kind edit)",
+        HOOK_DIRECT_EDIT_FIX,
+    ),
+    (
+        W_HOOK_NO_CITATION,
+        "a hook check finds staged code paths anchored to a decision and a commit message with no Implements value (rdy_hook check, kind code)",
+        HOOK_NO_CITATION_FIX,
+    ),
+    (
+        W_HOOK_UNAVAILABLE,
+        "a hook check could not finish (project, checkout or history unavailable, an unsafe path, an invalid event, an input limit, the deadline or an I/O failure); checked is false, never clean",
+        HOOK_UNAVAILABLE_FIX,
+    ),
+    (
+        W_HOOK_CONFLICT,
+        "a hook install or remove left a file unchanged (an existing hook, a changed owned file, an external hooks path, invalid settings, an unsafe path, a file changed meanwhile or a busy installer)",
+        HOOK_CONFLICT_FIX,
+    ),
+    (
         E_DUMP_CHAIN,
         "The dump files do not form a chain, or the predecessor does not match this store.",
         "Pass a full dump and its increments in order, or start a new chain.",

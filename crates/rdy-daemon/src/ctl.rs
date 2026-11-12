@@ -5,6 +5,7 @@ use crate::error::{E_BAD_INPUT, E_LIMIT, ErrorReply};
 use crate::handler::Handler;
 use crate::session::{SessionInfo, Sessions};
 use crate::signing_transport::{CALLBACK_MARK, HostInbound, MAX_CALLBACK_LINE_BYTES, host_link};
+use rdy_engine::hooks::{HOOK_DEADLINE, RunContext};
 use rdy_engine::signing_crypto::SigningAgent;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -220,19 +221,33 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".into())
 }
 
-/// Runs the handler on the blocking pool; a panic becomes an `E_INTERNAL` reply.
+/// The ctl op that runs under a run context: its deadline starts when the daemon reads the
+/// request, and a lost connection cancels it (FW-HOOK).
+pub const HOOK_OP: &str = "hook";
+
+/// The run context of a request of `op`: for the `hook` op, [`HOOK_DEADLINE`] from now, so the
+/// daemon stops its work at the deadline whether or not the client is still there; none for any
+/// other op.
+fn run_context(op: &str) -> Option<RunContext> {
+    (op == HOOK_OP).then(|| RunContext::new().with_deadline(Instant::now() + HOOK_DEADLINE))
+}
+
+/// Runs the handler on the blocking pool, under `run` when the op has one
+/// ([`Handler::ctl_run`]); a panic becomes an `E_INTERNAL` reply.
 async fn call_handler(
     handler: &Arc<dyn Handler>,
     session: &SessionInfo,
     request: CtlRequest,
     agent: Arc<dyn SigningAgent>,
+    run: Option<RunContext>,
 ) -> CtlReply {
     let id = request.id.clone();
     let op = request.op.clone();
     let (handler, session) = (Arc::clone(handler), session.clone());
     let out = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handler.ctl(&session, request, agent)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &run {
+            Some(run) => handler.ctl_run(&session, request, agent, run),
+            None => handler.ctl(&session, request, agent),
         }))
     })
     .await;
@@ -399,7 +414,8 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             _ => {
                 // the request's signer names it in each callback
                 let signer: Arc<dyn SigningAgent> = agent.for_request(id.clone());
-                let call = call_handler(&handler, &session, request, signer);
+                let run = run_context(&request.op);
+                let call = call_handler(&handler, &session, request, signer, run.clone());
                 let reply = run_request(
                     call,
                     &mut r,
@@ -408,6 +424,7 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     &inbound,
                     &mut outbound,
                     &mut held,
+                    run.as_ref(),
                 )
                 .await?;
                 answer(&mut w, &handler, &session, reply).await?;
@@ -422,6 +439,12 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// [`crate::signing_transport::MAX_READ_AHEAD_BYTES`] of cost the waiting callback fails, and
 /// nothing more is read until the request ends. A write that fails closes the signing channel;
 /// the error is returned once the request has ended.
+///
+/// A request with a run context (`run`) is read beside even when no callback waits, so a lost
+/// connection is seen while it runs: the end of input cancels `run` at once, and the request is
+/// still awaited, so its handler has stopped its work (a Git child killed and reaped) before the
+/// connection goes.
+#[allow(clippy::too_many_arguments)]
 async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     call: impl std::future::Future<Output = CtlReply>,
     r: &mut BufReader<R>,
@@ -430,12 +453,13 @@ async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     inbound: &HostInbound,
     outbound: &mut crate::signing_transport::HostOutbound,
     held: &mut Held,
+    run: Option<&RunContext>,
 ) -> io::Result<CtlReply> {
     tokio::pin!(call);
     let mut reading = true;
     let mut failed: Option<io::Error> = None;
     loop {
-        let read = reading && inbound.outstanding();
+        let read = reading && (inbound.outstanding() || run.is_some());
         tokio::select! {
             biased;
             reply = &mut call => return match failed {
@@ -456,6 +480,9 @@ async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 Ok(Got::Callback(l)) => inbound.deliver(&l),
                 Ok(Got::CallbackOver) => inbound.over(),
                 Ok(Got::Eof) | Err(_) => {
+                    if let Some(run) = run {
+                        run.cancel();
+                    }
                     inbound.close();
                     reading = false;
                     held.push(Got::Eof);
@@ -464,7 +491,11 @@ async fn run_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 Ok(other) => {
                     held.push(other);
                     if held.full() {
-                        inbound.flooded();
+                        // only a waiting callback fails: a run read beside for its connection's
+                        // loss keeps its signing channel
+                        if inbound.outstanding() {
+                            inbound.flooded();
+                        }
                         reading = false;
                     }
                 }

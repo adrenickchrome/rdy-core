@@ -318,6 +318,13 @@ impl Engine for DaemonEngine {
         Some(Arc::new(crate::instructions::PersonReader::daemon(version)))
     }
 
+    /// The local hook host (FW-HOOK, FW-L3): this project, run by this daemon's own binary
+    /// (the one `rdy serve` started). None when the binary cannot be named.
+    fn hook_host(&self) -> Option<Arc<dyn rdy_engine::hooks::HookHost>> {
+        let host = crate::hooks::LocalHooks::for_process(&self.0.root).ok()?;
+        Some(Arc::new(host))
+    }
+
     /// The full site's link for a source or profile target, and the profile-only listener's
     /// (bound on the first ask, reused after) for [`SiteTarget::ProfileOnly`]. The profile-only
     /// link carries the listener's own LAN diagnostic; the reply words it for the build's title.

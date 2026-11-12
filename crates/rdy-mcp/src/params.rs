@@ -103,11 +103,7 @@ pub fn parse_params_strict<P: DeserializeOwned + JsonSchema + 'static>(
             path,
             expected,
             actual,
-        }) => RdyError::new(
-            E_BAD_INPUT,
-            format!("{tool}: parameter \"{path}\" must be {expected}, not {actual}"),
-            format!("pass \"{path}\" as {expected}"),
-        ),
+        }) => wrong_type(tool, &path, &expected, &actual),
         Some(Miss::Missing { path, expected }) => RdyError::new(
             E_BAD_INPUT,
             format!("{tool}: parameter \"{path}\" is required"),
@@ -134,6 +130,59 @@ pub fn parse_params_strict<P: DeserializeOwned + JsonSchema + 'static>(
             )
         }),
     })
+}
+
+/// The refusal of a wrong-typed parameter, in the words every tool gives (mparm1).
+fn wrong_type(tool: &str, path: &str, expected: &str, actual: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("{tool}: parameter \"{path}\" must be {expected}, not {actual}"),
+        format!("pass \"{path}\" as {expected}"),
+    )
+}
+
+/// The wrong-typed parameter refusal for the first top-level argument of `args` whose JSON type
+/// `P`'s input schema does not accept, or `None`. Only the type is checked: a key outside the
+/// schema, a missing key, and a value of an accepted type (an enum choice, a list's items, a
+/// bound) are left to the tool's own parser. A tool whose engine parser reads its raw arguments
+/// (rdy_hook) calls this first, so a wrong type is refused as every tool refuses it.
+pub fn wrong_typed<P: JsonSchema + 'static>(tool: &str, args: &JsonObject) -> Option<RdyError> {
+    let schema = Value::Object((*schema_for_input::<P>().ok()?).clone());
+    let props = schema.get("properties")?.as_object()?;
+    args.iter().find_map(|(key, value)| {
+        let prop = props.get(key)?;
+        let types = json_types(prop, &schema);
+        (!types.is_empty() && !types.iter().any(|t| has_type(value, t)))
+            .then(|| wrong_type(tool, key, &shape(prop, &schema), &actual(value)))
+    })
+}
+
+/// The JSON types `schema` accepts: its own `type`, or those of its `anyOf` or `oneOf` branches,
+/// through `$ref`s. Empty when it, or one of its branches, names none (any type fits).
+fn json_types(schema: &Value, root: &Value) -> Vec<String> {
+    if let Some(def) = deref(schema, root) {
+        return json_types(def, root);
+    }
+    if let Some(bs) = branches(schema) {
+        let mut all = vec![];
+        for b in bs {
+            let types = json_types(b, root);
+            if types.is_empty() {
+                return vec![];
+            }
+            all.extend(types);
+        }
+        return all;
+    }
+    match schema.get("type") {
+        Some(Value::String(t)) => vec![t.clone()],
+        Some(Value::Array(ts)) => ts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => vec![],
+    }
 }
 
 /// The first place where a value does not fit the schema.

@@ -1056,6 +1056,32 @@ pub fn catch_interrupt() -> io::Result<InterruptGuard> {
     Ok(InterruptGuard { seen })
 }
 
+// 9. Local hooks
+
+/// The text a hook launcher's shell line names `path` by: its own text here. `None` for a path
+/// that is not UTF-8, which no launcher or settings file can hold as data.
+pub fn hook_sh_path(path: &Path) -> Option<String> {
+    path.to_str().map(str::to_string)
+}
+
+/// The text a harness's exec-form settings name `path` by: its own text here (see
+/// [`hook_sh_path`]).
+pub fn hook_exec_path(path: &Path) -> Option<String> {
+    path.to_str().map(str::to_string)
+}
+
+/// Makes the hook launcher `name` in the open directory `dir` runnable (mode 0o755), never
+/// through a link at `name` (`pio::set_mode_at`): Git runs `commit-msg` only when it is
+/// executable.
+pub fn make_launcher_executable(dir: &fs::File, name: &OsStr) -> io::Result<()> {
+    rdy_store::pio::set_mode_at(dir, name, 0o755)
+}
+
+/// Whether a launcher with metadata `meta` may be run by its owner.
+pub fn launcher_is_executable(meta: &fs::Metadata) -> bool {
+    meta.permissions().mode() & 0o100 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{

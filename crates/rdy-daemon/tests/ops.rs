@@ -39,7 +39,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 69);
+    assert_eq!(OPS.len(), 70);
     assert_eq!(OPS[0], "session");
     let impact = OPS.iter().position(|o| *o == "impact").unwrap();
     assert_eq!(
@@ -110,9 +110,10 @@ fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
             "key_bind",
             "key_retire",
             "key_revoke",
-            "publish"
+            "publish",
+            "hook"
         ],
-        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke"
+        "sig9: sign and key_show follow answer; hsa9: remote, key_bind, key_retire and key_revoke follow key_show; hpb15: publish follows key_revoke; m4a2: hook follows publish"
     );
     let resolve = OPS.iter().position(|o| *o == "resolve").unwrap();
     assert_eq!(

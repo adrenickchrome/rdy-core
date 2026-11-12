@@ -3,6 +3,7 @@
 use crate::ctl::CtlRequest;
 use crate::error::ErrorReply;
 use crate::session::SessionInfo;
+use rdy_engine::hooks::RunContext;
 use rdy_engine::signing_crypto::SigningAgent;
 use std::future::Future;
 use std::pin::Pin;
@@ -28,6 +29,22 @@ pub trait Handler: Send + Sync + 'static {
         request: CtlRequest,
         agent: Arc<dyn SigningAgent>,
     ) -> Result<serde_json::Value, ErrorReply>;
+
+    /// One ctl request that runs under `run`: the `hook` op's deadline and cancellation signal
+    /// (FW-HOOK). The connection cancels `run` when it is lost while the request runs, and waits
+    /// for this call to return before it lets the connection go, so the handler must pass `run`
+    /// to the work it starts and return once that work has stopped. The default ignores `run`
+    /// and calls [`Handler::ctl`].
+    fn ctl_run(
+        &self,
+        session: &SessionInfo,
+        request: CtlRequest,
+        agent: Arc<dyn SigningAgent>,
+        run: &RunContext,
+    ) -> Result<serde_json::Value, ErrorReply> {
+        let _ = run;
+        self.ctl(session, request, agent)
+    }
 
     /// An `mcp` connection after its hello, its signing channel already taken out of `stream`;
     /// `agent` is the signer of the process at the other end. The default closes the stream (M2b
