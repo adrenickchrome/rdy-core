@@ -489,6 +489,11 @@ impl Records for UploadSource<'_> {
         Some((at.record, at.offset))
     }
 
+    /// A union key's links are indexed; any other key's are read from the holder.
+    fn in_memory(&self, k: &ObjectKey) -> bool {
+        self.union.contains_key(k)
+    }
+
     fn links(&mut self, k: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {
         if let Some(e) = self.union.get(&k) {
             let mut links = e.refs.clone();

@@ -86,6 +86,11 @@ pub(crate) trait Records {
     fn position(&self, _key: &ObjectKey) -> Option<(u64, u64)> {
         None
     }
+    /// Whether the source indexes `key` in memory, so its links cost no read of a holder: true
+    /// for every key of a source with no holder. The closure walk expands these keys first.
+    fn in_memory(&self, _key: &ObjectKey) -> bool {
+        true
+    }
 }
 
 /// The forward links of one record: its references, then its removal proof.
@@ -329,7 +334,8 @@ fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
         .collect()
 }
 
-/// Checks that every incoming key is in the root's closure: reached from the root by forward
+/// Checks that every incoming key is in the root's closure (D-BPYN8: "a take adds a stream's
+/// closure and its tag in one batch"; the take's step 5): reached from the root by forward
 /// links (through every record of the source), or attached as the closure attaches it
 /// (`crate::closure`): answers of reached landings and tags, signatures of reached landings and
 /// of the root, the root's relay answer (O11), the sealed plans of reached landings, requests of
@@ -338,42 +344,61 @@ fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
 /// and proposal versions and the reviews of reached requests. The first incoming key outside it, in key order, is
 /// `object is outside the tag closure`. A record of the source that is not incoming (a holder's)
 /// may be reached, and is never required to be.
+///
+/// The walk expands the keys the source indexes in memory (`Records::in_memory`: a take's
+/// union) before keys only a holder holds, and it ends once every incoming key is reached and
+/// no in-memory key is left to expand. The answer is the same as a whole walk's: the walk only
+/// stops once it is yes. While an incoming key is not reached, the walk goes on through the
+/// holder as far as the closure goes, so an attachment of an old held landing is still found.
+/// The bounds ([`MAX_RECORDS`] reached records, [`MAX_EDGES`] edges; p-VCW8D bounds what one
+/// batch and one upload hold) count only what the walk visits, so held history the walk does
+/// not need is never charged to them; a walk that must go through the holder is charged
+/// everything it visits, as a whole walk is.
 pub(crate) fn check_closure(
     rec: &mut dyn Records,
     root_key: ObjectKey,
     root: &Tag,
     input_keys: &[ObjectKey],
 ) -> Result<(), StreamError> {
+    walk_closure(rec, root_key, root, input_keys, MAX_RECORDS, MAX_EDGES)
+}
+
+/// [`check_closure`] with its record and edge bounds named, so a test can use small ones.
+fn walk_closure(
+    rec: &mut dyn Records,
+    root_key: ObjectKey,
+    root: &Tag,
+    input_keys: &[ObjectKey],
+    max_records: u64,
+    max_edges: u64,
+) -> Result<(), StreamError> {
     let att = attachments(rec.object_source(), root_key, root, input_keys)?;
-    let mut reached: HashSet<ObjectKey> = HashSet::new();
-    let mut queue: Vec<ObjectKey> = Vec::new();
+    let mut walk = Walk {
+        reached: HashSet::new(),
+        wanted: HashSet::new(),
+        front: Vec::new(),
+        back: Vec::new(),
+        max_records,
+    };
+    walk.wanted
+        .try_reserve(input_keys.len())
+        .map_err(|_| StreamError::allocation(None, 0))?;
+    walk.wanted.extend(input_keys.iter().copied());
     let mut edges = 0u64;
-    fn reach(
-        k: ObjectKey,
-        reached: &mut HashSet<ObjectKey>,
-        queue: &mut Vec<ObjectKey>,
-    ) -> Result<(), StreamError> {
-        if reached.contains(&k) {
-            return Ok(());
-        }
-        if reached.len() as u64 >= MAX_RECORDS {
-            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
-        }
-        reached
-            .try_reserve(1)
-            .map_err(|_| StreamError::allocation(None, 0))?;
-        queue
-            .try_reserve(1)
-            .map_err(|_| StreamError::allocation(None, 0))?;
-        reached.insert(k);
-        queue.push(k);
-        Ok(())
-    }
-    reach(root_key, &mut reached, &mut queue)?;
+    walk.reach(&*rec, root_key)?;
     for r in &att.relay {
-        reach(*r, &mut reached, &mut queue)?;
+        walk.reach(&*rec, *r)?;
     }
-    while let Some(k) = queue.pop() {
+    loop {
+        let k = match walk.front.pop() {
+            Some(k) => k,
+            // every incoming key is reached: the held history left is not needed
+            None if walk.wanted.is_empty() => return Ok(()),
+            None => match walk.back.pop() {
+                Some(k) => k,
+                None => break,
+            },
+        };
         // forward links
         let mut links: Vec<ObjectKey> = Vec::new();
         if let Some(refs) = rec.links(k)? {
@@ -408,18 +433,55 @@ pub(crate) fn check_closure(
         }
         links.extend(att.applies.get(&k).into_iter().flatten());
         edges += links.len() as u64;
-        if edges > MAX_EDGES {
+        if edges > max_edges {
             return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES));
         }
         for l in links {
             if l.kind != 0 {
-                reach(l, &mut reached, &mut queue)?;
+                walk.reach(&*rec, l)?;
             }
         }
     }
-    match input_keys.iter().find(|k| !reached.contains(k)) {
+    match input_keys.iter().find(|k| !walk.reached.contains(k)) {
         Some(k) => Err(bad(Reason::OutsideTagClosure, *k)),
         None => Ok(()),
+    }
+}
+
+/// The state of one closure walk: what it reached, the incoming keys not reached yet, and the
+/// keys left to expand, in-memory ones (`front`) apart from held ones (`back`).
+struct Walk {
+    reached: HashSet<ObjectKey>,
+    wanted: HashSet<ObjectKey>,
+    front: Vec<ObjectKey>,
+    back: Vec<ObjectKey>,
+    max_records: u64,
+}
+
+impl Walk {
+    /// Reaches `k` once, within the record bound, and queues it to expand.
+    fn reach(&mut self, rec: &dyn Records, k: ObjectKey) -> Result<(), StreamError> {
+        if self.reached.contains(&k) {
+            return Ok(());
+        }
+        if self.reached.len() as u64 >= self.max_records {
+            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
+        }
+        let queue = if rec.in_memory(&k) {
+            &mut self.front
+        } else {
+            &mut self.back
+        };
+        self.reached
+            .try_reserve(1)
+            .map_err(|_| StreamError::allocation(None, 0))?;
+        queue
+            .try_reserve(1)
+            .map_err(|_| StreamError::allocation(None, 0))?;
+        self.reached.insert(k);
+        queue.push(k);
+        self.wanted.remove(&k);
+        Ok(())
     }
 }
 
@@ -1468,5 +1530,173 @@ impl<R: Read + Seek> ObjectSource for CheckedStream<R> {
 impl<R: Read + Seek> ObjectSource for &CheckedStream<R> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.records.read(key)
+    }
+}
+
+#[cfg(test)]
+mod tcw_tests {
+    //! The closure walk's early end (D-BPYN8, p-VCW8D; TASK-2324) over a fake union and holder.
+    use super::*;
+    use rdy_model::{Provenance, Role};
+
+    /// In-memory keys (the union) over held ones, each with its forward links. Counts the link
+    /// reads of keys only the holder holds.
+    #[derive(Default)]
+    struct Fake {
+        union: BTreeMap<ObjectKey, Vec<ObjectKey>>,
+        held: BTreeMap<ObjectKey, Vec<ObjectKey>>,
+        held_reads: u64,
+    }
+
+    impl ObjectSource for Fake {
+        fn record(&mut self, _: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
+            Ok(None)
+        }
+    }
+
+    fn refs(keys: &[ObjectKey]) -> Vec<ObjectRef> {
+        keys.iter()
+            .map(|k| ObjectRef {
+                kind: Some(k.kind),
+                hash: k.hash,
+            })
+            .collect()
+    }
+
+    impl Records for Fake {
+        fn object_source(&mut self) -> &mut dyn ObjectSource {
+            self
+        }
+        fn has(&mut self, k: &ObjectKey) -> Result<bool, StreamError> {
+            Ok(self.union.contains_key(k) || self.held.contains_key(k))
+        }
+        fn links(&mut self, k: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {
+            if let Some(l) = self.union.get(&k) {
+                return Ok(Some(refs(l)));
+            }
+            self.held_reads += 1;
+            Ok(self.held.get(&k).map(|l| refs(l)))
+        }
+        fn in_memory(&self, k: &ObjectKey) -> bool {
+            self.union.contains_key(k)
+        }
+    }
+
+    fn key(kind: u8, n: u32) -> ObjectKey {
+        let mut b = vec![kind];
+        b.extend(n.to_le_bytes());
+        ObjectKey {
+            kind,
+            hash: Hash::of(&b),
+        }
+    }
+
+    fn tag() -> Tag {
+        Tag {
+            name: "v2".into(),
+            landing: key(kinds::LANDING, 1_000_000).hash,
+            message: None,
+            tagged_by: Provenance {
+                actor: "human:t".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 1,
+            },
+        }
+    }
+
+    /// `n` held landings, each linking to its snapshot and the landing before, and an upload of
+    /// a root TAG, one new landing over the last held one, and its snapshot. Held: 2n records
+    /// and 2n - 1 edges; the whole closure: 2n + 3 records and 2n + 2 edges.
+    fn history(n: u32) -> (Fake, ObjectKey, Vec<ObjectKey>) {
+        let mut f = Fake::default();
+        for i in 0..n {
+            let mut links = vec![key(kinds::SNAPSHOT, i)];
+            if i > 0 {
+                links.push(key(kinds::LANDING, i - 1));
+            }
+            f.held.insert(key(kinds::LANDING, i), links);
+            f.held.insert(key(kinds::SNAPSHOT, i), vec![]);
+        }
+        let root = key(kinds::TAG, 0);
+        let new = key(kinds::LANDING, 1_000_000);
+        let snap = key(kinds::SNAPSHOT, 1_000_000);
+        f.union.insert(root, vec![new]);
+        f.union
+            .insert(new, vec![snap, key(kinds::LANDING, n.saturating_sub(1))]);
+        f.union.insert(snap, vec![]);
+        (f, root, vec![root, new, snap])
+    }
+
+    fn walk(
+        f: &mut Fake,
+        root: ObjectKey,
+        input: &[ObjectKey],
+        records: u64,
+        edges: u64,
+    ) -> Result<(), StreamError> {
+        walk_closure(f, root, &tag(), input, records, edges)
+    }
+
+    #[test]
+    fn tcw_walk_ends_once_every_upload_key_is_reached() {
+        // only new records past a long held history: the walk reads no held record, and the
+        // held history is never charged to the bounds (a whole walk would pass both)
+        let (mut f, root, input) = history(10_000);
+        walk(&mut f, root, &input, 4, 3).unwrap();
+        assert_eq!(f.held_reads, 0);
+        walk(&mut f, root, &input, MAX_RECORDS, MAX_EDGES).unwrap();
+        assert_eq!(f.held_reads, 0);
+    }
+
+    #[test]
+    fn tcw_walk_goes_through_the_holder_for_a_key_only_it_reaches() {
+        // an upload key that only the oldest held landing reaches (as a held landing's later
+        // attachment is): the walk goes on through the whole holder and accepts it
+        let n = 50;
+        let (mut f, root, mut input) = history(n);
+        let late = key(kinds::SIGNATURE, 7);
+        f.union.insert(late, vec![]);
+        f.held.get_mut(&key(kinds::LANDING, 0)).unwrap().push(late);
+        input.push(late);
+        walk(&mut f, root, &input, MAX_RECORDS, MAX_EDGES).unwrap();
+        // every held landing down to the oldest is read (a held snapshot, which links to
+        // nothing, need not be once the key is reached)
+        assert!(f.held_reads >= n as u64, "{}", f.held_reads);
+        // and it is charged every record and edge it visits: 2n + 4 records, 2n + 3 edges
+        let records = 2 * n as u64 + 4;
+        let edges = 2 * n as u64 + 3;
+        walk(&mut f, root, &input, records, edges).unwrap();
+        let e = walk(&mut f, root, &input, records - 1, edges).unwrap_err();
+        assert_eq!(e.message, "stream exceeds 1000000 object records");
+        let e = walk(&mut f, root, &input, records, edges - 1).unwrap_err();
+        assert_eq!(e.message, "stream exceeds 1000000 graph edges");
+    }
+
+    #[test]
+    fn tcw_walk_that_cannot_end_early_keeps_bounds_and_refusals() {
+        // an upload key outside the closure: the walk visits all of it, as a whole walk does,
+        // and refuses the key with today's text; the bounds count the whole closure
+        let n = 50;
+        let (mut f, root, mut input) = history(n);
+        let stray = key(kinds::BLOCK, 3);
+        f.union.insert(stray, vec![]);
+        input.push(stray);
+        let records = 2 * n as u64 + 3;
+        let edges = 2 * n as u64 + 2;
+        for (r, e) in [(MAX_RECORDS, MAX_EDGES), (records, edges)] {
+            f.held_reads = 0;
+            let got = walk(&mut f, root, &input, r, e).unwrap_err();
+            assert_eq!(
+                got.message,
+                "stream record 0 at byte 0: object is outside the tag closure"
+            );
+            assert_eq!(got.object, Some(stray));
+            assert_eq!(f.held_reads, 2 * n as u64);
+        }
+        let got = walk(&mut f, root, &input, records - 1, edges).unwrap_err();
+        assert_eq!(got.message, "stream exceeds 1000000 object records");
+        let got = walk(&mut f, root, &input, records, edges - 1).unwrap_err();
+        assert_eq!(got.message, "stream exceeds 1000000 graph edges");
     }
 }

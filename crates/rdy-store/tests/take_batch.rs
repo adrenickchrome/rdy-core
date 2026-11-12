@@ -1663,3 +1663,201 @@ fn markers_since(h: &Store, from: rdy_store::segment::Location) -> usize {
         .filter(|(l, k, _, _)| *l >= from && *k == kinds::BATCH_COMMIT)
         .count()
 }
+
+// ---------------------------------------------------------------------------------------------
+// tcw (TASK-2324; D-BPYN8, p-VCW8D): the take's closure walk ends once every upload key is
+// reached, and goes on through the holder while one is not
+
+/// Lands `n` more changes on `s`, each creating one new block, and returns the last landing.
+fn tcw_land(s: &mut Store, from: usize, n: usize) -> Hash {
+    let mut last = None;
+    for i in from..from + n {
+        s.commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![Op::Create {
+                    block: block(&format!("b-{:05}", 10 + i), &format!("body {i}")),
+                }],
+            ),
+        )
+        .unwrap();
+        let p = s
+            .propose("work", &format!("p{i}"), prov("agent:w", Role::Writer))
+            .unwrap();
+        last = Some(s.land(&p, prov("human:alice", Role::Approver)).unwrap());
+    }
+    last.expect("at least one landing")
+}
+
+/// Tags `landing` as `name` with its relay answer; returns the tag.
+fn tcw_tag(s: &mut Store, name: &str, landing: Hash) -> Hash {
+    s.put_tag_answered(
+        &Tag {
+            name: name.into(),
+            landing,
+            message: None,
+            tagged_by: prov("human:alice", Role::Approver),
+        },
+        answer(&format!("tag:{name}"), vec![], None),
+    )
+    .unwrap()
+    .0
+}
+
+/// A source with `n` landings tagged `v1` (as [`source`]'s fields give it: `landing` is the
+/// first landing, `tag` is `v1`), and a holder that holds `v1`'s whole closure.
+fn tcw_held_history(n: usize) -> (Src, Store) {
+    let src = source();
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 0, n);
+    let v1 = tcw_tag(&mut s, "v1.1", last);
+    drop(s);
+    let (_, mut h) = holder(&src, "h");
+    let paths = src.split(v1, 1, "v1-full");
+    let target = UploadTarget {
+        tag: "v1.1".into(),
+        landing: last,
+    };
+    take(&mut h, &open(&paths), &target).unwrap();
+    (Src { tag: v1, ..src }, h)
+}
+
+/// Lands `n` more changes past `held`'s tag and tags them `v2`; returns the target and the batch
+/// of `v2`'s closure less what `known` holds.
+fn tcw_next(
+    src: &Src,
+    n: usize,
+    known: &BTreeSet<ObjectKey>,
+    name: &str,
+) -> (UploadTarget, PathBuf, Vec<ObjectKey>, Hash) {
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 50_000, n);
+    let v2 = tcw_tag(&mut s, "v2", last);
+    drop(s);
+    let (_s, r) = src.reader();
+    let c = closure(&r, v2, known).unwrap();
+    let path = src.dir.path().join(format!("{name}.rdysync"));
+    write(&r, &src.repo, v2, &c.records, c.prerequisites, &path);
+    (
+        UploadTarget {
+            tag: "v2".into(),
+            landing: last,
+        },
+        path,
+        c.records,
+        v2,
+    )
+}
+
+fn tcw_known(src: &Src) -> BTreeSet<ObjectKey> {
+    src.closure(src.tag).into_iter().collect()
+}
+
+#[test]
+fn tcw_new_records_past_a_long_held_history_are_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "new");
+    assert!(records.iter().all(|k| !known.contains(k)));
+    let got = take(&mut h, &open(&[path]), &target).unwrap();
+    assert_eq!(got.new_objects as usize, records.len());
+    assert!(h.get_ref("tag/v2").unwrap().is_some());
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_a_record_outside_the_root_closure_is_still_refused() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, _, v2) = tcw_next(&src, 2, &known, "new");
+    let stray = src.dir.path().join("stray.rdysync");
+    write_extra(
+        &src.repo,
+        v2,
+        &[(kinds::BLOCK, enc(&block("b-99999", "stray")))],
+        vec![key(kinds::TAG, v2)],
+        &stray,
+    );
+    let end = h.log_end();
+    let e = stream_err(take(&mut h, &open(&[path, stray]), &target).unwrap_err());
+    assert_eq!(
+        e.message,
+        "stream record 0 at byte 0: object is outside the tag closure"
+    );
+    assert_eq!(
+        e.object,
+        Some(key(
+            kinds::BLOCK,
+            Hash::of(&enc(&block("b-99999", "stray")))
+        ))
+    );
+    assert_eq!(h.log_end(), end);
+    assert_eq!(h.get_ref("tag/v2").unwrap(), None);
+}
+
+#[test]
+fn tcw_a_new_record_attached_to_an_old_held_landing_is_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    // a later signature of the first landing, which the holder holds since v1
+    assert!(h.has_kind(kinds::LANDING, &src.landing).unwrap());
+    let mut s = Store::open(&src.path).unwrap();
+    let late = s
+        .put_signature(&sig(src.landing, "rdy-approval-v1", 9))
+        .unwrap();
+    drop(s);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "late");
+    assert!(records.contains(&key(kinds::SIGNATURE, late)));
+    take(&mut h, &open(&[path]), &target).unwrap();
+    assert!(h.has_kind(kinds::SIGNATURE, &late).unwrap());
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_a_full_layout_that_resends_held_records_is_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &BTreeSet::new(), "full");
+    // every held landing, snapshot and change is sent again (only v1.1's tag and its relay
+    // answer are not in v2's closure)
+    let resent = records.iter().filter(|k| known.contains(k)).count();
+    assert!(resent + 2 >= known.len(), "{resent} of {}", known.len());
+    let got = take(&mut h, &open(&[path]), &target).unwrap();
+    assert_eq!(got.new_objects as usize, records.len() - resent);
+    h.check_holder().unwrap();
+}
+
+/// Bench only (TASK-2324): a take of only the new records of `v2` past about 5,000 held
+/// objects, timed up to the caller's check. Prints the times; asserts none.
+#[test]
+#[ignore]
+fn tcw_bench_take_of_new_records_past_5000_held_objects() {
+    let (src, mut h) = tcw_held_history(1000);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "bench");
+    let mut times = Vec::new();
+    for _ in 0..7 {
+        let start = std::time::Instant::now();
+        let mut at = None;
+        h.take_batches(
+            &open(std::slice::from_ref(&path)),
+            &target,
+            |_: &mut dyn ObjectSource, _: &UploadFacts| {
+                at = Some(start.elapsed());
+                Ok::<_, StreamError>(TagChoice::Incoming)
+            },
+        )
+        .unwrap();
+        times.push(at.unwrap());
+    }
+    times.sort();
+    println!(
+        "tcw bench: {} held objects, {} new; take to the caller's check: median {:?}, min {:?}, max {:?}",
+        known.len(),
+        records.len(),
+        times[3],
+        times[0],
+        times[6]
+    );
+}
