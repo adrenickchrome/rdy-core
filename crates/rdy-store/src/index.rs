@@ -130,7 +130,9 @@ const LANDING_WAITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landi
 /// [`LANDING_DEPTHS`], [`LANDING_WAITS`]) were last kept, written in the same commit as
 /// `indexed_upto`. Only a writer that keeps the counts writes it; an older rdy moves
 /// `indexed_upto` alone. So an index whose two positions differ (or that has no `counts_upto`)
-/// has counts behind its log, and the open rebuilds it from the log (known issue 2309).
+/// has counts behind its log ([`Index::counts_behind`]), and the store's open rebuilds it from
+/// the log (known issue 2309). That is not damage: the index opens, and its `indexed_upto` stays
+/// the log's floor until the rebuilt index replaces it.
 const COUNTS_UPTO_KEY: &str = "counts_upto";
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
@@ -1207,20 +1209,6 @@ impl Index {
             return Err(StoreError::Db(
                 "the index has no capacity counts; it is rebuilt from the log".into(),
             ));
-        }
-        // likewise for capacity counts behind the log: an older rdy moves `indexed_upto` and
-        // leaves the counts as they were, so a count or a depth would read low
-        if has(OBJECTS.name()) {
-            let meta = w.open_table(META).map_err(db)?;
-            let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
-                Ok(meta.get(key).map_err(db)?.map(|v| v.value().to_vec()))
-            };
-            if at("indexed_upto")? != at(COUNTS_UPTO_KEY)? {
-                return Err(StoreError::Db(
-                    "the index's capacity counts are behind its log; it is rebuilt from the log"
-                        .into(),
-                ));
-            }
         }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
@@ -2866,6 +2854,19 @@ impl Index {
             n += 1;
         }
         Ok(n)
+    }
+
+    /// Whether the capacity counts are behind the log ([`COUNTS_UPTO_KEY`]): `counts_upto` is
+    /// missing or differs from `indexed_upto`, as an older rdy that wrote to the store leaves
+    /// them (known issue 2309). The store's open then rebuilds the index from the log; the index
+    /// is not damaged, so its `indexed_upto` is still the log's floor.
+    pub fn counts_behind(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(META).map_err(db)?;
+        let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+        };
+        Ok(at("indexed_upto")? != at(COUNTS_UPTO_KEY)?)
     }
 
     /// The acknowledged end of the log, or None if this index has never applied a write.

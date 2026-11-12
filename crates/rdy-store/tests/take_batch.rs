@@ -2566,16 +2566,14 @@ fn tcw_counts_left_behind_by_an_older_writer_are_rebuilt_at_open() {
     tcw_older_writer(&root, |h| {
         take(h, &open(std::slice::from_ref(&path)), &target).unwrap();
     });
-    match rdy_store::index::Index::open(&root.join("index.redb")) {
-        Err(rdy_store::StoreError::Db(m)) => assert_eq!(
-            m,
-            "the index's capacity counts are behind its log; it is rebuilt from the log"
-        ),
-        Err(e) => panic!("another refusal: {e}"),
-        Ok(_) => panic!("an index with counts behind its log opened"),
+    // counts behind the log are not damage: the index opens, and says its counts are behind
+    {
+        let ix = rdy_store::index::Index::open(&root.join("index.redb")).unwrap();
+        assert!(ix.counts_behind().unwrap(), "the counts are behind the log");
     }
     let mut h = Store::open(&root).unwrap();
     assert!(h.open_report().index_rebuilt);
+    assert_eq!(tcw_set_aside(&root), Vec::<String>::new());
     assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
     assert_eq!(
         h.reader().landing_depth(&target.landing).unwrap(),
@@ -2710,4 +2708,205 @@ fn tcw_bench_take_of_new_records_past_5000_held_objects() {
         times[0],
         times[6]
     );
+}
+
+// tcw (known issue 2309, review round): counts behind the log are not damage. The open trusts
+// the index, so its acknowledged end stays the log's floor, and the rebuild from the log zeroes
+// the old index file as a removal's reindex does, so no copy of what a pending removal erases is
+// kept
+
+/// The names of the index files an open set aside as damaged in the store at `root`.
+fn tcw_set_aside(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("index.redb.damaged-"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Sets `counts_upto` of the closed store at `root` to `to` (None removes it), as rdy 0.50.0
+/// (missing) or an older writer after this code (stale) leaves it; the capacity tables stay.
+fn tcw_set_counts_upto(root: &Path, to: Option<Vec<u8>>) {
+    let file = root.join("index.redb");
+    let mut was = tcw_read_counts(&file);
+    assert!(was.1.is_some(), "this code writes counts_upto");
+    was.1 = to;
+    tcw_write_counts(&file, &was);
+}
+
+/// The names of the files in the segments folder of the store at `root`.
+fn tcw_segment_names(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(root.join("segments"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn tcw_counts_behind_keep_the_acknowledged_floor() {
+    const BLOB: &[u8] = b"tcw acknowledged blob under a damaged marker";
+    // counts_upto kept (the control), missing (0.50.0) and stale (an older writer)
+    for (what, counts_upto) in [
+        ("kept", None),
+        ("missing", Some(None)),
+        ("stale", Some(Some(enc(&ORIGIN)))),
+    ] {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("s");
+        let blob = {
+            let mut s = Store::create(&root).unwrap();
+            let blob = s.put_blob(BLOB).unwrap();
+            s.close().unwrap();
+            blob
+        };
+        if let Some(to) = counts_upto {
+            tcw_set_counts_upto(&root, to);
+        }
+        // the final batch's marker is damaged: only the index's floor says the batch was
+        // acknowledged
+        let seg = root
+            .join("segments")
+            .join(tcw_segment_names(&root).last().unwrap());
+        let mut bytes = std::fs::read(&seg).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&seg, &bytes).unwrap();
+        let (segments, names) = (segment_bytes(&root), tcw_segment_names(&root));
+        let e = Store::open(&root)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: the open truncated an acknowledged batch"));
+        assert!(
+            matches!(&e, rdy_store::StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+            "{what}: {e:?}"
+        );
+        assert!(
+            e.to_string()
+                .contains("damages acknowledged data; refusing to truncate"),
+            "{what}: {e}"
+        );
+        assert_eq!(
+            segment_bytes(&root),
+            segments,
+            "{what}: the log is as it was"
+        );
+        assert_eq!(
+            tcw_segment_names(&root),
+            names,
+            "{what}: nothing quarantined"
+        );
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+        // the marker restored, the acknowledged blob reads back
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&seg, &bytes).unwrap();
+        let s = Store::open(&root).unwrap();
+        assert_eq!(
+            s.open_report().index_rebuilt,
+            what != "kept",
+            "{what}: counts behind the log are rebuilt"
+        );
+        assert_eq!(s.get_blob(&blob).unwrap(), BLOB, "{what}");
+        s.close().unwrap();
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+    }
+}
+
+/// The text of the block a removal erases in the tcw removal test.
+const TCW_SECRET: &str = "tcw canary removal secret";
+
+/// A diagram cache row that holds [`TCW_SECRET`], as a drawing of the block caches it.
+fn tcw_secret_row() -> (Vec<u8>, Vec<u8>) {
+    let mut key = vec![0xAB; 32];
+    key.extend_from_slice(b"mmdflux 2.6.1\0test");
+    let payload = TCW_SECRET.as_bytes();
+    let mut value = vec![1u8];
+    value.extend_from_slice(&Hash::of(payload).0);
+    value.extend_from_slice(payload);
+    (key, value)
+}
+
+/// The files under `root` that hold [`TCW_SECRET`].
+fn tcw_files_with_secret(root: &Path) -> Vec<PathBuf> {
+    let secret = TCW_SECRET.as_bytes();
+    let mut found = vec![];
+    let mut files = vec![root.to_path_buf()];
+    while let Some(p) = files.pop() {
+        if p.is_dir() {
+            files.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+        } else if std::fs::read(&p)
+            .unwrap()
+            .windows(secret.len())
+            .any(|w| w == secret)
+        {
+            found.push(p);
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn tcw_counts_behind_with_a_pending_removal_keep_no_copy_of_the_removed_text() {
+    use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fixture};
+    let secret = block("b-00009", TCW_SECRET);
+    // counts_upto missing (0.50.0) and stale (an older writer)
+    for (what, counts_upto) in [("missing", None), ("stale", Some(enc(&ORIGIN)))] {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("s");
+        {
+            let mut s = Store::create(&root).unwrap();
+            s.commit_to_view(
+                "work",
+                change(
+                    "work",
+                    vec![Op::Create {
+                        block: secret.clone(),
+                    }],
+                ),
+            )
+            .unwrap();
+            let (key, value) = tcw_secret_row();
+            s.reader().diagram_cache().put_raw_for_tests(&key, &value);
+            s.checkpoint().unwrap();
+            s.close().unwrap();
+        }
+        // an authorized removal of the block, not finished: the next open finishes it
+        let f = authorized_batch_fixture(
+            &root,
+            &[RequestSpec::new(
+                "work",
+                vec![rdy_model::redaction::RedactTarget::Version {
+                    id: secret.id.clone(),
+                    version: secret.version_hash(),
+                }],
+            )],
+            &FixtureOptions::approved(Proof::local_human()),
+        );
+        tcw_set_counts_upto(&root, counts_upto);
+        assert!(
+            tcw_files_with_secret(&root).contains(&root.join("index.redb")),
+            "{what}: the index holds the cached drawing"
+        );
+        let s = Store::open(&root).unwrap();
+        assert!(s.open_report().index_rebuilt, "{what}");
+        assert_eq!(s.reader().diagram_cache().rows_for_tests(), 0, "{what}");
+        assert_eq!(
+            s.get_block(&secret.version_hash()).unwrap().redaction(),
+            Some(f.requests[0].request),
+            "{what}: the removal finished"
+        );
+        s.close().unwrap();
+        assert_eq!(
+            tcw_files_with_secret(&root),
+            Vec::<PathBuf>::new(),
+            "{what}: no file holds the removed text"
+        );
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+        // and the next open does not rebuild again
+        let s = Store::open(&root).unwrap();
+        assert!(!s.open_report().index_rebuilt, "{what}: rebuilt once");
+        s.close().unwrap();
+    }
 }
