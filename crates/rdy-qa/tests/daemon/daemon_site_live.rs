@@ -461,3 +461,185 @@ fn ls5_a_page_opened_before_its_scope_builds_gets_reload() {
     sh.site.refresh(&sh, &d()).unwrap();
     assert_eq!(alpha.rx.try_recv(), Ok(LiveEvent::Reload));
 }
+
+/// slb1 (TASK-2307): the test cap on the bytes of inactive builds, small so a few builds of
+/// [`figures_host`] pass it.
+const SLB1_CAP: u64 = 16 * 1024 * 1024;
+
+/// A host over a project with one landed doc, Figures, of 8 figures of 1 MiB each (distinct
+/// bytes), and views `v0`..`v9`, each with one unlanded prose edit. Each source build holds
+/// about 8 MiB of figure bytes.
+fn figures_host() -> Hosted {
+    let (dir, mut r) = tiny();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "figures", "title": "Figures", "doc_type": "page"}}),
+        json!({"op": "create", "type": "prose", "parent": "$d", "body": "Figures first."}),
+    ];
+    for i in 0..8u8 {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend((0..1024 * 1024u32).map(|n| (n as u8) ^ i.wrapping_mul(37)));
+        png.push(i);
+        let blob = r.store_mut().put_blob(&png).unwrap();
+        ops.push(json!({"op": "create", "type": "figure", "parent": "$d", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": format!("Figure {i}")}}));
+    }
+    rdy_qa::golden::write(&mut r, "work", Value::Array(ops)).unwrap();
+    land(&mut r, "work").unwrap();
+    for v in 0..10 {
+        rdy_qa::golden::write(
+            &mut r,
+            &format!("v{v}"),
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("note{v}"), "title": format!("Note {v}"), "doc_type": "page"}},
+                {"op": "create", "type": "prose", "parent": "$d", "body": format!("View {v}.")}
+            ]),
+        )
+        .unwrap();
+    }
+    host(dir, r)
+}
+
+fn view(v: usize) -> SiteTarget {
+    SiteTarget::Source(ScopeRef::View(format!("v{v}")))
+}
+
+/// slb1: inactive builds are dropped, least recently used first, past the byte cap, not only
+/// past the count: canon and 10 views of 8 MiB each stay under a 16 MiB cap.
+#[test]
+fn slb1_inactive_builds_stay_under_the_byte_cap() {
+    let h = figures_host();
+    let sh = shared(&h);
+    sh.site.set_inactive_build_cap(Some(SLB1_CAP));
+    let one = sh.site.refresh(&sh, &C).unwrap();
+    let size: u64 = one.live.files.values().map(|f| f.len() as u64).sum();
+    assert!(size >= 8 * 1024 * 1024, "a build holds the figures: {size}");
+    drop(one);
+    for v in 0..10 {
+        sh.site.refresh(&sh, &view(v)).unwrap();
+        assert!(
+            sh.site.held_inactive_bytes() <= SLB1_CAP,
+            "after view {v}: {} inactive bytes held",
+            sh.site.held_inactive_bytes()
+        );
+    }
+    assert!(
+        (1..=2).contains(&sh.site.held_builds()),
+        "{} builds held",
+        sh.site.held_builds()
+    );
+    assert_eq!(sh.site.held_bytes(), sh.site.held_inactive_bytes());
+}
+
+/// slb1: a build dropped by the byte cap is built again on its next request, to the same bytes.
+#[test]
+fn slb1_a_dropped_build_is_rebuilt_on_its_next_request() {
+    let h = figures_host();
+    let sh = shared(&h);
+    sh.site.set_inactive_build_cap(Some(SLB1_CAP));
+    let first = sh.site.refresh(&sh, &C).unwrap();
+    let (files, revs) = (first.live.files.clone(), first.live.revs.clone());
+    drop(first);
+    for v in 0..3 {
+        sh.site.refresh(&sh, &view(v)).unwrap();
+    }
+    let builds = sh.site.builds();
+    let again = sh.site.refresh(&sh, &C).unwrap();
+    assert_eq!(
+        sh.site.builds(),
+        builds + 1,
+        "canon was dropped and builds again"
+    );
+    assert_eq!(again.live.revs, revs);
+    assert!(
+        again.live.files == files,
+        "the rebuilt site serves the same bytes"
+    );
+}
+
+/// slb1: a target with an open stream keeps its build, whatever the inactive bytes.
+#[test]
+fn slb1_open_stream_builds_are_never_dropped_by_bytes() {
+    let h = figures_host();
+    let sh = shared(&h);
+    sh.site.set_inactive_build_cap(Some(SLB1_CAP));
+    let b = sh.site.refresh(&sh, &C).unwrap();
+    let _home = sub(&sh, &C, "index.html", &b);
+    let size: u64 = b.live.files.values().map(|f| f.len() as u64).sum();
+    drop(b);
+    for v in 0..10 {
+        sh.site.refresh(&sh, &view(v)).unwrap();
+    }
+    assert!(sh.site.held_inactive_bytes() <= SLB1_CAP);
+    assert!(
+        sh.site.held_bytes() - sh.site.held_inactive_bytes() >= size,
+        "the open target's build is still held"
+    );
+    let builds = sh.site.builds();
+    sh.site.refresh(&sh, &C).unwrap();
+    assert_eq!(sh.site.builds(), builds, "canon kept its build");
+}
+
+/// slb1: after a landing rebuilds an open target, the old build is released: no slot, worker
+/// or fan-out keeps it.
+#[test]
+fn slb1_a_landing_rebuild_releases_the_old_build() {
+    let h = figures_host();
+    let sh = shared(&h);
+    let b = sh.site.refresh(&sh, &C).unwrap();
+    let _home = sub(&sh, &C, "index.html", &b);
+    let old = Arc::downgrade(&b);
+    drop(b);
+    assert_eq!(sh.site.held_builds(), 1);
+    on_writer(&sh, |r| {
+        rdy_qa::golden::write(
+            r,
+            "late",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "late", "title": "Late", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "parent": "$d", "body": "Late."}
+            ]),
+        )
+        .unwrap();
+        land(r, "late").unwrap();
+    });
+    let new = sh.site.refresh(&sh, &C).unwrap();
+    assert!(
+        new.live.files.contains_key("late.html"),
+        "{:?}",
+        new.live.files.keys()
+    );
+    drop(new);
+    // the worker may still be in its step for the landing; it holds no build once it is done
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while old.strong_count() > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(old.strong_count(), 0, "the old build is released");
+    assert_eq!(sh.site.held_builds(), 1, "one build of canon is held");
+}
+
+/// slb1 (review F1): builds kept by open streams become inactive when their last stream closes,
+/// and the byte cap holds from then on, with no new build: a cache hit finds them dropped.
+#[test]
+fn slb1_closing_the_last_streams_enforces_the_byte_cap() {
+    let h = figures_host();
+    let sh = shared(&h);
+    sh.site.set_inactive_build_cap(Some(SLB1_CAP));
+    let mut subs = Vec::new();
+    for t in [C, view(0), view(1), view(2)] {
+        let b = sh.site.refresh(&sh, &t).unwrap();
+        subs.push(sub(&sh, &t, "index.html", &b));
+    }
+    assert_eq!(sh.site.held_builds(), 4, "open targets keep their builds");
+    assert!(sh.site.held_bytes() > SLB1_CAP, "{}", sh.site.held_bytes());
+    drop(subs);
+    let builds = sh.site.builds();
+    sh.site.refresh(&sh, &view(2)).unwrap();
+    assert_eq!(sh.site.builds(), builds, "a cache hit");
+    assert!(
+        sh.site.held_inactive_bytes() <= SLB1_CAP || sh.site.held_builds() == 1,
+        "{} inactive bytes in {} builds",
+        sh.site.held_inactive_bytes(),
+        sh.site.held_builds()
+    );
+    assert_eq!(sh.site.held_bytes(), sh.site.held_inactive_bytes());
+}

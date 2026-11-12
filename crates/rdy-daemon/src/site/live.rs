@@ -75,6 +75,13 @@ pub const STREAM_QUEUE: usize = 8;
 /// Each profile target's slot also keeps its history memo, so at most `MAX_STREAMS + MAX_SCOPES`
 /// memos stay, each of at most `history_facts::MAX_LANDINGS` results.
 pub const MAX_SCOPES: usize = 8;
+/// The bytes the inactive targets' builds may hold together (TASK-2307): past it, inactive
+/// builds are dropped least recently used first, as past [`MAX_SCOPES`], keeping the most
+/// recently used one. A fixed limit by judgement: a build holds every figure's bytes, so a count
+/// alone let a few image-heavy builds hold gigabytes.
+pub const MAX_INACTIVE_BUILD_BYTES: u64 = 256 * 1024 * 1024;
+/// What a held build counts per file beside its bytes: the file's path and the map's own entry.
+const FILE_OVERHEAD: u64 = 64;
 
 /// How often the worker looks whether any `Shared` still lives while no publish wakes it. A
 /// wake lost while the worker starts waits at most this long.
@@ -234,6 +241,8 @@ impl Stream {
 #[derive(Default)]
 struct ScopeState {
     build: Option<Arc<SiteBuild>>,
+    /// The bytes `build` holds (see [`held_size`]), set with it.
+    bytes: u64,
     /// The input key of `build`, with the redaction epoch its state captured.
     key: Option<(u64, Hash)>,
     /// The publish count the build (or a check that found the same key) read.
@@ -271,6 +280,10 @@ struct Inner {
     clock: u64,
     next_id: u64,
     closed: bool,
+    /// The cap on the bytes of inactive builds: [`MAX_INACTIVE_BUILD_BYTES`], or a test's. Kept
+    /// here so every path that makes a build inactive (a new build, a cache hit, the last
+    /// stream of a target closing) enforces it under this lock.
+    cap: u64,
 }
 
 impl Inner {
@@ -288,26 +301,32 @@ impl Inner {
         s
     }
 
-    /// Drops the state of `scope` when it holds neither a build nor a stream.
-    fn forget_if_empty(&mut self, scope: &SiteTarget) {
-        if self
-            .scopes
-            .get(scope)
-            .is_some_and(|s| s.build.is_none() && s.streams.is_empty())
-        {
-            self.scopes.remove(scope);
-        }
+    /// The bytes the inactive targets' builds hold.
+    fn inactive_bytes(&self) -> u64 {
+        self.scopes
+            .values()
+            .filter(|s| s.build.is_some() && s.streams.is_empty())
+            .map(|s| s.bytes)
+            .sum()
     }
 
-    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], least recently
-    /// used first, with their memos; a target with neither a build nor a stream goes too. A
-    /// target with an open stream keeps its build outside that count ([`MAX_STREAMS`] bounds
-    /// those), so open pages never push an inactive build out of its slot.
+    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], or while their
+    /// builds hold more than [`Inner::cap`] bytes together (keeping the most recently used one), least
+    /// recently used first, with their memos; a target with neither a build nor a stream goes
+    /// too. A target with an open stream keeps its build outside both limits ([`MAX_STREAMS`]
+    /// bounds those), so open pages never push an inactive build out of its slot. A dropped
+    /// build is built again on its next request.
     fn evict(&mut self) {
+        let cap = self.cap;
         self.scopes
             .retain(|_, s| s.build.is_some() || !s.streams.is_empty());
         let inactive = |s: &ScopeState| s.build.is_some() && s.streams.is_empty();
-        while self.scopes.values().filter(|s| inactive(s)).count() > MAX_SCOPES {
+        loop {
+            let count = self.scopes.values().filter(|s| inactive(s)).count();
+            let over = count > MAX_SCOPES || (count > 1 && self.inactive_bytes() > cap);
+            if !over {
+                return;
+            }
             let Some(oldest) = self
                 .scopes
                 .iter()
@@ -320,6 +339,16 @@ impl Inner {
             self.scopes.remove(&oldest);
         }
     }
+}
+
+/// The bytes `b` holds, counted once when it is built: each file's bytes and path, plus
+/// [`FILE_OVERHEAD`] per file.
+fn held_size(b: &SiteBuild) -> u64 {
+    b.live
+        .files
+        .iter()
+        .map(|(k, v)| k.len() as u64 + v.len() as u64 + FILE_OVERHEAD)
+        .sum()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -487,7 +516,10 @@ impl Drop for Subscription {
                     if let Some(s) = inner.scopes.get_mut(scope) {
                         s.streams.retain(|st| st.id != self.id);
                     }
-                    inner.forget_if_empty(scope);
+                    // the target's build may be inactive now: the count and byte caps hold
+                    // from here, not from the next build (review F1); this also forgets the
+                    // target when it holds neither a build nor a stream
+                    inner.evict();
                 }
                 StreamKey::Ui => inner.ui_streams.retain(|st| st.id != self.id),
             }
@@ -502,7 +534,10 @@ impl LiveSite {
             worker: OnceLock::new(),
             stopped: AtomicBool::new(false),
             building: Mutex::new(()),
-            inner: Arc::new(Mutex::new(Inner::default())),
+            inner: Arc::new(Mutex::new(Inner {
+                cap: MAX_INACTIVE_BUILD_BYTES,
+                ..Inner::default()
+            })),
             builds: AtomicU64::new(0),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
@@ -518,6 +553,37 @@ impl LiveSite {
     #[doc(hidden)]
     pub fn set_log_hook(&self, f: Option<LogHook>) {
         *lock(&self.log_hook) = f;
+    }
+
+    /// Test hook: from now on, inactive builds hold at most `cap` bytes together (`None`:
+    /// [`MAX_INACTIVE_BUILD_BYTES`]).
+    #[doc(hidden)]
+    pub fn set_inactive_build_cap(&self, cap: Option<u64>) {
+        let mut inner = lock(&self.inner);
+        inner.cap = cap.unwrap_or(MAX_INACTIVE_BUILD_BYTES);
+        inner.evict();
+    }
+
+    /// Test hook: the builds the site holds, of every target.
+    #[doc(hidden)]
+    pub fn held_builds(&self) -> usize {
+        lock(&self.inner)
+            .scopes
+            .values()
+            .filter(|s| s.build.is_some())
+            .count()
+    }
+
+    /// Test hook: the bytes of every build the site holds.
+    #[doc(hidden)]
+    pub fn held_bytes(&self) -> u64 {
+        lock(&self.inner).scopes.values().map(|s| s.bytes).sum()
+    }
+
+    /// Test hook: the bytes of the inactive targets' builds (a build and no open stream).
+    #[doc(hidden)]
+    pub fn held_inactive_bytes(&self) -> u64 {
+        lock(&self.inner).inactive_bytes()
     }
 
     /// Test hook: from now on, each profile build counts at most `n` landings since its tag
@@ -640,6 +706,7 @@ impl LiveSite {
             })?;
             let s = inner.touch(scope);
             s.seen = now;
+            inner.evict();
             Some(hit)
         };
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.seen == now) {
@@ -726,6 +793,7 @@ impl LiveSite {
                 None => true,
             }
         });
+        s.bytes = held_size(&new);
         s.build = Some(Arc::clone(&new));
         s.key = Some(key);
         s.seen = now;
