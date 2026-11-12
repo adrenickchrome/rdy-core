@@ -122,6 +122,12 @@ pub struct Closure {
 /// over the emitted records only (a link to a known key is no step of the order), so it already
 /// charges only the chain the upload holds. With nothing known, every record and edge the walk
 /// finds is charged, as for a full export.
+///
+/// A known record keeps only its key once the walk has reached its links (its links and proof
+/// are released), so the walk's memory stays within these bounds and the size of `known`.
+///
+/// The receiver's take also checks the holder's capacity, so an upload this walk accepts can
+/// still be refused by a full holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalkBounds {
     /// The most emitted records.
@@ -168,6 +174,85 @@ pub fn closure_within(
     end: Location,
     bounds: WalkBounds,
 ) -> Result<Closure, StreamError> {
+    let w = walk(reader, tag, known, end, bounds)?;
+    let root = w.root;
+    // the batch: every record found that the receiver does not hold
+    let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
+        .nodes
+        .iter()
+        .filter(|(k, _)| !known.contains(k))
+        .map(|(k, n)| (*k, n.children.clone()))
+        .collect();
+    let records = dependency_order(root, &children)?;
+    // the prerequisites: what the batch's records need or name as a proof, and do not hold
+    let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
+    let mut body = 0u64;
+    for k in children.keys() {
+        let n = &w.nodes[k];
+        body += FRAME_HEADER + n.len;
+        for c in n.children.iter().chain(&n.proof) {
+            if !children.contains_key(c) {
+                prerequisites.insert(*c);
+                if prerequisites.len() > MAX_PREREQUISITES {
+                    return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
+                }
+            }
+        }
+    }
+    if !children.contains_key(&root) {
+        prerequisites.insert(root);
+    }
+    if prerequisites.len() > MAX_PREREQUISITES {
+        return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
+    }
+    // the header names the source store's features (sync format 2)
+    let manifest = reader
+        .store_features()
+        .map_err(|e| store_error(e, Some(root)))?
+        .to_json()
+        .len();
+    let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
+    let bytes =
+        MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
+    if bytes > MAX_STREAM_BYTES {
+        return Err(StreamError::limit(None, 0, LIMIT_TOTAL_BYTES));
+    }
+    Ok(Closure {
+        records,
+        prerequisites: prerequisites.into_iter().collect(),
+    })
+}
+
+/// The links that the walk of [`closure_within`] keeps when it ends, summed over the records it
+/// found: each record's needed keys and its proof. Only an emitted record keeps them, so this is
+/// the edges the emitted records carry. The walk has no bounds. For tests of the walk's memory.
+#[doc(hidden)]
+pub fn closure_kept_links_for_tests(
+    reader: &StoreReader,
+    tag: Hash,
+    known: &BTreeSet<ObjectKey>,
+    end: Location,
+) -> Result<u64, StreamError> {
+    let unbounded = WalkBounds {
+        records: u64::MAX,
+        edges: u64::MAX,
+    };
+    let w = walk(reader, tag, known, end, unbounded)?;
+    Ok(w.nodes
+        .values()
+        .map(|n| n.children.len() as u64 + u64::from(n.proof.is_some()))
+        .sum())
+}
+
+/// The walk of the closure of the TAG `tag` to its fixed point: every record found, known
+/// records included, within `bounds`.
+fn walk<'a>(
+    reader: &'a StoreReader,
+    tag: Hash,
+    known: &'a BTreeSet<ObjectKey>,
+    end: Location,
+    bounds: WalkBounds,
+) -> Result<Walk<'a>, StreamError> {
     let root = ObjectKey {
         kind: kinds::TAG,
         hash: tag,
@@ -224,51 +309,7 @@ pub fn closure_within(
         w.attach_answers(&ask)?;
         w.asked.extend(ask);
     }
-    // the batch: every record found that the receiver does not hold
-    let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
-        .nodes
-        .iter()
-        .filter(|(k, _)| !known.contains(k))
-        .map(|(k, n)| (*k, n.children.clone()))
-        .collect();
-    let records = dependency_order(root, &children)?;
-    // the prerequisites: what the batch's records need or name as a proof, and do not hold
-    let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
-    let mut body = 0u64;
-    for k in children.keys() {
-        let n = &w.nodes[k];
-        body += FRAME_HEADER + n.len;
-        for c in n.children.iter().chain(&n.proof) {
-            if !children.contains_key(c) {
-                prerequisites.insert(*c);
-                if prerequisites.len() > MAX_PREREQUISITES {
-                    return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
-                }
-            }
-        }
-    }
-    if !children.contains_key(&root) {
-        prerequisites.insert(root);
-    }
-    if prerequisites.len() > MAX_PREREQUISITES {
-        return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
-    }
-    // the header names the source store's features (sync format 2)
-    let manifest = reader
-        .store_features()
-        .map_err(|e| store_error(e, Some(root)))?
-        .to_json()
-        .len();
-    let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
-    let bytes =
-        MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
-    if bytes > MAX_STREAM_BYTES {
-        return Err(StreamError::limit(None, 0, LIMIT_TOTAL_BYTES));
-    }
-    Ok(Closure {
-        records,
-        prerequisites: prerequisites.into_iter().collect(),
-    })
+    Ok(w)
 }
 
 /// The dependency order of the records `children` maps (each to the keys it needs, in
@@ -490,7 +531,8 @@ fn outside_closure(k: ObjectKey) -> StreamError {
 struct Walk<'a> {
     source: StoreSource<'a>,
     root: ObjectKey,
-    /// The records found so far, each with the keys it needs; known records included.
+    /// The records found so far, known records included; an emitted record with the keys it
+    /// needs, a known record with none (its links are released once reached).
     nodes: BTreeMap<ObjectKey, Node>,
     /// Every key met: a record found or queued, or a known key the source does not hold.
     seen: HashSet<ObjectKey>,
@@ -595,12 +637,20 @@ impl Walk<'_> {
         for c in children.iter().chain(&proof) {
             self.reach(*c)?;
         }
+        // a known record keeps only its key and its attachment flag: its links are reached, and
+        // no later step reads them (the batch, its prerequisites and its bytes are the emitted
+        // records'; an attachment pass reads keys only)
+        let (children, proof, len) = if charged {
+            (children, proof, record.frame_len())
+        } else {
+            (Vec::new(), None, 0)
+        };
         self.nodes.insert(
             k,
             Node {
                 children,
                 proof,
-                len: record.frame_len(),
+                len,
                 attached: false,
             },
         );

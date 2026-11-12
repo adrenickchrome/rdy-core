@@ -315,3 +315,20 @@ fn xwk_full_export_charges_everything() {
         "1000000 graph edges",
     );
 }
+
+/// A known record keeps no links once the walk has reached them: the links the walk keeps at its
+/// end are exactly the edges the emitted records carry. With nothing known, every record found
+/// keeps its links, as the batch needs them.
+#[test]
+fn xwk_known_records_keep_no_links() {
+    let f = fixture();
+    let reader = f.r.store().reader();
+    let kept = |known: &BTreeSet<ObjectKey>| {
+        closure::closure_kept_links_for_tests(&reader, f.v2, known, END_OF_LOG).unwrap()
+    };
+    let emitted = edges_of(&f.r, &f.incremental.records);
+    let all = edges_of(&f.r, &f.full.records);
+    assert_eq!(kept(&f.known), emitted);
+    assert_eq!(kept(&BTreeSet::new()), all);
+    assert!(emitted * 3 < all, "{emitted} kept of {all} walked");
+}

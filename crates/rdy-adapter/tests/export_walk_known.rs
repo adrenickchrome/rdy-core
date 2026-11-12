@@ -114,6 +114,14 @@ fn xwk_adapter_incremental_upload_past_a_million_known_edges() {
         closure::closure_within(&reader, v1, &BTreeSet::new(), END_OF_LOG, unbounded).unwrap();
     let known: BTreeSet<ObjectKey> = held.records.into_iter().collect();
     let want = closure::closure_within(&reader, v2, &known, END_OF_LOG, unbounded).unwrap();
+    // the walk of the incremental upload keeps the links of its emitted records only; a known
+    // record's links are released once reached (before, every record walked kept them)
+    let kept = closure::closure_kept_links_for_tests(&reader, v2, &known, END_OF_LOG).unwrap();
+    let walked =
+        closure::closure_kept_links_for_tests(&reader, v2, &BTreeSet::new(), END_OF_LOG).unwrap();
+    eprintln!("links kept: {kept} with v1.0.0 known, {walked} with nothing known");
+    assert!(kept < 20_000, "{kept} links kept");
+    assert!(walked > MAX_EDGES, "{walked} links walked");
     drop(reader);
     r.close().unwrap();
 
