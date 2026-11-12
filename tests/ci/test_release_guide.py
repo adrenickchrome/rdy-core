@@ -45,8 +45,8 @@ OWNER_TOOLS = {
                 'rdy_publication_check', 'rdy_publish', 'rdy_remote', 'rdy_render'),
     'review': ('rdy_review', 'rdy_review_next', 'rdy_review_submit'),
     'parallel': ('rdy_alternatives', 'rdy_view'),
-    'project-ops': ('rdy_clone', 'rdy_compact', 'rdy_dump', 'rdy_import', 'rdy_load', 'rdy_redact', 'rdy_sign',
-                    'rdy_stream_check', 'rdy_upgrade'),
+    'project-ops': ('rdy_clone', 'rdy_compact', 'rdy_dump', 'rdy_hook', 'rdy_import', 'rdy_load', 'rdy_redact',
+                    'rdy_sign', 'rdy_stream_check', 'rdy_upgrade'),
 }
 LINE_START = 'On every call to a tool in this ruleset, pass kungfu: "'
 
@@ -884,7 +884,7 @@ class Kfu1Binary(BinaryCase):
 
     def test_kfu1_checker_reads_the_table_by_the_builds_rules(self):
         good = json.loads(TABLE.read_text())
-        self.assertEqual(len(good), 61)
+        self.assertEqual(len(good), 62)
         table = GUIDE.read_table(TABLE)
         self.assertEqual({name: tuple(tools) for name, tools in table.items()}, OWNER_TOOLS)
         path = self.dir / 'table.json'

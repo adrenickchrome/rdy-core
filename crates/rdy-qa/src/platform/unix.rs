@@ -186,6 +186,12 @@ pub fn open_to_everyone(path: &Path) -> io::Result<()> {
 pub const ANOTHER_ACCOUNT_PROOF: &str =
     "the mode and the owner of the opened handle (this platform has no second-account fixture)";
 
+/// Unix has no second-account fixture to miss: [`another_account_can_read`] needs no other
+/// account, so no run leaves the check out.
+pub fn hosted_without_second_account() -> bool {
+    false
+}
+
 /// Lets another account read and list the directory `dir` (mode 0o755): the control that shows
 /// [`another_account_can_read`] can say yes.
 pub fn share_with_another_account(dir: &Path) -> io::Result<()> {

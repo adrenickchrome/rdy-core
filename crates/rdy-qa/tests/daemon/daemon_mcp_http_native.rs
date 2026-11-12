@@ -294,16 +294,22 @@ fn mht9_native_http_auth_and_listen_match_on_both_platforms() {
     let ep = endpoint(&s);
     let token = token_path(s.dir.path());
     // the bearer's files are closed to another account: the ACL on Windows, the mode elsewhere
-    eprintln!(
-        "mht9 second account proves: {}",
-        platform::ANOTHER_ACCOUNT_PROOF
-    );
-    for object in [token.as_path(), s.run_dir().path()] {
-        assert!(
-            !platform::another_account_can_read(object).expect("check"),
-            "another account reads {}",
-            object.display()
+    if platform::hosted_without_second_account() {
+        eprintln!(
+            "mht9 second account: not checked on the hosted CI runner (no second account); the native gate checks it"
         );
+    } else {
+        eprintln!(
+            "mht9 second account proves: {}",
+            platform::ANOTHER_ACCOUNT_PROOF
+        );
+        for object in [token.as_path(), s.run_dir().path()] {
+            assert!(
+                !platform::another_account_can_read(object).expect("check"),
+                "another account reads {}",
+                object.display()
+            );
+        }
     }
     assert_eq!(ep.addr.ip().to_string(), "127.0.0.1", "{ep:?}");
     scenarios(&ep, "v4");
@@ -392,8 +398,10 @@ fn mht9_native_private_token_survives_restart() {
     let first = endpoint(&s);
     let token = token_path(s.dir.path());
     let bytes = std::fs::read(&token).expect("the token file");
+    // the hosted CI runner has no second account; the native gate checks it
+    let check_account = !platform::hosted_without_second_account();
     assert!(
-        !platform::another_account_can_read(&token).expect("check"),
+        !check_account || !platform::another_account_can_read(&token).expect("check"),
         "the token is closed to another account"
     );
     s.stop();
@@ -408,7 +416,7 @@ fn mht9_native_private_token_survives_restart() {
         "the file is not rewritten"
     );
     assert!(
-        !platform::another_account_can_read(&token).expect("check"),
+        !check_account || !platform::another_account_can_read(&token).expect("check"),
         "the token stays closed after the restart"
     );
     let r = second.post(&pairs(&legacy(LEGACY[0])), &overview(1, "agent:r", "r1"));

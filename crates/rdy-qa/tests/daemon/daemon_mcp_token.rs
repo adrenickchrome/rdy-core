@@ -8,7 +8,8 @@
 //!
 //! Another account (W3): Windows asks the system's access check (Authz) what the second account
 //! (`RDY_QA_SECOND_ACCOUNT`, default `rdyother`) is granted; a missing account is an error, and
-//! the hosted runner, which has none, does not pass this test (the native gate runs it). Unix
+//! the hosted runner, which has none, leaves this test out (`RDY_QA_HOSTED_CI=1` and no
+//! `RDY_QA_SECOND_ACCOUNT`, as wx24; the native gate runs it). Unix
 //! has no second-account fixture, so there the test proves only the mode and the owner of the
 //! opened handle: no process of another account tries the read.
 use rdy_daemon::mcp_token::{self, McpToken, TOKEN_FILE, TokenError};
@@ -355,6 +356,12 @@ fn mht2_token_links_and_reparse_points_are_refused() {
 
 #[test]
 fn mht2_native_other_account_cannot_read_token() {
+    if platform::hosted_without_second_account() {
+        eprintln!(
+            "mht2_native_other_account_cannot_read_token: not run on the hosted CI runner: no second account (RDY_QA_SECOND_ACCOUNT is unset, RDY_QA_HOSTED_CI=1); the native gate runs it"
+        );
+        return;
+    }
     eprintln!(
         "mht2_native_other_account_cannot_read_token proves: {}",
         platform::ANOTHER_ACCOUNT_PROOF

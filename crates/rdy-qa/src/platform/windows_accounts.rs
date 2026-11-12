@@ -35,8 +35,15 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 pub const SECOND_ACCOUNT_VAR: &str = "RDY_QA_SECOND_ACCOUNT";
 
 /// Set to `1` by the hosted CI workflow only: that runner has no second account.
-#[cfg(test)]
-const HOSTED_CI_VAR: &str = "RDY_QA_HOSTED_CI";
+pub const HOSTED_CI_VAR: &str = "RDY_QA_HOSTED_CI";
+
+/// Whether this run is the hosted CI runner, which has no second account: its workflow sets
+/// [`HOSTED_CI_VAR`] to `1` and names no account in [`SECOND_ACCOUNT_VAR`]. Only there may a
+/// test leave out its second-account check; the native gate always runs it.
+pub fn hosted_without_second_account() -> bool {
+    std::env::var(HOSTED_CI_VAR).as_deref() == Ok("1")
+        && std::env::var_os(SECOND_ACCOUNT_VAR).is_none()
+}
 
 /// The second account's name when the variable is unset.
 pub const SECOND_ACCOUNT_DEFAULT: &str = "rdyother";
@@ -291,9 +298,7 @@ mod tests {
         // The hosted runner has no second account and names none. Only its workflow marks the run
         // (RDY_QA_HOSTED_CI=1), so the native gate stays mandatory. The line is not a
         // prerequisite skip: `--require-all` would refuse it, and the native gate holds the check.
-        if std::env::var(HOSTED_CI_VAR).as_deref() == Ok("1")
-            && std::env::var_os(SECOND_ACCOUNT_VAR).is_none()
-        {
+        if hosted_without_second_account() {
             let _ = std::io::Write::write_fmt(
                 &mut std::io::stderr().lock(),
                 format_args!(
