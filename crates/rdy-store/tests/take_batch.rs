@@ -12,6 +12,7 @@ use rdy_model::signature::Signature;
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::holder::answer_tag_object_ref;
+use rdy_store::index::IndexEntry;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::redaction::StoredFrame;
@@ -19,7 +20,8 @@ use rdy_store::stream_error::StreamError;
 use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{StreamHeader, StreamReader, StreamRecord};
 use rdy_store::take_batch::{
-    BatchTaken, TagChoice, TakeError, UploadFacts, UploadTarget, check_input_bounds,
+    BatchTaken, HolderCapacity, TagChoice, TakeError, UploadFacts, UploadTarget,
+    check_input_bounds, set_holder_capacity_for_tests,
 };
 use rdy_store::{Store, StoreReader};
 use redaction_fixture::{ORIGIN, enc, segment_bytes};
@@ -1662,4 +1664,825 @@ fn markers_since(h: &Store, from: rdy_store::segment::Location) -> usize {
         .iter()
         .filter(|(l, k, _, _)| *l >= from && *k == kinds::BATCH_COMMIT)
         .count()
+}
+
+// ---------------------------------------------------------------------------------------------
+// tcw (TASK-2324; D-BPYN8, p-VCW8D): the take's closure walk ends once every upload key is
+// reached, and goes on through the holder while one is not
+
+/// Lands `n` more changes on `s`, each creating one new block, and returns the last landing.
+fn tcw_land(s: &mut Store, from: usize, n: usize) -> Hash {
+    let mut last = None;
+    for i in from..from + n {
+        s.commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![Op::Create {
+                    block: block(&format!("b-{:05}", 10 + i), &format!("body {i}")),
+                }],
+            ),
+        )
+        .unwrap();
+        let p = s
+            .propose("work", &format!("p{i}"), prov("agent:w", Role::Writer))
+            .unwrap();
+        last = Some(s.land(&p, prov("human:alice", Role::Approver)).unwrap());
+    }
+    last.expect("at least one landing")
+}
+
+/// Tags `landing` as `name` with its relay answer; returns the tag.
+fn tcw_tag(s: &mut Store, name: &str, landing: Hash) -> Hash {
+    s.put_tag_answered(
+        &Tag {
+            name: name.into(),
+            landing,
+            message: None,
+            tagged_by: prov("human:alice", Role::Approver),
+        },
+        answer(&format!("tag:{name}"), vec![], None),
+    )
+    .unwrap()
+    .0
+}
+
+/// A source with `n` landings tagged `v1` (as [`source`]'s fields give it: `landing` is the
+/// first landing, `tag` is `v1`), and a holder that holds `v1`'s whole closure.
+fn tcw_held_history(n: usize) -> (Src, Store) {
+    let src = source();
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 0, n);
+    let v1 = tcw_tag(&mut s, "v1.1", last);
+    drop(s);
+    let (_, mut h) = holder(&src, "h");
+    let paths = src.split(v1, 1, "v1-full");
+    let target = UploadTarget {
+        tag: "v1.1".into(),
+        landing: last,
+    };
+    take(&mut h, &open(&paths), &target).unwrap();
+    (Src { tag: v1, ..src }, h)
+}
+
+/// Lands `n` more changes past `held`'s tag and tags them `v2`; returns the target and the batch
+/// of `v2`'s closure less what `known` holds.
+fn tcw_next(
+    src: &Src,
+    n: usize,
+    known: &BTreeSet<ObjectKey>,
+    name: &str,
+) -> (UploadTarget, PathBuf, Vec<ObjectKey>, Hash) {
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 50_000, n);
+    let v2 = tcw_tag(&mut s, "v2", last);
+    drop(s);
+    let (_s, r) = src.reader();
+    let c = closure(&r, v2, known).unwrap();
+    let path = src.dir.path().join(format!("{name}.rdysync"));
+    write(&r, &src.repo, v2, &c.records, c.prerequisites, &path);
+    (
+        UploadTarget {
+            tag: "v2".into(),
+            landing: last,
+        },
+        path,
+        c.records,
+        v2,
+    )
+}
+
+fn tcw_known(src: &Src) -> BTreeSet<ObjectKey> {
+    src.closure(src.tag).into_iter().collect()
+}
+
+#[test]
+fn tcw_new_records_past_a_long_held_history_are_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "new");
+    assert!(records.iter().all(|k| !known.contains(k)));
+    let got = take(&mut h, &open(&[path]), &target).unwrap();
+    assert_eq!(got.new_objects as usize, records.len());
+    assert!(h.get_ref("tag/v2").unwrap().is_some());
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_a_record_outside_the_root_closure_is_still_refused() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, _, v2) = tcw_next(&src, 2, &known, "new");
+    let stray = src.dir.path().join("stray.rdysync");
+    write_extra(
+        &src.repo,
+        v2,
+        &[(kinds::BLOCK, enc(&block("b-99999", "stray")))],
+        vec![key(kinds::TAG, v2)],
+        &stray,
+    );
+    let end = h.log_end();
+    let e = stream_err(take(&mut h, &open(&[path, stray]), &target).unwrap_err());
+    assert_eq!(
+        e.message,
+        "stream record 0 at byte 0: object is outside the tag closure"
+    );
+    assert_eq!(
+        e.object,
+        Some(key(
+            kinds::BLOCK,
+            Hash::of(&enc(&block("b-99999", "stray")))
+        ))
+    );
+    assert_eq!(h.log_end(), end);
+    assert_eq!(h.get_ref("tag/v2").unwrap(), None);
+}
+
+#[test]
+fn tcw_a_new_record_attached_to_an_old_held_landing_is_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    // a later signature of the first landing, which the holder holds since v1
+    assert!(h.has_kind(kinds::LANDING, &src.landing).unwrap());
+    let mut s = Store::open(&src.path).unwrap();
+    let late = s
+        .put_signature(&sig(src.landing, "rdy-approval-v1", 9))
+        .unwrap();
+    drop(s);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "late");
+    assert!(records.contains(&key(kinds::SIGNATURE, late)));
+    take(&mut h, &open(&[path]), &target).unwrap();
+    assert!(h.has_kind(kinds::SIGNATURE, &late).unwrap());
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_a_full_layout_that_resends_held_records_is_taken() {
+    let (src, mut h) = tcw_held_history(60);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &BTreeSet::new(), "full");
+    // every held landing, snapshot and change is sent again (only v1.1's tag and its relay
+    // answer are not in v2's closure)
+    let resent = records.iter().filter(|k| known.contains(k)).count();
+    assert!(resent + 2 >= known.len(), "{resent} of {}", known.len());
+    let got = take(&mut h, &open(&[path]), &target).unwrap();
+    assert_eq!(got.new_objects as usize, records.len() - resent);
+    h.check_holder().unwrap();
+}
+
+// tcw (TASK-2340; D-BPYN8, p-7QDPC): the take keeps its holder within what the holder check
+// reads, whether the closure walk ended early or not
+
+/// Sets the take's capacity bounds on this thread for the guard's life.
+struct Capacity;
+
+impl Capacity {
+    fn set(landing_depth: u64, objects: u64, edges: u64) -> Capacity {
+        set_holder_capacity_for_tests(Some(HolderCapacity {
+            landing_depth,
+            objects,
+            edges,
+        }));
+        Capacity
+    }
+}
+
+impl Drop for Capacity {
+    fn drop(&mut self) {
+        set_holder_capacity_for_tests(None);
+    }
+}
+
+/// What a holder holds after taking `v2` too: its counts and `v2`'s landing depth, read from a
+/// second holder that takes the same files with the default bounds.
+fn tcw_after(
+    src: &Src,
+    v1_target: &UploadTarget,
+    v1: &[PathBuf],
+    target: &UploadTarget,
+    v2: &Path,
+) -> (u64, u64, u64) {
+    let (_, mut other) = holder(src, "other");
+    take(&mut other, &open(v1), v1_target).unwrap();
+    take(&mut other, &open(&[v2.to_path_buf()]), target).unwrap();
+    let (objects, edges) = other.reader().holder_counts().unwrap();
+    let depth = other
+        .reader()
+        .landing_depth(&target.landing)
+        .unwrap()
+        .unwrap();
+    (objects, edges, depth)
+}
+
+fn capacity_err(e: TakeError<StreamError>, text: &str) {
+    let e = stream_err(e);
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_LIMIT",
+            text,
+            "keep the project; this holder takes no more history until its limit is raised"
+        )
+    );
+}
+
+/// A source of `n` landings tagged `v1.1`, its whole-closure files and target, a holder that
+/// holds them, and the new-only upload of `v2` (two landings more).
+fn tcw_capacity_setup(
+    n: usize,
+) -> (
+    Src,
+    UploadTarget,
+    Vec<PathBuf>,
+    Store,
+    UploadTarget,
+    PathBuf,
+) {
+    let src = source();
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 0, n);
+    let v1 = tcw_tag(&mut s, "v1.1", last);
+    drop(s);
+    let v1_target = UploadTarget {
+        tag: "v1.1".into(),
+        landing: last,
+    };
+    let v1_paths = src.split(v1, 1, "v1-full");
+    let (_, mut h) = holder(&src, "h");
+    take(&mut h, &open(&v1_paths), &v1_target).unwrap();
+    let src = Src { tag: v1, ..src };
+    let known = tcw_known(&src);
+    let (target, path, _, _) = tcw_next(&src, 2, &known, "new");
+    (src, v1_target, v1_paths, h, target, path)
+}
+
+#[test]
+fn tcw_capacity_guard_refuses_one_past_each_bound_and_accepts_at_it() {
+    let (src, v1_target, v1_paths, mut h, target, path) = tcw_capacity_setup(10);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    // the source's first landing, ten more, then v2's two
+    assert_eq!(depth, 13);
+    let end = h.log_end();
+    for (bounds, text) in [
+        (
+            (depth, objects - 1, edges),
+            format!("holder check exceeds {} objects", objects - 1),
+        ),
+        (
+            (depth, objects, edges - 1),
+            format!("holder check exceeds {} edges", edges - 1),
+        ),
+        (
+            (depth - 1, objects, edges),
+            format!("holder check exceeds {} landing depth", depth - 1),
+        ),
+    ] {
+        let _c = Capacity::set(bounds.0, bounds.1, bounds.2);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap_err(),
+            &text,
+        );
+        assert_eq!(h.log_end(), end, "{text}");
+        assert_eq!(h.get_ref("tag/v2").unwrap(), None, "{text}");
+    }
+    // at every bound the take is accepted, and the holder passes its check at the same bounds
+    {
+        let _c = Capacity::set(depth, objects, edges);
+        take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    }
+    assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
+    h.check_holder_bounded_for_tests(depth as usize, objects as usize, edges as usize)
+        .unwrap();
+    // the depth is exact: one less is past the chain the check reads. The object and edge
+    // counts are upper bounds (a held signature is no forward link of a tag, so the check may
+    // read fewer)
+    let err = h
+        .check_holder_bounded_for_tests(depth as usize - 1, objects as usize, edges as usize)
+        .unwrap_err();
+    let text = format!("{} landing depth", depth - 1);
+    assert_eq!(
+        rdy_store::check_holder::holder_check_limit(&err),
+        Some(text.as_str())
+    );
+}
+
+#[test]
+fn tcw_early_exit_take_is_refused_once_the_holder_would_pass_its_bounds() {
+    // the case the closure walk's early exit accepts with no holder bound: new records only,
+    // past a long held history
+    let (src, v1_target, v1_paths, mut h, target, path) = tcw_capacity_setup(60);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    let (held, _) = h.reader().holder_counts().unwrap();
+    assert!(held < objects);
+    // a holder full already refuses it
+    {
+        let _c = Capacity::set(depth, held, edges);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap_err(),
+            &format!("holder check exceeds {held} objects"),
+        );
+    }
+    // one that fits takes it, and passes its check at the same bounds
+    let _c = Capacity::set(depth, objects, edges);
+    take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    h.check_holder_bounded_for_tests(depth as usize, objects as usize, edges as usize)
+        .unwrap();
+}
+
+#[test]
+fn tcw_capacity_counts_and_depths_survive_reopen_and_reindex() {
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(30);
+    take(&mut h, &open(&[path]), &target).unwrap();
+    let r = h.reader();
+    let counts = r.holder_counts().unwrap();
+    // the chain from v2's landing: the source's first landing, thirty more, then two
+    assert_eq!(r.landing_depth(&target.landing).unwrap(), Some(33));
+    assert_eq!(r.landing_depth(&src.landing).unwrap(), Some(1));
+    let dump = h.index_dump_for_tests().unwrap();
+    assert!(!dump.holder_counts.is_empty() && dump.landing_depths.len() == 33);
+    drop(r);
+    let root = src.dir.path().join("h");
+    drop(h);
+    let mut h = Store::open(&root).unwrap();
+    assert_eq!(h.reader().holder_counts().unwrap(), counts);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    h.reindex().unwrap();
+    assert_eq!(h.reader().holder_counts().unwrap(), counts);
+    assert_eq!(h.reader().landing_depth(&target.landing).unwrap(), Some(33));
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_an_index_without_the_capacity_tables_is_rebuilt_at_open() {
+    // an index written before the capacity counts never reads them as zero: the open refuses
+    // it and rebuilds it from the log, with the same counts and depths
+    for table in ["holder_counts", "landing_depths", "landing_waits"] {
+        let (src, _, _, mut h, target, path) = tcw_capacity_setup(5);
+        take(&mut h, &open(&[path]), &target).unwrap();
+        let dump = h.index_dump_for_tests().unwrap();
+        let counts = h.reader().holder_counts().unwrap();
+        drop(h);
+        let root = src.dir.path().join("h");
+        let file = root.join("index.redb");
+        {
+            let raw = redb::Database::create(&file).unwrap();
+            let w = raw.begin_write().unwrap();
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+            assert!(w.delete_table(def).unwrap(), "the table was there");
+            w.commit().unwrap();
+        }
+        match rdy_store::index::Index::open(&file) {
+            Err(rdy_store::StoreError::Db(m)) => assert_eq!(
+                m,
+                "the index has no capacity counts; it is rebuilt from the log"
+            ),
+            Err(e) => panic!("another refusal: {e}"),
+            Ok(_) => panic!("an index without {table} opened"),
+        }
+        let h = Store::open(&root).unwrap();
+        assert!(h.open_report().index_rebuilt, "{table}");
+        assert_eq!(h.index_dump_for_tests().unwrap(), dump, "{table}");
+        assert_eq!(h.reader().holder_counts().unwrap(), counts, "{table}");
+    }
+}
+
+// tcw (TASK-2340 review F1, F2): the capacity counts and the landing depths are the same however
+// the frames arrive: in any order, in one commit or many, across checkpoints and replay chunks,
+// live, after a reindex and after an open that rebuilds the index
+
+/// Deletes `table` from the index of the closed store at `root`, then opens the store: the open
+/// rebuilds the index from the log.
+fn tcw_rebuilt(root: &Path, table: &str) -> Store {
+    {
+        let raw = redb::Database::create(root.join("index.redb")).unwrap();
+        let w = raw.begin_write().unwrap();
+        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+        assert!(w.delete_table(def).unwrap(), "{table} was there");
+        w.commit().unwrap();
+    }
+    let h = Store::open(root).unwrap();
+    assert!(h.open_report().index_rebuilt, "{table}");
+    h
+}
+
+/// The live index of `h` (the store at `root`) equals the index a reindex builds, and each index
+/// an open rebuilds from the log when one capacity table is missing. Returns `h` reopened.
+fn tcw_same_after_rebuilds(mut h: Store, root: &Path) -> Store {
+    let dump = h.index_dump_for_tests().unwrap();
+    h.reindex().unwrap();
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump, "reindex");
+    drop(h);
+    for table in ["holder_counts", "landing_depths", "landing_waits"] {
+        let h = tcw_rebuilt(root, table);
+        assert_eq!(
+            h.index_dump_for_tests().unwrap(),
+            dump,
+            "rebuilt without {table}"
+        );
+    }
+    Store::open(root).unwrap()
+}
+
+/// A landing hash of the index-level histories.
+fn tcw_l(n: u8) -> Hash {
+    Hash::of(&[b'l', n])
+}
+
+/// The orders the index-level tests apply a history in: log order, newest first, and twenty
+/// fixed shuffles.
+fn tcw_orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    let mut out = vec![items.to_vec(), items.iter().rev().cloned().collect()];
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..20 {
+        let mut v = items.to_vec();
+        for i in (1..v.len()).rev() {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            v.swap(i, (seed >> 33) as usize % (i + 1));
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// The commit sizes the index-level tests cut an order into: one entry per commit up to all in
+/// one commit.
+fn tcw_cuts(n: usize) -> Vec<usize> {
+    let mut cuts: Vec<usize> = vec![1, 2, 3, n.div_ceil(2), n];
+    cuts.dedup();
+    cuts
+}
+
+#[test]
+fn tcw_landing_depths_are_exact_in_any_order_and_commit_bounds() {
+    // the chain 1 <- 2 <- 3 <- 4 <- 5; a fork 2 <- 6 <- 7 (3 and 6 share prev 2); and 9 <- 10,
+    // whose 9 names a prev (8) never indexed. Landings 3 and 7 come twice, as a repeated frame
+    let p = |n: u8| Some(tcw_l(n));
+    let history = vec![
+        (tcw_l(1), None),
+        (tcw_l(2), p(1)),
+        (tcw_l(3), p(2)),
+        (tcw_l(4), p(3)),
+        (tcw_l(5), p(4)),
+        (tcw_l(6), p(2)),
+        (tcw_l(7), p(6)),
+        (tcw_l(9), p(8)),
+        (tcw_l(10), p(9)),
+        (tcw_l(3), p(2)),
+        (tcw_l(7), p(6)),
+    ];
+    // the holder check's chain lengths
+    let depths: BTreeMap<Vec<u8>, Vec<u8>> =
+        [(1, 1u64), (2, 2), (3, 3), (4, 4), (5, 5), (6, 3), (7, 4)]
+            .into_iter()
+            .map(|(n, d)| (tcw_l(n).0.to_vec(), d.to_le_bytes().to_vec()))
+            .collect();
+    let waits: BTreeMap<Vec<u8>, Vec<u8>> = [(8, 9), (9, 10)]
+        .into_iter()
+        .map(|(prev, l)| ([tcw_l(prev).0, tcw_l(l).0].concat(), vec![]))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = 0;
+    for order in tcw_orders(&history) {
+        for cut in tcw_cuts(order.len()) {
+            n += 1;
+            let ix = rdy_store::index::Index::open(&dir.path().join(format!("{n}.redb"))).unwrap();
+            for (i, part) in order.chunks(cut).enumerate() {
+                let entries: Vec<IndexEntry> = part
+                    .iter()
+                    .map(|(landing, prev)| IndexEntry::LandingDepth {
+                        landing: *landing,
+                        prev: *prev,
+                    })
+                    .collect();
+                let upto = rdy_store::segment::Location {
+                    segment: 0,
+                    offset: i as u64,
+                };
+                ix.apply(&entries, upto).unwrap();
+            }
+            let dump = ix.dump().unwrap();
+            assert_eq!(dump.landing_depths, depths, "order {n}, {cut} per commit");
+            assert_eq!(dump.landing_waits, waits, "order {n}, {cut} per commit");
+            assert_eq!(ix.landing_depth(&tcw_l(10)).unwrap(), None);
+        }
+    }
+}
+
+#[test]
+fn tcw_object_links_are_charged_once_in_any_commit_bounds() {
+    // a TAG of one link four times, a CHANGE of three links twice, a BLOCK of none: three
+    // objects and four links, however the frames split into commits
+    let (t, c, b) = (tcw_l(1), tcw_l(2), tcw_l(3));
+    let frames = [
+        (kinds::TAG, t, 1u64),
+        (kinds::CHANGE, c, 3),
+        (kinds::TAG, t, 1),
+        (kinds::BLOCK, b, 0),
+        (kinds::TAG, t, 1),
+        (kinds::CHANGE, c, 3),
+        (kinds::TAG, t, 1),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = 0;
+    for cut in 1..=frames.len() {
+        n += 1;
+        let ix = rdy_store::index::Index::open(&dir.path().join(format!("{n}.redb"))).unwrap();
+        for (i, part) in frames.chunks(cut).enumerate() {
+            let mut entries = vec![];
+            for (j, (kind, hash, links)) in part.iter().enumerate() {
+                entries.push(IndexEntry::Object {
+                    kind: *kind,
+                    hash: *hash,
+                    loc: rdy_store::segment::Location {
+                        segment: 0,
+                        offset: (i * cut + j) as u64,
+                    },
+                });
+                if *links > 0 {
+                    entries.push(IndexEntry::Links {
+                        kind: *kind,
+                        hash: *hash,
+                        links: *links,
+                    });
+                }
+            }
+            let upto = rdy_store::segment::Location {
+                segment: 0,
+                offset: (i * cut + part.len()) as u64,
+            };
+            ix.apply(&entries, upto).unwrap();
+        }
+        assert_eq!(ix.holder_counts().unwrap(), (3, 4), "{cut} per commit");
+    }
+}
+
+#[test]
+fn tcw_landings_indexed_newest_first_keep_exact_depths_and_take_decisions() {
+    // a holder whose landing depths were folded newest first, all in one commit or one landing
+    // per commit (each prev arrives in a later commit than the landing that names it), holds
+    // the depths a log-order fold gives, and a take at the depth bound is decided as the holder
+    // check decides
+    for per_commit in [false, true] {
+        let (src, v1_target, v1_paths, h, target, path) = tcw_capacity_setup(5);
+        let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+        // the source's first landing, five more, then v2's two
+        assert_eq!(depth, 8);
+        let chain = h.reader().tag_chain(&v1_target.landing).unwrap();
+        assert_eq!(chain.len(), 6);
+        let dump = h.index_dump_for_tests().unwrap();
+        let end = h.log_end();
+        let root = src.dir.path().join("h");
+        drop(h);
+        let file = root.join("index.redb");
+        {
+            let raw = redb::Database::create(&file).unwrap();
+            let w = raw.begin_write().unwrap();
+            for table in ["landing_depths", "landing_waits"] {
+                let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+                assert!(w.delete_table(def).unwrap(), "{table} was there");
+                w.open_table(def).unwrap();
+            }
+            w.commit().unwrap();
+        }
+        {
+            let ix = rdy_store::index::Index::open(&file).unwrap();
+            let entries: Vec<IndexEntry> = chain
+                .iter()
+                .map(|(l, rec)| IndexEntry::LandingDepth {
+                    landing: *l,
+                    prev: rec.prev,
+                })
+                .collect();
+            if per_commit {
+                for (i, e) in entries.iter().enumerate() {
+                    ix.apply_durable(std::slice::from_ref(e), end).unwrap();
+                    // nothing has a depth until the first landing arrives
+                    let got = ix.landing_depth(&v1_target.landing).unwrap();
+                    assert_eq!(got, (i + 1 == entries.len()).then_some(6));
+                }
+            } else {
+                ix.apply_durable(&entries, end).unwrap();
+            }
+        }
+        let mut h = Store::open(&root).unwrap();
+        assert!(!h.open_report().index_rebuilt);
+        assert_eq!(h.index_dump_for_tests().unwrap(), dump, "{per_commit}");
+        assert_eq!(
+            h.reader().landing_depth(&v1_target.landing).unwrap(),
+            Some(6)
+        );
+        {
+            let _c = Capacity::set(depth - 1, objects, edges);
+            capacity_err(
+                take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap_err(),
+                &format!("holder check exceeds {} landing depth", depth - 1),
+            );
+        }
+        {
+            let _c = Capacity::set(depth, objects, edges);
+            take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+        }
+        assert_eq!(
+            h.reader().landing_depth(&target.landing).unwrap(),
+            Some(depth)
+        );
+        h.check_holder_bounded_for_tests(depth as usize, objects as usize, edges as usize)
+            .unwrap();
+        let err = h
+            .check_holder_bounded_for_tests(depth as usize - 1, objects as usize, edges as usize)
+            .unwrap_err();
+        let text = format!("{} landing depth", depth - 1);
+        assert_eq!(
+            rdy_store::check_holder::holder_check_limit(&err),
+            Some(text.as_str())
+        );
+        tcw_same_after_rebuilds(h, &root);
+    }
+}
+
+/// Lands two changes on the store at `at` (block names from `from`), tags the last `tag`, and
+/// writes the batch of its closure less `known` as `name`.
+fn tcw_branch(
+    src: &Src,
+    at: &Path,
+    from: usize,
+    tag: &str,
+    known: &BTreeSet<ObjectKey>,
+    name: &str,
+) -> (UploadTarget, PathBuf) {
+    let mut s = Store::open(at).unwrap();
+    let last = tcw_land(&mut s, from, 2);
+    let t = tcw_tag(&mut s, tag, last);
+    let r = s.reader();
+    let c = closure(&r, t, known).unwrap();
+    let path = src.dir.path().join(format!("{name}.rdysync"));
+    write(&r, &src.repo, t, &c.records, c.prerequisites, &path);
+    (
+        UploadTarget {
+            tag: tag.into(),
+            landing: last,
+        },
+        path,
+    )
+}
+
+#[test]
+fn tcw_a_fork_has_exact_depths_live_after_reindex_and_rebuild() {
+    // two tags whose chains part after v1.1's landing: each new first landing names it as prev
+    let src = source();
+    let mut s = Store::open(&src.path).unwrap();
+    let head = tcw_land(&mut s, 0, 3);
+    let v1 = tcw_tag(&mut s, "v1.1", head);
+    drop(s);
+    let (_, mut h) = holder(&src, "h");
+    let v1_target = UploadTarget {
+        tag: "v1.1".into(),
+        landing: head,
+    };
+    take(&mut h, &open(&src.split(v1, 1, "v1-full")), &v1_target).unwrap();
+    let known: BTreeSet<ObjectKey> = src.closure(v1).into_iter().collect();
+    let copy = src.dir.path().join("src-fork");
+    carried_fixture::copy_store(&src.path, &copy);
+    let (a, a_path) = tcw_branch(&src, &src.path, 50_000, "v2", &known, "a");
+    let (b, b_path) = tcw_branch(&src, &copy, 60_000, "v3", &known, "b");
+    take(&mut h, &open(&[a_path]), &a).unwrap();
+    take(&mut h, &open(&[b_path]), &b).unwrap();
+    let held = h.reader().tag_chain(&head).unwrap().len() as u64;
+    assert_eq!(held, 4);
+    let (ca, cb) = (
+        h.reader().tag_chain(&a.landing).unwrap(),
+        h.reader().tag_chain(&b.landing).unwrap(),
+    );
+    assert_ne!(ca[1].0, cb[1].0);
+    assert_eq!((ca[1].1.prev, cb[1].1.prev), (Some(head), Some(head)));
+    let r = h.reader();
+    for l in [ca[1].0, cb[1].0] {
+        assert_eq!(r.landing_depth(&l).unwrap(), Some(held + 1));
+    }
+    for l in [a.landing, b.landing] {
+        assert_eq!(r.landing_depth(&l).unwrap(), Some(held + 2));
+    }
+    drop(r);
+    h.check_holder_bounded_for_tests(held as usize + 2, 1_000_000, 1_000_000)
+        .unwrap();
+    let err = h
+        .check_holder_bounded_for_tests(held as usize + 1, 1_000_000, 1_000_000)
+        .unwrap_err();
+    let text = format!("{} landing depth", held + 1);
+    assert_eq!(
+        rdy_store::check_holder::holder_check_limit(&err),
+        Some(text.as_str())
+    );
+    let root = src.dir.path().join("h");
+    let h = tcw_same_after_rebuilds(h, &root);
+    assert_eq!(
+        h.reader().landing_depth(&b.landing).unwrap(),
+        Some(held + 2)
+    );
+}
+
+/// Appends `items` as one sealed batch to the log of the closed store at `root`, past the
+/// store's own writer (which writes a held key once): the next open indexes them as it catches
+/// its index up from the log.
+fn tcw_raw_append(root: &Path, items: &[(u8, Vec<u8>)]) {
+    let (mut log, quarantined) =
+        rdy_store::segment::SegmentLog::open_marked(&root.join("segments"), 64 * 1024 * 1024, None)
+            .unwrap();
+    assert!(quarantined.is_empty());
+    log.append_batch(items).unwrap();
+    log.sync().unwrap();
+}
+
+#[test]
+fn tcw_duplicate_frames_charge_their_links_once() {
+    // repeated TAG frames, in one batch and across batches, across a replay chunk and a
+    // checkpoint, add one object and its links once: live, after a reindex and after a rebuild
+    let (src, _, _, mut h, _, _) = tcw_capacity_setup(2);
+    let root = src.dir.path().join("h");
+    let tag = |name: &str| {
+        enc(&Tag {
+            name: name.into(),
+            landing: src.landing,
+            message: None,
+            tagged_by: prov("human:alice", Role::Approver),
+        })
+    };
+    let base = h.reader().holder_counts().unwrap();
+    h.write(vec![(kinds::TAG, tag("dup-a"))]).unwrap();
+    let one = h.reader().holder_counts().unwrap();
+    assert_eq!(one.0, base.0 + 1);
+    let links = one.1 - base.1;
+    assert!(links > 0);
+    let t = Hash::of(&tag("dup-a"));
+    let mut frame = None;
+    h.reader()
+        .for_each_record_from(ORIGIN, h.log_end(), |_, f, _| {
+            if let StoredFrame::Present {
+                kind,
+                hash,
+                payload,
+            } = f
+                && hash == t
+            {
+                frame = Some((kind, payload.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+    let frame = frame.expect("the tag's frame");
+    assert_eq!(frame.1, tag("dup-a"));
+    drop(h);
+    // copies: three in one batch, one in each of two batches, then one batch past a replay
+    // chunk (a checkpoint too), each indexed by the next open's catch-up
+    for n in [3, 1, 1, rdy_store::CATCH_UP_CHUNK + 100] {
+        tcw_raw_append(&root, &vec![frame.clone(); n]);
+        let h = Store::open(&root).unwrap();
+        assert!(!h.open_report().index_rebuilt);
+        assert_eq!(h.reader().holder_counts().unwrap(), one, "{n} copies");
+    }
+    // a key whose first frame has copies in the same batch
+    tcw_raw_append(&root, &vec![(frame.0, tag("dup-b")); 5]);
+    let h = Store::open(&root).unwrap();
+    let two = (one.0 + 1, one.1 + links);
+    assert_eq!(h.reader().holder_counts().unwrap(), two);
+    h.check_holder().unwrap();
+    let h = tcw_same_after_rebuilds(h, &root);
+    assert_eq!(h.reader().holder_counts().unwrap(), two);
+}
+
+/// Bench only (TASK-2324): a take of only the new records of `v2` past about 5,000 held
+/// objects, timed up to the caller's check. Prints the times; asserts none.
+#[test]
+#[ignore]
+fn tcw_bench_take_of_new_records_past_5000_held_objects() {
+    let (src, mut h) = tcw_held_history(1000);
+    let known = tcw_known(&src);
+    let (target, path, records, _) = tcw_next(&src, 2, &known, "bench");
+    let mut times = Vec::new();
+    for _ in 0..7 {
+        let start = std::time::Instant::now();
+        let mut at = None;
+        h.take_batches(
+            &open(std::slice::from_ref(&path)),
+            &target,
+            |_: &mut dyn ObjectSource, _: &UploadFacts| {
+                at = Some(start.elapsed());
+                Ok::<_, StreamError>(TagChoice::Incoming)
+            },
+        )
+        .unwrap();
+        times.push(at.unwrap());
+    }
+    times.sort();
+    println!(
+        "tcw bench: {} held objects, {} new; take to the caller's check: median {:?}, min {:?}, max {:?}",
+        known.len(),
+        records.len(),
+        times[3],
+        times[0],
+        times[6]
+    );
 }

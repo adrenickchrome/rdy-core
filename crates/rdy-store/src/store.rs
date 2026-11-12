@@ -758,6 +758,21 @@ pub(crate) fn resolution_entry(
     })
 }
 
+/// The object links of the present frame of raw kind `raw` and stored payload `payload`, as the
+/// holder check counts them (`portable_refs_of` over the stored frame), for the holder's edge
+/// count (TASK-2340); None for a kind that is not portable or has no links. A frame whose links
+/// do not decode counts none: the holder check refuses it as damage, never as a bound.
+pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEntry> {
+    let kind = crate::codec::logical_kind(raw);
+    if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
+        return None;
+    }
+    let links = crate::object_refs::portable_refs_of(raw, payload)
+        .ok()?
+        .len() as u64;
+    (links > 0).then_some(IndexEntry::Links { kind, hash, links })
+}
+
 /// `entries_for_frame` before the frame is noted.
 fn frame_entries(
     kind: u8,
@@ -773,8 +788,10 @@ fn frame_entries(
     // the logical kind and the body of the frame's encoding (`crate::codec`): an index, a
     // dependency and a redaction identity know objects by their logical kind
     let o = crate::codec::split_stored(kind, payload)?;
+    let links = links_entry(kind, hash, payload);
     let (kind, payload) = (o.kind, o.body);
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
+    out.extend(links);
     match kind {
         kinds::CHANGE => {
             let change: Change = crate::codec::decode_split(&o)?;
@@ -807,6 +824,10 @@ fn frame_entries(
         }
         kinds::LANDING => {
             let rec: LandingRecord = crate::codec::decode_split(&o)?;
+            out.push(IndexEntry::LandingDepth {
+                landing: hash,
+                prev: rec.prev,
+            });
             out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
                 change,
                 landing: hash,
@@ -1191,14 +1212,16 @@ fn replay_into(
             ],
             // a request's spans are the log's own: a holder's come from its approvals
             // (a request of any encoding: a cited version target has its own)
-            Some(payload) if crate::codec::logical_kind(v.kind) == kinds::REDACTION => vec![
-                IndexEntry::Object {
+            Some(payload) if crate::codec::logical_kind(v.kind) == kinds::REDACTION => {
+                let mut e = vec![IndexEntry::Object {
                     kind: kinds::REDACTION,
                     hash: v.hash,
                     loc,
-                },
-                auth.request_entry(v.kind, v.hash, payload)?,
-            ],
+                }];
+                e.extend(links_entry(v.kind, v.hash, payload));
+                e.push(auth.request_entry(v.kind, v.hash, payload)?);
+                e
+            }
             // a foreign removal's proof record is an object only: never local history
             Some(_) if auth.foreign.is_proof_record(v.kind, loc) => {
                 r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
@@ -2621,6 +2644,7 @@ impl Store {
                     hash: *hash,
                     loc: *at,
                 });
+                out.extend(links_entry(*kind, *hash, payload));
                 out.push(auth.request_entry(*kind, *hash, payload)?);
             } else {
                 out.extend(entries_for_frame(*kind, *hash, *at, payload, &mut r)?);
@@ -3931,6 +3955,20 @@ impl StoreReader {
         self.index()
             .typed(kinds::CHANGE, h)?
             .ok_or(StoreError::NotFound(*h))
+    }
+
+    /// The capacity counts the index derives (TASK-2340): the distinct portable objects stored
+    /// and the sum of their object links, as the holder check counts links. Upper bounds of what
+    /// the holder check reads; a reindex rebuilds them from the log.
+    pub fn holder_counts(&self) -> Result<(u64, u64), StoreError> {
+        self.index().holder_counts()
+    }
+
+    /// The chain depth of landing `landing` the index derives (TASK-2340): one with no `prev`,
+    /// else its `prev`'s plus one, whatever order the chain's frames were indexed in. None when
+    /// the index does not hold the landing, or does not hold every landing of its chain.
+    pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
+        self.index().landing_depth(landing)
     }
 
     /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.

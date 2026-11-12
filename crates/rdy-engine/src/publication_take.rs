@@ -12,7 +12,9 @@
 //!    and the snapshot limits, in the take's own order (`stream_take`).
 //! 3. The chosen root landing is materialized through that checked source, approved removals
 //!    applied (`render_source::materialize_landing`), and the requested profile is resolved in
-//!    it (`publication::resolve_source`): [`PublicationFacts`].
+//!    it (`publication::resolve_source`): [`PublicationFacts`]. When step 2 read the root
+//!    landing's snapshot (the landing is new to the holder), its blocks are used as step 2
+//!    built them, from the same source, and the snapshot is not read again (TASK-2324).
 //! 4. The selector, profile and public-reference refusals are core errors, before any verdict:
 //!    a selector that is not a full profile id or `implicit:org`, a block that is not a
 //!    profile, an invalid or redacted profile, a Publications limit, and a public profile whose
@@ -42,7 +44,9 @@ use crate::error::{E_INTERNAL, RdyError};
 use crate::publication::{
     IMPLICIT_ORG, ProfileFacts, check_stable_selector, profile_facts, resolve_source,
 };
-use crate::render_source::{ObjectPublicationSource, SourceSettings, materialize_landing};
+use crate::render_source::{
+    CheckedSnapshot, ObjectPublicationSource, SourceSettings, materialize_landing,
+};
 use crate::stream_error::to_rdy;
 use crate::stream_take::{TakeOutcome, take_checked};
 use rdy_model::{BlockId, Hash, RepoId};
@@ -129,14 +133,21 @@ pub fn take_publication<E>(
         description: description.as_deref(),
     };
     let reader = rdy.store.reader();
-    let (outcome, facts) = take_checked(rdy, batches, upload, |source, upload, choice| {
-        let facts = publication_facts(source, &reader, upload, choice, &profile, settings())?;
-        match catch_unwind(AssertUnwindSafe(|| verdict(&facts))) {
-            Ok(Ok(())) => Ok(facts),
-            Ok(Err(e)) => Err(PublicationRefusal::Verdict(e)),
-            Err(_) => Err(PublicationRefusal::Core(verdict_panicked())),
-        }
-    })?;
+    let (outcome, facts) = take_checked(
+        rdy,
+        batches,
+        upload,
+        true,
+        |source, upload, choice, root| {
+            let facts =
+                publication_facts(source, &reader, upload, choice, root, &profile, settings())?;
+            match catch_unwind(AssertUnwindSafe(|| verdict(&facts))) {
+                Ok(Ok(())) => Ok(facts),
+                Ok(Err(e)) => Err(PublicationRefusal::Verdict(e)),
+                Err(_) => Err(PublicationRefusal::Core(verdict_panicked())),
+            }
+        },
+    )?;
     Ok(PublicationTaken { outcome, facts })
 }
 
@@ -150,12 +161,14 @@ fn verdict_panicked() -> RdyError {
 }
 
 /// Steps 3 and 4: the facts of `profile` in the root landing of `upload`, read through the
-/// checked `source` over the holder `held`, with the holder's `settings`.
+/// checked `source` over the holder `held`, with the holder's `settings`. `root` is the root
+/// landing's snapshot as step 2 built it through the same source, when it did.
 fn publication_facts(
     source: &mut dyn ObjectSource,
     held: &StoreReader,
     upload: &UploadFacts,
     choice: &TagChoice,
+    root: Option<CheckedSnapshot>,
     profile: &str,
     settings: SourceSettings<'_>,
 ) -> Result<PublicationFacts, RdyError> {
@@ -166,7 +179,7 @@ fn publication_facts(
     let landing = upload.root.landing;
     check_stable_selector(profile)?;
     MATERIALIZATIONS.with(|c| c.set(c.get().wrapping_add(1)));
-    let m = materialize_landing(source, landing)?;
+    let m = materialize_landing(source, landing, root)?;
     // a full id names a block of this tag or nothing; no prefix or key lookup
     let named = profile != IMPLICIT_ORG;
     let absent = named && BlockId::parse(profile).is_ok_and(|id| m.get(&id).is_none());
@@ -190,6 +203,19 @@ fn publication_facts(
 thread_local! {
     static MATERIALIZATIONS: Cell<u64> = const { Cell::new(0) };
     static BLOB_PAYLOAD_READS: Cell<u64> = const { Cell::new(0) };
+    static ROOT_SNAPSHOT_REUSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Counts one root landing materialized from the snapshot the take's check built.
+pub(crate) fn count_root_snapshot_reuse() {
+    ROOT_SNAPSHOT_REUSES.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// Tests only: how many root landings publication takes have materialized on this thread from
+/// the snapshot their snapshot check built, not by reading it again.
+#[doc(hidden)]
+pub fn root_snapshot_reuses_for_tests() -> u64 {
+    ROOT_SNAPSHOT_REUSES.with(Cell::get)
 }
 
 /// Counts one blob chunk payload that a take's publication source returned.
