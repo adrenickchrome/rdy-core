@@ -19469,6 +19469,7 @@
       "BAD_URL_MESSAGE": "\"the hub address is not an HTTPS URL\"",
       "BLOCKED_FIX": "\"Include the target docs or remove these references. Run the publication check again.\"",
       "BRIEFING_FIX": "\"exclude the change from the view, then brief the block and write it again\"",
+      "CAPACITY_FIX": "\"keep the project; this holder takes no more history until its limit is raised\"",
       "CARD_CHANGE_FIX": "\"Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.\"",
       "CARRIED_WARNING_BUDGET_FIX": "\"Increase max_tokens, or run rdy fsck for the complete warning list.\"",
       "CARRIER_MESSAGE": "\"Request content removal.\"",
