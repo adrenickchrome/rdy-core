@@ -280,6 +280,10 @@ struct Inner {
     clock: u64,
     next_id: u64,
     closed: bool,
+    /// The cap on the bytes of inactive builds: [`MAX_INACTIVE_BUILD_BYTES`], or a test's. Kept
+    /// here so every path that makes a build inactive (a new build, a cache hit, the last
+    /// stream of a target closing) enforces it under this lock.
+    cap: u64,
 }
 
 impl Inner {
@@ -297,17 +301,6 @@ impl Inner {
         s
     }
 
-    /// Drops the state of `scope` when it holds neither a build nor a stream.
-    fn forget_if_empty(&mut self, scope: &SiteTarget) {
-        if self
-            .scopes
-            .get(scope)
-            .is_some_and(|s| s.build.is_none() && s.streams.is_empty())
-        {
-            self.scopes.remove(scope);
-        }
-    }
-
     /// The bytes the inactive targets' builds hold.
     fn inactive_bytes(&self) -> u64 {
         self.scopes
@@ -318,12 +311,13 @@ impl Inner {
     }
 
     /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], or while their
-    /// builds hold more than `cap` bytes together (keeping the most recently used one), least
+    /// builds hold more than [`Inner::cap`] bytes together (keeping the most recently used one), least
     /// recently used first, with their memos; a target with neither a build nor a stream goes
     /// too. A target with an open stream keeps its build outside both limits ([`MAX_STREAMS`]
     /// bounds those), so open pages never push an inactive build out of its slot. A dropped
     /// build is built again on its next request.
-    fn evict(&mut self, cap: u64) {
+    fn evict(&mut self) {
+        let cap = self.cap;
         self.scopes
             .retain(|_, s| s.build.is_some() || !s.streams.is_empty());
         let inactive = |s: &ScopeState| s.build.is_some() && s.streams.is_empty();
@@ -390,8 +384,6 @@ pub struct LiveSite {
     /// Test hook: the barrier of a UI subscribe after its stream is registered, before its last
     /// comparison.
     before_ui_compare: Mutex<Option<UiBarrier>>,
-    /// The cap on the bytes of inactive builds: [`MAX_INACTIVE_BUILD_BYTES`], or a test's.
-    inactive_cap: AtomicU64,
 }
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
@@ -524,7 +516,10 @@ impl Drop for Subscription {
                     if let Some(s) = inner.scopes.get_mut(scope) {
                         s.streams.retain(|st| st.id != self.id);
                     }
-                    inner.forget_if_empty(scope);
+                    // the target's build may be inactive now: the count and byte caps hold
+                    // from here, not from the next build (review F1); this also forgets the
+                    // target when it holds neither a build nor a stream
+                    inner.evict();
                 }
                 StreamKey::Ui => inner.ui_streams.retain(|st| st.id != self.id),
             }
@@ -539,7 +534,10 @@ impl LiveSite {
             worker: OnceLock::new(),
             stopped: AtomicBool::new(false),
             building: Mutex::new(()),
-            inner: Arc::new(Mutex::new(Inner::default())),
+            inner: Arc::new(Mutex::new(Inner {
+                cap: MAX_INACTIVE_BUILD_BYTES,
+                ..Inner::default()
+            })),
             builds: AtomicU64::new(0),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
@@ -548,7 +546,6 @@ impl LiveSite {
             log_hook: Mutex::new(None),
             history_ceiling: Mutex::new(None),
             before_ui_compare: Mutex::new(None),
-            inactive_cap: AtomicU64::new(MAX_INACTIVE_BUILD_BYTES),
         })
     }
 
@@ -562,8 +559,9 @@ impl LiveSite {
     /// [`MAX_INACTIVE_BUILD_BYTES`]).
     #[doc(hidden)]
     pub fn set_inactive_build_cap(&self, cap: Option<u64>) {
-        self.inactive_cap
-            .store(cap.unwrap_or(MAX_INACTIVE_BUILD_BYTES), Ordering::SeqCst);
+        let mut inner = lock(&self.inner);
+        inner.cap = cap.unwrap_or(MAX_INACTIVE_BUILD_BYTES);
+        inner.evict();
     }
 
     /// Test hook: the builds the site holds, of every target.
@@ -708,6 +706,7 @@ impl LiveSite {
             })?;
             let s = inner.touch(scope);
             s.seen = now;
+            inner.evict();
             Some(hit)
         };
         if let Some(b) = cached(&mut lock(&self.inner), &|s| s.seen == now) {
@@ -801,7 +800,7 @@ impl LiveSite {
         if selected {
             s.memo = memo;
         }
-        inner.evict(self.inactive_cap.load(Ordering::SeqCst));
+        inner.evict();
         Ok((new, true))
     }
 

@@ -616,3 +616,30 @@ fn slb1_a_landing_rebuild_releases_the_old_build() {
     assert_eq!(old.strong_count(), 0, "the old build is released");
     assert_eq!(sh.site.held_builds(), 1, "one build of canon is held");
 }
+
+/// slb1 (review F1): builds kept by open streams become inactive when their last stream closes,
+/// and the byte cap holds from then on, with no new build: a cache hit finds them dropped.
+#[test]
+fn slb1_closing_the_last_streams_enforces_the_byte_cap() {
+    let h = figures_host();
+    let sh = shared(&h);
+    sh.site.set_inactive_build_cap(Some(SLB1_CAP));
+    let mut subs = Vec::new();
+    for t in [C, view(0), view(1), view(2)] {
+        let b = sh.site.refresh(&sh, &t).unwrap();
+        subs.push(sub(&sh, &t, "index.html", &b));
+    }
+    assert_eq!(sh.site.held_builds(), 4, "open targets keep their builds");
+    assert!(sh.site.held_bytes() > SLB1_CAP, "{}", sh.site.held_bytes());
+    drop(subs);
+    let builds = sh.site.builds();
+    sh.site.refresh(&sh, &view(2)).unwrap();
+    assert_eq!(sh.site.builds(), builds, "a cache hit");
+    assert!(
+        sh.site.held_inactive_bytes() <= SLB1_CAP || sh.site.held_builds() == 1,
+        "{} inactive bytes in {} builds",
+        sh.site.held_inactive_bytes(),
+        sh.site.held_builds()
+    );
+    assert_eq!(sh.site.held_bytes(), sh.site.held_inactive_bytes());
+}
