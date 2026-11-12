@@ -3965,7 +3965,8 @@ impl StoreReader {
     }
 
     /// The chain depth of landing `landing` the index derives (TASK-2340): one with no `prev`,
-    /// else its `prev`'s plus one. None when the index does not hold the landing.
+    /// else its `prev`'s plus one, whatever order the chain's frames were indexed in. None when
+    /// the index does not hold the landing, or does not hold every landing of its chain.
     pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
         self.index().landing_depth(landing)
     }

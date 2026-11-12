@@ -104,8 +104,9 @@ const DISPUTE_RESOLUTIONS: TableDefinition<&[u8], &[u8]> =
 /// The holder's capacity counts (TASK-2340), derived from the log in log order so a reindex
 /// rebuilds them: key `objects` -> the number of distinct (kind, hash) keys of portable kinds the
 /// index holds; key `edges` -> the sum, over those keys, of the object links
-/// (`portable_refs_of`) of the first present frame indexed for each, as the holder check counts
-/// links. Both are u64 little-endian. They are upper bounds of what the holder check reads
+/// (`portable_refs_of`) of the first frame indexed for each, as the holder check counts links
+/// (a later frame of the same key adds nothing, in the same commit or a later one). Both are
+/// u64 little-endian. They are upper bounds of what the holder check reads
 /// (`crate::check_holder`): it reads at most every held object, and follows each one's links
 /// once. The edge count follows the holder check's own counting; a change to that counting (a
 /// future snapshot_delta feature) is recounted by a reindex.
@@ -115,10 +116,16 @@ const OBJECTS_COUNT_KEY: &[u8] = b"objects";
 /// The [`HOLDER_COUNTS`] key of the edge count.
 const EDGES_COUNT_KEY: &[u8] = b"edges";
 /// A landing's hash (32 bytes) -> its chain depth, u64 little-endian (TASK-2340): one for a
-/// landing with no `prev`, else its `prev`'s depth plus one (a `prev` the index does not hold
-/// counts as depth 0). A log-order fold, as the open tensions are; the first frame of a landing
-/// keeps its row.
+/// landing with no `prev`, else its `prev`'s depth plus one, the chain length the holder check
+/// reads. Only a landing whose whole chain the index holds has a row; one whose `prev` has no
+/// row yet waits in [`LANDING_WAITS`] and gets its row when that `prev` gets its own. So the
+/// rows depend only on which landings are indexed, never on their order or on commit bounds.
 const LANDING_DEPTHS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_depths");
+/// The landings that wait for a depth (TASK-2340): key `prev` (32 bytes) || landing (32 bytes)
+/// -> empty, for each indexed landing whose `prev` has no [`LANDING_DEPTHS`] row. When `prev`
+/// gets its row, its waiting landings get theirs (and their own waiting landings, in turn), and
+/// leave this table.
+const LANDING_WAITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_waits");
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -159,14 +166,15 @@ pub enum IndexEntry {
         loc: Location,
     },
     /// The object links (`portable_refs_of`) of the present frame of (kind, hash) just indexed:
-    /// added to the holder's edge count when that frame was the key's first (TASK-2340).
+    /// added to the holder's edge count when that frame was the key's first (TASK-2340). It
+    /// follows that frame's `Object` entry, with no other `Object` entry of the key between.
     Links {
         kind: u8,
         hash: Hash,
         links: u64,
     },
-    /// A landing and the landing before it: the landing's chain depth is folded from its
-    /// `prev`'s (TASK-2340).
+    /// A landing and the landing before it: the landing's chain depth is its `prev`'s plus one
+    /// (TASK-2340), in whatever order the two are indexed ([`LANDING_WAITS`]).
     LandingDepth {
         landing: Hash,
         prev: Option<Hash>,
@@ -489,6 +497,7 @@ pub struct IndexDump {
     pub dispute_resolutions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub holder_counts: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_depths: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub landing_waits: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The `meta` value of the first briefed change's location, if any.
     pub first_briefed_change: Option<Vec<u8>>,
 }
@@ -832,6 +841,69 @@ pub(crate) fn check_not_held(path: &Path) -> Result<(), StoreError> {
 /// carried places.
 pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 7];
 
+/// The two landing depth tables of one write transaction (TASK-2340).
+struct LandingDepthTables<'t> {
+    depths: redb::Table<'t, &'static [u8], &'static [u8]>,
+    waits: redb::Table<'t, &'static [u8], &'static [u8]>,
+}
+
+impl LandingDepthTables<'_> {
+    /// Indexes landing `landing` with `prev`: it gets its depth when `prev` has one (or it has
+    /// no `prev`), else it waits for `prev`. A landing that gets its depth gives the landings
+    /// that wait for it theirs, and so on down every chain that waited. A landing with a depth
+    /// already keeps it (a later frame of the same landing names the same `prev`).
+    fn fold(&mut self, landing: &Hash, prev: Option<&Hash>) -> Result<(), StoreError> {
+        if self.depth(landing)?.is_some() {
+            return Ok(());
+        }
+        let below = match prev {
+            None => 0,
+            Some(p) => match self.depth(p)? {
+                Some(d) => d,
+                None => {
+                    let mut key = [0u8; 64];
+                    key[..32].copy_from_slice(&p.0);
+                    key[32..].copy_from_slice(&landing.0);
+                    self.waits.insert(&key[..], &[][..]).map_err(db)?;
+                    return Ok(());
+                }
+            },
+        };
+        // iterative: a chain that waited may be as long as the log
+        let mut todo = vec![(*landing, below.saturating_add(1))];
+        while let Some((l, d)) = todo.pop() {
+            self.depths
+                .insert(&l.0[..], &d.to_le_bytes()[..])
+                .map_err(db)?;
+            let mut waiting = Vec::new();
+            for item in self.waits.range(&l.0[..]..).map_err(db)? {
+                let (k, _) = item.map_err(db)?;
+                let key = k.value();
+                if !key.starts_with(&l.0) {
+                    break;
+                }
+                waiting.push(key.to_vec());
+            }
+            for key in waiting {
+                self.waits.remove(&key[..]).map_err(db)?;
+                let child = hash_from(&key[32..], "landing wait entry")?;
+                if self.depth(&child)?.is_none() {
+                    todo.push((child, d.saturating_add(1)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
+        self.depths
+            .get(&landing.0[..])
+            .map_err(db)?
+            .map(|v| u64_from(v.value()))
+            .transpose()
+    }
+}
+
 /// The seven redaction tables of one write transaction.
 struct RedactionTables<'t> {
     carriers: redb::Table<'t, &'static [u8], &'static [u8]>,
@@ -1122,7 +1194,7 @@ impl Index {
         // likewise for the capacity counts and the landing depths (TASK-2340): a count is never
         // read as zero for objects the index already holds
         if has(OBJECTS.name())
-            && [&HOLDER_COUNTS, &LANDING_DEPTHS]
+            && [&HOLDER_COUNTS, &LANDING_DEPTHS, &LANDING_WAITS]
                 .iter()
                 .any(|t| !has(t.name()))
         {
@@ -1161,6 +1233,7 @@ impl Index {
             w.open_table(DISPUTE_RESOLUTIONS).map_err(db)?;
             w.open_table(HOLDER_COUNTS).map_err(db)?;
             w.open_table(LANDING_DEPTHS).map_err(db)?;
+            w.open_table(LANDING_WAITS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1257,11 +1330,13 @@ impl Index {
             let mut resolutions: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
-            // the capacity counts (TASK-2340): the keys this commit indexes first, and what they
-            // add
+            // the capacity counts (TASK-2340): the keys whose frame just indexed was their first,
+            // until that frame's links are charged, and what this commit adds. A later frame of
+            // the same key removes its mark, so only the first frame's links are charged however
+            // the frames split across commits
             let mut first: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
             let (mut add_objects, mut add_edges) = (0u64, 0u64);
-            let mut depths: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            let mut depths: Option<LandingDepthTables<'_>> = None;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -1271,6 +1346,8 @@ impl Index {
                         if new && crate::object_refs::is_portable(*kind) {
                             add_objects += 1;
                             first.insert(key);
+                        } else {
+                            first.remove(&key);
                         }
                         // the untyped entry keeps the first frame written with this hash
                         if objects.get(&hash.0[..]).map_err(db)?.is_none() {
@@ -1278,29 +1355,19 @@ impl Index {
                         }
                     }
                     IndexEntry::Links { kind, hash, links } => {
-                        if first.contains(&typed_key(*kind, hash)) {
+                        if first.remove(&typed_key(*kind, hash)) {
                             add_edges += links;
                         }
                     }
                     IndexEntry::LandingDepth { landing, prev } => {
                         let t = match &mut depths {
                             Some(t) => t,
-                            None => depths.insert(w.open_table(LANDING_DEPTHS).map_err(db)?),
+                            None => depths.insert(LandingDepthTables {
+                                depths: w.open_table(LANDING_DEPTHS).map_err(db)?,
+                                waits: w.open_table(LANDING_WAITS).map_err(db)?,
+                            }),
                         };
-                        if t.get(&landing.0[..]).map_err(db)?.is_none() {
-                            let before = match prev {
-                                Some(p) => t
-                                    .get(&p.0[..])
-                                    .map_err(db)?
-                                    .map(|v| u64_from(v.value()))
-                                    .transpose()?
-                                    .unwrap_or(0),
-                                None => 0,
-                            };
-                            let depth = before.saturating_add(1);
-                            t.insert(&landing.0[..], &depth.to_le_bytes()[..])
-                                .map_err(db)?;
-                        }
+                        t.fold(landing, prev.as_ref())?;
                     }
                     IndexEntry::Producer { version, change } => {
                         let mut key = [0u8; 64];
@@ -1768,6 +1835,7 @@ impl Index {
             dispute_resolutions: dump_table(&r, DISPUTE_RESOLUTIONS)?,
             holder_counts: dump_table(&r, HOLDER_COUNTS)?,
             landing_depths: dump_table(&r, LANDING_DEPTHS)?,
+            landing_waits: dump_table(&r, LANDING_WAITS)?,
             first_briefed_change: r
                 .open_table(META)
                 .map_err(db)?
@@ -1792,7 +1860,8 @@ impl Index {
         Ok((get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?))
     }
 
-    /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it.
+    /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it and its whole
+    /// chain.
     pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(LANDING_DEPTHS).map_err(db)?;
