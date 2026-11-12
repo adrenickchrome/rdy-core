@@ -65,6 +65,32 @@ fn exceeds(limit: String) -> StoreError {
     StoreError::Refused(format!("{LIMIT_PREFIX}{limit}"))
 }
 
+/// The bound texts of the holder check (p-FM4CS), one per bound: `{n} objects`, `{n} edges` and
+/// `{n} landing depth`. The check's refusals and the take's capacity guard (TASK-2340) both use
+/// them.
+pub(crate) fn objects_limit(n: usize) -> String {
+    format!("{n} objects")
+}
+
+/// See [`objects_limit`].
+pub(crate) fn edges_limit(n: usize) -> String {
+    format!("{n} edges")
+}
+
+/// See [`objects_limit`].
+pub(crate) fn depth_limit(n: usize) -> String {
+    format!("{n} landing depth")
+}
+
+/// The whole text of a holder check refusal past `limit`: `holder check exceeds {limit}`.
+pub(crate) fn exceeds_text(limit: &str) -> String {
+    format!("{LIMIT_PREFIX}{limit}")
+}
+
+/// The fix of a take the capacity guard refuses (TASK-2340).
+pub(crate) const CAPACITY_FIX: &str =
+    "keep the project; this holder takes no more history until its limit is raised";
+
 /// The bound named by a holder check's refusal (`100000 landing depth`, `1000000 objects` or
 /// `1000000 edges`), or `None` for any other error.
 pub fn holder_check_limit(e: &StoreError) -> Option<&str> {
@@ -132,7 +158,7 @@ impl<'a> Closure<'a> {
             return Ok(false);
         }
         if self.seen.len() >= self.limits.objects {
-            return Err(exceeds(format!("{} objects", self.limits.objects)));
+            return Err(exceeds(objects_limit(self.limits.objects)));
         }
         self.seen.insert(key);
         Ok(true)
@@ -156,7 +182,7 @@ impl<'a> Closure<'a> {
             for r in refs {
                 self.edges += 1;
                 if self.edges > self.limits.edges {
-                    return Err(exceeds(format!("{} edges", self.limits.edges)));
+                    return Err(exceeds(edges_limit(self.limits.edges)));
                 }
                 let kind = match r.kind {
                     Some(k) => {
@@ -275,7 +301,7 @@ fn walk_chain<E: From<StoreError>>(
     let mut cur = Some(*head);
     while let Some(h) = cur {
         if out.len() >= depth {
-            return Err(exceeds(format!("{depth} landing depth")).into());
+            return Err(exceeds(depth_limit(depth)).into());
         }
         if !on.insert(h) {
             return Err(bad(format!("landing {h} is on its own chain twice")).into());
@@ -417,7 +443,7 @@ impl StoreReader {
                     break;
                 }
                 if path.len() >= depth {
-                    return Err(exceeds(format!("{depth} landing depth")));
+                    return Err(exceeds(depth_limit(depth)));
                 }
                 if !on.insert(h) {
                     return Err(bad(format!("landing {h} is on its own chain twice")));
@@ -426,7 +452,7 @@ impl StoreReader {
                 path.push(h);
             }
             if path.len() + below > depth {
-                return Err(exceeds(format!("{depth} landing depth")));
+                return Err(exceeds(depth_limit(depth)));
             }
             let n = path.len();
             for (i, h) in path.into_iter().enumerate() {

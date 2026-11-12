@@ -19,7 +19,8 @@ use rdy_store::stream_error::StreamError;
 use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{StreamHeader, StreamReader, StreamRecord};
 use rdy_store::take_batch::{
-    BatchTaken, TagChoice, TakeError, UploadFacts, UploadTarget, check_input_bounds,
+    BatchTaken, HolderCapacity, TagChoice, TakeError, UploadFacts, UploadTarget,
+    check_input_bounds, set_holder_capacity_for_tests,
 };
 use rdy_store::{Store, StoreReader};
 use redaction_fixture::{ORIGIN, enc, segment_bytes};
@@ -1826,6 +1827,223 @@ fn tcw_a_full_layout_that_resends_held_records_is_taken() {
     let got = take(&mut h, &open(&[path]), &target).unwrap();
     assert_eq!(got.new_objects as usize, records.len() - resent);
     h.check_holder().unwrap();
+}
+
+// tcw (TASK-2340; D-BPYN8, p-7QDPC): the take keeps its holder within what the holder check
+// reads, whether the closure walk ended early or not
+
+/// Sets the take's capacity bounds on this thread for the guard's life.
+struct Capacity;
+
+impl Capacity {
+    fn set(landing_depth: u64, objects: u64, edges: u64) -> Capacity {
+        set_holder_capacity_for_tests(Some(HolderCapacity {
+            landing_depth,
+            objects,
+            edges,
+        }));
+        Capacity
+    }
+}
+
+impl Drop for Capacity {
+    fn drop(&mut self) {
+        set_holder_capacity_for_tests(None);
+    }
+}
+
+/// What a holder holds after taking `v2` too: its counts and `v2`'s landing depth, read from a
+/// second holder that takes the same files with the default bounds.
+fn tcw_after(
+    src: &Src,
+    v1_target: &UploadTarget,
+    v1: &[PathBuf],
+    target: &UploadTarget,
+    v2: &Path,
+) -> (u64, u64, u64) {
+    let (_, mut other) = holder(src, "other");
+    take(&mut other, &open(v1), v1_target).unwrap();
+    take(&mut other, &open(&[v2.to_path_buf()]), target).unwrap();
+    let (objects, edges) = other.reader().holder_counts().unwrap();
+    let depth = other
+        .reader()
+        .landing_depth(&target.landing)
+        .unwrap()
+        .unwrap();
+    (objects, edges, depth)
+}
+
+fn capacity_err(e: TakeError<StreamError>, text: &str) {
+    let e = stream_err(e);
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_LIMIT",
+            text,
+            "keep the project; this holder takes no more history until its limit is raised"
+        )
+    );
+}
+
+/// A source of `n` landings tagged `v1.1`, its whole-closure files and target, a holder that
+/// holds them, and the new-only upload of `v2` (two landings more).
+fn tcw_capacity_setup(
+    n: usize,
+) -> (
+    Src,
+    UploadTarget,
+    Vec<PathBuf>,
+    Store,
+    UploadTarget,
+    PathBuf,
+) {
+    let src = source();
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, 0, n);
+    let v1 = tcw_tag(&mut s, "v1.1", last);
+    drop(s);
+    let v1_target = UploadTarget {
+        tag: "v1.1".into(),
+        landing: last,
+    };
+    let v1_paths = src.split(v1, 1, "v1-full");
+    let (_, mut h) = holder(&src, "h");
+    take(&mut h, &open(&v1_paths), &v1_target).unwrap();
+    let src = Src { tag: v1, ..src };
+    let known = tcw_known(&src);
+    let (target, path, _, _) = tcw_next(&src, 2, &known, "new");
+    (src, v1_target, v1_paths, h, target, path)
+}
+
+#[test]
+fn tcw_capacity_guard_refuses_one_past_each_bound_and_accepts_at_it() {
+    let (src, v1_target, v1_paths, mut h, target, path) = tcw_capacity_setup(10);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    // the source's first landing, ten more, then v2's two
+    assert_eq!(depth, 13);
+    let end = h.log_end();
+    for (bounds, text) in [
+        (
+            (depth, objects - 1, edges),
+            format!("holder check exceeds {} objects", objects - 1),
+        ),
+        (
+            (depth, objects, edges - 1),
+            format!("holder check exceeds {} edges", edges - 1),
+        ),
+        (
+            (depth - 1, objects, edges),
+            format!("holder check exceeds {} landing depth", depth - 1),
+        ),
+    ] {
+        let _c = Capacity::set(bounds.0, bounds.1, bounds.2);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap_err(),
+            &text,
+        );
+        assert_eq!(h.log_end(), end, "{text}");
+        assert_eq!(h.get_ref("tag/v2").unwrap(), None, "{text}");
+    }
+    // at every bound the take is accepted, and the holder passes its check at the same bounds
+    {
+        let _c = Capacity::set(depth, objects, edges);
+        take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    }
+    assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
+    h.check_holder_bounded_for_tests(depth as usize, objects as usize, edges as usize)
+        .unwrap();
+    // the depth is exact: one less is past the chain the check reads. The object and edge
+    // counts are upper bounds (a held signature is no forward link of a tag, so the check may
+    // read fewer)
+    let err = h
+        .check_holder_bounded_for_tests(depth as usize - 1, objects as usize, edges as usize)
+        .unwrap_err();
+    let text = format!("{} landing depth", depth - 1);
+    assert_eq!(
+        rdy_store::check_holder::holder_check_limit(&err),
+        Some(text.as_str())
+    );
+}
+
+#[test]
+fn tcw_early_exit_take_is_refused_once_the_holder_would_pass_its_bounds() {
+    // the case the closure walk's early exit accepts with no holder bound: new records only,
+    // past a long held history
+    let (src, v1_target, v1_paths, mut h, target, path) = tcw_capacity_setup(60);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    let (held, _) = h.reader().holder_counts().unwrap();
+    assert!(held < objects);
+    // a holder full already refuses it
+    {
+        let _c = Capacity::set(depth, held, edges);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap_err(),
+            &format!("holder check exceeds {held} objects"),
+        );
+    }
+    // one that fits takes it, and passes its check at the same bounds
+    let _c = Capacity::set(depth, objects, edges);
+    take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    h.check_holder_bounded_for_tests(depth as usize, objects as usize, edges as usize)
+        .unwrap();
+}
+
+#[test]
+fn tcw_capacity_counts_and_depths_survive_reopen_and_reindex() {
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(30);
+    take(&mut h, &open(&[path]), &target).unwrap();
+    let r = h.reader();
+    let counts = r.holder_counts().unwrap();
+    // the chain from v2's landing: the source's first landing, thirty more, then two
+    assert_eq!(r.landing_depth(&target.landing).unwrap(), Some(33));
+    assert_eq!(r.landing_depth(&src.landing).unwrap(), Some(1));
+    let dump = h.index_dump_for_tests().unwrap();
+    assert!(!dump.holder_counts.is_empty() && dump.landing_depths.len() == 33);
+    drop(r);
+    let root = src.dir.path().join("h");
+    drop(h);
+    let mut h = Store::open(&root).unwrap();
+    assert_eq!(h.reader().holder_counts().unwrap(), counts);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    h.reindex().unwrap();
+    assert_eq!(h.reader().holder_counts().unwrap(), counts);
+    assert_eq!(h.reader().landing_depth(&target.landing).unwrap(), Some(33));
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_an_index_without_the_capacity_tables_is_rebuilt_at_open() {
+    // an index written before the capacity counts never reads them as zero: the open refuses
+    // it and rebuilds it from the log, with the same counts and depths
+    for table in ["holder_counts", "landing_depths"] {
+        let (src, _, _, mut h, target, path) = tcw_capacity_setup(5);
+        take(&mut h, &open(&[path]), &target).unwrap();
+        let dump = h.index_dump_for_tests().unwrap();
+        let counts = h.reader().holder_counts().unwrap();
+        drop(h);
+        let root = src.dir.path().join("h");
+        let file = root.join("index.redb");
+        {
+            let raw = redb::Database::create(&file).unwrap();
+            let w = raw.begin_write().unwrap();
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(table);
+            assert!(w.delete_table(def).unwrap(), "the table was there");
+            w.commit().unwrap();
+        }
+        match rdy_store::index::Index::open(&file) {
+            Err(rdy_store::StoreError::Db(m)) => assert_eq!(
+                m,
+                "the index has no capacity counts; it is rebuilt from the log"
+            ),
+            Err(e) => panic!("another refusal: {e}"),
+            Ok(_) => panic!("an index without {table} opened"),
+        }
+        let h = Store::open(&root).unwrap();
+        assert!(h.open_report().index_rebuilt, "{table}");
+        assert_eq!(h.index_dump_for_tests().unwrap(), dump, "{table}");
+        assert_eq!(h.reader().holder_counts().unwrap(), counts, "{table}");
+    }
 }
 
 /// Bench only (TASK-2324): a take of only the new records of `v2` past about 5,000 held

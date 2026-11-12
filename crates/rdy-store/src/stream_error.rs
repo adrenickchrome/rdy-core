@@ -260,6 +260,12 @@ impl StreamError {
         )
     }
 
+    /// E_LIMIT: a take that would put its holder past what the holder check reads (TASK-2340):
+    /// `message` is the holder check's own refusal text, `fix` the capacity fix.
+    pub(crate) fn capacity(message: String, fix: &str) -> Self {
+        Self::new(E_LIMIT, message, fix, None, 0)
+    }
+
     /// E_LIMIT: a bounded buffer could not be reserved.
     pub fn allocation(record: Option<u64>, offset: u64) -> Self {
         Self::new(

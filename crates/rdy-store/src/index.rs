@@ -101,6 +101,24 @@ const DISPUTE_LANDINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("di
 /// resolution's hash: every resolution of every dispute, in log order.
 const DISPUTE_RESOLUTIONS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("dispute_resolutions");
+/// The holder's capacity counts (TASK-2340), derived from the log in log order so a reindex
+/// rebuilds them: key `objects` -> the number of distinct (kind, hash) keys of portable kinds the
+/// index holds; key `edges` -> the sum, over those keys, of the object links
+/// (`portable_refs_of`) of the first present frame indexed for each, as the holder check counts
+/// links. Both are u64 little-endian. They are upper bounds of what the holder check reads
+/// (`crate::check_holder`): it reads at most every held object, and follows each one's links
+/// once. The edge count follows the holder check's own counting; a change to that counting (a
+/// future snapshot_delta feature) is recounted by a reindex.
+const HOLDER_COUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_counts");
+/// The [`HOLDER_COUNTS`] key of the object count.
+const OBJECTS_COUNT_KEY: &[u8] = b"objects";
+/// The [`HOLDER_COUNTS`] key of the edge count.
+const EDGES_COUNT_KEY: &[u8] = b"edges";
+/// A landing's hash (32 bytes) -> its chain depth, u64 little-endian (TASK-2340): one for a
+/// landing with no `prev`, else its `prev`'s depth plus one (a `prev` the index does not hold
+/// counts as depth 0). A log-order fold, as the open tensions are; the first frame of a landing
+/// keeps its row.
+const LANDING_DEPTHS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_depths");
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -139,6 +157,19 @@ pub enum IndexEntry {
         kind: u8,
         hash: Hash,
         loc: Location,
+    },
+    /// The object links (`portable_refs_of`) of the present frame of (kind, hash) just indexed:
+    /// added to the holder's edge count when that frame was the key's first (TASK-2340).
+    Links {
+        kind: u8,
+        hash: Hash,
+        links: u64,
+    },
+    /// A landing and the landing before it: the landing's chain depth is folded from its
+    /// `prev`'s (TASK-2340).
+    LandingDepth {
+        landing: Hash,
+        prev: Option<Hash>,
     },
     /// `change` has an op that produces `version`; a version keeps every producer.
     Producer {
@@ -456,6 +487,8 @@ pub struct IndexDump {
     pub assessment_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
     pub dispute_landings: BTreeMap<Vec<u8>, Vec<u8>>,
     pub dispute_resolutions: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub holder_counts: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub landing_depths: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The `meta` value of the first briefed change's location, if any.
     pub first_briefed_change: Option<Vec<u8>>,
 }
@@ -1086,6 +1119,17 @@ impl Index {
                 "the index has no dispute tables; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the capacity counts and the landing depths (TASK-2340): a count is never
+        // read as zero for objects the index already holds
+        if has(OBJECTS.name())
+            && [&HOLDER_COUNTS, &LANDING_DEPTHS]
+                .iter()
+                .any(|t| !has(t.name()))
+        {
+            return Err(StoreError::Db(
+                "the index has no capacity counts; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1115,6 +1159,8 @@ impl Index {
             w.open_table(ASSESSMENT_PROPOSALS).map_err(db)?;
             w.open_table(DISPUTE_LANDINGS).map_err(db)?;
             w.open_table(DISPUTE_RESOLUTIONS).map_err(db)?;
+            w.open_table(HOLDER_COUNTS).map_err(db)?;
+            w.open_table(LANDING_DEPTHS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1211,16 +1257,49 @@ impl Index {
             let mut resolutions: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
+            // the capacity counts (TASK-2340): the keys this commit indexes first, and what they
+            // add
+            let mut first: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
+            let (mut add_objects, mut add_edges) = (0u64, 0u64);
+            let mut depths: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
                         let at = enc(loc);
-                        typed
-                            .insert(&typed_key(*kind, hash)[..], &at[..])
-                            .map_err(db)?;
+                        let key = typed_key(*kind, hash);
+                        let new = typed.insert(&key[..], &at[..]).map_err(db)?.is_none();
+                        if new && crate::object_refs::is_portable(*kind) {
+                            add_objects += 1;
+                            first.insert(key);
+                        }
                         // the untyped entry keeps the first frame written with this hash
                         if objects.get(&hash.0[..]).map_err(db)?.is_none() {
                             objects.insert(&hash.0[..], &at[..]).map_err(db)?;
+                        }
+                    }
+                    IndexEntry::Links { kind, hash, links } => {
+                        if first.contains(&typed_key(*kind, hash)) {
+                            add_edges += links;
+                        }
+                    }
+                    IndexEntry::LandingDepth { landing, prev } => {
+                        let t = match &mut depths {
+                            Some(t) => t,
+                            None => depths.insert(w.open_table(LANDING_DEPTHS).map_err(db)?),
+                        };
+                        if t.get(&landing.0[..]).map_err(db)?.is_none() {
+                            let before = match prev {
+                                Some(p) => t
+                                    .get(&p.0[..])
+                                    .map_err(db)?
+                                    .map(|v| u64_from(v.value()))
+                                    .transpose()?
+                                    .unwrap_or(0),
+                                None => 0,
+                            };
+                            let depth = before.saturating_add(1);
+                            t.insert(&landing.0[..], &depth.to_le_bytes()[..])
+                                .map_err(db)?;
                         }
                     }
                     IndexEntry::Producer { version, change } => {
@@ -1426,6 +1505,23 @@ impl Index {
             }
             if applied_removal {
                 meta.insert(ERASE_DUE_KEY, &[1u8][..]).map_err(db)?;
+            }
+            if add_objects > 0 || add_edges > 0 {
+                let mut counts = w.open_table(HOLDER_COUNTS).map_err(db)?;
+                for (key, add) in [
+                    (OBJECTS_COUNT_KEY, add_objects),
+                    (EDGES_COUNT_KEY, add_edges),
+                ] {
+                    let was = counts
+                        .get(key)
+                        .map_err(db)?
+                        .map(|v| u64_from(v.value()))
+                        .transpose()?
+                        .unwrap_or(0);
+                    counts
+                        .insert(key, &was.saturating_add(add).to_le_bytes()[..])
+                        .map_err(db)?;
+                }
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
         }
@@ -1670,6 +1766,8 @@ impl Index {
             assessment_proposals: dump_table(&r, ASSESSMENT_PROPOSALS)?,
             dispute_landings: dump_table(&r, DISPUTE_LANDINGS)?,
             dispute_resolutions: dump_table(&r, DISPUTE_RESOLUTIONS)?,
+            holder_counts: dump_table(&r, HOLDER_COUNTS)?,
+            landing_depths: dump_table(&r, LANDING_DEPTHS)?,
             first_briefed_change: r
                 .open_table(META)
                 .map_err(db)?
@@ -1677,6 +1775,31 @@ impl Index {
                 .map_err(db)?
                 .map(|v| v.value().to_vec()),
         })
+    }
+
+    /// The capacity counts (TASK-2340): the distinct portable objects the index holds and the
+    /// sum of their object links ([`HOLDER_COUNTS`]).
+    pub fn holder_counts(&self) -> Result<(u64, u64), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(HOLDER_COUNTS).map_err(db)?;
+        let get = |key: &[u8]| -> Result<u64, StoreError> {
+            t.get(key)
+                .map_err(db)?
+                .map(|v| u64_from(v.value()))
+                .transpose()
+                .map(|v| v.unwrap_or(0))
+        };
+        Ok((get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?))
+    }
+
+    /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it.
+    pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(LANDING_DEPTHS).map_err(db)?;
+        t.get(&landing.0[..])
+            .map_err(db)?
+            .map(|v| u64_from(v.value()))
+            .transpose()
     }
 
     /// The seal of `landing` and its location, if one is indexed.
@@ -2701,4 +2824,11 @@ fn diagram_count(
         .map_err(db)?
         .and_then(|v| <[u8; 8]>::try_from(v.value()).ok())
         .map(u64::from_le_bytes))
+}
+
+/// A count or depth value of the capacity tables: 8 bytes little-endian.
+fn u64_from(v: &[u8]) -> Result<u64, StoreError> {
+    <[u8; 8]>::try_from(v)
+        .map(u64::from_le_bytes)
+        .map_err(|_| StoreError::Db("a capacity count is not 8 bytes".into()))
 }

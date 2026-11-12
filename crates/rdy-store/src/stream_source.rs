@@ -1641,7 +1641,9 @@ mod tcw_tests {
     #[test]
     fn tcw_walk_ends_once_every_upload_key_is_reached() {
         // only new records past a long held history: the walk reads no held record, and the
-        // held history is never charged to the bounds (a whole walk would pass both)
+        // held history is never charged to the walk's bounds (a whole walk would pass both).
+        // The holder's own capacity is the take's separate guard (TASK-2340,
+        // `take_batch::check_capacity`), which runs whether the walk ends early or not
         let (mut f, root, input) = history(10_000);
         walk(&mut f, root, &input, 4, 3).unwrap();
         assert_eq!(f.held_reads, 0);

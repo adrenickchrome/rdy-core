@@ -37,6 +37,11 @@
 //!    place.
 //! 7. An intact CHANGE that embeds an approved block version and that no approval covers, in the
 //!    holder or in the union, is `UncoveredChange`.
+//!    Then the holder's capacity (TASK-2340, `check_capacity`): the take refuses a batch after
+//!    which the holder would hold more than the holder check reads (more objects or object
+//!    links than its bounds, over the whole holder, from the index's derived counts, or a new
+//!    landing deeper than its chain bound), E_LIMIT with the holder check's own text. It runs
+//!    whether the closure walk of step 5 ended early or not.
 //! 8. The caller's check (`check`) runs once, with the union and the holder as its source; its
 //!    choice selects which tag survives. With `Incoming`, the take writes `tag/<name>`. Either
 //!    way the root TAG is stored, and for every TAG object of the union whose relay answer the
@@ -738,6 +743,128 @@ fn residue(source: &mut UploadSource, r: Hash) -> Result<(RedactionResidue, u16)
     Ok((res, encoding))
 }
 
+/// The bounds a take keeps its holder within (TASK-2340): the holder check's own
+/// (`crate::check_holder`), so a holder that takes a batch can still pass its check.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HolderCapacity {
+    /// The deepest landing chain.
+    pub landing_depth: u64,
+    /// The most distinct objects.
+    pub objects: u64,
+    /// The most object links.
+    pub edges: u64,
+}
+
+impl HolderCapacity {
+    /// The holder check's bounds.
+    pub const DEFAULT: HolderCapacity = HolderCapacity {
+        landing_depth: crate::check_holder::MAX_LANDING_DEPTH as u64,
+        objects: crate::check_holder::MAX_OBJECTS as u64,
+        edges: crate::check_holder::MAX_EDGES as u64,
+    };
+
+    fn current() -> HolderCapacity {
+        CAPACITY
+            .with(|c| c.get())
+            .unwrap_or(HolderCapacity::DEFAULT)
+    }
+}
+
+thread_local! {
+    /// Lowered capacity bounds for this thread (test hook); None is the default.
+    static CAPACITY: std::cell::Cell<Option<HolderCapacity>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test hook: lowers the take's capacity bounds on this thread (None puts the holder check's
+/// back), so a test pins N and N+1 without a holder of a million objects. A take on this thread
+/// uses them; pair it with `StoreReader::check_holder_bounded_for_tests` at the same bounds.
+#[doc(hidden)]
+pub fn set_holder_capacity_for_tests(bounds: Option<HolderCapacity>) {
+    CAPACITY.with(|c| c.set(bounds));
+}
+
+/// The take's capacity guard (TASK-2340; D-BPYN8, p-7QDPC). The holder check reads the whole
+/// holder within its bounds, and every upgrade, load and fsck of a holder runs it, so a take
+/// refuses a batch after which the check could not: more than [`HolderCapacity::objects`]
+/// objects or [`HolderCapacity::edges`] object links over the whole holder (the index's derived
+/// counts, `StoreReader::holder_counts`, upper bounds of what the check reads, plus what this
+/// batch writes), or a new landing deeper than [`HolderCapacity::landing_depth`] in its chain
+/// (its `prev`'s depth, `StoreReader::landing_depth` for a held one, plus one). The edge count
+/// follows the holder check's counting (`portable_refs_of` of each present record; a future
+/// snapshot_delta feature changes it, and a reindex recounts). It costs index reads and the
+/// batch's own records, never a walk of the holder, and it runs whether the closure walk ended
+/// early or not. The refusal is E_LIMIT with the holder check's own text.
+fn check_capacity(
+    reader: &StoreReader,
+    source: &mut UploadSource<'_>,
+    writes: &BTreeMap<ObjectKey, (Write, Vec<ObjectKey>)>,
+) -> Result<(), StreamError> {
+    use crate::check_holder::{
+        CAPACITY_FIX, depth_limit, edges_limit, exceeds_text, objects_limit,
+    };
+    let bounds = HolderCapacity::current();
+    let refuse = |limit: String| StreamError::capacity(exceeds_text(&limit), CAPACITY_FIX);
+    let (held_objects, held_edges) = reader.holder_counts().map_err(|e| store_error(e, None))?;
+    let (mut objects, mut edges) = (held_objects, held_edges);
+    for (key, (w, _)) in writes {
+        if !crate::object_refs::is_portable(key.kind) {
+            continue;
+        }
+        objects += 1;
+        if let Write::Present { .. } = w
+            && key.kind != kinds::BLOB_CHUNK
+            && let Some(e) = source.union.get(key)
+        {
+            edges += e.refs.len() as u64;
+        }
+    }
+    if objects > bounds.objects {
+        return Err(refuse(objects_limit(bounds.objects as usize)));
+    }
+    if edges > bounds.edges {
+        return Err(refuse(edges_limit(bounds.edges as usize)));
+    }
+    // each new landing's depth: its chain through the batch's new landings down to a held one
+    let too_deep = || refuse(depth_limit(bounds.landing_depth as usize));
+    let mut depth: std::collections::HashMap<Hash, u64> = std::collections::HashMap::new();
+    for key in writes.keys().filter(|k| k.kind == kinds::LANDING) {
+        let mut chain: Vec<Hash> = Vec::new();
+        let mut cur = Some(key.hash);
+        let mut base = 0u64;
+        while let Some(h) = cur {
+            if let Some(d) = depth.get(&h) {
+                base = *d;
+                break;
+            }
+            let k = ObjectKey {
+                kind: kinds::LANDING,
+                hash: h,
+            };
+            if !writes.contains_key(&k) {
+                base = reader
+                    .landing_depth(&h)
+                    .map_err(|e| store_error(e, Some(k)))?
+                    .unwrap_or(0);
+                break;
+            }
+            chain.push(h);
+            if chain.len() as u64 > bounds.landing_depth {
+                return Err(too_deep());
+            }
+            cur = stream_source::typed::<rdy_model::LandingRecord>(source, k)?.and_then(|l| l.prev);
+        }
+        for (i, h) in chain.iter().rev().enumerate() {
+            let d = base + i as u64 + 1;
+            if d > bounds.landing_depth {
+                return Err(too_deep());
+            }
+            depth.insert(*h, d);
+        }
+    }
+    Ok(())
+}
+
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
 /// caller's check, and the frames to write in canonical order.
 pub(crate) fn prepare<E>(
@@ -1054,6 +1181,8 @@ pub(crate) fn prepare<E>(
         }
         scan?;
     }
+    // the holder's capacity: after this batch the holder check can still read the whole holder
+    check_capacity(reader, &mut source, &writes)?;
     // 8. the caller's check, with removed objects as their drops
     for (k, by) in &approved {
         if let Some((apply, t)) = by.first() {
