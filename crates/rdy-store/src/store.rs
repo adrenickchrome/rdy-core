@@ -234,6 +234,33 @@ pub struct Store {
     /// `append_and_index` between the two. The upgrade's commit (`commit_upgrade_refs`) reads it
     /// to keep a batch whose index update failed after its sync.
     synced_unindexed: bool,
+    /// Whether the last [`Store::roll_back`] cut the log back: `None` until one runs. Read by
+    /// [`Store::seal_reporting`], which clears it first.
+    last_rollback: Option<bool>,
+}
+
+/// What became of a held batch the store could not seal or was asked to abandon (plan M4bc): an
+/// import tells a confirmed rollback from one it cannot prove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rollback {
+    /// No batch was open, so nothing was cut.
+    NothingOpen,
+    /// The log was cut back to the batch's start: no frame of the batch stays. The handle is
+    /// poisoned until reopen (its index holds entries of the cut frames).
+    Confirmed,
+    /// The cut failed or never ran: frames of the batch may stay in the log, and a complete
+    /// marked batch (its seal wrote the marker) survives reopen and reindex. The handle is
+    /// poisoned until reopen.
+    Unproven,
+}
+
+/// A failed [`Store::seal_reporting`]: the error, and what became of the batch.
+#[derive(Debug)]
+pub struct SealFailure {
+    pub error: StoreError,
+    /// `None` when the seal was refused before anything was appended: the batch is still open,
+    /// as it was. Else [`Rollback::Confirmed`] or [`Rollback::Unproven`].
+    pub rollback: Option<Rollback>,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -1839,6 +1866,7 @@ impl Store {
             accept_pending: upgrade_pending,
             completion_pending: false,
             synced_unindexed: false,
+            last_rollback: None,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -2020,6 +2048,7 @@ impl Store {
             accept_pending: false,
             completion_pending: false,
             synced_unindexed: false,
+            last_rollback: None,
         };
         // the log's features are the store's; FORMAT is judged as the writable open judges it,
         // and never repaired
@@ -2501,6 +2530,27 @@ impl Store {
                 Err(e)
             }
         }
+    }
+
+    /// [`Store::seal`], reporting what became of the batch when it fails (plan M4bc): refused
+    /// before anything was appended (the batch is still open), cut back to its start (a
+    /// confirmed rollback), or neither proved (an unproven rollback, or a redaction apply whose
+    /// failure came after its sync). The store poisons and restores `FORMAT` exactly as `seal`
+    /// does.
+    pub fn seal_reporting(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<(), SealFailure> {
+        let was_open = self.open.is_some();
+        self.last_rollback = None;
+        self.seal(last).map_err(|error| {
+            let rollback = match self.last_rollback.take() {
+                Some(true) => Some(Rollback::Confirmed),
+                Some(false) => Some(Rollback::Unproven),
+                // nothing was cut: a refusal before any append leaves the batch as it was
+                None if self.open.is_some() || !was_open => None,
+                // a batch that is gone with no cut stays in the log
+                None => Some(Rollback::Unproven),
+            };
+            SealFailure { error, rollback }
+        })
     }
 
     /// `seal` once `last` decoded: its frames are indexed at their places once appended.
@@ -4594,16 +4644,25 @@ impl Store {
     /// rebuilds it from the log. Does nothing when no batch is open.
     ///
     /// The engine calls it when a batch that holds a redaction apply cannot be sealed with the
-    /// moves it computed (a preview or move failure before authorization).
-    pub fn abandon_open_batch(&mut self) {
+    /// moves it computed (a preview or move failure before authorization), and when an import
+    /// fails before its seal. Returns what became of the batch: [`Rollback::NothingOpen`],
+    /// [`Rollback::Confirmed`] (the log is cut back), or [`Rollback::Unproven`] (the cut
+    /// failed: the batch's unmarked frames may stay in the log until the next open sets them
+    /// aside).
+    pub fn abandon_open_batch(&mut self) -> Rollback {
         let Some(open) = self.open.take() else {
-            return;
+            return Rollback::NothingOpen;
         };
         let ahead = self.held_features.take().is_some();
         self.poison();
         self.stale_index = true;
-        if self.roll_back(open.start) && ahead {
-            self.restore_mirror();
+        if self.roll_back(open.start) {
+            if ahead {
+                self.restore_mirror();
+            }
+            Rollback::Confirmed
+        } else {
+            Rollback::Unproven
         }
     }
 
@@ -4617,6 +4676,7 @@ impl Store {
         if !rolled_back {
             self.poison();
         }
+        self.last_rollback = Some(rolled_back);
         rolled_back
     }
 

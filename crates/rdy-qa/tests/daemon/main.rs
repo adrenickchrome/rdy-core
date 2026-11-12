@@ -14,6 +14,7 @@ mod daemon_mcp_activity;
 mod daemon_mcp_http;
 mod daemon_mcp_http_native;
 mod daemon_mcp_token;
+mod daemon_migration;
 mod daemon_notify;
 mod daemon_pack_reads;
 mod daemon_redaction_reads;

@@ -565,7 +565,10 @@ pub fn dispatch_with(
                 "{version, landing?, message?, relayed_by?, evidence?, question?, session_ref?}",
             )?,
         ),
-        "import" => import(cx, parse(op, args, "{dir, view}")?),
+        "import" => import(
+            cx,
+            parse(op, args, "{dir, view, md?, dry_run?, expected_source?}")?,
+        ),
         "reindex" => {
             parse::<NoArgs>(op, args, "{}")?;
             reindex(cx)

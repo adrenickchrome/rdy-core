@@ -110,6 +110,77 @@ impl Rdy {
         }
     }
 
+    /// Publishes the open batch of an import (plan M4bc; modelled on `publish_removal`). Before
+    /// the seal, the next state is built (the foreign state read included) and the batch's
+    /// moves are computed against it; a failure or a panic of either abandons the whole batch
+    /// (`Rdy::abandon_import`) and publishes nothing: there is no fallback that seals without
+    /// the state or the moves. A seal refused before any append abandons the batch too; a
+    /// failed seal whose rollback is confirmed returns its own error; one whose rollback the
+    /// store cannot prove returns the indeterminate refusal. On a seal, the state is published
+    /// and the batch's events emitted as `publish` does. Ordinary writes keep `publish`.
+    pub(crate) fn publish_import(&mut self, delta: Delta) -> Result<(), RdyError> {
+        let recheck = self.recheck.take();
+        let prev = self.state.load_full();
+        // a state that holds an error has nothing to carry over
+        let delta = if prev.error.is_some() {
+            Delta::Full
+        } else {
+            delta
+        };
+        let built = crate::import_prepared::fault(crate::import_prepared::ImportFault::StateBuild)
+            .and_then(|()| self.next_state(&prev, delta));
+        let mut next = match built {
+            Ok(next) => next,
+            Err(e) => return Err(self.abandon_import(e)),
+        };
+        let rec = match self.import_moves(&prev, &next, recheck) {
+            Ok(rec) => rec,
+            Err(e) => return Err(self.abandon_import(e)),
+        };
+        let last = match &rec {
+            Some(r) if !r.is_empty() => {
+                debug_assert_eq!(r.invalid(), None, "{r:?}");
+                vec![r.frame()]
+            }
+            _ => vec![],
+        };
+        if let Err(f) = self.store.seal_reporting(last) {
+            return Err(match f.rollback {
+                None => self.abandon_import(f.error.into()),
+                Some(rdy_store::Rollback::Unproven) => {
+                    crate::import_prepared::import_indeterminate()
+                }
+                Some(_) => f.error.into(),
+            });
+        }
+        next.seq = self.store.log_end();
+        let next = Arc::new(next);
+        if rec.is_some() {
+            // the sealed moves fold the log to this state
+            self.logged = Some(Arc::clone(&next));
+            self.transition_error = None;
+        }
+        self.state.store(next);
+        self.emit_last_batch();
+        Ok(())
+    }
+
+    /// The moves of the open import batch, computed against `next` by the closed rule of
+    /// `seal_with_moves` (`None` when the batch computes none). Any error, or a panic, is
+    /// returned: the caller abandons the batch.
+    fn import_moves(
+        &self,
+        prev: &ReadState,
+        next: &ReadState,
+        recheck: Option<Cause>,
+    ) -> Result<Option<TransitionsV1>, RdyError> {
+        let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
+        let Some(cause) = self.batch_cause(&frames, recheck) else {
+            return Ok(None);
+        };
+        self.compute_moves(prev, next, &frames, cause).map(Some)
+    }
+
     /// Seals the open batch (or writes a batch of its own) with the moves between the logged
     /// state and `next`, by the closed rule: a batch with a frame that can move something logs
     /// under its own cause; else `recheck` names the cause (a `recheck` before anything was

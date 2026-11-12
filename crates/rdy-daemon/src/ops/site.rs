@@ -62,6 +62,12 @@ fn closed<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, RdyError> {
 pub(super) struct ImportArgs {
     dir: String,
     view: String,
+    #[serde(default)]
+    md: Option<bool>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    expected_source: Option<String>,
 }
 
 pub(super) fn render(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
@@ -151,11 +157,17 @@ pub(crate) fn export_print(
     Ok(to_json(&summary))
 }
 
-/// The import op: the engine's import reply (`run_import`, which the chat tool shares) for the
-/// session as it is. A writer, a reviewer and a person's approver import under the role rule of
-/// every write (D-Y9DNZ); the engine refuses a reader and canon.
+/// The import op: the engine's import reply (`run_import_with`, which the chat tool shares) for
+/// the session as it is, with the Markdown options `md`, `dry_run` and `expected_source`. A
+/// writer, a reviewer and a person's approver import under the role rule of every write
+/// (D-Y9DNZ); the engine refuses a reader and canon.
 pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let view = view_of(cx.session, Some(a.view));
     let dir = resolve_path(cx.cwd, &a.dir);
-    rdy_engine::import_api::run_import(cx.engine, cx.session, &view, &dir)
+    let options = rdy_engine::import_api::ImportOptions {
+        md: a.md.unwrap_or(false),
+        dry_run: a.dry_run.unwrap_or(false),
+        expected_source: a.expected_source,
+    };
+    rdy_engine::import_api::run_import_with(cx.engine, cx.session, &view, &dir, &options)
 }

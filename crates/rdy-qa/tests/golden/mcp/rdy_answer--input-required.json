@@ -3,7 +3,7 @@
     "answer": {
       "method": "elicitation/create",
       "params": {
-        "message": "P-fda8caebd31c@1  one                                         approve\n\nSummary (human:qa)\n  Adds one claim.\n\nFacts (computed)\n  Changes         1 doc, 1 block\n  Justification   none\n  Decisions       none\n  Supersedes      none\n  Re-affirms      none\n  Reversibility   none\n  Consequences    1 returned\n  Change plan     1 open, 0 closed, 0 deferred\n  Tensions        0 blocking, 0 advisory\n  Coverage        73% → 75%\n  Confidence      medium: untied_content on c-MPAR5\n  Base            canon at 46ddec7fa052, current\n  Exceptions      none\n  Policy          needs a person: no authority policy is set\n\nOptions\n  1. Approve P-fda8caebd31c@1                       recommended\n     Lands the proposal in canon.\n     Why recommended: its checks pass and nothing blocks it\n  2. Reject\n     Returns the proposal to its view. Canon does not change.\n  3. Later\n     Hides this card until the chat session changes.",
+        "message": "P-b5b224218e7c@1  one                                         approve\n\nSummary (human:qa)\n  Adds one claim.\n\nFacts (computed)\n  Changes         1 doc, 1 block\n  Justification   none\n  Decisions       none\n  Supersedes      none\n  Re-affirms      none\n  Reversibility   none\n  Consequences    1 returned\n  Change plan     1 open, 0 closed, 0 deferred\n  Tensions        0 blocking, 0 advisory\n  Coverage        73% → 75%\n  Confidence      medium: untied_content on c-MPAR5\n  Base            canon at bbeaa00364bc, current\n  Exceptions      none\n  Policy          needs a person: no authority policy is set\n\nOptions\n  1. Approve P-b5b224218e7c@1                       recommended\n     Lands the proposal in canon.\n     Why recommended: its checks pass and nothing blocks it\n  2. Reject\n     Returns the proposal to its view. Canon does not change.\n  3. Later\n     Hides this card until the chat session changes.",
         "mode": "form",
         "requestedSchema": {
           "properties": {
@@ -11,7 +11,7 @@
               "oneOf": [
                 {
                   "const": "approve",
-                  "title": "Approve P-fda8caebd31c@1 (Recommended)"
+                  "title": "Approve P-b5b224218e7c@1 (Recommended)"
                 },
                 {
                   "const": "reject",

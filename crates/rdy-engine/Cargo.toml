@@ -16,6 +16,8 @@ serde_yaml_ng.workspace = true
 thiserror.workspace = true
 semver.workspace = true
 saphyr-parser.workspace = true
+# Markdown import (`markdown_import`): the CommonMark event parser, tables on.
+pulldown-cmark.workspace = true
 imbl.workspace = true
 arc-swap.workspace = true
 regex.workspace = true

@@ -172,16 +172,32 @@ pub struct ImportParams {
     pub dir: String,
     /// The view to import into. Import never writes canon.
     pub view: String,
+    /// Read dir as a Markdown source, not a format-3 tree. Default false.
+    #[serde(default)]
+    pub md: Option<bool>,
+    /// Preview the Markdown import and write nothing. Needs md: true. Default false.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    /// The source_digest of a preview. The import refuses when the source changed. Needs md: true.
+    #[serde(default)]
+    pub expected_source: Option<String>,
 }
 
-/// `rdy_import`: imports the format-3 tree at `dir` into `view` as this session (D-Y9DNZ). The
-/// session is resolved first, then the path (a relative `dir` is under the project directory),
-/// then the engine imports under the ordinary write rule: a reader is refused, canon is never
-/// written, and the reply is the import reply the command line shares. The session is never
-/// widened: an agent stays an agent, and a person approves imported statuses at landing.
+/// `rdy_import`: imports the format-3 tree at `dir` into `view` as this session (D-Y9DNZ), or with
+/// `md` the Markdown source at `dir` (D-19BZD): `dry_run` previews it and writes nothing, and
+/// `expected_source` is the digest a preview gave. The session is resolved first, then the path
+/// (a relative `dir` is under the project directory), then the engine imports under the ordinary
+/// write rule: a reader is refused, canon is never written, and the reply is the import reply the
+/// command line shares. The session is never widened: an agent stays an agent, and a person
+/// approves imported statuses at landing.
 pub fn rdy_import(st: &mut McpState, p: ImportParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let view = p.view.strip_prefix("view:").unwrap_or(&p.view).to_string();
     let dir = st.engine.root().join(&p.dir);
-    rdy_engine::import_api::run_import(&*st.engine, &s, &view, &dir)
+    let options = rdy_engine::import_api::ImportOptions {
+        md: p.md.unwrap_or(false),
+        dry_run: p.dry_run.unwrap_or(false),
+        expected_source: p.expected_source,
+    };
+    rdy_engine::import_api::run_import_with(&*st.engine, &s, &view, &dir, &options)
 }

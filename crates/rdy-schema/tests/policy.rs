@@ -1022,3 +1022,32 @@ fn rtc1_policy_rejects_typos_kinds_and_bad_values() {
     assert_eq!(found[0].code, "E_FIELD_UNKNOWN");
     assert!(found[0].fix.contains("rules_from_chat"), "{}", found[0].fix);
 }
+
+#[test]
+fn m4bc1_reconstructed_adds_no_policy_permission() {
+    // D-E4W0Y: `reconstructed` is a local decision basis only. A policy rule's closed basis
+    // list refuses it, with the same text as any value the list does not hold.
+    let pack = with_areas();
+    let mut r0 = rule("r0");
+    r0.insert("decisions".into(), s("two_way"));
+    r0.insert("two_way_areas".into(), list(&["payments"]));
+    r0.insert("basis".into(), list(&["reconstructed"]));
+    assert_eq!(
+        errors(&pack, &with_rules(vec![r0.clone()])),
+        vec![issue(
+            "E_FIELD_KIND",
+            "agent_may_accept[0].basis[0]",
+            "must be delegated, precedent, elimination or none"
+        )]
+    );
+    // beside a listed value, the listed value passes and only `reconstructed` is reported
+    r0.insert("basis".into(), list(&["precedent", "reconstructed"]));
+    assert_eq!(
+        errors(&pack, &with_rules(vec![r0])),
+        vec![issue(
+            "E_FIELD_KIND",
+            "agent_may_accept[0].basis[1]",
+            "must be delegated, precedent, elimination or none"
+        )]
+    );
+}

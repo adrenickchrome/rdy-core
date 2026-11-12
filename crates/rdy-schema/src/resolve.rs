@@ -433,6 +433,7 @@ fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
                     "precedent",
                     "elimination",
                     "none",
+                    "reconstructed",
                 ],
             ),
         ),

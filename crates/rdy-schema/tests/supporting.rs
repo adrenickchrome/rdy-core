@@ -605,7 +605,8 @@ fn rf1_delegated_is_an_enum_value() {
             "delegated",
             "precedent",
             "elimination",
-            "none"
+            "none",
+            "reconstructed"
         ]
     );
     let decision = |b: &str| {
@@ -623,6 +624,7 @@ fn rf1_delegated_is_an_enum_value() {
             "precedent",
             "elimination",
             "none",
+            "reconstructed",
         ] {
             let d = decision(b);
             let found: Vec<_> = validate_block(&p, &d, Some(&section()))
@@ -632,16 +634,54 @@ fn rf1_delegated_is_an_enum_value() {
             assert_eq!(found, vec![], "{} {b}", p.name);
         }
     }
-    for b in ["external", "reconstructed", "unknown", "Delegated"] {
+    for b in [
+        "external",
+        "inferred",
+        "unknown",
+        "Delegated",
+        "Reconstructed",
+    ] {
         assert_eq!(
             issues(&decision(b)),
             vec![(
                 "E_FIELD_ENUM",
                 format!("field \"authority_basis\" has value {b:?}"),
-                "use one of: direct_ruling, recorded_ruling, delegated, precedent, elimination, none"
+                "use one of: direct_ruling, recorded_ruling, delegated, precedent, elimination, none, reconstructed"
                     .to_string()
             )],
             "{b}"
         );
+    }
+}
+
+#[test]
+fn m4bc1_reconstructed_is_a_local_basis_in_every_pack() {
+    // D-E4W0Y: the value is the last of the closed list and is injected with the decision type
+    // into every pack, built in or custom, with no required companion field.
+    let mut set = PackSet::with_builtin();
+    let extending = set
+        .add_yaml("name: team2\nversion: \"1\"\nextends: rdy-standard\n")
+        .unwrap();
+    let extending = set.resolve(&extending).unwrap();
+    for p in [standard(), bare(), custom(), extending] {
+        let basis = &p.block_types["decision"].fields["authority_basis"];
+        assert_eq!(basis.kind, FieldKind::Enum, "{}", p.name);
+        assert!(!basis.required, "{}", p.name);
+        assert_eq!(
+            basis.values.last().map(String::as_str),
+            Some("reconstructed")
+        );
+        assert_eq!(basis.values.len(), 7, "{}", p.name);
+        let mut d = block("D-AAAAA", "decision", Some("s-SECT1"));
+        d.fields
+            .insert("statement".into(), s("Inferred from the code."));
+        d.fields.insert("status".into(), s("proposed"));
+        d.fields
+            .insert("authority_basis".into(), s("reconstructed"));
+        let found: Vec<_> = validate_block(&p, &d, Some(&section()))
+            .into_iter()
+            .filter(|i| i.code.starts_with("E_FIELD"))
+            .collect();
+        assert_eq!(found, vec![], "{}", p.name);
     }
 }

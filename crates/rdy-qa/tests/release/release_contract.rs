@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4a-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4bc-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -97,12 +97,12 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root exists")
 }
 
-/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json` and
-/// `mcp-http-v1.json`, all frozen) with the additions since. A capture writes this file, never a
-/// baseline. It starts as a byte copy of `mcp-http-v1.json`, whose bytes
-/// `mht8_http_contract_capture_is_complete` pins; a later contract change is a successor fixture.
+/// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
+/// `mcp-http-v1.json` and `m4a-v1.json`, all frozen) with the additions since. A capture writes
+/// this file, never a baseline. It starts as a byte copy of `m4a-v1.json`, whose bytes
+/// `m4a5_contract_changes_only_hook_surfaces` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/m4a-v1.json")
+    qa_root().join("fixtures/contracts/m4bc-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -2321,6 +2321,63 @@ fn hook_decision(dir: &Path) -> String {
 /// warnings and skipped files: checks that warn, pass and cannot finish, a refused form, installs
 /// and removes that write, keep, remove and skip a file, the two host entry points, and setup
 /// with both options and with a repo that is not linked.
+/// A Markdown source for the import probes: two docs that link, a raw HTML line (an `unmapped`
+/// row with a line) and a picture (a reported file, line 0).
+fn write_markdown_source(root: &Path) {
+    for (rel, text) in [
+        ("a.md", "# Alpha\n\nSee [beta](sub/b.md).\n\n<b>html</b>\n"),
+        ("sub/b.md", "# Beta\n\nText.\n"),
+        ("pics/one.png", "png"),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+        std::fs::write(path, text).expect("a source file");
+    }
+}
+
+/// m4bc5: `rdy import --md`, a preview, the import it describes and the refusal of a flag
+/// without `--md`, in a project of their own so no other probe meets the view they make.
+fn cli_markdown_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, project) = project();
+    drop(project);
+    let md = tempfile::tempdir().expect("a Markdown source");
+    write_markdown_source(md.path());
+    let md_dir = md.path().to_string_lossy().into_owned();
+    let preview = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "import md preview",
+        &["import", &md_dir, "--view", "mdv", "--md", "--dry-run"],
+    );
+    let digest = preview["source_digest"]
+        .as_str()
+        .expect("the preview has a digest")
+        .to_string();
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "import md",
+        &[
+            "import",
+            &md_dir,
+            "--view",
+            "mdv",
+            "--md",
+            "--expected-source",
+            &digest,
+        ],
+    );
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "import md without flag",
+        &["import", &md_dir, "--view", "mdv", "--dry-run"],
+    );
+}
+
 fn cli_hook_probes(seen: &mut Seen) {
     let h = HookWorld::new();
     let root = h.root.clone();
@@ -2660,6 +2717,7 @@ fn cli_runtime() -> Value {
     cli_publication_probes(&mut seen, &env);
     cli_links_probes(&mut seen, &env);
     cli_hook_probes(&mut seen);
+    cli_markdown_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -3576,6 +3634,40 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
     assert!(
         imported["created"].is_object(),
         "the writer's import succeeds: {imported}"
+    );
+    // m4bc5: the Markdown import. A preview, the import it describes, and the refusal of an
+    // option without `md`. The old probes above keep their inputs and their shapes.
+    let md = tempfile::tempdir().expect("a Markdown source");
+    write_markdown_source(md.path());
+    let md_dir = md.path().to_string_lossy().into_owned();
+    let preview = ok_of(&mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import md preview",
+        json!({"dir": md_dir, "view": "imp-md", "md": true, "dry_run": true}),
+    ));
+    let digest = preview["source_digest"].clone();
+    assert!(digest.is_string(), "the preview has a digest: {preview}");
+    let md_imported = ok_of(&mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import md",
+        json!({"dir": md_dir, "view": "imp-md", "md": true, "expected_source": digest}),
+    ));
+    assert!(
+        md_imported["unmapped"]
+            .as_array()
+            .is_some_and(|u| !u.is_empty()),
+        "the Markdown import reports what it kept as text: {md_imported}"
+    );
+    mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import md without flag",
+        json!({"dir": md_dir, "view": "imp-md", "dry_run": true}),
     );
     drop(im);
     let mut rdr = isolated_mcp(dir);
@@ -6395,7 +6487,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// with a home of their own and a project with no instruction set, so every row and menu entry
 /// is built in, and those store no reason and name no selector; setup in a clean home warns of
 /// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
-/// empty; the warnings of its hooks are in `hooks`.
+/// empty; the warnings of its hooks are in `hooks`. m4bc5: the Markdown import's reply holds the
+/// same empty write-report arrays as the format-3 import's, and its refusal states no issue rows.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -6415,6 +6508,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/diff/stdout/entries[]/repinned",
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
+    "cli/import md/stdout/consequences",
+    "cli/import md/stdout/on_change/checks",
+    "cli/import md/stdout/on_change/resolved",
+    "cli/import md/stdout/on_change/tensions",
+    "cli/import md/stdout/suggestions",
     "cli/inbox/stdout/entries",
     "cli/instructions full/stdout/instructions[]/reason",
     "cli/instructions full/stdout/menu[]/hints",
@@ -6545,6 +6643,12 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/repinned",
     "mcp/rdy_hook check/refused/issues",
     "mcp/rdy_hook install/refused/issues",
+    "mcp/rdy_import md without flag/refused/issues",
+    "mcp/rdy_import md/ok/consequences",
+    "mcp/rdy_import md/ok/on_change/checks",
+    "mcp/rdy_import md/ok/on_change/resolved",
+    "mcp/rdy_import md/ok/on_change/tensions",
+    "mcp/rdy_import md/ok/suggestions",
     "mcp/rdy_import reader/refused/issues",
     "mcp/rdy_import unknown key/refused/issues",
     "mcp/rdy_import/ok/consequences",
@@ -8640,5 +8744,379 @@ fn m4a5_contract_changes_only_hook_surfaces() {
     assert_eq!(
         sha(&m4a5_fixture("mcp-http-v1.json").0),
         "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de"
+    );
+}
+
+/// m4bc1: the members of `m4bc-v1.json` that differ from its predecessor `m4a-v1.json`, as
+/// `added|removed|changed <path>`. Closed: a member that is not here is byte-identical. The
+/// fixtures' lists of identified entries are compared by identity (see [`m4a5_keyed`]); a list
+/// without identities is one member.
+///
+/// Task 1 admits one enum value, so one schema member changes. The derived-identities scenario
+/// hashes the pack into every landing id, so the ids and lines built from a landing id change with
+/// it; [`m4bc1_basis_contract_changes_only_the_allowed_enum`] shows those changes are id text only.
+const M4BC_CHANGES: &[(&str, &str)] = &[
+    (
+        "changed /schema_packs/rdy_standard/block_types/decision/fields/authority_basis/values",
+        "m4bc1",
+    ),
+    (
+        "added /derived_identities/scenario/tensions/tn-31af126dccec",
+        "m4bc1",
+    ),
+    (
+        "removed /derived_identities/scenario/tensions/tn-b193a13b5413",
+        "m4bc1",
+    ),
+    (
+        "removed /derived_identities/scenario/tensions/tn-bc2501dbc52a",
+        "m4bc1",
+    ),
+    (
+        "added /derived_identities/scenario/tensions/tn-c7804141f02d",
+        "m4bc1",
+    ),
+    (
+        "changed /derived_identities/scenario/inboxes/agent:a/a",
+        "m4bc1",
+    ),
+    (
+        "changed /derived_identities/scenario/logged_tensions",
+        "m4bc1",
+    ),
+];
+
+/// `v` with every run of 12 to 64 lowercase hexadecimal digits, in strings and in keys, replaced
+/// by `#`: the shape of the value without its derived identifiers.
+fn m4bc1_without_ids(v: &Value) -> Value {
+    fn mask(s: &str) -> String {
+        let mut out = String::new();
+        let mut run = String::new();
+        let flush = |out: &mut String, run: &mut String| {
+            if (12..=64).contains(&run.len()) {
+                out.push('#');
+            } else {
+                out.push_str(run);
+            }
+            run.clear();
+        };
+        for c in s.chars() {
+            if c.is_ascii_digit() || ('a'..='f').contains(&c) {
+                run.push(c);
+            } else {
+                flush(&mut out, &mut run);
+                out.push(c);
+            }
+        }
+        flush(&mut out, &mut run);
+        out
+    }
+    match v {
+        Value::String(s) => Value::String(mask(s)),
+        Value::Array(a) => Value::Array(a.iter().map(m4bc1_without_ids).collect()),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .map(|(k, x)| (mask(k), m4bc1_without_ids(x)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn m4bc1_basis_contract_changes_only_the_allowed_enum() {
+    let (old_bytes, old) = m4a5_fixture("m4a-v1.json");
+    let (_, new) = m4a5_fixture("m4bc-v1.json");
+
+    // every changed member is listed, and none else moved
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    // Task 5's import rows are listed in `M4BC5_CHANGES` and pinned by
+    // `m4bc5_contract_diff_is_only_basis_and_import_additions`
+    found.retain(|f| !M4BC5_CHANGES.contains(&f.as_str()));
+    let mut want: Vec<String> = M4BC_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    found.sort();
+    want.sort();
+    assert_eq!(
+        found, want,
+        "every changed path of m4bc-v1.json is listed, and none else"
+    );
+
+    // the one schema change: the closed list gains `reconstructed` at its end, in that one pack
+    // member; the policy's own basis list and every other type are as they were
+    let at = "/schema_packs/rdy_standard/block_types/decision/fields/authority_basis/values";
+    let values = |v: &Value| -> Vec<String> {
+        v.pointer(at)
+            .and_then(Value::as_array)
+            .expect("the basis values")
+            .iter()
+            .map(|s| s.as_str().expect("a string").to_string())
+            .collect()
+    };
+    let mut expect = values(&old);
+    assert_eq!(
+        expect,
+        [
+            "direct_ruling",
+            "recorded_ruling",
+            "delegated",
+            "precedent",
+            "elimination",
+            "none"
+        ]
+    );
+    expect.push("reconstructed".to_string());
+    assert_eq!(values(&new), expect);
+
+    // the derived-identities change is id text only: with every derived hexadecimal identifier
+    // masked, the section is as it was (counts, event names, conflict sets, wording)
+    assert_eq!(
+        m4bc1_without_ids(&new["derived_identities"]),
+        m4bc1_without_ids(&old["derived_identities"]),
+        "the scenario changed beyond its derived identifiers"
+    );
+    for member in [
+        "conflict_id",
+        "consequence_id",
+        "domains",
+        "pair_key",
+        "scenario/conflicts",
+        "scenario/events",
+    ] {
+        let p = format!("/derived_identities/{member}");
+        assert_eq!(new.pointer(&p), old.pointer(&p), "{p} moved");
+    }
+
+    // nothing is removed from the predecessor outside the renamed tension ids, and the other
+    // predecessors keep their bytes
+    assert!(
+        found
+            .iter()
+            .filter(|f| f.starts_with("removed "))
+            .all(|f| f.starts_with("removed /derived_identities/scenario/tensions/tn-")),
+        "{found:#?}"
+    );
+    for member in [
+        "/config",
+        "/dump_load",
+        "/errors_warnings",
+        "/inventory_version",
+        "/markdown_exports",
+        "/signatures",
+        "/site_urls",
+        "/store",
+        "/sync",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    let sha = |bytes: &[u8]| -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(sha(&old_bytes), M4A_V1_SHA, "m4a-v1.json is frozen");
+}
+
+/// m4bc5: the members of `m4bc-v1.json` that Task 5 changes after Task 1's, as
+/// `added|changed <path>` in the fixtures' keyed paths (see [`m4a5_keyed`]). Closed: the import
+/// tool's three options, the import command's three flags and their group, and the new probes of
+/// the Markdown import. Every one is an addition but the group's argument list.
+const M4BC5_CHANGES: &[&str] = &[
+    "added /cli/runtime/probes/import md",
+    "added /cli/runtime/probes/import md preview",
+    "added /cli/runtime/probes/import md without flag",
+    "added /cli/tree/subcommands/name=import/args/id=dry_run",
+    "added /cli/tree/subcommands/name=import/args/id=expected_source",
+    "added /cli/tree/subcommands/name=import/args/id=md",
+    "changed /cli/tree/subcommands/name=import/groups/id=ImportArgs/args",
+    "added /mcp/result_fields/rdy_import md",
+    "added /mcp/result_fields/rdy_import md preview",
+    "added /mcp/result_fields/rdy_import md without flag",
+    "added /mcp/tools/rdy_import/input_schema/properties/dry_run",
+    "added /mcp/tools/rdy_import/input_schema/properties/expected_source",
+    "added /mcp/tools/rdy_import/input_schema/properties/md",
+];
+
+#[test]
+fn m4bc5_contract_diff_is_only_basis_and_import_additions() {
+    let (_, old) = m4a5_fixture("m4a-v1.json");
+    let (_, new) = m4a5_fixture("m4bc-v1.json");
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+
+    // Task 1's rows are listed in `M4BC_CHANGES`; every other changed member is Task 5's, and
+    // each is the import tool or the import command
+    let task1: Vec<String> = M4BC_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    for path in &task1 {
+        assert!(found.contains(path), "{path} is no longer a change");
+    }
+    let mut mine: Vec<String> = found
+        .iter()
+        .filter(|f| !task1.contains(f))
+        .cloned()
+        .collect();
+    let mut want: Vec<String> = M4BC5_CHANGES.iter().map(|p| (*p).to_string()).collect();
+    mine.sort();
+    want.sort();
+    assert_eq!(
+        mine, want,
+        "every changed path after Task 1's is listed, and none else"
+    );
+    // nothing the predecessor records is gone, and the one changed member is a group's list
+    assert!(found.iter().all(|f| !f.starts_with("removed ")
+        || f.starts_with("removed /derived_identities/scenario/tensions/tn-")));
+
+    // the tool: the three options are optional; `dir` and `view` stay required
+    let schema = &new["mcp"]["tools"]["rdy_import"]["input_schema"];
+    let props = schema["properties"].as_object().expect("properties");
+    let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["dir", "dry_run", "expected_source", "md", "view"]);
+    assert_eq!(schema["required"], json!(["dir", "view"]));
+    assert_eq!(schema["additionalProperties"], json!(false));
+    for (k, ty) in [
+        ("md", "boolean"),
+        ("dry_run", "boolean"),
+        ("expected_source", "string"),
+    ] {
+        let t = &props[k]["type"];
+        assert!(*t == json!(ty) || *t == json!([ty, "null"]), "{k}: {t}");
+    }
+    // the two words that were there are as they were
+    assert_eq!(
+        props["dir"],
+        old["mcp"]["tools"]["rdy_import"]["input_schema"]["properties"]["dir"]
+    );
+    assert_eq!(
+        props["view"],
+        old["mcp"]["tools"]["rdy_import"]["input_schema"]["properties"]["view"]
+    );
+    // no tool is added or removed: the inventory is the predecessor's
+    assert_eq!(new["mcp"]["tool_names"], old["mcp"]["tool_names"]);
+    assert_eq!(
+        new["mcp"]["tools"].as_object().unwrap().len(),
+        old["mcp"]["tools"].as_object().unwrap().len()
+    );
+    for (name, spec) in old["mcp"]["tools"].as_object().unwrap() {
+        if name != "rdy_import" {
+            assert_eq!(&new["mcp"]["tools"][name], spec, "{name} moved");
+        }
+    }
+
+    // the old import probes keep their bytes; the new ones are separate rows
+    for label in ["rdy_import", "rdy_import reader", "rdy_import unknown key"] {
+        assert_eq!(
+            new["mcp"]["result_fields"][label], old["mcp"]["result_fields"][label],
+            "{label} moved"
+        );
+    }
+    for label in [
+        "rdy_import md preview",
+        "rdy_import md",
+        "rdy_import md without flag",
+    ] {
+        assert!(old["mcp"]["result_fields"].get(label).is_none(), "{label}");
+        assert!(new["mcp"]["result_fields"].get(label).is_some(), "{label}");
+    }
+    let md = &new["mcp"]["result_fields"]["rdy_import md preview"]["ok"];
+    assert_eq!(
+        shape_keys(md),
+        ["blocks", "dry_run", "files", "source_digest", "unmapped"]
+    );
+    assert_eq!(shape_keys(&md["files"][0]), ["blocks", "doc_key", "path"]);
+    assert_eq!(shape_keys(&md["unmapped"][0]), ["kind", "line", "path"]);
+    let imported = &new["mcp"]["result_fields"]["rdy_import md"]["ok"];
+    for k in ["source_digest", "files", "unmapped", "created", "changes"] {
+        assert!(imported.get(k).is_some(), "{k}");
+    }
+    assert_eq!(
+        shape_keys(&new["mcp"]["result_fields"]["rdy_import md without flag"]["refused"]),
+        ["code", "fix", "issues", "message"]
+    );
+
+    // the command: its flags, in the clap tree, and the probes of the Markdown forms
+    let command = |v: &Value| -> Value {
+        v["cli"]["tree"]["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "import")
+            .cloned()
+            .expect("import")
+    };
+    let flags = |v: &Value| -> Vec<String> {
+        command(v)["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["long"].as_str().map(str::to_string))
+            .collect()
+    };
+    let (was, now) = (flags(&old), flags(&new));
+    for long in ["md", "dry-run", "expected-source"] {
+        assert!(
+            !was.contains(&long.to_string()) && now.contains(&long.to_string()),
+            "{long}"
+        );
+    }
+    assert_eq!(command(&new)["subcommands"], command(&old)["subcommands"]);
+    for command in new["cli"]["tree"]["subcommands"].as_array().unwrap() {
+        if command["name"] != "import" {
+            let was = old["cli"]["tree"]["subcommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == command["name"])
+                .expect("a command of the predecessor");
+            assert_eq!(command, was, "{} moved", command["name"]);
+        }
+    }
+    let (op, np) = (
+        old["cli"]["runtime"]["probes"].as_object().unwrap(),
+        new["cli"]["runtime"]["probes"].as_object().unwrap(),
+    );
+    for (label, row) in op {
+        assert_eq!(&np[label], row, "{label} moved");
+    }
+    let added: Vec<&String> = np.keys().filter(|k| !op.contains_key(*k)).collect();
+    assert_eq!(
+        added,
+        ["import md", "import md preview", "import md without flag"]
+    );
+    assert_eq!(
+        np["import md without flag"]["stderr"],
+        json!({"code": "string", "fix": "string", "message": "string"})
+    );
+    assert_eq!(
+        new["cli"]["runtime"]["not_probed_commands"],
+        old["cli"]["runtime"]["not_probed_commands"]
+    );
+
+    // every other row is the predecessor's but for Task 1's ids and enum
+    for member in [
+        "/config",
+        "/dump_load",
+        "/errors_warnings",
+        "/inventory_version",
+        "/markdown_exports",
+        "/signatures",
+        "/site_urls",
+        "/store",
+        "/sync",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    assert_eq!(
+        m4bc1_without_ids(&new["derived_identities"]),
+        m4bc1_without_ids(&old["derived_identities"])
+    );
+    // the guards read the released baseline, and it never moves
+    let released = read_released();
+    assert_ne!(
+        released["mcp"]["tools"]["rdy_import"],
+        new["mcp"]["tools"]["rdy_import"]
     );
 }

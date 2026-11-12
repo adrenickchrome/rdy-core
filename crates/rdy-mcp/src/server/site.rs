@@ -43,7 +43,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Import a format-3 tree from dir into view. Needs a writer session. The tree's authors stay recorded, and imported_by names this session. Imported accepted or rejected decisions need a person's approval before they land."
+        description = "Import a format-3 tree from dir into view. Needs a writer session. The tree's authors stay recorded, and imported_by names this session. Imported accepted or rejected decisions need a person's approval before they land. With md: true, dir is a Markdown source: dry_run previews it and writes nothing, and expected_source (the source_digest of a preview) refuses the import when the source changed."
     )]
     async fn rdy_import(&self, Parameters(p): Parameters<ImportParams>) -> CallToolResult {
         self.run("rdy_import", p, tools::rdy_import).await
