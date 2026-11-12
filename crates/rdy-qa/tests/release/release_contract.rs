@@ -8834,6 +8834,8 @@ fn m4bc1_basis_contract_changes_only_the_allowed_enum() {
     // Task 5's import rows are listed in `M4BC5_CHANGES` and pinned by
     // `m4bc5_contract_diff_is_only_basis_and_import_additions`
     found.retain(|f| !M4BC5_CHANGES.contains(&f.as_str()));
+    // the take guard's new fix text is pinned by `tcw_contract_adds_only_the_capacity_fix_text`
+    found.retain(|f| !TCW_CHANGES.contains(&f.as_str()));
     let mut want: Vec<String> = M4BC_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
     found.sort();
     want.sort();
@@ -8908,7 +8910,11 @@ fn m4bc1_basis_contract_changes_only_the_allowed_enum() {
         "/sync",
         "/working_copy",
     ] {
-        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+        assert_eq!(
+            tcw_without_capacity_fix(&new).pointer(member),
+            old.pointer(member),
+            "{member} moved"
+        );
     }
     let sha = |bytes: &[u8]| -> String {
         Sha256::digest(bytes)
@@ -8923,6 +8929,54 @@ fn m4bc1_basis_contract_changes_only_the_allowed_enum() {
 /// `added|changed <path>` in the fixtures' keyed paths (see [`m4a5_keyed`]). Closed: the import
 /// tool's three options, the import command's three flags and their group, and the new probes of
 /// the Markdown import. Every one is an addition but the group's argument list.
+/// The publication take's holder capacity guard adds one fix text to the public contract: the
+/// refusal's own words are new, and no other member moves. Pinned by
+/// [`tcw_contract_adds_only_the_capacity_fix_text`].
+const TCW_CHANGES: &[&str] = &["added /errors_warnings/templates/CAPACITY_FIX"];
+
+/// `doc` without the one member [`TCW_CHANGES`] adds, for the pins that hold a section as it was.
+fn tcw_without_capacity_fix(doc: &Value) -> Value {
+    let mut doc = doc.clone();
+    if let Some(t) = doc
+        .pointer_mut("/errors_warnings/templates")
+        .and_then(Value::as_object_mut)
+    {
+        t.remove("CAPACITY_FIX");
+    }
+    doc
+}
+
+/// tcw: the capacity guard's contract change is exactly one added template, and its text is the
+/// guard's fix text in `rdy-store`'s holder check.
+#[test]
+fn tcw_contract_adds_only_the_capacity_fix_text() {
+    let (_, old) = m4a5_fixture("m4a-v1.json");
+    let (_, new) = m4a5_fixture("m4bc-v1.json");
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    for path in TCW_CHANGES {
+        assert!(
+            found.iter().any(|f| f == path),
+            "{path} is no longer a change"
+        );
+    }
+    assert!(old["errors_warnings"]["templates"]["CAPACITY_FIX"].is_null());
+    let source =
+        std::fs::read_to_string(workspace_root().join("crates/rdy-store/src/check_holder.rs"))
+            .expect("the holder check source");
+    let text = "keep the project; this holder takes no more history until its limit is raised";
+    assert!(
+        source.contains(&format!(
+            "pub(crate) const CAPACITY_FIX: &str =\n    \"{text}\";"
+        )),
+        "the guard's fix text moved"
+    );
+    assert_eq!(
+        new["errors_warnings"]["templates"]["CAPACITY_FIX"],
+        json!(format!("\"{text}\""))
+    );
+}
+
 const M4BC5_CHANGES: &[&str] = &[
     "added /cli/runtime/probes/import md",
     "added /cli/runtime/probes/import md preview",
@@ -8954,7 +9008,7 @@ fn m4bc5_contract_diff_is_only_basis_and_import_additions() {
     }
     let mut mine: Vec<String> = found
         .iter()
-        .filter(|f| !task1.contains(f))
+        .filter(|f| !task1.contains(f) && !TCW_CHANGES.contains(&f.as_str()))
         .cloned()
         .collect();
     let mut want: Vec<String> = M4BC5_CHANGES.iter().map(|p| (*p).to_string()).collect();
@@ -9107,7 +9161,11 @@ fn m4bc5_contract_diff_is_only_basis_and_import_additions() {
         "/sync",
         "/working_copy",
     ] {
-        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+        assert_eq!(
+            tcw_without_capacity_fix(&new).pointer(member),
+            old.pointer(member),
+            "{member} moved"
+        );
     }
     assert_eq!(
         m4bc1_without_ids(&new["derived_identities"]),
