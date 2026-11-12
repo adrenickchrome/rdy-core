@@ -50,8 +50,9 @@
 //! one no record of the batch needs is not. The take verifies every prerequisite again; a claim
 //! is no authorization. A known key the source does not hold is not walked.
 //!
-//! The upload's bounds are charged to the walk: at most [`MAX_RECORDS`] records and
-//! [`MAX_EDGES`] distinct references of each record, summed, known records included.
+//! The walk charges to the upload's bounds (p-VCW8D) only what the upload holds; see
+//! [`WalkBounds`]. A known record, and every edge it carries, charges nothing, so an incremental
+//! upload past a long held history is bounded by what it sends.
 //!
 //! # Carried removals
 //!
@@ -103,6 +104,40 @@ pub struct Closure {
     pub prerequisites: Vec<ObjectKey>,
 }
 
+/// The bounds the walk of a closure charges, as one upload holds them (p-VCW8D: "One batch, and
+/// one upload, hold at most ... 1,000,000 object records and 1,000,000 dependency edges").
+///
+/// The walk charges only what the upload holds (TASK-2329):
+///
+/// - a record is charged to `records` when it is emitted: found by the walk and not in `known`.
+///   A known record is walked through but charges nothing;
+/// - an edge is charged to `edges` when an emitted record carries it: each distinct link of an
+///   emitted record (after kind resolution) and the removal proof it names, whatever the target.
+///   An edge from an emitted record to a known record (or to a known key the source does not
+///   hold) is a dependency edge the upload holds, so it is charged; the receiver counts it too.
+///   An edge that a known record carries is not charged, even when its target is emitted: the
+///   upload does not hold it.
+///
+/// The dependency chain bound ([`MAX_HISTORY_DEPTH`]) is not a field: [`dependency_order`] runs
+/// over the emitted records only (a link to a known key is no step of the order), so it already
+/// charges only the chain the upload holds. With nothing known, every record and edge the walk
+/// finds is charged, as for a full export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkBounds {
+    /// The most emitted records.
+    pub records: u64,
+    /// The most dependency edges the emitted records carry, summed.
+    pub edges: u64,
+}
+
+impl WalkBounds {
+    /// One upload's bounds: [`MAX_RECORDS`] records and [`MAX_EDGES`] edges.
+    pub const UPLOAD: WalkBounds = WalkBounds {
+        records: MAX_RECORDS,
+        edges: MAX_EDGES,
+    };
+}
+
 /// The closure of the TAG `tag` that `reader` holds, less the keys in `known`.
 pub fn closure(
     reader: &StoreReader,
@@ -120,6 +155,19 @@ pub fn closure_before(
     known: &BTreeSet<ObjectKey>,
     end: Location,
 ) -> Result<Closure, StreamError> {
+    closure_within(reader, tag, known, end, WalkBounds::UPLOAD)
+}
+
+/// [`closure_before`] with the walk's record and edge bounds `bounds` (see [`WalkBounds`]); the
+/// product passes [`WalkBounds::UPLOAD`]. A refusal keeps the bound's text of [`MAX_RECORDS`] or
+/// [`MAX_EDGES`], whatever `bounds` holds.
+pub fn closure_within(
+    reader: &StoreReader,
+    tag: Hash,
+    known: &BTreeSet<ObjectKey>,
+    end: Location,
+    bounds: WalkBounds,
+) -> Result<Closure, StreamError> {
     let root = ObjectKey {
         kind: kinds::TAG,
         hash: tag,
@@ -130,6 +178,10 @@ pub fn closure_before(
         nodes: BTreeMap::new(),
         seen: HashSet::new(),
         queue: Vec::new(),
+        known,
+        bounds,
+        records: 0,
+        met: 0,
         edges: 0,
         asked: HashSet::new(),
         carried: uncovered_carried(reader, end)?,
@@ -139,7 +191,7 @@ pub fn closure_before(
         // forward links and the indexed attachments, to their fixed point
         loop {
             while let Some(k) = w.queue.pop() {
-                w.expand(k, known)?;
+                w.expand(k)?;
             }
             let fresh: Vec<ObjectKey> = w
                 .nodes
@@ -443,7 +495,15 @@ struct Walk<'a> {
     /// Every key met: a record found or queued, or a known key the source does not hold.
     seen: HashSet<ObjectKey>,
     queue: Vec<ObjectKey>,
-    /// The distinct references of the records found, summed.
+    /// The keys the receiver claims to hold.
+    known: &'a BTreeSet<ObjectKey>,
+    /// The bounds the walk charges.
+    bounds: WalkBounds,
+    /// The emitted records found: not in `known`.
+    records: u64,
+    /// The keys met that are not in `known`.
+    met: usize,
+    /// The edges the emitted records carry, summed ([`WalkBounds`]).
     edges: u64,
     /// The landings and tags whose answers a pass looked for.
     asked: HashSet<Hash>,
@@ -464,17 +524,22 @@ struct Node {
     attached: bool,
 }
 
-/// The most keys a walk meets: its records and the known keys the source does not hold.
+/// The most objects a carried pass names: an upload's records and its prerequisites.
 const MAX_SEEN: usize = MAX_RECORDS as usize + MAX_PREREQUISITES;
 
 impl Walk<'_> {
-    /// Notes `k`: a key met for the first time is queued. The bound is checked before the sets
-    /// grow.
+    /// Notes `k`: a key met for the first time is queued. The bound (the record bound and the
+    /// header's prerequisites) is checked before the sets grow; a known key is not charged to
+    /// it, so the keys met stay within that bound and the size of `known`.
     fn reach(&mut self, k: ObjectKey) -> Result<(), StreamError> {
         if self.seen.contains(&k) {
             return Ok(());
         }
-        if self.seen.len() >= MAX_SEEN {
+        let charged = !self.known.contains(&k);
+        let bound = usize::try_from(self.bounds.records)
+            .unwrap_or(usize::MAX)
+            .saturating_add(MAX_PREREQUISITES);
+        if charged && self.met >= bound {
             return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
         }
         let grow = |_| StreamError::allocation(None, 0);
@@ -482,13 +547,16 @@ impl Walk<'_> {
         self.queue.try_reserve(1).map_err(grow)?;
         self.seen.insert(k);
         self.queue.push(k);
+        self.met += usize::from(charged);
         Ok(())
     }
 
     /// Reads record `k` and notes the keys it needs and the proof it names. A known key the
-    /// source does not hold is left as it is.
-    fn expand(&mut self, k: ObjectKey, known: &BTreeSet<ObjectKey>) -> Result<(), StreamError> {
-        if self.nodes.len() as u64 >= MAX_RECORDS {
+    /// source does not hold is left as it is. An emitted record (one not in `known`) and the
+    /// edges it carries are charged to the bounds ([`WalkBounds`]); a known record is not.
+    fn expand(&mut self, k: ObjectKey) -> Result<(), StreamError> {
+        let charged = !self.known.contains(&k);
+        if charged && self.records >= self.bounds.records {
             return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
         }
         if let Some(carried) = self.carried.get(&k) {
@@ -499,7 +567,7 @@ impl Walk<'_> {
             return Err(outside_closure(k));
         }
         let Some(record) = self.source.record(k)? else {
-            if known.contains(&k) {
+            if !charged {
                 return Ok(());
             }
             return Err(StreamError::unresolved(0, 0, k));
@@ -517,9 +585,12 @@ impl Walk<'_> {
         children.sort_unstable();
         children.dedup();
         let proof = record.proof();
-        self.edges += children.len() as u64 + u64::from(proof.is_some());
-        if self.edges > MAX_EDGES {
-            return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES).with_object(Some(k)));
+        if charged {
+            self.edges += children.len() as u64 + u64::from(proof.is_some());
+            if self.edges > self.bounds.edges {
+                return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES).with_object(Some(k)));
+            }
+            self.records += 1;
         }
         for c in children.iter().chain(&proof) {
             self.reach(*c)?;
