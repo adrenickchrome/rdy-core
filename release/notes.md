@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-This release adds MCP over HTTP, warning hooks for commits and agent edits, and Markdown import. It keeps the compatibility promise of Release 1. See "About Release 1" below.
+This small release makes a take into a holder faster. A holder is the store that keeps uploads for rdyhub. A take also refuses an upload that would take the holder past the limits of its check. A live site now uses less memory. For a project's store, the only change is that rdy 0.50.0 rebuilds its index once, at the first open. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -37,26 +37,26 @@ To install from the archive instead:
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.49.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.49.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.50.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.50.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.49.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.50.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.49.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
@@ -65,13 +65,13 @@ On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HO
 rdy --version
 ```
 
-It prints `rdy 0.49.0`.
+It prints `rdy 0.50.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
 ## Release key
 
-This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0 and 0.48.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.49.0:
+This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0 and 0.49.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.50.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
@@ -79,7 +79,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M`.
 
-Compare this line and fingerprint with the ones in the README at v0.49.0. Use the key only when both match.
+Compare this line and fingerprint with the ones in the README at v0.50.0. Use the key only when both match.
 
 ## Try it: your first project
 
@@ -147,52 +147,23 @@ Compare this line and fingerprint with the ones in the README at v0.49.0. Use th
 
    The site keeps running after `rdy site` exits. To stop it, close your agent's session first, then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. Your meta project has its own daemon: stop it with `rdy serve --stop --project ~/.rdy/meta`.
 
-## What changed since 0.48.0
-
-### New features
-
-- **MCP over HTTP.** An MCP client can connect to a project over HTTP, as well as over stdio. The endpoint is `/~mcp` on the project's live site, on loopback only. It is off by default.
-  - To turn it on, set `serve.mcp_http` to `true` in your user config (`~/.config/rdy/config.yaml`) or in the project's `.rdy/local.yaml`. The project config cannot turn it on.
-  - Run `rdy mcp --http-config` to get the endpoint's URL and its `Authorization: Bearer` header for your client, or add `--json` for JSON. The bearer is a secret. rdy makes it when the daemon first starts, keeps it in `.rdy/run/mcp-token`, and shows it only through this command.
-  - The endpoint refuses a request with no bearer (HTTP 401) and any request with an `Origin` header (HTTP 403). It takes the MCP protocol revisions 2025-06-18, 2025-11-25 and 2026-07-28.
-  - Over HTTP, rdy shows its own approval card only to a client on revision 2026-07-28. With an older revision, the call refuses with `E_ELICITATION_UNAVAILABLE`, and the agent shows the card in chat and relays your answer.
-  - Over HTTP, `rdy_session` and a call's `_meta` must name the same actor and run, or the call refuses with `E_BAD_INPUT`. One actor and run can have 8 calls waiting, and the endpoint holds 32 open listen requests. Past those limits, a call refuses with `E_LIMIT`.
-  - The tools are the same as over stdio. `rdy status` shows the endpoint, the reply of `rdy site` names it as `mcp_url`, and `rdy_overview` gets `mcp_http`, never the token.
-  - An HTTP call never starts the daemon, and a daemon that rdy started stops after 10 idle minutes. Then run an rdy command, such as `rdy mcp --http-config`, to start it again, or keep `rdy serve` running in a terminal. The URL names the site's port: set `serve.site_port` to keep the same URL across starts.
-- **Warning hooks.** Two optional hooks warn, and never refuse a commit or an edit. A plain `rdy setup` installs neither.
-  - The code hook is a Git `commit-msg` hook in a linked code repo. It warns with `W_HOOK_NO_CITATION` when a commit touches code anchored to a decision and has no `Implements:` trailer. Install it with `rdy setup --code-hook <repo>`.
-  - The edit hook is a Claude Code `PostToolUse` entry for `Edit` and `Write`, in `.claude/settings.local.json`. It warns with `W_HOOK_DIRECT_EDIT` when an agent edits rdy's working-copy files directly. Install it with `rdy setup --edit-hook claude-code`.
-  - `rdy hook install`, `rdy hook remove` and `rdy hook check` manage the hooks, and the hooks run `rdy hook run-code` and `rdy hook run-edit`. In chat, use the new tool `rdy_hook`. An install never overwrites a file that you changed: it leaves the file as it is, with `W_HOOK_CONFLICT`. A check that cannot finish within 2 seconds, or cannot reach the project, gives `W_HOOK_UNAVAILABLE`, and your work goes on.
-- **Markdown import.** Bring a folder of Markdown files into a view: `rdy import <dir> --view <name> --md`, or `rdy_import` with `md: true` in chat.
-  - Preview first with `--dry-run` (`dry_run: true`). It writes nothing. It shows the blocks for each file, a `source_digest`, and an unmapped report: the HTML, images, extensions, links, front matter and non-Markdown files that rdy did not map.
-  - Then import with `--expected-source <digest>` (`expected_source`). rdy refuses when the source changed after the preview. An import over its limits, such as 4,096 files or 64 MiB in all, refuses with `E_LIMIT`.
-  - Folders become folders, files become docs, headings become sections, and text, code and tables become blocks. A local link becomes a reference when it names one imported Markdown file. rdy infers no decision, status, author or relation: the importing session is the author.
-  - The `rdy:project-ops` ruleset of the agent guide takes an agent through a migration.
-- **Reconstructed decisions.** A new decision basis, `reconstructed`, marks a decision that an agent inferred from code or a running system, and that nobody ruled. Only a person can approve such a decision: no authority policy accepts it.
-- **More in the agent guide.** The built-in guide now covers how to revise a decision, how to sort design changes while you code, what to do when a block comes back a second time, onboarding phases, and Markdown and format-3 imports.
+## What changed since 0.49.0
 
 ### Changes
 
-- **No format change.** Store format 19, dump format 4, and sync stream formats 2 and 3 stay, and no store feature is added. rdy 0.49.0 opens a store made by rdy 0.48.0 as it is, and loads every earlier dump. You do nothing to move. rdy 0.48.0 shows a decision whose `authority_basis` is `reconstructed`, but refuses a write that changes it, such as an edit or a supersede, and an import of a file that holds one. Change such decisions with rdy 0.49.0 or later.
-- **Derived ids.** The schema pack gained `reconstructed`. So the ids that rdy derives for a new change, such as tension and landing ids, differ from the ids that rdy 0.48.0 would compute. The ids in your store do not change when you upgrade.
-- **An import that fails as it seals says whether rdy undid it.** When rdy cannot prove that it cut the store back, the import refuses with `E_IO` "import outcome is indeterminate". Reopen the project and look at the target view before you retry. This applies to format-3 and Markdown imports.
-- **`rdy status`** prints `mcp http:` lines before `views:`.
-- **`rdy_schema`:** the `E_SITE` row also covers MCP over HTTP that is off or has no valid token file. The four `W_HOOK_*` warnings are new rows. The `E_FIELD_KIND` fix for a wrong `authority_basis` lists `reconstructed`.
+- **No format change.** Store format 19, dump format 4, and sync stream formats 2 and 3 stay, and no store feature is added. rdy 0.50.0 opens a store made by rdy 0.49.0 as it is, and loads every earlier dump. You do nothing to move.
+- **The index is rebuilt once.** The index gains tables for the counts that a take checks. The first time rdy 0.50.0 opens a store that an earlier rdy made, it rebuilds the store's index from the log. This costs about as much as `rdy reindex`, so on a store with a long history the first open takes longer. The log does not change, and neither do the ids, landings and tags in it.
+- **A take stops at the holder's limits.** A take now refuses with `E_LIMIT`, before it adds anything, when the holder would then pass a limit of its holder check. The message names the limit: `holder check exceeds 1000000 objects`, `holder check exceeds 1000000 edges` or `holder check exceeds 100000 landing depth`. The fix reads `keep the project; this holder takes no more history until its limit is raised`. Before, the take's walk through the whole history refused such a holder on its stream limits, with `stream exceeds ...`. The code stays `E_LIMIT`, and the holder check keeps its limits.
 
 ### Fixes
 
-- **A revoked repo link keeps its rules.** After a repo link is revoked, the instructions that the project adopted through it stay in force, and so do the locks of their organization or team sets. Before, `rdy_instructions` left them out.
-- **A cancelled call frees its place.** An MCP call that the client cancels while it waits for its turn is withdrawn. Before, it kept its place in the queue.
-- **Site landmarks.** The "On this page" aside and each note and example callout have accessible names. Question callouts read "Open question".
-- **Project delete.** While a project is deleted, its running daemon writes nothing into the project's folder.
-
-### Security
-
-- **rustix 1.1.6.** rdy builds with rustix 1.1.6, which fixes RUSTSEC-2026-0486.
+- **A faster take.** A take now ends its walk through the holder's history when it has reached every key that the upload names. Before, it walked the whole history. `take_publication` also reuses the root snapshot that the take's check built, and does not build it again. rdyhub measured a publish at 466 ms before this change and 246 ms after it, as the median of five incremental publishes.
+- **A live site uses less memory.** The daemon serves the live site that `rdy site` opens. It keeps the last build of each scope that a page asked for, such as canon, a view or a tag. A build holds the bytes of every image in it. The builds that no open page uses now hold at most 256 MiB together. Past that, the daemon drops the least recently used build first, but it keeps the newest one. When a page asks for a dropped build, the daemon builds it again. The daemon checks the limit after a build and when it serves a build that it holds. It also checks the limit when the last open page of a build closes. Before, the daemon of an open site with many images only grew. On a server with 4 GB of memory, one daemon grew from 1.5 GB to 3 GB in 3 hours.
 
 ### Project and build
 
-- **New dependencies.** MCP over HTTP uses the streamable HTTP server of rmcp 3.9.0, with hyper, hyper-util, getrandom and subtle. The Markdown import uses pulldown-cmark and unicase. The third-party notices in each archive list them: 196 crates.io packages for macOS, and 195 for Linux and Windows.
+- **rdy-store** gives the counts that a take checks, for tools that build on it, such as rdyhub: `Store::holder_counts`, `Store::landing_depth`, `Index::holder_counts`, `Index::landing_depth`, and `HolderCapacity` with `HolderCapacity::DEFAULT`. Two test hooks, `set_holder_capacity_for_tests` and `root_snapshot_reuses_for_tests`, are public in release builds too. Do not call them outside tests.
+- The dependencies do not change.
 
 ## Feedback
 
@@ -247,13 +218,17 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
   - A source folder that is a symbolic link is imported. If the folder is replaced while rdy reads it, rdy can read the old folder.
   - A folder with several hundred empty subfolders can fail with `E_IO` "Too many open files" on a system that allows 256 open files.
   - When the first write of an import fails and rdy cannot undo it, the refusal reads `E_IO` "index error", not "import outcome is indeterminate". Reopen the project before you retry.
+- Holders:
+  - A take counts a holder's objects and edges as upper bounds. These counts grow faster than the holder check's counts, by about 3 objects for each signed release. Near the limit of 1,000,000, a take can refuse a holder that the holder check would pass.
+  - In a take's check, a held landing whose previous landing is not in the index counts as depth zero. Only a damaged log can hold such a landing.
+  - The holder check's limit of 1,000,000 objects is the next limit for a large project. A holder of a project with large landings can reach it after about 7,900 landings.
 
 ## Third-party source (MPL-2.0)
 
 rdy is licensed MIT OR Apache-2.0. The binaries also contain two libraries under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/): `imbl` 7.0.2 and `imbl-sized-chunks` 0.2.0. This release attaches the exact source code of each, as its crates.io crate file. Each SHA-256 matches rdy's `Cargo.lock` at this release:
 
-- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
-- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
+- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
+- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
 
 Each archive's `THIRD-PARTY-NOTICES.txt` gives the license of every library in the binary.
 
@@ -312,11 +287,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -326,11 +301,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -343,16 +318,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.49.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.50.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.49.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.49.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.49.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.49.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.50.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.50.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.50.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.49.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.50.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -366,16 +341,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.49.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.50.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
