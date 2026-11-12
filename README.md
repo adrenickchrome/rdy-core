@@ -58,7 +58,7 @@ Open a new terminal, then check:
 rdy --version
 ```
 
-It prints `rdy 0.49.0`.
+It prints `rdy 0.50.0`.
 
 <details>
 <summary>Install from the archive instead</summary>
@@ -66,26 +66,26 @@ It prints `rdy 0.49.0`.
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.49.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.49.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.50.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.50.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.49.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.50.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.49.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 If `~/.local/bin` is not on your PATH, add it. On macOS, a binary from a browser download may be blocked: run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
@@ -239,11 +239,11 @@ Each release has three archives: macOS arm64, Windows amd64 and Linux amd64. The
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.49.0-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-aarch64-apple-darwin.tar.gz) |
-| Windows amd64 | `x86_64-pc-windows-msvc` | [rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.50.0-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz) |
+| Windows amd64 | `x86_64-pc-windows-msvc` | [rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz) |
 
-The release is [v0.49.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.49.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.49.0/SHA256SUMS.sig).
+The release is [v0.50.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.50.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/SHA256SUMS.sig).
 
 Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
 Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
@@ -257,7 +257,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M.
 
-Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.49.0). Use the key only when both match.
+Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.50.0). Use the key only when both match.
 
 ### Release keys
 
@@ -325,11 +325,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -339,11 +339,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -356,16 +356,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.49.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.49.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.50.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.49.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.49.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.49.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.49.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.50.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.50.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.50.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.49.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.50.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -379,16 +379,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.49.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.49.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.49.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.49.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.49.0/bin/rdy' &&
-'/path/to/rdy-0.49.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
+'/path/to/rdy-0.50.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.49.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.50.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
