@@ -51,7 +51,7 @@
 //! take keeps no receipt, transaction id or timer.
 use crate::error::{E_BAD_INPUT, E_REDACTION_STALE, E_REPO_MISMATCH, E_TAG_EXISTS, RdyError};
 use crate::publication_take::PublicationRefusal;
-use crate::render_source::check_snapshots;
+use crate::render_source::{CheckedSnapshot, check_snapshots};
 use crate::stream_error::to_rdy;
 use crate::version::parse_version;
 use crate::{Delta, Rdy};
@@ -122,7 +122,7 @@ pub fn take(
     batches: &[File],
     target: UploadTarget,
 ) -> Result<TakeOutcome, RdyError> {
-    match take_checked::<(), Infallible>(rdy, batches, target, |_, _, _| Ok(())) {
+    match take_checked::<(), Infallible>(rdy, batches, target, false, |_, _, _, _| Ok(())) {
         Ok((outcome, ())) => Ok(outcome),
         Err(PublicationRefusal::Core(e)) => Err(e),
         Err(PublicationRefusal::Verdict(never)) => match never {},
@@ -135,14 +135,20 @@ pub fn take(
 /// holder, approved removals as their drops), the upload's facts and the tag that survives, and
 /// its value is kept only once it returns `Ok`. A refusal of either is returned as it was given,
 /// before anything is appended; the store's own errors are the engine's ([`take_error`]).
+///
+/// With `keep_root`, `check` also gets the root landing's snapshot as the snapshot check built
+/// it, when that check read it (the root landing is new to the holder); else None
+/// (`render_source::CheckedSnapshot`).
 pub(crate) fn take_checked<T, E>(
     rdy: &mut Rdy,
     batches: &[File],
     target: UploadTarget,
+    keep_root: bool,
     check: impl FnOnce(
         &mut dyn ObjectSource,
         &UploadFacts,
         &TagChoice,
+        Option<CheckedSnapshot>,
     ) -> Result<T, PublicationRefusal<E>>,
 ) -> Result<(TakeOutcome, T), PublicationRefusal<E>> {
     check_input_bounds(batches.len(), &target).map_err(|e| PublicationRefusal::Core(to_rdy(e)))?;
@@ -172,9 +178,9 @@ pub(crate) fn take_checked<T, E>(
     let taken = rdy
         .store
         .take_batches(batches, &target, move |source, facts| {
-            let choice = validate(&reader, source, facts, held, damage.as_ref())
+            let (choice, root) = validate(&reader, source, facts, held, damage.as_ref(), keep_root)
                 .map_err(PublicationRefusal::Core)?;
-            *slot = Some(check(source, facts, &choice)?);
+            *slot = Some(check(source, facts, &choice, root)?);
             Ok(choice)
         });
     rdy.store
@@ -303,18 +309,20 @@ fn same_version_pair(held: &[Held]) -> bool {
 
 /// The store take's validation callback: the tag rule, then the structural and snapshot checks
 /// of every new record (`render_source::check_snapshots`, which a render runs with nothing
-/// held).
+/// held). With `keep_root`, the root landing's snapshot as that check built it, when it read it.
 fn validate(
     reader: &StoreReader,
     source: &mut dyn ObjectSource,
     facts: &UploadFacts,
     held: &[Held],
     damage: Option<&RdyError>,
-) -> Result<TagChoice, RdyError> {
+    keep_root: bool,
+) -> Result<(TagChoice, Option<CheckedSnapshot>), RdyError> {
     let choice = choose_tag(&facts.root, held, damage)?;
     // steps 2 to 5: the structural and snapshot checks a render runs too
-    check_snapshots(reader, source, facts)?;
-    Ok(choice)
+    let keep = keep_root.then_some(facts.root.landing);
+    let root = check_snapshots(reader, source, facts, keep)?;
+    Ok((choice, root))
 }
 
 /// The tag rule (module docs, step 1).

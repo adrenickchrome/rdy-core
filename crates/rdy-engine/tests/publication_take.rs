@@ -11,7 +11,7 @@ use rdy_engine::engine::{Engine, Local, with_writer_result};
 use rdy_engine::publication::{self, CheckStatus, Limits};
 use rdy_engine::publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTarget, blob_payload_reads_for_tests,
-    materializations_for_tests, take_publication,
+    materializations_for_tests, root_snapshot_reuses_for_tests, take_publication,
 };
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
@@ -526,4 +526,50 @@ fn hpb17_limits_precede_materialization_and_asset_reads() {
         3,
         "the doc, its prose and its figure"
     );
+}
+
+/// tcw (TASK-2324; D-91DZW): the facts a take resolves from the root snapshot its snapshot check
+/// built equal the facts from reading that snapshot again (`materialize_landing`), for
+/// `implicit:org` and for an explicit profile. A retry, whose root landing the holder holds
+/// already, reads the snapshot again and gives the same facts.
+#[test]
+fn tcw_reused_root_snapshot_gives_the_facts_of_a_fresh_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, profile, _, v1) = source(&dir.path().join("src"));
+    let l1 = landing_of(&r, v1);
+    let bytes = export(&r, v1);
+    for (i, selector) in ["implicit:org", profile.as_str()].into_iter().enumerate() {
+        let (_, mut h) = holder(&dir.path().join(format!("h{i}")), repo(&r));
+        let counts = || {
+            (
+                materializations_for_tests(),
+                root_snapshot_reuses_for_tests(),
+            )
+        };
+        // the first take: the root landing is new, so its checked snapshot is used
+        let start = counts();
+        let first = take_publication(
+            &mut h,
+            &files(dir.path(), &format!("first{i}"), &bytes),
+            target("v1.0.0", l1, selector),
+            |_| Ok::<_, ()>(()),
+        )
+        .unwrap_or_else(|e| panic!("{selector}: {e:?}"));
+        assert_eq!(counts(), (start.0 + 1, start.1 + 1), "{selector}: reused");
+        assert!(!first.outcome.unchanged);
+        let facts = first.facts.profile.as_ref().expect("the profile");
+        assert!(!facts.selection.is_empty(), "{selector}");
+        // the retry: the root landing is held, so the snapshot is read again
+        let start = counts();
+        let again = take_publication(
+            &mut h,
+            &files(dir.path(), &format!("again{i}"), &bytes),
+            target("v1.0.0", l1, selector),
+            |_| Ok::<_, ()>(()),
+        )
+        .unwrap_or_else(|e| panic!("{selector}: {e:?}"));
+        assert_eq!(counts(), (start.0 + 1, start.1), "{selector}: read again");
+        assert!(again.outcome.unchanged);
+        assert_eq!(again.facts, first.facts, "{selector}");
+    }
 }

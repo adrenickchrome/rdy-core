@@ -147,7 +147,7 @@ impl RenderSource {
         .map_err(to_rdy)?;
         parse_version(&facts.root.name)?;
         // a record read again from the scratch file that fails is the scratch error
-        check_snapshots(&NothingHeld, &mut &stream, facts).map_err(scratch_io)?;
+        check_snapshots(&NothingHeld, &mut &stream, facts, None).map_err(scratch_io)?;
         let (snapshot, blocks) = stream.materialize_tag().map_err(from_stream)?;
         let landing = facts.root.landing;
         let tag_redacted = tag_is_redacted(&mut StreamHistory(&stream), landing, &inputs.pack)?;
@@ -569,15 +569,19 @@ impl Held for NothingHeld {
 /// fields and the root tag's chain rules, each new signature, then each new landing's snapshot
 /// within the Publications limits. A record that breaks a structural rule is E_BAD_RECORD with
 /// the holder fsck's own text.
+///
+/// With `keep`, a landing hash, the snapshot of that landing is returned as the check built it
+/// when the check reads it (the landing is not held): see [`CheckedSnapshot`].
 pub(crate) fn check_snapshots(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
     facts: &UploadFacts,
-) -> Result<(), RdyError> {
+    keep: Option<Hash>,
+) -> Result<Option<CheckedSnapshot>, RdyError> {
     check_records(held, source, facts)?;
     check_landing_rules(held, source, facts)?;
     check_signatures(held, source, facts)?;
-    check_landings(held, source, facts)
+    check_landings(held, source, facts, keep)
 }
 
 /// SIG's check of every signature of the upload that the receiver does not hold, as the
@@ -910,11 +914,31 @@ fn at_object(e: RdyError, key: ObjectKey) -> RdyError {
 /// blocks held at any time are within the Publications limits of one snapshot, plus the one
 /// block being read: a snapshot past the limits is refused before it is materialized, and the
 /// memory a check holds follows the limits, not the upload.
+///
+/// With `keep`, a landing the receiver does not hold, a copy of that landing's snapshot and
+/// blocks is kept as this check built them and returned, keyed by the snapshot's hash
+/// ([`CheckedSnapshot`]); it is within the Publications limits of one snapshot too.
 fn check_landings(
     held: &dyn Held,
     source: &mut dyn ObjectSource,
     facts: &UploadFacts,
-) -> Result<(), RdyError> {
+    keep: Option<Hash>,
+) -> Result<Option<CheckedSnapshot>, RdyError> {
+    let keep_state = match keep {
+        Some(hash) => {
+            let key = ObjectKey {
+                kind: kinds::LANDING,
+                hash,
+            };
+            if held.holds(&key)? {
+                None
+            } else {
+                typed::<LandingRecord>(source, key)?.map(|l| l.state)
+            }
+        }
+        None => None,
+    };
+    let mut kept = None;
     let mut checked: HashSet<Hash> = HashSet::new();
     let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
     for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
@@ -927,10 +951,28 @@ fn check_landings(
         if !checked.insert(landing.state) {
             continue;
         }
-        let (_, blocks) = snapshot_blocks(source, landing.state, &mut last)?;
+        let (snapshot, blocks) = snapshot_blocks(source, landing.state, &mut last)?;
+        if keep_state == Some(landing.state) {
+            kept = Some(CheckedSnapshot {
+                state: landing.state,
+                snapshot,
+                blocks: blocks.clone(),
+            });
+        }
         last = blocks;
     }
-    Ok(())
+    Ok(kept)
+}
+
+/// One snapshot as [`check_landings`] built it through a take's checked source: its hash, its
+/// record and its blocks by version, each charged to the snapshot's budget and the whole kept
+/// within [`check_snapshot_limits`]. A publication take hands the root landing's to
+/// [`materialize_landing`] instead of reading that snapshot again (D-91DZW: the facts are
+/// resolved inside the take, before the append, from the same checked source; TASK-2324).
+pub(crate) struct CheckedSnapshot {
+    state: Hash,
+    snapshot: StateSnapshot,
+    blocks: BTreeMap<Hash, Block>,
 }
 
 /// The blocks of snapshot `state`, by version, read through `source` within the Publications
@@ -986,9 +1028,15 @@ fn snapshot_blocks(
 /// snapshot: the bounded read [`check_landings`] makes of each new landing, with the same
 /// errors. A removed block reads as its approved residue's stub, with its original version
 /// hash; one no residue describes reads as nothing.
+///
+/// `checked` is the snapshot the same take's [`check_landings`] built through the same
+/// `source`: when it is the landing's snapshot (the same snapshot hash), its blocks are used and
+/// the snapshot is not read again, with the same result. Otherwise (none was kept: the landing
+/// is held already) the snapshot is read here.
 pub(crate) fn materialize_landing(
     source: &mut dyn ObjectSource,
     landing: Hash,
+    checked: Option<CheckedSnapshot>,
 ) -> Result<Materialized, RdyError> {
     let key = ObjectKey {
         kind: kinds::LANDING,
@@ -996,7 +1044,13 @@ pub(crate) fn materialize_landing(
     };
     let record = typed::<LandingRecord>(source, key)?
         .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, key)))?;
-    let (snapshot, blocks) = snapshot_blocks(source, record.state, &mut BTreeMap::new())?;
+    let (snapshot, blocks) = match checked {
+        Some(c) if c.state == record.state => {
+            crate::publication_take::count_root_snapshot_reuse();
+            (c.snapshot, c.blocks)
+        }
+        _ => snapshot_blocks(source, record.state, &mut BTreeMap::new())?,
+    };
     let by_id = blocks.into_values().map(|b| (b.id.clone(), b)).collect();
     Ok(Materialized::build(snapshot, by_id))
 }
