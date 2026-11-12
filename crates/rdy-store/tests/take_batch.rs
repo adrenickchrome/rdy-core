@@ -2453,6 +2453,231 @@ fn tcw_duplicate_frames_charge_their_links_once() {
     assert_eq!(h.reader().holder_counts().unwrap(), two);
 }
 
+// tcw (known issue 2309): an older rdy (0.47.0 to 0.49.0) writes to the store, moves
+// `indexed_upto` and leaves the capacity tables as they were. The index records a second
+// position, `counts_upto`, that only a writer that keeps the counts moves; an open that finds
+// the two apart rebuilds the index from the log, so no count or depth is read low
+
+/// The capacity tables of the index.
+const TCW_COUNT_TABLES: [&str; 3] = ["holder_counts", "landing_depths", "landing_waits"];
+
+/// The rows of the capacity tables and the `counts_upto` value of the index file `file`.
+type TcwCounts = (Vec<Vec<(Vec<u8>, Vec<u8>)>>, Option<Vec<u8>>);
+
+fn tcw_read_counts(file: &Path) -> TcwCounts {
+    use redb::{ReadableDatabase, ReadableTable};
+    let raw = redb::Database::create(file).unwrap();
+    let r = raw.begin_read().unwrap();
+    let tables = TCW_COUNT_TABLES
+        .iter()
+        .map(|name| {
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(name);
+            let t = r.open_table(def).unwrap();
+            t.iter()
+                .unwrap()
+                .map(|item| {
+                    let (k, v) = item.unwrap();
+                    (k.value().to_vec(), v.value().to_vec())
+                })
+                .collect()
+        })
+        .collect();
+    let meta: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+    let upto = r
+        .open_table(meta)
+        .unwrap()
+        .get("counts_upto")
+        .unwrap()
+        .map(|v| v.value().to_vec());
+    (tables, upto)
+}
+
+/// Puts the capacity tables and `counts_upto` of the index file `file` back to `was`.
+fn tcw_write_counts(file: &Path, was: &TcwCounts) {
+    let raw = redb::Database::create(file).unwrap();
+    let w = raw.begin_write().unwrap();
+    for (name, rows) in TCW_COUNT_TABLES.iter().zip(&was.0) {
+        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(name);
+        assert!(w.delete_table(def).unwrap(), "{name} was there");
+        let mut t = w.open_table(def).unwrap();
+        for (k, v) in rows {
+            t.insert(&k[..], &v[..]).unwrap();
+        }
+    }
+    {
+        let meta: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+        let mut t = w.open_table(meta).unwrap();
+        match &was.1 {
+            Some(v) => t.insert("counts_upto", &v[..]).unwrap(),
+            None => t.remove("counts_upto").unwrap(),
+        };
+    }
+    w.commit().unwrap();
+}
+
+/// Runs `write` on the closed store at `root` as an older rdy does: the log and every other
+/// index table move, `indexed_upto` with them, and the capacity tables and `counts_upto` stay as
+/// they were. Asserts that the write moved the capacity tables (so the older writer left them
+/// behind).
+fn tcw_older_writer(root: &Path, write: impl FnOnce(&mut Store)) {
+    let file = root.join("index.redb");
+    let was = tcw_read_counts(&file);
+    let mut h = Store::open(root).unwrap();
+    assert!(!h.open_report().index_rebuilt);
+    write(&mut h);
+    drop(h);
+    assert_ne!(tcw_read_counts(&file).0, was.0, "the write moved no count");
+    tcw_write_counts(&file, &was);
+}
+
+/// Lands `n` more changes past `src`'s tag (from block `from`) and tags them `tag`; returns the
+/// target and the batch of the tag's closure less `known`.
+fn tcw_next_tag(
+    src: &Src,
+    from: usize,
+    n: usize,
+    known: &BTreeSet<ObjectKey>,
+    tag: &str,
+) -> (UploadTarget, PathBuf, Hash) {
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, from, n);
+    let t = tcw_tag(&mut s, tag, last);
+    drop(s);
+    let (_s, r) = src.reader();
+    let c = closure(&r, t, known).unwrap();
+    let path = src.dir.path().join(format!("{tag}.rdysync"));
+    write(&r, &src.repo, t, &c.records, c.prerequisites, &path);
+    (
+        UploadTarget {
+            tag: tag.into(),
+            landing: last,
+        },
+        path,
+        t,
+    )
+}
+
+#[test]
+fn tcw_counts_left_behind_by_an_older_writer_are_rebuilt_at_open() {
+    let (src, v1_target, v1_paths, h, target, path) = tcw_capacity_setup(10);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    let root = src.dir.path().join("h");
+    drop(h);
+    tcw_older_writer(&root, |h| {
+        take(h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    });
+    match rdy_store::index::Index::open(&root.join("index.redb")) {
+        Err(rdy_store::StoreError::Db(m)) => assert_eq!(
+            m,
+            "the index's capacity counts are behind its log; it is rebuilt from the log"
+        ),
+        Err(e) => panic!("another refusal: {e}"),
+        Ok(_) => panic!("an index with counts behind its log opened"),
+    }
+    let mut h = Store::open(&root).unwrap();
+    assert!(h.open_report().index_rebuilt);
+    assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
+    assert_eq!(
+        h.reader().landing_depth(&target.landing).unwrap(),
+        Some(depth)
+    );
+    let dump = h.index_dump_for_tests().unwrap();
+    h.reindex().unwrap();
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump, "reindex");
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_depth_after_an_older_writer_counts_from_the_true_depth() {
+    let (src, _, _, h, target, path) = tcw_capacity_setup(10);
+    let root = src.dir.path().join("h");
+    drop(h);
+    // the older rdy takes v2: its landing's depth is 13, and the index holds no row of it
+    tcw_older_writer(&root, |h| {
+        take(h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    });
+    let v2 = tcw_tag_of(&src, "v2");
+    let src = Src { tag: v2, ..src };
+    let known = tcw_known(&src);
+    let (v3_target, v3_path, _) = tcw_next_tag(&src, 60_000, 2, &known, "v3");
+    let mut h = Store::open(&root).unwrap();
+    // v3 sits two landings past v2: depth 15, which a count from depth 0 would read as 2
+    {
+        let _c = Capacity::set(14, u64::MAX, u64::MAX);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&v3_path)), &v3_target).unwrap_err(),
+            "holder check exceeds 14 landing depth",
+        );
+    }
+    {
+        let _c = Capacity::set(15, u64::MAX, u64::MAX);
+        take(&mut h, &open(std::slice::from_ref(&v3_path)), &v3_target).unwrap();
+    }
+    assert_eq!(
+        h.reader().landing_depth(&v3_target.landing).unwrap(),
+        Some(15)
+    );
+    h.check_holder().unwrap();
+}
+
+/// The tag `name` of the source project.
+fn tcw_tag_of(src: &Src, name: &str) -> Hash {
+    let s = Store::open(&src.path).unwrap();
+    let v = s.get_ref(&format!("tag/{name}")).unwrap().expect("tagged");
+    Hash(v.try_into().expect("a tag ref is a hash"))
+}
+
+#[test]
+fn tcw_an_open_after_a_normal_write_does_not_rebuild_the_index() {
+    // a holder: takes and reopens
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(3);
+    take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    let root = src.dir.path().join("h");
+    drop(h);
+    for i in 0..3 {
+        let mut h = Store::open(&root).unwrap();
+        assert!(!h.open_report().index_rebuilt, "holder open {i}");
+        // a repeat take is a no-op write; the reindex writes a whole new index
+        take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+        if i == 1 {
+            h.reindex().unwrap();
+        }
+    }
+    // a project: writes and reopens
+    for i in 0..3 {
+        let mut s = Store::open(&src.path).unwrap();
+        assert!(!s.open_report().index_rebuilt, "project open {i}");
+        tcw_land(&mut s, 70_000 + 10 * i, 2);
+        if i == 1 {
+            s.reindex().unwrap();
+        }
+    }
+    let s = Store::open(&src.path).unwrap();
+    assert!(!s.open_report().index_rebuilt, "last project open");
+}
+
+#[test]
+fn tcw_an_index_without_counts_upto_is_rebuilt_once() {
+    // as rdy 0.50.0 writes it: the capacity tables, but no `counts_upto`
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(5);
+    take(&mut h, &open(&[path]), &target).unwrap();
+    let dump = h.index_dump_for_tests().unwrap();
+    let root = src.dir.path().join("h");
+    drop(h);
+    let file = root.join("index.redb");
+    let mut was = tcw_read_counts(&file);
+    assert!(was.1.is_some(), "this code writes counts_upto");
+    was.1 = None;
+    tcw_write_counts(&file, &was);
+    let h = Store::open(&root).unwrap();
+    assert!(h.open_report().index_rebuilt);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    drop(h);
+    let h = Store::open(&root).unwrap();
+    assert!(!h.open_report().index_rebuilt);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+}
+
 /// Bench only (TASK-2324): a take of only the new records of `v2` past about 5,000 held
 /// objects, timed up to the caller's check. Prints the times; asserts none.
 #[test]

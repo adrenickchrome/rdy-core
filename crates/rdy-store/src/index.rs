@@ -126,6 +126,12 @@ const LANDING_DEPTHS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("land
 /// gets its row, its waiting landings get theirs (and their own waiting landings, in turn), and
 /// leave this table.
 const LANDING_WAITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_waits");
+/// The `meta` key that holds the `indexed_upto` at which the capacity counts ([`HOLDER_COUNTS`],
+/// [`LANDING_DEPTHS`], [`LANDING_WAITS`]) were last kept, written in the same commit as
+/// `indexed_upto`. Only a writer that keeps the counts writes it; an older rdy moves
+/// `indexed_upto` alone. So an index whose two positions differ (or that has no `counts_upto`)
+/// has counts behind its log, and the open rebuilds it from the log (known issue 2309).
+const COUNTS_UPTO_KEY: &str = "counts_upto";
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -1202,6 +1208,20 @@ impl Index {
                 "the index has no capacity counts; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for capacity counts behind the log: an older rdy moves `indexed_upto` and
+        // leaves the counts as they were, so a count or a depth would read low
+        if has(OBJECTS.name()) {
+            let meta = w.open_table(META).map_err(db)?;
+            let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
+                Ok(meta.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+            };
+            if at("indexed_upto")? != at(COUNTS_UPTO_KEY)? {
+                return Err(StoreError::Db(
+                    "the index's capacity counts are behind its log; it is rebuilt from the log"
+                        .into(),
+                ));
+            }
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1591,6 +1611,8 @@ impl Index {
                 }
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
+            // the counts above are kept to `upto` in this same commit
+            meta.insert(COUNTS_UPTO_KEY, &enc(&upto)[..]).map_err(db)?;
         }
         w.commit().map_err(db)?;
         Ok(())
