@@ -644,11 +644,32 @@ pub fn dead_endpoint(dir: &Path) -> PathBuf {
 pub fn replace_rdy_dir(dir: &Path) {
     let rdy = dir.join(".rdy");
     if cfg!(windows) {
-        std::fs::remove_dir_all(&rdy).expect("delete the old .rdy");
+        remove_dir_all_retrying(&rdy);
     } else {
         std::fs::rename(&rdy, dir.join(".rdy-old")).expect("move the old .rdy");
     }
     std::fs::create_dir(&rdy).expect("a fresh .rdy");
+}
+
+/// On Windows a short-lived handle (the daemon's own read, or a scanner) can hold a file in the old
+/// `.rdy` for a moment, so the delete fails with a sharing violation and succeeds once the handle
+/// closes. KNOWN-ISSUES 2255.
+fn remove_dir_all_retrying(path: &Path) {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_DIR_NOT_EMPTY (a delete still pending).
+    const RETRY: [i32; 3] = [5, 32, 145];
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(e)
+                if e.raw_os_error().is_some_and(|c| RETRY.contains(&c))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("delete the old .rdy: {e:?}"),
+        }
+    }
 }
 
 /// How long `Served::kill9` waits for the killed daemon to exit.
