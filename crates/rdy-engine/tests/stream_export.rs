@@ -445,3 +445,41 @@ fn hc3_export_error_keeps_code_message_and_fix() {
         "Propose the redaction of the listed targets again, and have a person approve it."
     );
 }
+
+/// TASK-2393, D-3XFMP: an export's report lists the features its records need, as a check of the
+/// same bytes does; a history with no foreign record does not list foreign_copy.
+#[test]
+fn export_reports_the_features_its_records_need() {
+    let (_dir, r, _secret, v1, _v2) = tagged();
+    let (bytes, report) = export(&r, v1, &BTreeSet::new()).unwrap();
+    assert!(
+        !report
+            .record_features
+            .features
+            .iter()
+            .any(|f| f.name == "foreign_copy")
+    );
+    assert_eq!(check_batch(bytes.as_slice()).unwrap(), report);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "repo_link", "id": "$l", "parent": "$d",
+             "fields": {"alias": "core", "repo": RepoId([7; 16]).to_string(), "profile": "pf-AGNT1"}}
+        ]),
+    );
+    land(&mut r, "linked");
+    let t = tag(&mut r, "v1.0.0");
+    let (bytes, report) = export(&r, t, &BTreeSet::new()).unwrap();
+    let names: Vec<&str> = report
+        .record_features
+        .features
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert!(names.contains(&"foreign_copy"), "{names:?}");
+    assert_eq!(check_batch(bytes.as_slice()).unwrap(), report);
+}

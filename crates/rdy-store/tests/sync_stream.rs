@@ -1498,3 +1498,50 @@ fn plb2_header_dependency_errors_are_specific_and_ordered() {
     assert_eq!(check(&reheader(2, &[two[0], two[0]])).unwrap_err(), invalid);
     assert_eq!(check(&reheader(3, &two)).unwrap_err(), invalid);
 }
+
+/// TASK-2393, D-3XFMP: `record_features` is the union of `format::required_features` over the
+/// batch's present records, in the header's manifest form; `header.features` stays as written.
+#[test]
+fn record_features_lists_what_the_records_need() {
+    let mut link_block = block("b-00002", "a link");
+    link_block.block_type = rdy_store::format::REPO_LINK_TYPE.into();
+    let plain = present(kinds::BLOCK, &block("b-00001", "plain"));
+    let linked = present(kinds::BLOCK, &link_block);
+    let t = tag("v1", Hash([4; 32]));
+    let tag_record = present(kinds::TAG, &t);
+    let h = header(t.id(), vec![key(kinds::LANDING, Hash([4; 32]))]);
+
+    // a batch with records that need nothing reports an empty set
+    let quiet = check(&batch(&h, &[plain.clone(), tag_record.clone()])).unwrap();
+    assert!(quiet.record_features.features.is_empty());
+    assert_eq!(quiet.record_features.manifest_version, 1);
+
+    // a record that needs a feature names it; the header is unchanged
+    let records = [plain, linked, tag_record];
+    let report = check(&batch(&h, &records)).unwrap();
+    let mut want = Vec::new();
+    for r in &records {
+        if let StreamRecord::Present { payload, .. } = r {
+            for f in rdy_store::format::required_features(r.raw_kind(), payload) {
+                if !want.contains(&f) {
+                    want.push(f);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        want.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        ["foreign_copy"]
+    );
+    assert_eq!(
+        report.record_features,
+        rdy_store::format::StoreFeatures::of(want)
+    );
+    assert_eq!(report.header.features, baseline_features());
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["record_features"]["features"][0]["name"],
+        "foreign_copy"
+    );
+    assert_eq!(json["record_features"]["manifest_version"], 1);
+}
