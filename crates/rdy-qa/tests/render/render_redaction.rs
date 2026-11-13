@@ -1432,7 +1432,10 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             );
         }
         for (name, bytes) in &after_all {
-            if !name.ends_with(".pdf") {
+            // a source read (rdy_read, show, search) shows a block's own fields, its alt text
+            // among them: only the blob goes (rfr2 covers the rendered outputs)
+            let rendered = !name.starts_with("mcp: ") && !name.starts_with("cli: ");
+            if rendered && !name.ends_with(".pdf") {
                 assert!(
                     !text(bytes).contains(ALT_DARK),
                     "{adapter}: {name} holds the dark figure's alt"
