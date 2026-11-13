@@ -1350,3 +1350,65 @@ fn rfr4_readme_refuses_links_and_nonregular_inputs() {
     );
     assert_eq!(snapshot(dir.path()), before);
 }
+
+// --- the repository's own README ----------------------------------------------------------------
+
+/// The checked-in export makes the checked-in README: `release/readme.md` matches its sidecar
+/// (64 lowercase hex and LF), every file in `assets/readme/` is named by its SHA-256, and the
+/// assembly of the source under the repository's authenticated release keys at this build's
+/// version is `README.md`, byte for byte. Check mode accepts the repository and writes nothing.
+/// This proves reproducibility and the absence of corruption, not approval of the source.
+#[test]
+fn rfr4_repository_readme_matches_the_checked_export() {
+    let root = repo();
+    let version = env!("CARGO_PKG_VERSION");
+    let source = std::fs::read(root.join("release/readme.md")).expect("release/readme.md");
+    let sidecar = std::fs::read_to_string(root.join("release/readme.sha256")).expect("sidecar");
+    let digest = sidecar
+        .strip_suffix('\n')
+        .expect("the sidecar ends with one LF");
+    assert!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "the sidecar is 64 lowercase hex digits: {sidecar:?}"
+    );
+    assert_eq!(
+        sha(&source),
+        digest,
+        "release/readme.md matches its sidecar"
+    );
+
+    let mut assets = 0;
+    for e in std::fs::read_dir(root.join("assets/readme")).expect("assets/readme") {
+        let p = e.unwrap().path();
+        assert!(
+            std::fs::symlink_metadata(&p).unwrap().is_file(),
+            "{}",
+            p.display()
+        );
+        let name = p.file_name().unwrap().to_str().unwrap().to_string();
+        let (stem, _ext) = name.split_once('.').expect("a name with an extension");
+        assert_eq!(
+            stem,
+            sha(&std::fs::read(&p).unwrap()),
+            "{name} is named by its SHA-256"
+        );
+        assets += 1;
+    }
+    assert!(assets > 0, "the export's images are in assets/readme/");
+
+    let readme = std::fs::read(root.join("README.md")).expect("README.md");
+    let assembled = release_readme::assemble(&source, &real_keys(), version).expect("assembly");
+    assert_eq!(
+        assembled.as_bytes(),
+        readme.as_slice(),
+        "README.md is the assembly"
+    );
+
+    let before = snapshot(&root.join("assets/readme"));
+    assert_eq!(release_readme::run(&root, version, Mode::Check), Ok(()));
+    assert_eq!(snapshot(&root.join("assets/readme")), before);
+    assert_eq!(std::fs::read(root.join("README.md")).unwrap(), readme);
+}

@@ -4,13 +4,13 @@
 
 rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents.
 
-[![Latest release](https://img.shields.io/github/v/release/adrenickchrome/rdy-core?color=2456C9)](https://github.com/adrenickchrome/rdy-core/releases/latest) [![Docs](https://img.shields.io/badge/docs-getrdy.dev-2456C9)](https://getrdy.dev/docs/) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2456C9)](#license)
+[![Latest release](https://img.shields.io/github/v/release/adrenickchrome/rdy-core?color=2456C9)](https://github.com/adrenickchrome/rdy-core/releases/latest) [![Docs](https://img.shields.io/badge/docs-getrdy.dev-2456C9)](https://getrdy.dev/docs/) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2456C9)](https://github.com/adrenickchrome/rdy-core#license)
 
 [Documentation](https://getrdy.dev/docs/latest/docs/) · [Install](#install) · [Try it](#try-it-your-first-project) · [Releases](https://github.com/adrenickchrome/rdy-core/releases) · [Report problems](#report-problems)
 
 rdy keeps the compatibility promise of **Release 1** (rdy 0.47.0). See "About Release 1" at the bottom.
 
-[![rdy. Your intent, ready for anyone who needs it.](.github/readme/social-card.png)](https://getrdy.dev/)
+[![rdy. Your intent, ready for anyone who needs it.](https://getrdy.dev/assets/social-card.png)](https://getrdy.dev/)
 
 ## How it works
 
@@ -18,10 +18,7 @@ rdy keeps the compatibility promise of **Release 1** (rdy 0.47.0). See "About Re
 - **After the write**, rdy shows what the change affected.
 - **Nothing joins the accepted design** until a person approves it.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/review-loop-dark.svg">
-  <img src=".github/readme/review-loop-light.svg" alt="An illustrated EU retention change moves from an agent’s proposal, through affected-document review in rdy, to a person’s confirmation and approval of Proposal 1@1.">
-</picture>
+![An illustrated EU retention change moves from an agent’s proposal, through affected-document review in rdy, to a person’s confirmation and approval of Proposal 1@1.](assets/readme/8778e74bdaa56707cba421788fad65a4852393cd34c3ff7e8e7bd60bdd4c54b6.svg)
 
 rdy computes. Agents write. People decide.
 
@@ -58,34 +55,34 @@ Open a new terminal, then check:
 rdy --version
 ```
 
-It prints `rdy 0.50.0`.
+It prints `rdy 0.51.0`.
 
 <details>
-<summary>Install from the archive instead</summary>
+<summary><b>Install from the archive instead</b></summary>
 
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.50.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.50.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.51.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.51.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.50.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.51.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.51.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 If `~/.local/bin` is not on your PATH, add it. On macOS, a binary from a browser download may be blocked: run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
@@ -124,7 +121,7 @@ To check the signature yourself, see "Verify the download" at the bottom. You do
 
 4. **Ask your agent for something real.** For example:
 
-   > Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.
+   “Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.”
 
 5. **Review and approve it yourself.**
 
@@ -146,10 +143,10 @@ Next: [Make your first change](https://getrdy.dev/docs/latest/docs/guide/start-h
 
 ## Documentation
 
-The docs for the latest release are at **[getrdy.dev/docs](https://getrdy.dev/docs/latest/docs/)**. [Each release](https://getrdy.dev/docs/) keeps its own edition.
+The docs for the latest release are at [**getrdy.dev/docs**](https://getrdy.dev/docs/latest/docs/). [Each release](https://getrdy.dev/docs/) keeps its own edition.
 
 | To | Read |
-|---|---|
+| --- | --- |
 | Work with an agent, from a first project to a full design | [User guide](https://getrdy.dev/docs/latest/docs/guide/) |
 | Learn blocks, views, briefings, decisions and tensions | [Concepts](https://getrdy.dev/docs/latest/docs/concepts/) |
 | Look up a command, a tool or an error code | [CLI](https://getrdy.dev/docs/latest/docs/reference/cli) · [MCP tools](https://getrdy.dev/docs/latest/docs/reference/mcp-tools) · [Errors](https://getrdy.dev/docs/latest/docs/reference/errors) |
@@ -184,7 +181,7 @@ cargo install --path crates/rdy-cli
 
 ## License
 
-rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your choice.
+rdy is available under either [MIT](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-MIT) or [Apache 2.0](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-APACHE), at your choice.
 
 rdy's binaries also contain open-source libraries under their own licenses. Two of them, `imbl` and `imbl-sized-chunks`, use the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/). Each release archive holds `THIRD-PARTY-NOTICES.txt` with every library's license. Each release also attaches the exact source code of the MPL-2.0 libraries.
 
@@ -227,9 +224,9 @@ You do not need this to use rdy. It shows how to check that an archive is the on
 ### Platforms
 
 | Platform | Status |
-|---|---|
+| --- | --- |
 | macOS (arm64) | Supported. The fast gate (`cargo qa --skip-perf --require-all`) passes. |
-| Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64; aarch64 builds and runs its tests (one timing-bound test is being fixed). Perf baselines are Linux only. |
+| Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64. On aarch64 you build from source, and no gate checks that build for now. Perf baselines are Linux only. |
 | Windows (x86_64) | Supported on Windows 11. Each release ships a native `x86_64-pc-windows-msvc` archive. |
 | Other Unix (the BSDs, illumos) | Untested. |
 
@@ -239,11 +236,11 @@ Each release has three archives: macOS arm64, Windows amd64 and Linux amd64. The
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.50.0-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz) |
-| Windows amd64 | `x86_64-pc-windows-msvc` | [rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.51.0-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-aarch64-apple-darwin.tar.gz) |
+| Windows amd64 | `x86_64-pc-windows-msvc` | [rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz) |
 
-The release is [v0.50.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.50.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/SHA256SUMS.sig).
+The release is [v0.51.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.51.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/SHA256SUMS.sig).
 
 Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
 Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
@@ -257,7 +254,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M.
 
-Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.50.0). Use the key only when both match.
+Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.51.0). Use the key only when both match.
 
 ### Release keys
 
@@ -325,11 +322,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -339,11 +336,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -356,16 +353,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.50.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.51.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.50.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.50.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.50.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.51.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.51.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.51.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.51.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.50.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.51.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -379,16 +376,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.50.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.51.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"

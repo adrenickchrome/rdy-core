@@ -674,7 +674,7 @@ fn pre2_preview_readme_has_one_trust_state() {
         "Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.",
         "This signature is not Apple notarization.",
         &format!("Report problems at {ISSUES}."),
-        "rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your choice.",
+        "rdy is available under either [MIT](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-MIT) or [Apache 2.0](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-APACHE), at your choice.",
     ] {
         assert!(readme.contains(text), "missing: {text}");
     }
