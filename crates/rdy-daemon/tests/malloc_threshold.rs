@@ -6,6 +6,7 @@
 /// mapping. With glibc's moving threshold it came from the heap: the freed 4 MiB block had
 /// raised the threshold to 4 MiB.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[allow(unsafe_code)]
 #[test]
 fn a_freed_large_buffer_leaves_later_ones_mapped() {
     assert!(rdy_daemon::sys::fix_malloc_threshold());

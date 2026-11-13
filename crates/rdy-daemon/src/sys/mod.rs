@@ -80,6 +80,7 @@ pub const MALLOC_MMAP_THRESHOLD: usize = 1024 * 1024;
 /// landing and the unused pages went to swap. A fixed threshold also stops the moving one: each
 /// block of 1 MiB or more gets its own mapping and goes back to the system when freed. Nothing on
 /// other platforms. Returns whether the setting was applied.
+#[allow(unsafe_code)]
 pub fn fix_malloc_threshold() -> bool {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
