@@ -1694,7 +1694,8 @@ fn page_changes(
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
 /// doc), else the first block of the first section when it is such a prose and the doc has more
 /// sections (a one-section doc keeps all its text under its heading); a prose of several
-/// paragraphs or with a list renders in place.
+/// paragraphs or with a list renders in place. A collapsed first section keeps its prose: it
+/// stays in the fold, with its Copy range and its change marks.
 pub(crate) fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block> {
     let children = m.children(Some(&doc.id));
     let one_paragraph = |p: &Block| p.block_type == "prose" && inline::is_one_paragraph(&p.body);
@@ -1707,6 +1708,7 @@ pub(crate) fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block>
                 .first()
                 .filter(|s| {
                     s.block_type == "section"
+                        && s.fields.get("collapsed") != Some(&rdy_model::FieldValue::Bool(true))
                         && children
                             .iter()
                             .filter(|c| c.block_type == "section")

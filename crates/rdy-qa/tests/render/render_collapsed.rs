@@ -1019,3 +1019,76 @@ Sibling words, see [Gamma body words](guide.md#gamma-body-words).\n"
         page_copy.text
     );
 }
+
+/// A collapsed first section keeps its first prose: the prose is not the page lede, it sits in the
+/// fold, section Copy holds it, and an edit to it opens the fold in a review render.
+#[test]
+fn rfr1_collapsed_first_section_keeps_its_first_prose() {
+    let (dir, mut r) = tiny();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "first-fold", "title": "First fold", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$a", "parent": "$g", "fields": {"title": "Closed first", "collapsed": true}},
+            {"op": "create", "type": "prose", "id": "$pa", "parent": "$a", "body": "Closed first words."},
+            {"op": "create", "type": "section", "id": "$b", "parent": "$g", "fields": {"title": "Second"}},
+            {"op": "create", "type": "prose", "parent": "$b", "body": "Second words."}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    fn render(r: &Rdy, scope: &Scope) -> String {
+        let out = tempfile::tempdir().unwrap();
+        rdy_render::render_site(&r.read(), scope, out.path()).unwrap();
+        html(out.path(), "first-fold.html")
+    }
+    let page = render(&r, &Scope::Canon);
+    let folds = folds_of(&page);
+    assert_eq!(folds.len(), 1, "{page}");
+    assert!(!folds[0].open);
+    assert!(folds[0].body.contains("Closed first words."), "{page}");
+    // nothing of it outside the fold: it is not the lede
+    let template = Regex::new(r"(?s)<template data-copy-page hidden>.*?</template>").unwrap();
+    let outside = template
+        .replace_all(
+            &format!("{}{}", &page[..folds[0].start], &page[folds[0].end..]),
+            "",
+        )
+        .into_owned();
+    assert!(!outside.contains("Closed first words."), "{outside}");
+
+    // an edit to that prose opens its fold in a review
+    write(
+        &mut r,
+        "draft",
+        json!([{"op": "update", "id": w.created["$pa"], "body": "Closed first edited."}]),
+    )
+    .unwrap();
+    let review = folds_of(&render(&r, &Scope::View("draft".into())));
+    assert_eq!(review.len(), 1);
+    assert!(review[0].open, "{review:?}");
+    assert!(review[0].body.contains("Closed first edited."));
+
+    // section Copy holds the prose
+    if !crate::render_copy_text::node_or_skip("rfr1_collapsed_first_section_keeps_its_first_prose")
+    {
+        drop(dir);
+        return;
+    }
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let page = html(out.path(), "first-fold.html");
+    let v = crate::render_copy_text::run(crate::render_copy_text::page_spec(
+        &page,
+        "http://h/first-fold.html",
+        crate::render_copy_text::COPY_ALL,
+    ));
+    let copies = crate::render_copy_text::copies(&page, &v);
+    let sec = copies
+        .iter()
+        .find(|c| c.text.starts_with("<details>\n<summary><b>Closed first"))
+        .expect("a section copy");
+    assert!(sec.text.contains("Closed first words."), "{}", sec.text);
+    drop(dir);
+}
