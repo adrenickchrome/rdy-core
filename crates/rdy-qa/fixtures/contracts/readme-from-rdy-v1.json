@@ -18105,9 +18105,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "c104200d06826f8d5d4f03a962c924090a67b1aa162b5494c4fb76be84c97bc2"
+              "dfda10f705960fc4b4a5faf596d3de1761311c754b5da6a0b1b129eabda90436"
             ],
-            "line": "P-c104200d0682@1 waits for an answer; read rdy_pending"
+            "line": "P-dfda10f70596@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -18127,46 +18127,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "d9576c0305f03ac12631604283c32db750e2ffee0e56c51dd4ce6a3f62745433"
+              "c4eb622a4f34a4868693cbc86c6f40a2817d0173ff65b052fbed09b09c6dd02e"
             ],
-            "line": "P-d9576c0305f0@1 waits for an answer; read rdy_pending"
+            "line": "P-c4eb622a4f34@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "6106e571c2872289b504e1a6a4ff2ff33c8913e2a4fe1743dde02a87e175bb87",
-              "d9576c0305f03ac12631604283c32db750e2ffee0e56c51dd4ce6a3f62745433"
+              "50f4eb609d085b3e7fe4948aaa3ee54a66318413ecb7f285427f268c09ffc9af",
+              "c4eb622a4f34a4868693cbc86c6f40a2817d0173ff65b052fbed09b09c6dd02e"
             ],
-            "line": "landing 6106e571c287 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 50f4eb609d08 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "6106e571c2872289b504e1a6a4ff2ff33c8913e2a4fe1743dde02a87e175bb87",
+              "50f4eb609d085b3e7fe4948aaa3ee54a66318413ecb7f285427f268c09ffc9af",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 6106e571c287 with 1 conflicts"
+            "line": "your view a rebased onto landing 50f4eb609d08 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "31af126dccecf690777919de4c8b2edcd8ec3e9dfb128465be6d8739ed062f2b",
+              "16f2d490fc3b4e9215d510bf9924e6fdc91a9ed12003f787f52c3424909a7817",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 31af126dccec replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 6106e571c287"
+            "line": "tension 16f2d490fc3b replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 50f4eb609d08"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
+        "tn-16f2d490fc3b",
         "tn-26128692ed56",
-        "tn-31af126dccec",
-        "tn-c7804141f02d"
+        "tn-38f39054fcf2"
       ],
       "tensions": {
+        "tn-16f2d490fc3b": "open",
         "tn-26128692ed56": "open",
-        "tn-31af126dccec": "open",
-        "tn-c7804141f02d": "open"
+        "tn-38f39054fcf2": "open"
       },
       "transitions": 3
     },
@@ -29095,6 +29095,11 @@
           ],
           "class": null,
           "fields": {
+            "collapsed": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "lifecycle": {
               "kind": "enum",
               "required": false,
@@ -29518,6 +29523,18 @@
       "policy_rules_from_chat_land": {
         "issues": [],
         "reads": "land"
+      },
+      "section_collapsed": {
+        "absent": [],
+        "bad_kind": [
+          [
+            "E_FIELD_KIND",
+            "field \"collapsed\" must be Bool",
+            "write collapsed as a bool value"
+          ]
+        ],
+        "false": [],
+        "true": []
       },
       "unknown_field_kind": "pack YAML is invalid: block_types.t.fields.f.kind: unknown variant `nope`, expected one of `str`, `int`, `bool`, `list`, `map`, `enum` at line 8 column 15",
       "unknown_pack_key": "pack YAML is invalid: unknown field `bogus`, expected one of `name`, `version`, `extends`, `link_types`, `block_types`, `doc_types`, `default_doc_type`, `tensions`, `tensions_across`, `duplicate_text_min_words`, `areas`, `coverage`, `rules` at line 3 column 1"
