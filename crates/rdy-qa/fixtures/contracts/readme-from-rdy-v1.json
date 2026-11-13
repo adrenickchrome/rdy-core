@@ -1387,7 +1387,15 @@
               "landing": "string"
             },
             "disclosure": {
-              "added_attachments": [],
+              "added_attachments": [
+                {
+                  "available": "bool",
+                  "blob": "string",
+                  "block": "string",
+                  "home_doc": "string",
+                  "variant?": "string"
+                }
+              ],
               "added_docs": [],
               "after_profile_version": "string",
               "after_selection_hash": "string",
@@ -1396,8 +1404,28 @@
               "before_profile_version": "string",
               "before_selection_hash": "string",
               "before_selection_identity": "string",
-              "changed_attachments": [],
-              "changed_docs": [],
+              "changed_attachments": [
+                {
+                  "after_available": "bool",
+                  "after_blob": "string",
+                  "after_home_doc": "string",
+                  "before_available": "bool",
+                  "before_blob": "string",
+                  "before_home_doc": "string",
+                  "block": "string",
+                  "variant?": "string"
+                }
+              ],
+              "changed_docs": [
+                {
+                  "after_digest": "string",
+                  "after_path": "string",
+                  "before_digest": "string",
+                  "before_path": "string",
+                  "id": "string",
+                  "redacted": "bool"
+                }
+              ],
               "changed_folders": [],
               "changed_outside_docs": [],
               "new_reference_count": "number",
@@ -1431,7 +1459,15 @@
               "profile_changed": "bool",
               "profile_id": "string",
               "redactions": [],
-              "removed_attachments": [],
+              "removed_attachments": [
+                {
+                  "available": "bool",
+                  "blob": "string",
+                  "block": "string",
+                  "home_doc": "string",
+                  "variant?": "string"
+                }
+              ],
               "removed_docs": [
                 {
                   "digest": "string",
@@ -18105,9 +18141,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "dfda10f705960fc4b4a5faf596d3de1761311c754b5da6a0b1b129eabda90436"
+              "77c53908fc8e207d499a0d4330eb0925661b71f77c2d15c268f201af9e8552e0"
             ],
-            "line": "P-dfda10f70596@1 waits for an answer; read rdy_pending"
+            "line": "P-77c53908fc8e@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -18127,46 +18163,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "c4eb622a4f34a4868693cbc86c6f40a2817d0173ff65b052fbed09b09c6dd02e"
+              "4f1ae18e03add1a534281c9156994bf3d5fbe0fce88bae1a6c2fb28f4b0a6778"
             ],
-            "line": "P-c4eb622a4f34@1 waits for an answer; read rdy_pending"
+            "line": "P-4f1ae18e03ad@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "50f4eb609d085b3e7fe4948aaa3ee54a66318413ecb7f285427f268c09ffc9af",
-              "c4eb622a4f34a4868693cbc86c6f40a2817d0173ff65b052fbed09b09c6dd02e"
+              "21158e2d11846491e184f9f08ec8dbaef673232658cd16a1edf069c7e9148ec5",
+              "4f1ae18e03add1a534281c9156994bf3d5fbe0fce88bae1a6c2fb28f4b0a6778"
             ],
-            "line": "landing 50f4eb609d08 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 21158e2d1184 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "50f4eb609d085b3e7fe4948aaa3ee54a66318413ecb7f285427f268c09ffc9af",
+              "21158e2d11846491e184f9f08ec8dbaef673232658cd16a1edf069c7e9148ec5",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 50f4eb609d08 with 1 conflicts"
+            "line": "your view a rebased onto landing 21158e2d1184 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "16f2d490fc3b4e9215d510bf9924e6fdc91a9ed12003f787f52c3424909a7817",
+              "bb161e5eeac73451d016ddc24bda1399489b7a0b68e642a7d0c8a15d5b34acd0",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 16f2d490fc3b replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 50f4eb609d08"
+            "line": "tension bb161e5eeac7 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 21158e2d1184"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-16f2d490fc3b",
+        "tn-0a79891d1de5",
         "tn-26128692ed56",
-        "tn-38f39054fcf2"
+        "tn-bb161e5eeac7"
       ],
       "tensions": {
-        "tn-16f2d490fc3b": "open",
+        "tn-0a79891d1de5": "open",
         "tn-26128692ed56": "open",
-        "tn-38f39054fcf2": "open"
+        "tn-bb161e5eeac7": "open"
       },
       "transitions": 3
     },
@@ -18357,6 +18393,8 @@
       "v4-f1-e1-ck-holder.rdydump": "7016 f0fde8153ed1a1801bc8ad163c08e578684445086ba9de175c163e3b06616bae",
       "v4-f1-e1-ck.expect.json": "18732 0a4881db4127014b6e49ee43ab7b207182ad16774075295d98fbd2b38b7b52f7",
       "v4-f1-e1-ck.rdydump": "13383 2c576d7c7e1114d6a3ff0b955babb7c6c71d379e2f278e8fcd6bcacd7b8f2cce",
+      "v4-f1-e1-figure-dark.expect.json": "9374 b6b68175c227aae5b869d55394ae6a939975241eb005391a4a2ae4a312e4b4c6",
+      "v4-f1-e1-figure-dark.rdydump": "6842 a64524b4ae80f73235ae9b06b773b0e15cfe4ca34be859b81bdeb33474969aa0",
       "v4-f1-e1-foreign-copy.expect.json": "27430 1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
       "v4-f1-e1-foreign-copy.rdydump": "20793 6aca7c40fefdff88db530fdbce96355f38e068c85e65ba4e8e627b9977a78bbf",
       "v4-f1-e1-holder-chain-1.rdydump": "4486 49a98826eb8c1bb79f02301ce1430526a6f4e012dba10c26673f2280c76bd6cf",
@@ -21701,7 +21739,15 @@
             "landing": "string"
           },
           "disclosure": {
-            "added_attachments": [],
+            "added_attachments": [
+              {
+                "available": "bool",
+                "blob": "string",
+                "block": "string",
+                "home_doc": "string",
+                "variant?": "string"
+              }
+            ],
             "added_docs": [],
             "after_profile_version": "string",
             "after_selection_hash": "string",
@@ -21710,8 +21756,28 @@
             "before_profile_version": "string",
             "before_selection_hash": "string",
             "before_selection_identity": "string",
-            "changed_attachments": [],
-            "changed_docs": [],
+            "changed_attachments": [
+              {
+                "after_available": "bool",
+                "after_blob": "string",
+                "after_home_doc": "string",
+                "before_available": "bool",
+                "before_blob": "string",
+                "before_home_doc": "string",
+                "block": "string",
+                "variant?": "string"
+              }
+            ],
+            "changed_docs": [
+              {
+                "after_digest": "string",
+                "after_path": "string",
+                "before_digest": "string",
+                "before_path": "string",
+                "id": "string",
+                "redacted": "bool"
+              }
+            ],
             "changed_folders": [],
             "changed_outside_docs": [],
             "new_reference_count": "number",
@@ -21745,7 +21811,15 @@
             "profile_changed": "bool",
             "profile_id": "string",
             "redactions": [],
-            "removed_attachments": [],
+            "removed_attachments": [
+              {
+                "available": "bool",
+                "blob": "string",
+                "block": "string",
+                "home_doc": "string",
+                "variant?": "string"
+              }
+            ],
             "removed_docs": [
               {
                 "digest": "string",
@@ -28668,6 +28742,16 @@
               "required": true,
               "values": []
             },
+            "dark_blob": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            },
+            "dark_media_type": {
+              "kind": "str",
+              "required": false,
+              "values": []
+            },
             "media_type": {
               "kind": "str",
               "required": true,
@@ -29492,6 +29576,31 @@
       "coverage_level_too_high": "invalid pack: coverage.max_docs_per_level is 100001; it must be 1 to 100000",
       "coverage_level_too_low": "invalid pack: coverage.max_docs_per_level is 0; it must be 1 to 100000",
       "duplicate_pack_name": "pack \"rdy-standard\" is defined twice: in the built-in pack and in x.yaml",
+      "figure_dark": {
+        "bad_kind": [
+          [
+            "E_FIELD_KIND",
+            "field \"dark_blob\" must be Str",
+            "write dark_blob as a str value"
+          ]
+        ],
+        "dark_blob_only": [
+          [
+            "E_VALIDATION",
+            "fg-F1G01's dark_blob and dark_media_type are set together",
+            "set both fields, or neither"
+          ]
+        ],
+        "dark_media_type_only": [
+          [
+            "E_VALIDATION",
+            "fg-F1G01's dark_blob and dark_media_type are set together",
+            "set both fields, or neither"
+          ]
+        ],
+        "light_only": [],
+        "pair": []
+      },
       "policy_rules_from_chat_bad_kind": {
         "issues": [
           [
@@ -29983,6 +30092,7 @@
       "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
       "content_hash_v2": "baseline: every store this rdy writes",
       "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
+      "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
       "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
       "object_encoding": "any frame of encoding 1 or more",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
@@ -30008,6 +30118,11 @@
         "class": "incompatible",
         "name": "dispute",
         "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "figure_dark",
+        "required_rdy": "0.51.0"
       },
       {
         "class": "incompatible",
@@ -30329,6 +30444,7 @@
       "check_request",
       "content_hash_v2",
       "dispute",
+      "figure_dark",
       "foreign_copy",
       "object_encoding",
       "plan_tension",

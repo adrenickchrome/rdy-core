@@ -235,9 +235,12 @@ fn rfr1_contract_adds_only_collapsed() {
         m
     };
     assert_eq!(fields(&old), fields(&new));
+    // the figure's own change is Task 2's (`rfr2_contract_adds_only_image_support_and_feature`)
     for ty in ["prose", "claim", "note", "doc", "table", "figure"] {
         let p = format!("/schema_packs/rdy_standard/block_types/{ty}");
-        assert_eq!(old.pointer(&p), new.pointer(&p), "{ty} is unchanged");
+        if ty != "figure" {
+            assert_eq!(old.pointer(&p), new.pointer(&p), "{ty} is unchanged");
+        }
         assert!(
             new.pointer(&format!("{p}/fields/collapsed")).is_none(),
             "{ty} has no collapsed field"
