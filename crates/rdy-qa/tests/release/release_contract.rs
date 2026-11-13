@@ -2093,8 +2093,8 @@ fn publication_project() -> tempfile::TempDir {
         id("$late"),
         id("$calm"),
     );
-    // rfr2 (D-TBDA1): figures whose images the comparison sees added, changed and removed, each
-    // row naming its variant
+    // rfr2 (D-TBDA1): figures whose images the comparison sees added, changed and removed, light
+    // and dark: a dark image's row names its variant, a light image's row has none
     let blob = |r: &mut rdy_engine::Rdy, tail: &[u8]| {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
         b.extend_from_slice(tail);
@@ -2111,6 +2111,7 @@ fn publication_project() -> tempfile::TempDir {
         blob(&mut r, b"d dark"),
         blob(&mut r, b"d dark 2"),
     );
+    let (light_e, light_f) = (blob(&mut r, b"e"), blob(&mut r, b"f"));
     let figures = write(
         &mut r,
         "work",
@@ -2122,14 +2123,17 @@ fn publication_project() -> tempfile::TempDir {
                 "dark_blob": dark_c, "dark_media_type": "image/png", "alt": "Figure C"}},
             {"op": "create", "type": "figure", "id": "$fd", "parent": guide, "fields": {
                 "blob": light_d, "media_type": "image/png",
-                "dark_blob": dark_d, "dark_media_type": "image/png", "alt": "Figure D"}}
+                "dark_blob": dark_d, "dark_media_type": "image/png", "alt": "Figure D"}},
+            {"op": "create", "type": "figure", "id": "$ff", "parent": guide, "fields": {
+                "blob": light_f, "media_type": "image/png", "alt": "Figure F"}}
         ]),
     )
     .expect("the figures");
-    let (fig_a, fig_c, fig_d) = (
+    let (fig_a, fig_c, fig_d, fig_f) = (
         figures.created["$fa"].clone(),
         figures.created["$fc"].clone(),
         figures.created["$fd"].clone(),
+        figures.created["$ff"].clone(),
     );
     write(
         &mut r,
@@ -2157,7 +2161,10 @@ fn publication_project() -> tempfile::TempDir {
             {"op": "update", "id": late, "fields": {"planned": true}},
             {"op": "update", "id": fig_a, "fields": {"blob": light_a2, "dark_blob": dark_a, "dark_media_type": "image/png"}},
             {"op": "update", "id": fig_c, "unset": ["dark_blob", "dark_media_type"]},
-            {"op": "update", "id": fig_d, "fields": {"dark_blob": dark_d2}}
+            {"op": "update", "id": fig_d, "fields": {"dark_blob": dark_d2}},
+            {"op": "create", "type": "figure", "parent": guide, "fields": {
+                "blob": light_e, "media_type": "image/png", "alt": "Figure E"}},
+            {"op": "delete", "id": fig_f}
         ]),
     )
     .expect("the second change");
@@ -6683,7 +6690,6 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
     "cli/publication check against/stdout/disclosure/added_docs",
-    "cli/publication check against/stdout/disclosure/changed_docs",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
@@ -6817,7 +6823,6 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
-    "mcp/rdy_publication_check against/ok/disclosure/changed_docs",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
