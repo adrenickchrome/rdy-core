@@ -567,3 +567,97 @@ fn rf4_hostile_reflects_stream_leaves_holder_unchanged() {
         assert_eq!(segments(&root), before, "{name}: the log is unchanged");
     }
 }
+
+/// TASK-2393, D-3XFMP: the re-exported `BatchReport` carries `record_features`, in the form of
+/// `header.features`, from a batch whose records need a feature the header does not name.
+#[test]
+fn batch_report_carries_record_features() {
+    use rdy_model::{Block, BlockId, Tag};
+    use std::collections::BTreeMap;
+    let block = |id: &str, block_type: &str| Block {
+        id: BlockId::parse(id).unwrap(),
+        block_type: block_type.into(),
+        parent: None,
+        order: "V".into(),
+        fields: BTreeMap::new(),
+        body: "x".into(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        foreign: Default::default(),
+        read_identity: None,
+    };
+    let present = |kind: u8, v: &Block| {
+        let payload = postcard::to_allocvec(v).unwrap();
+        StreamRecord::Present {
+            encoding: 0,
+            key: ObjectKey {
+                kind,
+                hash: Hash::of(&payload),
+            },
+            payload,
+        }
+    };
+    let landing = Hash([4; 32]);
+    let t = Tag {
+        name: "v1".into(),
+        landing,
+        message: None,
+        tagged_by: rdy_model::Provenance {
+            actor: "agent:w".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 1,
+        },
+    };
+    let tag_payload = postcard::to_allocvec(&t).unwrap();
+    let tag_record = StreamRecord::Present {
+        encoding: 0,
+        key: ObjectKey {
+            kind: rdy_store::kinds::TAG,
+            hash: t.id(),
+        },
+        payload: tag_payload,
+    };
+    let h = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        RepoId([7; 16]),
+        t.id(),
+        vec![ObjectKey {
+            kind: rdy_store::kinds::LANDING,
+            hash: landing,
+        }],
+    );
+    let make = |records: &[StreamRecord]| {
+        let mut w = StreamWriter::new(Vec::new(), &h).unwrap();
+        for r in records {
+            w.record(r).unwrap();
+        }
+        w.finish().unwrap().0
+    };
+    let plain = present(rdy_store::kinds::BLOCK, &block("b-00001", "claim"));
+    let linked = present(rdy_store::kinds::BLOCK, &block("b-00002", "repo_link"));
+
+    let quiet: BatchReport =
+        check_batch(make(&[plain.clone(), tag_record.clone()]).as_slice(), None).unwrap();
+    assert!(quiet.record_features.features.is_empty());
+
+    let report: BatchReport =
+        check_batch(make(&[plain, linked, tag_record]).as_slice(), None).unwrap();
+    assert_eq!(
+        report.header.features,
+        rdy_store::format::baseline_features()
+    );
+    assert_eq!(report.record_features.manifest_version, 1);
+    let names: Vec<&str> = report
+        .record_features
+        .features
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(names, ["foreign_copy"]);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["record_features"]["features"][0]["name"],
+        "foreign_copy"
+    );
+}

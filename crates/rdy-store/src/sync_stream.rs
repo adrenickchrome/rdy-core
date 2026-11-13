@@ -87,7 +87,9 @@ use crate::dump::{
     ENCODED_DROPPED_LEN, Frame, LINK_LEN, check_dropped, encoded_dropped_payload, link,
     parse_encoded_dropped,
 };
-use crate::format::{MAX_MANIFEST_BYTES, StoreFeatures, check_features};
+use crate::format::{
+    MAX_MANIFEST_BYTES, StoreFeature, StoreFeatures, check_features, required_features,
+};
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, portable_refs_of};
 use crate::segment::HEADER as FRAME_HEADER;
@@ -482,16 +484,47 @@ pub struct StreamTotals {
 }
 
 /// What a valid batch holds: its header, the logical key of every object record in wire order
-/// (not sorted), and its trailer's records, bytes and digest. It says the batch's framing and
-/// objects are valid, never that an upload is complete or a removal authorized.
+/// (not sorted), the features its records need, and its trailer's records, bytes and digest. It
+/// says the batch's framing and objects are valid, never that an upload is complete or a removal
+/// authorized.
+///
+/// `record_features` has the type and JSON form of `header.features`: the union of
+/// `format::required_features` over the batch's present records (the rule the take uses; a
+/// dropped record needs none), sorted by name. It is empty when no record needs a feature. It
+/// reports the records only: `header.features` stays what the header says, and no receiver is
+/// refused for either.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BatchReport {
     pub header: StreamHeader,
     pub keys: Vec<ObjectKey>,
+    pub record_features: StoreFeatures,
     pub records: u64,
     pub bytes: u64,
     #[serde(serialize_with = "hex_hash")]
     pub digest: Hash,
+}
+
+/// The union of the features the records added to it need (`format::required_features`), for a
+/// [`BatchReport`]'s `record_features`.
+#[derive(Debug, Default)]
+pub struct RecordFeatures(Vec<StoreFeature>);
+
+impl RecordFeatures {
+    /// Adds what `r` needs; a dropped record needs nothing.
+    pub fn add(&mut self, r: &StreamRecord) {
+        if let StreamRecord::Present { payload, .. } = r {
+            for f in required_features(r.raw_kind(), payload) {
+                if !self.0.iter().any(|g| g.name == f.name) {
+                    self.0.push(f);
+                }
+            }
+        }
+    }
+
+    /// The union, as a manifest sorted by name.
+    pub fn finish(self) -> StoreFeatures {
+        StoreFeatures::of(self.0)
+    }
 }
 
 fn hex_hash<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
@@ -1351,6 +1384,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     let (mut reader, header) = StreamReader::open_for(input, StreamPurpose::TagHistory)?;
     on_header(&header)?;
     let mut keys: Vec<ObjectKey> = Vec::new();
+    let mut record_features = RecordFeatures::default();
     let mut at: Vec<u64> = Vec::new();
     let mut index: HashMap<ObjectKey, u32> = HashMap::new();
     let mut edges: Vec<ObjectRef> = Vec::new();
@@ -1372,6 +1406,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
         record_rules(n, offset, &r)?;
         on_record(n, offset, &r)?;
+        record_features.add(&r);
         let proof = r.proof();
         if (edges.len() + proofs.len() + refs.len() + usize::from(proof.is_some())) as u64
             > MAX_EDGES
@@ -1472,6 +1507,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     Ok(BatchReport {
         header,
         keys,
+        record_features: record_features.finish(),
         records: totals.records,
         bytes: totals.bytes,
         digest: totals.digest,
