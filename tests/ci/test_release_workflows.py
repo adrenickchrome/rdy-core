@@ -70,6 +70,11 @@ def condition_of_notify():
 def evaluate(condition, context):
     """The notify job's `if`: a conjunction of `lhs == literal` terms over a closed set of names."""
     for term in condition.split(' && '):
+        negated = re.fullmatch(r"!startsWith\(([A-Za-z0-9_.]+), '([^']*)'\)", term)
+        if negated:
+            if str(context[negated.group(1)]).startswith(negated.group(2)):
+                return False
+            continue
         left, right = term.split(' == ')
         want = right[1:-1] if right.startswith("'") else {'true': True, 'false': False}[right]
         if context[left] != want:
@@ -117,6 +122,7 @@ class Notify(object):
         self.runs += 1
         context = {'github.repository_id': repository_id,
                    'github.event.release.draft': event['release']['draft'],
+                   'github.event.release.tag_name': event['release']['tag_name'],
                    'vars.RDY_WEB_DISPATCH_ENABLED': enabled}
         if not evaluate(condition_of_notify(), context):
             return 'skipped'
@@ -178,6 +184,10 @@ class Delivery(unittest.TestCase):
         self.assertEqual(notify.run(published_event(), receiver, enabled='TRUE'), 'skipped')
         self.assertEqual(notify.run(published_event(draft=True), receiver), 'skipped')
         self.assertEqual(notify.run(published_event(), receiver, repository_id='1'), 'skipped')
+        # A docs bundle prerelease is skipped, never failed. Any other non-semver tag still fails in the script.
+        self.assertEqual(notify.run(published_event(tag='docs-v0.51.0'), receiver), 'skipped')
+        self.assertEqual(notify.run(published_event(tag='v0.51.0'), receiver), 'dispatched')
+        receiver.calls.clear()
         # An event that passes the job condition but is not a genuine published event stops in the script.
         for changed in (dict(action='created'), dict(action='edited'), dict(published_at=None), dict(published_at=''),
                         dict(release_id='4242'), dict(release_id=0), dict(release_id=True),
