@@ -128,6 +128,8 @@ pub(crate) fn render_static(
 /// summary. The scope and the profile read as [`render_static`] reads
 /// them: with a profile, its selected view and its reference check; without, the full source.
 /// The `export` op and the daemon's `Engine::export` (`rdy_export`) both print through it.
+// the op's and the tool's arguments, one each: no struct of them crosses the op module
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn export_print(
     st: &ReadState,
     scope_text: &str,
