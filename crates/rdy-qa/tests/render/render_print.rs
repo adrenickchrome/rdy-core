@@ -686,20 +686,23 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// digest is the one before.
 /// Re-taken for the as-built plan's Task 5 (FW-AB1): `assets/site.css` gained the status line's
 /// two rules (`.block-status`, `.status`); with the old stylesheet every digest is the one before.
+/// Re-taken for the README plan's Task 1 (D-3VVNC): `assets/site.css` gained the fold rules and
+/// `js/theme.js` (bundled in `assets/app.js`) the fold opener; with the old assets every digest is
+/// the one before. The fixture holds no collapsed section, so no page text moved.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "18db39054441a843359f76e82d8eaa432a897d2a96e164b977f27b7d1efb016e",
+            "87adb8ba3f7a8a3abed8730ad02dc28712e7b0e9e907112972760edb14277881",
         ),
         (
             "view:editing",
-            "cb5f7b5def061cfad67a65ae0dbcdadd920ecf897e040bf27739539c60820c53",
+            "bfb803528c70f5d11ee6794201c70ea457b87be3f88008cfa41f34c7d5400c79",
         ),
         (
             "view:reserved",
-            "00101b758309f9992ba7e5b40b3894b1eef991d282e14507e9e2de0441e1f970",
+            "fcb14f5c7ac0e2e34441d9fcfb3b38f7920d9f9cf1d01f8e35bd6f1e8585de2e",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
