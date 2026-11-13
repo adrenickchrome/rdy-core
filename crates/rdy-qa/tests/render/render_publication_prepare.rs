@@ -105,10 +105,15 @@ fn print_out(p: &Print) -> PrintOut {
     print::md::write_markdown(p, &md, Layout::Plain).expect("the markdown tree");
     print::md::write_markdown(p, &mkdocs, Layout::Mkdocs).expect("the mkdocs tree");
     PrintOut {
-        // pub8 added `tag_redacted` for a named profile's chosen tag; a source print has none
+        // pub8 added `tag_redacted` for a named profile's chosen tag; a source print has none.
+        // README Task 3 added a run's `ref_of`, which only the single Markdown file's reading sets;
+        // the site's reading leaves it unset, so it is masked the same way
         model: {
             assert!(!p.tag_redacted, "a source print marks no tag");
-            format!("{model:?}").replacen(", tag_redacted: false", "", 1)
+            let text = format!("{model:?}");
+            assert!(!text.contains("ref_of: Some"), "the print sets no ref_of");
+            text.replacen(", tag_redacted: false", "", 1)
+                .replace(", ref_of: None", "")
         },
         pdf: std::fs::read(&pdf).unwrap(),
         html: std::fs::read(&html).unwrap(),
