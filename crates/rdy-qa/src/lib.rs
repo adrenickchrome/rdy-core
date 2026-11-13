@@ -28,6 +28,7 @@ pub mod reindex_check;
 pub mod release_install;
 pub mod release_keys;
 pub mod release_notices;
+pub mod release_readme;
 pub mod release_sample;
 pub mod report;
 pub mod seams;

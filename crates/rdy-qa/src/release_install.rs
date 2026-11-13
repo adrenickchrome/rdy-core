@@ -1418,6 +1418,57 @@ pub fn readme_version_section(keys: &ReleaseKeys, version: &str) -> Result<Strin
     readme_install_section(version, &signer.signer_line)
 }
 
+/// The repository's GitHub releases page: each release's tag page and downloads sit below it.
+pub const RELEASES_URL: &str = "https://github.com/adrenickchrome/rdy-core/releases";
+
+/// The release notes page of `version`: its GitHub release.
+pub fn readme_notes_url(version: &str) -> String {
+    format!("{RELEASES_URL}/tag/v{version}")
+}
+
+/// The README's name for the platform of `target`.
+fn platform_label(target: &str) -> &'static str {
+    if target == TARGETS[0] {
+        "macOS arm64"
+    } else if target == WINDOWS_TARGET {
+        "Windows amd64"
+    } else {
+        "Linux amd64"
+    }
+}
+
+/// The README's Archives part for `version` (D-81YJG): one row per release target, in manifest
+/// order, named by [`archive_name`], then the release's own links and the download steps.
+pub fn readme_archives_section(version: &str) -> String {
+    let labels: Vec<&str> = MANIFEST_TARGETS.iter().map(|t| platform_label(t)).collect();
+    let count = match labels.len() {
+        1 => "one".to_string(),
+        2 => "two".to_string(),
+        3 => "three".to_string(),
+        n => n.to_string(),
+    };
+    let list = match labels.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    };
+    let download = format!("{RELEASES_URL}/download/v{version}");
+    let rows: String = MANIFEST_TARGETS
+        .iter()
+        .map(|t| {
+            let name = archive_name(version, t);
+            format!(
+                "| {} | `{t}` | [{name}]({download}/{name}) |\n",
+                platform_label(t)
+            )
+        })
+        .collect();
+    format!(
+        "### Archives\n\nEach release has {count} archives: {list}. The Linux archive is qualified on Ubuntu 26.\n\n| Platform | Target | Archive |\n|---|---|---|\n{rows}\nThe release is [v{version}]({}). It also holds [SHA256SUMS]({download}/SHA256SUMS) and [SHA256SUMS.sig]({download}/SHA256SUMS.sig).\n\nDownload the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.\nCheck the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.\nThis signature is not Apple notarization.\n",
+        readme_notes_url(version)
+    )
+}
+
 /// The README's ready state for `version`: the selected release key with its fingerprint, the
 /// trust list of every key and range (historical and machine epochs, their statements and the
 /// root verification commands), then the install blocks for the selected key. All of it comes
