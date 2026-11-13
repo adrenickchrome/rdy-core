@@ -1,8 +1,8 @@
 {
-  "advised_digest": "5e031cc4ef5d",
+  "advised_digest": "177b150649cb",
   "assessment": null,
   "blocking": [],
-  "canon_at": "6fe503b97d1e38f5791acc84dca4812d8ac909cf51de8635d3ac965ddeda8558",
+  "canon_at": "376eeba1ccfa9b0903c37a9877e4603f71af79422399735d7c094d108b42da79",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -17,7 +17,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-ed996125a2a2ba1a",
+      "id": "cq-3771326916698249",
       "kind": "suspect"
     }
   ],
@@ -33,13 +33,13 @@
       }
     ]
   },
-  "id": "ef5126facfa7de060e8d28f3b9d1a073f4cbbf3b020c63f7453e7a41266bdbe7",
+  "id": "1177c99fa0d7b326511d4a2961186b9eaa2cec863922e609344d2d358e780cac",
   "issues": [
     {
       "block": null,
       "code": "E_BLOCKING_TENSION",
       "fix": "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
-      "message": "landing P-4838f92f172c@2 would put 2 blocking tension(s) into canon",
+      "message": "landing P-d0026d236794@2 would put 2 blocking tension(s) into canon",
       "severity": "error"
     },
     {
@@ -101,10 +101,10 @@
       {
         "cause": "D-REKH0",
         "edge": "tension",
-        "id": "tn-984a4b2d200f",
+        "id": "tn-ae5e4cdefc7c",
         "kind": "tension",
         "state": "open",
-        "subject": "984a4b2d200f3098267ca5556a4698e67c5a3f8fd47f126116361a0f61ce1bf5"
+        "subject": "ae5e4cdefc7c5fbf57447e4afb0983371f027dd4b6bc443987f36e3b48ce4df4"
       },
       {
         "cause": "c-CFPE0",
@@ -119,8 +119,8 @@
   },
   "policy": null,
   "ready": false,
-  "ref": "P-4838f92f172c@2",
-  "stable": "4838f92f172cb14655ef81661cdf24c715067daccc64849784c6149885ce8779",
+  "ref": "P-d0026d236794@2",
+  "stable": "d0026d236794c34d89c93d3a186bed23ba0511daf14916dd2d7610dc2f997936",
   "summary": "Rewords A and C.",
   "tensions": [
     {
@@ -190,7 +190,7 @@
         "D-REKH0",
         "c-ZCQ17"
       ],
-      "id": "tn-984a4b2d200f",
+      "id": "tn-ae5e4cdefc7c",
       "judged": {
         "actor": "agent:r",
         "advice": "it contradicts the gate rule",
@@ -200,7 +200,7 @@
             "note": "these two cannot both hold"
           }
         ],
-        "review": "2c79c0c903b27b042ca42521ab1019d39549a34a99f35cac20597818f55be753",
+        "review": "f076b407e40e083c3c3b9225130deeaba8704c4d0c47e57bb32fa17417d35c98",
         "run": "r"
       },
       "kind": "semantic",
@@ -234,15 +234,15 @@
               "version": "8a49e301116bef42ff3e19d5bda609356d06d0c3dabb312c0a70d6c98c7b4995"
             }
           ],
-          "landing": "e8ed4a31161e1429319f7ac61b14c57d1393a5f7378fd1d4720438ff6ac39dbb",
+          "landing": "1877b431128f5179bbfa81f712c067192dd125372138fe1895bb6a7945db9e5c",
           "run": "cli",
-          "side": "canon@e8ed4a31161e1429319f7ac61b14c57d1393a5f7378fd1d4720438ff6ac39dbb",
+          "side": "canon@1877b431128f5179bbfa81f712c067192dd125372138fe1895bb6a7945db9e5c",
           "views": []
         }
       ],
       "status": "open",
       "summary": "a reviewer judged that D-REKH0 and c-ZCQ17 disagree",
-      "tension": "984a4b2d200f3098267ca5556a4698e67c5a3f8fd47f126116361a0f61ce1bf5"
+      "tension": "ae5e4cdefc7c5fbf57447e4afb0983371f027dd4b6bc443987f36e3b48ce4df4"
     },
     {
       "blocks": [

@@ -1,22 +1,22 @@
 {
   "accepted": [
     {
-      "id": "tn-1823845b5994",
-      "version": "7fa238686d79c37b78c61d73dd777466817cd2ced83544835682f20065067498",
-      "was": "tn-984a4b2d200f"
+      "id": "tn-7176156178d8",
+      "version": "72b034176b0f5dfbfc5eb6c51402f856f7428d813b4f3a0225d4172f6c30397e",
+      "was": "tn-ae5e4cdefc7c"
     }
   ],
   "now_blocking": [
     {
-      "tension": "tn-1823845b5994",
+      "tension": "tn-7176156178d8",
       "view": "a"
     },
     {
-      "proposal": "P-4838f92f172c@2",
-      "tension": "tn-1823845b5994",
+      "proposal": "P-d0026d236794@2",
+      "tension": "tn-7176156178d8",
       "view": "b"
     }
   ],
-  "proposal": "P-4838f92f172c@2",
+  "proposal": "P-d0026d236794@2",
   "severity": "blocking"
 }
