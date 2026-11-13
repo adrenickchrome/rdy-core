@@ -251,6 +251,8 @@ fn start_checked(
         crate::spawn::detach().map_err(ServeError::Runtime)?;
     }
     let root = RunDir::of_project(&opts.project).root();
+    // (1a) figure buffers of 1 MiB or more go back to the system when freed (glibc only, TASK-2307)
+    crate::sys::fix_malloc_threshold();
     // (2) the start first, then the store: start.lock before the store lock. The line comes
     // first too: a rival start that waits at the lock is a start that opens the store
     log("opening store");
