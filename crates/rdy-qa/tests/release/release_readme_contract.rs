@@ -181,7 +181,44 @@ const RFR2_CHANGES: &[&str] = &[
 ];
 
 /// Task 3: its members of `readme-from-rdy-v1.json` that differ from `m4bc-v1.json`.
-const RFR3_CHANGES: &[&str] = &["TO BE CAPTURED"];
+const RFR3_CHANGES: &[&str] = &[
+    // the tool's parameters
+    "added /mcp/tools/rdy_export/input_schema/properties/assets",
+    "changed /mcp/tools/rdy_export/input_schema/$defs/ExportLayout/description",
+    "changed /mcp/tools/rdy_export/input_schema/$defs/ExportLayout/enum",
+    "changed /mcp/tools/rdy_export/input_schema/properties/layout/description",
+    "changed /mcp/tools/rdy_export/input_schema/properties/out/description",
+    // the command line
+    "added /cli/tree/subcommands/name=export/args/id=assets",
+    "changed /cli/tree/subcommands/name=export/args/id=layout/choices",
+    "changed /cli/tree/subcommands/name=export/groups/id=ExportArgs/args",
+    // the layout's files and result, and each layout's file of a list-part doc (D-7M4TR)
+    "added /markdown_exports/layouts/single",
+    "added /markdown_exports/layouts/plain/list_parts",
+    "added /markdown_exports/layouts/mkdocs/list_parts",
+    "added /markdown_exports/layouts/techdocs/list_parts",
+    // the texts of the refusals (D-ESHXM, D-6PR3Y, D-H1FRY) and of the warning
+    "added /errors_warnings/templates/EXPORT_ASSETS_FIX",
+    "added /errors_warnings/templates/EXPORT_ASSETS_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_FILE_FIX",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_FILE_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_FULL_FIX",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_FULL_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_PATH_FIX",
+    "added /errors_warnings/templates/SINGLE_MD_ASSETS_PATH_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_DOCS_FIX",
+    "added /errors_warnings/templates/SINGLE_MD_DOCS_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_FIGURE_FIX",
+    "added /errors_warnings/templates/SINGLE_MD_FIGURE_MESSAGE",
+    "added /errors_warnings/templates/SINGLE_MD_REF_MESSAGE",
+    // the export's probes, which replace its rows among what is not probed
+    "added /mcp/result_fields/rdy_export",
+    "added /mcp/result_fields/rdy_export single",
+    "added /cli/runtime/probes/export",
+    "added /cli/runtime/probes/export single",
+    "removed /mcp/result_fields_not_captured/rdy_export",
+    "removed /cli/runtime/not_probed_commands/export",
+];
 
 /// Every changed member of the current fixture against `m4bc-v1.json` is in one task's list or
 /// in `DERIVED_CHANGES`, and none else moved: a member that is not listed is byte-identical.
@@ -601,7 +638,8 @@ fn rfr3_contract_adds_only_single_export() {
             "drop --assets, or export with --format md --layout single",
         ),
     ] {
-        assert_eq!(templates[name], Value::from(text), "{name}");
+        // the row holds each constant's literal, quotes and all
+        assert_eq!(templates[name], Value::from(format!("{text:?}")), "{name}");
     }
 
     // the probes: the single file's result and its refusal, over the command line and the tool

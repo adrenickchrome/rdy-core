@@ -18,7 +18,6 @@
         "dispute": "a person's act on a landing; cli_dispute pins its replies and lines",
         "dump": "writes a file; the dump_load row covers the bytes",
         "edit": "working copy: the working_copy row records its replies",
-        "export": "writes a file tree; the markdown_exports row covers it",
         "import": "reads a directory of YAML; the working copy and sync rows cover the formats",
         "init": "makes a project; every probe starts from one",
         "intent renew": "the same reply as post",
@@ -452,6 +451,45 @@
               "kind": "string",
               "name": "string"
             }
+          }
+        },
+        "export": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "assets": "number",
+            "bytes": "number",
+            "docs": "number",
+            "folders": "number",
+            "format": "string",
+            "out": "string",
+            "pages": "null",
+            "warnings": []
+          }
+        },
+        "export single": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "assets": "number",
+            "bytes": "number",
+            "docs": "number",
+            "folders": "number",
+            "format": "string",
+            "layout": "string",
+            "out": "string",
+            "pages": "null",
+            "warnings": [
+              "string"
+            ]
           }
         },
         "fsck": {
@@ -12491,13 +12529,23 @@
               "action": "set",
               "choices": [
                 "mkdocs",
-                "techdocs"
+                "techdocs",
+                "single"
               ],
               "id": "layout",
               "long": "layout",
               "num_args": "1",
               "value_names": [
                 "LAYOUT"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "assets",
+              "long": "assets",
+              "num_args": "1",
+              "value_names": [
+                "ASSETS"
               ]
             },
             {
@@ -12568,6 +12616,7 @@
           "groups": [
             {
               "args": [
+                "assets",
                 "format",
                 "layout",
                 "out",
@@ -19526,6 +19575,8 @@
       "EDIT_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest of the block and update it if needed.\"",
       "EVIDENCE_FIX": "\"write evidence as a list of {quote, session_ref?, question?} or {source: \\\"{{S-…}}\\\"} entries\"",
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
+      "EXPORT_ASSETS_FIX": "\"drop --assets, or export with --format md --layout single\"",
+      "EXPORT_ASSETS_MESSAGE": "\"--assets applies to --format md --layout single only\"",
       "EXPORT_CHAIN_FIX": "\"follow the newest file of this store's chain, or start a new chain with rdy dump\"",
       "FILTER_FIX": "\"read the filter guide in rdy_schema, or run rdy q --help\"",
       "GONE_FIX": "\"check rdy status; a write may or may not have committed; it is not retried\"",
@@ -19634,6 +19685,17 @@
       "SIG_INVALID_FIX": "\"check the source of this signature; it may be damaged or forged\"",
       "SIG_OBJECT_MISMATCH_FIX": "\"run rdy sign for this subject, or refuse the record\"",
       "SIG_UNKNOWN_KEY_FIX": "\"add the key and principal to signing.allowed_signers\"",
+      "SINGLE_MD_ASSETS_FILE_FIX": "\"pass a folder path such as assets\"",
+      "SINGLE_MD_ASSETS_FILE_MESSAGE": "\"<path> is a file: --assets names a folder\"",
+      "SINGLE_MD_ASSETS_FULL_FIX": "\"choose an empty directory (or one that does not exist yet) so no stale files mix into the export\"",
+      "SINGLE_MD_ASSETS_FULL_MESSAGE": "\"<path> is not empty\"",
+      "SINGLE_MD_ASSETS_PATH_FIX": "\"pass a relative folder path with no .. part, such as assets\"",
+      "SINGLE_MD_ASSETS_PATH_MESSAGE": "\"--assets <path> must be a folder below the folder of --out\"",
+      "SINGLE_MD_DOCS_FIX": "\"choose a profile that selects one doc\"",
+      "SINGLE_MD_DOCS_MESSAGE": "\"a single-file Markdown export takes one doc; the selection holds <n>\"",
+      "SINGLE_MD_FIGURE_FIX": "\"pass --assets with a folder beside the file\"",
+      "SINGLE_MD_FIGURE_MESSAGE": "\"figure <id> needs --assets <dir>\"",
+      "SINGLE_MD_REF_MESSAGE": "\"warning: <doc path>: <block id>: the ref to <target id> is not in this file; it is written as its label\"",
       "SITE_LAN_FIX": "\"set serve.site_lan to false to keep the site on this machine\"",
       "START_FIX": "\"look at .rdy/run/daemon.log; run rdy serve in the foreground to see why\"",
       "STOPPED_LOAD_REDACTION_LIMIT_FIX": "\"Stop at another place, or load the whole chain with no stop.\"",
@@ -19761,7 +19823,8 @@
             "headings": [],
             "link_targets": []
           }
-        }
+        },
+        "list_parts": "---\ntitle: \"Parts\"\nrdy_id: d-XE5QZ\n---\n\n# Parts\n\n1.  <a id=\"make-a-project.-rdy-init-p\"></a>\n    **Make a project.**\n\n    Shell\n\n    ```sh\n    rdy init ~/p\n    ```\n2.  Second\\\n    line.\n\n    A paragraph of its own.\n\n    Text\n\n    ```text\n    <b> *not em* `x`\n    ```\n\n    -   nested\n"
       },
       "plain": {
         "files": {
@@ -19826,7 +19889,38 @@
               "transactions.md#ledger"
             ]
           }
-        }
+        },
+        "list_parts": "---\ntitle: \"Parts\"\nrdy_id: d-XE5QZ\n---\n\n# Parts\n\n1.  <a id=\"make-a-project.-rdy-init-p\"></a>\n    **Make a project.**\n\n    Shell\n\n    ```sh\n    rdy init ~/p\n    ```\n2.  Second\\\n    line.\n\n    A paragraph of its own.\n\n    Text\n\n    ```text\n    <b> *not em* `x`\n    ```\n\n    -   nested\n"
+      },
+      "single": {
+        "files": {
+          "README.md": {
+            "anchors": [],
+            "blake3": "2e5a710c9f3153cc691ae735d179d83b7d0fce97dc9f4447b58ca99b5ef49e15",
+            "front_matter_keys": null,
+            "headings": [
+              "# Transactions",
+              "## Guards"
+            ],
+            "link_targets": [
+              "#guards",
+              "#guards"
+            ]
+          }
+        },
+        "list_parts": "# Parts\n\n1. **Make a project.**\n\n   ```sh\n   rdy init ~/p\n   ```\n\n2. Second\n   line.\n\n   A paragraph of its own.\n\n   ```text\n   <b> *not em* `x`\n   ```\n\n   - nested\n",
+        "result": {
+          "assets": "number",
+          "bytes": "number",
+          "docs": "number",
+          "folders": "number",
+          "format": "string",
+          "layout": "string",
+          "out": "string",
+          "pages": "null",
+          "warnings": []
+        },
+        "warnings": []
       },
       "techdocs": {
         "files": {
@@ -19900,7 +19994,8 @@
             ],
             "link_targets": []
           }
-        }
+        },
+        "list_parts": "---\ntitle: \"Parts\"\nrdy_id: d-XE5QZ\n---\n\n<!-- generated by rdy, edit in rdy -->\n\n# Parts\n\n1.  <a id=\"make-a-project.-rdy-init-p\"></a>\n    **Make a project.**\n\n    Shell\n\n    ```sh\n    rdy init ~/p\n    ```\n2.  Second\\\n    line.\n\n    A paragraph of its own.\n\n    Text\n\n    ```text\n    <b> *not em* `x`\n    ```\n\n    -   nested\n"
       }
     },
     "sources": [
@@ -20710,6 +20805,42 @@
             "kind": "string",
             "name": "string"
           }
+        }
+      },
+      "rdy_export": {
+        "ok": {
+          "assets": "number",
+          "bytes": "number",
+          "docs": "number",
+          "folders": "number",
+          "format": "string",
+          "out": "string",
+          "pages": "null",
+          "warnings": []
+        }
+      },
+      "rdy_export single": {
+        "ok": {
+          "assets": "number",
+          "bytes": "number",
+          "docs": "number",
+          "folders": "number",
+          "format": "string",
+          "layout": "string",
+          "out": "string",
+          "pages": "null",
+          "warnings": [
+            "string"
+          ]
+        },
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
         }
       },
       "rdy_hook check": {
@@ -24058,7 +24189,6 @@
       "rdy_clone": "writes a second project to disk",
       "rdy_dispute": "a person's act on a landing; mcp_dispute pins its replies",
       "rdy_dump": "writes a file; the dump_load row covers the bytes",
-      "rdy_export": "writes a file tree; the markdown_exports row covers it",
       "rdy_key_bind": "changes the signing key",
       "rdy_key_retire": "changes the signing key",
       "rdy_key_revoke": "changes the signing key",
@@ -25058,10 +25188,11 @@
               "type": "string"
             },
             "ExportLayout": {
-              "description": "The Markdown tree's layouts, in lower case.",
+              "description": "The Markdown layouts, in lower case: the tree's two, and the single file.",
               "enum": [
                 "mkdocs",
-                "techdocs"
+                "techdocs",
+                "single"
               ],
               "type": "string"
             }
@@ -25069,6 +25200,13 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "assets": {
+              "description": "With layout single only: a folder below the folder of out, absent or empty, for the figures' images, such as assets. Needed when the doc has a figure.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "format": {
               "$ref": "#/$defs/ExportFormat",
               "description": "pdf, html or md."
@@ -25082,10 +25220,10 @@
                   "type": "null"
                 }
               ],
-              "description": "mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. Only with md."
+              "description": "mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. single: the one doc the selection holds as one Markdown file. Only with md."
             },
             "out": {
-              "description": "The file (pdf, html) or directory (md) to write: absolute, or relative to the project directory. It must not exist; a directory may be empty.",
+              "description": "The file (pdf, html, md with layout single) or directory (md) to write: absolute, or relative to the project directory. It must not exist; a directory may be empty.",
               "type": "string"
             },
             "profile": {
