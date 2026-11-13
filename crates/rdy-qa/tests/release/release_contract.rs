@@ -2093,6 +2093,35 @@ fn publication_project() -> tempfile::TempDir {
         id("$late"),
         id("$calm"),
     );
+    // rfr2 (D-TBDA1): figures whose images the comparison sees added, changed and removed, each
+    // row naming its variant
+    let blob = |r: &mut rdy_engine::Rdy, tail: &[u8]| {
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        b.extend_from_slice(tail);
+        r.store_mut().put_blob(&b).expect("the image").to_string()
+    };
+    let (light_a, light_a2, dark_a) = (
+        blob(&mut r, b"a"),
+        blob(&mut r, b"a2"),
+        blob(&mut r, b"a dark"),
+    );
+    let (light_c, dark_c) = (blob(&mut r, b"c"), blob(&mut r, b"c dark"));
+    let figures = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "figure", "id": "$fa", "parent": guide, "fields": {
+                "blob": light_a, "media_type": "image/png", "alt": "Figure A"}},
+            {"op": "create", "type": "figure", "id": "$fc", "parent": guide, "fields": {
+                "blob": light_c, "media_type": "image/png",
+                "dark_blob": dark_c, "dark_media_type": "image/png", "alt": "Figure C"}}
+        ]),
+    )
+    .expect("the figures");
+    let (fig_a, fig_c) = (
+        figures.created["$fa"].clone(),
+        figures.created["$fc"].clone(),
+    );
     write(
         &mut r,
         "work",
@@ -2116,7 +2145,9 @@ fn publication_project() -> tempfile::TempDir {
         "work",
         json!([
             {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
-            {"op": "update", "id": late, "fields": {"planned": true}}
+            {"op": "update", "id": late, "fields": {"planned": true}},
+            {"op": "update", "id": fig_a, "fields": {"blob": light_a2, "dark_blob": dark_a, "dark_media_type": "image/png"}},
+            {"op": "update", "id": fig_c, "unset": ["dark_blob", "dark_media_type"]}
         ]),
     )
     .expect("the second change");
@@ -4891,6 +4922,56 @@ fn packs_row() -> Value {
             .collect();
         json!(issues)
     };
+    // rfr2 (D-6PR3Y): a figure's dark image and its media type, as one optional pair
+    let figure_dark_probe = |dark_blob: Option<rdy_model::FieldValue>,
+                             dark_media_type: Option<&str>|
+     -> Value {
+        let field = |k: &str, v: &str| (k.to_string(), rdy_model::FieldValue::Str(v.to_string()));
+        let doc = rdy_model::Block {
+            id: BlockId::parse("d-D0C11").expect("a doc id"),
+            block_type: "doc".to_string(),
+            parent: None,
+            order: "V".to_string(),
+            fields: [
+                field("name", "plan"),
+                field("title", "Plan"),
+                field("doc_type", "page"),
+            ]
+            .into_iter()
+            .collect(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            foreign: Default::default(),
+            read_identity: None,
+        };
+        let mut figure = doc.clone();
+        figure.id = BlockId::parse("fg-F1G01").expect("a figure id");
+        figure.block_type = "figure".to_string();
+        figure.parent = Some(doc.id.clone());
+        figure.fields = [
+            field("blob", &"a".repeat(64)),
+            field("media_type", "image/png"),
+            field("alt", "A chart"),
+        ]
+        .into_iter()
+        .collect();
+        if let Some(v) = dark_blob {
+            figure.fields.insert("dark_blob".to_string(), v);
+        }
+        if let Some(v) = dark_media_type {
+            figure.fields.insert(
+                "dark_media_type".to_string(),
+                rdy_model::FieldValue::Str(v.to_string()),
+            );
+        }
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &figure, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        json!(issues)
+    };
+    let dark = || Some(rdy_model::FieldValue::Str("b".repeat(64)));
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -4934,6 +5015,13 @@ fn packs_row() -> Value {
                 "true": collapsed_probe(Some(rdy_model::FieldValue::Bool(true))),
                 "false": collapsed_probe(Some(rdy_model::FieldValue::Bool(false))),
                 "bad_kind": collapsed_probe(Some(rdy_model::FieldValue::Str("yes".to_string()))),
+            },
+            "figure_dark": {
+                "light_only": figure_dark_probe(None, None),
+                "pair": figure_dark_probe(dark(), Some("image/png")),
+                "dark_blob_only": figure_dark_probe(dark(), None),
+                "dark_media_type_only": figure_dark_probe(None, Some("image/png")),
+                "bad_kind": figure_dark_probe(Some(rdy_model::FieldValue::Int(3)), Some("image/png")),
             },
         },
     })
