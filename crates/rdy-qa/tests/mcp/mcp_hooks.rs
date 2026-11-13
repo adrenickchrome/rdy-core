@@ -131,6 +131,11 @@ impl Hooked {
     /// `rdy --json hook <op> --kind <kind> ...` as the world's human, through the daemon, with
     /// `form`'s own fields as the options (a check's through an input file).
     fn cli(&self, form: &Value) -> Value {
+        retry_on_deadline("cli", || self.cli_once(form))
+    }
+
+    /// One `cli` run, with no retry.
+    fn cli_once(&self, form: &Value) -> Value {
         let op = form["op"].as_str().unwrap();
         let kind = form["kind"].as_str().unwrap();
         let mut args: Vec<String> = ["--json", "hook", op, "--kind", kind]
@@ -171,6 +176,35 @@ impl Hooked {
         assert!(r.is_ok(), "{r:?}");
         c
     }
+}
+
+/// Runs `attempt` up to 3 times and returns the first result that is not a deadline miss.
+///
+/// The product gives every hook run a fixed 2 s deadline (`HOOK_DEADLINE` in
+/// `rdy-engine/src/hooks.rs`) and, past it, its designed fail-open answer: `checked` false with
+/// one `W_HOOK_UNAVAILABLE` warning whose reason is `deadline`. These tests run the real binary
+/// and Git, so a loaded host can pass the deadline (known issue 2240). This retry covers load
+/// only: it fires on exactly that answer and no other. Tests that assert an unavailable check
+/// on purpose call `rdy_hook` and `cli` directly and never use it.
+fn retry_on_deadline(helper: &str, mut attempt: impl FnMut() -> Value) -> Value {
+    let mut n = 1;
+    loop {
+        let v = attempt();
+        let missed = v["checked"] == false
+            && v["warnings"].as_array().is_some_and(|w| {
+                w.len() == 1 && w[0]["code"] == "W_HOOK_UNAVAILABLE" && w[0]["reason"] == "deadline"
+            });
+        if !missed || n == 3 {
+            return v;
+        }
+        n += 1;
+        eprintln!("{helper}: hook run passed the 2 s deadline under load; attempt {n} of 3");
+    }
+}
+
+/// `rdy_hook` over MCP with `form`, retried only on a deadline miss.
+fn mcp_check(c: &mut McpClient, form: &Value) -> Value {
+    retry_on_deadline("mcp_check", || c.call("rdy_hook", form.clone()).ok())
 }
 
 fn next() -> u64 {
@@ -230,7 +264,7 @@ fn m4a4_checks_and_installs_use_the_same_host() {
 
     // a populated code check: the same reply over MCP and over the command line
     let form = h.code_check(&["src/anchored.rs", "src/plain.rs"], "feat: change");
-    let via_mcp = c.call("rdy_hook", form.clone()).ok();
+    let via_mcp = mcp_check(&mut c, &form);
     assert_eq!(via_mcp["kind"], "code", "{via_mcp}");
     assert_eq!(via_mcp["checked"], true, "{via_mcp}");
     assert_eq!(
@@ -248,7 +282,7 @@ fn m4a4_checks_and_installs_use_the_same_host() {
         h.code_check(&["src/anchored.rs"], "feat: change\n\nImplements: D-ABCDE"),
         h.code_check(&["src/plain.rs"], "feat: change"),
     ] {
-        let v = c.call("rdy_hook", form.clone()).ok();
+        let v = mcp_check(&mut c, &form);
         assert_eq!((v["checked"].as_bool(), warnings(&v)), (Some(true), vec![]));
         assert_eq!(v, h.cli(&form));
     }
@@ -262,7 +296,7 @@ fn m4a4_checks_and_installs_use_the_same_host() {
         [("W_HOOK_UNAVAILABLE".to_string(), vec![])],
         "{v}"
     );
-    assert_eq!(v, h.cli(&moved));
+    assert_eq!(v, h.cli_once(&moved));
 
     // a direct edit of a checked-out member warns; a code file does not
     let out = h.w.rdy(h.project.path(), &["checkout"]);
@@ -276,13 +310,13 @@ fn m4a4_checks_and_installs_use_the_same_host() {
         .join("spec.yaml");
     assert!(doc.is_file());
     let edit = json!({"op": "check", "kind": "edit", "paths": [doc.display().to_string()]});
-    let v = c.call("rdy_hook", edit.clone()).ok();
+    let v = mcp_check(&mut c, &edit);
     assert_eq!(v["checked"], true, "{v}");
     assert_eq!(warnings(&v)[0].0, "W_HOOK_DIRECT_EDIT", "{v}");
     assert_eq!(v["warnings"][0]["message"], DIRECT_EDIT);
     assert_eq!(v, h.cli(&edit));
     let plain = json!({"op": "check", "kind": "edit", "paths": [h.root.join("src/plain.rs").display().to_string()]});
-    let v = c.call("rdy_hook", plain.clone()).ok();
+    let v = mcp_check(&mut c, &plain);
     assert_eq!((v["checked"].as_bool(), warnings(&v)), (Some(true), vec![]));
     assert_eq!(v, h.cli(&plain));
 
