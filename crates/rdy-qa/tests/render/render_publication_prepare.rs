@@ -238,26 +238,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// `js/theme.js` (bundled in `assets/app.js`) the fold opener, so every scope's digest moved; the
 /// fixture holds no collapsed section, so no page text moved. With the old assets every digest is
 /// the one before.
+/// Re-taken for the README plan's Task 2 (D-3DAX4): `assets/site.css` gained the dark-figure
+/// rules, so every scope's digest moved; the fixture holds no figure with a dark image. With the
+/// old stylesheet every digest is the one before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "2b10d834482590b16585c32af5af3274f2f66f79e7e65840f9e958f51ff5deca",
-        "ae28167483d7fa70a0e0bac0f721cbf4e38da46f0ae1b6d5d45a8224ce947aca",
+        "a014b1e828d012ed1cb52f9deaa8e9d5f16d053e9684b9b71a3e7ed2e984c03c",
+        "ae6a9387695491845a2132384ed853608721740fd0ef7392abba40d4fb7f0955",
     ),
     (
         "tag",
-        "5fcb4c3ef58e70d09487715a7a072651b87f5d3260a2e401961ab55a4fc83f30",
-        "48c77ba5615bb59f85cab55800274e97350bc1e3e4aa7eceb54e88416d18456d",
+        "2eee6d6a963f8b38413ab0c113cd5cb6792c108a8ff114ce35b14d14152f5eba",
+        "63a7fc3e201ffd4291d36a40477f8f476e4d9531b7697f325fc492928654b629",
     ),
     (
         "view",
-        "9f3e6399a8012bd7d8cc674b34000115ea598d6beeb5085e07392e7c20b48dfe",
-        "cc2900cb7682d375764d05ee52ee7138b6c7b23f91c0ef114f1483318fd45d99",
+        "1e8cf5ac2e31a1322df5ca7ad2bac43f7719765eca2094a3cb85255c97a1c8ba",
+        "e2f80b3870d166c1064ab250046f781dc821479434a75679cb971b814b1c52a7",
     ),
     (
         "proposal",
-        "6103aaecc95bac2dbc6791bbacf9a7a089f3a04cf8a1ff54987900c4a75d58a5",
-        "cb68c6bac4807fb192d36c1b556d408754a2a89685cb3aa0ee7bd600c1792881",
+        "fb9d31b0ba578866e877a2af35281c511b4dd524e5155ffa45521e0a7eef8185",
+        "aae90c062fcce4fe49b27f077dc7458afde8661d3385f9dc12bb53653073856e",
     ),
 ];
 
@@ -298,11 +301,15 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// Re-taken for the section field `collapsed` (README plan Task 1): it joins the standard pack, so
 /// the pack's digest and the version's hash move. Only the proposal scope moved; the other three
 /// scopes kept their bytes.
+/// Re-taken for the figure fields `dark_blob` and `dark_media_type` (README plan Task 2): the pack's
+/// digest moves the proposal scope's five digests. The print model gained a run's `image` and a
+/// figure's `dark`, so each scope's model text (the first digest) moved too; the PDF, the HTML file
+/// and both Markdown trees of the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
         [
-            "7df1bc6c03640d1f5f912c4ccda9f80d94dbf749497bd94bc820aef60d664fce",
+            "cbf11b977e365c9c5c4453ee5fe90f358f09fc14d79b37b490b69b5b31ecf07f",
             "b3826ab0c67fd3712ab13832626f1fdd1d830a05d6e904387ee20c6612678bd8",
             "840b9ce1dc431cc9550fc985144ebedab4c4127b55212bb159938a733ec159d7",
             "b8ced92384c39f43280164e3daedc7b303d8aa7cd3ddcd4601ab85dac0f73b88",
@@ -312,7 +319,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "tag",
         [
-            "26e4f19e3f15182e2ef91d87363a21945eed6d283e5de83f5c92834db58f4c75",
+            "d57d4821aada24a53c3f228da8647e895109abc9a84131b86ce6eb31c7f4c41e",
             "1c6f05d0f8c4d0bf68b2840751f487348db56b51191c8fd8aaa4eea25cdff01d",
             "b6637f99fd02c5c1d3fd452e14b12a29dc80dfdda0a02067160d242becad5ed4",
             "b3ada5447380be2263827a850d76ee5e4272d6b0a8dd08ab5be2f169ed073df3",
@@ -322,7 +329,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "view",
         [
-            "57a295d1e12dcd87b5057a75ec960aab8df167a01824ee1c2fdef7530efb0306",
+            "25231ad92b9d95496de39db09bd46188b28fc9ae238225cd18e7a3870d7c5f25",
             "630fa826e8fb59d9cb68883fb583453b492a50075fff2e92211b9bb7663acbb9",
             "9dc60ab3b6704cb058f23f01514f718b169f3bb781e622bf10cfb924d35826aa",
             "c0ceb6424823c01fb23b5528ba5e2c4ac673eb4033d2cf4989115719fb269349",
@@ -332,11 +339,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "3fe21c547fcb19f1f899bc175566816ed99385b67b591979a3f4d4c3b82ba61e",
-            "e75abb3e225a40185b660686b0999b5214e782d9a4a3fe29b4273d9f51420679",
-            "7d683cb4779e612e308dcc2d35930c8afd14aea0513fc9791102a1b779b6da8b",
-            "c7bbe482ff321ed36dfee7f9be19eae282024df839419781b59efe95d9ee3802",
-            "53fb36a375fc1f45900e84c6aeb1641474235f96c952cfe337b3186151e26d65",
+            "5b82854324480f2a3d3d840aeea8d5a39fac7ba3376e0ed0d5cd611e39fac3a0",
+            "d9f0a218460cc0e2d5de5532e0191aefb5230c70775233e81c81b11b96209df2",
+            "636136e174f383d50fb45644f5ffc87d8dd9d75eaf8eb5e255b284712a56afc2",
+            "40cc9607bfa4eecf59ee4c1109c11c34a505aeb57cb7ee3347ccd26762efd5dc",
+            "3240e85850ea13a10715520e43ba5686e0f53a730fb9d63eebfb814271b9bb0f",
         ],
     ),
 ];

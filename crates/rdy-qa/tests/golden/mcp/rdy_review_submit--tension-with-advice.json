@@ -1,8 +1,8 @@
 {
   "advice": "it contradicts the gate rule",
   "request": "rq-fa03f79641a2",
-  "review": "f076b407e40e083c3c3b9225130deeaba8704c4d0c47e57bb32fa17417d35c98",
+  "review": "66e24ae9c536314abdcabbc81682cc2c6d7088eb2934bbd22690f1e2a8a02d44",
   "severity": "advisory",
-  "tension": "tn-ae5e4cdefc7c",
+  "tension": "tn-72bb378813b7",
   "verdict": "tension"
 }
