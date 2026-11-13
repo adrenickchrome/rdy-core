@@ -69,6 +69,24 @@ impl CopyPayload {
         self.blocks.len()
     }
 
+    /// Adds the lines that open a collapsed section (`<details>` and its summary) as one block,
+    /// from the section's own HTML (its heading); false when that holds no heading, which adds
+    /// nothing.
+    pub(crate) fn push_fold_open(&mut self, html: &str, page: &str) -> bool {
+        let (blocks, _) = ir::from_html_with_figures(html, page);
+        let Some(crate::print::PBlock::Heading { runs, .. }) = blocks.into_iter().next() else {
+            return false;
+        };
+        self.blocks
+            .push(crate::print::md::fold_open_parts(&runs, page));
+        true
+    }
+
+    /// Adds the line that ends a collapsed section as one block.
+    pub(crate) fn push_fold_close(&mut self) {
+        self.blocks.push(crate::print::md::fold_close_parts());
+    }
+
     /// The Markdown of `range`, as `copy.js` writes it: the blocks joined by one blank line, each
     /// link target `resolve`d (an absolute URL) and written with [`link_target`]. None when the
     /// range is not one of this payload's or a target does not resolve: nothing is copied.

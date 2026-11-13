@@ -359,10 +359,13 @@ fn export_level(
                 break;
             }
             list.push(to_yaml_struct(c));
-            if pack.is_asset(&c.block_type)
-                && let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
-            {
-                blobs.entry(h).or_insert_with(|| c.id.clone());
+            // an asset's blob and its dark image (D-3DAX4): both reach blobs/
+            if pack.is_asset(&c.block_type) {
+                for field in rdy_schema::ASSET_BLOB_FIELDS {
+                    if let Some(h) = c.field_str(field).and_then(|s| s.parse::<Hash>().ok()) {
+                        blobs.entry(h).or_insert_with(|| c.id.clone());
+                    }
+                }
             }
             let mut kids = m.children(Some(&c.id));
             kids.reverse();

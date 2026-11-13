@@ -66,6 +66,9 @@ pub const FEATURE_REQUIRED_RDY: &str = "0.26.0";
 /// The first rdy that knows [`FEATURE_FOREIGN_COPY`] (R, repo links): the release that registers
 /// the shared foreign shapes. The release that carries them sets it to its own version.
 pub const FOREIGN_COPY_REQUIRED_RDY: &str = "0.48.0";
+/// The first rdy that knows [`FEATURE_FIGURE_DARK`] (D-MKSFF): the release that first ships a
+/// figure's dark image. It never moves.
+pub const FIGURE_DARK_REQUIRED_RDY: &str = "0.51.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -85,14 +88,18 @@ pub const FEATURE_VIEW_REPLAY: &str = "view_replay";
 /// part or a `repo_link` block, and every record in a kind's optional repo-links encoding
 /// (`crate::codec::OPTIONAL`). A local instruction alone never uses it.
 pub const FEATURE_FOREIGN_COPY: &str = "foreign_copy";
+/// A figure's dark image (D-MKSFF, D-3DAX4): a `figure` block that sets `dark_blob`, alone or in
+/// a change's create or update. It stays on once a record uses it, whatever is removed later.
+pub const FEATURE_FIGURE_DARK: &str = "figure_dark";
 
-/// The features this rdy registers (O11, D-1HDVA; repo links), sorted by name. Each is
+/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF), sorted by name. Each is
 /// `incompatible` and needs its own minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 8] = [
+pub const REGISTERED_FEATURES: [&str; 9] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
     FEATURE_DISPUTE,
+    FEATURE_FIGURE_DARK,
     FEATURE_FOREIGN_COPY,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
@@ -100,12 +107,13 @@ pub const REGISTERED_FEATURES: [&str; 8] = [
 ];
 
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
-/// `foreign_copy`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+/// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`, [`FEATURE_REQUIRED_RDY`] for
+/// the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
-    if name == FEATURE_FOREIGN_COPY {
-        FOREIGN_COPY_REQUIRED_RDY
-    } else {
-        FEATURE_REQUIRED_RDY
+    match name {
+        FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
+        FEATURE_FIGURE_DARK => FIGURE_DARK_REQUIRED_RDY,
+        _ => FEATURE_REQUIRED_RDY,
     }
 }
 
@@ -120,6 +128,16 @@ pub(crate) fn registered(name: &str) -> StoreFeature {
 
 /// The block type of a repo link (repo links): its first write turns `foreign_copy` on.
 pub const REPO_LINK_TYPE: &str = "repo_link";
+
+/// The block type of a figure, and the field of its dark image (D-3DAX4): a figure that sets it
+/// turns `figure_dark` on.
+pub const FIGURE_TYPE: &str = "figure";
+pub const DARK_BLOB_FIELD: &str = "dark_blob";
+
+/// Whether `b` is a figure with a dark image: its first write turns `figure_dark` on.
+pub fn is_dark_figure(b: &rdy_model::Block) -> bool {
+    b.block_type == FIGURE_TYPE && b.fields.contains_key(DARK_BLOB_FIELD)
+}
 
 /// The name of the feature tests inject ([`inject_test_feature`]); production never registers
 /// it.
@@ -897,7 +915,9 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///   (`crate::codec::OPTIONAL`: a block with a foreign part, a change that embeds one, a
 ///   delivered or foreign transition, a foreign pair side, an Adopt or KeepPin answer, a foreign
 ///   assessment part or a `foreign_version` target), or a `repo_link` block, alone or in a
-///   change.
+///   change;
+/// - `figure_dark`: a `figure` block that sets `dark_blob`, alone or in a change's create or
+///   update ([`is_dark_figure`]).
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -928,20 +948,30 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     let repo_link = |b: &rdy_model::Block| b.block_type == REPO_LINK_TYPE;
     match o.kind {
         kinds::BLOCK => {
-            if typed::<rdy_model::Block>(&o).is_some_and(|b| repo_link(&b)) {
-                add(FEATURE_FOREIGN_COPY);
+            if let Some(b) = typed::<rdy_model::Block>(&o) {
+                if repo_link(&b) {
+                    add(FEATURE_FOREIGN_COPY);
+                }
+                if is_dark_figure(&b) {
+                    add(FEATURE_FIGURE_DARK);
+                }
             }
         }
         kinds::CHANGE => {
             if let Some(c) = typed::<rdy_model::Change>(&o) {
-                let links_repo = c.ops.iter().any(|op| match op {
-                    rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
-                        repo_link(block)
-                    }
-                    rdy_model::Op::Delete { .. } => false,
-                });
-                if links_repo {
+                let written = || {
+                    c.ops.iter().filter_map(|op| match op {
+                        rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } => {
+                            Some(block)
+                        }
+                        rdy_model::Op::Delete { .. } => None,
+                    })
+                };
+                if written().any(repo_link) {
                     add(FEATURE_FOREIGN_COPY);
+                }
+                if written().any(is_dark_figure) {
+                    add(FEATURE_FIGURE_DARK);
                 }
                 if o.version >= 1 && c.links.replayed_from.is_some() {
                     add(FEATURE_VIEW_REPLAY);

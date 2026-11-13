@@ -23,15 +23,15 @@
         "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
         "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op 9ca5b32dd08d)"
+      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op 6a71177d9a58)"
     },
     {
       "event": "tension_resolved",
       "ids": [
         "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
-        "32a98e1b398ff6c7f5e8c9d55df23ad2bd56ac114366c52540f4f8463efa3dd2"
+        "74daf145e93242c2cada3bc6c0f654b8d4b5043cfd6c773e5d5dc39356274dda"
       ],
-      "line": "tension 7ed8fe6e7017 no longer involves your in-flight changes: a view changed (op 32a98e1b398f)"
+      "line": "tension 7ed8fe6e7017 no longer involves your in-flight changes: a view changed (op 74daf145e932)"
     },
     {
       "event": "tension_opened",
@@ -39,7 +39,7 @@
         "7ed8fe6e701705af8f3651dbaa0b764217fa8ea13b8a4a41caea47779ddec569",
         "ae5f9f12ed1d6804905d62217ff7d89e42dff25c0b71cdf14b67ba761a315c4f"
       ],
-      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op 2ad2cf6f33b5)"
+      "line": "tension 7ed8fe6e7017 opened on your change ae5f9f12ed1d (unjustified_change, blocking): a view changed (op 8ceeed122075)"
     },
     {
       "event": "tension_opened",
@@ -93,23 +93,23 @@
     {
       "event": "pending_added",
       "ids": [
-        "4838f92f172cb14655ef81661cdf24c715067daccc64849784c6149885ce8779"
+        "a8ee5d5ede8db38aaf80124eea9e11f7812915554e5fd23a6ba99ed0767efafd"
       ],
-      "line": "P-4838f92f172c@1 waits for an answer; read rdy_pending"
+      "line": "P-a8ee5d5ede8d@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "2c79c0c903b27b042ca42521ab1019d39549a34a99f35cac20597818f55be753"
+        "66e24ae9c536314abdcabbc81682cc2c6d7088eb2934bbd22690f1e2a8a02d44"
       ],
       "line": "new advice waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "ef5126facfa7de060e8d28f3b9d1a073f4cbbf3b020c63f7453e7a41266bdbe7"
+        "f184d62d315509f053f339ed840a9f0f77401497a0576807b265979eec88157d"
       ],
-      "line": "P-4838f92f172c@2 waits for an answer; read rdy_pending"
+      "line": "P-a8ee5d5ede8d@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false

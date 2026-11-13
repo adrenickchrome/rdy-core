@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4bc-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/readme-from-rdy-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -98,11 +98,11 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
-/// `mcp-http-v1.json` and `m4a-v1.json`, all frozen) with the additions since. A capture writes
-/// this file, never a baseline. It starts as a byte copy of `m4a-v1.json`, whose bytes
-/// `m4a5_contract_changes_only_hook_surfaces` pins; a later contract change is a successor fixture.
+/// `mcp-http-v1.json`, `m4a-v1.json` and `m4bc-v1.json`, all frozen) with the additions since. A
+/// capture writes this file, never a baseline. It starts as a byte copy of `m4bc-v1.json`, whose
+/// bytes `rfr1_contract_adds_only_collapsed` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/m4bc-v1.json")
+    qa_root().join("fixtures/contracts/readme-from-rdy-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -978,6 +978,7 @@ fn store_row() -> Value {
             "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
             "content_hash_v2": "baseline: every store this rdy writes",
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
+            "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
@@ -1980,10 +1981,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "working copy: the working_copy row records its replies",
     ),
     (
-        "export",
-        "writes a file tree; the markdown_exports row covers it",
-    ),
-    (
         "import",
         "reads a directory of YAML; the working copy and sync rows cover the formats",
     ),
@@ -2092,6 +2089,48 @@ fn publication_project() -> tempfile::TempDir {
         id("$late"),
         id("$calm"),
     );
+    // rfr2 (D-TBDA1): figures whose images the comparison sees added, changed and removed, light
+    // and dark: a dark image's row names its variant, a light image's row has none
+    let blob = |r: &mut rdy_engine::Rdy, tail: &[u8]| {
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        b.extend_from_slice(tail);
+        r.store_mut().put_blob(&b).expect("the image").to_string()
+    };
+    let (light_a, light_a2, dark_a) = (
+        blob(&mut r, b"a"),
+        blob(&mut r, b"a2"),
+        blob(&mut r, b"a dark"),
+    );
+    let (light_c, dark_c) = (blob(&mut r, b"c"), blob(&mut r, b"c dark"));
+    let (light_d, dark_d, dark_d2) = (
+        blob(&mut r, b"d"),
+        blob(&mut r, b"d dark"),
+        blob(&mut r, b"d dark 2"),
+    );
+    let (light_e, light_f) = (blob(&mut r, b"e"), blob(&mut r, b"f"));
+    let figures = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "figure", "id": "$fa", "parent": guide, "fields": {
+                "blob": light_a, "media_type": "image/png", "alt": "Figure A"}},
+            {"op": "create", "type": "figure", "id": "$fc", "parent": guide, "fields": {
+                "blob": light_c, "media_type": "image/png",
+                "dark_blob": dark_c, "dark_media_type": "image/png", "alt": "Figure C"}},
+            {"op": "create", "type": "figure", "id": "$fd", "parent": guide, "fields": {
+                "blob": light_d, "media_type": "image/png",
+                "dark_blob": dark_d, "dark_media_type": "image/png", "alt": "Figure D"}},
+            {"op": "create", "type": "figure", "id": "$ff", "parent": guide, "fields": {
+                "blob": light_f, "media_type": "image/png", "alt": "Figure F"}}
+        ]),
+    )
+    .expect("the figures");
+    let (fig_a, fig_c, fig_d, fig_f) = (
+        figures.created["$fa"].clone(),
+        figures.created["$fc"].clone(),
+        figures.created["$fd"].clone(),
+        figures.created["$ff"].clone(),
+    );
     write(
         &mut r,
         "work",
@@ -2115,7 +2154,13 @@ fn publication_project() -> tempfile::TempDir {
         "work",
         json!([
             {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
-            {"op": "update", "id": late, "fields": {"planned": true}}
+            {"op": "update", "id": late, "fields": {"planned": true}},
+            {"op": "update", "id": fig_a, "fields": {"blob": light_a2, "dark_blob": dark_a, "dark_media_type": "image/png"}},
+            {"op": "update", "id": fig_c, "unset": ["dark_blob", "dark_media_type"]},
+            {"op": "update", "id": fig_d, "fields": {"dark_blob": dark_d2}},
+            {"op": "create", "type": "figure", "parent": guide, "fields": {
+                "blob": light_e, "media_type": "image/png", "alt": "Figure E"}},
+            {"op": "delete", "id": fig_f}
         ]),
     )
     .expect("the second change");
@@ -2376,6 +2421,95 @@ fn cli_markdown_probes(seen: &mut Seen, env: &[(String, String)]) {
         "import md without flag",
         &["import", &md_dir, "--view", "mdv", "--dry-run"],
     );
+}
+
+/// rfr3 (D-ESHXM, D-6PR3Y): a project whose one-doc profile `onep` exports as one Markdown file
+/// with an image and warnings: doc `Guide` holds a figure and refs into its collapsed section,
+/// and doc `Other` makes the full source hold two docs.
+fn write_export_project(dir: &Path) {
+    use rdy_qa::fixtures::{land, write};
+    let mut r = rdy_engine::Rdy::open(dir).expect("open the export project");
+    let blob = r
+        .store_mut()
+        .put_blob(b"\x89PNG\r\n\x1a\nexport probe image")
+        .expect("a blob");
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$fold", "parent": "$g", "fields": {"title": "Folded", "collapsed": true}},
+            {"op": "create", "type": "prose", "id": "$hid", "parent": "$fold", "body": "Folded words."},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Use"}},
+            {"op": "create", "type": "prose", "parent": "$s", "body": "See {{$hid|the fold}} and {{$s}}.\n\n1. Step\n\n   ```sh\n   rdy init\n   ```"},
+            {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "A picture"}},
+            {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$o", "body": "Other words."}
+        ]),
+    )
+    .expect("write the export project");
+    land(&mut r, "w1").expect("land the export project");
+    write(
+        &mut r,
+        "w2",
+        json!([{"op": "create", "type": "publication_profile", "parent": w.created["$o"],
+            "fields": {"key": "onep", "title": "One", "audience": "org", "select": [w.created["$g"]]}}]),
+    )
+    .expect("write the profile");
+    land(&mut r, "w2").expect("land the profile");
+    r.close().expect("close the export project");
+}
+
+/// rfr3: `rdy export --layout single`: its result (an image and warnings) and a refusal (the full
+/// source holds two docs), noted under one label; and a tree export's result.
+fn cli_export_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, project) = project();
+    drop(project);
+    write_export_project(dir.path());
+    let out = tempfile::tempdir().expect("an output folder");
+    let at = |n: &str| out.path().join(n).to_string_lossy().into_owned();
+    let (one, two, tree) = (at("one.md"), at("two.md"), at("tree"));
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export single",
+        &[
+            "export",
+            "--out",
+            &one,
+            "--format",
+            "md",
+            "--layout",
+            "single",
+            "--profile",
+            "onep",
+            "--assets",
+            "img",
+        ],
+    );
+    assert!(
+        v["assets"] == json!(1) && v["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "the single file's result is populated: {v}"
+    );
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export single",
+        &[
+            "export", "--out", &two, "--format", "md", "--layout", "single",
+        ],
+    );
+    assert_eq!(v["code"], "E_BAD_INPUT", "{v}");
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export",
+        &["export", "--out", &tree, "--format", "md"],
+    );
+    assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
 }
 
 fn cli_hook_probes(seen: &mut Seen) {
@@ -2718,6 +2852,7 @@ fn cli_runtime() -> Value {
     cli_links_probes(&mut seen, &env);
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
+    cli_export_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -2984,10 +3119,6 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "rdy_dump",
         "writes a file; the dump_load row covers the bytes",
-    ),
-    (
-        "rdy_export",
-        "writes a file tree; the markdown_exports row covers it",
     ),
     ("rdy_key_bind", "changes the signing key"),
     ("rdy_key_retire", "changes the signing key"),
@@ -4249,6 +4380,49 @@ fn mcp_publication_probes(seen: &mut Seen) {
     }
 }
 
+/// rfr3: `rdy_export` runs in the daemon, so its probes go through the proxy of a served project
+/// (which stops its daemon at drop): the single file's result and a refusal under one label, and
+/// a tree export's result.
+fn mcp_export_probes(seen: &mut Seen) {
+    let s = rdy_qa::daemon::Served::new();
+    write_export_project(s.dir.path());
+    let out = rdy_qa::daemon::short_tempdir();
+    let at = |n: &str| out.path().join(n).to_string_lossy().into_owned();
+    let mut c = rdy_qa::mcp::McpClient::start_proxy(&s);
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:exp", "run": "exp", "role": "writer"}),
+    );
+    assert!(opened.is_ok(), "the session opens");
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export single",
+        json!({"out": at("one.md"), "format": "md", "layout": "single", "profile": "onep", "assets": "img"}),
+    ));
+    assert!(
+        v["assets"] == json!(1) && v["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "the single file's result is populated: {v}"
+    );
+    let refused = mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export single",
+        json!({"out": at("two.md"), "format": "md", "layout": "single"}),
+    );
+    assert_eq!(refused.code(), Some("E_BAD_INPUT"));
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export",
+        json!({"out": at("tree"), "format": "md"}),
+    ));
+    assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
+}
+
 /// The `rdy_links` reads over a project that holds a live link, a revoked one and a repo no link
 /// names (see [`links_project`]): each reply of the list, the show and the refs has its rows.
 fn mcp_links_probes(seen: &mut Seen) {
@@ -4408,6 +4582,7 @@ fn mcp_row() -> Value {
     mcp_publication_probes(&mut seen);
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
+    mcp_export_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -4854,6 +5029,92 @@ fn packs_row() -> Value {
         json!({"issues": issues, "reads": read})
     };
     let text = |s: &str| Some(rdy_model::FieldValue::Str(s.to_string()));
+    // rfr1 (D-3VVNC): the section field `collapsed`: optional, a boolean, and the refusal of
+    // another kind
+    let collapsed_probe = |value: Option<rdy_model::FieldValue>| -> Value {
+        let field = |k: &str, v: &str| (k.to_string(), rdy_model::FieldValue::Str(v.to_string()));
+        let doc = rdy_model::Block {
+            id: BlockId::parse("d-D0C11").expect("a doc id"),
+            block_type: "doc".to_string(),
+            parent: None,
+            order: "V".to_string(),
+            fields: [
+                field("name", "plan"),
+                field("title", "Plan"),
+                field("doc_type", "page"),
+            ]
+            .into_iter()
+            .collect(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            foreign: Default::default(),
+            read_identity: None,
+        };
+        let mut section = doc.clone();
+        section.id = BlockId::parse("s-SECT1").expect("a section id");
+        section.block_type = "section".to_string();
+        section.parent = Some(doc.id.clone());
+        section.fields = [field("title", "Goals")].into_iter().collect();
+        if let Some(v) = value {
+            section.fields.insert("collapsed".to_string(), v);
+        }
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &section, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        json!(issues)
+    };
+    // rfr2 (D-6PR3Y): a figure's dark image and its media type, as one optional pair
+    let figure_dark_probe = |dark_blob: Option<rdy_model::FieldValue>,
+                             dark_media_type: Option<&str>|
+     -> Value {
+        let field = |k: &str, v: &str| (k.to_string(), rdy_model::FieldValue::Str(v.to_string()));
+        let doc = rdy_model::Block {
+            id: BlockId::parse("d-D0C11").expect("a doc id"),
+            block_type: "doc".to_string(),
+            parent: None,
+            order: "V".to_string(),
+            fields: [
+                field("name", "plan"),
+                field("title", "Plan"),
+                field("doc_type", "page"),
+            ]
+            .into_iter()
+            .collect(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            foreign: Default::default(),
+            read_identity: None,
+        };
+        let mut figure = doc.clone();
+        figure.id = BlockId::parse("fg-F1G01").expect("a figure id");
+        figure.block_type = "figure".to_string();
+        figure.parent = Some(doc.id.clone());
+        figure.fields = [
+            field("blob", &"a".repeat(64)),
+            field("media_type", "image/png"),
+            field("alt", "A chart"),
+        ]
+        .into_iter()
+        .collect();
+        if let Some(v) = dark_blob {
+            figure.fields.insert("dark_blob".to_string(), v);
+        }
+        if let Some(v) = dark_media_type {
+            figure.fields.insert(
+                "dark_media_type".to_string(),
+                rdy_model::FieldValue::Str(v.to_string()),
+            );
+        }
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &figure, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        json!(issues)
+    };
+    let dark = || Some(rdy_model::FieldValue::Str("b".repeat(64)));
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -4892,6 +5153,19 @@ fn packs_row() -> Value {
             "policy_rules_from_chat_card": policy_probe(text("card")),
             "policy_rules_from_chat_bad_value": policy_probe(text("later")),
             "policy_rules_from_chat_bad_kind": policy_probe(Some(rdy_model::FieldValue::Int(3))),
+            "section_collapsed": {
+                "absent": collapsed_probe(None),
+                "true": collapsed_probe(Some(rdy_model::FieldValue::Bool(true))),
+                "false": collapsed_probe(Some(rdy_model::FieldValue::Bool(false))),
+                "bad_kind": collapsed_probe(Some(rdy_model::FieldValue::Str("yes".to_string()))),
+            },
+            "figure_dark": {
+                "light_only": figure_dark_probe(None, None),
+                "pair": figure_dark_probe(dark(), Some("image/png")),
+                "dark_blob_only": figure_dark_probe(dark(), None),
+                "dark_media_type_only": figure_dark_probe(None, Some("image/png")),
+                "bad_kind": figure_dark_probe(Some(rdy_model::FieldValue::Int(3)), Some("image/png")),
+            },
         },
     })
 }
@@ -4959,6 +5233,101 @@ fn markdown_row() -> Value {
         }
         assert!(files.contains_key("index.md") || files.contains_key("docs/index.md"));
         layouts.insert(name.into(), json!({"files": files}));
+    }
+    // rfr3 (D-ESHXM, D-6PR3Y): the single file of the one doc and its images
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("README.md");
+        let summary = rdy_render::print::export_with(
+            &r.read(),
+            &Scope::Canon,
+            &out,
+            rdy_render::print::Format::Md,
+            &rdy_render::print::ExportOptions {
+                layout: Some(rdy_render::print::ExportLayout::Single),
+                assets: Some("assets"),
+            },
+        )
+        .expect("the single file");
+        let mut files = Map::new();
+        let text = normalize(&std::fs::read_to_string(&out).expect("read"), &[dir.path()]);
+        files.insert(
+            "README.md".into(),
+            json!({
+                "front_matter_keys": null,
+                "headings": heading.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
+                "anchors": anchor.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
+                "link_targets": link.captures_iter(&text).map(|c| c[1].to_string()).collect::<Vec<_>>(),
+                "blake3": blake3_of(text.as_bytes()),
+            }),
+        );
+        let assets = dir.path().join("assets");
+        if assets.is_dir() {
+            let mut names: Vec<_> = std::fs::read_dir(&assets)
+                .expect("read dir")
+                .map(|e| e.expect("entry").path())
+                .collect();
+            names.sort();
+            for p in names {
+                let bytes = std::fs::read(&p).expect("read");
+                files.insert(
+                    format!("assets/{}", p.file_name().unwrap().to_string_lossy()),
+                    json!({"len": bytes.len(), "blake3": blake3_of(&bytes)}),
+                );
+            }
+        }
+        let mut result = serde_json::to_value(&summary).expect("a result");
+        result["out"] = json!("<out>");
+        layouts.insert(
+            "single".into(),
+            json!({"files": files, "result": shape(&result), "warnings": summary.warnings}),
+        );
+    }
+    // rfr3 (D-7M4TR): a list item's paragraph after a blank line, its fenced code and its nested
+    // list, as each layout writes the doc's file
+    {
+        use rdy_qa::fixtures::{land, write};
+        let (_d, mut r) = rdy_qa::golden::tiny();
+        write(
+            &mut r,
+            "parts",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "parts", "title": "Parts", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "parent": "$d", "body": "1. **Make a project.**\n\n   ```sh\n   rdy init ~/p\n   ```\n\n2. Second\n   line.\n\n   A paragraph of its own.\n\n   ~~~~text\n   <b> *not em* `x`\n   ~~~~\n   - nested"}
+            ]),
+        )
+        .expect("the list-part doc");
+        land(&mut r, "parts").expect("land it");
+        let p = rdy_render::print::build(&r.read(), &Scope::Canon).expect("the print builds");
+        for (name, layout) in [
+            ("plain", Layout::Plain),
+            ("mkdocs", Layout::Mkdocs),
+            ("techdocs", Layout::Techdocs),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("md");
+            write_markdown(&p, &out, layout).expect("write the tree");
+            let file = [out.join("parts.md"), out.join("docs/parts.md")]
+                .into_iter()
+                .find(|f| f.is_file())
+                .expect("the doc's file");
+            let text = normalize(&std::fs::read_to_string(file).expect("read"), &[dir.path()]);
+            layouts[name]["list_parts"] = json!(text);
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("parts.md");
+        rdy_render::print::export_with(
+            &r.read(),
+            &Scope::Canon,
+            &out,
+            rdy_render::print::Format::Md,
+            &rdy_render::print::ExportOptions {
+                layout: Some(rdy_render::print::ExportLayout::Single),
+                assets: None,
+            },
+        )
+        .expect("the single file");
+        layouts["single"]["list_parts"] = json!(std::fs::read_to_string(&out).expect("read"));
     }
     rdy_model::unseed_ids_for_tests();
     json!({
@@ -6506,6 +6875,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/diff/stdout/entries[]/fields",
     "cli/diff/stdout/entries[]/links",
     "cli/diff/stdout/entries[]/repinned",
+    "cli/export/stdout/warnings",
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/import md/stdout/consequences",
@@ -6541,15 +6911,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/plan/items",
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
-    "cli/publication check against/stdout/disclosure/added_attachments",
     "cli/publication check against/stdout/disclosure/added_docs",
-    "cli/publication check against/stdout/disclosure/changed_attachments",
-    "cli/publication check against/stdout/disclosure/changed_docs",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
     "cli/publication check against/stdout/disclosure/redactions",
-    "cli/publication check against/stdout/disclosure/removed_attachments",
     "cli/publication check against/stdout/references/links_outside/rows",
     "cli/publication check against/stdout/references/rows",
     "cli/publication check against/stdout/warnings",
@@ -6641,6 +7007,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/fields",
     "mcp/rdy_diff/ok/entries[]/links",
     "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_export single/refused/issues",
+    "mcp/rdy_export/ok/warnings",
     "mcp/rdy_hook check/refused/issues",
     "mcp/rdy_hook install/refused/issues",
     "mcp/rdy_import md without flag/refused/issues",
@@ -6678,15 +7046,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
-    "mcp/rdy_publication_check against/ok/disclosure/added_attachments",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
-    "mcp/rdy_publication_check against/ok/disclosure/changed_attachments",
-    "mcp/rdy_publication_check against/ok/disclosure/changed_docs",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
     "mcp/rdy_publication_check against/ok/disclosure/redactions",
-    "mcp/rdy_publication_check against/ok/disclosure/removed_attachments",
     "mcp/rdy_publication_check against/ok/references/links_outside/rows",
     "mcp/rdy_publication_check against/ok/references/rows",
     "mcp/rdy_publication_check against/ok/warnings",

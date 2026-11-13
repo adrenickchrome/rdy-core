@@ -280,7 +280,10 @@ fn human_size(n: u64) -> String {
     }
 }
 
-/// A figure: its image or a download link, or a sentence when the store lacks the blob.
+/// A figure: its image or a download link, or a sentence when the store lacks the blob. A figure
+/// with a dark image the store holds (D-3DAX4 rule 6) shows both images, each marked by its
+/// theme: the stylesheet shows the dark one under the dark theme (the Auto, Light and Dark
+/// setting, as a drawn diagram follows it) and the light one otherwise, and in print.
 fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let h = b.field_str("blob").unwrap_or("");
     let alt_text = b.field_str("alt").unwrap_or("");
@@ -289,22 +292,36 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let caption = alt.clone();
     let media = b.field_str("media_type").unwrap_or("");
     let image = media.starts_with("image/");
+    let dark = || {
+        b.field_str(rdy_schema::DARK_BLOB_FIELD)
+            .and_then(|d| d.parse::<Hash>().ok())
+            .filter(|d| image && (ctx.present)(d))
+            .map(|d| {
+                let media = b.field_str(rdy_schema::DARK_MEDIA_TYPE_FIELD).unwrap_or("");
+                escape(&(ctx.asset_href)(&d, asset_media(media, ctx)))
+            })
+    };
     match h.parse::<Hash>() {
         Ok(hash) if (ctx.present)(&hash) => {
             let src = escape(&(ctx.asset_href)(&hash, asset_media(media, ctx)));
-            if image {
-                format!(
+            let dark = dark();
+            match dark {
+                Some(dark) if image => format!(
+                    "<figure class=\"figure figure-themed\"><img class=\"figure-light\" src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><img class=\"figure-dark\" src=\"{dark}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{caption}</figcaption></figure>"
+                ),
+                _ if image => format!(
                     "<figure class=\"figure\"><img src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{caption}</figcaption></figure>"
-                )
-            } else {
-                let mut meta = media_words(media, ctx);
-                if let Some(n) = (ctx.blob_len)(&hash) {
-                    let _ = write!(meta, ", {}", human_size(n));
+                ),
+                _ => {
+                    let mut meta = media_words(media, ctx);
+                    if let Some(n) = (ctx.blob_len)(&hash) {
+                        let _ = write!(meta, ", {}", human_size(n));
+                    }
+                    format!(
+                        "<p class=\"download\"><a href=\"{src}\" download>{alt}</a> <span class=\"meta\">({})</span></p>",
+                        escape(&meta)
+                    )
                 }
-                format!(
-                    "<p class=\"download\"><a href=\"{src}\" download>{alt}</a> <span class=\"meta\">({})</span></p>",
-                    escape(&meta)
-                )
             }
         }
         _ => format!(

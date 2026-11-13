@@ -273,7 +273,7 @@ fn pub10_output_parameters_are_strict_and_scope_defaults_to_canon() {
     );
     assert_eq!(
         export,
-        "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs, or techdocs for Backstage TechDocs). Pass profile to use its selected view and reference check. This creates local files; it does not publish them or control who can read them. It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
+        "Print the docs for a person to read: one PDF file, one HTML file, or a Markdown tree (layout mkdocs for MkDocs, or techdocs for Backstage TechDocs), or with layout single the one selected doc as one Markdown file (assets names a folder for its images). Pass profile to use its selected view and reference check. This creates local files; it does not publish them or control who can read them. It never overwrites. Relay each entry of warnings to the person. Read and write through the tools yourself, not the export."
     );
     let help = "A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.";
     for tool in ["rdy_render", "rdy_export"] {

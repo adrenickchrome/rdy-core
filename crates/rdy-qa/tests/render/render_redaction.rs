@@ -47,6 +47,12 @@ const SELECTED: [&str; 3] = [TERM_BODY, TERM_NAME, RULING];
 const AUDIT: &str = "Osprey audit quote";
 /// The picture the removal selects, by its size in pixels.
 const PICTURE: (u32, u32) = (11, 6);
+/// rfr2 in the end-to-end canary: a figure with a dark image. Its dark image is selected; its
+/// light image is not, yet the whole figure goes, so neither image, nor the alt text, reaches an
+/// output.
+const DARK: (u32, u32) = (13, 7);
+const LIGHT2: (u32, u32) = (9, 5);
+const ALT_DARK: &str = "Dark figure alt canary";
 const PERSON: &str = "human:qa";
 
 // --- the project --------------------------------------------------------------------------------
@@ -67,6 +73,9 @@ struct Ids {
     term: BlockId,
     decision: BlockId,
     blob: Hash,
+    /// The dark figure's light image (not selected) and its dark image (selected).
+    light2: Hash,
+    dark: Hash,
 }
 
 impl Ids {
@@ -76,6 +85,7 @@ impl Ids {
             self.term.to_string(),
             self.decision.to_string(),
             format!("blob:{}", self.blob),
+            format!("blob:{}", self.dark),
         ]
     }
 }
@@ -155,6 +165,14 @@ fn content(s: &Served) -> Ids {
             .store_mut()
             .put_blob(&rgb_png(PICTURE.0, PICTURE.1, [200, 30, 30]))
             .unwrap();
+        let light2 = r
+            .store_mut()
+            .put_blob(&rgb_png(LIGHT2.0, LIGHT2.1, [30, 30, 200]))
+            .unwrap();
+        let dark = r
+            .store_mut()
+            .put_blob(&rgb_png(DARK.0, DARK.1, [30, 200, 30]))
+            .unwrap();
         let w = write(
             r,
             "work",
@@ -163,7 +181,8 @@ fn content(s: &Served) -> Ids {
                 {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}},
                 {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": TERM_NAME, "aliases": [AUDIT]}, "body": format!("{TERM_BODY}.")},
                 {"op": "create", "type": "prose", "id": "$b", "parent": "$s", "body": "A readable sibling."},
-                {"op": "create", "type": "figure", "id": "$f", "parent": "$s", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "Plain figure alt"}}
+                {"op": "create", "type": "figure", "id": "$f", "parent": "$s", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "Plain figure alt"}},
+                {"op": "create", "type": "figure", "id": "$g", "parent": "$s", "fields": {"blob": light2.to_string(), "media_type": "image/png", "dark_blob": dark.to_string(), "dark_media_type": "image/png", "alt": ALT_DARK}}
             ]),
         )
         .unwrap();
@@ -239,6 +258,8 @@ fn content(s: &Served) -> Ids {
             term,
             decision,
             blob,
+            light2,
+            dark,
         }
     })
 }
@@ -282,6 +303,30 @@ fn static_outputs(st: &ReadState) -> Outputs {
         out.insert(name, std::fs::read(&f).unwrap());
     }
     out.insert("print: single.html".into(), print::single::single_html(&p));
+    // rfr3: the single Markdown file of the one doc, and its images
+    let single = dir.path().join("single.md");
+    print::export_with(
+        st,
+        &Scope::Canon,
+        &single,
+        print::Format::Md,
+        &print::ExportOptions {
+            layout: Some(print::ExportLayout::Single),
+            assets: Some("single-assets"),
+        },
+    )
+    .unwrap();
+    out.insert("print: single.md".into(), std::fs::read(&single).unwrap());
+    let assets = dir.path().join("single-assets");
+    if assets.is_dir() {
+        for f in walk(&assets) {
+            let name = format!(
+                "print: single-assets/{}",
+                f.strip_prefix(&assets).unwrap().display()
+            );
+            out.insert(name, std::fs::read(&f).unwrap());
+        }
+    }
     out.insert(
         "print: print.pdf".into(),
         print::pdf::pdf_bytes(&p, &Fonts::load()).0,
@@ -407,6 +452,26 @@ fn holdings(outputs: &Outputs, picture: &[u8]) -> BTreeMap<String, BTreeSet<Stri
         out.insert(name.clone(), found);
     }
     out
+}
+
+/// The outputs that carry a picture: its bytes raw or in a base64 data URI, or, in a PDF, an
+/// image of its size.
+fn carriers(outputs: &Outputs, picture: &[u8], size: (u32, u32)) -> BTreeSet<String> {
+    outputs
+        .iter()
+        .filter(|(name, bytes)| {
+            if name.ends_with(".pdf")
+                && pdf_images(bytes).contains(&(i64::from(size.0), i64::from(size.1)))
+            {
+                return true;
+            }
+            find(bytes, picture, 0).is_some()
+                || data_uri_payloads(&text(bytes))
+                    .iter()
+                    .any(|p| find(p, picture, 0).is_some())
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// Whether any segment file of the project at `dir` holds `needle`.
@@ -1028,6 +1093,7 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             "view:ed: plan.html",
             "tag:v1.0.0: plan.html",
             "print: single.html",
+            "print: single.md",
             "print: print.pdf",
             "mcp: rdy_read canon",
             "mcp: rdy_read view:ed",
@@ -1053,6 +1119,27 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             "{adapter}: the picture is an asset"
         );
         assert!(held["print: print.pdf"].contains("picture"), "{adapter}");
+        assert!(
+            held.iter()
+                .any(|(k, h)| k.starts_with("print: single-assets/") && h.contains("picture")),
+            "{adapter}: the single Markdown file's picture is its asset"
+        );
+        // the dark figure's two images are assets of the site and of the single Markdown file
+        let (light2_png, dark_png) = (
+            rgb_png(LIGHT2.0, LIGHT2.1, [30, 30, 200]),
+            rgb_png(DARK.0, DARK.1, [30, 200, 30]),
+        );
+        for (what, png, size) in [("light", &light2_png, LIGHT2), ("dark", &dark_png, DARK)] {
+            let c = carriers(&before_all, png, size);
+            assert!(
+                c.iter().any(|k| k.starts_with("canon: assets/")),
+                "{adapter}: the {what} image is a site asset: {c:?}"
+            );
+            assert!(
+                c.iter().any(|k| k.starts_with("print: single-assets/")),
+                "{adapter}: the {what} image is an asset of the single Markdown file: {c:?}"
+            );
+        }
         // the single-file HTML embeds the picture as a base64 data URI, which the detector reads
         assert!(
             held["print: single.html"].contains("picture"),
@@ -1334,6 +1421,37 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             text(&after["canon: plan.html"]).contains("A readable sibling."),
             "{adapter}: the sibling still reads"
         );
+        // rfr2: the dark figure goes whole. Its selected dark image is gone, and so are its
+        // readable light image and its alt text, from every output, the single Markdown file
+        // and its assets with them
+        for (what, png, size) in [("light", &light2_png, LIGHT2), ("dark", &dark_png, DARK)] {
+            assert_eq!(
+                carriers(&after_all, png, size),
+                BTreeSet::new(),
+                "{adapter}: the dark figure's {what} image"
+            );
+        }
+        for (name, bytes) in &after_all {
+            // a source read (rdy_read, show, search) shows a block's own fields, its alt text
+            // among them: only the blob goes (rfr2 covers the rendered outputs)
+            let rendered = !name.starts_with("mcp: ") && !name.starts_with("cli: ");
+            if rendered && !name.ends_with(".pdf") {
+                assert!(
+                    !text(bytes).contains(ALT_DARK),
+                    "{adapter}: {name} holds the dark figure's alt"
+                );
+            }
+            for blob in [ids.light2, ids.dark] {
+                assert!(
+                    !name.contains(&blob.to_string()),
+                    "{adapter}: {name} is named for a dark figure image"
+                );
+            }
+        }
+        assert!(
+            !text(&after["print: single.md"]).contains("single-assets/"),
+            "{adapter}: the single Markdown has no image of a lost figure"
+        );
     }
     // the two adapters showed the same request and the same card facts
     assert_eq!(
@@ -1364,5 +1482,296 @@ fn rdx15_the_canary_detector_reads_data_uri_pictures() {
         );
         // the encoded text alone is no match for other bytes
         assert!(holdings(&outputs, b"other bytes")["print: single.html"].is_empty());
+    }
+}
+
+/// Every file under `dir`, by its `/` path.
+fn rfr2_tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    walk(dir)
+        .into_iter()
+        .map(|p| {
+            let rel: Vec<_> = p
+                .strip_prefix(dir)
+                .unwrap()
+                .iter()
+                .map(|c| c.to_string_lossy().into_owned())
+                .collect();
+            (rel.join("/"), std::fs::read(&p).unwrap())
+        })
+        .collect()
+}
+
+/// rfr2 (D-TBDA1 rule 6, D-3DAX4): a figure with a dark image is removed whole when either
+/// image lost content: its light image, its dark image, or a chunk its dark image shares with a
+/// removed blob. Every output shows the one notice in its place, and none reads or carries
+/// either image, its alt text or its file: the canon, view and tag sites with their Copy
+/// payloads, a profile's site, the Markdown tree, the PDF and the single HTML file. A figure
+/// whose images are readable is as before.
+#[test]
+fn rfr2_redaction_removes_whole_figure_when_either_variant_lost() {
+    use crate::render_blob_state as bs;
+    let (dir, mut r) = rdy_qa::golden::tiny();
+    // a shared first chunk: the blob store cuts at 1 MiB
+    let shared: Vec<u8> = (0..1_048_576u32).map(|i| (i * 7 % 251) as u8).collect();
+    let big = |tail: &str| {
+        let mut b = bs::picture("big");
+        b.truncate(8);
+        b.extend_from_slice(&shared[8..]);
+        b.extend_from_slice(tail.as_bytes());
+        b
+    };
+    let images = [
+        ("light one", bs::picture("light one bytes")),
+        ("dark one", bs::picture("dark one bytes")),
+        ("light two", bs::picture("light two bytes")),
+        ("dark two", bs::picture("dark two bytes")),
+        ("light three", bs::picture("light three bytes")),
+        ("dark three", big("dark three tail")),
+        ("other", big("other blob tail")),
+        ("kept light", bs::picture("kept light bytes")),
+        ("kept dark", bs::picture("kept dark bytes")),
+    ];
+    let h: BTreeMap<&str, Hash> = images
+        .iter()
+        .map(|(k, b)| (*k, r.store_mut().put_blob(b).unwrap()))
+        .collect();
+    let bytes: BTreeMap<&str, &[u8]> = images.iter().map(|(k, b)| (*k, b.as_slice())).collect();
+    let fig = |id: &str, light: &str, dark: &str, alt: &str| {
+        json!({"op": "create", "type": "figure", "id": id, "parent": "$d", "fields": {
+            "blob": h[light].to_string(), "media_type": "image/png",
+            "dark_blob": h[dark].to_string(), "dark_media_type": "image/png", "alt": alt}})
+    };
+    let ids = bs::put(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "figs", "title": "Figures", "doc_type": "page"}},
+            fig("$f1", "light one", "dark one", "Alt canary one"),
+            fig("$f2", "light two", "dark two", "Alt canary two"),
+            fig("$f3", "light three", "dark three", "Alt canary three"),
+            fig("$f4", "kept light", "kept dark", "Kept figure"),
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    bs::put(
+        &mut r,
+        "w1",
+        json!([{"op": "create", "type": "publication_profile", "parent": ids["$admin"].to_string(),
+            "fields": {"key": "guide", "title": "Guide", "audience": "org",
+                "select": [ids["$d"].to_string()]}}]),
+    );
+    land(&mut r, "w1").unwrap();
+    r.tag(&rdy_qa::fixtures::approver(), "v1.0.0", None, None)
+        .unwrap();
+    bs::put(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "prose", "parent": ids["$d"].to_string(), "body": "Under review."}]),
+    );
+    r.close().unwrap();
+    // the dark image of the first, the light image of the second, and a blob no figure shows
+    // whose first chunk the third's dark image shares
+    let (r, _request) = bs::redact(
+        dir.path(),
+        vec![
+            rdy_model::redaction::RedactTarget::Blob(h["dark one"]),
+            rdy_model::redaction::RedactTarget::Blob(h["light two"]),
+            rdy_model::redaction::RedactTarget::Blob(h["other"]),
+        ],
+    );
+    let st = r.read();
+    for k in ["dark one", "light two", "dark three"] {
+        assert!(
+            matches!(
+                st.reader().blob_state(&h[k]).unwrap(),
+                rdy_engine::BlobState::Removed(_)
+            ),
+            "{k}"
+        );
+    }
+    for k in ["light one", "dark two", "light three", "kept light"] {
+        assert_eq!(
+            st.reader().blob_state(&h[k]).unwrap(),
+            rdy_engine::BlobState::Readable,
+            "{k}"
+        );
+    }
+    let lost = [
+        "light one",
+        "dark one",
+        "light two",
+        "dark two",
+        "light three",
+    ];
+    // what an output must never hold of a removed figure: any of its bytes (the big dark
+    // image's own tail), its alt text and its blob's name
+    let check = |what: &str, files: &BTreeMap<String, Vec<u8>>| {
+        for k in lost {
+            assert_eq!(
+                bs::carries(files, bytes[k]),
+                Vec::<String>::new(),
+                "{what}: {k}"
+            );
+            assert_eq!(
+                bs::carries(files, h[k].to_string().as_bytes()),
+                Vec::<String>::new(),
+                "{what}: {k}'s name"
+            );
+        }
+        assert_eq!(
+            bs::carries(files, b"dark three tail"),
+            Vec::<String>::new(),
+            "{what}"
+        );
+        for alt in ["Alt canary one", "Alt canary two", "Alt canary three"] {
+            assert_eq!(
+                bs::carries(files, alt.as_bytes()),
+                Vec::<String>::new(),
+                "{what}: {alt}"
+            );
+        }
+        // the readable figure keeps both images
+        assert!(
+            !bs::carries(files, bytes["kept light"]).is_empty(),
+            "{what}"
+        );
+    };
+    let landing: Hash = st.versions().unwrap()[0].landing.parse().unwrap();
+
+    // the sites, each page's Copy payload with them
+    for scope in [Scope::Canon, Scope::View("work".into()), Scope::At(landing)] {
+        let s = build_site(&st, &scope, Mode::Static).unwrap();
+        check(&format!("{scope:?} site"), &s.files);
+        assert!(
+            !bs::carries(&s.files, bytes["kept dark"]).is_empty(),
+            "{scope:?}"
+        );
+        let html = bs::page(&s.files, "figs.html");
+        assert_eq!(
+            html.matches(bs::NOTICE_HTML).count(),
+            3,
+            "{scope:?}: {html}"
+        );
+        assert_eq!(
+            html.matches("figure-themed").count(),
+            1,
+            "{scope:?}: {html}"
+        );
+        let copy = html
+            .split("<template data-copy-page hidden>")
+            .nth(1)
+            .and_then(|t| t.split("</template>").next())
+            .unwrap_or_else(|| panic!("{scope:?}: no Copy payload"));
+        assert_eq!(
+            copy.matches(CONTENT_REMOVED).count(),
+            3,
+            "{scope:?}: {copy}"
+        );
+    }
+    // a profile's site reads only the readable figure's two images
+    for scope in ["canon", "tag:v1.0.0"] {
+        let before = rdy_engine::publication::blob_reads_for_tests();
+        let s = rdy_render::build_profile_site(&st, scope, "guide").unwrap();
+        assert_eq!(
+            rdy_engine::publication::blob_reads_for_tests() - before,
+            2,
+            "{scope}"
+        );
+        check(&format!("profile {scope}"), &s.files);
+        let html = bs::page(&s.files, "figs.html");
+        assert_eq!(html.matches(bs::NOTICE_HTML).count(), 3, "{scope}: {html}");
+    }
+    // the single Markdown file of the profile's one doc (rfr3), with its assets folder: the same
+    // whole-figure notice, and neither image, alt text nor asset of a lost figure; the readable
+    // figure keeps its light and dark images
+    for scope in [
+        "canon".to_string(),
+        "tag:v1.0.0".to_string(),
+        format!("landing:{landing}"),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        print::export_profile_with(
+            &st,
+            &scope,
+            "guide",
+            &out.path().join("single.md"),
+            print::Format::Md,
+            &print::ExportOptions {
+                layout: Some(print::ExportLayout::Single),
+                assets: Some("single-assets"),
+            },
+        )
+        .unwrap();
+        let tree = rfr2_tree(out.path());
+        check(&format!("{scope} single Markdown"), &tree);
+        for k in ["kept light", "kept dark"] {
+            assert!(
+                !bs::carries(&tree, bytes[k]).is_empty(),
+                "{scope} single Markdown: {k}"
+            );
+        }
+        let md = bs::page(&tree, "single.md");
+        assert_eq!(
+            md.matches(CONTENT_REMOVED).count(),
+            3,
+            "{scope} single Markdown: {md}"
+        );
+        for lost_name in lost {
+            assert!(
+                !md.contains(&h[lost_name].to_string()),
+                "{scope} single Markdown: {lost_name}"
+            );
+        }
+    }
+    // the print outputs: the model holds the readable blobs only
+    for scope in [Scope::Canon, Scope::View("work".into()), Scope::At(landing)] {
+        let p = print::build(&st, &scope).unwrap();
+        let held: BTreeSet<Hash> = p.blobs.keys().copied().collect();
+        assert_eq!(
+            held,
+            BTreeSet::from([h["kept light"], h["kept dark"]]),
+            "{scope:?}"
+        );
+        let out = tempfile::tempdir().unwrap();
+        rdy_render::print::md::write_markdown(
+            &p,
+            &out.path().join("md"),
+            rdy_render::print::md::Layout::Plain,
+        )
+        .unwrap();
+        let tree = rfr2_tree(&out.path().join("md"));
+        check(&format!("{scope:?} Markdown"), &tree);
+        let md = bs::page(&tree, "figs.md");
+        assert_eq!(md.matches(CONTENT_REMOVED).count(), 3, "{scope:?}: {md}");
+        // the single HTML file embeds its pictures as data URIs: the readable light image only
+        let single = String::from_utf8(print::single::single_html(&p)).unwrap();
+        let embedded = data_uri_payloads(&single);
+        for k in lost {
+            assert!(
+                !embedded.iter().any(|b| b == bytes[k]),
+                "{scope:?} single HTML: {k}"
+            );
+            assert!(
+                !single.contains(&h[k].to_string()),
+                "{scope:?} single HTML: {k}"
+            );
+        }
+        assert!(
+            embedded.iter().any(|b| b == bytes["kept light"]),
+            "{scope:?}"
+        );
+        for alt in ["Alt canary one", "Alt canary two", "Alt canary three"] {
+            assert!(!single.contains(alt), "{scope:?} single HTML: {alt}");
+        }
+        assert_eq!(single.matches(CONTENT_REMOVED).count(), 3, "{scope:?}");
+        let (pdf, _, _) = print::pdf::pdf_bytes(&p, &Fonts::load());
+        let one = BTreeMap::from([("print.pdf".to_string(), pdf)]);
+        for k in lost {
+            assert_eq!(
+                bs::carries(&one, bytes[k]),
+                Vec::<String>::new(),
+                "{scope:?} PDF: {k}"
+            );
+        }
     }
 }

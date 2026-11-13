@@ -42,6 +42,20 @@ pub const MAX_REFLECTS_GLOBS: usize = 32;
 /// The fix of a publication profile placed anywhere but directly under a doc.
 const PROFILE_PARENT_FIX: &str = "set parent to a doc id";
 
+/// A figure's dark image (D-3DAX4): the blob the site shows under the dark theme. It is set
+/// together with [`DARK_MEDIA_TYPE_FIELD`] (D-6PR3Y).
+pub const DARK_BLOB_FIELD: &str = "dark_blob";
+
+/// The media type of a figure's dark image, set together with [`DARK_BLOB_FIELD`].
+pub const DARK_MEDIA_TYPE_FIELD: &str = "dark_media_type";
+
+/// The fields of an asset block that name a blob, the light image first: every place that reads
+/// `blob` reads `dark_blob` too (D-3DAX4 rule 5).
+pub const ASSET_BLOB_FIELDS: [&str; 2] = ["blob", DARK_BLOB_FIELD];
+
+/// The media type field of each of [`ASSET_BLOB_FIELDS`], in the same order.
+pub const ASSET_MEDIA_TYPE_FIELDS: [&str; 2] = ["media_type", DARK_MEDIA_TYPE_FIELD];
+
 pub(crate) fn err(block: &Block, code: &'static str, message: String, fix: String) -> Issue {
     Issue {
         severity: Severity::Error,
@@ -351,6 +365,24 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             "E_FIELD_KIND",
             format!("{CONFIRMATION_FIELD} must have 1 to 2000 characters"),
             "say how the team knows the decision is kept, in 1 to 2000 characters".to_string(),
+        ));
+    }
+    // D-6PR3Y: a figure's dark image and its media type are set together. A removed version's
+    // projection holds no fields to pair
+    if !projection
+        && def.fields.contains_key(DARK_BLOB_FIELD)
+        && def.fields.contains_key(DARK_MEDIA_TYPE_FIELD)
+        && block.fields.contains_key(DARK_BLOB_FIELD)
+            != block.fields.contains_key(DARK_MEDIA_TYPE_FIELD)
+    {
+        out.push(err(
+            block,
+            "E_VALIDATION",
+            format!(
+                "{}'s {DARK_BLOB_FIELD} and {DARK_MEDIA_TYPE_FIELD} are set together",
+                block.id
+            ),
+            "set both fields, or neither".into(),
         ));
     }
     for (name, fd) in &def.fields {

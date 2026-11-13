@@ -540,6 +540,30 @@ impl<'a> HubCredentials<'a> {
         self.poll(&mut held, install, &d)
     }
 
+    /// Waits on the pending sign-in `pending` of `install` until it ends (D-VRH3Z): before each
+    /// check, `sleep_until` waits until the next check time, or the end of the sign-in if that is
+    /// sooner; each check is [`HubCredentials::state`], so the hub's interval and `slow_down` are
+    /// honoured and each check's update is atomic. The end is the first reply that is not
+    /// `pending`, or the first error, as `state` gives them. A reply that is not `pending` is
+    /// returned as it is, with no wait. A stop between checks leaves the saved sign-in pending.
+    pub fn wait(
+        &self,
+        install: &Origin,
+        claim: &RequestClaim,
+        pending: &AuthState,
+        sleep_until: &mut dyn FnMut(i64),
+    ) -> Result<AuthState, RdyError> {
+        let mut s = pending.clone();
+        while s.state == AuthPhase::Pending {
+            let (Some(next), Some(end)) = (s.next_poll_at_ms, s.expires_at_ms) else {
+                return Err(upstream_protocol());
+            };
+            sleep_until(next.min(end));
+            s = self.state(install, claim)?;
+        }
+        Ok(s)
+    }
+
     /// The state when no request is needed; `None` when a pending sign-in is due for a poll.
     fn local_state(
         &self,
@@ -700,6 +724,30 @@ impl<'a> HubCredentials<'a> {
         held.put(install, Some(Credential::Ready(next.clone())))
             .map_err(|_| auth())?;
         Ok(grant(install, &next, bound))
+    }
+
+    /// [`HubCredentials::access`] for a hub call (D-VRH3Z, check on use): a pending sign-in whose
+    /// next check is due (`next_poll_at_ms <= now`) and whose time has not run out is first
+    /// checked once with [`HubCredentials::state`], under its lock, so it saves the next check time
+    /// as `state` does. That check's own reply or error is not the call's: access then reads the
+    /// record as it is, so a check that signed in lets the call go on, and anything else fails
+    /// as access does. Any other record makes no request.
+    pub fn access_on_use(
+        &self,
+        install: &Origin,
+        claim: &RequestClaim,
+    ) -> Result<AccessGrant, RdyError> {
+        let due = {
+            let held = self.lock()?;
+            let now = self.clock.now_ms();
+            matches!(held.get(install), Some(Credential::Pending(p))
+                if p.next_poll_at_ms <= now && now < p.expires_at_ms)
+        };
+        if due {
+            // Its outcome is the record that access reads next.
+            let _ = self.state(install, claim);
+        }
+        self.access(install, claim)
     }
 
     /// Reads `/me` again after the hub refused an actor claim: with current access, a snapshot

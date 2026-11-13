@@ -2453,6 +2453,229 @@ fn tcw_duplicate_frames_charge_their_links_once() {
     assert_eq!(h.reader().holder_counts().unwrap(), two);
 }
 
+// tcw (known issue 2309): an older rdy (0.47.0 to 0.49.0) writes to the store, moves
+// `indexed_upto` and leaves the capacity tables as they were. The index records a second
+// position, `counts_upto`, that only a writer that keeps the counts moves; an open that finds
+// the two apart rebuilds the index from the log, so no count or depth is read low
+
+/// The capacity tables of the index.
+const TCW_COUNT_TABLES: [&str; 3] = ["holder_counts", "landing_depths", "landing_waits"];
+
+/// The rows of the capacity tables and the `counts_upto` value of the index file `file`.
+type TcwCounts = (Vec<Vec<(Vec<u8>, Vec<u8>)>>, Option<Vec<u8>>);
+
+fn tcw_read_counts(file: &Path) -> TcwCounts {
+    use redb::{ReadableDatabase, ReadableTable};
+    let raw = redb::Database::create(file).unwrap();
+    let r = raw.begin_read().unwrap();
+    let tables = TCW_COUNT_TABLES
+        .iter()
+        .map(|name| {
+            let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(name);
+            let t = r.open_table(def).unwrap();
+            t.iter()
+                .unwrap()
+                .map(|item| {
+                    let (k, v) = item.unwrap();
+                    (k.value().to_vec(), v.value().to_vec())
+                })
+                .collect()
+        })
+        .collect();
+    let meta: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+    let upto = r
+        .open_table(meta)
+        .unwrap()
+        .get("counts_upto")
+        .unwrap()
+        .map(|v| v.value().to_vec());
+    (tables, upto)
+}
+
+/// Puts the capacity tables and `counts_upto` of the index file `file` back to `was`.
+fn tcw_write_counts(file: &Path, was: &TcwCounts) {
+    let raw = redb::Database::create(file).unwrap();
+    let w = raw.begin_write().unwrap();
+    for (name, rows) in TCW_COUNT_TABLES.iter().zip(&was.0) {
+        let def: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new(name);
+        assert!(w.delete_table(def).unwrap(), "{name} was there");
+        let mut t = w.open_table(def).unwrap();
+        for (k, v) in rows {
+            t.insert(&k[..], &v[..]).unwrap();
+        }
+    }
+    {
+        let meta: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+        let mut t = w.open_table(meta).unwrap();
+        match &was.1 {
+            Some(v) => t.insert("counts_upto", &v[..]).unwrap(),
+            None => t.remove("counts_upto").unwrap(),
+        };
+    }
+    w.commit().unwrap();
+}
+
+/// Runs `write` on the closed store at `root` as an older rdy does: the log and every other
+/// index table move, `indexed_upto` with them, and the capacity tables and `counts_upto` stay as
+/// they were. Asserts that the write moved the capacity tables (so the older writer left them
+/// behind).
+fn tcw_older_writer(root: &Path, write: impl FnOnce(&mut Store)) {
+    let file = root.join("index.redb");
+    let was = tcw_read_counts(&file);
+    let mut h = Store::open(root).unwrap();
+    assert!(!h.open_report().index_rebuilt);
+    write(&mut h);
+    drop(h);
+    assert_ne!(tcw_read_counts(&file).0, was.0, "the write moved no count");
+    tcw_write_counts(&file, &was);
+}
+
+/// Lands `n` more changes past `src`'s tag (from block `from`) and tags them `tag`; returns the
+/// target and the batch of the tag's closure less `known`.
+fn tcw_next_tag(
+    src: &Src,
+    from: usize,
+    n: usize,
+    known: &BTreeSet<ObjectKey>,
+    tag: &str,
+) -> (UploadTarget, PathBuf, Hash) {
+    let mut s = Store::open(&src.path).unwrap();
+    let last = tcw_land(&mut s, from, n);
+    let t = tcw_tag(&mut s, tag, last);
+    drop(s);
+    let (_s, r) = src.reader();
+    let c = closure(&r, t, known).unwrap();
+    let path = src.dir.path().join(format!("{tag}.rdysync"));
+    write(&r, &src.repo, t, &c.records, c.prerequisites, &path);
+    (
+        UploadTarget {
+            tag: tag.into(),
+            landing: last,
+        },
+        path,
+        t,
+    )
+}
+
+#[test]
+fn tcw_counts_left_behind_by_an_older_writer_are_rebuilt_at_open() {
+    let (src, v1_target, v1_paths, h, target, path) = tcw_capacity_setup(10);
+    let (objects, edges, depth) = tcw_after(&src, &v1_target, &v1_paths, &target, &path);
+    let root = src.dir.path().join("h");
+    drop(h);
+    tcw_older_writer(&root, |h| {
+        take(h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    });
+    // counts behind the log are not damage: the index opens, and says its counts are behind
+    {
+        let ix = rdy_store::index::Index::open(&root.join("index.redb")).unwrap();
+        assert!(ix.counts_behind().unwrap(), "the counts are behind the log");
+    }
+    let mut h = Store::open(&root).unwrap();
+    assert!(h.open_report().index_rebuilt);
+    assert_eq!(tcw_set_aside(&root), Vec::<String>::new());
+    assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
+    assert_eq!(
+        h.reader().landing_depth(&target.landing).unwrap(),
+        Some(depth)
+    );
+    let dump = h.index_dump_for_tests().unwrap();
+    h.reindex().unwrap();
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump, "reindex");
+    h.check_holder().unwrap();
+}
+
+#[test]
+fn tcw_depth_after_an_older_writer_counts_from_the_true_depth() {
+    let (src, _, _, h, target, path) = tcw_capacity_setup(10);
+    let root = src.dir.path().join("h");
+    drop(h);
+    // the older rdy takes v2: its landing's depth is 13, and the index holds no row of it
+    tcw_older_writer(&root, |h| {
+        take(h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    });
+    let v2 = tcw_tag_of(&src, "v2");
+    let src = Src { tag: v2, ..src };
+    let known = tcw_known(&src);
+    let (v3_target, v3_path, _) = tcw_next_tag(&src, 60_000, 2, &known, "v3");
+    let mut h = Store::open(&root).unwrap();
+    // v3 sits two landings past v2: depth 15, which a count from depth 0 would read as 2
+    {
+        let _c = Capacity::set(14, u64::MAX, u64::MAX);
+        capacity_err(
+            take(&mut h, &open(std::slice::from_ref(&v3_path)), &v3_target).unwrap_err(),
+            "holder check exceeds 14 landing depth",
+        );
+    }
+    {
+        let _c = Capacity::set(15, u64::MAX, u64::MAX);
+        take(&mut h, &open(std::slice::from_ref(&v3_path)), &v3_target).unwrap();
+    }
+    assert_eq!(
+        h.reader().landing_depth(&v3_target.landing).unwrap(),
+        Some(15)
+    );
+    h.check_holder().unwrap();
+}
+
+/// The tag `name` of the source project.
+fn tcw_tag_of(src: &Src, name: &str) -> Hash {
+    let s = Store::open(&src.path).unwrap();
+    let v = s.get_ref(&format!("tag/{name}")).unwrap().expect("tagged");
+    Hash(v.try_into().expect("a tag ref is a hash"))
+}
+
+#[test]
+fn tcw_an_open_after_a_normal_write_does_not_rebuild_the_index() {
+    // a holder: takes and reopens
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(3);
+    take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+    let root = src.dir.path().join("h");
+    drop(h);
+    for i in 0..3 {
+        let mut h = Store::open(&root).unwrap();
+        assert!(!h.open_report().index_rebuilt, "holder open {i}");
+        // a repeat take is a no-op write; the reindex writes a whole new index
+        take(&mut h, &open(std::slice::from_ref(&path)), &target).unwrap();
+        if i == 1 {
+            h.reindex().unwrap();
+        }
+    }
+    // a project: writes and reopens
+    for i in 0..3 {
+        let mut s = Store::open(&src.path).unwrap();
+        assert!(!s.open_report().index_rebuilt, "project open {i}");
+        tcw_land(&mut s, 70_000 + 10 * i, 2);
+        if i == 1 {
+            s.reindex().unwrap();
+        }
+    }
+    let s = Store::open(&src.path).unwrap();
+    assert!(!s.open_report().index_rebuilt, "last project open");
+}
+
+#[test]
+fn tcw_an_index_without_counts_upto_is_rebuilt_once() {
+    // as rdy 0.50.0 writes it: the capacity tables, but no `counts_upto`
+    let (src, _, _, mut h, target, path) = tcw_capacity_setup(5);
+    take(&mut h, &open(&[path]), &target).unwrap();
+    let dump = h.index_dump_for_tests().unwrap();
+    let root = src.dir.path().join("h");
+    drop(h);
+    let file = root.join("index.redb");
+    let mut was = tcw_read_counts(&file);
+    assert!(was.1.is_some(), "this code writes counts_upto");
+    was.1 = None;
+    tcw_write_counts(&file, &was);
+    let h = Store::open(&root).unwrap();
+    assert!(h.open_report().index_rebuilt);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+    drop(h);
+    let h = Store::open(&root).unwrap();
+    assert!(!h.open_report().index_rebuilt);
+    assert_eq!(h.index_dump_for_tests().unwrap(), dump);
+}
+
 /// Bench only (TASK-2324): a take of only the new records of `v2` past about 5,000 held
 /// objects, timed up to the caller's check. Prints the times; asserts none.
 #[test]
@@ -2485,4 +2708,205 @@ fn tcw_bench_take_of_new_records_past_5000_held_objects() {
         times[0],
         times[6]
     );
+}
+
+// tcw (known issue 2309, review round): counts behind the log are not damage. The open trusts
+// the index, so its acknowledged end stays the log's floor, and the rebuild from the log zeroes
+// the old index file as a removal's reindex does, so no copy of what a pending removal erases is
+// kept
+
+/// The names of the index files an open set aside as damaged in the store at `root`.
+fn tcw_set_aside(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("index.redb.damaged-"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Sets `counts_upto` of the closed store at `root` to `to` (None removes it), as rdy 0.50.0
+/// (missing) or an older writer after this code (stale) leaves it; the capacity tables stay.
+fn tcw_set_counts_upto(root: &Path, to: Option<Vec<u8>>) {
+    let file = root.join("index.redb");
+    let mut was = tcw_read_counts(&file);
+    assert!(was.1.is_some(), "this code writes counts_upto");
+    was.1 = to;
+    tcw_write_counts(&file, &was);
+}
+
+/// The names of the files in the segments folder of the store at `root`.
+fn tcw_segment_names(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(root.join("segments"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn tcw_counts_behind_keep_the_acknowledged_floor() {
+    const BLOB: &[u8] = b"tcw acknowledged blob under a damaged marker";
+    // counts_upto kept (the control), missing (0.50.0) and stale (an older writer)
+    for (what, counts_upto) in [
+        ("kept", None),
+        ("missing", Some(None)),
+        ("stale", Some(Some(enc(&ORIGIN)))),
+    ] {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("s");
+        let blob = {
+            let mut s = Store::create(&root).unwrap();
+            let blob = s.put_blob(BLOB).unwrap();
+            s.close().unwrap();
+            blob
+        };
+        if let Some(to) = counts_upto {
+            tcw_set_counts_upto(&root, to);
+        }
+        // the final batch's marker is damaged: only the index's floor says the batch was
+        // acknowledged
+        let seg = root
+            .join("segments")
+            .join(tcw_segment_names(&root).last().unwrap());
+        let mut bytes = std::fs::read(&seg).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&seg, &bytes).unwrap();
+        let (segments, names) = (segment_bytes(&root), tcw_segment_names(&root));
+        let e = Store::open(&root)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: the open truncated an acknowledged batch"));
+        assert!(
+            matches!(&e, rdy_store::StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+            "{what}: {e:?}"
+        );
+        assert!(
+            e.to_string()
+                .contains("damages acknowledged data; refusing to truncate"),
+            "{what}: {e}"
+        );
+        assert_eq!(
+            segment_bytes(&root),
+            segments,
+            "{what}: the log is as it was"
+        );
+        assert_eq!(
+            tcw_segment_names(&root),
+            names,
+            "{what}: nothing quarantined"
+        );
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+        // the marker restored, the acknowledged blob reads back
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&seg, &bytes).unwrap();
+        let s = Store::open(&root).unwrap();
+        assert_eq!(
+            s.open_report().index_rebuilt,
+            what != "kept",
+            "{what}: counts behind the log are rebuilt"
+        );
+        assert_eq!(s.get_blob(&blob).unwrap(), BLOB, "{what}");
+        s.close().unwrap();
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+    }
+}
+
+/// The text of the block a removal erases in the tcw removal test.
+const TCW_SECRET: &str = "tcw canary removal secret";
+
+/// A diagram cache row that holds [`TCW_SECRET`], as a drawing of the block caches it.
+fn tcw_secret_row() -> (Vec<u8>, Vec<u8>) {
+    let mut key = vec![0xAB; 32];
+    key.extend_from_slice(b"mmdflux 2.6.1\0test");
+    let payload = TCW_SECRET.as_bytes();
+    let mut value = vec![1u8];
+    value.extend_from_slice(&Hash::of(payload).0);
+    value.extend_from_slice(payload);
+    (key, value)
+}
+
+/// The files under `root` that hold [`TCW_SECRET`].
+fn tcw_files_with_secret(root: &Path) -> Vec<PathBuf> {
+    let secret = TCW_SECRET.as_bytes();
+    let mut found = vec![];
+    let mut files = vec![root.to_path_buf()];
+    while let Some(p) = files.pop() {
+        if p.is_dir() {
+            files.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+        } else if std::fs::read(&p)
+            .unwrap()
+            .windows(secret.len())
+            .any(|w| w == secret)
+        {
+            found.push(p);
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn tcw_counts_behind_with_a_pending_removal_keep_no_copy_of_the_removed_text() {
+    use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fixture};
+    let secret = block("b-00009", TCW_SECRET);
+    // counts_upto missing (0.50.0) and stale (an older writer)
+    for (what, counts_upto) in [("missing", None), ("stale", Some(enc(&ORIGIN)))] {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("s");
+        {
+            let mut s = Store::create(&root).unwrap();
+            s.commit_to_view(
+                "work",
+                change(
+                    "work",
+                    vec![Op::Create {
+                        block: secret.clone(),
+                    }],
+                ),
+            )
+            .unwrap();
+            let (key, value) = tcw_secret_row();
+            s.reader().diagram_cache().put_raw_for_tests(&key, &value);
+            s.checkpoint().unwrap();
+            s.close().unwrap();
+        }
+        // an authorized removal of the block, not finished: the next open finishes it
+        let f = authorized_batch_fixture(
+            &root,
+            &[RequestSpec::new(
+                "work",
+                vec![rdy_model::redaction::RedactTarget::Version {
+                    id: secret.id.clone(),
+                    version: secret.version_hash(),
+                }],
+            )],
+            &FixtureOptions::approved(Proof::local_human()),
+        );
+        tcw_set_counts_upto(&root, counts_upto);
+        assert!(
+            tcw_files_with_secret(&root).contains(&root.join("index.redb")),
+            "{what}: the index holds the cached drawing"
+        );
+        let s = Store::open(&root).unwrap();
+        assert!(s.open_report().index_rebuilt, "{what}");
+        assert_eq!(s.reader().diagram_cache().rows_for_tests(), 0, "{what}");
+        assert_eq!(
+            s.get_block(&secret.version_hash()).unwrap().redaction(),
+            Some(f.requests[0].request),
+            "{what}: the removal finished"
+        );
+        s.close().unwrap();
+        assert_eq!(
+            tcw_files_with_secret(&root),
+            Vec::<PathBuf>::new(),
+            "{what}: no file holds the removed text"
+        );
+        assert_eq!(tcw_set_aside(&root), Vec::<String>::new(), "{what}");
+        // and the next open does not rebuild again
+        let s = Store::open(&root).unwrap();
+        assert!(!s.open_report().index_rebuilt, "{what}: rebuilt once");
+        s.close().unwrap();
+    }
 }

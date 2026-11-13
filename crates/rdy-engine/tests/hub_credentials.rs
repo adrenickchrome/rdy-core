@@ -2782,3 +2782,232 @@ fn hsa5_all_public_states_and_aggregates_hide_secrets() {
     // No secret reaches the settings file.
     assert_eq!(fs::read_to_string(&e.user_file).unwrap(), CONFIG);
 }
+
+// ---------------------------------------------------------------------------------------------
+// D-VRH3Z: the wait on a terminal and the check on use
+// ---------------------------------------------------------------------------------------------
+
+fn poll_reply(r: DevicePollReply) -> Reply {
+    Ok(HubReply::DevicePoll(r))
+}
+
+/// The wait checks at the hub's interval with `state`'s own check: each wait ends at the next
+/// check time (or the end of the sign-in, if sooner), `slow_down` makes the next one later, and
+/// the wait ends with the state's reply for signed in, expired and denied.
+#[test]
+fn si7_wait_checks_at_the_hubs_interval_until_the_sign_in_ends() {
+    let e = env();
+    let install = origin(INSTALL);
+    let c = claim(&human());
+    let run = |fake: &Fake, clock: &Clock| {
+        let s = svc(&e, fake, clock);
+        let first = s.state(&install, &c).unwrap();
+        assert_eq!(first.state, AuthPhase::Pending);
+        let mut waits = Vec::new();
+        let end = s.wait(&install, &c, &first, &mut |at| {
+            waits.push(at);
+            clock.set(at);
+        });
+        (end, waits)
+    };
+
+    // pending, slow_down, then the tokens: signed in
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0 + 5_000, 5))]);
+    let (fake, clock) = (Fake::default(), Clock::at(T0));
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", poll_reply(DevicePollReply::Pending))
+        .reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", poll_reply(DevicePollReply::SlowDown))
+        .reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", me(HANDLE));
+    let (end, waits) = run(&fake, &clock);
+    assert_eq!(waits, [T0 + 5_000, T0 + 10_000, T0 + 20_000]);
+    let end = end.unwrap();
+    assert_eq!(end.state, AuthPhase::SignedIn);
+    assert_eq!(end.human_actor.as_deref(), Some("human:test-person"));
+    assert_eq!(
+        end,
+        s_state(&e, &install, &c, &clock),
+        "the state's own reply"
+    );
+    fake.done();
+
+    // expired at the hub: signed out
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0 + 5_000, 5))]);
+    let (fake, clock) = (Fake::default(), Clock::at(T0));
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", poll_reply(DevicePollReply::Expired));
+    let (end, waits) = run(&fake, &clock);
+    assert_eq!(waits, [T0 + 5_000]);
+    assert_eq!(end.unwrap().state, AuthPhase::SignedOut);
+    assert_eq!(on_disk(&e.creds, INSTALL), None);
+    fake.done();
+
+    // denied at the hub: the state's refusal
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0 + 5_000, 5))]);
+    let (fake, clock) = (Fake::default(), Clock::at(T0));
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", Err(HubFailure::Refused));
+    let (end, waits) = run(&fake, &clock);
+    assert_eq!(waits, [T0 + 5_000]);
+    assert_code(end, E_UPSTREAM_REFUSED);
+    fake.done();
+
+    // the sign-in's time runs out before the next check: the last wait ends then, with no request
+    seed(&e, &[(INSTALL, pending(T0 + 8_000, T0 + 5_000, 5))]);
+    let (fake, clock) = (Fake::default(), Clock::at(T0));
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", poll_reply(DevicePollReply::Pending));
+    let (end, waits) = run(&fake, &clock);
+    assert_eq!(waits, [T0 + 5_000, T0 + 8_000]);
+    assert_eq!(end.unwrap().state, AuthPhase::SignedOut);
+    assert_eq!(fake.ops(), ["Metadata", "DevicePoll"]);
+    fake.done();
+
+    // a reply that is not pending is the end as it is: no wait
+    seed(
+        &e,
+        &[(
+            INSTALL,
+            ready(&old_access(), &old_refresh(), T0 + HOUR_MS, HANDLE),
+        )],
+    );
+    let (fake, clock) = (Fake::default(), Clock::at(T0));
+    let s = svc(&e, &fake, &clock);
+    let signed_in = s.state(&install, &c).unwrap();
+    let end = s
+        .wait(&install, &c, &signed_in, &mut |_| panic!("no wait"))
+        .unwrap();
+    assert_eq!(end, signed_in);
+    assert!(fake.seen().is_empty());
+}
+
+/// `install`'s state now, read with no request.
+fn s_state(e: &Env, install: &Origin, c: &RequestClaim, clock: &Clock) -> AuthState {
+    let fake = Fake::default();
+    let st = svc(e, &fake, clock).state(install, c).unwrap();
+    assert!(fake.seen().is_empty());
+    st
+}
+
+/// A confirmed start saves the pending record before it returns, so it is on disk when the wait
+/// begins; a stop at the first wait (Ctrl-C) leaves it pending, and `state` finishes it.
+#[test]
+fn si8_the_pending_record_is_on_disk_before_the_first_wait() {
+    let e = env();
+    let clock = Clock::at(T0);
+    let install = origin(INSTALL);
+    let person = human();
+    let c = claim(&person);
+    let fake = Fake::default();
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DeviceStart", device_start(INSTALL));
+    let s = svc(&e, &fake, &clock);
+    let st = s
+        .start(
+            &install,
+            MACHINE,
+            Some(&confirm(INSTALL)),
+            caller(&person, false),
+        )
+        .unwrap();
+    assert_eq!(st.state, AuthPhase::Pending);
+    fake.done();
+    let creds = e.creds.clone();
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.wait(&install, &c, &st, &mut |at| {
+            assert_eq!(at, T0 + 5_000);
+            assert_eq!(
+                on_disk(&creds, INSTALL),
+                Some(pending(T0 + 600_000, T0 + 5_000, 5)),
+                "saved before the first wait"
+            );
+            panic!("stopped between checks");
+        })
+    }));
+    assert!(stopped.is_err());
+    assert!(fake.seen().len() == 2, "the stop sent nothing");
+    assert_eq!(
+        on_disk(&e.creds, INSTALL),
+        Some(pending(T0 + 600_000, T0 + 5_000, 5)),
+        "still pending"
+    );
+    clock.set(T0 + 5_000);
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", me(HANDLE));
+    assert_eq!(s.state(&install, &c).unwrap().state, AuthPhase::SignedIn);
+    fake.done();
+}
+
+/// A hub call's access checks a pending sign-in once when its next check is due, with `state`'s
+/// own check under the same lock: signed in, the call goes on; still pending, the next check
+/// time is saved and the call fails as today; not due, expired or another record, no request.
+#[test]
+fn si9_a_hub_call_checks_a_due_pending_sign_in_once() {
+    let e = env();
+    let clock = Clock::at(T0);
+    let install = origin(INSTALL);
+    let c = claim(&human());
+    let fake = Fake::default();
+    let s = svc(&e, &fake, &clock);
+
+    // not due: as today, with no request
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0 + 5_000, 5))]);
+    assert_code(s.access_on_use(&install, &c), E_UPSTREAM_AUTH);
+    assert!(fake.seen().is_empty());
+
+    // due and still pending: one check, its next time saved as state saves it, then as today
+    clock.set(T0 + 5_000);
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", poll_reply(DevicePollReply::Pending));
+    assert_code(s.access_on_use(&install, &c), E_UPSTREAM_AUTH);
+    assert_eq!(fake.ops(), ["Metadata", "DevicePoll"]);
+    assert_eq!(
+        on_disk(&e.creds, INSTALL),
+        Some(pending(T0 + 600_000, T0 + 10_000, 5))
+    );
+    fake.done();
+    fake.clear();
+    assert_code(s.access_on_use(&install, &c), E_UPSTREAM_AUTH);
+    assert!(fake.seen().is_empty(), "the next check is not due yet");
+
+    // due and approved: the call goes on with the new access, checked once
+    clock.set(T0 + 10_000);
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", me(HANDLE));
+    let g = s.access_on_use(&install, &c).unwrap();
+    assert_eq!(g.access_token.expose(), new_access());
+    assert_eq!(g.human_actor, "human:test-person");
+    assert_eq!(fake.ops(), ["Metadata", "DevicePoll", "Me"]);
+    fake.done();
+    fake.clear();
+    let g = s.access_on_use(&install, &c).unwrap();
+    assert_eq!(g.access_token.expose(), new_access());
+    assert!(fake.seen().is_empty(), "a ready record needs no check");
+
+    // due and denied: the call fails as today
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", Err(HubFailure::Refused));
+    assert_code(s.access_on_use(&install, &c), E_UPSTREAM_AUTH);
+    assert_eq!(fake.ops(), ["Metadata", "DevicePoll"]);
+    fake.done();
+    fake.clear();
+
+    // expired, reauth_required or no record: as today, with no request
+    for rec in [
+        Some(pending(T0 + 10_000, T0, 5)),
+        Some(Credential::ReauthRequired),
+        None,
+    ] {
+        let records: Vec<(&str, Credential)> =
+            rec.clone().map(|r| (INSTALL, r)).into_iter().collect();
+        seed(&e, &records);
+        assert_code(s.access_on_use(&install, &c), E_UPSTREAM_AUTH);
+        assert!(fake.seen().is_empty(), "{rec:?}");
+        assert_eq!(on_disk(&e.creds, INSTALL), rec, "kept as it is");
+    }
+}

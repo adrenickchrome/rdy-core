@@ -459,6 +459,7 @@ fn pub7_child_asset_path_and_redaction_changes_are_visible() {
         d.changed_attachments,
         vec![ChangedAttachment {
             block: bid("fg-F1G01"),
+            variant: None,
             before_home_doc: bid("d-PAGE1"),
             after_home_doc: bid("d-PAGE1"),
             before_blob: Hash::of(b"one"),
@@ -579,6 +580,7 @@ fn pub7_child_asset_path_and_redaction_changes_are_visible() {
         d.changed_attachments,
         vec![ChangedAttachment {
             block: iso.figure.clone(),
+            variant: None,
             before_home_doc: iso.doc.clone(),
             after_home_doc: iso.doc.clone(),
             before_blob: iso.shared_blob,
@@ -627,6 +629,7 @@ fn pub7_child_asset_path_and_redaction_changes_are_visible() {
         d.changed_attachments,
         vec![ChangedAttachment {
             block: f.clone(),
+            variant: None,
             before_home_doc: d_id.clone(),
             after_home_doc: d_id.clone(),
             before_blob: shared_blob,
@@ -855,6 +858,7 @@ fn pub7_removed_docs_and_attachments_are_reported() {
         vec![
             ChangedAttachment {
                 block: bid("fg-HM001"),
+                variant: None,
                 before_home_doc: bid("d-KEEP1"),
                 after_home_doc: bid("d-0THR1"),
                 before_blob: Hash::of(b"homed"),
@@ -864,6 +868,7 @@ fn pub7_removed_docs_and_attachments_are_reported() {
             },
             ChangedAttachment {
                 block: bid("fg-SWAP1"),
+                variant: None,
                 before_home_doc: bid("d-KEEP1"),
                 after_home_doc: bid("d-KEEP1"),
                 before_blob: Hash::of(b"first"),

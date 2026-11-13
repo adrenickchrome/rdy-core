@@ -17,7 +17,9 @@ use crate::stream_error::to_rdy;
 use rdy_model::Hash;
 use rdy_store::closure::{StoreSource, closure_before, write_batch};
 use rdy_store::object_refs::ObjectKey;
-use rdy_store::sync_stream::{BatchReport, StreamHeader};
+use rdy_store::stream_error::StreamError;
+use rdy_store::sync_proof::ObjectSource;
+use rdy_store::sync_stream::{BatchReport, RecordFeatures, StreamHeader, StreamRecord};
 use std::collections::BTreeSet;
 use std::io::Write;
 
@@ -58,14 +60,35 @@ pub fn write(
         tag_hash,
         found.prerequisites,
     );
-    let mut source = StoreSource { reader, end };
+    let mut source = Features {
+        inner: StoreSource { reader, end },
+        seen: RecordFeatures::default(),
+    };
     let (_, totals) = write_batch(&mut source, &header, &found.records, out).map_err(to_rdy)?;
+    let record_features = source.seen.finish();
     read.ensure_current_epoch()?;
     Ok(BatchReport {
         header,
         keys: found.records,
+        record_features,
         records: totals.records,
         bytes: totals.bytes,
         digest: totals.digest,
     })
+}
+
+/// A source that notes the features of every record it hands to the writer.
+struct Features<S> {
+    inner: S,
+    seen: RecordFeatures,
+}
+
+impl<S: ObjectSource> ObjectSource for Features<S> {
+    fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
+        let r = self.inner.record(key)?;
+        if let Some(r) = &r {
+            self.seen.add(r);
+        }
+        Ok(r)
+    }
 }

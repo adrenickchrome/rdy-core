@@ -278,3 +278,95 @@ fn hd5_image_diagnostics_name_the_entrys_type() {
         "{untyped}"
     );
 }
+
+/// rfr2 (D-3DAX4): a figure's dark image enters through a file as its light image does: commit
+/// stores both, infers both media types and rewrites both paths to hashes; checkout projects
+/// both blobs, never through a linked `_blobs`; a dark path that is missing or untyped is refused
+/// with the dark field's name.
+#[test]
+fn rfr2_working_copy_resolves_both_image_paths() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/chart.png"), b"\x89PNG chart").unwrap();
+    std::fs::write(at(&s, "guides/img/chart-dark.png"), b"\x89PNG dark chart").unwrap();
+    add_figure(
+        &s,
+        &seed.section,
+        "img/chart.png",
+        "    dark_blob: img/chart-dark.png\n",
+    );
+    let (okk, v) = json(&s, &["commit", "-m", "a themed figure"]);
+    assert!(okk, "{v}");
+    let fig = entries(&s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("figure"))
+        .unwrap();
+    let light = fig["fields"]["blob"].as_str().unwrap().to_string();
+    let dark = fig["fields"]["dark_blob"].as_str().unwrap().to_string();
+    assert_eq!(light.len(), 64, "{fig:?}");
+    assert_eq!(dark.len(), 64, "{fig:?}");
+    assert_ne!(light, dark);
+    assert_eq!(fig["fields"]["media_type"].as_str(), Some("image/png"));
+    assert_eq!(fig["fields"]["dark_media_type"].as_str(), Some("image/png"));
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{light}.png"))).unwrap(),
+        b"\x89PNG chart"
+    );
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{dark}.png"))).unwrap(),
+        b"\x89PNG dark chart"
+    );
+    // a fresh checkout projects both blobs
+    std::fs::remove_dir_all(at(&s, "_blobs")).unwrap();
+    ok(&s, &["checkout", "--force"]);
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{light}.png"))).unwrap(),
+        b"\x89PNG chart"
+    );
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{dark}.png"))).unwrap(),
+        b"\x89PNG dark chart"
+    );
+    // a linked _blobs directory: neither image is written through it
+    std::fs::remove_dir_all(at(&s, "_blobs")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    rdy_qa::platform::symlink(outside.path(), &at(&s, "_blobs")).unwrap();
+    let _ = json(&s, &["checkout", "--force"]);
+    assert_eq!(
+        std::fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "a blob was written outside the working copy"
+    );
+    std::fs::remove_file(at(&s, "_blobs")).unwrap();
+    ok(&s, &["checkout", "--force"]);
+
+    // a missing dark image names its path
+    add_figure(
+        &s,
+        &seed.section,
+        "img/chart.png",
+        "    dark_blob: img/none-dark.png\n",
+    );
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    assert!(
+        v["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("img/none-dark.png"),
+        "{v}"
+    );
+    // an untyped dark image asks for its own media type field
+    ok(&s, &["checkout", "--force"]);
+    std::fs::write(at(&s, "guides/pic-dark.bmp"), b"BM").unwrap();
+    add_figure(
+        &s,
+        &seed.section,
+        "img/chart.png",
+        "    dark_blob: pic-dark.bmp\n",
+    );
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    let msg = v["diagnostics"][0]["message"].as_str().unwrap_or_default();
+    assert!(!okk && msg.contains("set dark_media_type"), "{v}");
+}

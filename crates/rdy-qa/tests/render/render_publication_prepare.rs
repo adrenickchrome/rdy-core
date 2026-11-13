@@ -105,10 +105,15 @@ fn print_out(p: &Print) -> PrintOut {
     print::md::write_markdown(p, &md, Layout::Plain).expect("the markdown tree");
     print::md::write_markdown(p, &mkdocs, Layout::Mkdocs).expect("the mkdocs tree");
     PrintOut {
-        // pub8 added `tag_redacted` for a named profile's chosen tag; a source print has none
+        // pub8 added `tag_redacted` for a named profile's chosen tag; a source print has none.
+        // README Task 3 added a run's `ref_of`, which only the single Markdown file's reading sets;
+        // the site's reading leaves it unset, so it is masked the same way
         model: {
             assert!(!p.tag_redacted, "a source print marks no tag");
-            format!("{model:?}").replacen(", tag_redacted: false", "", 1)
+            let text = format!("{model:?}");
+            assert!(!text.contains("ref_of: Some"), "the print sets no ref_of");
+            text.replacen(", tag_redacted: false", "", 1)
+                .replace(", ref_of: None", "")
         },
         pdf: std::fs::read(&pdf).unwrap(),
         html: std::fs::read(&html).unwrap(),
@@ -234,26 +239,33 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the as-built plan's Task 5 (FW-AB1): only `assets/site.css` moved (the status
 /// line's `.block-status` and `.status` rules); with the old stylesheet every digest is the one
 /// before. The fixture holds no planned or since content, so no page text moved.
+/// Re-taken for the README plan's Task 1 (D-3VVNC): `assets/site.css` gained the fold rules and
+/// `js/theme.js` (bundled in `assets/app.js`) the fold opener, so every scope's digest moved; the
+/// fixture holds no collapsed section, so no page text moved. With the old assets every digest is
+/// the one before.
+/// Re-taken for the README plan's Task 2 (D-3DAX4): `assets/site.css` gained the dark-figure
+/// rules, so every scope's digest moved; the fixture holds no figure with a dark image. With the
+/// old stylesheet every digest is the one before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "d7cc2cd1f4d8d89129862129ec6167c357753cfaaa70ea3fddc990b95e1afe5b",
-        "40290db35d723b46a08d39c0b156bc9cef5d2cc4f443b89400b351e03d042823",
+        "a014b1e828d012ed1cb52f9deaa8e9d5f16d053e9684b9b71a3e7ed2e984c03c",
+        "ae6a9387695491845a2132384ed853608721740fd0ef7392abba40d4fb7f0955",
     ),
     (
         "tag",
-        "30204f754f4cc45428d58e559e680635db007d34ccb340aeb011e0b195b63e70",
-        "699863c23c1fa81e78514be6e6c277690925204fb6f46bab8e69e3fa36dbfec9",
+        "2eee6d6a963f8b38413ab0c113cd5cb6792c108a8ff114ce35b14d14152f5eba",
+        "63a7fc3e201ffd4291d36a40477f8f476e4d9531b7697f325fc492928654b629",
     ),
     (
         "view",
-        "229adf5b033004e35dfb06e054ad3c7551f94394703034a921167119a601b4f5",
-        "4c4eff0e95f25c3c2e479d71a90b60b31bdcd4bffb170f62252fbde9e2133cb6",
+        "1e8cf5ac2e31a1322df5ca7ad2bac43f7719765eca2094a3cb85255c97a1c8ba",
+        "e2f80b3870d166c1064ab250046f781dc821479434a75679cb971b814b1c52a7",
     ),
     (
         "proposal",
-        "4574d619541814c3ebf6aaefdf310a4cca4c97fb2823195acf78f498ea1ec47f",
-        "9f79b0a78d193e9430ffdd2fe07390ac02d31d9604c831f175a3c43dc0412c56",
+        "fb9d31b0ba578866e877a2af35281c511b4dd524e5155ffa45521e0a7eef8185",
+        "aae90c062fcce4fe49b27f077dc7458afde8661d3385f9dc12bb53653073856e",
     ),
 ];
 
@@ -291,11 +303,18 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// Re-taken for the repo_link block type (rpl4): it joins every resolved pack, so the pack's
 /// digest and the version's hash move. Only the proposal scope moved; the site digests and the
 /// other three scopes kept their bytes.
+/// Re-taken for the section field `collapsed` (README plan Task 1): it joins the standard pack, so
+/// the pack's digest and the version's hash move. Only the proposal scope moved; the other three
+/// scopes kept their bytes.
+/// Re-taken for the figure fields `dark_blob` and `dark_media_type` (README plan Task 2): the pack's
+/// digest moves the proposal scope's five digests. The print model gained a run's `image` and a
+/// figure's `dark`, so each scope's model text (the first digest) moved too; the PDF, the HTML file
+/// and both Markdown trees of the other three scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
         [
-            "7df1bc6c03640d1f5f912c4ccda9f80d94dbf749497bd94bc820aef60d664fce",
+            "cbf11b977e365c9c5c4453ee5fe90f358f09fc14d79b37b490b69b5b31ecf07f",
             "b3826ab0c67fd3712ab13832626f1fdd1d830a05d6e904387ee20c6612678bd8",
             "840b9ce1dc431cc9550fc985144ebedab4c4127b55212bb159938a733ec159d7",
             "b8ced92384c39f43280164e3daedc7b303d8aa7cd3ddcd4601ab85dac0f73b88",
@@ -305,7 +324,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "tag",
         [
-            "26e4f19e3f15182e2ef91d87363a21945eed6d283e5de83f5c92834db58f4c75",
+            "d57d4821aada24a53c3f228da8647e895109abc9a84131b86ce6eb31c7f4c41e",
             "1c6f05d0f8c4d0bf68b2840751f487348db56b51191c8fd8aaa4eea25cdff01d",
             "b6637f99fd02c5c1d3fd452e14b12a29dc80dfdda0a02067160d242becad5ed4",
             "b3ada5447380be2263827a850d76ee5e4272d6b0a8dd08ab5be2f169ed073df3",
@@ -315,7 +334,7 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "view",
         [
-            "57a295d1e12dcd87b5057a75ec960aab8df167a01824ee1c2fdef7530efb0306",
+            "25231ad92b9d95496de39db09bd46188b28fc9ae238225cd18e7a3870d7c5f25",
             "630fa826e8fb59d9cb68883fb583453b492a50075fff2e92211b9bb7663acbb9",
             "9dc60ab3b6704cb058f23f01514f718b169f3bb781e622bf10cfb924d35826aa",
             "c0ceb6424823c01fb23b5528ba5e2c4ac673eb4033d2cf4989115719fb269349",
@@ -325,11 +344,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "4e5330534ae3f411cc1d97efa332f266f96e25ab7ccb180dd79c2d79ba3d0aeb",
-            "dbc96556bb27893f5f115f3ccda7d2f9a8662035e75605fa5aeca7073db8aa71",
-            "b8552585944c9a964f54dbd9b3fd155711fda4199d02c2a10bfc00fe678a6e49",
-            "8e137652ed0d1ce4d3c16ca336a90a114851257acdc218b024792745d7458d1d",
-            "6c66cdb1d92dcc28dfa136615f8c60685e0fb2d8c5fe4e9000f6a16c79b0e9f9",
+            "5b82854324480f2a3d3d840aeea8d5a39fac7ba3376e0ed0d5cd611e39fac3a0",
+            "d9f0a218460cc0e2d5de5532e0191aefb5230c70775233e81c81b11b96209df2",
+            "636136e174f383d50fb45644f5ffc87d8dd9d75eaf8eb5e255b284712a56afc2",
+            "40cc9607bfa4eecf59ee4c1109c11c34a505aeb57cb7ee3347ccd26762efd5dc",
+            "3240e85850ea13a10715520e43ba5686e0f53a730fb9d63eebfb814271b9bb0f",
         ],
     ),
 ];

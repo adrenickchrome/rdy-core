@@ -1,5 +1,6 @@
 //! The Windows calls of [`crate::pio`] in an open directory (FW-XP1 Phase 4): opens, entry kinds,
-//! listings, creates, removals, renames and child processes anchored to a directory handle.
+//! listings, creates, removals, renames and child processes anchored to a directory handle; and
+//! beside them, this machine's host name (`host_name`).
 //!
 //! - The directory handle is the verified ancestor. Every entry is opened relative to it
 //!   (`NtOpenFile` with the handle as the root directory and one entry name), never through a
@@ -124,6 +125,28 @@ pub fn no_console_window(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt as _;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
     cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// The longest host name read, in UTF-16 units with its end.
+const MAX_HOST_NAME_UNITS: u32 = 1024;
+
+/// This machine's DNS host name (`GetComputerNameExW` with `ComputerNameDnsHostname`), or `None`
+/// when it cannot be read, is longer than 1023 UTF-16 units, is empty or is not Unicode.
+#[allow(unsafe_code)]
+pub fn host_name() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsHostname, GetComputerNameExW,
+    };
+    let mut buf = vec![0u16; MAX_HOST_NAME_UNITS as usize];
+    let mut size = MAX_HOST_NAME_UNITS;
+    // SAFETY: the buffer is valid for writes of `size` UTF-16 units; on success the call sets
+    // `size` to the units written without the terminating NUL.
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut size) };
+    if ok == 0 {
+        return None;
+    }
+    let name = String::from_utf16(buf.get(..size as usize)?).ok()?;
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]

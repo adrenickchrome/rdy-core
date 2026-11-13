@@ -738,6 +738,21 @@ impl TextBuild {
         true
     }
 
+    /// Writes a backslash before the `!` at `at`, which opens an image that rdy's own text now
+    /// reads as a remote image (D-3DAX4), so the image stays literal text as D-19BZD keeps it;
+    /// false (the text stays as written) when `at` is not ahead of the text built so far.
+    fn escape_image(&mut self, at: usize) -> bool {
+        if self.start.is_none() || at < self.cursor {
+            return false;
+        }
+        if at > self.cursor {
+            self.pieces.push(Piece::Src(self.cursor..at));
+        }
+        self.pieces.push(Piece::Out("\\".to_string()));
+        self.cursor = at;
+        true
+    }
+
     fn finish(mut self, text: &str, mode: Mode) -> Text {
         if self.start.is_none() {
             return Text::default();
@@ -1321,6 +1336,34 @@ fn build(
                 }
             },
             Top::Prose { .. } | Top::None => {}
+        }
+        // an image rdy's text reads as a remote image (D-3DAX4): `![alt](https:…)` written
+        // inline. Its `!` gets a backslash, so it stays literal text with its `image` row
+        // (D-19BZD); rdy imports and fetches no image
+        if let Event::Start(Tag::Image {
+            link_type: LinkType::Inline,
+            dest_url,
+            ..
+        }) = &ev
+            && text[r.start..].starts_with("![")
+            && dest_url
+                .get(..6)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https:"))
+        {
+            let escape = |b: &mut TextBuild| {
+                b.escape_image(r.start);
+            };
+            match &mut top {
+                Top::Heading { title, .. } => escape(title),
+                Top::Prose { text, .. } => escape(text),
+                Top::Table(t) => {
+                    escape(&mut t.text);
+                    if let Some(c) = &mut t.cell {
+                        escape(c);
+                    }
+                }
+                Top::Code { .. } | Top::None => {}
+            }
         }
         // and the links it opens or closes
         match &ev {

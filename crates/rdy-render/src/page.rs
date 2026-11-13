@@ -141,6 +141,11 @@ pub struct Item {
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
     pub html: String,
+    /// The block's HTML with each remote image as an `img` element
+    /// ([`inline::with_image_markup`]), when that differs from `html`: what the print model and
+    /// Copy read, so the Markdown outputs write the image (D-3DAX4 rule 3). Never on a page.
+    #[serde(skip)]
+    pub md_html: Option<String>,
     /// The block shows as removed content (the notice). A removed term has no `<dt>`, so its
     /// block holds its anchor.
     pub removed: bool,
@@ -160,6 +165,15 @@ pub struct Item {
     /// What the block's Copy control copies of the page's [`CopyPayload`]: the block, or a
     /// section's heading and every block under it; none when that is empty (no Copy control).
     pub copy: Option<CopyRange>,
+    /// The block is a section whose `collapsed` field is true: it is a `<details>` fold, and its
+    /// heading and toolbar are the fold's summary.
+    pub collapsed: bool,
+    /// A collapsed section starts open: in a review render, when it holds a changed, new or
+    /// removed block. Otherwise it starts closed.
+    pub fold_open: bool,
+    /// How many folds end just before this block: the fold of each collapsed section whose extent
+    /// the block is the first item past.
+    pub folds_closed: usize,
 }
 
 /// The toolbar of an authored page's title (a doc's or a folder's): its block's Link, Copy ref
@@ -188,6 +202,10 @@ pub struct RemovedLine {
     /// The label of its first removed block (rule 3), for the group only.
     #[serde(skip)]
     pub label: String,
+    /// The id of the block the first removed block stood under, so a collapsed section that held
+    /// it starts open.
+    #[serde(skip)]
+    pub parent: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -198,6 +216,10 @@ pub struct DocBody {
     /// The first block of the first section as HTML (spans), when it is a prose of one paragraph
     /// and the doc has more sections; it is left out of `items`.
     pub lede: Option<String>,
+    /// The lede with each remote image as an `img` element, when that differs from `lede`
+    /// ([`Item::md_html`]). Never on a page.
+    #[serde(skip)]
+    pub lede_md: Option<String>,
     /// The anchor the lede has on the page (it keeps the one its block would have had).
     pub lede_anchor: Option<String>,
     /// The word the doc's own block carries in a draft render.
@@ -210,6 +232,8 @@ pub struct DocBody {
     pub lede_diff: Option<String>,
     /// The removed lines a draft shows after the last block.
     pub removed_end: Vec<RemovedLine>,
+    /// How many folds end after the last block, before the removed lines of the doc's end.
+    pub folds_closed_end: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -222,6 +246,10 @@ pub struct ChildRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct FolderBody {
     pub title: String,
+    /// The description with each remote image as an `img` element, when that differs from
+    /// `description_html` ([`Item::md_html`]). Never on a page.
+    #[serde(skip)]
+    pub description_md: Option<String>,
     /// The description as written.
     pub description: Option<String>,
     /// The description as HTML (spans).
@@ -681,15 +709,18 @@ impl Shared<'_> {
         }
     }
 
-    /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
-    /// redaction removed content of (a block of another side than the scope's, such as a draft's
-    /// removed line, is not projected). Its page shows [`REMOVED_HTML`] in its place.
+    /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob, or
+    /// dark image (D-TBDA1 rule 6), a redaction removed content of (a block of another side than
+    /// the scope's, such as a draft's removed line, is not projected). Its page shows
+    /// [`REMOVED_HTML`] in its place.
     fn shows_removed(&self, b: &Block) -> bool {
         b.is_redacted()
             || (b.block_type == "figure"
-                && b.field_str("blob")
-                    .and_then(|h| h.parse::<Hash>().ok())
-                    .is_some_and(|h| self.removed_blobs.contains_key(&h)))
+                && rdy_schema::ASSET_BLOB_FIELDS.iter().any(|f| {
+                    b.field_str(f)
+                        .and_then(|h| h.parse::<Hash>().ok())
+                        .is_some_and(|h| self.removed_blobs.contains_key(&h))
+                }))
     }
 
     /// The header's markup for a page at relative root `root` (RULING F4). A static page links
@@ -1090,26 +1121,29 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             let link = |id: &BlockId| sh.link(&page_url, id);
             let local = |h: &str| sh.local_href(&page_url, h);
             let description = f.field_str("description");
+            let ictx = Ctx {
+                link: &link,
+                doc_page: "",
+                unavailable: sh.unavailable,
+                local_link: sh.local_link(&local),
+            };
+            let description_html = description.map(|d| inline::spans_html(d, &ictx));
+            let description_md = description
+                .filter(|d| inline::may_hold_image(d))
+                .map(|d| inline::with_image_markup(|| inline::spans_html(d, &ictx)))
+                .filter(|md| description_html.as_ref() != Some(md));
             body.folder = Some(FolderBody {
                 title: title.clone(),
+                description_md,
                 description: description.map(String::from),
-                description_html: description.map(|d| {
-                    inline::spans_html(
-                        d,
-                        &Ctx {
-                            link: &link,
-                            doc_page: "",
-                            unavailable: sh.unavailable,
-                            local_link: sh.local_link(&local),
-                        },
-                    )
-                }),
+                description_html,
                 children,
             });
             let lede = body
                 .folder
                 .as_ref()
-                .and_then(|f| f.description_html.as_deref());
+                .and_then(|f| f.description_md.as_ref().or(f.description_html.as_ref()))
+                .map(String::as_str);
             // the print reads no Copy (its pages have no toolbar)
             if sh.draw_diagrams {
                 (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
@@ -1125,7 +1159,11 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                     doc,
                     &page_url,
                     &title,
-                    doc_body.lede.as_deref(),
+                    doc_body
+                        .lede_md
+                        .as_ref()
+                        .or(doc_body.lede.as_ref())
+                        .map(String::as_str),
                     &mut built,
                 );
             }
@@ -1240,32 +1278,72 @@ fn page_copy(
     if let Some(l) = lede {
         payload.push_html(&format!("<p>{l}</p>"), page);
     }
-    // the payload's length before and after each item
-    let mut at = Vec::with_capacity(items.len() + 1);
-    for item in items.iter() {
+    // the payload's length before and after each item. A collapsed section writes its opening
+    // lines as its own block and its closing line as one after its extent. The closing lines of
+    // the folds that end before an item come between the end of the item before it (`before`)
+    // and the start of the item (`at`); `closed` records each one's fold and where it ends, so a
+    // range holds the closing lines of the folds that opened inside it and no other.
+    let n = items.len();
+    let mut at = Vec::with_capacity(n + 1);
+    let mut before = Vec::with_capacity(n + 1);
+    let mut closed: Vec<Vec<(usize, usize)>> = vec![vec![]; n + 1];
+    let mut folds: Vec<(usize, bool)> = vec![];
+    for (i, item) in items.iter().enumerate() {
+        before.push(payload.blocks.len());
+        while let Some(&(s, wrote)) = folds.last() {
+            if item.depth > items[s].depth {
+                break;
+            }
+            folds.pop();
+            if wrote {
+                payload.push_fold_close();
+                closed[i].push((s, payload.blocks.len()));
+            }
+        }
         at.push(payload.blocks.len());
-        payload.push_html(&item.html, page);
+        if item.collapsed {
+            let wrote = payload.push_fold_open(&item.html, page);
+            folds.push((i, wrote));
+        } else {
+            payload.push_html(item.md_html.as_ref().unwrap_or(&item.html), page);
+        }
+    }
+    before.push(payload.blocks.len());
+    while let Some((s, wrote)) = folds.pop() {
+        if wrote {
+            payload.push_fold_close();
+            closed[n].push((s, payload.blocks.len()));
+        }
     }
     at.push(payload.blocks.len());
+    // where the section at item `s` ends when item `i` (or the page's end) comes: after the
+    // closing line of the last fold that began at `s` or inside it, else where item `i - 1` ends
+    let section_end = |s: usize, i: usize| {
+        closed[i]
+            .iter()
+            .rev()
+            .find(|(fold, _)| *fold >= s)
+            .map_or(before[i], |(_, end)| *end)
+    };
     // one pass: each section waits on a stack until an item no deeper than it arrives, or the
     // page ends; its range then ends where that item's starts
     let mut open: Vec<usize> = vec![];
-    for i in 0..items.len() {
+    for i in 0..n {
         while let Some(&s) = open.last() {
             if items[i].depth > items[s].depth {
                 break;
             }
-            items[s].copy = CopyRange::of(at[s], at[i]);
+            items[s].copy = CopyRange::of(at[s], section_end(s, i));
             open.pop();
         }
         if items[i].block_type == "section" {
             open.push(i);
         } else {
-            items[i].copy = CopyRange::of(at[i], at[i + 1]);
+            items[i].copy = CopyRange::of(at[i], before[i + 1]);
         }
     }
     for s in open {
-        items[s].copy = CopyRange::of(at[s], at[items.len()]);
+        items[s].copy = CopyRange::of(at[s], section_end(s, n));
     }
     let (ref_head, ref_) = trail::ref_attrs(b, sh.site, sh.pin(), sh.m);
     let tools = TitleTools {
@@ -1334,23 +1412,31 @@ fn doc_parts(
         .as_ref()
         .and_then(|p| m.get(p))
         .map(|f| site.label(f));
+    let lede_html = |p: &Block| {
+        let pill = html::status_pill(p, sh.status.get(&p.id)).map(|s| format!("{s} "));
+        format!(
+            "{}{}",
+            pill.unwrap_or_default(),
+            inline::spans_html(&p.body, &own)
+        )
+    };
+    let lede = lede_block.map(lede_html);
+    let lede_md = lede_block
+        .filter(|p| inline::may_hold_image(&p.body) || inline::ref_markup())
+        .map(|p| inline::with_image_markup(|| lede_html(p)))
+        .filter(|md| lede.as_ref() != Some(md));
     let mut doc_body = DocBody {
         title: title.to_string(),
         eyebrow,
-        lede: lede_block.map(|p| {
-            let pill = html::status_pill(p, sh.status.get(&p.id)).map(|s| format!("{s} "));
-            format!(
-                "{}{}",
-                pill.unwrap_or_default(),
-                inline::spans_html(&p.body, &own)
-            )
-        }),
+        lede,
+        lede_md,
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
         diff: edited_diff(sh, &doc.id),
         lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
         lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
+        folds_closed_end: 0,
     };
     let mut items = vec![];
     // the group's label of each item that carries a word, beside `items`
@@ -1428,6 +1514,19 @@ fn doc_parts(
             _ if titled => b.field_str("name").map(|t| site.words(t)),
             _ => None,
         };
+        // the one interception: a removed block of any type is the notice, before its type's
+        // rendering reads anything of it
+        let html = if removed {
+            REMOVED_HTML.to_string()
+        } else {
+            html::block_html(b, &ctx)
+        };
+        // the print model's and Copy's source, rendered again only when a remote image may be
+        // in the block's text (a diagram's or code block's body is never text), or when the
+        // single Markdown file reads each reference's id ([`inline::with_ref_markup`])
+        let md_html = (!removed && (may_hold_image(b) || inline::ref_markup()))
+            .then(|| inline::with_image_markup(|| html::block_html(b, &ctx)))
+            .filter(|md| *md != html);
         items.push(Item {
             id: b.id.to_string(),
             block_type: b.block_type.clone(),
@@ -1435,13 +1534,8 @@ fn doc_parts(
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
             title,
-            // the one interception: a removed block of any type is the notice, before its type's
-            // rendering reads anything of it
-            html: if removed {
-                REMOVED_HTML.to_string()
-            } else {
-                html::block_html(b, &ctx)
-            },
+            html,
+            md_html,
             removed,
             presentational,
             // a named profile that does not permit the trail shows none: no markup, no data
@@ -1465,6 +1559,11 @@ fn doc_parts(
             diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
             copy: None,
+            collapsed: b.block_type == "section"
+                && !removed
+                && b.fields.get("collapsed") == Some(&rdy_model::FieldValue::Bool(true)),
+            fold_open: false,
+            folds_closed: 0,
         });
     }
     // the removed lines: before the block they stood before, else at the doc's end
@@ -1480,6 +1579,10 @@ fn doc_parts(
                 .first()
                 .map(|b| group_label(sh, old, b))
                 .unwrap_or_default(),
+            parent: line
+                .blocks
+                .first()
+                .and_then(|b| b.parent.as_ref().map(ToString::to_string)),
         };
         let target = match &line.before {
             Some(b) if lede_block.is_some_and(|l| l.id == *b) => items.first_mut(),
@@ -1502,6 +1605,7 @@ fn doc_parts(
     for (n, line) in lines.enumerate() {
         line.anchor = format!("Removed-{}", n + 1);
     }
+    fold_extents(&mut items, &mut doc_body);
     let changes = match sh.review {
         Some(_) => page_changes(
             &doc_body,
@@ -1512,6 +1616,60 @@ fn doc_parts(
         None => vec![],
     };
     (doc_body, items, changes)
+}
+
+/// Marks where each collapsed section's fold ends and whether it starts open. A fold holds the
+/// section's item and every item after it up to the first item no deeper than the section (the
+/// page's own item depth, not the heading level, so a child that left the page leaves no gap).
+/// In a review render a fold starts open when its extent holds a changed or new item, a removed
+/// line, or a removed line whose block stood under a section of the extent.
+fn fold_extents(items: &mut [Item], body: &mut DocBody) {
+    let mut open: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = open.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            open.pop();
+            items[i].folds_closed += 1;
+        }
+        if items[i].collapsed {
+            open.push(i);
+        }
+    }
+    body.folds_closed_end = open.len();
+    // the extent of each fold: [s, end)
+    let mut ends = vec![items.len(); items.len()];
+    let mut stack: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = stack.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            ends[s] = i;
+            stack.pop();
+        }
+        if items[i].collapsed {
+            stack.push(i);
+        }
+    }
+    let parents: Vec<String> = items
+        .iter()
+        .flat_map(|i| i.removed_before.iter())
+        .chain(body.removed_end.iter())
+        .filter_map(|l| l.parent.clone())
+        .collect();
+    for s in 0..items.len() {
+        if !items[s].collapsed {
+            continue;
+        }
+        let extent = &items[s..ends[s]];
+        let changed = extent
+            .iter()
+            .any(|i| i.change.is_some() || !i.removed_before.is_empty())
+            || extent.iter().any(|i| parents.contains(&i.id));
+        items[s].fold_open = changed;
+    }
 }
 
 /// The group's label of `b` as `site` reads it, cut to [`toc::LABEL_MAX`], as escaped HTML: the
@@ -1571,10 +1729,28 @@ fn page_changes(
     out
 }
 
+/// Whether `b`'s text may hold a remote image (D-3DAX4): its body or a string in its fields holds
+/// the opener `![`. A diagram's and a code block's body are source, never text.
+fn may_hold_image(b: &Block) -> bool {
+    fn in_value(v: &rdy_model::FieldValue) -> bool {
+        match v {
+            rdy_model::FieldValue::Str(s) => inline::may_hold_image(s),
+            rdy_model::FieldValue::List(items) => items.iter().any(in_value),
+            rdy_model::FieldValue::Map(m) => m
+                .iter()
+                .any(|(k, v)| inline::may_hold_image(k) || in_value(v)),
+            _ => false,
+        }
+    }
+    (!matches!(b.block_type.as_str(), "diagram" | "code") && inline::may_hold_image(&b.body))
+        || b.fields.values().any(in_value)
+}
+
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
 /// doc), else the first block of the first section when it is such a prose and the doc has more
 /// sections (a one-section doc keeps all its text under its heading); a prose of several
-/// paragraphs or with a list renders in place.
+/// paragraphs or with a list renders in place. A collapsed first section keeps its prose: it
+/// stays in the fold, with its Copy range and its change marks.
 pub(crate) fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block> {
     let children = m.children(Some(&doc.id));
     let one_paragraph = |p: &Block| p.block_type == "prose" && inline::is_one_paragraph(&p.body);
@@ -1587,6 +1763,7 @@ pub(crate) fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block>
                 .first()
                 .filter(|s| {
                     s.block_type == "section"
+                        && s.fields.get("collapsed") != Some(&rdy_model::FieldValue::Bool(true))
                         && children
                             .iter()
                             .filter(|c| c.block_type == "section")

@@ -466,20 +466,38 @@ struct FirstUse {
 /// list. `foreign_copy` (repo links, registered by Task 3) is frozen by Task 33 ("Freeze the
 /// released-format compatibility matrix"): the dump pair `v4-f1-e1-foreign-copy` and the native
 /// store `store/foreign-copy-1`, whose own tests are `rpl33_` in the release and store areas.
-const FIRST_USE: &[FirstUse] = &[FirstUse {
-    name: "foreign_copy",
-    dump: &[
-        (
-            "v4-f1-e1-foreign-copy.rdydump",
-            "6aca7c40fefdff88db530fdbce96355f38e068c85e65ba4e8e627b9977a78bbf",
-        ),
-        (
-            "v4-f1-e1-foreign-copy.expect.json",
-            "1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
-        ),
-    ],
-    native: "fixtures/store/foreign-copy-1/expect.json",
-}];
+/// `figure_dark` (D-MKSFF, README from rdy Task 2): the dump pair `v4-f1-e1-figure-dark` and the
+/// native store `store/figure-dark-1`, whose own tests are `rfr2_` in the release and store areas.
+const FIRST_USE: &[FirstUse] = &[
+    FirstUse {
+        name: "foreign_copy",
+        dump: &[
+            (
+                "v4-f1-e1-foreign-copy.rdydump",
+                "6aca7c40fefdff88db530fdbce96355f38e068c85e65ba4e8e627b9977a78bbf",
+            ),
+            (
+                "v4-f1-e1-foreign-copy.expect.json",
+                "1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
+            ),
+        ],
+        native: "fixtures/store/foreign-copy-1/expect.json",
+    },
+    FirstUse {
+        name: "figure_dark",
+        dump: &[
+            (
+                "v4-f1-e1-figure-dark.rdydump",
+                "a64524b4ae80f73235ae9b06b773b0e15cfe4ca34be859b81bdeb33474969aa0",
+            ),
+            (
+                "v4-f1-e1-figure-dark.expect.json",
+                "b6b68175c227aae5b869d55394ae6a939975241eb005391a4a2ae4a312e4b4c6",
+            ),
+        ],
+        native: "fixtures/store/figure-dark-1/expect.json",
+    },
+];
 
 /// The dump members of every per-feature first-use fixture.
 fn first_use_members() -> Vec<&'static str> {

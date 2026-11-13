@@ -316,20 +316,35 @@ pub fn shown_sources(b: &Block) -> Vec<(String, String)> {
 
 /// `text` with each reference under `mode` replaced by what `resolve` gives for its span, and
 /// `\{{` shown as `{{`. A `RefMode::Off` text is returned as it is. `rdy_read` and the review
-/// case files both render text this way.
+/// case files both render text this way. Fenced code in a list item stays as stored, its `\{{`
+/// too (D-7M4TR: code is literal).
 pub fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&RefSpan) -> String) -> String {
     if mode == RefMode::Off {
         return text.to_string();
     }
-    let plain = |s: &str| s.replace("\\{{", "{{");
+    let code = match mode {
+        RefMode::Strict => crate::list_parts::code_ranges(text),
+        _ => vec![],
+    };
+    // the text from `a` to `b`, which holds no reference, with `\{{` shown as `{{` outside code
+    let plain = |out: &mut String, a: usize, b: usize| {
+        let mut at = a;
+        for c in code.iter().filter(|c| c.start < b && a < c.end) {
+            let (s, e) = (c.start.max(a), c.end.min(b));
+            out.push_str(&text[at..s].replace("\\{{", "{{"));
+            out.push_str(&text[s..e]);
+            at = e;
+        }
+        out.push_str(&text[at..b].replace("\\{{", "{{"));
+    };
     let mut out = String::new();
     let mut last = 0;
     for span in ref_spans(text, mode) {
-        out.push_str(&plain(&text[last..span.range.start]));
+        plain(&mut out, last, span.range.start);
         out.push_str(&resolve(&span));
         last = span.range.end;
     }
-    out.push_str(&plain(&text[last..]));
+    plain(&mut out, last, text.len());
     out
 }
 

@@ -380,6 +380,7 @@ impl Engine for DaemonEngine {
             &req.format,
             req.layout.as_deref(),
             req.profile.as_deref(),
+            req.assets.as_deref(),
         )
     }
 
@@ -1134,6 +1135,7 @@ mod tests {
                     layout: None,
                     scope: Some(scope.into()),
                     profile: None,
+                    assets: None,
                 },
             )
         };

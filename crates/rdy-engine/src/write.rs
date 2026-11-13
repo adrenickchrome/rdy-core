@@ -1684,31 +1684,37 @@ fn check_name(
     })
 }
 
-/// blob2: an asset block's `blob` must parse as a hash naming a blob (a manifest) in the store.
-/// The check keys on the type's `asset` trait, not on any field named `blob`.
+/// blob2: an asset block's `blob`, and its `dark_blob` (D-3DAX4 rule 5, D-6PR3Y rule 7), must
+/// each parse as a hash naming a blob (a manifest) in the store, with the same check and text
+/// under the field's own name; `blob` is checked first. The check keys on the type's `asset`
+/// trait, not on any field named `blob`.
 fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Result<(), RdyError> {
-    let is_asset = pack.is_asset(&block.block_type);
-    let Some(v) = block.fields.get("blob").filter(|_| is_asset) else {
+    if !pack.is_asset(&block.block_type) {
         return Ok(());
-    };
-    let fix = "upload the file with rdy_asset and set blob to the hash it returns";
-    let Some(h) = v.as_str().and_then(|s| s.parse::<Hash>().ok()) else {
-        return Err(RdyError::new(
-            E_VALIDATION,
-            format!(
-                "{}'s blob {:?} is not a blob hash",
-                block.id,
-                v.as_str().unwrap_or("(not a string)")
-            ),
-            fix,
-        ));
-    };
-    if !store.has_blob(&h)? {
-        return Err(RdyError::new(
-            E_VALIDATION,
-            format!("{}'s blob {h} is not a blob in this project", block.id),
-            fix,
-        ));
+    }
+    for field in rdy_schema::ASSET_BLOB_FIELDS {
+        let Some(v) = block.fields.get(field) else {
+            continue;
+        };
+        let fix = format!("upload the file with rdy_asset and set {field} to the hash it returns");
+        let Some(h) = v.as_str().and_then(|s| s.parse::<Hash>().ok()) else {
+            return Err(RdyError::new(
+                E_VALIDATION,
+                format!(
+                    "{}'s {field} {:?} is not a blob hash",
+                    block.id,
+                    v.as_str().unwrap_or("(not a string)")
+                ),
+                fix,
+            ));
+        };
+        if !store.has_blob(&h)? {
+            return Err(RdyError::new(
+                E_VALIDATION,
+                format!("{}'s {field} {h} is not a blob in this project", block.id),
+                fix,
+            ));
+        }
     }
     Ok(())
 }

@@ -35,9 +35,12 @@ const MONO_NAME: &[u8] = b"F2";
 /// The layout the PDF draws: the print on A4 pages, with the figures whose images print
 /// ([`image::decode`]) at their size and every other figure as a line.
 pub fn lay_out(p: &Print, fonts: &Fonts) -> Laid {
+    // the light images only: a dark image (D-3DAX4) never prints
+    let light = p.light_blobs();
     let sizes = p
         .blobs
         .iter()
+        .filter(|(h, _)| light.contains(h))
         .filter_map(|(h, b)| image::decode(&b.media_type, &b.bytes).map(|px| (*h, px.size())))
         .collect();
     lay_out_with(p, fonts, &sizes)
@@ -63,6 +66,7 @@ pub fn write_pdf(p: &Print, out: &Path) -> Result<PrintSummary, RdyError> {
     Ok(PrintSummary {
         out: out.display().to_string(),
         format: "pdf",
+        layout: None,
         docs: count(PageKind::Doc),
         folders: count(PageKind::Folder),
         assets: r.images,
@@ -118,7 +122,9 @@ fn warnings<V>(p: &Print, images: &BTreeMap<Hash, V>, laid: &Laid) -> Vec<String
                         figures(p, images, i, out);
                     }
                 }
-                PBlock::Callout { blocks, .. } => figures(p, images, blocks, out),
+                PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => {
+                    figures(p, images, blocks, out)
+                }
                 _ => {}
             }
         }
@@ -311,7 +317,8 @@ fn render(p: &Print, fonts: &Fonts) -> Rendered {
     let mut sizes: BTreeMap<Hash, (u32, u32)> = BTreeMap::new();
     let mut image_index: BTreeMap<Hash, usize> = BTreeMap::new();
     let mut image_refs: Vec<Ref> = vec![];
-    for (h, b) in &p.blobs {
+    let light = p.light_blobs();
+    for (h, b) in p.blobs.iter().filter(|(h, _)| light.contains(h)) {
         let Some(px) = image::decode(&b.media_type, &b.bytes) else {
             continue;
         };
@@ -880,6 +887,8 @@ mod tests {
             italic,
             code,
             link: None,
+            image: None,
+            ref_of: None,
         }
     }
 
@@ -1086,6 +1095,7 @@ mod tests {
             p.docs[0].blocks.push(PBlock::Figure {
                 anchor: None,
                 blob: Some(h),
+                dark: None,
                 alt: alt.into(),
                 caption: vec![],
             });
@@ -1152,6 +1162,7 @@ mod tests {
             PBlock::Figure {
                 anchor: None,
                 blob: None,
+                dark: None,
                 alt: "صورة".into(),
                 caption: vec![],
             },

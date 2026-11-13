@@ -88,6 +88,13 @@ struct Cx<'a> {
     /// A fragment ([`copy_parts`]): a link leads to the site page (`.html`), and no block writes
     /// its anchor line.
     fragment: bool,
+    /// A collapsed section's `<details>` carries `markdown="1"`, which the `md_in_html`
+    /// extension of MkDocs and TechDocs needs to read the blocks inside it as Markdown.
+    md_attr: bool,
+    /// The single Markdown file (D-ESHXM rule 7): no anchor line, GitHub Flavored Markdown's
+    /// minimal escapes, a plain newline for a line break, and one space after a list marker
+    /// with continuation lines indented to the item's text.
+    single: bool,
 }
 
 /// One part of a Copy fragment ([`copy_parts`]): literal Markdown, or a link target.
@@ -266,6 +273,11 @@ fn push_text(out: &mut Vec<CopyPart>, s: &str) {
 /// `&amp;`, which every reader shows as `&`: the text `&copy;` stays `&copy;` and never becomes
 /// `©`.
 fn entities(s: &str) -> String {
+    entities_as(s, "&amp;")
+}
+
+/// `s` with each `&` that starts a character reference written as `amp`.
+fn entities_as(s: &str, amp: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -274,7 +286,7 @@ fn entities(s: &str) -> String {
         let name = tail.strip_prefix('#').unwrap_or(tail);
         let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
         out.push_str(if len > 0 && name[len..].starts_with(';') {
-            "&amp;"
+            amp
         } else {
             "&"
         });
@@ -288,6 +300,64 @@ fn entities(s: &str) -> String {
 /// character references that it leaves alone.
 fn md_escape(s: &str, line_start: bool) -> String {
     entities(&llms_escape(s, line_start))
+}
+
+/// The single file's text escape (D-ESHXM rule 7): a character is escaped only where GitHub
+/// Flavored Markdown would read markup that block text reads as text. An underscore inside a
+/// word, a lone `*` between spaces, a bare URL and a backslash before no punctuation stay as
+/// written; `<` is always escaped, so no raw HTML reaches the file, and `&` before a character
+/// reference is escaped as `\&`. At a line's start, a `#`, `>`, `-`, `+`, `*` or `N.` that would open a
+/// block is escaped too.
+pub(crate) fn gfm_escape(s: &str, line_start: bool) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    let lead = chars.iter().take_while(|c| c.is_whitespace()).count();
+    out.extend(&chars[..lead]);
+    let mut i = lead;
+    if line_start && i < chars.len() {
+        let digits = chars[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+        match chars[i] {
+            '#' | '>' | '-' | '+' | '*' => {
+                out.push('\\');
+                out.push(chars[i]);
+                i += 1;
+            }
+            _ if digits > 0 && matches!(chars.get(i + digits), Some('.' | ')')) => {
+                out.extend(&chars[i..i + digits]);
+                out.push('\\');
+                out.push(chars[i + digits]);
+                i += digits + 1;
+            }
+            _ => {}
+        }
+    }
+    let word = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric());
+    let space = |c: Option<&char>| c.is_none_or(|c| c.is_whitespace());
+    while i < chars.len() {
+        let c = chars[i];
+        let (prev, next) = (
+            i.checked_sub(1).and_then(|p| chars.get(p)),
+            chars.get(i + 1),
+        );
+        let escape = match c {
+            '`' | '[' | ']' | '<' => true,
+            '\\' => next.is_some_and(|n| n.is_ascii_punctuation()),
+            '*' => !(space(prev) && space(next)),
+            '_' => !(word(prev) && word(next)),
+            '~' => {
+                prev == Some(&'~')
+                    || next == Some(&'~')
+                    || (word(next) && chars[i + 1..].contains(&'~'))
+            }
+            _ => false,
+        };
+        if escape {
+            out.push('\\');
+        }
+        out.push(c);
+        i += 1;
+    }
+    entities_as(&out, "\\&")
 }
 
 /// One line of a paragraph (or of text like it) that no reader takes for the underline of the
@@ -349,6 +419,9 @@ pub(crate) fn url(raw: &str) -> String {
     entities(&out)
 }
 
+/// The line that ends a collapsed section.
+const FOLD_CLOSE: &str = "</details>";
+
 /// A piece of code as an inline code span: its delimiter is longer than any backtick run inside.
 fn code_span(s: &str) -> String {
     let delim = "`".repeat(longest_backticks(s) + 1);
@@ -369,6 +442,21 @@ fn longest_backticks(s: &str) -> usize {
 }
 
 impl Cx<'_> {
+    /// Text escaped for this output: the single file's minimal escapes, else the exporter's.
+    fn esc(&self, s: &str, line_start: bool) -> String {
+        if self.single {
+            gfm_escape(s, line_start)
+        } else {
+            md_escape(s, line_start)
+        }
+    }
+
+    /// What a line break in a paragraph is: a plain newline in the single file, else a hard
+    /// break.
+    fn br(&self) -> &'static str {
+        if self.single { "\n" } else { "\\\n" }
+    }
+
     /// Where a link leads, before its escape: the export's `.md` file, or a fragment's site page.
     fn target(&self, href: &Href) -> String {
         match href {
@@ -397,10 +485,29 @@ impl Cx<'_> {
         let lead = &piece[..piece.len() - piece.trim_start().len()];
         let trail = &piece[piece.trim_end().len()..];
         let plain = !(run.code || run.bold || run.italic || run.link.is_some());
+        let mut md = Md::text(lead);
+        // a remote image keeps its syntax, inside its link when it has one
+        if let Some(src) = &run.image {
+            let mut image = Md::text(&format!("![{}](", self.esc(core, false)));
+            image.push_url(src.clone());
+            image.push_str(")");
+            match &run.link {
+                Some(href) => {
+                    md.push_str("[");
+                    md.append(image);
+                    md.push_str("](");
+                    md.push_url(self.target(href));
+                    md.push_str(")");
+                }
+                None => md.append(image),
+            }
+            md.push_str(trail);
+            return md;
+        }
         let mut out = if run.code {
             code_span(core)
         } else {
-            md_escape(core, line_start && plain)
+            self.esc(core, line_start && plain)
         };
         out = match (run.bold, run.italic) {
             (true, true) => format!("***{out}***"),
@@ -408,7 +515,6 @@ impl Cx<'_> {
             (false, true) => format!("*{out}*"),
             (false, false) => out,
         };
-        let mut md = Md::text(lead);
         match &run.link {
             Some(href) => {
                 md.push_str(&format!("[{out}]("));
@@ -480,7 +586,7 @@ impl Cx<'_> {
                 self.anchored(anchor, true, vec![heading_md(usize::from(*level), text)])
             }
             PBlock::Para { anchor, runs } => {
-                let text = self.inline(runs, "\\\n", true);
+                let text = self.inline(runs, self.br(), true);
                 self.anchored(anchor, true, guarded_lines(text))
             }
             PBlock::List {
@@ -507,21 +613,40 @@ impl Cx<'_> {
             PBlock::Figure {
                 anchor,
                 blob,
+                dark,
                 alt,
                 caption,
             } => {
                 let mut lines = vec![];
                 let file = blob.and_then(|h| self.blobs.get(&h)).map(|b| &b.file);
+                let dark_file = dark.and_then(|h| self.blobs.get(&h)).map(|b| &b.file);
                 let alt_text = alt.split_whitespace().collect::<Vec<_>>().join(" ");
-                if let Some(file) = file {
-                    let mut image = Md::text(&format!("![{}](", md_escape(&alt_text, false)));
+                if let (Some(file), Some(dark_file)) = (file, dark_file) {
+                    // a figure with a dark image: the generated four-line picture, its alt text
+                    // and paths escaped for an attribute
+                    lines.push(Md::text("<picture>"));
+                    let mut source =
+                        Md::text("<source media=\"(prefers-color-scheme: dark)\" srcset=\"");
+                    source.push_url(relative(self.from, dark_file).replace('"', "%22"));
+                    source.push_str("\">");
+                    lines.push(source);
+                    let mut img = Md::text(&format!(
+                        "<img alt=\"{}\" src=\"",
+                        crate::html::escape(&alt_text)
+                    ));
+                    img.push_url(relative(self.from, file).replace('"', "%22"));
+                    img.push_str("\">");
+                    lines.push(img);
+                    lines.push(Md::text("</picture>"));
+                } else if let Some(file) = file {
+                    let mut image = Md::text(&format!("![{}](", self.esc(&alt_text, false)));
                     image.push_url(relative(self.from, file));
                     image.push_str(")");
                     lines.push(image);
                 }
-                let caption = self.inline(caption, "\\\n", true);
+                let caption = self.inline(caption, self.br(), true);
                 if file.is_none() && caption.is_empty() && !alt_text.is_empty() {
-                    lines.push(Md::text(&guard_line(&md_escape(&alt_text, true))));
+                    lines.push(Md::text(&guard_line(&self.esc(&alt_text, true))));
                 }
                 if !caption.is_empty() {
                     if !lines.is_empty() {
@@ -529,6 +654,25 @@ impl Cx<'_> {
                     }
                     lines.extend(guarded_lines(caption));
                 }
+                self.anchored(anchor, false, lines)
+            }
+            PBlock::Fold {
+                anchor,
+                runs,
+                blocks,
+                ..
+            } => {
+                // the title is HTML in the summary and never a heading of its own; the blocks
+                // keep their levels
+                let mut lines = self.fold_open(runs);
+                lines.push(Md::default());
+                let inner = self.blocks(blocks);
+                if !inner.is_empty() {
+                    lines.extend(inner);
+                    lines.push(Md::default());
+                }
+                lines.push(Md::text(FOLD_CLOSE));
+                // a blank line after the anchor: an HTML block starts its own paragraph
                 self.anchored(anchor, false, lines)
             }
             PBlock::Callout {
@@ -540,7 +684,7 @@ impl Cx<'_> {
                 let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
                 let inner = self.blocks(blocks);
                 if !label.is_empty() {
-                    lines.push(Md::text(&format!("> **{}**", md_escape(&label, false))));
+                    lines.push(Md::text(&format!("> **{}**", self.esc(&label, false))));
                     if !inner.is_empty() {
                         lines.push(Md::text(">"));
                     }
@@ -557,7 +701,84 @@ impl Cx<'_> {
         }
     }
 
+    /// A collapsed section's title as inline HTML: the text escaped, a code span as `code`, bold
+    /// and italic as `strong` and `em`, a link as `a` (its target a slot, as in any line).
+    fn title_html(&self, runs: &[Run]) -> Md {
+        let mut out = Md::default();
+        for run in runs {
+            let text = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let lead = if run.text.starts_with(char::is_whitespace) && !text.is_empty() {
+                " "
+            } else {
+                ""
+            };
+            let trail = if run.text.ends_with(char::is_whitespace) && !text.is_empty() {
+                " "
+            } else {
+                ""
+            };
+            if text.is_empty() {
+                if !run.text.is_empty() {
+                    out.push_str(" ");
+                }
+                continue;
+            }
+            let mut inner = crate::html::escape(&text);
+            if let Some(src) = &run.image {
+                out.push_str(lead);
+                let mut img = Md::text(&format!("<img alt=\"{inner}\" src=\""));
+                img.push_url(src.replace('"', "%22"));
+                img.push_str("\">");
+                match &run.link {
+                    Some(href) => {
+                        out.push_str("<a href=\"");
+                        out.push_url(self.target(href).replace('"', "%22"));
+                        out.push_str("\">");
+                        out.append(img);
+                        out.push_str("</a>");
+                    }
+                    None => out.append(img),
+                }
+                out.push_str(trail);
+                continue;
+            }
+            for (on, tag) in [(run.code, "code"), (run.italic, "em"), (run.bold, "strong")] {
+                if on {
+                    inner = format!("<{tag}>{inner}</{tag}>");
+                }
+            }
+            out.push_str(lead);
+            match &run.link {
+                Some(href) => {
+                    out.push_str("<a href=\"");
+                    out.push_url(self.target(href).replace('"', "%22"));
+                    out.push_str(&format!("\">{inner}</a>"));
+                }
+                None => out.push_str(&inner),
+            }
+            out.push_str(trail);
+        }
+        out.map_first(|t| t.trim_start().to_string())
+            .map_last(|t| t.trim_end().to_string())
+    }
+
+    /// The lines that open a collapsed section: `<details>` and its summary.
+    fn fold_open(&self, runs: &[Run]) -> Vec<Md> {
+        let details = if self.md_attr {
+            "<details markdown=\"1\">"
+        } else {
+            "<details>"
+        };
+        let mut summary = Md::text("<summary><b>");
+        summary.append(self.title_html(runs));
+        summary.push_str("</b></summary>");
+        vec![Md::text(details), summary]
+    }
+
     fn list(&self, ordered: bool, start: u32, items: &[Vec<PBlock>]) -> Vec<Md> {
+        if self.single {
+            return self.single_list(ordered, start, items);
+        }
         let mut out = vec![];
         for (i, item) in items.iter().enumerate() {
             let mark = if ordered {
@@ -573,6 +794,46 @@ impl Cx<'_> {
                 None => out.push(Md::text(&mark)),
             }
             let pad = " ".repeat(width);
+            out.extend(lines.map(|l| if l.is_empty() { l } else { l.prefixed(&pad) }));
+        }
+        out
+    }
+
+    /// A list in the single file (D-ESHXM rule 7, D-7M4TR): one space after each marker and every
+    /// part indented to the item's text. A list whose items hold more than one part (a paragraph
+    /// or code past the first) is loose: a blank line between items and between parts. Any
+    /// other list is tight, and a nested list follows its item's text directly.
+    fn single_list(&self, ordered: bool, start: u32, items: &[Vec<PBlock>]) -> Vec<Md> {
+        let loose = items.iter().any(|item| {
+            item.iter()
+                .filter(|b| !matches!(b, PBlock::List { .. }))
+                .count()
+                > 1
+        });
+        let mut out = vec![];
+        for (i, item) in items.iter().enumerate() {
+            let mark = if ordered {
+                format!("{}.", u64::from(start) + i as u64)
+            } else {
+                "-".to_string()
+            };
+            if i > 0 && loose {
+                out.push(Md::default());
+            }
+            let lines = if loose {
+                self.blocks(item)
+            } else {
+                item.iter()
+                    .filter_map(|b| self.written(b))
+                    .flatten()
+                    .collect()
+            };
+            let mut lines = lines.into_iter();
+            match lines.next() {
+                Some(first) => out.push(first.prefixed(&format!("{mark} "))),
+                None => out.push(Md::text(&mark)),
+            }
+            let pad = " ".repeat(mark.len() + 1);
             out.extend(lines.map(|l| if l.is_empty() { l } else { l.prefixed(&pad) }));
         }
         out
@@ -614,7 +875,7 @@ impl Cx<'_> {
     /// directly; any other block follows a blank line, so a reader that needs the blank line
     /// finds it. A fragment writes no anchor line (D-E8P8J).
     fn anchored(&self, anchor: &Option<String>, adjacent: bool, lines: Vec<Md>) -> Vec<Md> {
-        let Some(a) = anchor.as_ref().filter(|_| !self.fragment) else {
+        let Some(a) = anchor.as_ref().filter(|_| !self.fragment && !self.single) else {
             return lines;
         };
         let mut out = vec![Md::text(&format!(
@@ -646,6 +907,8 @@ pub fn copy_parts(
         from: page,
         blobs,
         fragment: true,
+        md_attr: false,
+        single: false,
     };
     let mut out = vec![];
     for b in blocks {
@@ -666,6 +929,73 @@ pub fn copy_parts(
         push_text(&mut out, "\n");
     }
     Ok(out)
+}
+
+/// The single Markdown file's text of `blocks` (D-ESHXM): one blank line between blocks, no
+/// anchor line, and each figure by its file in `blobs` (a path relative to the folder of the
+/// file). The lines only, with no final line feed.
+pub(crate) fn single_blocks(blocks: &[PBlock], blobs: &BTreeMap<Hash, super::Blob>) -> String {
+    let cx = Cx {
+        from: "",
+        blobs,
+        fragment: false,
+        md_attr: false,
+        single: true,
+    };
+    cx.blocks(blocks)
+        .iter()
+        .map(Md::export)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The single file's heading line of `text` (escaped as its text is).
+pub(crate) fn single_heading(level: usize, text: &str) -> String {
+    heading(
+        level,
+        &gfm_escape(
+            &text.split_whitespace().collect::<Vec<_>>().join(" "),
+            false,
+        ),
+    )
+}
+
+/// Copy's Markdown of the lines that open a collapsed section whose title is `runs`, on the site
+/// page `page`: `<details>` and the summary, the plain form (no `markdown` attribute), with the
+/// line feed that ends a block.
+pub fn fold_open_parts(runs: &[Run], page: &str) -> Vec<CopyPart> {
+    let blobs = BTreeMap::new();
+    let cx = Cx {
+        from: page,
+        blobs: &blobs,
+        fragment: true,
+        md_attr: false,
+        single: false,
+    };
+    let mut out = vec![];
+    for (i, line) in cx.fold_open(runs).into_iter().enumerate() {
+        if i > 0 {
+            push_text(&mut out, "\n");
+        }
+        line.into_parts(&mut out);
+    }
+    push_text(&mut out, "\n");
+    out
+}
+
+/// Copy's Markdown of the line that ends a collapsed section.
+pub fn fold_close_parts() -> Vec<CopyPart> {
+    vec![CopyPart::Text(format!("{FOLD_CLOSE}\n"))]
+}
+
+/// Whether any page of the print holds a collapsed section.
+fn has_fold(blocks: &[PBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        PBlock::Fold { .. } => true,
+        PBlock::List { items, .. } => items.iter().any(|i| has_fold(i)),
+        PBlock::Callout { blocks, .. } => has_fold(blocks),
+        _ => false,
+    })
 }
 
 /// A string as YAML reads it: a JSON string (O28 (c)).
@@ -691,7 +1021,7 @@ fn push_mark(out: &mut String, generated: bool) {
 }
 
 /// The file of a folder, doc or the glossary.
-fn page_file(p: &Print, d: &PrintDoc, generated: bool) -> String {
+fn page_file(p: &Print, d: &PrintDoc, generated: bool, layout: Layout) -> String {
     let mut out = String::from("---\n");
     out.push_str(&format!("title: {}\n", json(&d.title)));
     if d.kind != PageKind::Glossary {
@@ -705,6 +1035,8 @@ fn page_file(p: &Print, d: &PrintDoc, generated: bool) -> String {
         from: &file,
         blobs: &p.blobs,
         fragment: false,
+        md_attr: layout != Layout::Plain,
+        single: false,
     };
     let lines = cx.blocks(&d.blocks);
     if !lines.is_empty() {
@@ -767,6 +1099,11 @@ fn mkdocs_yml(p: &Print, layout: Layout, generated: bool) -> String {
     out.push_str(&format!("site_name: {}\n", json(&p.title)));
     if layout == Layout::Techdocs {
         out.push_str("docs_dir: docs\nplugins:\n  - techdocs-core\n");
+    }
+    // a collapsed section is `<details markdown="1">`, which MkDocs reads with `md_in_html`; a
+    // tree with none needs no extension
+    if p.docs.iter().any(|d| has_fold(&d.blocks)) {
+        out.push_str("markdown_extensions:\n  - md_in_html\n");
     }
     out.push_str("nav:\n");
     out.push_str(&format!("  - {}: index.md\n", json(&p.title)));
@@ -884,6 +1221,7 @@ pub fn write_markdown(p: &Print, out: &Path, layout: Layout) -> Result<PrintSumm
     Ok(PrintSummary {
         out: out.display().to_string(),
         format: "md",
+        layout: None,
         docs: p.docs.iter().filter(|d| d.kind == PageKind::Doc).count(),
         folders: p.docs.iter().filter(|d| d.kind == PageKind::Folder).count(),
         assets: p.blobs.len(),
@@ -927,7 +1265,7 @@ pub fn emit_files(
     for d in &p.docs {
         write(
             format!("{base}{}", md_path(&d.page)),
-            page_file(p, d, generated).as_bytes(),
+            page_file(p, d, generated, layout).as_bytes(),
         )?;
     }
     for blob in p.blobs.values() {

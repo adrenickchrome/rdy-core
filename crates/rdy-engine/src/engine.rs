@@ -160,8 +160,11 @@ pub struct ExportRequest {
     pub out: PathBuf,
     /// `pdf`, `html` or `md`.
     pub format: String,
-    /// `mkdocs` or `techdocs`, with `md` only.
+    /// `mkdocs`, `techdocs` or `single`, with `md` only.
     pub layout: Option<String>,
+    /// The single Markdown file's assets folder, relative to the folder of `out`, as the caller
+    /// wrote it (D-6PR3Y); with `md` and `single` only (D-H1FRY).
+    pub assets: Option<String>,
     /// The scope's text; canon when none.
     pub scope: Option<String>,
     /// A publication profile (an id, a key, or `implicit:org`); the full source when none.

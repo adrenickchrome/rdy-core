@@ -259,6 +259,10 @@ fn runs_of<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a Run>) {
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => out.extend(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(runs);
+                runs_of(blocks, out);
+            }
             PBlock::List { items, .. } => items.iter().for_each(|i| runs_of(i, out)),
             PBlock::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
@@ -290,7 +294,7 @@ fn paras(p: &Print) -> Vec<String> {
                     out.push(runs.iter().map(|r| r.text.as_str()).collect());
                 }
                 PBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
-                PBlock::Callout { blocks, .. } => walk(blocks, out),
+                PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => walk(blocks, out),
                 _ => {}
             }
         }
@@ -580,6 +584,78 @@ fn pub8_all_print_formats_share_the_selected_model() {
             "md {want}"
         );
     }
+    // rfr2 (D-3DAX4): the same loop over a figure with a dark image. The Markdown trees write
+    // both images and the generated picture; the HTML file and the PDF show the light one only;
+    // an excluded page's paired figure reaches none of them.
+    let (_dark_dir, mut dr) = tiny();
+    let light_png = png(6, 2, [250, 250, 240]);
+    let dark_png = png(6, 2, [12, 14, 20]);
+    let hidden_png = png(3, 3, [99, 1, 77]);
+    let hidden_dark_png = png(3, 3, [77, 1, 99]);
+    let lb = dr.store_mut().put_blob(&light_png).unwrap();
+    let db = dr.store_mut().put_blob(&dark_png).unwrap();
+    let hb = dr.store_mut().put_blob(&hidden_png).unwrap();
+    let hdb = dr.store_mut().put_blob(&hidden_dark_png).unwrap();
+    let fig = |parent: &str, l: &Hash, d: &Hash, alt: &str| {
+        json!({"op": "create", "type": "figure", "parent": parent, "fields": {
+            "blob": l.to_string(), "media_type": "image/png",
+            "dark_blob": d.to_string(), "dark_media_type": "image/png", "alt": alt}})
+    };
+    let dids = put(
+        &mut dr,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$dk", "fields": {"name": "dk", "title": "Dark page", "doc_type": "page"}},
+            fig("$dk", &lb, &db, "Paired figure alt"),
+            {"op": "create", "type": "doc", "id": "$hid", "fields": {"name": "hid", "title": "DARKCANARY page", "doc_type": "page"}},
+            fig("$hid", &hb, &hdb, "DARKCANARY figure alt"),
+            {"op": "create", "type": "doc", "id": "$adm", "fields": {"name": "adm", "title": "Admin", "doc_type": "page"}}
+        ]),
+    );
+    put(
+        &mut dr,
+        "w1",
+        json!([profile_op("dkp", "org", &dids["$adm"], &[&dids["$dk"]])]),
+    );
+    land(&mut dr, "w1").unwrap();
+    let dst = dr.read();
+    let dp = model(&dst, "canon", "dkp");
+    assert_eq!(
+        dp.blobs.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([lb, db])
+    );
+    let (lf, df) = (dp.blobs[&lb].file.clone(), dp.blobs[&db].file.clone());
+    let dout = tempfile::tempdir().unwrap();
+    let dall = export_all(&dst, "canon", "dkp", dout.path());
+    for canary in [
+        b"DARKCANARY".as_slice(),
+        &hidden_png,
+        &hidden_dark_png,
+        hb.to_string().as_bytes(),
+        hdb.to_string().as_bytes(),
+    ] {
+        assert_eq!(holding(&dall, canary), Vec::<String>::new());
+    }
+    for (short, prefix) in [("md", ""), ("mkdocs", "docs/")] {
+        let o = &dall[short];
+        assert_eq!(o.summary.assets, 2, "{short}");
+        assert_eq!(o.files[&format!("{prefix}{lf}")], light_png, "{short}");
+        assert_eq!(o.files[&format!("{prefix}{df}")], dark_png, "{short}");
+        let page = text(o, &format!("{prefix}dk.md"));
+        assert!(
+            page.contains(&format!(
+                "<picture>\n<source media=\"(prefers-color-scheme: dark)\" srcset=\"{df}\">\n<img alt=\"Paired figure alt\" src=\"{lf}\">\n</picture>\n"
+            )),
+            "{short}: {page}"
+        );
+    }
+    let dhtml = text(&dall["html"], "out.html");
+    assert_eq!(dall["html"].summary.assets, 1);
+    assert_eq!(dhtml.matches("<img ").count(), 1, "{dhtml}");
+    assert!(dhtml.contains(&base64(&light_png)));
+    assert!(!dhtml.contains(&base64(&dark_png)));
+    assert_eq!(dall["pdf"].summary.assets, 1);
+    assert!(pdf_words(&dp).contains("Paired figure alt"));
 }
 
 // --- 2. no excluded byte -----------------------------------------------------------------------
@@ -1102,6 +1178,93 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
         );
     }
     assert!(!base.join("l.out").exists());
+
+    // rfr3: the single Markdown file joins the matrix, with and without an assets folder
+    let single = |profile: &str, out: &Path, assets: Option<&str>| {
+        print::export_profile_with(
+            &st,
+            "canon",
+            profile,
+            out,
+            Format::Md,
+            &print::ExportOptions {
+                layout: Some(print::ExportLayout::Single),
+                assets,
+            },
+        )
+    };
+    let (before, entries_before) = (tree(base), entries(base));
+    for assets in [None, Some("single-assets")] {
+        let e = single("pubp", &base.join("out-single.md"), assets).unwrap_err();
+        assert_eq!(e.code, E_PUBLICATION_REFERENCE, "single {assets:?}: {e}");
+        assert_eq!(
+            e.message,
+            format!("Public profile has {count} references outside its selection.")
+        );
+        assert_eq!(
+            entries(base),
+            entries_before,
+            "single {assets:?}: nothing staged"
+        );
+        assert_eq!(tree(base), before, "single {assets:?}: nothing changed");
+        for out in [
+            rdy.join("out.md"),
+            physical.join("out.md"),
+            link.join("out.md"),
+            link.clone(),
+            other.join("..").join(".rdy").join("out.md"),
+        ] {
+            let e = single("orgp", &out, assets).unwrap_err();
+            if !rdy_qa::platform::follow_refused(&out) {
+                assert_eq!(
+                    e.code,
+                    E_BAD_INPUT,
+                    "single {}: {}",
+                    out.display(),
+                    e.message
+                );
+                assert_eq!(
+                    e.message,
+                    format!("{} is inside the project .rdy directory", out.display())
+                );
+            }
+            assert_eq!(entries(&rdy), store_before, "single: no file in the store");
+        }
+        let e = single("orgp", &base.join("none").join("out.md"), assets).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert!(e.message.ends_with("does not exist"), "{}", e.message);
+        let e = single("orgp", Path::new("/"), assets).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_BAD_INPUT, "/ does not name a directory")
+        );
+        // no overwrite: an existing file, of any kind
+        for held in ["held.pdf", "held-md"] {
+            let e = single("orgp", &base.join(held), assets).unwrap_err();
+            assert_eq!(e.code, E_ALREADY_EXISTS, "single {held}");
+        }
+    }
+    // the layout refusal of a file format comes first, then the assets one (D-H1FRY)
+    for format in [Format::Pdf, Format::Html] {
+        let e = print::export_profile_with(
+            &st,
+            "canon",
+            "orgp",
+            &base.join("l.out"),
+            format,
+            &print::ExportOptions {
+                layout: Some(print::ExportLayout::Single),
+                assets: Some("assets"),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_BAD_INPUT, "--layout single applies to the md format only")
+        );
+    }
+    assert!(!base.join("l.out").exists());
+    assert_eq!(std::fs::read(base.join("held.pdf")).unwrap(), b"mine pdf");
     drop(st);
     // the store still opens and checks clean
     let World { dir, r, .. } = w;

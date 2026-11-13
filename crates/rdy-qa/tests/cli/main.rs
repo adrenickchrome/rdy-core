@@ -23,6 +23,7 @@ mod cli_dump_chain;
 mod cli_editor;
 mod cli_entities;
 mod cli_export;
+mod cli_export_single;
 mod cli_hooks;
 mod cli_hooks_native;
 mod cli_hub_auth;

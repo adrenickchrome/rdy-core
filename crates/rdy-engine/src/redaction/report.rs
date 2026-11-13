@@ -891,13 +891,16 @@ pub(crate) fn compute_excluding(
             kinds::BLOCK if delivered.only.contains(&f.hash) => {}
             kinds::BLOCK if !block_ids.contains_key(&f.hash) => {
                 let b = reader.get_block(&f.hash)?;
-                if let Some(h) = b
-                    .fields
-                    .get("blob")
-                    .and_then(FieldValue::as_str)
-                    .and_then(|s| s.parse::<Hash>().ok())
-                {
-                    blob_refs.push((h, b.id.clone(), f.hash));
+                // a figure's light and dark images each name a blob (D-3DAX4 rule 5)
+                for field in rdy_schema::ASSET_BLOB_FIELDS {
+                    if let Some(h) = b
+                        .fields
+                        .get(field)
+                        .and_then(FieldValue::as_str)
+                        .and_then(|s| s.parse::<Hash>().ok())
+                    {
+                        blob_refs.push((h, b.id.clone(), f.hash));
+                    }
                 }
                 by_id.entry(b.id.clone()).or_default().insert(f.hash);
                 block_ids.insert(f.hash, b.id);
@@ -1760,11 +1763,13 @@ fn prospective_hits(
         })
         .collect();
     let blob_hit = |b: &Block| {
-        b.fields
-            .get("blob")
-            .and_then(FieldValue::as_str)
-            .and_then(|s| s.parse::<Hash>().ok())
-            .is_some_and(|h| manifest.blobs.contains(&h) || manifest.shared_blobs.contains(&h))
+        rdy_schema::ASSET_BLOB_FIELDS.iter().any(|field| {
+            b.fields
+                .get(*field)
+                .and_then(FieldValue::as_str)
+                .and_then(|s| s.parse::<Hash>().ok())
+                .is_some_and(|h| manifest.blobs.contains(&h) || manifest.shared_blobs.contains(&h))
+        })
     };
     let mut quotes = Quotes::new(sources, limits.levels)?;
     for c in prospective {

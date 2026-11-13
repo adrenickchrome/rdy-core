@@ -358,12 +358,18 @@ impl Projector<'_> {
         for v in c.fields.values_mut() {
             self.keys_back_value(v);
         }
-        if self.pack.is_asset(&b.block_type)
-            && let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
-        {
-            let h = h.to_string();
-            let name = blob_name(&h, b.field_str("media_type"));
-            self.blobs.entry(h).or_insert(name);
+        // an asset's image and its dark image (D-3DAX4), each named by its own media type
+        if self.pack.is_asset(&b.block_type) {
+            for (field, media) in rdy_schema::ASSET_BLOB_FIELDS
+                .iter()
+                .zip(rdy_schema::ASSET_MEDIA_TYPE_FIELDS)
+            {
+                if let Some(h) = b.field_str(field).and_then(|s| s.parse::<Hash>().ok()) {
+                    let h = h.to_string();
+                    let name = blob_name(&h, b.field_str(media));
+                    self.blobs.entry(h).or_insert(name);
+                }
+            }
         }
         let version = self.m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
         let cited = self.foreign_links(b, &mut hidden);

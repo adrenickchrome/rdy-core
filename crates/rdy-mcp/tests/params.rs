@@ -1083,9 +1083,16 @@ fn hsa8_auth_tool_schema_is_strict_and_complete() {
         needs("start", "install"),
         "install is checked first"
     );
+    // machine_name is optional: its default is the host name (D-VRH3Z)
     assert_eq!(
-        check(json!({"op": "start", "install": o})).unwrap_err(),
-        needs("start", "machine_name")
+        check(json!({"op": "start", "install": o})),
+        rdy_engine::hub_types::machine_name_or_default(None)
+            .map(|machine_name| AuthRequest::Start {
+                install: rdy_engine::hub_types::Origin::parse(o).unwrap(),
+                machine_name,
+                confirmation: None,
+            })
+            .map_err(|e| (e.code.to_string(), e.message, e.fix))
     );
     assert_eq!(
         check(json!({"op": "start", "install": o, "machine_name": "m", "answer": "confirm"}))

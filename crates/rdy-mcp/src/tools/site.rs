@@ -39,16 +39,18 @@ pub fn rdy_site(st: &mut McpState, p: SiteParams) -> Result<Value, RdyError> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExportParams {
-    /// The file (pdf, html) or directory (md) to write: absolute, or relative to the project directory. It must not exist; a directory may be empty.
+    /// The file (pdf, html, md with layout single) or directory (md) to write: absolute, or relative to the project directory. It must not exist; a directory may be empty.
     pub out: String,
     /// pdf, html or md.
     pub format: ExportFormat,
-    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. Only with md.
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. single: the one doc the selection holds as one Markdown file. Only with md.
     pub layout: Option<ExportLayout>,
     /// canon (the default), a view, tag:<version>, landing:<id> or proposal:P-<id>@<n>. With a profile: canon, tag:<version> or landing:<id>.
     pub scope: Option<String>,
     /// A publication profile id or key in the selected scope, or implicit:org for every doc. Selects whole docs and folders for local output.
     pub profile: Option<String>,
+    /// With layout single only: a folder below the folder of out, absent or empty, for the figures' images, such as assets. Needed when the doc has a figure.
+    pub assets: Option<String>,
 }
 
 /// The print formats, in lower case.
@@ -70,12 +72,13 @@ impl ExportFormat {
     }
 }
 
-/// The Markdown tree's layouts, in lower case.
+/// The Markdown layouts, in lower case: the tree's two, and the single file.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportLayout {
     Mkdocs,
     Techdocs,
+    Single,
 }
 
 impl ExportLayout {
@@ -83,6 +86,7 @@ impl ExportLayout {
         match self {
             ExportLayout::Mkdocs => "mkdocs",
             ExportLayout::Techdocs => "techdocs",
+            ExportLayout::Single => "single",
         }
     }
 }
@@ -99,6 +103,7 @@ pub fn rdy_export(st: &mut McpState, p: ExportParams) -> Result<Value, RdyError>
         layout: p.layout.map(|l| l.as_str().to_string()),
         scope: p.scope,
         profile: p.profile,
+        assets: p.assets,
         view: Some(st.view.clone()),
     })
 }

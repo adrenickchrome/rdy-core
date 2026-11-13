@@ -5,6 +5,7 @@ mod store;
 mod store_answer;
 mod store_collide;
 mod store_crash;
+mod store_dark_figure;
 mod store_dump;
 mod store_feature_fixture;
 mod store_flush;

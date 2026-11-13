@@ -11,6 +11,7 @@ block_types:
     fields:
       title: { kind: str, required: true }
       lifecycle: { kind: enum, values: [draft, stable, deprecated] }
+      collapsed: { kind: bool }
     children: [section, prose, claim, requirement, constraint, term, component, actor, interface, value, entity, flow, example, note, rationale, table, diagram, figure, code, decision, question]
   prose:       { prefix: p,  traits: [informative], body: required }
   claim:       { prefix: c,  traits: [normative, describes], body: required }
@@ -95,6 +96,8 @@ block_types:
       blob: { kind: str, required: true }
       media_type: { kind: str, required: true }
       alt: { kind: str, required: true }
+      dark_blob: { kind: str }
+      dark_media_type: { kind: str }
   code:
     prefix: cd
     traits: [informative]

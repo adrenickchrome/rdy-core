@@ -226,6 +226,7 @@ fn ec11_rdy_export_without_a_daemon_is_refused() {
             out: "p.pdf".into(),
             format: ExportFormat::Pdf,
             layout: None,
+            assets: None,
             scope: None,
             profile: None,
         },

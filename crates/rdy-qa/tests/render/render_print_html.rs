@@ -82,6 +82,10 @@ fn runs_of<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a Run>) {
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => out.extend(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(runs);
+                runs_of(blocks, out);
+            }
             PBlock::List { items, .. } => items.iter().for_each(|i| runs_of(i, out)),
             PBlock::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
@@ -101,7 +105,7 @@ fn figure_count(blocks: &[PBlock]) -> usize {
         .map(|b| match b {
             PBlock::Figure { blob: Some(_), .. } => 1,
             PBlock::List { items, .. } => items.iter().map(|i| figure_count(i)).sum(),
-            PBlock::Callout { blocks, .. } => figure_count(blocks),
+            PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => figure_count(blocks),
             _ => 0,
         })
         .sum()

@@ -25,6 +25,7 @@ mod mcp_dump_chain;
 mod mcp_elicitation;
 mod mcp_everyday;
 mod mcp_export;
+mod mcp_export_single;
 mod mcp_golden;
 mod mcp_grounded;
 mod mcp_history;

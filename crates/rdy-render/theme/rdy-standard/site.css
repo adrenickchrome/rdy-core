@@ -264,6 +264,12 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 
 /* == content == */
 .block { position: relative; }
+/* a collapsed section is native disclosure: its heading and toolbar are the summary, closed it hides the blocks under it */
+.section-fold > .section-fold-head { display: block; list-style: none; cursor: pointer; }
+.section-fold > .section-fold-head::-webkit-details-marker { display: none; }
+.section-fold-head > .block > .section-title { position: relative; padding-inline-start: 1.3rem; }
+.section-fold-head > .block > .section-title::before { content: ''; position: absolute; inset-inline-start: 0.2rem; top: 50%; width: 0.45rem; height: 0.45rem; border-right: 2px solid var(--ink-soft); border-bottom: 2px solid var(--ink-soft); transform: translateY(-65%) rotate(-45deg); }
+.section-fold[open] > .section-fold-head > .block > .section-title::before { transform: translateY(-65%) rotate(45deg); }
 .id-anchor { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
 .marker { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem; }
 .block-status { margin: 1rem 0 0.25rem; font-size: 0.7rem; line-height: 1.2; }
@@ -291,6 +297,17 @@ caption { caption-side: top; text-align: left; font-size: 0.84rem; color: var(--
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 figure { margin: 1.2rem 0; }
 .figure img { display: block; border-radius: var(--radius); }
+/* A figure with a dark image shows the variant of the page's theme: the explicit choice, else the
+   system's. Print always shows the light one. */
+.figure-themed .figure-dark { display: none; }
+@media screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .figure-themed .figure-light { display: none; }
+  :root:not([data-theme="light"]) .figure-themed .figure-dark { display: block; }
+}
+@media screen {
+  :root[data-theme="dark"] .figure-themed .figure-light { display: none; }
+  :root[data-theme="dark"] .figure-themed .figure-dark { display: block; }
+}
 .figure-missing, .download .meta { color: var(--ink-soft); }
 .content code { overflow-wrap: anywhere; background: var(--surface); border-color: var(--line); color: var(--ink); }
 .content a code { color: inherit; }

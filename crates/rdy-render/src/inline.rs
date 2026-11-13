@@ -50,9 +50,6 @@ pub enum Form {
     Label,
 }
 
-/// The most lists a body nests.
-const MAX_DEPTH: usize = 6;
-
 /// A body as HTML: paragraphs and lists. A blank body is the empty string.
 pub fn body_html(text: &str, ctx: &Ctx) -> String {
     let mut out = String::new();
@@ -208,7 +205,7 @@ fn plain_refs_in(
                 Block::Para(p) => read(p, false),
                 Block::List(l) => {
                     let mut lines = vec![];
-                    list_plain(l, &|t| read(t, false), &mut lines);
+                    list_plain(l, &|t| read(t, false), coded, &mut lines);
                     lines.join("\n")
                 }
             })
@@ -309,7 +306,106 @@ enum Node {
     Code(Vec<Node>),
     Strong(Vec<Node>),
     Em(Vec<Node>),
-    Link { target: String, children: Vec<Node> },
+    Link {
+        target: String,
+        children: Vec<Node>,
+    },
+    /// A remote image (D-3DAX4): `![alt](https:…)`, alone or as the whole label of a link. Its
+    /// alt text is never empty.
+    Image {
+        alt: String,
+        url: String,
+    },
+}
+
+thread_local! {
+    /// Whether the HTML being written is the print model's source ([`with_image_markup`]): a
+    /// remote image is then an `img` element the print reader reads, never written to a page.
+    static IMAGE_MARKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with every remote image written as `<img class="remote-image" src alt>` in place of its
+/// alt text: the HTML the print model and Copy read (D-3DAX4 rule 3), so the Markdown outputs
+/// write the image from the selected blocks alone. A page never holds this HTML: the site shows
+/// the alt text and loads nothing.
+pub(crate) fn with_image_markup<T>(f: impl FnOnce() -> T) -> T {
+    let before = IMAGE_MARKUP.with(|m| m.replace(true));
+    let out = f();
+    IMAGE_MARKUP.with(|m| m.set(before));
+    out
+}
+
+thread_local! {
+    /// Whether the print model's source marks each reference with the id it names
+    /// ([`with_ref_markup`]): the single Markdown file reads them to link a reference within its
+    /// doc and to warn of any other (D-ESHXM rule 8, D-6PR3Y rule 6).
+    static REF_MARKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with each reference in the print model's source ([`with_image_markup`]) marked with the
+/// token it names (`data-rdy-ref`). A page never holds this markup.
+pub(crate) fn with_ref_markup<T>(f: impl FnOnce() -> T) -> T {
+    let before = REF_MARKUP.with(|m| m.replace(true));
+    let out = f();
+    REF_MARKUP.with(|m| m.set(before));
+    out
+}
+
+/// Whether references are being marked ([`with_ref_markup`]): every block's print source is then
+/// rendered, not only one that may hold a remote image.
+pub(crate) fn ref_markup() -> bool {
+    REF_MARKUP.with(std::cell::Cell::get)
+}
+
+/// The attribute that marks a reference in the print model's source, or nothing.
+fn ref_mark(span: &RefSpan) -> String {
+    if IMAGE_MARKUP.with(std::cell::Cell::get) && ref_markup() {
+        format!(" data-rdy-ref=\"{}\"", escape(&span.token))
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `text` may hold a remote image: it holds `![`, the opener every one starts with. A
+/// cheap test, before the print model's second rendering of a block.
+pub(crate) fn may_hold_image(text: &str) -> bool {
+    text.contains("![")
+}
+
+/// The remote image whose `[` is at `open` (right after an unescaped `!`) and whose label ends
+/// at `close`: its alt text and URL and the index after it. None when it is not one rdy reads
+/// (D-3DAX4 rule 1): the label must hold text and no reference, and the target must be an
+/// `https:` URL that [`href`] allows, within [`MAX_LOCAL_URL`] bytes.
+fn image_at(toks: &[Tok], open: usize, close: usize) -> Option<(Node, usize)> {
+    let (close, url, end) = link_at(toks, open, close)?;
+    let mut alt = String::new();
+    let mut j = open + 1;
+    while j < close {
+        match toks[j] {
+            Tok::Atom(_) => return None,
+            Tok::Ch('\\') if matches!(toks.get(j + 1), Some(Tok::Ch(p)) if p.is_ascii_punctuation()) =>
+            {
+                if let Some(Tok::Ch(p)) = toks.get(j + 1) {
+                    alt.push(*p);
+                }
+                j += 2;
+                continue;
+            }
+            Tok::Ch(c) | Tok::Lit(c) => alt.push(c),
+        }
+        j += 1;
+    }
+    let https = url
+        .get(..6)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https:"));
+    if alt.trim().is_empty()
+        || !https
+        || url.len() > MAX_LOCAL_URL
+        || href(&url, "").is_none_or(|(_, away)| !away)
+    {
+        return None;
+    }
+    Some((Node::Image { alt, url }, end))
 }
 
 fn is_punct(c: char) -> bool {
@@ -555,7 +651,16 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
             }
             Tok::Ch('[') if !in_link && !was_bang => match link_at(toks, i, closes[i]) {
                 Some((close, target, end)) => {
-                    let children = parse_spans(&toks[i + 1..close], true);
+                    // a label that is exactly one remote image is that image (D-3DAX4)
+                    let label = &toks[i + 1..close];
+                    let image = (label.len() > 1 && label[0] == Tok::Ch('!'))
+                        .then(|| image_at(label, 1, bracket_closes(label)[1]))
+                        .flatten()
+                        .filter(|(_, after)| *after == label.len());
+                    let children = match image {
+                        Some((img, _)) => vec![img],
+                        None => parse_spans(label, true),
+                    };
                     pieces.push(Piece::Node(Node::Link { target, children }));
                     i = end;
                 }
@@ -588,6 +693,15 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
                     });
                 }
                 i += n;
+            }
+            // a remote image, outside a link's own label (where only a whole label is one)
+            Tok::Ch('!')
+                if !in_link
+                    && toks.get(i + 1) == Some(&Tok::Ch('['))
+                    && let Some((img, end)) = image_at(toks, i + 1, closes[i + 1]) =>
+            {
+                pieces.push(Piece::Node(img));
+                i = end;
             }
             Tok::Ch(c) => {
                 bang = c == '!';
@@ -840,30 +954,39 @@ fn render_html(
                 let link = target_of(span, ctx);
                 let words = ref_words(span, link.as_ref(), ctx.unavailable);
                 let words = text_html(&one_period(span, words, next));
+                // the print model's source marks the reference (never a page)
+                let mark = ref_mark(span);
+                let plain = |out: &mut String| {
+                    if mark.is_empty() || words.is_empty() {
+                        out.push_str(&words)
+                    } else {
+                        out.push_str(&format!("<span{mark}>{words}</span>"))
+                    }
+                };
                 match link {
                     _ if in_link => out.push_str(&words),
                     // a named profile: a reference outside the selection is its words alone
-                    None if ctx.local_link.is_some() => out.push_str(&words),
+                    None if ctx.local_link.is_some() => plain(out),
                     // the target resolves but has no place on the site: its words, unlinked
-                    Some(Link { href: None, .. }) => out.push_str(&words),
+                    Some(Link { href: None, .. }) => plain(out),
                     Some(Link {
                         href: Some(h),
                         title,
                         ..
                     }) if title.is_empty() => {
-                        out.push_str(&format!("<a href=\"{}\">{words}</a>", escape(&h)))
+                        out.push_str(&format!("<a href=\"{}\"{mark}>{words}</a>", escape(&h)))
                     }
                     Some(Link {
                         href: Some(h),
                         title,
                         ..
                     }) => out.push_str(&format!(
-                        "<a href=\"{}\" title=\"{}\">{words}</a>",
+                        "<a href=\"{}\" title=\"{}\"{mark}>{words}</a>",
                         escape(&h),
                         escape(&title)
                     )),
                     None => out.push_str(&format!(
-                        "<span class=\"ref unresolved\" title=\"This reference could not be resolved\">{words}</span>"
+                        "<span class=\"ref unresolved\" title=\"This reference could not be resolved\"{mark}>{words}</span>"
                     )),
                 }
             }
@@ -881,6 +1004,19 @@ fn render_html(
                 out.push_str("<em>");
                 render_html(c, refs, ctx, in_link, next, out);
                 out.push_str("</em>");
+            }
+            // the site and every print show the alt text and load nothing (D-3DAX4 rule 2); the
+            // print model's source writes the image for the Markdown outputs
+            Node::Image { alt, url } => {
+                if IMAGE_MARKUP.with(std::cell::Cell::get) {
+                    out.push_str(&format!(
+                        "<img class=\"remote-image\" src=\"{}\" alt=\"{}\">",
+                        escape(url),
+                        escape(alt)
+                    ));
+                } else {
+                    out.push_str(&text_html(alt));
+                }
             }
             Node::Link { target, children } => match local_href(target, ctx) {
                 Some((h, away)) => {
@@ -965,153 +1101,34 @@ fn render_plain(
             Node::Link { children, .. } => {
                 render_plain(children, refs, label, drop, coded, next, out)
             }
+            Node::Image { alt, .. } => push(out, alt),
         }
     }
 }
 
 // ---- bodies -------------------------------------------------------------------------------
 
-#[derive(Debug)]
-enum Block {
-    Para(String),
-    List(List),
-}
+use rdy_model::list_parts::{Block, List, Part, parse_body};
 
-#[derive(Debug)]
-struct List {
-    ordered: bool,
-    start: u32,
-    indent: usize,
-    items: Vec<Item>,
-}
-
-#[derive(Debug)]
-struct Item {
-    text: String,
-    lists: Vec<List>,
-}
-
-/// A line's indent: leading spaces, a tab counting as 4.
-fn indent(line: &str) -> usize {
-    line.chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .map(|c| if c == '\t' { 4 } else { 1 })
-        .sum()
-}
-
-/// A marker line: its indent, whether it is numbered, its number and its text.
-fn marker(line: &str) -> Option<(usize, bool, u32, &str)> {
-    let rest = line.trim_start_matches([' ', '\t']);
-    let (ordered, number, after) = if let Some(r) = rest.strip_prefix(['-', '*']) {
-        (false, 1, r)
+/// Fenced code in a list item as a `code` block shows its body (D-7M4TR): its language's label,
+/// the code-copy control, and the code highlighted; no reference or markup is read in it.
+fn item_code_html(lang: Option<&str>, text: &str) -> String {
+    let lang = lang.unwrap_or("").trim();
+    let human = match crate::highlight::human_name(lang) {
+        _ if lang.is_empty() => "Code".to_string(),
+        n if n.is_empty() => "Code".to_string(),
+        n => n,
+    };
+    let class = if lang.is_empty() {
+        String::new()
     } else {
-        let digits = rest.chars().take_while(char::is_ascii_digit).count();
-        if !(1..=3).contains(&digits) {
-            return None;
-        }
-        let r = rest[digits..].strip_prefix('.')?;
-        (true, rest[..digits].parse().ok()?, r)
+        format!(" class=\"language-{}\"", escape(lang))
     };
-    if !after.starts_with([' ', '\t']) {
-        return None;
-    }
-    let text = after.trim();
-    (!text.is_empty()).then_some((indent(line), ordered, number, text))
-}
-
-fn parse_body(text: &str) -> Vec<Block> {
-    let lines: Vec<&str> = text.lines().collect();
-    // the first line at or after each line that is not blank: one reverse pass, not a scan per
-    // blank line
-    let mut next_nonblank = vec![lines.len(); lines.len() + 1];
-    for (i, l) in lines.iter().enumerate().rev() {
-        next_nonblank[i] = if l.trim().is_empty() {
-            next_nonblank[i + 1]
-        } else {
-            i
-        };
-    }
-    let mut out: Vec<Block> = vec![];
-    let mut para: Vec<&str> = vec![];
-    let mut stack: Vec<List> = vec![];
-    fn flush(para: &mut Vec<&str>, out: &mut Vec<Block>) {
-        if !para.is_empty() {
-            out.push(Block::Para(para.join("\n")));
-            para.clear();
-        }
-    }
-    fn close_one(stack: &mut Vec<List>, out: &mut Vec<Block>) {
-        if let Some(l) = stack.pop() {
-            match stack.last_mut().and_then(|p| p.items.last_mut()) {
-                Some(item) => item.lists.push(l),
-                None => out.push(Block::List(l)),
-            }
-        }
-    }
-    fn close_all(stack: &mut Vec<List>, out: &mut Vec<Block>) {
-        while !stack.is_empty() {
-            close_one(stack, out);
-        }
-    }
-    let open = |indent: usize, ordered: bool, start: u32, text: &str| List {
-        ordered,
-        start,
-        indent,
-        items: vec![Item {
-            text: text.to_string(),
-            lists: vec![],
-        }],
-    };
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            flush(&mut para, &mut out);
-            if let Some(inner) = stack.last() {
-                let next = lines.get(next_nonblank[i + 1]);
-                let keep = next.is_some_and(|n| marker(n).is_some() || indent(n) > inner.indent);
-                if !keep {
-                    close_all(&mut stack, &mut out);
-                }
-            }
-            continue;
-        }
-        if let Some((ind, ordered, number, item)) = marker(line) {
-            flush(&mut para, &mut out);
-            while stack.last().is_some_and(|l| l.indent > ind) {
-                close_one(&mut stack, &mut out);
-            }
-            let new_item = Item {
-                text: item.to_string(),
-                lists: vec![],
-            };
-            let depth = stack.len();
-            match stack.last_mut() {
-                Some(l) if l.indent == ind && l.ordered == ordered => l.items.push(new_item),
-                Some(l) if l.indent == ind => {
-                    close_one(&mut stack, &mut out);
-                    stack.push(open(ind, ordered, number, item));
-                }
-                // deeper than a list may nest: a sibling of the innermost list's items
-                Some(l) if depth >= MAX_DEPTH => l.items.push(new_item),
-                _ => stack.push(open(ind, ordered, number, item)),
-            }
-            continue;
-        }
-        match stack.last_mut() {
-            Some(l) if indent(line) > l.indent => {
-                if let Some(it) = l.items.last_mut() {
-                    it.text.push('\n');
-                    it.text.push_str(line.trim());
-                }
-            }
-            _ => {
-                close_all(&mut stack, &mut out);
-                para.push(line);
-            }
-        }
-    }
-    flush(&mut para, &mut out);
-    close_all(&mut stack, &mut out);
-    out
+    format!(
+        "<div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">{}</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code{class}>{}</code></pre></div>",
+        escape(&human),
+        crate::highlight::html(lang, text)
+    )
 }
 
 fn list_html(l: &List, ctx: &Ctx, out: &mut String) {
@@ -1123,20 +1140,38 @@ fn list_html(l: &List, ctx: &Ctx, out: &mut String) {
     }
     for it in &l.items {
         out.push_str("<li>");
-        out.push_str(&spans_html(&it.text, ctx));
-        for sub in &it.lists {
-            list_html(sub, ctx, out);
+        for (i, part) in it.parts.iter().enumerate() {
+            match part {
+                // the marker line's paragraph is the item's text, as it always was; a later
+                // paragraph is a paragraph of its own
+                Part::Para(t) if i == 0 => out.push_str(&spans_html(t, ctx)),
+                Part::Para(t) => {
+                    out.push_str("<p>");
+                    out.push_str(&spans_html(t, ctx));
+                    out.push_str("</p>");
+                }
+                Part::Code { lang, text } => out.push_str(&item_code_html(lang.as_deref(), text)),
+                Part::List(sub) => list_html(sub, ctx, out),
+            }
         }
         out.push_str("</li>");
     }
     out.push_str(&format!("</{tag}>"));
 }
 
-fn list_plain(l: &List, words: &dyn Fn(&str) -> String, lines: &mut Vec<String>) {
+/// The plain lines of a list: each paragraph read by `words`, and fenced code as its literal
+/// text (in the coded form, between the code marks).
+fn list_plain(l: &List, words: &dyn Fn(&str) -> String, coded: bool, lines: &mut Vec<String>) {
     for it in &l.items {
-        lines.push(words(&it.text));
-        for sub in &it.lists {
-            list_plain(sub, words, lines);
+        for part in &it.parts {
+            match part {
+                Part::Para(t) => lines.push(words(t)),
+                Part::Code { text, .. } if coded => {
+                    lines.push(format!("{CODE_OPEN}{}{CODE_CLOSE}", code_escape(text)))
+                }
+                Part::Code { text, .. } => lines.push(text.clone()),
+                Part::List(sub) => list_plain(sub, words, coded, lines),
+            }
         }
     }
 }

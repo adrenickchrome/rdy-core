@@ -610,8 +610,12 @@ fn rpl3_feature_first_use_is_atomic() {
         format::required_rdy(FEATURE_FOREIGN_COPY),
         FOREIGN_COPY_REQUIRED_RDY
     );
-    assert_eq!(registered.len(), 8);
-    for f in registered.iter().filter(|f| f.name != FEATURE_FOREIGN_COPY) {
+    assert_eq!(registered.len(), 9);
+    // figure_dark (D-MKSFF) has its own minimum too
+    for f in registered
+        .iter()
+        .filter(|f| f.name != FEATURE_FOREIGN_COPY && f.name != format::FEATURE_FIGURE_DARK)
+    {
         assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
     }

@@ -25,6 +25,10 @@ fn runs_of<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a Run>) {
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => out.extend(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(runs);
+                runs_of(blocks, out);
+            }
             PBlock::List { items, .. } => items.iter().for_each(|i| runs_of(i, out)),
             PBlock::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
@@ -44,7 +48,7 @@ fn all_blocks<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a PBlock>) {
         out.push(b);
         match b {
             PBlock::List { items, .. } => items.iter().for_each(|i| all_blocks(i, out)),
-            PBlock::Callout { blocks, .. } => all_blocks(blocks, out),
+            PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => all_blocks(blocks, out),
             _ => {}
         }
     }
@@ -61,6 +65,10 @@ fn doc_words(d: &PrintDoc) -> Vec<String> {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => {
                 out.extend(words(&text(runs)))
+            }
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(words(&text(runs)));
+                blocks.iter().for_each(|b| block(b, out));
             }
             PBlock::List { items, .. } => items.iter().flatten().for_each(|b| block(b, out)),
             PBlock::Table { head, rows, .. } => {
@@ -385,6 +393,7 @@ fn ec3_print_shows_no_block_id() {
                     }
                     PBlock::Heading { anchor, .. }
                     | PBlock::Para { anchor, .. }
+                    | PBlock::Fold { anchor, .. }
                     | PBlock::Table { anchor, .. } => seen.extend(anchor.clone()),
                     PBlock::List { .. } => {}
                 }
@@ -677,20 +686,26 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// digest is the one before.
 /// Re-taken for the as-built plan's Task 5 (FW-AB1): `assets/site.css` gained the status line's
 /// two rules (`.block-status`, `.status`); with the old stylesheet every digest is the one before.
+/// Re-taken for the README plan's Task 1 (D-3VVNC): `assets/site.css` gained the fold rules and
+/// `js/theme.js` (bundled in `assets/app.js`) the fold opener; with the old assets every digest is
+/// the one before. The fixture holds no collapsed section, so no page text moved.
+/// Re-taken for the README plan's Task 2 (D-3DAX4): `assets/site.css` gained the dark-figure
+/// rules; with the old stylesheet every digest is the one before. The fixture holds no figure with
+/// a dark image, so no page text moved.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "18db39054441a843359f76e82d8eaa432a897d2a96e164b977f27b7d1efb016e",
+            "7309996d3a087890a5bbfd2bc976a9a12dde21e020df75376122adeaa61e79dd",
         ),
         (
             "view:editing",
-            "cb5f7b5def061cfad67a65ae0dbcdadd920ecf897e040bf27739539c60820c53",
+            "2bf2e5373dac957f4143c8ce6c8d92448b719edf7800f7c5648374e207c0d50d",
         ),
         (
             "view:reserved",
-            "00101b758309f9992ba7e5b40b3894b1eef991d282e14507e9e2de0441e1f970",
+            "b066f249fd3b720819aad229baeada087c9c14f58f4fa89b207d253f908774e2",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
@@ -865,6 +880,7 @@ fn assert_links_resolve(p: &Print) {
                     | PBlock::Table { anchor, .. }
                     | PBlock::Code { anchor, .. }
                     | PBlock::Figure { anchor, .. }
+                    | PBlock::Fold { anchor, .. }
                     | PBlock::Callout { anchor, .. } => anchor.as_deref(),
                     PBlock::List { .. } => None,
                 })

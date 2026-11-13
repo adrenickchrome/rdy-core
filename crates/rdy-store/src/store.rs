@@ -1918,6 +1918,14 @@ impl Store {
         if store.ensure_redaction_index(upto)? {
             store.report.index_rebuilt = true;
         }
+        // capacity counts an older rdy left behind the log (known issue 2309) are not damage:
+        // the index was trusted above, so its acknowledged end stayed the log's floor, and it is
+        // now rebuilt from the log. The old file is zeroed as a removal's reindex zeroes it, so
+        // no text a pending removal erases (a cached drawing) survives in a kept copy
+        if store.index().counts_behind()? {
+            store.reindex_after_removal()?;
+            store.report.index_rebuilt = true;
+        }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;

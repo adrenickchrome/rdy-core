@@ -690,6 +690,22 @@ fn blocks_to_bytes(blocks: u64) -> io::Result<u64> {
 /// so this changes nothing.
 pub fn no_console_window(_cmd: &mut std::process::Command) {}
 
+/// This machine's host name (`gethostname`), or `None` when it cannot be read, does not fit
+/// 256 bytes with its end, is empty or is not UTF-8.
+#[allow(unsafe_code)]
+pub fn host_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for writes of its length; gethostname writes at most that many
+    // bytes and its result is read only up to the first NUL inside the buffer.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    let name = std::str::from_utf8(&buf[..end]).ok()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

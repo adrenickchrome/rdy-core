@@ -285,11 +285,16 @@ impl Rdy {
                     ));
                 }
             }
-            // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
-            // project; non-asset types may have a field named blob that is not an asset
-            if self.pack.is_asset(&b.block_type)
-                && let Some(v) = b.fields.get("blob")
-            {
+            // blob2: an asset block's blob, and its dark_blob (D-3DAX4), must each be in the
+            // export's blobs/ or a blob in this project, before any blob is staged; non-asset
+            // types may have a field named blob that is not an asset
+            for field in rdy_schema::ASSET_BLOB_FIELDS {
+                if !self.pack.is_asset(&b.block_type) {
+                    break;
+                }
+                let Some(v) = b.fields.get(field) else {
+                    continue;
+                };
                 let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
                     Some(h) => blob_hashes.contains(&h) || self.store.has_blob(&h)?,
                     None => false,
@@ -298,7 +303,7 @@ impl Rdy {
                     return Err(RdyError::new(
                         E_UNKNOWN_REF,
                         format!(
-                            "{} names blob {}, which is neither in the export's blobs/ nor a blob in this project",
+                            "{} names {field} {}, which is neither in the export's blobs/ nor a blob in this project",
                             b.id,
                             v.as_str().unwrap_or("(not a string)")
                         ),

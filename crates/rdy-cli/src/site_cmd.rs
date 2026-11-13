@@ -22,15 +22,18 @@ pub(crate) struct RenderArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct ExportArgs {
-    /// The file (pdf, html) or directory (md) to write. It must not exist; a directory may be empty.
+    /// The file (pdf, html, md with --layout single) or directory (md) to write. It must not exist; a directory may be empty.
     #[arg(long)]
     out: PathBuf,
     /// pdf, html or md.
     #[arg(long, value_parser = ["pdf", "html", "md"])]
     format: String,
-    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. Only with --format md.
-    #[arg(long, value_parser = ["mkdocs", "techdocs"])]
+    /// mkdocs: a docs/ folder and mkdocs.yml whose nav follows the folders. techdocs: the same for Backstage TechDocs, with the techdocs-core plugin and a generated-by header in each Markdown and YAML file. single: the one doc the selection holds as one Markdown file. Only with --format md.
+    #[arg(long, value_parser = ["mkdocs", "techdocs", "single"])]
     layout: Option<String>,
+    /// With --layout single only: a folder below the folder of --out, absent or empty, for the figures' images, such as assets. Needed when the doc has a figure.
+    #[arg(long)]
+    assets: Option<String>,
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long, default_value = "canon")]
     scope: String,
@@ -138,20 +141,41 @@ pub(crate) fn render(env: &Env, a: RenderArgs) -> Result<(Value, String), ErrorR
 
 /// `rdy export`: prints the docs, the CLI twin of `rdy_export` (D-EVRNM, O1). One line names the
 /// docs, folders, format, path and bytes, then the pages of a PDF; then the warnings as `rdy
-/// render` prints them.
+/// render` prints them. The single Markdown file's line is `exported 1 doc as md to <path> (<n>
+/// bytes)`, and each warning already starts with `warning:` (D-6PR3Y rule 6), which is printed
+/// once.
 pub(crate) fn export(env: &Env, a: ExportArgs) -> Result<(Value, String), ErrorReply> {
     let ExportArgs {
         out,
         format,
         layout,
+        assets,
         scope,
         profile,
     } = a;
-    let v = call(
-        env,
-        "export",
-        json!({"out": path_arg(&out)?, "format": format, "layout": layout, "scope": scope, "profile": profile}),
-    )?;
+    // `assets` goes out only when set, so every other export sends what it always sent
+    let mut args = json!({"out": path_arg(&out)?, "format": format, "layout": layout, "scope": scope, "profile": profile});
+    if let Some(assets) = assets {
+        args["assets"] = json!(assets);
+    }
+    let v = call(env, "export", args)?;
+    if v["layout"] == json!("single") {
+        let mut t = format!(
+            "exported {} doc as {format} to {} ({} bytes)",
+            num(&v["docs"]),
+            out.display(),
+            num(&v["bytes"]),
+        );
+        for w in v["warnings"].as_array().into_iter().flatten() {
+            let w = text(w);
+            if w.starts_with("warning: ") {
+                t.push_str(&format!("\n{w}"));
+            } else {
+                t.push_str(&format!("\nwarning: {w}"));
+            }
+        }
+        return Ok((v, t));
+    }
     let mut t = format!(
         "exported {} docs in {} folders as {format} to {} ({} bytes)",
         num(&v["docs"]),

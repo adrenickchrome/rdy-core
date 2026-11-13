@@ -984,10 +984,16 @@ pub fn release_format_move_line(version: &str) -> Result<Option<String>, String>
 
 /// What a project does first that makes its store use registered feature `name`, for the
 /// feature-move line; a feature not listed is "first uses it".
-const FEATURE_FIRST_USE: &[(&str, &str)] = &[(
-    rdy_store::format::FEATURE_FOREIGN_COPY,
-    "first writes a repo link (in any view, even before a delivery)",
-)];
+const FEATURE_FIRST_USE: &[(&str, &str)] = &[
+    (
+        rdy_store::format::FEATURE_FOREIGN_COPY,
+        "first writes a repo link (in any view, even before a delivery)",
+    ),
+    (
+        rdy_store::format::FEATURE_FIGURE_DARK,
+        "first writes a figure with a dark image (in any view)",
+    ),
+];
 
 /// The sync stream formats added after Release 1, each with the first rdy that writes it and
 /// the stream purpose it carries. A tag history stays in [`rdy_store::sync_stream::STREAM_FORMAT`].
@@ -2706,6 +2712,32 @@ mod tests {
             want.map(|l| l.replace("rdy 0.47.0", &format!("rdy {previous}")))
         );
         assert_eq!(release_move_lines("0.36.0"), Ok(vec![]));
+    }
+
+    /// rfr2 (D-MKSFF): the first release that carries `figure_dark` names its move in its Changes
+    /// group: the feature with its class and minimum rdy, store format 19 and dump format 4
+    /// unchanged, and only a store that uses the feature needing that rdy. No line moves the
+    /// store or dump format, and a release before or after the first one has no such line.
+    #[test]
+    fn rfr2_feature_move_names_figure_dark() {
+        use rdy_store::format::{FIGURE_DARK_REQUIRED_RDY, registered_features};
+        assert_eq!(FIGURE_DARK_REQUIRED_RDY, "0.51.0");
+        let features = registered_features();
+        let want = [
+            "- **Breaking for older rdy: rdy 0.51.0 adds the store feature `figure_dark` (class incompatible, minimum rdy 0.51.0); store format 19 and dump format 4 stay.** A store starts to use `figure_dark` only when its project first writes a figure with a dark image (in any view), and only a store or dump that uses it needs rdy 0.51.0: rdy 0.50.0 refuses one with `E_STORE_FORMAT` and names rdy 0.51.0. rdy 0.51.0 opens a store made by rdy 0.50.0 as it is, and loads every earlier dump.",
+        ];
+        let got = move_lines("0.51.0", ("0.50.0", 4, 19), current_store(), &features);
+        assert_eq!(got, want);
+        assert_eq!(
+            format_move_line("0.51.0", ("0.50.0", 4, 19), current_store()),
+            None,
+            "sentinel 19 and dump format 4 do not move"
+        );
+        assert!(move_lines("0.50.1", ("0.50.0", 4, 19), current_store(), &features).is_empty());
+        assert!(move_lines("0.52.0", ("0.51.0", 4, 19), current_store(), &features).is_empty());
+        // the first release that carries foreign_copy keeps its own lines only
+        let at_048 = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
+        assert!(at_048.iter().all(|l| !l.contains("figure_dark")));
     }
 
     /// rpl33: the changes part must hold every move line in its Changes group; notes that lack

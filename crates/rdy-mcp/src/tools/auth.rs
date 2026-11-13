@@ -30,6 +30,7 @@ use rdy_engine::hub_credentials::{
 use rdy_engine::hub_http::HttpHubTransport;
 use rdy_engine::hub_types::{
     HubCall, HubFailure, HubReply, HubTransport, Origin, OriginFence, RequestClaim, SystemHubClock,
+    machine_name_or_default,
 };
 use rdy_engine::*;
 use rdy_schema::Issue;
@@ -85,7 +86,7 @@ pub struct AuthParams {
     pub op: AuthOp,
     /// The install's HTTPS origin. start, state and sign_out only.
     pub install: Option<String>,
-    /// This machine's name on the hub: 1 to 64 characters. start only.
+    /// This machine's name on the hub: 1 to 64 characters; the host name by default. start only.
     pub machine_name: Option<String>,
     /// The card_hash of the card the person answered. start only, with answer.
     pub card_hash: Option<String>,
@@ -146,10 +147,11 @@ enum Rule {
 /// Checks which fields `p` gives for its op, in the order install, machine_name, card_hash,
 /// answer, evidence, question, session_ref, and builds the request. `relayed_by` is the command
 /// line's relay flag (`None` over MCP, where the session is the relay); it counts as a relay
-/// field of start. start takes install and machine_name; with any of card_hash, answer or a
-/// relay field it is the answer to the card, which needs card_hash and answer, and question or
-/// session_ref needs evidence. state and sign_out take install only; installs takes nothing.
-/// Who may relay is the service's relay check, not this one.
+/// field of start. start takes install and may take machine_name, whose default is the host
+/// name (`machine_name_or_default`, D-VRH3Z); with any of card_hash, answer or a relay field it
+/// is the answer to the card, which needs card_hash and answer, and question or session_ref
+/// needs evidence. state and sign_out take install only; installs takes nothing. Who may relay
+/// is the service's relay check, not this one.
 pub fn auth_request(p: AuthParams, relayed_by: Option<String>) -> Result<AuthRequest, RdyError> {
     let op = p.op;
     let answered = p.card_hash.is_some()
@@ -170,7 +172,7 @@ pub fn auth_request(p: AuthParams, relayed_by: Option<String>) -> Result<AuthReq
     let quoted = p.question.is_some() || p.session_ref.is_some();
     let fields = [
         ("install", p.install.is_some(), install_rule),
-        ("machine_name", p.machine_name.is_some(), start(true)),
+        ("machine_name", p.machine_name.is_some(), start(false)),
         ("card_hash", p.card_hash.is_some(), start(answered)),
         ("answer", p.answer.is_some(), start(answered)),
         ("evidence", p.evidence.is_some(), start(quoted)),
@@ -203,7 +205,7 @@ pub fn auth_request(p: AuthParams, relayed_by: Option<String>) -> Result<AuthReq
             };
             AuthRequest::Start {
                 install: install()?,
-                machine_name: p.machine_name.unwrap_or_default(),
+                machine_name: machine_name_or_default(p.machine_name)?,
                 confirmation,
             }
         }

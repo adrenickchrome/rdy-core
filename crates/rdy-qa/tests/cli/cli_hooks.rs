@@ -228,27 +228,30 @@ impl Hooked {
         index: Option<&Path>,
     ) -> Value {
         let file = self.tmp.path().join("MSG ü 'x'");
-        std::fs::write(&file, message).unwrap();
         let env: Vec<(&str, &Path)> = index.map(|i| ("GIT_INDEX_FILE", i)).into_iter().collect();
-        let v = self.ok_json(
-            cwd,
-            direct,
-            &env,
-            &[
-                "hook",
-                "run-code",
-                "--repo",
-                repo,
-                "--message-file",
-                file.to_str().unwrap(),
-            ],
-        );
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            message,
-            "the message stays"
-        );
-        v
+        retry_on_deadline("run_code", || {
+            // each attempt starts from the same message file
+            std::fs::write(&file, message).unwrap();
+            let v = self.ok_json(
+                cwd,
+                direct,
+                &env,
+                &[
+                    "hook",
+                    "run-code",
+                    "--repo",
+                    repo,
+                    "--message-file",
+                    file.to_str().unwrap(),
+                ],
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                message,
+                "the message stays"
+            );
+            v
+        })
     }
 
     /// Starts the project's daemon, so a hook run's deadline never covers a daemon start.
@@ -307,6 +310,30 @@ fn warnings(v: &Value) -> Vec<(String, Vec<String>)> {
             (w["code"].as_str().unwrap().to_string(), paths)
         })
         .collect()
+}
+
+/// Runs `attempt` up to 3 times and returns the first result that is not a deadline miss.
+///
+/// The product gives every hook run a fixed 2 s deadline (`HOOK_DEADLINE` in
+/// `rdy-engine/src/hooks.rs`) and, past it, its designed fail-open answer: `checked` false with
+/// one `W_HOOK_UNAVAILABLE` warning whose reason is `deadline`. These tests run the real binary
+/// and Git, so a loaded host can pass the deadline (known issue 2240). This retry covers load
+/// only: it fires on exactly that answer and no other, so every other result, including an
+/// unavailable check for another reason, reaches the caller's assertions unchanged.
+fn retry_on_deadline(helper: &str, mut attempt: impl FnMut() -> Value) -> Value {
+    let mut n = 1;
+    loop {
+        let v = attempt();
+        let missed = v["checked"] == false
+            && v["warnings"].as_array().is_some_and(|w| {
+                w.len() == 1 && w[0]["code"] == "W_HOOK_UNAVAILABLE" && w[0]["reason"] == "deadline"
+            });
+        if !missed || n == 3 {
+            return v;
+        }
+        n += 1;
+        eprintln!("{helper}: hook run passed the 2 s deadline under load; attempt {n} of 3");
+    }
 }
 
 /// A clean code check.
@@ -731,19 +758,21 @@ fn m4a3_cli_and_direct_mode_share_hook_results() {
         json!({"paths": [root.join(".rdy.yaml").to_str().unwrap(), root.join("notes.md").to_str().unwrap()]}),
     );
     let check = |direct: bool, kind: &str, file: &Path| {
-        h.ok_json(
-            &app,
-            direct,
-            &[],
-            &[
-                "hook",
-                "check",
-                "--kind",
-                kind,
-                "--input",
-                file.to_str().unwrap(),
-            ],
-        )
+        retry_on_deadline("check", || {
+            h.ok_json(
+                &app,
+                direct,
+                &[],
+                &[
+                    "hook",
+                    "check",
+                    "--kind",
+                    kind,
+                    "--input",
+                    file.to_str().unwrap(),
+                ],
+            )
+        })
     };
     for (kind, file) in [("code", &warned), ("code", &cited), ("edit", &edit)] {
         let daemon = check(false, kind, file);

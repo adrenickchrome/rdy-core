@@ -381,25 +381,29 @@ pub fn tag_is_redacted(
                 if source.removed(kinds::BLOCK, block.version_hash())? {
                     return Ok(true);
                 }
-                // only an asset's `blob` field names a blob; on any other type it is plain text
+                // only an asset's `blob` and `dark_blob` fields name a blob; on any other type
+                // they are plain text
                 if !pack.is_asset(&block.block_type) {
                     continue;
                 }
-                let Some(h) = block.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) else {
-                    continue;
-                };
-                if !blobs.insert(h) {
-                    continue;
-                }
-                if source.removed(kinds::BLOB_MANIFEST, h)? {
-                    return Ok(true);
-                }
-                let Some(m) = source.manifest(h)? else {
-                    continue;
-                };
-                for chunk in &m.chunks {
-                    if source.removed(kinds::BLOB_CHUNK, *chunk)? {
+                for field in rdy_schema::ASSET_BLOB_FIELDS {
+                    let Some(h) = block.field_str(field).and_then(|s| s.parse::<Hash>().ok())
+                    else {
+                        continue;
+                    };
+                    if !blobs.insert(h) {
+                        continue;
+                    }
+                    if source.removed(kinds::BLOB_MANIFEST, h)? {
                         return Ok(true);
+                    }
+                    let Some(m) = source.manifest(h)? else {
+                        continue;
+                    };
+                    for chunk in &m.chunks {
+                        if source.removed(kinds::BLOB_CHUNK, *chunk)? {
+                            return Ok(true);
+                        }
                     }
                 }
             }

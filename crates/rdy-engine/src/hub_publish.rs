@@ -171,18 +171,24 @@ impl Serialize for DocRows<'_> {
     }
 }
 
+/// The attachment rows: a light row keeps its four fields; a dark row adds `variant: "dark"`
+/// (D-TBDA1), so the hub's receiver keys rows by block and variant.
 struct AttachmentRows<'a>(&'a [AttachmentEntry]);
 
 impl Serialize for AttachmentRows<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut seq = s.serialize_seq(Some(self.0.len()))?;
         for a in self.0 {
-            seq.serialize_element(&serde_json::json!({
+            let mut row = serde_json::json!({
                 "block": a.block.to_string(),
                 "home_doc": a.home_doc.to_string(),
                 "blob": hex(&a.blob),
                 "available": a.available,
-            }))?;
+            });
+            if let Some(v) = a.variant {
+                row["variant"] = serde_json::json!(v.as_str());
+            }
+            seq.serialize_element(&row)?;
         }
         seq.end()
     }
@@ -603,8 +609,8 @@ impl<'a> PublishService<'a> {
             Ok(c) => c,
             Err(e) => return Err(self.fail(&mut run, e)),
         };
-        // 4. access, discovery, state
-        let first = match self.credentials().access(&install, &claim) {
+        // 4. access (a due pending sign-in is checked once first, D-VRH3Z), discovery, state
+        let first = match self.credentials().access_on_use(&install, &claim) {
             Ok(g) => g,
             Err(e) => return Err(self.fail(&mut run, e)),
         };

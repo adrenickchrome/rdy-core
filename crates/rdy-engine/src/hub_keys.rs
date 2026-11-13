@@ -360,11 +360,11 @@ impl<'a> KeyService<'a> {
         t.fail(e)
     }
 
-    /// Current access to the target's install, with `claim` bound to its account. The
-    /// credential lock is released when it returns.
+    /// Current access to the target's install, with `claim` bound to its account; a due pending
+    /// sign-in is checked once first (D-VRH3Z). The credential lock is released when it returns.
     fn access(&self, t: &Target, claim: &RequestClaim) -> Result<AccessGrant, RdyError> {
         self.credentials()
-            .access(&t.install, claim)
+            .access_on_use(&t.install, claim)
             .map_err(|e| t.fail(e))
     }
 

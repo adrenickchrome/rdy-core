@@ -126,6 +126,14 @@ const LANDING_DEPTHS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("land
 /// gets its row, its waiting landings get theirs (and their own waiting landings, in turn), and
 /// leave this table.
 const LANDING_WAITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_waits");
+/// The `meta` key that holds the `indexed_upto` at which the capacity counts ([`HOLDER_COUNTS`],
+/// [`LANDING_DEPTHS`], [`LANDING_WAITS`]) were last kept, written in the same commit as
+/// `indexed_upto`. Only a writer that keeps the counts writes it; an older rdy moves
+/// `indexed_upto` alone. So an index whose two positions differ (or that has no `counts_upto`)
+/// has counts behind its log ([`Index::counts_behind`]), and the store's open rebuilds it from
+/// the log (known issue 2309). That is not damage: the index opens, and its `indexed_upto` stays
+/// the log's floor until the rebuilt index replaces it.
+const COUNTS_UPTO_KEY: &str = "counts_upto";
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -1591,6 +1599,8 @@ impl Index {
                 }
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
+            // the counts above are kept to `upto` in this same commit
+            meta.insert(COUNTS_UPTO_KEY, &enc(&upto)[..]).map_err(db)?;
         }
         w.commit().map_err(db)?;
         Ok(())
@@ -2844,6 +2854,19 @@ impl Index {
             n += 1;
         }
         Ok(n)
+    }
+
+    /// Whether the capacity counts are behind the log ([`COUNTS_UPTO_KEY`]): `counts_upto` is
+    /// missing or differs from `indexed_upto`, as an older rdy that wrote to the store leaves
+    /// them (known issue 2309). The store's open then rebuilds the index from the log; the index
+    /// is not damaged, so its `indexed_upto` is still the log's floor.
+    pub fn counts_behind(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(META).map_err(db)?;
+        let at = |key: &str| -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+        };
+        Ok(at("indexed_upto")? != at(COUNTS_UPTO_KEY)?)
     }
 
     /// The acknowledged end of the log, or None if this index has never applied a write.

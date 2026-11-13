@@ -6,6 +6,7 @@
 # fires; a release published with GITHUB_TOKEN would not trigger this workflow. This workflow never uses the
 # publisher App: the web dispatch has its own App. A failed notification is retried by re-running this run for
 # that release id, never by publishing again.
+# A docs bundle prerelease (tag docs-v<V>) is skipped by the job condition; every other tag must be v<semver> or the run fails.
 # No checkout, build, signing, upload or release change. The website verifies the release itself.
 name: Notify website of published core release
 on:
@@ -17,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   notify:
-    if: github.repository_id == '1403751388' && github.event.release.draft == false && vars.RDY_WEB_DISPATCH_ENABLED == 'true'
+    if: github.repository_id == '1403751388' && github.event.release.draft == false && vars.RDY_WEB_DISPATCH_ENABLED == 'true' && !startsWith(github.event.release.tag_name, 'docs-')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
