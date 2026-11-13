@@ -6,16 +6,14 @@
 /// mapping. With glibc's moving threshold it came from the heap: the freed 4 MiB block had
 /// raised the threshold to 4 MiB.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[allow(unsafe_code)]
 #[test]
 fn a_freed_large_buffer_leaves_later_ones_mapped() {
     assert!(rdy_daemon::sys::fix_malloc_threshold());
     drop(std::hint::black_box(vec![1u8; 4 << 20]));
-    // SAFETY: mallinfo2 only reads the allocator's counters
-    let before = unsafe { libc::mallinfo2() }.hblkhd;
+    let mapped = || rdy_daemon::sys::malloc_mapped_bytes().expect("glibc counters");
+    let before = mapped();
     let held = std::hint::black_box(vec![1u8; 3 << 19]);
-    // SAFETY: as above
-    let during = unsafe { libc::mallinfo2() }.hblkhd;
+    let during = mapped();
     assert!(
         during >= before + held.len(),
         "the 1.5 MiB buffer is not mapped on its own: {before} -> {during} mapped bytes"
@@ -28,4 +26,5 @@ fn a_freed_large_buffer_leaves_later_ones_mapped() {
 #[test]
 fn the_threshold_is_left_alone_off_glibc() {
     assert!(!rdy_daemon::sys::fix_malloc_threshold());
+    assert_eq!(rdy_daemon::sys::malloc_mapped_bytes(), None);
 }

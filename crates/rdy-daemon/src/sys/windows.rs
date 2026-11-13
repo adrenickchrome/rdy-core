@@ -55,3 +55,14 @@ pub fn launcher_is_executable(meta: &std::fs::Metadata) -> bool {
     let _ = meta;
     true
 }
+
+/// The allocator's large-block threshold: nothing to fix here (the Linux glibc step, TASK-2307).
+/// Returns false: no setting was applied.
+pub fn fix_malloc_threshold() -> bool {
+    false
+}
+
+/// The bytes the allocator holds in blocks with their own mapping: not read here.
+pub fn malloc_mapped_bytes() -> Option<usize> {
+    None
+}

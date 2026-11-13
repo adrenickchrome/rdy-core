@@ -53,8 +53,8 @@
 //!   quoted as data ([`code_launcher`]), and the launcher's executable bit
 //!   (`make_launcher_executable`, `launcher_is_executable`; Windows has none: Git for Windows runs
 //!   an extensionless `commit-msg` through its own shell).
-//! - the allocator's large-block threshold on Linux with glibc ([`fix_malloc_threshold`]); a
-//!   call that does nothing elsewhere.
+//! - the allocator's large-block threshold on Linux with glibc (`fix_malloc_threshold`) and its
+//!   mapped-bytes counter (`malloc_mapped_bytes`); both do nothing elsewhere.
 
 pub mod records;
 mod site_socket;
@@ -70,29 +70,8 @@ pub use unix::*;
 pub use windows::*;
 
 /// The size from which glibc's malloc gives each block its own mapping, on Linux with glibc
-/// ([`fix_malloc_threshold`]): 1 MiB, the store's blob chunk.
+/// (`fix_malloc_threshold`): 1 MiB, the store's blob chunk.
 pub const MALLOC_MMAP_THRESHOLD: usize = 1024 * 1024;
-
-/// Fixes glibc's large-block threshold at [`MALLOC_MMAP_THRESHOLD`] for this process, at daemon
-/// start (TASK-2307). glibc moves the threshold up to the size of each mapped block that is freed,
-/// up to 32 MiB. After the first site build frees its figures, later figure buffers of a few MiB
-/// came from the heap arenas, which keep freed memory and fragment, so the daemon grew after each
-/// landing and the unused pages went to swap. A fixed threshold also stops the moving one: each
-/// block of 1 MiB or more gets its own mapping and goes back to the system when freed. Nothing on
-/// other platforms. Returns whether the setting was applied.
-#[allow(unsafe_code)]
-pub fn fix_malloc_threshold() -> bool {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        let threshold = libc::c_int::try_from(MALLOC_MMAP_THRESHOLD).unwrap_or(libc::c_int::MAX);
-        // SAFETY: mallopt only sets an allocator parameter; it may run at any time, on any thread
-        unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, threshold) == 1 }
-    }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        false
-    }
-}
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("rdy_daemon::sys has no implementation for this platform (FW-XP1 D-1RXEA)");
