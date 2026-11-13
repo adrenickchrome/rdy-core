@@ -576,7 +576,9 @@ impl Reader<'_> {
                     }
                 }
             }
-            "img" => {
+            // a remote image is inline text in its line wherever it stands (also alone in a list
+            // item); any other image is a figure
+            "img" if !has_class(tag, "remote-image") => {
                 flush(out, pending);
                 out.push(PBlock::Figure {
                     anchor: id_of(tag),

@@ -192,7 +192,11 @@ fn rfr2_remote_images_are_alt_text_except_in_markdown() {
         "logo.png",
         "open.png",
     ] {
-        let line = md.lines().find(|l| l.contains(url)).unwrap();
+        // the block's text line, not the anchor line the print writes before it
+        let line = md
+            .lines()
+            .find(|l| l.contains(url) && !l.starts_with("<a id="))
+            .unwrap();
         assert!(line.starts_with("Literal \\!\\["), "{url}: {line}");
     }
 }
@@ -231,7 +235,10 @@ fn rfr2_remote_image_limits_reuse_the_inline_parser_bounds() {
     assert!(!seen.contains("<img"), "{seen}");
     assert!(!seen.contains("deep.png"), "{seen}");
     assert!(seen.contains("Deep"), "{seen}");
-    assert!(seen.matches("<ul").count() <= 6, "{seen}");
+    // the lists open to the parser's six levels, and the image's alt text stands in the sixth
+    let from = seen.find("<ul><li>level 0").expect("the list");
+    let to = from + seen[from..].find("Deep").expect("the alt text");
+    assert_eq!(seen[from..to].matches("<ul>").count(), 6, "{seen}");
 }
 
 /// A project with a paired figure and a light-only one, both on the top-level page `figs`.
