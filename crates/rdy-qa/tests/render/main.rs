@@ -36,6 +36,7 @@ mod render_print_export;
 mod render_print_html;
 mod render_print_md;
 mod render_print_pdf;
+mod render_print_single_md;
 mod render_profile_menu;
 mod render_publication_implicit;
 mod render_publication_outside_doc;

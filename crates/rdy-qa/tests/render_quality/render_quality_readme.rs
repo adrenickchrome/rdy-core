@@ -286,3 +286,177 @@ fn rfr2_image_attributes_and_copy_payloads_do_not_leak() {
         "{guide}"
     );
 }
+
+/// rfr3 (D-ESHXM, D-6PR3Y): the single Markdown file of a profile holds nothing outside its
+/// selection: no text, image, picture attribute, link or asset of a block it leaves out, under an
+/// org profile and a public one alike.
+#[test]
+fn rfr3_single_exposes_no_filtered_canary() {
+    use crate::render_quality::{external, srcset_urls};
+    use rdy_qa::site::attrs;
+    use rdy_render::print::{self, ExportLayout, ExportOptions, Format};
+    let (_dir, mut r) = tiny();
+    let shown = [
+        r.store_mut()
+            .put_blob(&picture("single shown light"))
+            .unwrap(),
+        r.store_mut()
+            .put_blob(&picture("single shown dark"))
+            .unwrap(),
+    ];
+    let hidden_bytes = [
+        picture("single hidden light canary"),
+        picture("single hidden dark canary"),
+    ];
+    let hidden = [
+        r.store_mut().put_blob(&hidden_bytes[0]).unwrap(),
+        r.store_mut().put_blob(&hidden_bytes[1]).unwrap(),
+    ];
+    let fig = |parent: &str, h: &[rdy_model::Hash; 2], alt: &str| {
+        json!({"op": "create", "type": "figure", "parent": parent, "fields": {
+            "blob": h[0].to_string(), "media_type": "image/png",
+            "dark_blob": h[1].to_string(), "dark_media_type": "image/png", "alt": alt}})
+    };
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "guide", "title": "Guide page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$g", "body": "A badge ![Selected badge](https://img.example.com/selected.svg) and [other](other.html)."},
+            fig("$g", &shown, "Selected figure"),
+            {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "othercanary", "title": "Other canary page", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$op", "parent": "$o", "body": "Hidden ![Canary alt q8](https://canary.example.com/hidden.svg) words CANARYTEXT."},
+            fig("$o", &hidden, "Hidden canary alt"),
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}
+        ]),
+    )
+    .unwrap();
+    // the selected doc refs the hidden one, so the public profile needs no blocked ref: the ref
+    // goes in only for the org profile's run
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "publication_profile", "parent": w.created["$admin"],
+                "fields": {"key": "readers", "title": "Readers", "audience": "org", "select": [w.created["$g"]]}},
+            {"op": "create", "type": "publication_profile", "parent": w.created["$admin"],
+                "fields": {"key": "world", "title": "World", "audience": "public", "select": [w.created["$g"]]}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let canaries: Vec<Vec<u8>> = vec![
+        b"Canary alt q8".to_vec(),
+        b"canary.example.com".to_vec(),
+        b"Hidden canary alt".to_vec(),
+        b"CANARYTEXT".to_vec(),
+        b"othercanary".to_vec(),
+        b"Other canary page".to_vec(),
+        b"Admin page".to_vec(),
+        hidden_bytes[0].clone(),
+        hidden_bytes[1].clone(),
+        hidden[0].to_string().into_bytes(),
+        hidden[1].to_string().into_bytes(),
+        w.created["$o"].clone().into_bytes(),
+        w.created["$op"].clone().into_bytes(),
+    ];
+    let check = |r: &rdy_engine::Rdy, profile: &str| {
+        let out = tempfile::tempdir().unwrap();
+        let file = out.path().join("README.md");
+        let s = print::export_profile_with(
+            &r.read(),
+            "canon",
+            profile,
+            &file,
+            Format::Md,
+            &ExportOptions {
+                layout: Some(ExportLayout::Single),
+                assets: Some("assets"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{profile}: {e}"));
+        assert_eq!(s.assets, 2, "{profile}: the selected light and dark images");
+        let mut files = std::collections::BTreeMap::new();
+        for path in files_under(out.path()) {
+            let rel = path
+                .strip_prefix(out.path())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.insert(rel, std::fs::read(&path).unwrap());
+        }
+        for canary in &canaries {
+            assert_eq!(
+                carries(&files, canary),
+                Vec::<String>::new(),
+                "{profile}: {}",
+                String::from_utf8_lossy(canary)
+            );
+        }
+        for w in &s.warnings {
+            for canary in &canaries {
+                assert!(
+                    !w.as_bytes()
+                        .windows(canary.len())
+                        .any(|x| x == canary.as_slice()),
+                    "{profile}: a warning names {}",
+                    String::from_utf8_lossy(canary)
+                );
+            }
+        }
+        let text = String::from_utf8(files["README.md"].clone()).unwrap();
+        // the picture names the selected images by their own files, never another origin
+        let srcset = attrs(&text, "srcset");
+        assert_eq!(srcset.len(), 1, "{profile}: {text}");
+        assert!(srcset_urls(srcset[0]).iter().all(|u| !external(u)));
+        for src in attrs(&text, "src") {
+            assert!(src.starts_with("assets/"), "{profile}: {src}");
+        }
+        assert_eq!(attrs(&text, "alt"), vec!["Selected figure"], "{profile}");
+        // a link to a page outside the file is its words
+        assert!(text.contains(" and other."), "{profile}: {text}");
+        // the remote badge of the selected doc stays a link
+        assert!(text.contains("![Selected badge](https://img.example.com/selected.svg)"));
+    };
+    check(&r, "readers");
+    check(&r, "world");
+    // the org profile with a ref to the hidden doc: its words only, and the warning names ids
+    write(
+        &mut r,
+        "more",
+        json!([{"op": "create", "type": "prose", "parent": w.created["$g"], "body": format!("See {{{{{}}}}}.", w.created["$op"])}]),
+    )
+    .unwrap();
+    land(&mut r, "more").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("README.md");
+    let s = print::export_profile_with(
+        &r.read(),
+        "canon",
+        "readers",
+        &file,
+        Format::Md,
+        &ExportOptions {
+            layout: Some(ExportLayout::Single),
+            assets: Some("assets"),
+        },
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("See unavailable reference."), "{text}");
+    for canary in &canaries[..7] {
+        assert!(
+            !text
+                .as_bytes()
+                .windows(canary.len())
+                .any(|x| x == canary.as_slice()),
+            "{}",
+            String::from_utf8_lossy(canary)
+        );
+    }
+    assert!(
+        s.warnings.iter().any(|w| w.starts_with("warning: guide: ")),
+        "{:?}",
+        s.warnings
+    );
+}

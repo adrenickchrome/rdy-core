@@ -366,8 +366,8 @@ struct Reader<'a> {
     page: &'a str,
     /// The site file of each figure read, in the order of the figures.
     figures: RefCell<Vec<String>>,
-    /// The single Markdown file's reading (D-ESHXM rule 4): no caption, label or pill, a term
-    /// as its text, and each reference's id read from its mark.
+    /// The single Markdown file's reading (D-ESHXM rule 4): no caption, label or pill, and each
+    /// reference's id read from its mark.
     single: bool,
 }
 
@@ -758,9 +758,10 @@ impl Reader<'_> {
 
     /// A list of terms: each term in bold, then its text in the same paragraph.
     fn terms(&self, children: &[Node], ctx: &Ctx, out: &mut Vec<PBlock>) {
-        // a term is its text in the single Markdown file (D-ESHXM rule 9)
+        // the single Markdown file writes a term's name as the tree does, with no anchor or
+        // link (D-ESHXM rule 9)
         let bold = Style {
-            bold: !self.single,
+            bold: true,
             ..Style::default()
         };
         let mut term: Option<(Option<String>, Vec<Run>)> = None;

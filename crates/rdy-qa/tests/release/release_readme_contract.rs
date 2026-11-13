@@ -15,6 +15,12 @@
 //! publication comparison's attachment rows with their `variant` (seen through a probe project
 //! that now changes figures). The derived identities follow the pack again.
 //!
+//! Task 3 adds the single Markdown layout (D-ESHXM, D-6PR3Y, D-H1FRY): the `assets` parameter
+//! and the `single` layout of `rdy_export` and `rdy export`, the layout's files and result in
+//! the Markdown exports with each layout's file of a D-7M4TR list-part doc, the texts of its
+//! refusals and warning, and the export probes that replace the export's rows among the commands
+//! and tools that are not probed.
+//!
 //! Every changed member of the current fixture is in exactly one task's list or in
 //! `DERIVED_CHANGES`, which follows the standard pack's current digest; each task's test checks
 //! the whole closed list and the content of its own members.
@@ -174,12 +180,15 @@ const RFR2_CHANGES: &[&str] = &[
     "changed /mcp/result_fields/rdy_publication_check against/ok/disclosure/changed_docs",
 ];
 
+/// Task 3: its members of `readme-from-rdy-v1.json` that differ from `m4bc-v1.json`.
+const RFR3_CHANGES: &[&str] = &["TO BE CAPTURED"];
+
 /// Every changed member of the current fixture against `m4bc-v1.json` is in one task's list or
 /// in `DERIVED_CHANGES`, and none else moved: a member that is not listed is byte-identical.
 fn assert_closed(old: &Value, new: &Value) {
     let mut found = vec![];
     leaves(&keyed(old), &keyed(new), "", &mut found);
-    let mut want: Vec<String> = [RFR1_CHANGES, RFR2_CHANGES, DERIVED_CHANGES]
+    let mut want: Vec<String> = [RFR1_CHANGES, RFR2_CHANGES, RFR3_CHANGES, DERIVED_CHANGES]
         .concat()
         .iter()
         .map(|p| (*p).to_string())
@@ -445,5 +454,198 @@ fn rfr2_contract_adds_only_image_support_and_feature() {
         without_ids(&old["derived_identities"]),
         without_ids(&new["derived_identities"]),
         "the derived identities differ in their ids alone"
+    );
+}
+
+#[test]
+fn rfr3_contract_adds_only_single_export() {
+    assert_eq!(sha("m4bc-v1.json"), M4BC_V1_SHA, "m4bc-v1.json is frozen");
+    let (old, new) = (read("m4bc-v1.json"), read("readme-from-rdy-v1.json"));
+    assert_closed(&old, &new);
+
+    // the tool's parameters: the layout `single` and the optional `assets` folder
+    let schema = new
+        .pointer("/mcp/tools/rdy_export/input_schema")
+        .expect("the export tool's schema");
+    assert_eq!(
+        schema["$defs"]["ExportLayout"]["enum"],
+        serde_json::json!(["mkdocs", "techdocs", "single"])
+    );
+    assert_eq!(
+        schema["properties"]["assets"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    let required = schema["required"].as_array().expect("required");
+    assert!(
+        !required.contains(&Value::from("assets")),
+        "assets is optional"
+    );
+    let keys = |v: &Value| -> BTreeSet<String> {
+        v["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let mut was = keys(&old["mcp"]["tools"]["rdy_export"]["input_schema"]);
+    was.insert("assets".into());
+    assert_eq!(keys(schema), was, "only assets is added");
+
+    // the command line: `--assets` and the layout `single` on `rdy export`
+    let export = new["cli"]["tree"]["subcommands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .find(|c| c["name"] == "export")
+        .expect("rdy export");
+    let text = export.to_string();
+    assert!(text.contains("assets"), "{text}");
+    assert!(text.contains("single"), "{text}");
+
+    // the single file: no front matter or anchor; its image named by the SHA-256 of its bytes
+    let single = new
+        .pointer("/markdown_exports/layouts/single")
+        .expect("the single layout");
+    let readme = &single["files"]["README.md"];
+    assert_eq!(readme["front_matter_keys"], Value::Null);
+    assert_eq!(readme["anchors"], serde_json::json!([]));
+    assert!(
+        readme["headings"][0]
+            .as_str()
+            .is_some_and(|h| h.starts_with("# ")),
+        "{readme}"
+    );
+    for (name, entry) in single["files"].as_object().expect("files") {
+        if let Some(file) = name.strip_prefix("assets/") {
+            let (stem, _) = file.split_once('.').expect("an extension");
+            assert_eq!(stem.len(), 64, "{name}");
+            assert!(entry["len"].is_u64(), "{name}");
+        }
+    }
+    assert_eq!(single["result"]["layout"], "string", "{single}");
+    assert_eq!(single["result"]["pages"], "null", "{single}");
+    // each layout writes a list item's parts: the paragraph and the code stay in their item
+    for layout in ["plain", "mkdocs", "techdocs", "single"] {
+        let parts = new["markdown_exports"]["layouts"][layout]["list_parts"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{layout} has a list-part file"));
+        assert!(parts.contains("```sh\n"), "{layout}: {parts}");
+        assert!(parts.contains("rdy init ~/p\n"), "{layout}: {parts}");
+        assert!(
+            parts.contains("A paragraph of its own.\n"),
+            "{layout}: {parts}"
+        );
+        assert!(
+            parts.contains("<b> *not em* `x`\n"),
+            "{layout}: literal code: {parts}"
+        );
+    }
+    assert_eq!(
+        new["markdown_exports"]["layouts"]["single"]["list_parts"],
+        Value::from(
+            "# Parts\n\n1. **Make a project.**\n\n   ```sh\n   rdy init ~/p\n   ```\n\n2. Second\n   line.\n\n   A paragraph of its own.\n\n   ```text\n   <b> *not em* `x`\n   ```\n\n   - nested\n"
+        )
+    );
+
+    // the texts of the refusals and the warning
+    let templates = &new["errors_warnings"]["templates"];
+    for (name, text) in [
+        (
+            "SINGLE_MD_DOCS_MESSAGE",
+            "a single-file Markdown export takes one doc; the selection holds <n>",
+        ),
+        (
+            "SINGLE_MD_DOCS_FIX",
+            "choose a profile that selects one doc",
+        ),
+        (
+            "SINGLE_MD_FIGURE_MESSAGE",
+            "figure <id> needs --assets <dir>",
+        ),
+        (
+            "SINGLE_MD_FIGURE_FIX",
+            "pass --assets with a folder beside the file",
+        ),
+        (
+            "SINGLE_MD_ASSETS_PATH_MESSAGE",
+            "--assets <path> must be a folder below the folder of --out",
+        ),
+        (
+            "SINGLE_MD_ASSETS_PATH_FIX",
+            "pass a relative folder path with no .. part, such as assets",
+        ),
+        ("SINGLE_MD_ASSETS_FULL_MESSAGE", "<path> is not empty"),
+        (
+            "SINGLE_MD_ASSETS_FULL_FIX",
+            "choose an empty directory (or one that does not exist yet) so no stale files mix into the export",
+        ),
+        (
+            "SINGLE_MD_ASSETS_FILE_MESSAGE",
+            "<path> is a file: --assets names a folder",
+        ),
+        (
+            "SINGLE_MD_ASSETS_FILE_FIX",
+            "pass a folder path such as assets",
+        ),
+        (
+            "SINGLE_MD_REF_MESSAGE",
+            "warning: <doc path>: <block id>: the ref to <target id> is not in this file; it is written as its label",
+        ),
+        (
+            "EXPORT_ASSETS_MESSAGE",
+            "--assets applies to --format md --layout single only",
+        ),
+        (
+            "EXPORT_ASSETS_FIX",
+            "drop --assets, or export with --format md --layout single",
+        ),
+    ] {
+        assert_eq!(templates[name], Value::from(text), "{name}");
+    }
+
+    // the probes: the single file's result and its refusal, over the command line and the tool
+    for (at, ok, refused) in [
+        ("/cli/runtime/probes/export single", "stdout", "stderr"),
+        ("/mcp/result_fields/rdy_export single", "ok", "refused"),
+    ] {
+        let probe = new.pointer(at).unwrap_or_else(|| panic!("{at}"));
+        let result = &probe[ok];
+        for k in [
+            "out", "format", "layout", "docs", "folders", "assets", "pages", "bytes", "warnings",
+        ] {
+            assert!(result.get(k).is_some(), "{at}: {k} in {result}");
+        }
+        assert_eq!(
+            result["warnings"],
+            serde_json::json!(["string"]),
+            "{at}: populated"
+        );
+        assert!(probe[refused].is_object(), "{at}: a refusal is probed");
+    }
+    // a tree export's result has no layout
+    for at in [
+        "/cli/runtime/probes/export/stdout",
+        "/mcp/result_fields/rdy_export/ok",
+    ] {
+        let r = new.pointer(at).unwrap_or_else(|| panic!("{at}"));
+        assert!(r.get("layout").is_none(), "{at}: {r}");
+    }
+    // the export is probed now, so it leaves the lists of what is not probed
+    assert!(
+        new.pointer("/cli/runtime/not_probed_commands/export")
+            .is_none()
+    );
+    assert!(
+        new.pointer("/mcp/result_fields_not_captured/rdy_export")
+            .is_none()
+    );
+    assert!(
+        old.pointer("/cli/runtime/not_probed_commands/export")
+            .is_some()
+    );
+    assert!(
+        old.pointer("/mcp/result_fields_not_captured/rdy_export")
+            .is_some()
     );
 }

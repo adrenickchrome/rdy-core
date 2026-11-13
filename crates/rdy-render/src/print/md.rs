@@ -273,6 +273,11 @@ fn push_text(out: &mut Vec<CopyPart>, s: &str) {
 /// `&amp;`, which every reader shows as `&`: the text `&copy;` stays `&copy;` and never becomes
 /// `©`.
 fn entities(s: &str) -> String {
+    entities_as(s, "&amp;")
+}
+
+/// `s` with each `&` that starts a character reference written as `amp`.
+fn entities_as(s: &str, amp: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -281,7 +286,7 @@ fn entities(s: &str) -> String {
         let name = tail.strip_prefix('#').unwrap_or(tail);
         let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
         out.push_str(if len > 0 && name[len..].starts_with(';') {
-            "&amp;"
+            amp
         } else {
             "&"
         });
@@ -301,7 +306,7 @@ fn md_escape(s: &str, line_start: bool) -> String {
 /// Flavored Markdown would read markup that block text reads as text. An underscore inside a
 /// word, a lone `*` between spaces, a bare URL and a backslash before no punctuation stay as
 /// written; `<` is always escaped, so no raw HTML reaches the file, and `&` before a character
-/// reference is `&amp;`. At a line's start, a `#`, `>`, `-`, `+`, `*` or `N.` that would open a
+/// reference is escaped as `\&`. At a line's start, a `#`, `>`, `-`, `+`, `*` or `N.` that would open a
 /// block is escaped too.
 pub(crate) fn gfm_escape(s: &str, line_start: bool) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -352,7 +357,7 @@ pub(crate) fn gfm_escape(s: &str, line_start: bool) -> String {
         out.push(c);
         i += 1;
     }
-    entities(&out)
+    entities_as(&out, "\\&")
 }
 
 /// One line of a paragraph (or of text like it) that no reader takes for the underline of the

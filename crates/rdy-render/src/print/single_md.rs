@@ -14,7 +14,7 @@
 //! never replaces a file. A failure removes only the files and folders this call made. The
 //! module makes portable `std::fs` calls only (D-1RXEA).
 use super::{Blob, Href, PBlock, PageKind, Print, PrintDoc, PrintSummary, Run};
-use rdy_engine::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, RdyError};
+use rdy_engine::{E_ALREADY_EXISTS, E_BAD_INPUT, E_IO, RdyError, dump::place_file};
 use rdy_model::Hash;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +23,29 @@ use std::path::{Component, Path, PathBuf};
 
 /// The layout's name, as the CLI, the tools and the reply name it.
 pub const LAYOUT: &str = "single";
+
+// The texts of the layout's refusals and warning (D-ESHXM, D-6PR3Y): each `<...>` is filled in.
+
+/// The selection holds `<n>` docs, not one (D-ESHXM rule 2).
+pub const SINGLE_MD_DOCS_MESSAGE: &str =
+    "a single-file Markdown export takes one doc; the selection holds <n>";
+pub const SINGLE_MD_DOCS_FIX: &str = "choose a profile that selects one doc";
+/// A figure and no assets folder (D-ESHXM rule 10).
+pub const SINGLE_MD_FIGURE_MESSAGE: &str = "figure <id> needs --assets <dir>";
+pub const SINGLE_MD_FIGURE_FIX: &str = "pass --assets with a folder beside the file";
+/// An assets path that is not a folder below the folder of `--out` (D-6PR3Y rule 2).
+pub const SINGLE_MD_ASSETS_PATH_MESSAGE: &str =
+    "--assets <path> must be a folder below the folder of --out";
+pub const SINGLE_MD_ASSETS_PATH_FIX: &str =
+    "pass a relative folder path with no .. part, such as assets";
+/// An assets folder that holds an entry (D-6PR3Y rule 3).
+pub const SINGLE_MD_ASSETS_FULL_MESSAGE: &str = "<path> is not empty";
+pub const SINGLE_MD_ASSETS_FULL_FIX: &str = "choose an empty directory (or one that does not exist yet) so no stale files mix into the export";
+/// A file where the assets folder goes (D-6PR3Y rule 3).
+pub const SINGLE_MD_ASSETS_FILE_MESSAGE: &str = "<path> is a file: --assets names a folder";
+pub const SINGLE_MD_ASSETS_FILE_FIX: &str = "pass a folder path such as assets";
+/// A reference written as its label (D-6PR3Y rule 6): the reply's warning, with its prefix.
+pub const SINGLE_MD_REF_MESSAGE: &str = "warning: <doc path>: <block id>: the ref to <target id> is not in this file; it is written as its label";
 
 /// What the single file's build knows of each doc page beyond its print, by the page's url.
 #[derive(Debug, Default)]
@@ -167,9 +190,10 @@ pub(crate) struct Targets<'a> {
 
 /// The warning of a reference written as its label (D-6PR3Y rule 6).
 pub fn ref_warning(doc_path: &str, block: &str, target: &str) -> String {
-    format!(
-        "warning: {doc_path}: {block}: the ref to {target} is not in this file; it is written as its label"
-    )
+    SINGLE_MD_REF_MESSAGE
+        .replace("<doc path>", doc_path)
+        .replace("<block id>", block)
+        .replace("<target id>", target)
 }
 
 /// The links of a doc's `blocks` as its file writes them (D-ESHXM rule 8): a reference or an
@@ -266,8 +290,8 @@ struct Assets {
 fn invalid_assets(given: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
-        format!("--assets {given} must be a folder below the folder of --out"),
-        "pass a relative folder path with no .. part, such as assets",
+        SINGLE_MD_ASSETS_PATH_MESSAGE.replace("<path>", given),
+        SINGLE_MD_ASSETS_PATH_FIX,
     )
 }
 
@@ -279,12 +303,16 @@ fn io(path: &Path, e: std::io::Error) -> RdyError {
     )
 }
 
-/// The refusal of an `out` that is there: no export replaces a file.
+/// The command the shared file placement names in its texts.
+const EXPORT_CMD: &str = "rdy export";
+
+/// The refusal of an entry that is there: no export replaces a file, with the words of the file
+/// formats' refusal.
 fn exists(out: &Path) -> RdyError {
     RdyError::new(
         E_ALREADY_EXISTS,
         format!(
-            "{} exists; rdy export never overwrites a file",
+            "{} exists; {EXPORT_CMD} never overwrites a file",
             out.display()
         ),
         "pick another path, or remove the file",
@@ -351,8 +379,8 @@ pub(crate) fn check_paths(
             Ok(_) if i + 1 == parts.len() => {
                 return Err(RdyError::new(
                     E_BAD_INPUT,
-                    format!("{given} is a file: --assets names a folder"),
-                    "pass a folder path such as assets",
+                    SINGLE_MD_ASSETS_FILE_MESSAGE.replace("<path>", given),
+                    SINGLE_MD_ASSETS_FILE_FIX,
                 ));
             }
             Ok(_) => return Err(invalid_assets(given)),
@@ -382,8 +410,8 @@ pub(crate) fn check_paths(
     {
         return Err(RdyError::new(
             E_BAD_INPUT,
-            format!("{given} is not empty"),
-            "choose an empty directory (or one that does not exist yet) so no stale files mix into the export",
+            SINGLE_MD_ASSETS_FULL_MESSAGE.replace("<path>", given),
+            SINGLE_MD_ASSETS_FULL_FIX,
         ));
     }
     let rel = parts
@@ -443,11 +471,8 @@ pub(crate) fn the_doc(p: &Print) -> Result<&PrintDoc, RdyError> {
         [d] => Ok(d),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
-            format!(
-                "a single-file Markdown export takes one doc; the selection holds {}",
-                docs.len()
-            ),
-            "choose a profile that selects one doc",
+            SINGLE_MD_DOCS_MESSAGE.replace("<n>", &docs.len().to_string()),
+            SINGLE_MD_DOCS_FIX,
         )),
     }
 }
@@ -535,8 +560,8 @@ pub(crate) fn write(p: &Print, facts: &Facts, paths: &Paths) -> Result<PrintSumm
                 .map_or("", |(id, _)| id.as_str());
             return Err(RdyError::new(
                 E_BAD_INPUT,
-                format!("figure {id} needs --assets <dir>"),
-                "pass --assets with a folder beside the file",
+                SINGLE_MD_FIGURE_MESSAGE.replace("<id>", id),
+                SINGLE_MD_FIGURE_FIX,
             ));
         };
         let mut names = BTreeSet::new();
@@ -574,8 +599,8 @@ pub(crate) fn write(p: &Print, facts: &Facts, paths: &Paths) -> Result<PrintSumm
             }
         }
         injected(usize::MAX, &paths.out)?;
-        create(&paths.out, text.as_bytes(), &mut made)?;
-        Ok(text.len() as u64)
+        // the file is placed whole or not at all, and never replaces one
+        place_file(&paths.out, text.as_bytes(), EXPORT_CMD)
     })();
     let bytes = match placed {
         Ok(n) => n,

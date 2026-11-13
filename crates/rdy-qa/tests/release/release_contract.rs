@@ -1981,10 +1981,6 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "working copy: the working_copy row records its replies",
     ),
     (
-        "export",
-        "writes a file tree; the markdown_exports row covers it",
-    ),
-    (
         "import",
         "reads a directory of YAML; the working copy and sync rows cover the formats",
     ),
@@ -2427,6 +2423,95 @@ fn cli_markdown_probes(seen: &mut Seen, env: &[(String, String)]) {
     );
 }
 
+/// rfr3 (D-ESHXM, D-6PR3Y): a project whose one-doc profile `onep` exports as one Markdown file
+/// with an image and warnings: doc `Guide` holds a figure and refs into its collapsed section,
+/// and doc `Other` makes the full source hold two docs.
+fn write_export_project(dir: &Path) {
+    use rdy_qa::fixtures::{land, write};
+    let mut r = rdy_engine::Rdy::open(dir).expect("open the export project");
+    let blob = r
+        .store_mut()
+        .put_blob(b"\x89PNG\r\n\x1a\nexport probe image")
+        .expect("a blob");
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$fold", "parent": "$g", "fields": {"title": "Folded", "collapsed": true}},
+            {"op": "create", "type": "prose", "id": "$hid", "parent": "$fold", "body": "Folded words."},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Use"}},
+            {"op": "create", "type": "prose", "parent": "$s", "body": "See {{$hid|the fold}} and {{$s}}.\n\n1. Step\n\n   ```sh\n   rdy init\n   ```"},
+            {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "A picture"}},
+            {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$o", "body": "Other words."}
+        ]),
+    )
+    .expect("write the export project");
+    land(&mut r, "w1").expect("land the export project");
+    write(
+        &mut r,
+        "w2",
+        json!([{"op": "create", "type": "publication_profile", "parent": w.created["$o"],
+            "fields": {"key": "onep", "title": "One", "audience": "org", "select": [w.created["$g"]]}}]),
+    )
+    .expect("write the profile");
+    land(&mut r, "w2").expect("land the profile");
+    r.close().expect("close the export project");
+}
+
+/// rfr3: `rdy export --layout single`: its result (an image and warnings) and a refusal (the full
+/// source holds two docs), noted under one label; and a tree export's result.
+fn cli_export_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let (dir, project) = project();
+    drop(project);
+    write_export_project(dir.path());
+    let out = tempfile::tempdir().expect("an output folder");
+    let at = |n: &str| out.path().join(n).to_string_lossy().into_owned();
+    let (one, two, tree) = (at("one.md"), at("two.md"), at("tree"));
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export single",
+        &[
+            "export",
+            "--out",
+            &one,
+            "--format",
+            "md",
+            "--layout",
+            "single",
+            "--profile",
+            "onep",
+            "--assets",
+            "img",
+        ],
+    );
+    assert!(
+        v["assets"] == json!(1) && v["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "the single file's result is populated: {v}"
+    );
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export single",
+        &[
+            "export", "--out", &two, "--format", "md", "--layout", "single",
+        ],
+    );
+    assert_eq!(v["code"], "E_BAD_INPUT", "{v}");
+    let v = cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "export",
+        &["export", "--out", &tree, "--format", "md"],
+    );
+    assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
+}
+
 fn cli_hook_probes(seen: &mut Seen) {
     let h = HookWorld::new();
     let root = h.root.clone();
@@ -2767,6 +2852,7 @@ fn cli_runtime() -> Value {
     cli_links_probes(&mut seen, &env);
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
+    cli_export_probes(&mut seen, &env);
     check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
@@ -3033,10 +3119,6 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "rdy_dump",
         "writes a file; the dump_load row covers the bytes",
-    ),
-    (
-        "rdy_export",
-        "writes a file tree; the markdown_exports row covers it",
     ),
     ("rdy_key_bind", "changes the signing key"),
     ("rdy_key_retire", "changes the signing key"),
@@ -4298,6 +4380,49 @@ fn mcp_publication_probes(seen: &mut Seen) {
     }
 }
 
+/// rfr3: `rdy_export` runs in the daemon, so its probes go through the proxy of a served project
+/// (which stops its daemon at drop): the single file's result and a refusal under one label, and
+/// a tree export's result.
+fn mcp_export_probes(seen: &mut Seen) {
+    let s = rdy_qa::daemon::Served::new();
+    write_export_project(s.dir.path());
+    let out = rdy_qa::daemon::short_tempdir();
+    let at = |n: &str| out.path().join(n).to_string_lossy().into_owned();
+    let mut c = rdy_qa::mcp::McpClient::start_proxy(&s);
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:exp", "run": "exp", "role": "writer"}),
+    );
+    assert!(opened.is_ok(), "the session opens");
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export single",
+        json!({"out": at("one.md"), "format": "md", "layout": "single", "profile": "onep", "assets": "img"}),
+    ));
+    assert!(
+        v["assets"] == json!(1) && v["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "the single file's result is populated: {v}"
+    );
+    let refused = mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export single",
+        json!({"out": at("two.md"), "format": "md", "layout": "single"}),
+    );
+    assert_eq!(refused.code(), Some("E_BAD_INPUT"));
+    let v = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_export",
+        "rdy_export",
+        json!({"out": at("tree"), "format": "md"}),
+    ));
+    assert!(v["docs"].as_u64().is_some_and(|n| n > 1), "{v}");
+}
+
 /// The `rdy_links` reads over a project that holds a live link, a revoked one and a repo no link
 /// names (see [`links_project`]): each reply of the list, the show and the refs has its rows.
 fn mcp_links_probes(seen: &mut Seen) {
@@ -4457,6 +4582,7 @@ fn mcp_row() -> Value {
     mcp_publication_probes(&mut seen);
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
+    mcp_export_probes(&mut seen);
     let (d, r) = rdy_qa::fixtures::project();
     drop(r);
     let mut c = isolated_mcp(d.path());
@@ -5107,6 +5233,101 @@ fn markdown_row() -> Value {
         }
         assert!(files.contains_key("index.md") || files.contains_key("docs/index.md"));
         layouts.insert(name.into(), json!({"files": files}));
+    }
+    // rfr3 (D-ESHXM, D-6PR3Y): the single file of the one doc and its images
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("README.md");
+        let summary = rdy_render::print::export_with(
+            &r.read(),
+            &Scope::Canon,
+            &out,
+            rdy_render::print::Format::Md,
+            &rdy_render::print::ExportOptions {
+                layout: Some(rdy_render::print::ExportLayout::Single),
+                assets: Some("assets"),
+            },
+        )
+        .expect("the single file");
+        let mut files = Map::new();
+        let text = normalize(&std::fs::read_to_string(&out).expect("read"), &[dir.path()]);
+        files.insert(
+            "README.md".into(),
+            json!({
+                "front_matter_keys": null,
+                "headings": heading.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
+                "anchors": anchor.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
+                "link_targets": link.captures_iter(&text).map(|c| c[1].to_string()).collect::<Vec<_>>(),
+                "blake3": blake3_of(text.as_bytes()),
+            }),
+        );
+        let assets = dir.path().join("assets");
+        if assets.is_dir() {
+            let mut names: Vec<_> = std::fs::read_dir(&assets)
+                .expect("read dir")
+                .map(|e| e.expect("entry").path())
+                .collect();
+            names.sort();
+            for p in names {
+                let bytes = std::fs::read(&p).expect("read");
+                files.insert(
+                    format!("assets/{}", p.file_name().unwrap().to_string_lossy()),
+                    json!({"len": bytes.len(), "blake3": blake3_of(&bytes)}),
+                );
+            }
+        }
+        let mut result = serde_json::to_value(&summary).expect("a result");
+        result["out"] = json!("<out>");
+        layouts.insert(
+            "single".into(),
+            json!({"files": files, "result": shape(&result), "warnings": summary.warnings}),
+        );
+    }
+    // rfr3 (D-7M4TR): a list item's paragraph after a blank line, its fenced code and its nested
+    // list, as each layout writes the doc's file
+    {
+        use rdy_qa::fixtures::{land, write};
+        let (_d, mut r) = rdy_qa::golden::tiny();
+        write(
+            &mut r,
+            "parts",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "parts", "title": "Parts", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "parent": "$d", "body": "1. **Make a project.**\n\n   ```sh\n   rdy init ~/p\n   ```\n\n2. Second\n   line.\n\n   A paragraph of its own.\n\n   ~~~~text\n   <b> *not em* `x`\n   ~~~~\n   - nested"}
+            ]),
+        )
+        .expect("the list-part doc");
+        land(&mut r, "parts").expect("land it");
+        let p = rdy_render::print::build(&r.read(), &Scope::Canon).expect("the print builds");
+        for (name, layout) in [
+            ("plain", Layout::Plain),
+            ("mkdocs", Layout::Mkdocs),
+            ("techdocs", Layout::Techdocs),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("md");
+            write_markdown(&p, &out, layout).expect("write the tree");
+            let file = [out.join("parts.md"), out.join("docs/parts.md")]
+                .into_iter()
+                .find(|f| f.is_file())
+                .expect("the doc's file");
+            let text = normalize(&std::fs::read_to_string(file).expect("read"), &[dir.path()]);
+            layouts[name]["list_parts"] = json!(text);
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("parts.md");
+        rdy_render::print::export_with(
+            &r.read(),
+            &Scope::Canon,
+            &out,
+            rdy_render::print::Format::Md,
+            &rdy_render::print::ExportOptions {
+                layout: Some(rdy_render::print::ExportLayout::Single),
+                assets: None,
+            },
+        )
+        .expect("the single file");
+        layouts["single"]["list_parts"] = json!(std::fs::read_to_string(&out).expect("read"));
     }
     rdy_model::unseed_ids_for_tests();
     json!({

@@ -187,6 +187,10 @@ fn tree_layout(layout: Option<ExportLayout>) -> Option<Layout> {
     }
 }
 
+/// An assets folder with another format or layout (D-H1FRY).
+pub const EXPORT_ASSETS_MESSAGE: &str = "--assets applies to --format md --layout single only";
+pub const EXPORT_ASSETS_FIX: &str = "drop --assets, or export with --format md --layout single";
+
 /// A layout applies to the Markdown format only, and comes first (D-H1FRY); the assets folder
 /// applies to the single Markdown file only.
 fn check_options(format: Format, opts: &ExportOptions) -> Result<(), RdyError> {
@@ -200,8 +204,8 @@ fn check_options(format: Format, opts: &ExportOptions) -> Result<(), RdyError> {
     if opts.assets.is_some() && opts.layout != Some(ExportLayout::Single) {
         return Err(RdyError::new(
             E_BAD_INPUT,
-            "--assets applies to --format md --layout single only",
-            "drop --assets, or export with --format md --layout single",
+            EXPORT_ASSETS_MESSAGE,
+            EXPORT_ASSETS_FIX,
         ));
     }
     Ok(())
