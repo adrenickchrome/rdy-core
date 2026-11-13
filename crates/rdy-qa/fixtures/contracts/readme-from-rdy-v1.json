@@ -15693,7 +15693,6 @@
                   "id": "machine_name",
                   "long": "machine-name",
                   "num_args": "1",
-                  "required": true,
                   "value_names": [
                     "MACHINE_NAME"
                   ]

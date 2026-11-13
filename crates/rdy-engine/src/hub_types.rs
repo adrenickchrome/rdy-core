@@ -128,6 +128,10 @@ pub const BAD_MACHINE_NAME_MESSAGE: &str =
     "machine_name must contain 1 to 64 characters without edge whitespace or control characters";
 /// The fix of an `E_BAD_INPUT` machine name.
 pub const BAD_MACHINE_NAME_FIX: &str = "change machine_name";
+/// The fix of an `E_BAD_INPUT` machine name when no name was given and the host name is no
+/// machine name (D-VRH3Z).
+pub const MACHINE_NAME_HOST_FIX: &str =
+    "pass a machine name with --machine-name, or machine_name in rdy_auth start";
 /// The message of an `E_BAD_INPUT` compromise time.
 pub const BAD_TIME_MESSAGE: &str = "compromised_since is not an RFC3339 time";
 /// The fix of an `E_BAD_INPUT` compromise time.
@@ -660,6 +664,33 @@ pub fn check_machine_name(name: &str) -> Result<(), RdyError> {
     } else {
         Err(bad_machine_name())
     }
+}
+
+/// The machine name of a sign-in (D-VRH3Z): `given` as it is (the service checks it), else the
+/// host name `host` reads, cut to its first [`MAX_MACHINE_NAME_CHARS`] characters (never inside a
+/// UTF-8 sequence). No host name, or a cut one that fails [`check_machine_name`], is the machine
+/// name error with [`MACHINE_NAME_HOST_FIX`].
+pub fn machine_name_or_host(
+    given: Option<String>,
+    host: impl FnOnce() -> Option<String>,
+) -> Result<String, RdyError> {
+    if let Some(name) = given {
+        return Ok(name);
+    }
+    let name: String = host()
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_MACHINE_NAME_CHARS)
+        .collect();
+    check_machine_name(&name)
+        .map(|()| name)
+        .map_err(|e| RdyError::new(e.code, e.message, MACHINE_NAME_HOST_FIX))
+}
+
+/// [`machine_name_or_host`] with this machine's host name (`rdy_store::pio::host_name`): the one
+/// default of `rdy auth sign-in` and `rdy_auth start`.
+pub fn machine_name_or_default(given: Option<String>) -> Result<String, RdyError> {
+    machine_name_or_host(given, rdy_store::pio::host_name)
 }
 
 /// Checks a user code: exactly eight letters from [`USER_CODE_ALPHABET`]. Else

@@ -1431,3 +1431,44 @@ fn hsa1_the_device_page_is_compared_byte_for_byte() {
         assert!(!is_device_page(&install, uri), "{uri}");
     }
 }
+
+/// D-VRH3Z: with no machine name given, the host name is the default, cut to its first 64
+/// characters, never inside a UTF-8 sequence. No host name, or a cut one that fails the machine
+/// name check, is the machine name error with a fix that names `--machine-name`. A given name is
+/// passed on as it is: the service checks it, as today.
+#[test]
+fn si3_machine_name_defaults_to_the_host_name() {
+    let given =
+        |g: &str| machine_name_or_host(Some(g.to_string()), || panic!("the host name is not read"));
+    assert_eq!(given("laptop").unwrap(), "laptop");
+    assert_eq!(given(" edge").unwrap(), " edge", "the service checks it");
+    let host = |h: Option<&str>| machine_name_or_host(None, || h.map(str::to_string));
+    assert_eq!(host(Some("build-box")).unwrap(), "build-box");
+    assert_eq!(host(Some(&"h".repeat(64))).unwrap(), "h".repeat(64));
+    assert_eq!(host(Some(&"h".repeat(70))).unwrap(), "h".repeat(64));
+    let wide = host(Some(&"\u{e9}".repeat(70))).unwrap();
+    assert_eq!(wide, "\u{e9}".repeat(64));
+    let four = host(Some(&"\u{1f600}".repeat(70))).unwrap();
+    assert_eq!((four.chars().count(), four.len()), (64, 256));
+    let mixed = format!("{}\u{20ac}x", "a".repeat(63));
+    assert_eq!(
+        host(Some(&mixed)).unwrap(),
+        format!("{}\u{20ac}", "a".repeat(63))
+    );
+    let edge_at_cut = format!("{} b", "a".repeat(63));
+    for bad in [
+        None,
+        Some(""),
+        Some(" edge"),
+        Some("tab\there"),
+        Some(edge_at_cut.as_str()),
+    ] {
+        assert_err(
+            host(bad),
+            E_BAD_INPUT,
+            BAD_MACHINE_NAME_MESSAGE,
+            MACHINE_NAME_HOST_FIX,
+        );
+    }
+    assert!(MACHINE_NAME_HOST_FIX.contains("--machine-name"));
+}

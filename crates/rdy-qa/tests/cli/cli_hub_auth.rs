@@ -1828,3 +1828,135 @@ fn id3_cli_auth_refuses_a_non_unicode_actor_or_run() {
         }
     }
 }
+
+/// The default machine name by D-VRH3Z's rule, computed here: this machine's host name cut to
+/// its first 64 characters, when that passes the machine name check; else `None`.
+fn host_default() -> Option<String> {
+    let cut: String = rdy_store::pio::host_name()?.chars().take(64).collect();
+    rdy_engine::hub_types::check_machine_name(&cut)
+        .ok()
+        .map(|()| cut)
+}
+
+/// D-VRH3Z: `auth sign-in --install` without `--machine-name`, piped: the card names the host
+/// name default, and the card and hash path works end to end with that same default.
+#[test]
+fn si10_cli_sign_in_defaults_the_machine_name_to_the_host_name() {
+    let home = Home::new();
+    let mut hub = Server::start();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let signin = ["auth", "sign-in", "--install", o.as_str()];
+    let (ok, v) = home.json(c, &signin);
+    let Some(machine) = host_default() else {
+        assert!(!ok, "{v}");
+        assert_eq!(err_code(&v), "E_BAD_INPUT");
+        assert!(v["fix"].as_str().unwrap().contains("--machine-name"), "{v}");
+        assert_eq!(hub.finish(), 0);
+        return;
+    };
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "confirmation_required");
+    assert_eq!(v["card"], card(&o, &machine));
+    let hash = card_hash(&o, &machine);
+    assert_eq!(v["card_hash"], hash);
+    // the text form, piped: today's card path, no question
+    let (ok, out, _) = home.text(c, &[], &signin);
+    assert!(ok);
+    assert_eq!(
+        out,
+        format!(
+            "{}card hash: {hash}\nanswer with --answer and --card-hash\n",
+            card(&o, &machine)
+        )
+    );
+    // the answer with the same default starts the sign-in, and state finishes it
+    queue_start(&mut hub);
+    let mut answer = signin.to_vec();
+    answer.extend(["--card-hash", &hash, "--answer", "confirm"]);
+    let (ok, v) = home.json(c, &answer);
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "pending");
+    let saved = home.read_creds();
+    let Some(Credential::Pending(p)) = saved.get(&Origin::parse(&o).unwrap()) else {
+        panic!("a pending sign-in");
+    };
+    assert_eq!(p.machine_name, machine);
+    home.make_due(&o);
+    queue_complete(&mut hub);
+    let (ok, v) = home.json(c, &["auth", "state", "--install", &o]);
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "signed_in");
+    assert_eq!(v["human_actor"], "human:test-person");
+    assert_eq!(hub.finish(), 0);
+}
+
+/// D-VRH3Z check on use: after a piped start, a hub call other than `auth state` (the
+/// credential consumer's token door) on a pending sign-in that is not due fails as today with
+/// no request; once due, after the person approved, it checks once and goes on.
+#[test]
+fn si12_cli_hub_call_checks_a_due_pending_sign_in_once() {
+    let home = Home::new();
+    let mut hub = Server::start();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let signin = [
+        "auth",
+        "sign-in",
+        "--install",
+        &o,
+        "--machine-name",
+        MACHINE,
+    ];
+    let hash = card_hash(&o, MACHINE);
+    queue_start(&mut hub);
+    let mut answer = signin.to_vec();
+    answer.extend(["--card-hash", &hash, "--answer", "confirm"]);
+    let (ok, v) = home.json(c, &answer);
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "pending");
+    let started = [route("GET", META), route("POST", "/auth/device")];
+    assert_eq!(routes(&hub.requests()), started);
+
+    // not due: as today, and the hub saw no check
+    home.make_not_due(&o);
+    let token = ["auth", "token", "--install", o.as_str()];
+    let (ok, v) = home.json(c, &token);
+    assert!(!ok, "{v}");
+    assert_eq!(err_code(&v), "E_UPSTREAM_AUTH");
+    assert_eq!(
+        routes(&hub.requests()),
+        started,
+        "no check before it is due"
+    );
+    assert_eq!(
+        home.read_creds()
+            .get(&Origin::parse(&o).unwrap())
+            .map(Credential::state),
+        Some("pending")
+    );
+
+    // the person approved at the hub; once due, the call checks once and goes on
+    home.make_due(&o);
+    queue_complete(&mut hub);
+    let (ok, v) = home.json(c, &token);
+    assert!(ok, "{v}");
+    assert_eq!(v["access_token"], ACCESS);
+    assert_eq!(v["human_actor"], "human:test-person");
+    let mut checked = started.to_vec();
+    checked.extend([
+        route("GET", META),
+        route("POST", "/auth/token"),
+        route("GET", "/api/v1/me"),
+    ]);
+    assert_eq!(routes(&hub.requests()), checked);
+    // signed in: the next call needs no check
+    let (ok, v) = home.json(c, &token);
+    assert!(ok, "{v}");
+    assert_eq!(routes(&hub.requests()), checked);
+    assert_eq!(hub.finish(), 0);
+}
