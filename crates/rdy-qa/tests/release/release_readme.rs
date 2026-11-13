@@ -191,11 +191,19 @@ fn snapshot(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
             let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
-            if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+            let kind = std::fs::symlink_metadata(&p).unwrap().file_type();
+            if kind.is_symlink() {
+                // a link is its target's path, never followed
+                let target = std::fs::read_link(&p).unwrap();
+                out.insert(rel, Some(format!("-> {}", target.display()).into_bytes()));
+            } else if kind.is_dir() {
                 out.insert(format!("{rel}/"), None);
                 walk(base, &p, out);
-            } else {
+            } else if kind.is_file() {
                 out.insert(rel, Some(std::fs::read(&p).unwrap()));
+            } else {
+                // a FIFO or another special file is never opened
+                out.insert(rel, Some(format!("{kind:?}").into_bytes()));
             }
         }
     }
@@ -1204,4 +1212,141 @@ fn rfr4_readme_write_is_deterministic() {
         )
     );
     assert_eq!(snapshot(dir.path()), before, "no temporary file is left");
+}
+
+// --- fix round 1: every HTML attribute form, links and non-regular inputs ------------------------
+
+/// Every HTML spelling of an image attribute is checked: unquoted values, blanks around `=`,
+/// any case, single quotes, and each `srcset` candidate. A bad target refuses in both modes and
+/// changes no file; a good or remote one in any spelling passes.
+#[test]
+fn rfr4_readme_checks_every_html_image_attribute_form() {
+    let source = image_source();
+    let files = image_files();
+    let image_msg = "release readme: a local image reference is invalid";
+    let l = files[1].0.clone();
+    let d = files[2].0.clone();
+    let img = format!("<img alt=\"Paired\" src=\"assets/readme/{l}\">");
+    let src =
+        format!("<source media=\"(prefers-color-scheme: dark)\" srcset=\"assets/readme/{d}\">");
+    assert!(source.contains(&img) && source.contains(&src));
+    for bad in [
+        "<img src=../private.png>",
+        "<img src = \"../private.png\">",
+        "<img src =../private.png alt=x>",
+        "<IMG SRC=\"../x.png\">",
+        "<img Src='../x.png'>",
+        "<img alt=\"a\"\nsrc=\"../x.png\">",
+        "<img src=/abs.png/>",
+    ] {
+        let text = source.replacen(
+            &img,
+            &format!("{bad}\n<img alt=\"Paired\" src=\"assets/readme/{l}\">"),
+            1,
+        );
+        let dir = RootSpec::of(&text).with_files(files.clone()).build();
+        refuses_root(dir.path(), V, 1, image_msg);
+    }
+    for bad in [
+        "<source srcset = \"../private.png 2x\">".to_string(),
+        "<source srcset=../private.png>".to_string(),
+        "<SOURCE SRCSET='../x.png 1x'>".to_string(),
+        format!("<source srcset=\"assets/readme/{d} 1x, ../x.png 2x\">"),
+        format!(
+            "<source srcset = 'assets/readme/{d} 1x,https://example.com/a.png 2x, /abs.png 3x'>"
+        ),
+    ] {
+        let text = source.replacen(&src, &format!("{bad}\n{src}"), 1);
+        let dir = RootSpec::of(&text).with_files(files.clone()).build();
+        refuses_root(dir.path(), V, 1, image_msg);
+    }
+    // good local targets and remote ones, in every spelling, pass
+    let good = source.replacen(
+        &img,
+        &format!(
+            "<IMG ALT=x SRC = assets/readme/{l}>\n<img src='https://example.com/a.png'>\n<img SRC=https://example.com/b.png>\n<source SrcSet = \"assets/readme/{d} 1x, https://example.com/c.png 2x\">"
+        ),
+        1,
+    );
+    let dir = RootSpec::of(&good).with_files(files.clone()).build();
+    writes(dir.path());
+    assert_eq!(
+        run_on(dir.path(), V, true),
+        (Some(0), String::new(), String::new())
+    );
+}
+
+/// Links and non-regular files: a link anywhere below the root, and a FIFO or folder in place
+/// of a file, refuse at once in both modes, and nothing is read through them.
+#[cfg(unix)]
+#[test]
+fn rfr4_readme_refuses_links_and_nonregular_inputs() {
+    use std::os::unix::fs::symlink;
+    let file_msg = "release readme: file operation failed";
+    let assets_msg = "release readme: assets/readme does not match the source";
+    let source = image_source();
+    let spec = RootSpec::of(&source).with_files(image_files());
+    let fifo = |p: &Path| {
+        let made = Command::new("mkfifo").arg(p).status().expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", p.display());
+    };
+    // a copy of a whole valid root outside, for the links to point at
+    let outside = spec.build();
+    let out = outside.path();
+    let relink = |root: &Path, rel: &str, target: &Path| {
+        let p = root.join(rel);
+        if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+            std::fs::remove_dir_all(&p).unwrap();
+        } else {
+            std::fs::remove_file(&p).unwrap();
+        }
+        symlink(target, &p).unwrap();
+    };
+    for (rel, msg) in [
+        ("release/readme.md", file_msg),
+        ("release/readme.sha256", file_msg),
+        ("release", file_msg),
+        ("Cargo.toml", file_msg),
+        ("assets/readme", assets_msg),
+        ("assets", assets_msg),
+    ] {
+        let dir = spec.build();
+        relink(dir.path(), rel, &out.join(rel));
+        refuses_root(dir.path(), V, 1, msg);
+    }
+    // a linked image entry
+    let dir = spec.build();
+    let name = image_files()[0].0.clone();
+    relink(
+        dir.path(),
+        &format!("assets/readme/{name}"),
+        &out.join(format!("assets/readme/{name}")),
+    );
+    refuses_root(dir.path(), V, 1, assets_msg);
+    // FIFOs in place of the source, the sidecar and an image: refused, never waited on
+    for (rel, msg) in [
+        ("release/readme.md", file_msg),
+        ("release/readme.sha256", file_msg),
+        (&*format!("assets/readme/{name}"), assets_msg),
+    ] {
+        let dir = spec.build();
+        std::fs::remove_file(dir.path().join(rel)).unwrap();
+        fifo(&dir.path().join(rel));
+        refuses_root(dir.path(), V, 1, msg);
+    }
+    // a folder in place of the source
+    let dir = spec.build();
+    std::fs::remove_file(dir.path().join("release/readme.md")).unwrap();
+    std::fs::create_dir(dir.path().join("release/readme.md")).unwrap();
+    refuses_root(dir.path(), V, 1, file_msg);
+    // check mode: a FIFO README is a failure, never a wait
+    let dir = spec.build();
+    std::fs::remove_file(dir.path().join("README.md")).unwrap();
+    fifo(&dir.path().join("README.md"));
+    let before = snapshot(dir.path());
+    assert_eq!(
+        run_on(dir.path(), V, true),
+        (Some(1), String::new(), format!("{file_msg}\n"))
+    );
+    assert_eq!(snapshot(dir.path()), before);
 }

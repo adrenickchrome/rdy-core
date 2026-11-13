@@ -192,9 +192,9 @@ pub fn run_with(root: &Path, version: &str, mode: Mode, limits: &Limits) -> Resu
     }
     let keys = release_keys(root)?;
     let parts = generated_parts(&keys, version)?;
-    let source = read_bounded(&root.join(SOURCE_FILE), limits.text).map_err(|e| match e {
+    let source = read_bounded(root, SOURCE_FILE, limits.text).map_err(|e| match e {
         ReadError::TooLarge => ReadmeFailure::SizeLimit,
-        ReadError::Io => ReadmeFailure::FileOperation,
+        ReadError::Missing | ReadError::Io => ReadmeFailure::FileOperation,
     })?;
     let sidecar = read_sidecar(root)?;
     if sha256_hex(&source) != sidecar {
@@ -452,41 +452,105 @@ fn without_code_spans(line: &str) -> String {
     out
 }
 
-/// The values of the HTML attribute `attr` (as `name=`) in `line`, double or single quoted and
-/// after a blank.
-fn attribute_values<'a>(line: &'a str, attr: &str, out: &mut Vec<&'a str>) {
-    let mut from = 0;
-    while let Some(k) = line[from..].find(attr) {
-        let at = from + k;
-        from = at + attr.len();
-        if at == 0 || !line.as_bytes()[at - 1].is_ascii_whitespace() {
+/// Pushes each image target of the `src` and `srcset` attributes in the HTML tags of `text`:
+/// names in any case, blanks (line ends too) around `=`, and double-quoted, single-quoted or
+/// unquoted values. Every `srcset` candidate is one target; an empty one is an empty target.
+fn tag_targets(text: &str, out: &mut Vec<String>) {
+    let b = text.as_bytes();
+    let blank = |c: u8| c.is_ascii_whitespace();
+    let mut i = 0;
+    while let Some(k) = text[i..].find('<') {
+        let mut j = i + k + 1;
+        i = j;
+        if j >= b.len() || !b[j].is_ascii_alphabetic() {
             continue;
         }
-        let rest = &line[from..];
-        let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
-        };
-        let value = &rest[1..];
-        let end = value.find(q).unwrap_or(value.len());
-        out.push(&value[..end]);
-        from += 1 + end;
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'-') {
+            j += 1;
+        }
+        loop {
+            while j < b.len() && blank(b[j]) {
+                j += 1;
+            }
+            if j >= b.len() || b[j] == b'>' {
+                break;
+            }
+            if b[j] == b'/' || b[j] == b'"' || b[j] == b'\'' || b[j] == b'=' {
+                j += 1;
+                continue;
+            }
+            let name_at = j;
+            while j < b.len() && !blank(b[j]) && !b"=>/\"'".contains(&b[j]) {
+                j += 1;
+            }
+            let name = &text[name_at..j];
+            let mut k = j;
+            while k < b.len() && blank(b[k]) {
+                k += 1;
+            }
+            if k >= b.len() || b[k] != b'=' {
+                // an attribute with no value
+                continue;
+            }
+            k += 1;
+            while k < b.len() && blank(b[k]) {
+                k += 1;
+            }
+            let value = if k < b.len() && (b[k] == b'"' || b[k] == b'\'') {
+                let q = b[k] as char;
+                let from = k + 1;
+                let end = text[from..].find(q).map_or(b.len(), |e| from + e);
+                j = (end + 1).min(b.len());
+                &text[from..end]
+            } else {
+                let from = k;
+                while k < b.len() && !blank(b[k]) && b[k] != b'>' {
+                    k += 1;
+                }
+                j = k;
+                // `<img src=x/>`: the closing slash is not part of the value
+                let v = &text[from..k];
+                if k < b.len() && b[k] == b'>' {
+                    v.strip_suffix('/').unwrap_or(v)
+                } else {
+                    v
+                }
+            };
+            if name.eq_ignore_ascii_case("src") {
+                out.push(value.to_string());
+            } else if name.eq_ignore_ascii_case("srcset") {
+                for candidate in value.split(',') {
+                    out.push(
+                        candidate
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        i = j.max(i);
     }
 }
 
-/// Every image target in `text` outside fenced code and inline code: Markdown images, `src`
-/// values and each `srcset` candidate (an empty `srcset` is one empty target).
+/// Every image target in `text` outside fenced code and inline code: Markdown images, and the
+/// `src` and `srcset` targets of HTML tags, which may span lines.
 fn image_targets(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut fence: Option<Fence> = None;
+    let mut prose = String::new();
     for line in text.split_terminator('\n') {
         if let Some(f) = &fence {
             if fence_closes(line, f) {
                 fence = None;
             }
+            prose.push('\n');
             continue;
         }
         if let Some(f) = fence_open(line) {
             fence = Some(f);
+            prose.push('\n');
             continue;
         }
         let line = without_code_spans(line);
@@ -506,22 +570,10 @@ fn image_targets(text: &str) -> Vec<String> {
             out.push(target.to_string());
             rest = after;
         }
-        let mut values = Vec::new();
-        attribute_values(&line, "src=", &mut values);
-        out.extend(values.drain(..).map(str::to_string));
-        attribute_values(&line, "srcset=", &mut values);
-        for value in values {
-            for candidate in value.split(',') {
-                out.push(
-                    candidate
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-            }
-        }
+        prose.push_str(&line);
+        prose.push('\n');
     }
+    tag_targets(&prose, &mut out);
     out
 }
 
@@ -551,12 +603,21 @@ fn parse_asset_name(name: &str) -> Option<&str> {
 fn check_assets(root: &Path, text: &str, limits: &Limits) -> Result<()> {
     let dir = root.join(ASSETS_DIR);
     let mut files: Vec<(String, String, u64)> = Vec::new();
-    let missing = match fs::symlink_metadata(&dir) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => true,
-        Err(_) => return Err(ReadmeFailure::FileOperation),
-        Ok(m) if !m.is_dir() => return Err(ReadmeFailure::Assets),
-        Ok(_) => false,
-    };
+    // each folder on the assets path is a real folder, never a link
+    let mut missing = false;
+    let mut at = root.to_path_buf();
+    for part in ASSETS_DIR.split('/') {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                missing = true;
+                break;
+            }
+            Err(_) => return Err(ReadmeFailure::FileOperation),
+            Ok(m) if !m.file_type().is_dir() => return Err(ReadmeFailure::Assets),
+            Ok(_) => {}
+        }
+    }
     if !missing {
         let mut hashes = BTreeSet::new();
         let mut total = 0u64;
@@ -619,7 +680,10 @@ fn check_assets(root: &Path, text: &str, limits: &Limits) -> Result<()> {
 
 /// The SHA-256 of the file `path` of `size` bytes, read in bounded chunks.
 fn stream_sha256(path: &Path, size: u64) -> Result<String> {
-    let file = File::open(path).map_err(|_| ReadmeFailure::FileOperation)?;
+    let (file, len) = open_regular(path).map_err(|_| ReadmeFailure::Assets)?;
+    if len != size {
+        return Err(ReadmeFailure::FileOperation);
+    }
     let mut reader = file.take(size + 1);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 65_536];
@@ -646,22 +710,56 @@ fn stream_sha256(path: &Path, size: u64) -> Result<String> {
 enum ReadError {
     /// The file is over its bound.
     TooLarge,
-    /// Any other failure, or no regular file.
+    /// The file, or a folder above it below the root, is not there.
+    Missing,
+    /// A link or a non-regular entry on the path, or any other failure.
     Io,
 }
 
-/// The bytes of the regular file `path`, at most `max` of them; the size is checked before
-/// allocation.
-fn read_bounded(path: &Path, max: u64) -> std::result::Result<Vec<u8>, ReadError> {
-    let file = File::open(path).map_err(|_| ReadError::Io)?;
+/// Checks the path `rel` below `root` without following anything: each folder on it is a real
+/// folder and the last entry a regular file, never a link. `root` itself is the caller's.
+fn plain_path(root: &Path, rel: &str) -> std::result::Result<(), ReadError> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut at = root.to_path_buf();
+    for (n, part) in parts.iter().enumerate() {
+        at.push(part);
+        let meta = match fs::symlink_metadata(&at) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ReadError::Missing),
+            Err(_) => return Err(ReadError::Io),
+        };
+        let kind = meta.file_type();
+        let last = n + 1 == parts.len();
+        if kind.is_symlink() || (last && !kind.is_file()) || (!last && !kind.is_dir()) {
+            return Err(ReadError::Io);
+        }
+    }
+    Ok(())
+}
+
+/// Opens the regular file `path` for reading, never through a link at its last entry and never
+/// waiting on a FIFO, and checks the opened handle is a regular file.
+fn open_regular(path: &Path) -> std::result::Result<(File, u64), ReadError> {
+    let file = crate::platform::open_input(path).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => ReadError::Missing,
+        _ => ReadError::Io,
+    })?;
     let meta = file.metadata().map_err(|_| ReadError::Io)?;
     if !meta.is_file() {
         return Err(ReadError::Io);
     }
-    if meta.len() > max {
+    Ok((file, meta.len()))
+}
+
+/// The bytes of the regular file `rel` below `root`, at most `max` of them: no link and no
+/// non-regular entry on the path, and the size checked on the opened handle before allocation.
+fn read_bounded(root: &Path, rel: &str, max: u64) -> std::result::Result<Vec<u8>, ReadError> {
+    plain_path(root, rel)?;
+    let (file, len) = open_regular(&root.join(rel))?;
+    if len > max {
         return Err(ReadError::TooLarge);
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    let mut bytes = Vec::with_capacity(len as usize);
     file.take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ReadError::Io)?;
@@ -673,7 +771,7 @@ fn read_bounded(path: &Path, max: u64) -> std::result::Result<Vec<u8>, ReadError
 
 /// The version of the workspace manifest at `root`: `workspace.package.version`.
 fn workspace_version(root: &Path) -> Result<String> {
-    let bytes = read_bounded(&root.join(WORKSPACE_FILE), MANIFEST_MAX)
+    let bytes = read_bounded(root, WORKSPACE_FILE, MANIFEST_MAX)
         .map_err(|_| ReadmeFailure::FileOperation)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| ReadmeFailure::Version)?;
     let table: toml::Table = toml::from_str(text).map_err(|_| ReadmeFailure::Version)?;
@@ -697,9 +795,9 @@ fn release_keys(root: &Path) -> Result<ReleaseKeys> {
 
 /// The sidecar's digest: exactly 64 lowercase hex digits and one LF.
 fn read_sidecar(root: &Path) -> Result<String> {
-    let bytes = read_bounded(&root.join(SIDECAR_FILE), 65).map_err(|e| match e {
+    let bytes = read_bounded(root, SIDECAR_FILE, 65).map_err(|e| match e {
         ReadError::TooLarge => ReadmeFailure::Sidecar,
-        ReadError::Io => ReadmeFailure::FileOperation,
+        ReadError::Missing | ReadError::Io => ReadmeFailure::FileOperation,
     })?;
     match bytes.split_last() {
         Some((b'\n', digest))
@@ -746,14 +844,12 @@ fn write_readme(root: &Path, text: &str) -> Result<()> {
     }
 }
 
-/// Compares `README.md` with `text`; a missing README, or one over the bound, differs.
+/// Compares `README.md` with `text`; a missing README, or one over the bound, differs. A link
+/// or a non-regular README is a failure.
 fn compare_readme(root: &Path, text: &str, max: u64) -> Result<()> {
-    match read_bounded(&root.join(README_FILE), max) {
+    match read_bounded(root, README_FILE, max) {
         Ok(bytes) if bytes == text.as_bytes() => Ok(()),
-        Ok(_) | Err(ReadError::TooLarge) => Err(ReadmeFailure::Mismatch),
-        Err(ReadError::Io) => match fs::symlink_metadata(root.join(README_FILE)) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ReadmeFailure::Mismatch),
-            _ => Err(ReadmeFailure::FileOperation),
-        },
+        Ok(_) | Err(ReadError::TooLarge) | Err(ReadError::Missing) => Err(ReadmeFailure::Mismatch),
+        Err(ReadError::Io) => Err(ReadmeFailure::FileOperation),
     }
 }
