@@ -800,6 +800,10 @@ pub(crate) fn map_links(blocks: &mut [PBlock], to: &dyn Fn(&Href) -> Option<Href
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => fix(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                fix(runs);
+                map_links(blocks, to);
+            }
             PBlock::List { items, .. } => {
                 for item in items {
                     map_links(item, to);
@@ -826,7 +830,7 @@ pub(crate) fn anchors(blocks: &[PBlock], out: &mut BTreeSet<String>) {
             | PBlock::Table { anchor, .. }
             | PBlock::Code { anchor, .. }
             | PBlock::Figure { anchor, .. } => anchor,
-            PBlock::Callout { anchor, blocks, .. } => {
+            PBlock::Callout { anchor, blocks, .. } | PBlock::Fold { anchor, blocks, .. } => {
                 anchors(blocks, out);
                 anchor
             }
@@ -848,6 +852,7 @@ pub(crate) fn set_anchor(blocks: &mut [PBlock], anchor: &str) -> bool {
             | PBlock::Table { anchor, .. }
             | PBlock::Code { anchor, .. }
             | PBlock::Figure { anchor, .. }
+            | PBlock::Fold { anchor, .. }
             | PBlock::Callout { anchor, .. } => anchor,
             PBlock::List { items, .. } => {
                 if items.iter_mut().any(|i| set_anchor(i, anchor)) {

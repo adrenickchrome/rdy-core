@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/m4bc-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/readme-from-rdy-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -98,11 +98,11 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
-/// `mcp-http-v1.json` and `m4a-v1.json`, all frozen) with the additions since. A capture writes
-/// this file, never a baseline. It starts as a byte copy of `m4a-v1.json`, whose bytes
-/// `m4a5_contract_changes_only_hook_surfaces` pins; a later contract change is a successor fixture.
+/// `mcp-http-v1.json`, `m4a-v1.json` and `m4bc-v1.json`, all frozen) with the additions since. A
+/// capture writes this file, never a baseline. It starts as a byte copy of `m4bc-v1.json`, whose
+/// bytes `rfr1_contract_adds_only_collapsed` pins; a later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/m4bc-v1.json")
+    qa_root().join("fixtures/contracts/readme-from-rdy-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -4854,6 +4854,42 @@ fn packs_row() -> Value {
         json!({"issues": issues, "reads": read})
     };
     let text = |s: &str| Some(rdy_model::FieldValue::Str(s.to_string()));
+    // rfr1 (D-3VVNC): the section field `collapsed`: optional, a boolean, and the refusal of
+    // another kind
+    let collapsed_probe = |value: Option<rdy_model::FieldValue>| -> Value {
+        let field = |k: &str, v: &str| (k.to_string(), rdy_model::FieldValue::Str(v.to_string()));
+        let doc = rdy_model::Block {
+            id: BlockId::parse("d-D0C11").expect("a doc id"),
+            block_type: "doc".to_string(),
+            parent: None,
+            order: "V".to_string(),
+            fields: [
+                field("name", "plan"),
+                field("title", "Plan"),
+                field("doc_type", "page"),
+            ]
+            .into_iter()
+            .collect(),
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+            foreign: Default::default(),
+            read_identity: None,
+        };
+        let mut section = doc.clone();
+        section.id = BlockId::parse("s-SECT1").expect("a section id");
+        section.block_type = "section".to_string();
+        section.parent = Some(doc.id);
+        section.fields = [field("title", "Goals")].into_iter().collect();
+        if let Some(v) = value {
+            section.fields.insert("collapsed".to_string(), v);
+        }
+        let issues: Vec<Value> = rdy_schema::validate_block(&std_pack, &section, Some(&doc))
+            .into_iter()
+            .map(|i| json!([i.code, i.message, i.fix]))
+            .collect();
+        json!(issues)
+    };
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
         "manifest_keys": pack_keys,
@@ -4892,6 +4928,12 @@ fn packs_row() -> Value {
             "policy_rules_from_chat_card": policy_probe(text("card")),
             "policy_rules_from_chat_bad_value": policy_probe(text("later")),
             "policy_rules_from_chat_bad_kind": policy_probe(Some(rdy_model::FieldValue::Int(3))),
+            "section_collapsed": {
+                "absent": collapsed_probe(None),
+                "true": collapsed_probe(Some(rdy_model::FieldValue::Bool(true))),
+                "false": collapsed_probe(Some(rdy_model::FieldValue::Bool(false))),
+                "bad_kind": collapsed_probe(Some(rdy_model::FieldValue::Str("yes".to_string()))),
+            },
         },
     })
 }

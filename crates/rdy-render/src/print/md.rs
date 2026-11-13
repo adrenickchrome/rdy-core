@@ -88,6 +88,9 @@ struct Cx<'a> {
     /// A fragment ([`copy_parts`]): a link leads to the site page (`.html`), and no block writes
     /// its anchor line.
     fragment: bool,
+    /// A collapsed section's `<details>` carries `markdown="1"`, which the `md_in_html`
+    /// extension of MkDocs and TechDocs needs to read the blocks inside it as Markdown.
+    md_attr: bool,
 }
 
 /// One part of a Copy fragment ([`copy_parts`]): literal Markdown, or a link target.
@@ -349,6 +352,9 @@ pub(crate) fn url(raw: &str) -> String {
     entities(&out)
 }
 
+/// The line that ends a collapsed section.
+const FOLD_CLOSE: &str = "</details>";
+
 /// A piece of code as an inline code span: its delimiter is longer than any backtick run inside.
 fn code_span(s: &str) -> String {
     let delim = "`".repeat(longest_backticks(s) + 1);
@@ -531,6 +537,25 @@ impl Cx<'_> {
                 }
                 self.anchored(anchor, false, lines)
             }
+            PBlock::Fold {
+                anchor,
+                runs,
+                blocks,
+                ..
+            } => {
+                // the title is HTML in the summary and never a heading of its own; the blocks
+                // keep their levels
+                let mut lines = self.fold_open(runs);
+                lines.push(Md::default());
+                let inner = self.blocks(blocks);
+                if !inner.is_empty() {
+                    lines.extend(inner);
+                    lines.push(Md::default());
+                }
+                lines.push(Md::text(FOLD_CLOSE));
+                // a blank line after the anchor: an HTML block starts its own paragraph
+                self.anchored(anchor, false, lines)
+            }
             PBlock::Callout {
                 anchor,
                 label,
@@ -555,6 +580,62 @@ impl Cx<'_> {
                 self.anchored(anchor, false, lines)
             }
         }
+    }
+
+    /// A collapsed section's title as inline HTML: the text escaped, a code span as `code`, bold
+    /// and italic as `strong` and `em`, a link as `a` (its target a slot, as in any line).
+    fn title_html(&self, runs: &[Run]) -> Md {
+        let mut out = Md::default();
+        for run in runs {
+            let text = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let lead = if run.text.starts_with(char::is_whitespace) && !text.is_empty() {
+                " "
+            } else {
+                ""
+            };
+            let trail = if run.text.ends_with(char::is_whitespace) && !text.is_empty() {
+                " "
+            } else {
+                ""
+            };
+            if text.is_empty() {
+                if !run.text.is_empty() {
+                    out.push_str(" ");
+                }
+                continue;
+            }
+            let mut inner = crate::html::escape(&text);
+            for (on, tag) in [(run.code, "code"), (run.italic, "em"), (run.bold, "strong")] {
+                if on {
+                    inner = format!("<{tag}>{inner}</{tag}>");
+                }
+            }
+            out.push_str(lead);
+            match &run.link {
+                Some(href) => {
+                    out.push_str("<a href=\"");
+                    out.push_url(self.target(href).replace('"', "%22"));
+                    out.push_str(&format!("\">{inner}</a>"));
+                }
+                None => out.push_str(&inner),
+            }
+            out.push_str(trail);
+        }
+        out.map_first(|t| t.trim_start().to_string())
+            .map_last(|t| t.trim_end().to_string())
+    }
+
+    /// The lines that open a collapsed section: `<details>` and its summary.
+    fn fold_open(&self, runs: &[Run]) -> Vec<Md> {
+        let details = if self.md_attr {
+            "<details markdown=\"1\">"
+        } else {
+            "<details>"
+        };
+        let mut summary = Md::text("<summary><b>");
+        summary.append(self.title_html(runs));
+        summary.push_str("</b></summary>");
+        vec![Md::text(details), summary]
     }
 
     fn list(&self, ordered: bool, start: u32, items: &[Vec<PBlock>]) -> Vec<Md> {
@@ -646,6 +727,7 @@ pub fn copy_parts(
         from: page,
         blobs,
         fragment: true,
+        md_attr: false,
     };
     let mut out = vec![];
     for b in blocks {
@@ -666,6 +748,43 @@ pub fn copy_parts(
         push_text(&mut out, "\n");
     }
     Ok(out)
+}
+
+/// Copy's Markdown of the lines that open a collapsed section whose title is `runs`, on the site
+/// page `page`: `<details>` and the summary, the plain form (no `markdown` attribute), with the
+/// line feed that ends a block.
+pub fn fold_open_parts(runs: &[Run], page: &str) -> Vec<CopyPart> {
+    let blobs = BTreeMap::new();
+    let cx = Cx {
+        from: page,
+        blobs: &blobs,
+        fragment: true,
+        md_attr: false,
+    };
+    let mut out = vec![];
+    for (i, line) in cx.fold_open(runs).into_iter().enumerate() {
+        if i > 0 {
+            push_text(&mut out, "\n");
+        }
+        line.into_parts(&mut out);
+    }
+    push_text(&mut out, "\n");
+    out
+}
+
+/// Copy's Markdown of the line that ends a collapsed section.
+pub fn fold_close_parts() -> Vec<CopyPart> {
+    vec![CopyPart::Text(format!("{FOLD_CLOSE}\n"))]
+}
+
+/// Whether any page of the print holds a collapsed section.
+fn has_fold(blocks: &[PBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        PBlock::Fold { .. } => true,
+        PBlock::List { items, .. } => items.iter().any(|i| has_fold(i)),
+        PBlock::Callout { blocks, .. } => has_fold(blocks),
+        _ => false,
+    })
 }
 
 /// A string as YAML reads it: a JSON string (O28 (c)).
@@ -691,7 +810,7 @@ fn push_mark(out: &mut String, generated: bool) {
 }
 
 /// The file of a folder, doc or the glossary.
-fn page_file(p: &Print, d: &PrintDoc, generated: bool) -> String {
+fn page_file(p: &Print, d: &PrintDoc, generated: bool, layout: Layout) -> String {
     let mut out = String::from("---\n");
     out.push_str(&format!("title: {}\n", json(&d.title)));
     if d.kind != PageKind::Glossary {
@@ -705,6 +824,7 @@ fn page_file(p: &Print, d: &PrintDoc, generated: bool) -> String {
         from: &file,
         blobs: &p.blobs,
         fragment: false,
+        md_attr: layout != Layout::Plain,
     };
     let lines = cx.blocks(&d.blocks);
     if !lines.is_empty() {
@@ -767,6 +887,11 @@ fn mkdocs_yml(p: &Print, layout: Layout, generated: bool) -> String {
     out.push_str(&format!("site_name: {}\n", json(&p.title)));
     if layout == Layout::Techdocs {
         out.push_str("docs_dir: docs\nplugins:\n  - techdocs-core\n");
+    }
+    // a collapsed section is `<details markdown="1">`, which MkDocs reads with `md_in_html`; a
+    // tree with none needs no extension
+    if p.docs.iter().any(|d| has_fold(&d.blocks)) {
+        out.push_str("markdown_extensions:\n  - md_in_html\n");
     }
     out.push_str("nav:\n");
     out.push_str(&format!("  - {}: index.md\n", json(&p.title)));
@@ -927,7 +1052,7 @@ pub fn emit_files(
     for d in &p.docs {
         write(
             format!("{base}{}", md_path(&d.page)),
-            page_file(p, d, generated).as_bytes(),
+            page_file(p, d, generated, layout).as_bytes(),
         )?;
     }
     for blob in p.blobs.values() {

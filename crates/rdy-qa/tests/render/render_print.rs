@@ -25,6 +25,10 @@ fn runs_of<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a Run>) {
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => out.extend(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(runs);
+                runs_of(blocks, out);
+            }
             PBlock::List { items, .. } => items.iter().for_each(|i| runs_of(i, out)),
             PBlock::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
@@ -44,7 +48,7 @@ fn all_blocks<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a PBlock>) {
         out.push(b);
         match b {
             PBlock::List { items, .. } => items.iter().for_each(|i| all_blocks(i, out)),
-            PBlock::Callout { blocks, .. } => all_blocks(blocks, out),
+            PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => all_blocks(blocks, out),
             _ => {}
         }
     }
@@ -61,6 +65,10 @@ fn doc_words(d: &PrintDoc) -> Vec<String> {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => {
                 out.extend(words(&text(runs)))
+            }
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(words(&text(runs)));
+                blocks.iter().for_each(|b| block(b, out));
             }
             PBlock::List { items, .. } => items.iter().flatten().for_each(|b| block(b, out)),
             PBlock::Table { head, rows, .. } => {
@@ -385,6 +393,7 @@ fn ec3_print_shows_no_block_id() {
                     }
                     PBlock::Heading { anchor, .. }
                     | PBlock::Para { anchor, .. }
+                    | PBlock::Fold { anchor, .. }
                     | PBlock::Table { anchor, .. } => seen.extend(anchor.clone()),
                     PBlock::List { .. } => {}
                 }
@@ -865,6 +874,7 @@ fn assert_links_resolve(p: &Print) {
                     | PBlock::Table { anchor, .. }
                     | PBlock::Code { anchor, .. }
                     | PBlock::Figure { anchor, .. }
+                    | PBlock::Fold { anchor, .. }
                     | PBlock::Callout { anchor, .. } => anchor.as_deref(),
                     PBlock::List { .. } => None,
                 })

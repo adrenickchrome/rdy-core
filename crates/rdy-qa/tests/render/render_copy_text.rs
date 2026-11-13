@@ -389,7 +389,7 @@ fn script(name: &str) -> String {
 
 /// Runs `spec` (`html` chunks, `scripts` texts, `url`, `clipboard`, `exec` and the `scenario`)
 /// in node and returns what the scenario filled into `h.out`.
-fn run(spec: Value) -> Value {
+pub(crate) fn run(spec: Value) -> Value {
     let mut child = std::process::Command::new("node")
         .args(["-e", HARNESS])
         .stdin(std::process::Stdio::piped())
@@ -411,7 +411,7 @@ fn run(spec: Value) -> Value {
 }
 
 /// The page's template and toolbars, with `copy.js`, at `url`, with a working clipboard.
-fn page_spec(page: &str, url: &str, scenario: &str) -> Value {
+pub(crate) fn page_spec(page: &str, url: &str, scenario: &str) -> Value {
     let mut chunks = vec![template_of(page)];
     chunks.extend(bars_of(page));
     json!({"html": chunks, "scripts": [script("copy.js")], "url": url,
@@ -419,7 +419,7 @@ fn page_spec(page: &str, url: &str, scenario: &str) -> Value {
 }
 
 /// Clicks every Copy control of the page in order: each one's range, label and copy.
-const COPY_ALL: &str = r#"
+pub(crate) const COPY_ALL: &str = r#"
     h.out.copies = [];
     for (const b of h.buttons('copy-text')) {
       const c = await h.copy(b);
@@ -430,15 +430,15 @@ const COPY_ALL: &str = r#"
 "#;
 
 /// One copy of [`COPY_ALL`]'s output: its range, label and text.
-struct Copied {
-    range: rdy_render::copy::CopyRange,
-    label: String,
-    text: String,
+pub(crate) struct Copied {
+    pub(crate) range: rdy_render::copy::CopyRange,
+    pub(crate) label: String,
+    pub(crate) text: String,
 }
 
 /// [`COPY_ALL`]'s copies, each checked against the renderer's own reading of the payload with the
 /// same resolved URLs: the Rust and the script results are one.
-fn copies(page: &str, v: &Value) -> Vec<Copied> {
+pub(crate) fn copies(page: &str, v: &Value) -> Vec<Copied> {
     let p = payload(page);
     let resolved: BTreeMap<String, String> = serde_json::from_value(v["resolved"].clone()).unwrap();
     v["copies"]
@@ -468,7 +468,7 @@ fn copies(page: &str, v: &Value) -> Vec<Copied> {
 }
 
 /// The node tests run only where node is installed.
-fn node_or_skip(test: &str) -> bool {
+pub(crate) fn node_or_skip(test: &str) -> bool {
     if rdy_qa::skip::node_available() {
         return true;
     }

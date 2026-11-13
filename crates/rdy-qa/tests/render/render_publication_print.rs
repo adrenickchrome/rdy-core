@@ -259,6 +259,10 @@ fn runs_of<'a>(blocks: &'a [PBlock], out: &mut Vec<&'a Run>) {
     for b in blocks {
         match b {
             PBlock::Heading { runs, .. } | PBlock::Para { runs, .. } => out.extend(runs),
+            PBlock::Fold { runs, blocks, .. } => {
+                out.extend(runs);
+                runs_of(blocks, out);
+            }
             PBlock::List { items, .. } => items.iter().for_each(|i| runs_of(i, out)),
             PBlock::Table { head, rows, .. } => {
                 for cell in head.iter().chain(rows.iter().flatten()) {
@@ -290,7 +294,7 @@ fn paras(p: &Print) -> Vec<String> {
                     out.push(runs.iter().map(|r| r.text.as_str()).collect());
                 }
                 PBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
-                PBlock::Callout { blocks, .. } => walk(blocks, out),
+                PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => walk(blocks, out),
                 _ => {}
             }
         }

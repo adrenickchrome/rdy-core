@@ -640,6 +640,12 @@ fn print_words(p: &Print) -> String {
                     out.push_str(label);
                     runs(blocks, out);
                 }
+                PBlock::Fold {
+                    runs: r, blocks, ..
+                } => {
+                    r.iter().for_each(|x| out.push_str(&x.text));
+                    runs(blocks, out);
+                }
             }
             out.push('\n');
         }
@@ -662,7 +668,7 @@ fn print_figures(p: &Print) -> BTreeSet<Hash> {
                     out.insert(*h);
                 }
                 PBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
-                PBlock::Callout { blocks, .. } => walk(blocks, out),
+                PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => walk(blocks, out),
                 _ => {}
             }
         }

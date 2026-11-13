@@ -207,6 +207,17 @@ fn block(h: &mut String, p: &Print, page: &str, b: &PBlock) {
             let n = (level + 1).clamp(3, 6);
             let _ = writeln!(h, "<h{n}{}>{}</h{n}>", id_attr(page, anchor), runs(r));
         }
+        PBlock::Fold {
+            level,
+            anchor,
+            runs: r,
+            blocks: inner,
+        } => {
+            // a collapsed section is a plain open section here: its heading, then its blocks
+            let n = (level + 1).clamp(3, 6);
+            let _ = writeln!(h, "<h{n}{}>{}</h{n}>", id_attr(page, anchor), runs(r));
+            blocks(h, p, page, inner);
+        }
         PBlock::Para { anchor, runs: r } => {
             let _ = writeln!(h, "<p{}>{}</p>", id_attr(page, anchor), runs(r));
         }

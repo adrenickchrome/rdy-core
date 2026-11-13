@@ -160,6 +160,15 @@ pub struct Item {
     /// What the block's Copy control copies of the page's [`CopyPayload`]: the block, or a
     /// section's heading and every block under it; none when that is empty (no Copy control).
     pub copy: Option<CopyRange>,
+    /// The block is a section whose `collapsed` field is true: it is a `<details>` fold, and its
+    /// heading and toolbar are the fold's summary.
+    pub collapsed: bool,
+    /// A collapsed section starts open: in a review render, when it holds a changed, new or
+    /// removed block. Otherwise it starts closed.
+    pub fold_open: bool,
+    /// How many folds end just before this block: the fold of each collapsed section whose extent
+    /// the block is the first item past.
+    pub folds_closed: usize,
 }
 
 /// The toolbar of an authored page's title (a doc's or a folder's): its block's Link, Copy ref
@@ -188,6 +197,10 @@ pub struct RemovedLine {
     /// The label of its first removed block (rule 3), for the group only.
     #[serde(skip)]
     pub label: String,
+    /// The id of the block the first removed block stood under, so a collapsed section that held
+    /// it starts open.
+    #[serde(skip)]
+    pub parent: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -210,6 +223,8 @@ pub struct DocBody {
     pub lede_diff: Option<String>,
     /// The removed lines a draft shows after the last block.
     pub removed_end: Vec<RemovedLine>,
+    /// How many folds end after the last block, before the removed lines of the doc's end.
+    pub folds_closed_end: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1240,32 +1255,72 @@ fn page_copy(
     if let Some(l) = lede {
         payload.push_html(&format!("<p>{l}</p>"), page);
     }
-    // the payload's length before and after each item
-    let mut at = Vec::with_capacity(items.len() + 1);
-    for item in items.iter() {
+    // the payload's length before and after each item. A collapsed section writes its opening
+    // lines as its own block and its closing line as one after its extent. The closing lines of
+    // the folds that end before an item come between the end of the item before it (`before`)
+    // and the start of the item (`at`); `closed` records each one's fold and where it ends, so a
+    // range holds the closing lines of the folds that opened inside it and no other.
+    let n = items.len();
+    let mut at = Vec::with_capacity(n + 1);
+    let mut before = Vec::with_capacity(n + 1);
+    let mut closed: Vec<Vec<(usize, usize)>> = vec![vec![]; n + 1];
+    let mut folds: Vec<(usize, bool)> = vec![];
+    for (i, item) in items.iter().enumerate() {
+        before.push(payload.blocks.len());
+        while let Some(&(s, wrote)) = folds.last() {
+            if item.depth > items[s].depth {
+                break;
+            }
+            folds.pop();
+            if wrote {
+                payload.push_fold_close();
+                closed[i].push((s, payload.blocks.len()));
+            }
+        }
         at.push(payload.blocks.len());
-        payload.push_html(&item.html, page);
+        if item.collapsed {
+            let wrote = payload.push_fold_open(&item.html, page);
+            folds.push((i, wrote));
+        } else {
+            payload.push_html(&item.html, page);
+        }
+    }
+    before.push(payload.blocks.len());
+    while let Some((s, wrote)) = folds.pop() {
+        if wrote {
+            payload.push_fold_close();
+            closed[n].push((s, payload.blocks.len()));
+        }
     }
     at.push(payload.blocks.len());
+    // where the section at item `s` ends when item `i` (or the page's end) comes: after the
+    // closing line of the last fold that began at `s` or inside it, else where item `i - 1` ends
+    let section_end = |s: usize, i: usize| {
+        closed[i]
+            .iter()
+            .rev()
+            .find(|(fold, _)| *fold >= s)
+            .map_or(before[i], |(_, end)| *end)
+    };
     // one pass: each section waits on a stack until an item no deeper than it arrives, or the
     // page ends; its range then ends where that item's starts
     let mut open: Vec<usize> = vec![];
-    for i in 0..items.len() {
+    for i in 0..n {
         while let Some(&s) = open.last() {
             if items[i].depth > items[s].depth {
                 break;
             }
-            items[s].copy = CopyRange::of(at[s], at[i]);
+            items[s].copy = CopyRange::of(at[s], section_end(s, i));
             open.pop();
         }
         if items[i].block_type == "section" {
             open.push(i);
         } else {
-            items[i].copy = CopyRange::of(at[i], at[i + 1]);
+            items[i].copy = CopyRange::of(at[i], before[i + 1]);
         }
     }
     for s in open {
-        items[s].copy = CopyRange::of(at[s], at[items.len()]);
+        items[s].copy = CopyRange::of(at[s], section_end(s, n));
     }
     let (ref_head, ref_) = trail::ref_attrs(b, sh.site, sh.pin(), sh.m);
     let tools = TitleTools {
@@ -1351,6 +1406,7 @@ fn doc_parts(
         lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
         lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
+        folds_closed_end: 0,
     };
     let mut items = vec![];
     // the group's label of each item that carries a word, beside `items`
@@ -1465,6 +1521,11 @@ fn doc_parts(
             diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
             copy: None,
+            collapsed: b.block_type == "section"
+                && !removed
+                && b.fields.get("collapsed") == Some(&rdy_model::FieldValue::Bool(true)),
+            fold_open: false,
+            folds_closed: 0,
         });
     }
     // the removed lines: before the block they stood before, else at the doc's end
@@ -1480,6 +1541,10 @@ fn doc_parts(
                 .first()
                 .map(|b| group_label(sh, old, b))
                 .unwrap_or_default(),
+            parent: line
+                .blocks
+                .first()
+                .and_then(|b| b.parent.as_ref().map(ToString::to_string)),
         };
         let target = match &line.before {
             Some(b) if lede_block.is_some_and(|l| l.id == *b) => items.first_mut(),
@@ -1502,6 +1567,7 @@ fn doc_parts(
     for (n, line) in lines.enumerate() {
         line.anchor = format!("Removed-{}", n + 1);
     }
+    fold_extents(&mut items, &mut doc_body);
     let changes = match sh.review {
         Some(_) => page_changes(
             &doc_body,
@@ -1512,6 +1578,60 @@ fn doc_parts(
         None => vec![],
     };
     (doc_body, items, changes)
+}
+
+/// Marks where each collapsed section's fold ends and whether it starts open. A fold holds the
+/// section's item and every item after it up to the first item no deeper than the section (the
+/// page's own item depth, not the heading level, so a child that left the page leaves no gap).
+/// In a review render a fold starts open when its extent holds a changed or new item, a removed
+/// line, or a removed line whose block stood under a section of the extent.
+fn fold_extents(items: &mut [Item], body: &mut DocBody) {
+    let mut open: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = open.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            open.pop();
+            items[i].folds_closed += 1;
+        }
+        if items[i].collapsed {
+            open.push(i);
+        }
+    }
+    body.folds_closed_end = open.len();
+    // the extent of each fold: [s, end)
+    let mut ends = vec![items.len(); items.len()];
+    let mut stack: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = stack.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            ends[s] = i;
+            stack.pop();
+        }
+        if items[i].collapsed {
+            stack.push(i);
+        }
+    }
+    let parents: Vec<String> = items
+        .iter()
+        .flat_map(|i| i.removed_before.iter())
+        .chain(body.removed_end.iter())
+        .filter_map(|l| l.parent.clone())
+        .collect();
+    for s in 0..items.len() {
+        if !items[s].collapsed {
+            continue;
+        }
+        let extent = &items[s..ends[s]];
+        let changed = extent
+            .iter()
+            .any(|i| i.change.is_some() || !i.removed_before.is_empty())
+            || extent.iter().any(|i| parents.contains(&i.id));
+        items[s].fold_open = changed;
+    }
 }
 
 /// The group's label of `b` as `site` reads it, cut to [`toc::LABEL_MAX`], as escaped HTML: the

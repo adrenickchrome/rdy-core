@@ -118,7 +118,9 @@ fn warnings<V>(p: &Print, images: &BTreeMap<Hash, V>, laid: &Laid) -> Vec<String
                         figures(p, images, i, out);
                     }
                 }
-                PBlock::Callout { blocks, .. } => figures(p, images, blocks, out),
+                PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => {
+                    figures(p, images, blocks, out)
+                }
                 _ => {}
             }
         }

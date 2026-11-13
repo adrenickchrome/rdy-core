@@ -271,6 +271,16 @@ pub enum PBlock {
         label: String,
         blocks: Vec<PBlock>,
     },
+    /// A collapsed section (the section's `collapsed` field): its heading and every block under
+    /// it, as the section's extent holds them. The Markdown writers write it as `<details>`; the
+    /// PDF and the single HTML file show it as a plain open section, so the heading is read as
+    /// a [`PBlock::Heading`] of `level` followed by `blocks`.
+    Fold {
+        anchor: Option<String>,
+        level: u8,
+        runs: Vec<Run>,
+        blocks: Vec<PBlock>,
+    },
 }
 
 /// A piece of a line of text that looks one way. A line break is `\n` in its text.
@@ -482,12 +492,46 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
                     }
                     blocks.extend(lede);
                 }
+                // a collapsed section keeps its extent: the items under it, up to the next item
+                // no deeper than it (a filtered child leaves no item, so the heading text alone
+                // cannot bound it)
+                let mut open: Vec<(usize, PBlock)> = vec![];
                 for item in &ctx.items {
+                    while open.last().is_some_and(|(d, _)| item.depth <= *d) {
+                        let (_, fold) = open.pop().expect("a fold is open");
+                        fold_into(&mut open, &mut blocks, fold);
+                    }
                     let mut b = from_html(&item.html, &mut figures);
                     if !item.anchor.is_empty() {
                         ir::set_anchor(&mut b, &item.anchor);
                     }
-                    blocks.extend(b);
+                    if item.collapsed && matches!(b.first(), Some(PBlock::Heading { .. })) {
+                        let PBlock::Heading {
+                            level,
+                            anchor,
+                            runs,
+                        } = b.remove(0)
+                        else {
+                            unreachable!("the first block is a heading")
+                        };
+                        open.push((
+                            item.depth,
+                            PBlock::Fold {
+                                anchor,
+                                level,
+                                runs,
+                                blocks: b,
+                            },
+                        ));
+                        continue;
+                    }
+                    match open.last_mut() {
+                        Some((_, PBlock::Fold { blocks: inner, .. })) => inner.extend(b),
+                        _ => blocks.extend(b),
+                    }
+                }
+                while let Some((_, fold)) = open.pop() {
+                    fold_into(&mut open, &mut blocks, fold);
                 }
             }
             PageKind::Glossary => {
@@ -598,6 +642,14 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
     })
 }
 
+/// Puts a finished `fold` into the fold still open above it, else into the page's `blocks`.
+fn fold_into(open: &mut [(usize, PBlock)], blocks: &mut Vec<PBlock>, fold: PBlock) {
+    match open.last_mut() {
+        Some((_, PBlock::Fold { blocks: inner, .. })) => inner.push(fold),
+        _ => blocks.push(fold),
+    }
+}
+
 /// The blobs the figures of `blocks` show.
 fn figure_blobs(blocks: &[PBlock], out: &mut BTreeSet<Hash>) {
     for b in blocks {
@@ -606,7 +658,9 @@ fn figure_blobs(blocks: &[PBlock], out: &mut BTreeSet<Hash>) {
                 out.insert(*h);
             }
             PBlock::List { items, .. } => items.iter().for_each(|i| figure_blobs(i, out)),
-            PBlock::Callout { blocks, .. } => figure_blobs(blocks, out),
+            PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => {
+                figure_blobs(blocks, out)
+            }
             _ => {}
         }
     }

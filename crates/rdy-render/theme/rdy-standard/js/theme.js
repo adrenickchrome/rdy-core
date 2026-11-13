@@ -135,4 +135,53 @@
       if (menu) menu.focus();
     }
   });
+
+  // Collapsed sections: a section with `collapsed` is a `details.section-fold` that starts
+  // closed (a review page opens the ones that hold a change). A link, the page index, a search
+  // result, the address and the history all end at an id: the folds around that target open
+  // first, the nearest one and every one outside it. Without this script the reader opens a
+  // fold from its summary, and every word in it stays on the page.
+  function foldTarget(hash) {
+    var id = (hash || '').replace(/^#/, '');
+    if (!id) return null;
+    try {
+      id = decodeURIComponent(id);
+    } catch (e) {}
+    return document.getElementById(id);
+  }
+
+  function openFolds(el) {
+    var opened = false;
+    for (var n = el; n; n = n.parentElement) {
+      if (n.tagName === 'DETAILS' && n.classList.contains('section-fold') && !n.hasAttribute('open')) {
+        n.setAttribute('open', '');
+        opened = true;
+      }
+    }
+    return opened;
+  }
+
+  // Opens the folds of `hash`'s target; a fold that opens moves the target, so it is scrolled
+  // back into view.
+  function reveal(hash) {
+    var el = foldTarget(hash);
+    if (el && openFolds(el) && el.scrollIntoView) el.scrollIntoView();
+  }
+
+  reveal(window.location.hash);
+  window.addEventListener('hashchange', function () {
+    reveal(window.location.hash);
+  });
+  // A link to a place on this page opens its folds before the browser scrolls to it, also when
+  // the address already ends there (no hashchange).
+  document.addEventListener('click', function (event) {
+    var a = event.target && event.target.closest && event.target.closest('a');
+    var href = a && a.getAttribute('href');
+    if (!href) return;
+    var at = href.indexOf('#');
+    if (at < 0) return;
+    var here = String(window.location.href).split('#')[0];
+    var path = href.slice(0, at);
+    if (path === '' || String(a.href || '').split('#')[0] === here) reveal(href.slice(at));
+  });
 })();

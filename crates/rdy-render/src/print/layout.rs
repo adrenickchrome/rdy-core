@@ -612,6 +612,22 @@ impl Layout<'_> {
                 });
                 self.flow(x, w, &Styled::runs(runs, true, false, size), line_h);
             }
+            PBlock::Fold {
+                anchor,
+                level,
+                runs,
+                blocks,
+            } => {
+                // a collapsed section is a plain open section here: its heading, then its blocks
+                // at the gap any block follows another
+                let heading = PBlock::Heading {
+                    level: *level,
+                    anchor: anchor.clone(),
+                    runs: runs.clone(),
+                };
+                self.block(page, &heading, x, w, gap);
+                self.blocks(page, blocks, x, w, BLOCK_GAP);
+            }
             PBlock::List {
                 ordered,
                 start,
