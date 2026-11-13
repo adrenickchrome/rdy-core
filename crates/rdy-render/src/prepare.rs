@@ -419,7 +419,10 @@ impl FigureBlobs {
 
     /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` reads
     /// and keeps the bytes of each readable blob (the scope a build pages); a change summary's
-    /// other side only reads which blobs lost content, never a byte.
+    /// other side only reads which blobs lost content, never a byte. A figure's dark image
+    /// (D-3DAX4) is read as its light one is; when either lost content the figure reads as
+    /// removed and neither image is read for it (D-TBDA1 rule 6): every state is read from the
+    /// metadata first, before any byte.
     fn side(
         &mut self,
         rdy: &ReadState,
@@ -428,50 +431,64 @@ impl FigureBlobs {
         keep: bool,
     ) -> Result<Arc<Materialized>, RdyError> {
         let m = rdy.materialized(scope)?;
+        let mut figures: Vec<Vec<Hash>> = vec![];
         for b in m.iter() {
-            let Some(h) = figure_blob(b) else { continue };
-            if self.bytes.contains_key(&h) {
+            let blobs = figure_blobs(b);
+            if blobs.is_empty() {
                 continue;
             }
-            let state = match self.states.get(&h) {
-                Some(state) => *state,
-                None => {
-                    let state = reads.state(&h)?;
-                    self.states.insert(h, state);
-                    if let BlobState::Removed(request) = state {
-                        self.removed.insert(h, request);
-                    }
-                    state
+            for h in &blobs {
+                if self.bytes.contains_key(h) || self.states.contains_key(h) {
+                    continue;
                 }
-            };
-            if !keep || state != BlobState::Readable {
-                continue;
+                let state = reads.state(h)?;
+                self.states.insert(*h, state);
+                if let BlobState::Removed(request) = state {
+                    self.removed.insert(*h, request);
+                }
             }
-            // a readable blob the paged scope shows: its bytes, once
-            match reads.bytes(&h) {
-                Ok(bytes) => {
-                    self.bytes.insert(h, bytes);
+            figures.push(blobs);
+        }
+        if keep {
+            for blobs in figures {
+                // a figure that lost content shows the notice: none of its bytes is read
+                if blobs.iter().any(|h| self.removed.contains_key(h)) {
+                    continue;
                 }
-                Err(e) => match removed_by(&e) {
-                    Some(request) => {
-                        self.states.insert(h, BlobState::Removed(request));
-                        self.removed.insert(h, request);
+                for h in blobs {
+                    if self.bytes.contains_key(&h)
+                        || self.states.get(&h) != Some(&BlobState::Readable)
+                    {
+                        continue;
                     }
-                    None => return Err(e),
-                },
+                    // a readable blob the paged scope shows: its bytes, once
+                    match reads.bytes(&h) {
+                        Ok(bytes) => {
+                            self.bytes.insert(h, bytes);
+                        }
+                        Err(e) => match removed_by(&e) {
+                            Some(request) => {
+                                self.states.insert(h, BlobState::Removed(request));
+                                self.removed.insert(h, request);
+                            }
+                            None => return Err(e),
+                        },
+                    }
+                }
             }
         }
         Ok(self.project(m))
     }
 
-    /// `m` with each figure whose blob lost content read as a removed block: its id, type,
-    /// parent and order, the notice, no fields, and its own recorded version (Task 3's
-    /// projection). Its alt text, caption and file name are never read again.
+    /// `m` with each figure whose blob, or dark image, lost content read as a removed block: its
+    /// id, type, parent and order, the notice, no fields, and its own recorded version (Task 3's
+    /// projection). Its alt text, caption and file names are never read again, and the other
+    /// image never stands in (D-TBDA1 rule 6).
     pub(crate) fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
         let ops: Vec<Op> = m
             .iter()
             .filter_map(|b| {
-                let request = self.removed.get(&figure_blob(b)?)?;
+                let request = figure_blobs(b).iter().find_map(|h| self.removed.get(h))?;
                 Some(Op::Update {
                     base: b.version_hash(),
                     block: BlockResidue::of(b).stub(*request),
@@ -503,13 +520,16 @@ impl BlobReads for ReadState {
     }
 }
 
-/// The blob a figure shows; none for any other block, and for a removed figure (it has no
-/// fields).
-fn figure_blob(b: &Block) -> Option<Hash> {
+/// The blobs a figure shows, light first: its `blob` and its `dark_blob` (D-3DAX4); none for any
+/// other block, and for a removed figure (it has no fields).
+fn figure_blobs(b: &Block) -> Vec<Hash> {
     if b.block_type != "figure" || b.is_redacted() {
-        return None;
+        return vec![];
     }
-    b.field_str("blob")?.parse().ok()
+    rdy_schema::ASSET_BLOB_FIELDS
+        .iter()
+        .filter_map(|f| b.field_str(f)?.parse().ok())
+        .collect()
 }
 
 /// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for

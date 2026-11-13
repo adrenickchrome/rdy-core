@@ -415,10 +415,11 @@ fn upload_figures(place: &Place, conn: &mut Conn, plan: &mut CommitPlan) -> Resu
                 "run rdy serve --stop, then commit again, with the same rdy binary",
             )
         })?;
+        // the placeholder sits in the field the upload is for: `blob`, or `dark_blob`
         let placeholder = format!("{UPLOAD_PREFIX}{n}");
         for op in &mut plan.ops {
-            if op["fields"]["blob"].as_str() == Some(placeholder.as_str()) {
-                op["fields"]["blob"] = json!(hash);
+            if op["fields"][up.field].as_str() == Some(placeholder.as_str()) {
+                op["fields"][up.field] = json!(hash);
             }
         }
         let dir = place.root.join(BLOBS_DIR);

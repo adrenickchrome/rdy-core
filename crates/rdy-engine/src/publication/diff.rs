@@ -16,7 +16,8 @@
 use super::hidden::HiddenList;
 use super::references::{Classification, ReferenceRow};
 use super::select::{
-    AttachmentEntry, DocEntry, RequestSet, Resolved, SelectionEntry, invalid_tree, name_replaced,
+    AttachmentEntry, AttachmentVariant, DocEntry, RequestSet, Resolved, SelectionEntry,
+    invalid_tree, name_replaced,
 };
 use crate::error::*;
 use crate::materialize::Materialized;
@@ -76,6 +77,9 @@ pub struct ChangedAttachment {
     pub after_blob: Hash,
     pub before_available: bool,
     pub after_available: bool,
+    /// The row's image: none for the light one, as before; a dark image's row is its own
+    /// (D-TBDA1 rule 4).
+    pub variant: Option<AttachmentVariant>,
 }
 
 /// The comparison of two resolutions of one profile. Doc, folder, outside-doc and attachment
@@ -328,11 +332,19 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         })
         .collect();
 
-    // attachments, by block id
-    let b_atts: BTreeMap<&BlockId, &AttachmentEntry> =
-        before.attachments.iter().map(|a| (&a.block, a)).collect();
-    let a_atts: BTreeMap<&BlockId, &AttachmentEntry> =
-        after.attachments.iter().map(|a| (&a.block, a)).collect();
+    // attachments, paired by block id and variant, light first (D-TBDA1): a dark image added,
+    // changed or removed is a change of its own row
+    type AttKey<'r> = (&'r BlockId, Option<AttachmentVariant>);
+    let b_atts: BTreeMap<AttKey, &AttachmentEntry> = before
+        .attachments
+        .iter()
+        .map(|a| ((&a.block, a.variant), a))
+        .collect();
+    let a_atts: BTreeMap<AttKey, &AttachmentEntry> = after
+        .attachments
+        .iter()
+        .map(|a| ((&a.block, a.variant), a))
+        .collect();
     let added_attachments = a_atts
         .iter()
         .filter(|(id, _)| !b_atts.contains_key(*id))
@@ -349,13 +361,14 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
             let b = b_atts.get(id)?;
             (a.blob != b.blob || a.home_doc != b.home_doc || a.available != b.available).then(
                 || ChangedAttachment {
-                    block: (*id).clone(),
+                    block: id.0.clone(),
                     before_home_doc: b.home_doc.clone(),
                     after_home_doc: a.home_doc.clone(),
                     before_blob: b.blob,
                     after_blob: a.blob,
                     before_available: b.available,
                     after_available: a.available,
+                    variant: id.1,
                 },
             )
         })

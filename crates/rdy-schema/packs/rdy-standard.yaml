@@ -96,6 +96,8 @@ block_types:
       blob: { kind: str, required: true }
       media_type: { kind: str, required: true }
       alt: { kind: str, required: true }
+      dark_blob: { kind: str }
+      dark_media_type: { kind: str }
   code:
     prefix: cd
     traits: [informative]

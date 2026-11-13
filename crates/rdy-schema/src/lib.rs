@@ -19,6 +19,7 @@ pub use rules::{
     RuleSeverity, compile_rules,
 };
 pub use validate::{
-    CONFIRMATION_FIELD, Issue, MAX_REFLECTS_GLOBS, REFLECTS_FIELD, Severity, has_errors,
+    ASSET_BLOB_FIELDS, ASSET_MEDIA_TYPE_FIELDS, CONFIRMATION_FIELD, DARK_BLOB_FIELD,
+    DARK_MEDIA_TYPE_FIELD, Issue, MAX_REFLECTS_GLOBS, REFLECTS_FIELD, Severity, has_errors,
     skeleton_gaps, validate_block, validate_prefix, validate_read_block,
 };

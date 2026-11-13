@@ -141,6 +141,11 @@ pub struct Item {
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
     pub html: String,
+    /// The block's HTML with each remote image as an `img` element
+    /// ([`inline::with_image_markup`]), when that differs from `html`: what the print model and
+    /// Copy read, so the Markdown outputs write the image (D-3DAX4 rule 3). Never on a page.
+    #[serde(skip)]
+    pub md_html: Option<String>,
     /// The block shows as removed content (the notice). A removed term has no `<dt>`, so its
     /// block holds its anchor.
     pub removed: bool,
@@ -211,6 +216,10 @@ pub struct DocBody {
     /// The first block of the first section as HTML (spans), when it is a prose of one paragraph
     /// and the doc has more sections; it is left out of `items`.
     pub lede: Option<String>,
+    /// The lede with each remote image as an `img` element, when that differs from `lede`
+    /// ([`Item::md_html`]). Never on a page.
+    #[serde(skip)]
+    pub lede_md: Option<String>,
     /// The anchor the lede has on the page (it keeps the one its block would have had).
     pub lede_anchor: Option<String>,
     /// The word the doc's own block carries in a draft render.
@@ -237,6 +246,10 @@ pub struct ChildRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct FolderBody {
     pub title: String,
+    /// The description with each remote image as an `img` element, when that differs from
+    /// `description_html` ([`Item::md_html`]). Never on a page.
+    #[serde(skip)]
+    pub description_md: Option<String>,
     /// The description as written.
     pub description: Option<String>,
     /// The description as HTML (spans).
@@ -696,15 +709,18 @@ impl Shared<'_> {
         }
     }
 
-    /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
-    /// redaction removed content of (a block of another side than the scope's, such as a draft's
-    /// removed line, is not projected). Its page shows [`REMOVED_HTML`] in its place.
+    /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob, or
+    /// dark image (D-TBDA1 rule 6), a redaction removed content of (a block of another side than
+    /// the scope's, such as a draft's removed line, is not projected). Its page shows
+    /// [`REMOVED_HTML`] in its place.
     fn shows_removed(&self, b: &Block) -> bool {
         b.is_redacted()
             || (b.block_type == "figure"
-                && b.field_str("blob")
-                    .and_then(|h| h.parse::<Hash>().ok())
-                    .is_some_and(|h| self.removed_blobs.contains_key(&h)))
+                && rdy_schema::ASSET_BLOB_FIELDS.iter().any(|f| {
+                    b.field_str(f)
+                        .and_then(|h| h.parse::<Hash>().ok())
+                        .is_some_and(|h| self.removed_blobs.contains_key(&h))
+                }))
     }
 
     /// The header's markup for a page at relative root `root` (RULING F4). A static page links
@@ -1105,26 +1121,29 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             let link = |id: &BlockId| sh.link(&page_url, id);
             let local = |h: &str| sh.local_href(&page_url, h);
             let description = f.field_str("description");
+            let ictx = Ctx {
+                link: &link,
+                doc_page: "",
+                unavailable: sh.unavailable,
+                local_link: sh.local_link(&local),
+            };
+            let description_html = description.map(|d| inline::spans_html(d, &ictx));
+            let description_md = description
+                .filter(|d| inline::may_hold_image(d))
+                .map(|d| inline::with_image_markup(|| inline::spans_html(d, &ictx)))
+                .filter(|md| description_html.as_ref() != Some(md));
             body.folder = Some(FolderBody {
                 title: title.clone(),
+                description_md,
                 description: description.map(String::from),
-                description_html: description.map(|d| {
-                    inline::spans_html(
-                        d,
-                        &Ctx {
-                            link: &link,
-                            doc_page: "",
-                            unavailable: sh.unavailable,
-                            local_link: sh.local_link(&local),
-                        },
-                    )
-                }),
+                description_html,
                 children,
             });
             let lede = body
                 .folder
                 .as_ref()
-                .and_then(|f| f.description_html.as_deref());
+                .and_then(|f| f.description_md.as_ref().or(f.description_html.as_ref()))
+                .map(String::as_str);
             // the print reads no Copy (its pages have no toolbar)
             if sh.draw_diagrams {
                 (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
@@ -1140,7 +1159,11 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                     doc,
                     &page_url,
                     &title,
-                    doc_body.lede.as_deref(),
+                    doc_body
+                        .lede_md
+                        .as_ref()
+                        .or(doc_body.lede.as_ref())
+                        .map(String::as_str),
                     &mut built,
                 );
             }
@@ -1282,7 +1305,7 @@ fn page_copy(
             let wrote = payload.push_fold_open(&item.html, page);
             folds.push((i, wrote));
         } else {
-            payload.push_html(&item.html, page);
+            payload.push_html(item.md_html.as_ref().unwrap_or(&item.html), page);
         }
     }
     before.push(payload.blocks.len());
@@ -1389,17 +1412,24 @@ fn doc_parts(
         .as_ref()
         .and_then(|p| m.get(p))
         .map(|f| site.label(f));
+    let lede_html = |p: &Block| {
+        let pill = html::status_pill(p, sh.status.get(&p.id)).map(|s| format!("{s} "));
+        format!(
+            "{}{}",
+            pill.unwrap_or_default(),
+            inline::spans_html(&p.body, &own)
+        )
+    };
+    let lede = lede_block.map(lede_html);
+    let lede_md = lede_block
+        .filter(|p| inline::may_hold_image(&p.body))
+        .map(|p| inline::with_image_markup(|| lede_html(p)))
+        .filter(|md| lede.as_ref() != Some(md));
     let mut doc_body = DocBody {
         title: title.to_string(),
         eyebrow,
-        lede: lede_block.map(|p| {
-            let pill = html::status_pill(p, sh.status.get(&p.id)).map(|s| format!("{s} "));
-            format!(
-                "{}{}",
-                pill.unwrap_or_default(),
-                inline::spans_html(&p.body, &own)
-            )
-        }),
+        lede,
+        lede_md,
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
         change: sh.review.and_then(|r| r.mark(&doc.id)),
         diff: edited_diff(sh, &doc.id),
@@ -1484,6 +1514,18 @@ fn doc_parts(
             _ if titled => b.field_str("name").map(|t| site.words(t)),
             _ => None,
         };
+        // the one interception: a removed block of any type is the notice, before its type's
+        // rendering reads anything of it
+        let html = if removed {
+            REMOVED_HTML.to_string()
+        } else {
+            html::block_html(b, &ctx)
+        };
+        // the print model's and Copy's source, rendered again only when a remote image may be
+        // in the block's text (a diagram's or code block's body is never text)
+        let md_html = (!removed && may_hold_image(b))
+            .then(|| inline::with_image_markup(|| html::block_html(b, &ctx)))
+            .filter(|md| *md != html);
         items.push(Item {
             id: b.id.to_string(),
             block_type: b.block_type.clone(),
@@ -1491,13 +1533,8 @@ fn doc_parts(
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
             title,
-            // the one interception: a removed block of any type is the notice, before its type's
-            // rendering reads anything of it
-            html: if removed {
-                REMOVED_HTML.to_string()
-            } else {
-                html::block_html(b, &ctx)
-            },
+            html,
+            md_html,
             removed,
             presentational,
             // a named profile that does not permit the trail shows none: no markup, no data
@@ -1689,6 +1726,23 @@ fn page_changes(
     }
     out.extend(body.removed_end.iter().map(removed));
     out
+}
+
+/// Whether `b`'s text may hold a remote image (D-3DAX4): its body or a string in its fields holds
+/// the opener `![`. A diagram's and a code block's body are source, never text.
+fn may_hold_image(b: &Block) -> bool {
+    fn in_value(v: &rdy_model::FieldValue) -> bool {
+        match v {
+            rdy_model::FieldValue::Str(s) => inline::may_hold_image(s),
+            rdy_model::FieldValue::List(items) => items.iter().any(in_value),
+            rdy_model::FieldValue::Map(m) => m
+                .iter()
+                .any(|(k, v)| inline::may_hold_image(k) || in_value(v)),
+            _ => false,
+        }
+    }
+    (!matches!(b.block_type.as_str(), "diagram" | "code") && inline::may_hold_image(&b.body))
+        || b.fields.values().any(in_value)
 }
 
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the

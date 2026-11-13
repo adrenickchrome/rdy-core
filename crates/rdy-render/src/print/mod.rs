@@ -191,6 +191,30 @@ pub struct Print {
 }
 
 impl Print {
+    /// The blobs of the light images the figures show: what the PDF and the single HTML file
+    /// hold. A dark image (D-3DAX4) is for the Markdown outputs alone.
+    pub(crate) fn light_blobs(&self) -> BTreeSet<Hash> {
+        fn walk(blocks: &[PBlock], out: &mut BTreeSet<Hash>) {
+            for b in blocks {
+                match b {
+                    PBlock::Figure { blob: Some(h), .. } => {
+                        out.insert(*h);
+                    }
+                    PBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
+                    PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => {
+                        walk(blocks, out)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        for d in &self.docs {
+            walk(&d.blocks, &mut out);
+        }
+        out
+    }
+
     /// What the Markdown and PDF version line writes after the label: ` (redacted)` for an
     /// affected chosen tag (D-3M81W), else nothing; nothing without a label (RULING F3).
     pub(crate) fn redacted_suffix(&self) -> &'static str {
@@ -260,9 +284,13 @@ pub enum PBlock {
         lang: Option<String>,
         text: String,
     },
+    /// A figure: its image's blob, and its dark image's (D-3DAX4) when the page shows one. The
+    /// PDF and the single HTML file show the light image only; the Markdown outputs write a
+    /// `<picture>` when both files are in the print.
     Figure {
         anchor: Option<String>,
         blob: Option<Hash>,
+        dark: Option<Hash>,
         alt: String,
         caption: Vec<Run>,
     },
@@ -283,7 +311,10 @@ pub enum PBlock {
     },
 }
 
-/// A piece of a line of text that looks one way. A line break is `\n` in its text.
+/// A piece of a line of text that looks one way. A line break is `\n` in its text. A remote
+/// image (D-3DAX4) is a run of its own whose `text` is the alt text and whose `image` is its
+/// `https:` URL: the PDF and the single HTML file show the alt text, inside its link when it
+/// has one, and the Markdown outputs write the image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
     pub text: String,
@@ -291,6 +322,7 @@ pub struct Run {
     pub italic: bool,
     pub code: bool,
     pub link: Option<Href>,
+    pub image: Option<String>,
 }
 
 /// Where a link leads: a page of the print and its anchor, or a place outside it.
@@ -473,18 +505,20 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         let mut blocks = vec![];
         match kind {
             PageKind::Folder => {
+                // the print model reads the text's remote images (D-3DAX4), which the page shows
+                // as their alt text
                 if let Some(d) = ctx
                     .body
                     .folder
                     .as_ref()
-                    .and_then(|f| f.description_html.as_ref())
+                    .and_then(|f| f.description_md.as_ref().or(f.description_html.as_ref()))
                 {
                     blocks.extend(from_html(&format!("<p>{d}</p>"), &mut figures));
                 }
             }
             PageKind::Doc => {
                 if let Some(d) = &ctx.body.doc
-                    && let Some(lede) = &d.lede
+                    && let Some(lede) = d.lede_md.as_ref().or(d.lede.as_ref())
                 {
                     let mut lede = from_html(&format!("<p>{lede}</p>"), &mut figures);
                     if let Some(a) = &d.lede_anchor {
@@ -501,7 +535,8 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
                         let (_, fold) = open.pop().expect("a fold is open");
                         fold_into(&mut open, &mut blocks, fold);
                     }
-                    let mut b = from_html(&item.html, &mut figures);
+                    let mut b =
+                        from_html(item.md_html.as_ref().unwrap_or(&item.html), &mut figures);
                     if !item.anchor.is_empty() {
                         ir::set_anchor(&mut b, &item.anchor);
                     }
@@ -650,12 +685,12 @@ fn fold_into(open: &mut [(usize, PBlock)], blocks: &mut Vec<PBlock>, fold: PBloc
     }
 }
 
-/// The blobs the figures of `blocks` show.
+/// The blobs the figures of `blocks` show, the dark images too.
 fn figure_blobs(blocks: &[PBlock], out: &mut BTreeSet<Hash>) {
     for b in blocks {
         match b {
-            PBlock::Figure { blob: Some(h), .. } => {
-                out.insert(*h);
+            PBlock::Figure { blob, dark, .. } => {
+                out.extend(blob.iter().chain(dark));
             }
             PBlock::List { items, .. } => items.iter().for_each(|i| figure_blobs(i, out)),
             PBlock::Callout { blocks, .. } | PBlock::Fold { blocks, .. } => {

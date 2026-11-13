@@ -14,8 +14,8 @@ use rdy_schema::publication::PROFILE_TYPE;
 
 pub use rdy_engine::RdyError;
 pub use rdy_engine::publication::{
-    AttachmentEntry, Audience, CheckStatus, DisclosureDiff, HiddenList, HiddenRow, ProfileFacts,
-    ReferenceReport, SelectionEntry, profile_facts,
+    AttachmentEntry, AttachmentVariant, Audience, CheckStatus, DisclosureDiff, HiddenList,
+    HiddenRow, ProfileFacts, ReferenceReport, SelectionEntry, profile_facts,
 };
 
 /// One publication profile as a tag holds it. `selector` is the value to pass back to

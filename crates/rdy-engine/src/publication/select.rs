@@ -193,13 +193,33 @@ pub struct DocEntry {
 }
 
 /// One selected figure's blob: its nearest selected doc, and whether the store can read the
-/// blob (`false` for a blob the store lacks or a redaction removed, with no error).
+/// blob (`false` for a blob the store lacks or a redaction removed, with no error). A figure with
+/// a dark image has two rows (D-TBDA1): the light row, whose `variant` is none, and the dark
+/// row, whose `variant` is [`AttachmentVariant::Dark`] and whose `blob` is the dark image's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachmentEntry {
     pub block: BlockId,
     pub home_doc: BlockId,
     pub blob: Hash,
     pub available: bool,
+    pub variant: Option<AttachmentVariant>,
+}
+
+/// Which image of a figure an attachment row names, other than the light one (D-TBDA1). A light
+/// row has no variant, so output with no dark image keeps its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AttachmentVariant {
+    /// The image the site shows under the dark theme (`dark_blob`).
+    Dark,
+}
+
+impl AttachmentVariant {
+    /// `dark`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttachmentVariant::Dark => "dark",
+        }
+    }
 }
 
 /// A warning on an output: `W_PUBLICATION_REFERENCE` for an org profile whose selection
@@ -923,10 +943,12 @@ fn sits_outside_a_doc<'m>(
     Ok(found)
 }
 
-/// Step 6: one row per selected figure whose `blob` field is a hash, sorted by (home doc, block,
-/// blob). A removed figure's stub has no fields, so no row. The rows are bounded and sorted
-/// first, then each distinct blob is checked once in that order, so the first damaged manifest
-/// reported is the first row's. Availability is the source's: no blob byte is read.
+/// Step 6: one row per selected figure whose `blob` field is a hash, and one more for its
+/// `dark_blob` when that is a hash (D-TBDA1), sorted by (home doc, block, variant), light first.
+/// A removed figure's stub has no fields, so no row. Both rows count toward the row bound. The
+/// rows are bounded and sorted first, then each distinct blob is checked once in that order, so
+/// the first damaged manifest reported is the first row's. Availability is the source's, per
+/// row: no blob byte is read.
 fn attachments(
     source: &dyn PublicationSource,
     sel: &Materialized,
@@ -934,19 +956,21 @@ fn attachments(
 ) -> Result<Vec<AttachmentEntry>, RdyError> {
     let mut rows = vec![];
     for b in sel.iter() {
-        let Some(blob) = attachment_blob(b) else {
-            continue;
-        };
-        check_attachment_row(rows.len(), l)?;
-        let home_doc = sel.doc_of(&b.id).ok_or_else(invalid_tree)?.id.clone();
-        rows.push(AttachmentEntry {
-            block: b.id.clone(),
-            home_doc,
-            blob,
-            available: false,
-        });
+        for (variant, blob) in attachment_blobs(b) {
+            check_attachment_row(rows.len(), l)?;
+            let home_doc = sel.doc_of(&b.id).ok_or_else(invalid_tree)?.id.clone();
+            rows.push(AttachmentEntry {
+                block: b.id.clone(),
+                home_doc,
+                blob,
+                available: false,
+                variant,
+            });
+        }
     }
-    rows.sort_by(|a, b| (&a.home_doc, &a.block, &a.blob).cmp(&(&b.home_doc, &b.block, &b.blob)));
+    rows.sort_by(|a, b| {
+        (&a.home_doc, &a.block, a.variant).cmp(&(&b.home_doc, &b.block, b.variant))
+    });
     let mut seen: BTreeMap<Hash, bool> = BTreeMap::new();
     for row in &mut rows {
         row.available = match seen.get(&row.blob) {
@@ -961,13 +985,18 @@ fn attachments(
     Ok(rows)
 }
 
-/// The blob of `b`'s attachment row: a figure whose `blob` field is a hash. A removed figure's
-/// stub has no fields, so no row.
-fn attachment_blob(b: &Block) -> Option<Hash> {
+/// The blobs of `b`'s attachment rows, light first: a figure's `blob` and `dark_blob` fields
+/// that are hashes. A removed figure's stub has no fields, so no row.
+fn attachment_blobs(b: &Block) -> Vec<(Option<AttachmentVariant>, Hash)> {
     if b.block_type != "figure" || b.is_redacted() {
-        return None;
+        return vec![];
     }
-    b.field_str("blob").and_then(|t| t.parse::<Hash>().ok())
+    let hash = |field: &str| b.field_str(field).and_then(|t| t.parse::<Hash>().ok());
+    hash("blob")
+        .map(|h| (None, h))
+        .into_iter()
+        .chain(hash(rdy_schema::DARK_BLOB_FIELD).map(|h| (Some(AttachmentVariant::Dark), h)))
+        .collect()
 }
 
 /// The bound on one more attachment row after `rows`.
@@ -1041,10 +1070,15 @@ fn put_entry(out: &mut Vec<u8>, e: &SelectionEntry) {
     );
 }
 
+/// A light row writes what it always wrote; a dark row adds its variant, so a selection with no
+/// dark image keeps its hash.
 fn put_attachment(out: &mut Vec<u8>, a: &AttachmentEntry) {
     put(out, a.block.as_str());
     put(out, &a.blob.to_string());
     put(out, if a.available { "1" } else { "0" });
+    if let Some(v) = a.variant {
+        put(out, v.as_str());
+    }
 }
 
 /// The ids of `id` and every block below it in `sel`, in id order.
@@ -1483,16 +1517,24 @@ pub fn load_source_assets(
 /// `source`, with no output gate: the live inspection reads a blocked public selection's figures
 /// and shows its warning (D-CWC91). Every manifest length is checked against the per-blob and
 /// total bounds before any blob byte is read, and each blob's bytes against the same bounds
-/// once read; an unavailable blob (one the store lacks or a removal masks) is skipped.
+/// once read; an unavailable blob (one the store lacks or a removal masks) is skipped. A figure
+/// with an unavailable row is read as a whole or not at all (D-TBDA1 rule 6): neither of its
+/// images is read for it, so the other image never stands in.
 pub fn load_inspection_assets(
     source: &dyn PublicationSource,
     resolved: &Resolved,
 ) -> Result<BTreeMap<Hash, Vec<u8>>, RdyError> {
     let l = limits();
+    let partial: BTreeSet<&BlockId> = resolved
+        .attachments
+        .iter()
+        .filter(|a| !a.available)
+        .map(|a| &a.block)
+        .collect();
     let hashes: BTreeSet<Hash> = resolved
         .attachments
         .iter()
-        .filter(|a| a.available)
+        .filter(|a| a.available && !partial.contains(&a.block))
         .map(|a| a.blob)
         .collect();
     check_assets(&hashes, &mut |h| source.manifest(h), &l)?;
@@ -1558,7 +1600,7 @@ pub(crate) fn check_snapshot_limits<'a>(
     let mut rows = 0usize;
     let mut blobs = BTreeSet::new();
     for b in by_id.values() {
-        if let Some(blob) = attachment_blob(b) {
+        for (_, blob) in attachment_blobs(b) {
             check_attachment_row(rows, &l)?;
             rows += 1;
             blobs.insert(blob);

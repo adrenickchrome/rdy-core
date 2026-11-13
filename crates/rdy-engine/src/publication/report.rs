@@ -222,13 +222,19 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
             })
         }),
     );
+    // a light row keeps its fields and has no `variant`; a dark row adds `variant: "dark"`
+    // (D-TBDA1)
     let attachment = |x: &super::AttachmentEntry| {
-        json!({
+        let mut row = json!({
             "block": x.block.to_string(),
             "home_doc": x.home_doc.to_string(),
             "blob": x.blob.to_string(),
             "available": x.available,
-        })
+        });
+        if let Some(v) = x.variant {
+            row["variant"] = json!(v.as_str());
+        }
+        row
     };
     let added_attachments = put(
         "added_attachments",
@@ -241,7 +247,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
     let changed_attachments = put(
         "changed_attachments",
         listed(&d.changed_attachments, |x| {
-            json!({
+            let mut row = json!({
                 "block": x.block.to_string(),
                 "before_home_doc": x.before_home_doc.to_string(),
                 "after_home_doc": x.after_home_doc.to_string(),
@@ -249,7 +255,11 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
                 "after_blob": x.after_blob.to_string(),
                 "before_available": x.before_available,
                 "after_available": x.after_available,
-            })
+            });
+            if let Some(v) = x.variant {
+                row["variant"] = json!(v.as_str());
+            }
+            row
         }),
     );
     let new_references = put("new_references", listed(&d.new_references, reference_row));

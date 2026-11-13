@@ -10,6 +10,10 @@
 //! The selection is the filtered view (D-WJ0SJ, D-69YCN): a block a profile hides is outside it,
 //! so a reference to it is excluded, and a hidden block, which no output shows, is scanned as no
 //! source. A shell is scanned as what it shows: its title, name and key.
+//!
+//! A remote image in text (`![alt](https://…)`, D-3DAX4 rule 4) names no block: its URL is no
+//! reference and adds no row, so it never blocks or warns. Only `{{…}}` references and link
+//! edges are read here; a link that wraps an image keeps the checks of any link.
 
 use super::select::{Limits, PublicationWarning, limit};
 use crate::error::*;

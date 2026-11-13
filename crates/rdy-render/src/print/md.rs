@@ -403,6 +403,25 @@ impl Cx<'_> {
         let lead = &piece[..piece.len() - piece.trim_start().len()];
         let trail = &piece[piece.trim_end().len()..];
         let plain = !(run.code || run.bold || run.italic || run.link.is_some());
+        let mut md = Md::text(lead);
+        // a remote image keeps its syntax, inside its link when it has one
+        if let Some(src) = &run.image {
+            let mut image = Md::text(&format!("![{}](", md_escape(core, false)));
+            image.push_url(src.clone());
+            image.push_str(")");
+            match &run.link {
+                Some(href) => {
+                    md.push_str("[");
+                    md.append(image);
+                    md.push_str("](");
+                    md.push_url(self.target(href));
+                    md.push_str(")");
+                }
+                None => md.append(image),
+            }
+            md.push_str(trail);
+            return md;
+        }
         let mut out = if run.code {
             code_span(core)
         } else {
@@ -414,7 +433,6 @@ impl Cx<'_> {
             (false, true) => format!("*{out}*"),
             (false, false) => out,
         };
-        let mut md = Md::text(lead);
         match &run.link {
             Some(href) => {
                 md.push_str(&format!("[{out}]("));
@@ -513,13 +531,32 @@ impl Cx<'_> {
             PBlock::Figure {
                 anchor,
                 blob,
+                dark,
                 alt,
                 caption,
             } => {
                 let mut lines = vec![];
                 let file = blob.and_then(|h| self.blobs.get(&h)).map(|b| &b.file);
+                let dark_file = dark.and_then(|h| self.blobs.get(&h)).map(|b| &b.file);
                 let alt_text = alt.split_whitespace().collect::<Vec<_>>().join(" ");
-                if let Some(file) = file {
+                if let (Some(file), Some(dark_file)) = (file, dark_file) {
+                    // a figure with a dark image: the generated four-line picture, its alt text
+                    // and paths escaped for an attribute
+                    lines.push(Md::text("<picture>"));
+                    let mut source =
+                        Md::text("<source media=\"(prefers-color-scheme: dark)\" srcset=\"");
+                    source.push_url(relative(self.from, dark_file).replace('"', "%22"));
+                    source.push_str("\">");
+                    lines.push(source);
+                    let mut img = Md::text(&format!(
+                        "<img alt=\"{}\" src=\"",
+                        crate::html::escape(&alt_text)
+                    ));
+                    img.push_url(relative(self.from, file).replace('"', "%22"));
+                    img.push_str("\">");
+                    lines.push(img);
+                    lines.push(Md::text("</picture>"));
+                } else if let Some(file) = file {
                     let mut image = Md::text(&format!("![{}](", md_escape(&alt_text, false)));
                     image.push_url(relative(self.from, file));
                     image.push_str(")");
@@ -605,6 +642,24 @@ impl Cx<'_> {
                 continue;
             }
             let mut inner = crate::html::escape(&text);
+            if let Some(src) = &run.image {
+                out.push_str(lead);
+                let mut img = Md::text(&format!("<img alt=\"{inner}\" src=\""));
+                img.push_url(src.replace('"', "%22"));
+                img.push_str("\">");
+                match &run.link {
+                    Some(href) => {
+                        out.push_str("<a href=\"");
+                        out.push_url(self.target(href).replace('"', "%22"));
+                        out.push_str("\">");
+                        out.append(img);
+                        out.push_str("</a>");
+                    }
+                    None => out.append(img),
+                }
+                out.push_str(trail);
+                continue;
+            }
             for (on, tag) in [(run.code, "code"), (run.italic, "em"), (run.bold, "strong")] {
                 if on {
                     inner = format!("<{tag}>{inner}</{tag}>");

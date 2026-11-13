@@ -774,18 +774,22 @@ impl ReadState {
                 if let Some(request) = block.redaction() {
                     found.insert(request);
                 }
-                // only an asset's `blob` field names a blob; on any other type it is plain text
+                // only an asset's `blob` and `dark_blob` fields name a blob; on any other type
+                // they are plain text
                 if !self.pack.is_asset(&block.block_type) {
                     continue;
                 }
-                let Some(h) = block.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) else {
-                    continue;
-                };
-                let requests = match blobs.entry(h) {
-                    Entry::Occupied(e) => e.into_mut(),
-                    Entry::Vacant(e) => e.insert(self.blob_requests(&h)?),
-                };
-                found.extend(requests.iter().copied());
+                for field in rdy_schema::ASSET_BLOB_FIELDS {
+                    let Some(h) = block.field_str(field).and_then(|s| s.parse::<Hash>().ok())
+                    else {
+                        continue;
+                    };
+                    let requests = match blobs.entry(h) {
+                        Entry::Occupied(e) => e.into_mut(),
+                        Entry::Vacant(e) => e.insert(self.blob_requests(&h)?),
+                    };
+                    found.extend(requests.iter().copied());
+                }
             }
         }
         Ok(found.into_iter().collect())

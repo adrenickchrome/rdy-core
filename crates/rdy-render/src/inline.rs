@@ -309,7 +309,75 @@ enum Node {
     Code(Vec<Node>),
     Strong(Vec<Node>),
     Em(Vec<Node>),
-    Link { target: String, children: Vec<Node> },
+    Link {
+        target: String,
+        children: Vec<Node>,
+    },
+    /// A remote image (D-3DAX4): `![alt](https:…)`, alone or as the whole label of a link. Its
+    /// alt text is never empty.
+    Image {
+        alt: String,
+        url: String,
+    },
+}
+
+thread_local! {
+    /// Whether the HTML being written is the print model's source ([`with_image_markup`]): a
+    /// remote image is then an `img` element the print reader reads, never written to a page.
+    static IMAGE_MARKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with every remote image written as `<img class="remote-image" src alt>` in place of its
+/// alt text: the HTML the print model and Copy read (D-3DAX4 rule 3), so the Markdown outputs
+/// write the image from the selected blocks alone. A page never holds this HTML: the site shows
+/// the alt text and loads nothing.
+pub(crate) fn with_image_markup<T>(f: impl FnOnce() -> T) -> T {
+    let before = IMAGE_MARKUP.with(|m| m.replace(true));
+    let out = f();
+    IMAGE_MARKUP.with(|m| m.set(before));
+    out
+}
+
+/// Whether `text` may hold a remote image: it holds `![`, the opener every one starts with. A
+/// cheap test, before the print model's second rendering of a block.
+pub(crate) fn may_hold_image(text: &str) -> bool {
+    text.contains("![")
+}
+
+/// The remote image whose `[` is at `open` (right after an unescaped `!`) and whose label ends
+/// at `close`: its alt text and URL and the index after it. None when it is not one rdy reads
+/// (D-3DAX4 rule 1): the label must hold text and no reference, and the target must be an
+/// `https:` URL that [`href`] allows, within [`MAX_LOCAL_URL`] bytes.
+fn image_at(toks: &[Tok], open: usize, close: usize) -> Option<(Node, usize)> {
+    let (close, url, end) = link_at(toks, open, close)?;
+    let mut alt = String::new();
+    let mut j = open + 1;
+    while j < close {
+        match toks[j] {
+            Tok::Atom(_) => return None,
+            Tok::Ch('\\') if matches!(toks.get(j + 1), Some(Tok::Ch(p)) if p.is_ascii_punctuation()) =>
+            {
+                if let Some(Tok::Ch(p)) = toks.get(j + 1) {
+                    alt.push(*p);
+                }
+                j += 2;
+                continue;
+            }
+            Tok::Ch(c) | Tok::Lit(c) => alt.push(c),
+        }
+        j += 1;
+    }
+    let https = url
+        .get(..6)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https:"));
+    if alt.trim().is_empty()
+        || !https
+        || url.len() > MAX_LOCAL_URL
+        || href(&url, "").is_none_or(|(_, away)| !away)
+    {
+        return None;
+    }
+    Some((Node::Image { alt, url }, end))
 }
 
 fn is_punct(c: char) -> bool {
@@ -555,7 +623,16 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
             }
             Tok::Ch('[') if !in_link && !was_bang => match link_at(toks, i, closes[i]) {
                 Some((close, target, end)) => {
-                    let children = parse_spans(&toks[i + 1..close], true);
+                    // a label that is exactly one remote image is that image (D-3DAX4)
+                    let label = &toks[i + 1..close];
+                    let image = (label.len() > 1 && label[0] == Tok::Ch('!'))
+                        .then(|| image_at(label, 1, bracket_closes(label)[1]))
+                        .flatten()
+                        .filter(|(_, after)| *after == label.len());
+                    let children = match image {
+                        Some((img, _)) => vec![img],
+                        None => parse_spans(label, true),
+                    };
                     pieces.push(Piece::Node(Node::Link { target, children }));
                     i = end;
                 }
@@ -588,6 +665,15 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
                     });
                 }
                 i += n;
+            }
+            // a remote image, outside a link's own label (where only a whole label is one)
+            Tok::Ch('!')
+                if !in_link
+                    && toks.get(i + 1) == Some(&Tok::Ch('['))
+                    && let Some((img, end)) = image_at(toks, i + 1, closes[i + 1]) =>
+            {
+                pieces.push(Piece::Node(img));
+                i = end;
             }
             Tok::Ch(c) => {
                 bang = c == '!';
@@ -882,6 +968,19 @@ fn render_html(
                 render_html(c, refs, ctx, in_link, next, out);
                 out.push_str("</em>");
             }
+            // the site and every print show the alt text and load nothing (D-3DAX4 rule 2); the
+            // print model's source writes the image for the Markdown outputs
+            Node::Image { alt, url } => {
+                if IMAGE_MARKUP.with(std::cell::Cell::get) {
+                    out.push_str(&format!(
+                        "<img class=\"remote-image\" src=\"{}\" alt=\"{}\">",
+                        escape(url),
+                        escape(alt)
+                    ));
+                } else {
+                    out.push_str(&text_html(alt));
+                }
+            }
             Node::Link { target, children } => match local_href(target, ctx) {
                 Some((h, away)) => {
                     out.push_str(&format!(
@@ -965,6 +1064,7 @@ fn render_plain(
             Node::Link { children, .. } => {
                 render_plain(children, refs, label, drop, coded, next, out)
             }
+            Node::Image { alt, .. } => push(out, alt),
         }
     }
 }

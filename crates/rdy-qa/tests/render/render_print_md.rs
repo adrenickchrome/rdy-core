@@ -393,6 +393,7 @@ fn run(text: &str) -> Run {
         italic: false,
         code: false,
         link: None,
+        image: None,
     }
 }
 
@@ -890,6 +891,7 @@ fn ec6_literal_entities_stay_literal() {
             PBlock::Figure {
                 anchor: None,
                 blob: None,
+                dark: None,
                 alt: String::new(),
                 caption: vec![run("&nbsp;caption")],
             },
@@ -948,6 +950,7 @@ fn ec6_text_never_becomes_a_setext_heading_or_a_fence() {
             PBlock::Figure {
                 anchor: None,
                 blob: None,
+                dark: None,
                 alt: String::new(),
                 caption: vec![run("cap\n===")],
             },

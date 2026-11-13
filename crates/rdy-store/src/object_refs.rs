@@ -316,21 +316,24 @@ impl Edges {
         }
     }
 
-    /// A figure's `blob` field names its blob manifest. A present field that is not a full hash
-    /// is `Decode`. Parent, links and pins name blocks or content, not stored objects.
+    /// A figure's `blob` field, and its `dark_blob` field (D-3DAX4), each name a blob manifest.
+    /// A present field that is not a full hash is `Decode`. Parent, links and pins name blocks or
+    /// content, not stored objects.
     fn block(&mut self, b: &Block) -> Result<(), RecordError> {
-        if b.block_type != "figure" {
+        if b.block_type != crate::format::FIGURE_TYPE {
             return Ok(());
         }
-        match b.fields.get("blob") {
-            None => Ok(()),
-            Some(FieldValue::Str(s)) => {
-                let h = s.parse::<Hash>().map_err(|_| RecordError::Decode)?;
-                self.one(BLOB_MANIFEST, h);
-                Ok(())
+        for field in ["blob", crate::format::DARK_BLOB_FIELD] {
+            match b.fields.get(field) {
+                None => {}
+                Some(FieldValue::Str(s)) => {
+                    let h = s.parse::<Hash>().map_err(|_| RecordError::Decode)?;
+                    self.one(BLOB_MANIFEST, h);
+                }
+                Some(_) => return Err(RecordError::Decode),
             }
-            Some(_) => Err(RecordError::Decode),
         }
+        Ok(())
     }
 
     fn change(&mut self, c: &Change) -> Result<(), RecordError> {

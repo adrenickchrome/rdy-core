@@ -18,6 +18,7 @@ mod render_font_parity;
 mod render_glossary;
 mod render_governing;
 mod render_header;
+mod render_images;
 mod render_live;
 mod render_llms;
 mod render_markdown;

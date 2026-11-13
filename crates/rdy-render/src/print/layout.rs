@@ -675,11 +675,13 @@ impl Layout<'_> {
                     self.line(x, &s, (start, s.chars.len()), CODE_LINE, false);
                 }
             }
+            // the light image only (D-3DAX4 rule 6)
             PBlock::Figure {
                 anchor,
                 blob,
                 alt,
                 caption,
+                ..
             } => {
                 self.gap(gap);
                 let sized = blob.and_then(|h| {
@@ -930,6 +932,7 @@ mod tests {
             italic: false,
             code: false,
             link: None,
+            image: None,
         }
     }
 
@@ -1276,12 +1279,14 @@ mod tests {
                 PBlock::Figure {
                     anchor: None,
                     blob: Some(fig),
+                    dark: None,
                     alt: "shown".into(),
                     caption: vec![run("cap ة")],
                 },
                 PBlock::Figure {
                     anchor: None,
                     blob: None,
+                    dark: None,
                     alt: "alt ت".into(),
                     caption: vec![],
                 },
@@ -1454,6 +1459,7 @@ mod tests {
         };
         let ext = Run {
             link: Some(Href::External("https://example.org/".into())),
+            image: None,
             ..run("out")
         };
         let mut p = print(vec![
@@ -1509,18 +1515,21 @@ mod tests {
                     PBlock::Figure {
                         anchor: Some("f1".into()),
                         blob: Some(wide),
+                        dark: None,
                         alt: "wide".into(),
                         caption: vec![run("A wide figure")],
                     },
                     PBlock::Figure {
                         anchor: None,
                         blob: Some(tall),
+                        dark: None,
                         alt: "tall".into(),
                         caption: vec![],
                     },
                     PBlock::Figure {
                         anchor: None,
                         blob: Some(odd),
+                        dark: None,
                         alt: "odd one".into(),
                         caption: vec![],
                     },

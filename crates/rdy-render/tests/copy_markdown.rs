@@ -377,6 +377,7 @@ fn para(s: &str) -> PBlock {
                 italic: false,
                 code: false,
                 link: None,
+                image: None,
             }]
         },
     }

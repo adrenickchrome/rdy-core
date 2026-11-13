@@ -1750,6 +1750,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "check_request",
             "content_hash_v2",
             "dispute",
+            "figure_dark",
             "foreign_copy",
             "object_encoding",
             "plan_tension",
@@ -1761,6 +1762,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
         let want = match f.name.as_str() {
             "foreign_copy" => format::FOREIGN_COPY_REQUIRED_RDY,
+            "figure_dark" => format::FIGURE_DARK_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);

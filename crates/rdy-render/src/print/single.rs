@@ -33,7 +33,7 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
         format: "html",
         docs: count(PageKind::Doc),
         folders: count(PageKind::Folder),
-        assets: p.blobs.len(),
+        assets: p.light_blobs().len(),
         pages: None,
         bytes: n,
         warnings: p.warnings.clone(),
@@ -276,11 +276,13 @@ fn block(h: &mut String, p: &Print, page: &str, b: &PBlock) {
                 esc(text)
             );
         }
+        // the light image only (D-3DAX4 rule 6)
         PBlock::Figure {
             anchor,
             blob,
             alt,
             caption,
+            ..
         } => {
             let _ = writeln!(h, "<figure{}>", id_attr(page, anchor));
             let img = blob.and_then(|b| p.blobs.get(&b));

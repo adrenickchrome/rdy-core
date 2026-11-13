@@ -48,12 +48,14 @@ pub struct CommitPlan {
     pub stable: bool,
 }
 
-/// A figure file to upload as its block's blob.
+/// A figure file to upload as its block's blob, or as its dark image (D-3DAX4): `field` is the
+/// field whose placeholder the hash replaces, `blob` or `dark_blob`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Upload {
     pub block: BlockId,
     pub file: PathBuf,
     pub media_type: Option<String>,
+    pub field: &'static str,
 }
 
 /// The staged files do not lint: every diagnostic, sorted by file, line and column.
@@ -84,17 +86,25 @@ fn media_type_of(path: &str) -> Option<&'static str> {
     })
 }
 
-/// The path an entry names as its image: an entry of an `asset` type whose `blob` is a string that
-/// is not a hash.
-fn asset_path<'a>(b: &'a WcBlock, pack: &Pack) -> Option<&'a str> {
+/// The paths an entry names as its images, each with its blob field and that field's media type
+/// field: an entry of an `asset` type whose `blob`, or `dark_blob` (D-3DAX4), is a string that
+/// is not a hash. The light image comes first.
+fn asset_paths<'a>(b: &'a WcBlock, pack: &Pack) -> Vec<(&'static str, &'static str, &'a str)> {
     if !pack.is_asset(&b.block.block_type) {
-        return None;
+        return vec![];
     }
-    b.block
-        .fields
-        .get("blob")
-        .and_then(FieldValue::as_str)
-        .filter(|s| !is_hash(s))
+    rdy_schema::ASSET_BLOB_FIELDS
+        .iter()
+        .zip(rdy_schema::ASSET_MEDIA_TYPE_FIELDS)
+        .filter_map(|(field, media)| {
+            b.block
+                .fields
+                .get(*field)
+                .and_then(FieldValue::as_str)
+                .filter(|s| !is_hash(s))
+                .map(|path| (*field, media, path))
+        })
+        .collect()
 }
 
 /// Why a figure's image was refused.
@@ -140,46 +150,60 @@ fn figure_file(root: &Path, file: &str, rel: &str) -> Result<PathBuf, Refused> {
 
 /// The figure rule (wcfg1), run before the entries are validated: every figure whose `blob` is a
 /// path gets its `media_type` from the file extension when the entry gives none, and is refused
-/// when the image is outside the working copy, missing, or of a type rdy cannot name.
+/// when the image is outside the working copy, missing, or of a type rdy cannot name. A
+/// `dark_blob` path (D-3DAX4) gets the same rule with `dark_media_type`.
 pub fn resolve_figures(tree: &mut WcTree, root: &Path, pack: &Pack) -> Vec<Diagnostic> {
     let mut out = vec![];
     for b in &mut tree.blocks {
-        let Some(path) = asset_path(b, pack).map(str::to_string) else {
-            continue;
-        };
-        let id = b.block.id.clone();
-        let ty = b.block.block_type.clone();
-        let diag = |message: String, fix: &str| {
-            Diagnostic::error(&b.file, b.at, E_FILE_FORMAT, message, fix)
-        };
-        let given = b.block.fields.contains_key("media_type");
-        let inferred = media_type_of(&path);
-        match figure_file(root, &b.file, &path) {
-            Ok(_) => {}
-            Err(Refused::Outside) => out.push(diag(
-                format!("{ty} {id}: {path} is outside the working copy"),
-                "keep the image inside the working copy, next to the doc or below it",
-            )),
-            Err(Refused::Missing) => out.push(diag(
-                format!("{ty} {id}: no image at {path}"),
-                "put the image at that path, relative to the doc file's directory",
-            )),
-        }
-        if !given {
-            match inferred {
-                Some(m) => {
-                    b.block
-                        .fields
-                        .insert("media_type".into(), FieldValue::Str(m.into()));
-                }
-                None => out.push(diag(
-                    format!("{ty} {id}: set media_type for {path}"),
-                    "add media_type, e.g. image/png, to the entry's fields",
-                )),
-            }
+        let paths: Vec<(&str, String)> = asset_paths(b, pack)
+            .into_iter()
+            .map(|(_, media, path)| (media, path.to_string()))
+            .collect();
+        for (media_field, path) in paths {
+            resolve_figure(b, root, media_field, &path, &mut out);
         }
     }
     out
+}
+
+/// [`resolve_figures`] of one image path of `b`, whose media type lives in `media_field`.
+fn resolve_figure(
+    b: &mut WcBlock,
+    root: &Path,
+    media_field: &str,
+    path: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let id = b.block.id.clone();
+    let ty = b.block.block_type.clone();
+    let diag =
+        |message: String, fix: &str| Diagnostic::error(&b.file, b.at, E_FILE_FORMAT, message, fix);
+    let given = b.block.fields.contains_key(media_field);
+    let inferred = media_type_of(path);
+    match figure_file(root, &b.file, path) {
+        Ok(_) => {}
+        Err(Refused::Outside) => out.push(diag(
+            format!("{ty} {id}: {path} is outside the working copy"),
+            "keep the image inside the working copy, next to the doc or below it",
+        )),
+        Err(Refused::Missing) => out.push(diag(
+            format!("{ty} {id}: no image at {path}"),
+            "put the image at that path, relative to the doc file's directory",
+        )),
+    }
+    if !given {
+        match inferred {
+            Some(m) => {
+                b.block
+                    .fields
+                    .insert(media_field.into(), FieldValue::Str(m.into()));
+            }
+            None => out.push(diag(
+                format!("{ty} {id}: set {media_field} for {path}"),
+                &format!("add {media_field}, e.g. image/png, to the entry's fields"),
+            )),
+        }
+    }
 }
 
 /// Where the commit tree is built, under the state directory.
@@ -803,34 +827,34 @@ impl<'a> Diff<'a> {
             .any(|id| self.base.stable(id) || self.commit.stable(id));
     }
 
-    /// A figure whose `blob` is a path: its image becomes an upload, and the op carries the
-    /// placeholder for the hash in its `blob` field.
+    /// A figure whose `blob`, or `dark_blob` (D-3DAX4), is a path: each image becomes an
+    /// upload, light first, and the op carries the placeholder for the hash in that field.
     fn upload(&self, b: &WcBlock, mut op: Value, plan: &mut CommitPlan) -> Value {
-        let Some(path) = asset_path(b, self.pack) else {
-            return op;
-        };
-        // the lint refused every path this cannot resolve
-        let Ok(file) = figure_file(&self.place.root, &b.file, path) else {
-            return op;
-        };
-        let media_type = b
-            .block
-            .fields
-            .get("media_type")
-            .and_then(FieldValue::as_str)
-            .map(str::to_string);
-        let placeholder = format!("{UPLOAD_PREFIX}{}", plan.uploads.len());
-        if let Some(m) = op.as_object_mut() {
-            let fields = m.entry("fields").or_insert_with(|| json!({}));
-            if let Some(f) = fields.as_object_mut() {
-                f.insert("blob".into(), placeholder.into());
+        for (field, media_field, path) in asset_paths(b, self.pack) {
+            // the lint refused every path this cannot resolve
+            let Ok(file) = figure_file(&self.place.root, &b.file, path) else {
+                continue;
+            };
+            let media_type = b
+                .block
+                .fields
+                .get(media_field)
+                .and_then(FieldValue::as_str)
+                .map(str::to_string);
+            let placeholder = format!("{UPLOAD_PREFIX}{}", plan.uploads.len());
+            if let Some(m) = op.as_object_mut() {
+                let fields = m.entry("fields").or_insert_with(|| json!({}));
+                if let Some(f) = fields.as_object_mut() {
+                    f.insert(field.into(), placeholder.into());
+                }
             }
+            plan.uploads.push(Upload {
+                block: b.block.id.clone(),
+                file,
+                media_type,
+                field,
+            });
         }
-        plan.uploads.push(Upload {
-            block: b.block.id.clone(),
-            file,
-            media_type,
-        });
         op
     }
 

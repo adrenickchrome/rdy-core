@@ -8,6 +8,7 @@ mod engine_adopted_as;
 mod engine_alts;
 mod engine_autokey;
 mod engine_commute;
+mod engine_dark_figure;
 mod engine_decision_home;
 mod engine_demo_write;
 mod engine_eff;

@@ -297,6 +297,17 @@ caption { caption-side: top; text-align: left; font-size: 0.84rem; color: var(--
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 figure { margin: 1.2rem 0; }
 .figure img { display: block; border-radius: var(--radius); }
+/* A figure with a dark image shows the variant of the page's theme: the explicit choice, else the
+   system's. Print always shows the light one. */
+.figure-themed .figure-dark { display: none; }
+@media screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .figure-themed .figure-light { display: none; }
+  :root:not([data-theme="light"]) .figure-themed .figure-dark { display: block; }
+}
+@media screen {
+  :root[data-theme="dark"] .figure-themed .figure-light { display: none; }
+  :root[data-theme="dark"] .figure-themed .figure-dark { display: block; }
+}
 .figure-missing, .download .meta { color: var(--ink-soft); }
 .content code { overflow-wrap: anywhere; background: var(--surface); border-color: var(--line); color: var(--ink); }
 .content a code { color: inherit; }

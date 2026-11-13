@@ -203,6 +203,7 @@ impl Style {
             italic: self.italic,
             code: self.code,
             link: self.link.clone(),
+            image: None,
         }
     }
 }
@@ -236,7 +237,7 @@ pub(crate) fn tidy(runs: Vec<Run>) -> Vec<Run> {
         let after_space = out
             .last()
             .is_none_or(|p: &Run| p.text.ends_with([' ', '\n']));
-        if after_space {
+        if after_space && r.image.is_none() {
             r.text = r.text.trim_start_matches(' ').to_string();
         }
         // a line break takes the space before it away
@@ -252,11 +253,14 @@ pub(crate) fn tidy(runs: Vec<Run>) -> Vec<Run> {
             continue;
         }
         match out.last_mut() {
+            // a remote image is a run of its own
             Some(p)
                 if p.bold == r.bold
                     && p.italic == r.italic
                     && p.code == r.code
-                    && p.link == r.link =>
+                    && p.link == r.link
+                    && p.image.is_none()
+                    && r.image.is_none() =>
             {
                 p.text.push_str(&r.text);
             }
@@ -384,6 +388,18 @@ impl Reader<'_> {
                     match name.as_str() {
                         "br" => {
                             out.push(style.run("\n".into()));
+                            continue;
+                        }
+                        // a remote image in the print model's source: a run of its alt text
+                        // and its URL, in the line's look and link
+                        "img" if has_class(tag, "remote-image") => {
+                            let (Some(src), Some(alt)) = (attr(tag, "src"), attr(tag, "alt"))
+                            else {
+                                continue;
+                            };
+                            let mut run = style.run(decode(alt));
+                            run.image = Some(decode(src));
+                            out.push(run);
                             continue;
                         }
                         "img" => continue,
@@ -531,9 +547,19 @@ impl Reader<'_> {
                                 Node::Text(_) => vec![],
                             })
                             .unwrap_or_default();
+                        // a figure with a dark image: the light one comes first
+                        let dark = children.iter().find_map(|c| match c {
+                            Node::Elem { name, tag, .. }
+                                if name == "img" && has_class(tag, "figure-dark") =>
+                            {
+                                attr(tag, "src").and_then(|s| self.figure_blob(s))
+                            }
+                            _ => None,
+                        });
                         out.push(PBlock::Figure {
                             anchor: id_of(tag),
                             blob: attr(img, "src").and_then(|s| self.figure_blob(s)),
+                            dark,
                             alt: attr(img, "alt").map(decode).unwrap_or_default(),
                             caption,
                         });
@@ -555,6 +581,7 @@ impl Reader<'_> {
                 out.push(PBlock::Figure {
                     anchor: id_of(tag),
                     blob: attr(tag, "src").and_then(|s| self.figure_blob(s)),
+                    dark: None,
                     alt: attr(tag, "alt").map(decode).unwrap_or_default(),
                     caption: vec![],
                 });
@@ -605,6 +632,7 @@ impl Reader<'_> {
                             italic: false,
                             code: false,
                             link: None,
+                            image: None,
                         },
                         plain.run(" ".into()),
                     ];
@@ -880,6 +908,7 @@ mod tests {
             italic: false,
             code: false,
             link: None,
+            image: None,
         }
     }
 
@@ -900,6 +929,7 @@ mod tests {
     fn link(text: &str, href: Href) -> Run {
         Run {
             link: Some(href),
+            image: None,
             ..run(text)
         }
     }
@@ -1020,6 +1050,7 @@ mod tests {
             PBlock::Figure {
                 anchor: None,
                 blob: Some(hash.parse().unwrap()),
+                dark: None,
                 alt: "A \"case\"".into(),
                 caption: vec![run("A case block")],
             },
