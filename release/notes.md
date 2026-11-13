@@ -1,6 +1,6 @@
 **Your intent, ready for anyone who needs it.** rdy stores what you intend and decided, and gives it to whoever needs it in a form they can use: a docs site for people, briefings and instructions for agents. Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-This small release makes a take into a holder faster. A holder is the store that keeps uploads for rdyhub. A take also refuses an upload that would take the holder past the limits of its check. A live site now uses less memory. For a project's store, the only change is that rdy 0.50.0 rebuilds its index once, at the first open. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
+This release adds what a README needs: collapsed sections, a dark image for a figure, and an export of one doc as one Markdown file. rdy-core's own README now comes from rdy this way. On a terminal, signing in to rdyhub is now one command. A project's first dark image turns on a new store feature, and older rdy then refuses that project. This release keeps the compatibility promise of Release 1. See "About Release 1" below.
 
 ## What you get
 
@@ -14,6 +14,7 @@ This small release makes a take into a holder faster. A holder is the store that
 - **Linked projects.** Cite the decisions and instructions that another project delivers through rdyhub. Your project keeps the version it cites until a person adopts a newer one.
 - **Bring your Markdown.** Import a folder of Markdown files as docs. A preview shows what maps, and what does not, before anything is written.
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
+- **A README from your docs.** Export one doc as one Markdown file, with its images in a folder beside it.
 - **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
 
 ## Install
@@ -37,26 +38,26 @@ To install from the archive instead:
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.50.0-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.50.0-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.51.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.51.0-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.50.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.51.0-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 **Windows (x86_64), in PowerShell:**
 
 ```powershell
-Invoke-WebRequest -OutFile rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
-tar.exe -xzf rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz
+tar.exe -xzf rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Move-Item -Force rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
+Move-Item -Force rdy-0.51.0-x86_64-pc-windows-msvc\rdy.exe "$HOME\.local\bin\"
 ```
 
 On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. On Windows, add `$HOME\.local\bin` to your PATH. Then check:
@@ -65,13 +66,13 @@ On macOS and Linux, if `~/.local/bin` is not on your PATH, add `export PATH="$HO
 rdy --version
 ```
 
-It prints `rdy 0.50.0`.
+It prints `rdy 0.51.0`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
 ## Release key
 
-This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0 and 0.49.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.50.0:
+This release is signed by rdy's machine release key, the same key that signed 0.46.0, 0.47.0, 0.48.0, 0.49.0 and 0.50.0. To check the signature of your download, follow "Verify the download" in the README. The allowed-signers line for v0.51.0:
 
 ```text
 rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8
@@ -79,7 +80,7 @@ rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUy
 
 Fingerprint: `SHA256:Tj8hfra0U07asaeSZkt1b5e1HGJ+w8vMzLrn+G6/+/M`.
 
-Compare this line and fingerprint with the ones in the README at v0.50.0. Use the key only when both match.
+Compare this line and fingerprint with the ones in the README at v0.51.0. Use the key only when both match.
 
 ## Try it: your first project
 
@@ -105,7 +106,7 @@ Compare this line and fingerprint with the ones in the README at v0.50.0. Use th
 
    A session lasts as long as one `rdy mcp` process, and keeps one actor and one run. To start another run, start a new `rdy mcp` process. A client that starts a new process for each call must start a new session each time.
 
-   The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. rdy's guide tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
+   The agent starts its session with `rdy_session`, which names its own `agent:` actor, such as `agent:claude`, and a run. rdy's guide tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
 
 3. **Set up rdy for your agents.** In the project folder, run:
 
@@ -119,7 +120,9 @@ Compare this line and fingerprint with the ones in the README at v0.50.0. Use th
 
    > Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.
 
-   The agent first loads its rules with `rdy_instructions`, then makes several calls before its first write.
+   The agent first loads its rules with `rdy_instructions`. The rules give a `kungfu` value for each tool that they cover, and the agent passes that value on each call to the tool. A call without it still runs, with the warning `W_KUNGFU`. In a new project nothing has landed yet, so the first writes need no brief. A later write that touches landed content needs a token from `rdy_brief`, which takes block ids or a path. With neither, `rdy_brief` refuses with `E_BAD_INPUT`.
+
+   A doc type can ask for sections: an `overview` doc needs Summary and Goals. Until the doc has them, a write gives the warning `W_SKELETON_MISSING`, and the agent adds them. It is a warning, not a refusal.
 
 5. **Review and approve it yourself.**
 
@@ -127,7 +130,7 @@ Compare this line and fingerprint with the ones in the README at v0.50.0. Use th
    rdy pending
    ```
 
-   This shows what waits for you, with the impact of each proposal. Approve with `rdy approve P-<id>`, or tell your agent your answer. If you answer a card in chat with Later, it stays hidden until the chat session changes, and `rdy pending` counts it as snoozed. When a proposal adds a decision, its option reads "Approve P-\<id\> and confirm D-\<id\>": approving it also confirms the decision.
+   This shows what waits for you, with the impact of each proposal. Approve with `rdy approve P-<id>`, or tell your agent your answer. Without `@<n>`, `rdy approve` takes the proposal's latest version, which the card shows as `P-<id>@<n>`. If you answer a card in chat with Later, it stays hidden until the chat session changes, and `rdy pending` counts it as snoozed. When a proposal adds a decision, its option reads "Approve P-\<id\> and confirm D-\<id\>": approving it also confirms the decision.
 
 6. **Read the result.**
 
@@ -137,33 +140,54 @@ Compare this line and fingerprint with the ones in the README at v0.50.0. Use th
 
    Open the link. The home page links to each page, and each page's address ends in `.html`. Now ask your agent: “For EU customers, raw conversations must be deleted after 7 days. Keep the 30-day rule elsewhere and the 2-year metrics window.” The agent briefs on the decision and its connected docs, follows the consequences, and brings you the proposal to approve.
 
-   If `rdy pending` shows more than one card, answer each one. A change to a decision can add a card that asks you to confirm it. Until you answer it, `rdy approve` refuses with `E_EXCEPTION_OPEN` and names the card. Answer it with `rdy answer <ref> confirm`, where `<ref>` is the card's ref in `rdy pending`, such as `D-<id>@<hash>`. Then run `rdy approve P-<id>` again. Or tell your agent your answer.
+   A decision gets a card of its own only in some cases. For example, it supersedes or revokes a live decision, it is `one_way`, or no content applies it yet. If the agent refines the first decision and applies the new one in the docs, you get one card.
 
-   After an approval, `rdy approve` can list `consequences:`, such as `k-<id>: confirm (neighbor k-<id>)`. That list names nearby blocks that the change may touch. It is not a card, and nothing waits for you unless `rdy pending` shows it.
+   If `rdy pending` shows more than one card, answer each one. Until you confirm a decision's own card, `rdy approve` refuses with `E_EXCEPTION_OPEN` and names the card. Answer it with `rdy answer <ref> confirm`, where `<ref>` is the card's ref in `rdy pending`, such as `D-<id>@<hash>`. Then run `rdy approve P-<id>` again. Or tell your agent your answer.
+
+   After an approval, `rdy approve` can list `consequences:`, with lines such as `dependent k-<id>: confirm (neighbor k-<id>)` and more lines under each. That list names nearby blocks that the change may touch. It is not a card, and nothing waits for you unless `rdy pending` shows it.
 
    New content shows a **Planned** label. A new decision starts planned, so the content that cites it does too. Set `built` on the decision when the work ships.
 
    On a remote machine, the link is on `127.0.0.1`. Open an SSH tunnel to its port first, for example `ssh -L <port>:127.0.0.1:<port> <host>`.
 
-   The site keeps running after `rdy site` exits. To stop it, close your agent's session first, then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. Your meta project has its own daemon: stop it with `rdy serve --stop --project ~/.rdy/meta`.
+   The site keeps running after `rdy site` exits. To stop it, close your agent's session first, then run `rdy serve --stop` in the project folder. An `rdy mcp` that is still open logs `E_DAEMON_GONE`. `rdy serve --stop` prints `stopped`, or `no daemon running` when none was running. Your meta project has its own daemon, which starts at the agent's first `rdy_instructions` call. Its default place is `.rdy/meta` in your home folder, so stop it with `rdy serve --stop --project ~/.rdy/meta`.
 
-## What changed since 0.49.0
+## What changed since 0.50.0
+
+### New features
+
+- **Collapsed sections.** A section takes the field `collapsed: true`. The site shows it as a fold, closed when the page loads, with the section's heading as its label. A link, a search result, an "On this page" entry or the browser's history opens the target's fold and the folds around it. A review page opens a fold that holds a change. Search and the `llms` files read the text in a fold. A PDF and a single HTML file show the section open, and Markdown writes it as `<details>`.
+- **A dark image for a figure.** A figure takes `dark_blob` and `dark_media_type`, set together, and its alt text describes both images. The site shows the dark image when its Auto, Light and Dark setting selects the dark theme. A PDF and a single HTML file show the light image. Markdown writes the pair as a `<picture>` element. The first dark image turns on a new store feature: see "Changes".
+- **Images from another host in text.** Block text takes `![alt](url)`, alone or as the label of a link. The alt text must not be empty, and the URL must use HTTPS. The site, a PDF and a single HTML file show the alt text and load nothing from another host. Markdown keeps the image, so a README on GitHub shows it.
+- **One doc as one Markdown file.** `rdy export --format md --layout single --out <file>` writes the one doc that the selection holds as one Markdown file, with no front matter. Select the doc with `--profile`. A ref to a block of the doc, outside a collapsed section, becomes a `#slug` link. Any other ref becomes its label, with a warning. A figure needs `--assets <dir>`, a folder below the folder of `--out`, and rdy writes each image there, named by its SHA-256. `rdy_export` takes the same `layout: "single"` and `assets`.
+- **Paragraphs and code in list items.** A list item in block text can hold more paragraphs and fenced code. Indent each part past the item's marker, and put a blank line before a new paragraph. A fence of three backticks or tildes opens the code, with an optional language, and the same fence closes it. The code is literal, and it shows as a code block.
+- **Sign in to rdyhub with one command.** On a terminal, `rdy auth sign-in --install <origin>` asks `Sign in to <origin> as <machine>? [y/N]` in place. After a yes, it prints the code and the link and offers to open the link in your browser. Then it waits until you are signed in, denied or expired. `--machine-name` is now optional, and its default is the host name, cut to 64 characters. rdy sends the machine name to the hub when the sign-in starts. The prompt shows it before you say yes, and `--machine-name` sets another. Without a terminal, or with `--json`, `--card-hash`, `--answer` or `--relayed-by`, the card and relay path stays as it was. In `rdy_auth`, `machine_name` is optional for `start` too.
+- **A pending sign-in finishes on the next hub call.** A hub call that finds a pending sign-in whose next check is due checks it once, as `rdy auth state` does. So after you confirm in the browser, the next hub call works without a `state` call.
 
 ### Changes
 
-- **No format change.** Store format 19, dump format 4, and sync stream formats 2 and 3 stay, and no store feature is added. rdy 0.50.0 opens a store made by rdy 0.49.0 as it is, and loads every earlier dump. You do nothing to move.
-- **The index is rebuilt once.** The index gains tables for the counts that a take checks. The first time rdy 0.50.0 opens a store that an earlier rdy made, it rebuilds the store's index from the log. This costs about as much as `rdy reindex`, so on a store with a long history the first open takes longer. The log does not change, and neither do the ids, landings and tags in it.
-- **A take stops at the holder's limits.** A take now refuses with `E_LIMIT`, before it adds anything, when the holder would then pass a limit of its holder check. The message names the limit: `holder check exceeds 1000000 objects`, `holder check exceeds 1000000 edges` or `holder check exceeds 100000 landing depth`. The fix reads `keep the project; this holder takes no more history until its limit is raised`. Before, the take's walk through the whole history refused such a holder on its stream limits, with `stream exceeds ...`. The code stays `E_LIMIT`, and the holder check keeps its limits.
+- **Breaking for older rdy: rdy 0.51.0 adds the store feature `figure_dark` (class incompatible, minimum rdy 0.51.0); store format 19 and dump format 4 stay.** A store starts to use `figure_dark` only when its project first writes a figure with a dark image (in any view), and only a store or dump that uses it needs rdy 0.51.0: rdy 0.50.0 refuses one with `E_STORE_FORMAT` and names rdy 0.51.0. rdy 0.51.0 opens a store made by rdy 0.50.0 as it is, and loads every earlier dump.
+- **`figure_dark` never turns off.** It stays on even when you remove that figure later. Once it is on, rdy 0.50.0 and older refuse the store and its dumps with `E_STORE_FORMAT`: `store feature figure_dark needs rdy 0.51.0`. A project with no dark image stays open to older rdy. So add no dark image while someone still uses an older rdy on the project. The sync stream formats stay too.
+- **You do nothing to move.** If an older rdy wrote to the store after rdy 0.50.0, the first open with rdy 0.51.0 rebuilds the index once. That is not damage.
+- **The schema pack changes.** The built-in pack adds the optional `collapsed` to `section` and the two dark fields to `figure`, so its digest changes. The ids already in a store do not move. New landings hash the new pack.
+- **An indented paragraph in a list item is now its own paragraph.** Before, it joined the item's first paragraph. The stored text and its hashes do not change. Only the site, the prints and the exports change.
+- **A fence in a list item now opens code.** Its text is literal: a ref, an escape or other markup in it shows as typed. A ref in that code is not checked and adds no link.
+- **New refusals, with no new codes.** A figure's `dark_blob` gets the checks of `blob`, under its own name, such as `<id>'s dark_blob <value> is not a blob hash`. One dark field without the other is `E_VALIDATION`: `<id>'s dark_blob and dark_media_type are set together`. The single-file export refuses with `E_BAD_INPUT` when the selection holds more than one doc or a figure has no `--assets`. It also refuses an assets folder that is not empty or not below the folder of `--out`. `--assets` with another format or layout is `E_BAD_INPUT` too: `--assets applies to --format md --layout single only`.
+- **The agent guide covers the new features.** rdy's built-in guide has new rules for them. They cover paragraphs and code in list items, collapsed sections, images from another host, dark figures, the single-file export and the optional machine name. The rule for dark figures tells the agent to ask the person before the first one.
 
 ### Fixes
 
-- **A faster take.** A take now ends its walk through the holder's history when it has reached every key that the upload names. Before, it walked the whole history. `take_publication` also reuses the root snapshot that the take's check built, and does not build it again. rdyhub measured a publish at 466 ms before this change and 246 ms after it, as the median of five incremental publishes.
-- **A live site uses less memory.** The daemon serves the live site that `rdy site` opens. It keeps the last build of each scope that a page asked for, such as canon, a view or a tag. A build holds the bytes of every image in it. The builds that no open page uses now hold at most 256 MiB together. Past that, the daemon drops the least recently used build first, but it keeps the newest one. When a page asks for a dropped build, the daemon builds it again. The daemon checks the limit after a build and when it serves a build that it holds. It also checks the limit when the last open page of a build closes. Before, the daemon of an open site with many images only grew. On a server with 4 GB of memory, one daemon grew from 1.5 GB to 3 GB in 3 hours.
+- **Uploads from a long history.** An upload to rdyhub now counts only the records and edges that it sends against its limits of 1,000,000 each. Before, a project with a long history could fail even an upload of one landing with `stream exceeds 1000000 graph edges`. The upload's walk through the history also uses less memory.
+- **Counts catch up after an older rdy.** When an rdy older than 0.50.0 wrote to a holder after rdy 0.50.0, the counts that a take checks fell behind the log. A take could then accept past the holder's limits, until a `rdy reindex`. rdy 0.51.0 sees counts that are behind the log at open, and rebuilds the index once.
+- **Daemon memory with an open site.** The project daemon no longer grows while its live site is open. A site build held each figure in a buffer of up to twice the figure's size. On Linux with glibc, the freed figure memory also stayed with the process, so the daemon grew after each landing. rdy now reads each figure into one buffer of its size. On Linux with glibc, the daemon gives freed figure memory back to the system. No setting changes.
 
 ### Project and build
 
-- **rdy-store** gives the counts that a take checks, for tools that build on it, such as rdyhub: `Store::holder_counts`, `Store::landing_depth`, `Index::holder_counts`, `Index::landing_depth`, and `HolderCapacity` with `HolderCapacity::DEFAULT`. Two test hooks, `set_holder_capacity_for_tests` and `root_snapshot_reuses_for_tests`, are public in release builds too. Do not call them outside tests.
-- The dependencies do not change.
+- **The README comes from rdy.** rdy-core's README is now one doc in rdy, exported as one Markdown file at the landing that each release freezes for its notes. The release step adds the archives, the signing key, the release keys and the install commands to its last section. `qa-release-readme` checks the result byte for byte.
+- **rdy-store** gives tools that build on it, such as rdyhub: `closure_within` with `WalkBounds`, `FEATURE_FIGURE_DARK`, `FIGURE_DARK_REQUIRED_RDY`, `FIGURE_TYPE`, `DARK_BLOB_FIELD`, `is_dark_figure`, `counts_behind` and `pio::host_name`. `REGISTERED_FEATURES` now lists nine features, and `BatchReport` has the new field `record_features`. The test hook `closure_kept_links_for_tests` is public in release builds too. Do not call it outside tests.
+- **rdy-adapter** gives `AttachmentVariant`, and `AttachmentEntry` has the new field `variant`.
+- **Dependencies.** No crate is new to the build. rdy-render now uses `sha2`, already in the workspace, for the names of exported images. rdy-store turns on the `windows-sys` feature `Win32_System_SystemInformation`, for the host name on Windows.
+- **Build.** The website notice skips a `docs-v` release instead of failing. The end-to-end hook tests retry under load.
 
 ## Feedback
 
@@ -190,6 +214,10 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 - On Windows, the checksum step of the install guide, `Get-FileHash`, fails with "not recognized" when another program starts Windows PowerShell 5.1 from PowerShell 7. Run the step in a normal PowerShell 5.1 or 7 window.
 - Your meta project has its own daemon. `rdy serve --stop` in a project does not stop it.
 - A misspelt or unknown kind under a pack's `tensions_across` is ignored with no warning. The docs say it warns with `W_CONFIG_UNKNOWN`.
+- A publish that is already running fails with `E_UPSTREAM_AUTH` when another sign-in for the same install becomes due. Run `rdy auth state`, then publish again.
+- In a single-file export, a doc whose title holds two spaces in a row, such as `A  B`, gets a link to itself that misses. The heading is `# A B`, but the link is `#a--b`.
+- In a multiline field that is not a prose body, fenced code in a list item is also read as code. A ref in that code stays as typed, is not checked and adds no link. The rule is for prose bodies only.
+- In a project of about 50,000 blocks, writes became slower after rdy 0.46. On the test machine a write takes about 1 ms, where it took 0.55 ms, and about 1.5 ms when it returns consequences. This release does not change it.
 - Repo links. All but the first of these need deliveries from rdyhub:
   - Two views that each add a repo link with the same alias, for different repos, can both land. Reads then use the link with the lower block id.
   - A misspelt link kind on a cited target, such as `decided_byy`, is accepted with no warning.
@@ -227,8 +255,8 @@ This is early. Tell us what worked and what did not: https://github.com/adrenick
 
 rdy is licensed MIT OR Apache-2.0. The binaries also contain two libraries under the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/): `imbl` 7.0.2 and `imbl-sized-chunks` 0.2.0. This release attaches the exact source code of each, as its crates.io crate file. Each SHA-256 matches rdy's `Cargo.lock` at this release:
 
-- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
-- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.50.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
+- [imbl-7.0.2.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/imbl-7.0.2.crate) — SHA-256: `46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec`
+- [imbl-sized-chunks-0.2.0.crate](https://github.com/adrenickchrome/rdy-core/releases/download/v0.51.0/imbl-sized-chunks-0.2.0.crate) — SHA-256: `2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6`
 
 Each archive's `THIRD-PARTY-NOTICES.txt` gives the license of every library in the binary.
 
@@ -287,11 +315,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -301,11 +329,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 On Windows amd64, in PowerShell:
@@ -318,16 +346,16 @@ $s = [IO.File]::Open('C:\path\to\download\release-allowed-signers', [IO.FileMode
 & 'cmd.exe' '/d' '/c' 'ssh-keygen.exe -Y verify -f release-allowed-signers -I rdy-release -n rdy-release-v1 -s SHA256SUMS.sig < SHA256SUMS'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 $n = 0; foreach ($line in [IO.File]::ReadAllLines('C:\path\to\download\SHA256SUMS')) { $want = $line.Substring(0, 64); $name = $line.Substring(66); $file = [IO.Path]::Combine('C:\path\to\download', $name); if (Test-Path -LiteralPath $file) { $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower(); if ($got -cne $want) { throw ($name + ': FAILED') }; [Console]::Out.Write($name + ': OK' + [char]10); $n++ } }; if ($n -eq 0) { throw 'no archive was checked' }
-foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.50.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
-& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.50.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
+foreach ($dir in @('C:\path\to\unpack', 'C:\path\to\rdy-0.51.0')) { if (Test-Path -LiteralPath $dir) { throw ($dir + ' exists') }; [void][IO.Directory]::CreateDirectory($dir) }
+& (Join-Path $env:SystemRoot 'System32\tar.exe') '-xzf' 'C:\path\to\download\rdy-0.51.0-x86_64-pc-windows-msvc.tar.gz' '-C' 'C:\path\to\unpack'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
-[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.50.0\bin')
-[IO.File]::Copy('C:\path\to\unpack\rdy-0.50.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.50.0\bin\rdy.exe')
-& 'C:\path\to\rdy-0.50.0\bin\rdy.exe' '--version'
+[void][IO.Directory]::CreateDirectory('C:\path\to\rdy-0.51.0\bin')
+[IO.File]::Copy('C:\path\to\unpack\rdy-0.51.0-x86_64-pc-windows-msvc\rdy.exe', 'C:\path\to\rdy-0.51.0\bin\rdy.exe')
+& 'C:\path\to\rdy-0.51.0\bin\rdy.exe' '--version'
 if ($LASTEXITCODE -ne 0) { throw 'a step failed' }
 }
 # Add the version's bin directory to PATH in this session:
-# $env:Path = 'C:\path\to\rdy-0.50.0\bin;' + $env:Path
+# $env:Path = 'C:\path\to\rdy-0.51.0\bin;' + $env:Path
 # rdy needs SSH_AUTH_SOCK, even when ssh works without it. Set it to the agent pipe:
 # $env:SSH_AUTH_SOCK = '\\.\pipe\openssh-ssh-agent'
 ```
@@ -341,16 +369,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUyk+U70yjuD/Ixg86ti9BBo0Kc/NL0ps3KAOAIVC/8' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.50.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.50.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.50.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.50.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.50.0/bin/rdy' &&
-'/path/to/rdy-0.50.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.51.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.51.0-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.51.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.51.0-aarch64-apple-darwin/rdy' '/path/to/rdy-0.51.0/bin/rdy' &&
+'/path/to/rdy-0.51.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.50.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.51.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
