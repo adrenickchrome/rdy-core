@@ -1437,7 +1437,7 @@ fn platform_label(target: &str) -> &'static str {
     }
 }
 
-/// The README's Archives part for `version` (D-81YJG): one row per release target, in manifest
+/// The README's Archives part for `version`: one row per release target, in manifest
 /// order, named by [`archive_name`], then the release's own links and the download steps.
 pub fn readme_archives_section(version: &str) -> String {
     let labels: Vec<&str> = MANIFEST_TARGETS.iter().map(|t| platform_label(t)).collect();

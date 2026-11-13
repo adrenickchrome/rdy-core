@@ -1281,7 +1281,7 @@ fn rfr4_readme_checks_every_html_image_attribute_form() {
 #[cfg(unix)]
 #[test]
 fn rfr4_readme_refuses_links_and_nonregular_inputs() {
-    use std::os::unix::fs::symlink;
+    use rdy_qa::platform::symlink;
     let file_msg = "release readme: file operation failed";
     let assets_msg = "release readme: assets/readme does not match the source";
     let source = image_source();

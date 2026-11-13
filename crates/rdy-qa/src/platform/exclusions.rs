@@ -288,6 +288,13 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         counterparts: &["wx16_native_a_forged_pid_file_never_ends_a_process"],
     },
     Exclusion {
+        file: "crates/rdy-qa/tests/release/release_readme.rs",
+        gate: Gate::Item,
+        tests: &["rfr4_readme_refuses_links_and_nonregular_inputs"],
+        mechanism: "Named pipes made with mkfifo, and symbolic links, in place of the README tool's inputs.",
+        counterparts: &["wx24_reparse_fixture_is_detected_as_a_reparse_point"],
+    },
+    Exclusion {
         file: "crates/rdy-qa/tests/release/release_install_unix.rs",
         gate: Gate::File,
         tests: &["pre3_render_refuses_non_utf8_bytes"],
