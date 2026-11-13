@@ -106,6 +106,25 @@ fn blobs_chunk_and_round_trip() {
     assert_eq!(s.put_blob(&data).unwrap(), h);
 }
 
+/// TASK-2307: a blob of several chunks is read into one buffer of its own length. Grown chunk by
+/// chunk, a 2.2 MiB blob held a 4 MiB buffer, and the live site keeps that buffer in each build.
+#[test]
+fn a_blob_read_holds_no_more_than_its_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    let data: Vec<u8> = (0..(22 * 1024 * 1024 / 10))
+        .map(|i| (i % 253) as u8)
+        .collect();
+    let h = s.put_blob(&data).unwrap();
+    let read = s.get_blob(&h).unwrap();
+    assert_eq!(read, data);
+    assert_eq!(
+        read.capacity(),
+        data.len(),
+        "the buffer is the blob's length"
+    );
+}
+
 #[test]
 fn commit_change_computes_deps_from_producers() {
     let dir = tempfile::tempdir().unwrap();

@@ -529,6 +529,27 @@ fn slb1_inactive_builds_stay_under_the_byte_cap() {
     assert_eq!(sh.site.held_bytes(), sh.site.held_inactive_bytes());
 }
 
+/// TASK-2307: a build holds each figure in a buffer of the figure's length, so the bytes the cap
+/// counts are the bytes the build holds. A figure of more than one store chunk was held in a
+/// buffer of up to twice its length, which the cap did not count.
+#[test]
+fn slb1_a_build_holds_each_figure_at_its_length() {
+    let h = figures_host();
+    let sh = shared(&h);
+    let b = sh.site.refresh(&sh, &C).unwrap();
+    let figures: Vec<(&String, &Vec<u8>)> = b
+        .live
+        .files
+        .iter()
+        .filter(|(_, f)| f.starts_with(b"\x89PNG"))
+        .collect();
+    assert_eq!(figures.len(), 8, "{:?}", b.live.files.keys());
+    for (path, f) in figures {
+        assert!(f.len() > 1024 * 1024, "{path}: {} bytes", f.len());
+        assert_eq!(f.capacity(), f.len(), "{path} is held at its length");
+    }
+}
+
 /// slb1: a build dropped by the byte cap is built again on its next request, to the same bytes.
 #[test]
 fn slb1_a_dropped_build_is_rebuilt_on_its_next_request() {

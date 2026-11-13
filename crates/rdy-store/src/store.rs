@@ -4107,8 +4107,11 @@ impl StoreReader {
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        let mut out = Vec::new();
-        self.read_blob(h, &mut |chunk| out.extend_from_slice(chunk))?;
+        let m = self.blob_manifest(h)?;
+        // one buffer of the blob's length (TASK-2307): grown chunk by chunk, a blob of more than
+        // one chunk ended in a buffer of up to twice its length, which a live site build keeps
+        let mut out = Vec::with_capacity(usize::try_from(m.len.min(MAX_BLOB_BYTES)).unwrap_or(0));
+        self.read_blob(h, &m, &mut |chunk| out.extend_from_slice(chunk))?;
         Ok(out)
     }
 
@@ -4144,10 +4147,15 @@ impl StoreReader {
         Ok(true)
     }
 
-    /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
-    /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
-    fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
-        let m = self.blob_manifest(h)?;
+    /// Hands each chunk of blob `h`, whose manifest `m` was checked against what `put_blob`
+    /// writes ([`Self::blob_manifest`]), to `sink` in order. Nothing is read before the manifest
+    /// is known to be canonical.
+    fn read_blob(
+        &self,
+        h: &Hash,
+        m: &BlobManifest,
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), StoreError> {
         let mut left = m.len;
         for c in &m.chunks {
             let bytes = self.blob_chunk(c)?;
