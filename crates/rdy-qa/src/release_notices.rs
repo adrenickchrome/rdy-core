@@ -3121,7 +3121,7 @@ mod tests {
             license,
             concat!(
                 "\n",
-                "rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your choice.\n",
+                "rdy is available under either [MIT](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-MIT) or [Apache 2.0](https://github.com/adrenickchrome/rdy-core/blob/main/LICENSE-APACHE), at your choice.\n",
                 "\n",
                 "rdy's binaries also contain open-source libraries under their own licenses. Two of them, `imbl` and `imbl-sized-chunks`, use the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/). Each release archive holds `THIRD-PARTY-NOTICES.txt` with every library's license. Each release also attaches the exact source code of the MPL-2.0 libraries.\n",
             )
