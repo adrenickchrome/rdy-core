@@ -4879,7 +4879,7 @@ fn packs_row() -> Value {
         let mut section = doc.clone();
         section.id = BlockId::parse("s-SECT1").expect("a section id");
         section.block_type = "section".to_string();
-        section.parent = Some(doc.id);
+        section.parent = Some(doc.id.clone());
         section.fields = [field("title", "Goals")].into_iter().collect();
         if let Some(v) = value {
             section.fields.insert("collapsed".to_string(), v);
