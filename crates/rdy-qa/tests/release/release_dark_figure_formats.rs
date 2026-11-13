@@ -34,12 +34,12 @@ const MEMBERS: [(&str, &str, &str); 3] = [
     (
         "dump",
         DUMP_EXPECT,
-        "b6b68175c227aae5b869d55394ae6a939975241eb005391a4a2ae4a312e4b4c6",
+        "de7494771ae5abb3ee975a270b222d0e22b63eff45077bba96fc7ceb9f50f7ba",
     ),
     (
         "store/figure-dark-1",
         "expect.json",
-        "c68069fa0dcca3507b7c2b8fb776963d941d511e1d1bc4c4d784531b27335604",
+        "07d0a6314d59f98fc88b03967d9803282a5dd3e5d295e4b02a0b228fe869dc40",
     ),
 ];
 
@@ -167,7 +167,7 @@ fn rfr2_every_released_dump_still_loads() {
 
     let file = fixtures().join("dump").join(DUMP);
     let expect = read_json(&fixtures().join("dump").join(DUMP_EXPECT));
-    assert_eq!(expect["published"], json!(false));
+    assert_eq!(expect["published"], json!(true));
     assert_eq!(foreign_fixture::dump_file_facts(&file), expect["file"]);
     assert_eq!(expect["file"]["dump_format"], json!(4));
     let fd = expect["file"]["store_format"]["features"]["features"]

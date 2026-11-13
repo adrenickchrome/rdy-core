@@ -22,7 +22,7 @@
     }
   ],
   "producer_commit": "f9952e26a58ca1e639399581ad336270bb7bcf53",
-  "published": false,
+  "published": true,
   "rdy": "0.50.0",
   "required_rdy": "0.51.0",
   "store": {

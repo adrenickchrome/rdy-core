@@ -492,7 +492,7 @@ const FIRST_USE: &[FirstUse] = &[
             ),
             (
                 "v4-f1-e1-figure-dark.expect.json",
-                "b6b68175c227aae5b869d55394ae6a939975241eb005391a4a2ae4a312e4b4c6",
+                "de7494771ae5abb3ee975a270b222d0e22b63eff45077bba96fc7ceb9f50f7ba",
             ),
         ],
         native: "fixtures/store/figure-dark-1/expect.json",

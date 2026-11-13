@@ -121,7 +121,7 @@
     },
     "stream_format": 2
   },
-  "published": false,
+  "published": true,
   "rdy": "0.50.0",
   "required_rdy": "0.51.0",
   "whole": {

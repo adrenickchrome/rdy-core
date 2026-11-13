@@ -547,7 +547,7 @@ fn rfr2_dark_fixture_keeps_hashes_landings_and_tags() {
         Hash::of(foreign_fixture::inventory_text(&dir).as_bytes()).to_string(),
         INVENTORY_BLAKE3
     );
-    assert_eq!(want["published"], json!(false));
+    assert_eq!(want["published"], json!(true));
     assert_eq!(want["required_rdy"], json!(FIGURE_DARK_REQUIRED_RDY));
     let commit = want["producer_commit"].as_str().unwrap();
     assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
