@@ -378,6 +378,7 @@ fn para(s: &str) -> PBlock {
                 code: false,
                 link: None,
                 image: None,
+                ref_of: None,
             }]
         },
     }

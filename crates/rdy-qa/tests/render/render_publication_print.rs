@@ -1178,6 +1178,93 @@ fn pub8_blocked_export_preserves_target_and_path_guards() {
         );
     }
     assert!(!base.join("l.out").exists());
+
+    // rfr3: the single Markdown file joins the matrix, with and without an assets folder
+    let single = |profile: &str, out: &Path, assets: Option<&str>| {
+        print::export_profile_with(
+            &st,
+            "canon",
+            profile,
+            out,
+            Format::Md,
+            &print::ExportOptions {
+                layout: Some(print::ExportLayout::Single),
+                assets,
+            },
+        )
+    };
+    let (before, entries_before) = (tree(base), entries(base));
+    for assets in [None, Some("single-assets")] {
+        let e = single("pubp", &base.join("out-single.md"), assets).unwrap_err();
+        assert_eq!(e.code, E_PUBLICATION_REFERENCE, "single {assets:?}: {e}");
+        assert_eq!(
+            e.message,
+            format!("Public profile has {count} references outside its selection.")
+        );
+        assert_eq!(
+            entries(base),
+            entries_before,
+            "single {assets:?}: nothing staged"
+        );
+        assert_eq!(tree(base), before, "single {assets:?}: nothing changed");
+        for out in [
+            rdy.join("out.md"),
+            physical.join("out.md"),
+            link.join("out.md"),
+            link.clone(),
+            other.join("..").join(".rdy").join("out.md"),
+        ] {
+            let e = single("orgp", &out, assets).unwrap_err();
+            if !rdy_qa::platform::follow_refused(&out) {
+                assert_eq!(
+                    e.code,
+                    E_BAD_INPUT,
+                    "single {}: {}",
+                    out.display(),
+                    e.message
+                );
+                assert_eq!(
+                    e.message,
+                    format!("{} is inside the project .rdy directory", out.display())
+                );
+            }
+            assert_eq!(entries(&rdy), store_before, "single: no file in the store");
+        }
+        let e = single("orgp", &base.join("none").join("out.md"), assets).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert!(e.message.ends_with("does not exist"), "{}", e.message);
+        let e = single("orgp", Path::new("/"), assets).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_BAD_INPUT, "/ does not name a directory")
+        );
+        // no overwrite: an existing file, of any kind
+        for held in ["held.pdf", "held-md"] {
+            let e = single("orgp", &base.join(held), assets).unwrap_err();
+            assert_eq!(e.code, E_ALREADY_EXISTS, "single {held}");
+        }
+    }
+    // the layout refusal of a file format comes first, then the assets one (D-H1FRY)
+    for format in [Format::Pdf, Format::Html] {
+        let e = print::export_profile_with(
+            &st,
+            "canon",
+            "orgp",
+            &base.join("l.out"),
+            format,
+            &print::ExportOptions {
+                layout: Some(print::ExportLayout::Single),
+                assets: Some("assets"),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_BAD_INPUT, "--layout single applies to the md format only")
+        );
+    }
+    assert!(!base.join("l.out").exists());
+    assert_eq!(std::fs::read(base.join("held.pdf")).unwrap(), b"mine pdf");
     drop(st);
     // the store still opens and checks clean
     let World { dir, r, .. } = w;

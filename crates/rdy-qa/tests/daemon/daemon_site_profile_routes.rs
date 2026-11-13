@@ -1118,6 +1118,7 @@ fn spv6_blocked_public_live_serves_while_output_refuses() {
                     layout: None,
                     scope: None,
                     profile: Some(key.into()),
+                    assets: None,
                     view: None,
                 })
                 .unwrap_err();

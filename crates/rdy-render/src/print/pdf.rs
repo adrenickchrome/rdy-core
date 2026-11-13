@@ -66,6 +66,7 @@ pub fn write_pdf(p: &Print, out: &Path) -> Result<PrintSummary, RdyError> {
     Ok(PrintSummary {
         out: out.display().to_string(),
         format: "pdf",
+        layout: None,
         docs: count(PageKind::Doc),
         folders: count(PageKind::Folder),
         assets: r.images,
@@ -887,6 +888,7 @@ mod tests {
             code,
             link: None,
             image: None,
+            ref_of: None,
         }
     }
 

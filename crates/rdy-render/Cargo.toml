@@ -19,6 +19,7 @@ skrifa.workspace = true
 pdf-writer.workspace = true
 subsetter.workspace = true
 miniz_oxide.workspace = true
+sha2.workspace = true
 
 [features]
 # Counts the render entry points and the preparations (see `probe`); on for the adapter's and

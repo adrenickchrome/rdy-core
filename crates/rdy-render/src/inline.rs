@@ -208,7 +208,7 @@ fn plain_refs_in(
                 Block::Para(p) => read(p, false),
                 Block::List(l) => {
                     let mut lines = vec![];
-                    list_plain(l, &|t| read(t, false), &mut lines);
+                    list_plain(l, &|t| read(t, false), coded, &mut lines);
                     lines.join("\n")
                 }
             })
@@ -336,6 +336,37 @@ pub(crate) fn with_image_markup<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     IMAGE_MARKUP.with(|m| m.set(before));
     out
+}
+
+thread_local! {
+    /// Whether the print model's source marks each reference with the id it names
+    /// ([`with_ref_markup`]): the single Markdown file reads them to link a reference within its
+    /// doc and to warn of any other (D-ESHXM rule 8, D-6PR3Y rule 6).
+    static REF_MARKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with each reference in the print model's source ([`with_image_markup`]) marked with the
+/// token it names (`data-rdy-ref`). A page never holds this markup.
+pub(crate) fn with_ref_markup<T>(f: impl FnOnce() -> T) -> T {
+    let before = REF_MARKUP.with(|m| m.replace(true));
+    let out = f();
+    REF_MARKUP.with(|m| m.set(before));
+    out
+}
+
+/// Whether references are being marked ([`with_ref_markup`]): every block's print source is then
+/// rendered, not only one that may hold a remote image.
+pub(crate) fn ref_markup() -> bool {
+    REF_MARKUP.with(std::cell::Cell::get)
+}
+
+/// The attribute that marks a reference in the print model's source, or nothing.
+fn ref_mark(span: &RefSpan) -> String {
+    if IMAGE_MARKUP.with(std::cell::Cell::get) && ref_markup() {
+        format!(" data-rdy-ref=\"{}\"", escape(&span.token))
+    } else {
+        String::new()
+    }
 }
 
 /// Whether `text` may hold a remote image: it holds `![`, the opener every one starts with. A
@@ -926,30 +957,39 @@ fn render_html(
                 let link = target_of(span, ctx);
                 let words = ref_words(span, link.as_ref(), ctx.unavailable);
                 let words = text_html(&one_period(span, words, next));
+                // the print model's source marks the reference (never a page)
+                let mark = ref_mark(span);
+                let plain = |out: &mut String| {
+                    if mark.is_empty() || words.is_empty() {
+                        out.push_str(&words)
+                    } else {
+                        out.push_str(&format!("<span{mark}>{words}</span>"))
+                    }
+                };
                 match link {
                     _ if in_link => out.push_str(&words),
                     // a named profile: a reference outside the selection is its words alone
-                    None if ctx.local_link.is_some() => out.push_str(&words),
+                    None if ctx.local_link.is_some() => plain(out),
                     // the target resolves but has no place on the site: its words, unlinked
-                    Some(Link { href: None, .. }) => out.push_str(&words),
+                    Some(Link { href: None, .. }) => plain(out),
                     Some(Link {
                         href: Some(h),
                         title,
                         ..
                     }) if title.is_empty() => {
-                        out.push_str(&format!("<a href=\"{}\">{words}</a>", escape(&h)))
+                        out.push_str(&format!("<a href=\"{}\"{mark}>{words}</a>", escape(&h)))
                     }
                     Some(Link {
                         href: Some(h),
                         title,
                         ..
                     }) => out.push_str(&format!(
-                        "<a href=\"{}\" title=\"{}\">{words}</a>",
+                        "<a href=\"{}\" title=\"{}\"{mark}>{words}</a>",
                         escape(&h),
                         escape(&title)
                     )),
                     None => out.push_str(&format!(
-                        "<span class=\"ref unresolved\" title=\"This reference could not be resolved\">{words}</span>"
+                        "<span class=\"ref unresolved\" title=\"This reference could not be resolved\"{mark}>{words}</span>"
                     )),
                 }
             }
@@ -1085,10 +1125,40 @@ struct List {
     items: Vec<Item>,
 }
 
+/// A list item: its parts in the order they are written (D-7M4TR). The first part is the
+/// marker line's paragraph.
 #[derive(Debug)]
 struct Item {
-    text: String,
-    lists: Vec<List>,
+    parts: Vec<Part>,
+}
+
+/// One part of a list item (D-7M4TR): a paragraph of spans, fenced code (literal text: no
+/// reference, no markup), or a nested list.
+#[derive(Debug)]
+enum Part {
+    Para(String),
+    Code { lang: Option<String>, text: String },
+    List(List),
+}
+
+impl Item {
+    fn new(text: &str) -> Item {
+        Item {
+            parts: vec![Part::Para(text.to_string())],
+        }
+    }
+
+    /// Adds a line to the paragraph that ends the item, or starts one when the item ends with
+    /// another part.
+    fn push_line(&mut self, line: &str) {
+        match self.parts.last_mut() {
+            Some(Part::Para(t)) => {
+                t.push('\n');
+                t.push_str(line);
+            }
+            _ => self.parts.push(Part::Para(line.to_string())),
+        }
+    }
 }
 
 /// A line's indent: leading spaces, a tab counting as 4.
@@ -1097,6 +1167,23 @@ fn indent(line: &str) -> usize {
         .take_while(|c| *c == ' ' || *c == '\t')
         .map(|c| if c == '\t' { 4 } else { 1 })
         .sum()
+}
+
+/// `line` with up to `n` columns of its indent removed (a tab counting as 4).
+fn dedent(line: &str, n: usize) -> &str {
+    let mut cols = 0;
+    for (i, c) in line.char_indices() {
+        let w = match c {
+            ' ' => 1,
+            '\t' => 4,
+            _ => return &line[i..],
+        };
+        if cols + w > n {
+            return &line[i..];
+        }
+        cols += w;
+    }
+    ""
 }
 
 /// A marker line: its indent, whether it is numbered, its number and its text.
@@ -1119,6 +1206,54 @@ fn marker(line: &str) -> Option<(usize, bool, u32, &str)> {
     (!text.is_empty()).then_some((indent(line), ordered, number, text))
 }
 
+/// An opening code fence (D-7M4TR rule 2): three or more backticks or tildes, then an optional
+/// language. Its character, its length and its language. A backtick fence whose info holds a
+/// backtick is no fence (it would read as a code span).
+fn fence_open(line: &str) -> Option<(char, usize, Option<String>)> {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let ch = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let len = rest.chars().take_while(|c| *c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    let info = rest[len..].trim();
+    if ch == '`' && info.contains('`') {
+        return None;
+    }
+    let lang = info.split_whitespace().next().map(String::from);
+    Some((ch, len, lang))
+}
+
+/// Whether `line` closes a fence of `ch` that opened with `len` characters: the same character,
+/// at least as many, and nothing else on the line.
+fn fence_close(line: &str, ch: char, len: usize) -> bool {
+    let rest = line.trim();
+    rest.chars().count() >= len && rest.chars().all(|c| c == ch)
+}
+
+/// Fenced code being read in a list item.
+struct OpenCode {
+    ch: char,
+    len: usize,
+    /// The opening fence line's indent, which each code line drops.
+    indent: usize,
+    lang: Option<String>,
+    lines: Vec<String>,
+}
+
+impl OpenCode {
+    /// The code as a part: a fence with no closing line keeps no blank line at its end.
+    fn into_part(mut self) -> Part {
+        while self.lines.last().is_some_and(|l| l.trim().is_empty()) {
+            self.lines.pop();
+        }
+        Part::Code {
+            lang: self.lang,
+            text: self.lines.join("\n"),
+        }
+    }
+}
+
 fn parse_body(text: &str) -> Vec<Block> {
     let lines: Vec<&str> = text.lines().collect();
     // the first line at or after each line that is not blank: one reverse pass, not a scan per
@@ -1134,6 +1269,10 @@ fn parse_body(text: &str) -> Vec<Block> {
     let mut out: Vec<Block> = vec![];
     let mut para: Vec<&str> = vec![];
     let mut stack: Vec<List> = vec![];
+    // the fenced code of the innermost list's last item, while it is open
+    let mut code: Option<OpenCode> = None;
+    // a blank line came before this line inside a list: an indented line starts a new paragraph
+    let mut after_blank = false;
     fn flush(para: &mut Vec<&str>, out: &mut Vec<Block>) {
         if !para.is_empty() {
             out.push(Block::Para(para.join("\n")));
@@ -1143,7 +1282,7 @@ fn parse_body(text: &str) -> Vec<Block> {
     fn close_one(stack: &mut Vec<List>, out: &mut Vec<Block>) {
         if let Some(l) = stack.pop() {
             match stack.last_mut().and_then(|p| p.items.last_mut()) {
-                Some(item) => item.lists.push(l),
+                Some(item) => item.parts.push(Part::List(l)),
                 None => out.push(Block::List(l)),
             }
         }
@@ -1153,36 +1292,65 @@ fn parse_body(text: &str) -> Vec<Block> {
             close_one(stack, out);
         }
     }
+    /// Ends the open code: it becomes the last part of the innermost list's last item.
+    fn end_code(code: &mut Option<OpenCode>, stack: &mut [List]) {
+        if let Some(c) = code.take()
+            && let Some(item) = stack.last_mut().and_then(|l| l.items.last_mut())
+        {
+            item.parts.push(c.into_part());
+        }
+    }
     let open = |indent: usize, ordered: bool, start: u32, text: &str| List {
         ordered,
         start,
         indent,
-        items: vec![Item {
-            text: text.to_string(),
-            lists: vec![],
-        }],
+        items: vec![Item::new(text)],
     };
     for (i, line) in lines.iter().enumerate() {
+        if let Some(c) = code.as_mut() {
+            // the code is the item's until a line closes it or a line ends the item
+            let item_indent = stack.last().map_or(0, |l| l.indent);
+            if line.trim().is_empty() {
+                c.lines.push(String::new());
+                continue;
+            }
+            if indent(line) > item_indent {
+                if fence_close(line, c.ch, c.len) {
+                    end_code(&mut code, &mut stack);
+                } else {
+                    let kept = dedent(line, c.indent).to_string();
+                    c.lines.push(kept);
+                }
+                continue;
+            }
+            // a line no deeper than the item's marker ends the item, and the code with it
+            end_code(&mut code, &mut stack);
+            after_blank = false;
+        }
         if line.trim().is_empty() {
             flush(&mut para, &mut out);
-            if let Some(inner) = stack.last() {
+            if !stack.is_empty() {
                 let next = lines.get(next_nonblank[i + 1]);
-                let keep = next.is_some_and(|n| marker(n).is_some() || indent(n) > inner.indent);
-                if !keep {
+                // the next line belongs to a list that stays open: a marker, or a line indented
+                // past an open list's marker
+                let keep = next.is_some_and(|n| {
+                    marker(n).is_some() || stack.iter().any(|l| indent(n) > l.indent)
+                });
+                if keep {
+                    after_blank = true;
+                } else {
                     close_all(&mut stack, &mut out);
                 }
             }
             continue;
         }
         if let Some((ind, ordered, number, item)) = marker(line) {
+            after_blank = false;
             flush(&mut para, &mut out);
             while stack.last().is_some_and(|l| l.indent > ind) {
                 close_one(&mut stack, &mut out);
             }
-            let new_item = Item {
-                text: item.to_string(),
-                lists: vec![],
-            };
+            let new_item = Item::new(item);
             let depth = stack.len();
             match stack.last_mut() {
                 Some(l) if l.indent == ind && l.ordered == ordered => l.items.push(new_item),
@@ -1196,11 +1364,33 @@ fn parse_body(text: &str) -> Vec<Block> {
             }
             continue;
         }
+        let ind = indent(line);
+        let fence = fence_open(line);
+        // a new part after a blank line, or a fence, belongs to the innermost item whose marker
+        // the line is indented past (D-7M4TR rule 1): the lists it is not inside end
+        if (after_blank || fence.is_some()) && stack.iter().any(|l| ind > l.indent) {
+            while stack.last().is_some_and(|l| l.indent >= ind) {
+                close_one(&mut stack, &mut out);
+            }
+        }
+        let blank_before = std::mem::take(&mut after_blank);
         match stack.last_mut() {
-            Some(l) if indent(line) > l.indent => {
-                if let Some(it) = l.items.last_mut() {
-                    it.text.push('\n');
-                    it.text.push_str(line.trim());
+            Some(l) if ind > l.indent => {
+                let Some(it) = l.items.last_mut() else {
+                    continue;
+                };
+                if let Some((ch, len, lang)) = fence {
+                    code = Some(OpenCode {
+                        ch,
+                        len,
+                        indent: ind,
+                        lang,
+                        lines: vec![],
+                    });
+                } else if blank_before {
+                    it.parts.push(Part::Para(line.trim().to_string()));
+                } else {
+                    it.push_line(line.trim());
                 }
             }
             _ => {
@@ -1209,9 +1399,31 @@ fn parse_body(text: &str) -> Vec<Block> {
             }
         }
     }
+    end_code(&mut code, &mut stack);
     flush(&mut para, &mut out);
     close_all(&mut stack, &mut out);
     out
+}
+
+/// Fenced code in a list item as a `code` block shows its body (D-7M4TR): its language's label,
+/// the code-copy control, and the code highlighted; no reference or markup is read in it.
+fn item_code_html(lang: Option<&str>, text: &str) -> String {
+    let lang = lang.unwrap_or("").trim();
+    let human = match crate::highlight::human_name(lang) {
+        _ if lang.is_empty() => "Code".to_string(),
+        n if n.is_empty() => "Code".to_string(),
+        n => n,
+    };
+    let class = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{}\"", escape(lang))
+    };
+    format!(
+        "<div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">{}</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code{class}>{}</code></pre></div>",
+        escape(&human),
+        crate::highlight::html(lang, text)
+    )
 }
 
 fn list_html(l: &List, ctx: &Ctx, out: &mut String) {
@@ -1223,20 +1435,38 @@ fn list_html(l: &List, ctx: &Ctx, out: &mut String) {
     }
     for it in &l.items {
         out.push_str("<li>");
-        out.push_str(&spans_html(&it.text, ctx));
-        for sub in &it.lists {
-            list_html(sub, ctx, out);
+        for (i, part) in it.parts.iter().enumerate() {
+            match part {
+                // the marker line's paragraph is the item's text, as it always was; a later
+                // paragraph is a paragraph of its own
+                Part::Para(t) if i == 0 => out.push_str(&spans_html(t, ctx)),
+                Part::Para(t) => {
+                    out.push_str("<p>");
+                    out.push_str(&spans_html(t, ctx));
+                    out.push_str("</p>");
+                }
+                Part::Code { lang, text } => out.push_str(&item_code_html(lang.as_deref(), text)),
+                Part::List(sub) => list_html(sub, ctx, out),
+            }
         }
         out.push_str("</li>");
     }
     out.push_str(&format!("</{tag}>"));
 }
 
-fn list_plain(l: &List, words: &dyn Fn(&str) -> String, lines: &mut Vec<String>) {
+/// The plain lines of a list: each paragraph read by `words`, and fenced code as its literal
+/// text (in the coded form, between the code marks).
+fn list_plain(l: &List, words: &dyn Fn(&str) -> String, coded: bool, lines: &mut Vec<String>) {
     for it in &l.items {
-        lines.push(words(&it.text));
-        for sub in &it.lists {
-            list_plain(sub, words, lines);
+        for part in &it.parts {
+            match part {
+                Part::Para(t) => lines.push(words(t)),
+                Part::Code { text, .. } if coded => {
+                    lines.push(format!("{CODE_OPEN}{}{CODE_CLOSE}", code_escape(text)))
+                }
+                Part::Code { text, .. } => lines.push(text.clone()),
+                Part::List(sub) => list_plain(sub, words, coded, lines),
+            }
         }
     }
 }

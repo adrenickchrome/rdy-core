@@ -9,6 +9,24 @@ use std::path::Path;
 
 const FORMATS: [Format; 3] = [Format::Pdf, Format::Html, Format::Md];
 
+/// rfr3: the single Markdown file, with and without an assets folder, keeps the same path rules.
+fn export_single(
+    r: &Rdy,
+    out: &Path,
+    assets: Option<&str>,
+) -> Result<print::PrintSummary, rdy_engine::RdyError> {
+    print::export_with(
+        &r.read(),
+        &Scope::Canon,
+        out,
+        Format::Md,
+        &print::ExportOptions {
+            layout: Some(print::ExportLayout::Single),
+            assets,
+        },
+    )
+}
+
 /// Every path under `dir` (files and directories), relative to it, sorted.
 fn paths(dir: &Path) -> Vec<String> {
     let mut out = vec![];
@@ -55,6 +73,28 @@ fn assert_refused_inside(r: &Rdy, out: &Path, store: &Path) {
             "{format:?}: no out"
         );
         assert_eq!(paths(store), before, "{format:?}: no new file in the store");
+    }
+    for assets in [None, Some("assets")] {
+        let before = paths(store);
+        let e = export_single(r, out, assets).expect_err("a single file inside .rdy");
+        if !rdy_qa::platform::follow_refused(out) {
+            assert_eq!(e.code, E_BAD_INPUT, "single {assets:?}: {}", e.message);
+            assert_eq!(
+                e.message,
+                format!("{} is inside the project .rdy directory", out.display()),
+                "single {assets:?}"
+            );
+            assert_eq!(e.fix, "export to a path outside .rdy", "single {assets:?}");
+        }
+        assert!(
+            std::fs::symlink_metadata(out).is_err(),
+            "single {assets:?}: no out"
+        );
+        assert_eq!(
+            paths(store),
+            before,
+            "single {assets:?}: no new file in the store"
+        );
     }
 }
 
@@ -162,6 +202,18 @@ fn ec11_every_format_refuses_an_out_with_no_file_name() {
         assert_eq!(
             e.fix, "pass a directory path such as ./docs-md",
             "{format:?}"
+        );
+    }
+    for assets in [None, Some("assets")] {
+        let e = export_single(&r, Path::new("/"), assets).expect_err("no file name");
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_BAD_INPUT,
+                "/ does not name a directory",
+                "pass a directory path such as ./docs-md"
+            ),
+            "single {assets:?}"
         );
     }
     // the file writers apply the same rule when they are called on their own

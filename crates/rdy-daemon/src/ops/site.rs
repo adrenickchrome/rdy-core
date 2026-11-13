@@ -14,7 +14,8 @@ pub(super) struct OutArgs {
 }
 
 /// The print arguments of the `export` op (O1): `format` is `pdf`, `html` or `md`; `layout` is
-/// `mkdocs` or `techdocs`, with `md` only.
+/// `mkdocs`, `techdocs` or `single`, with `md` only; `assets` is the single Markdown file's
+/// assets folder, relative to the folder of `out` (D-6PR3Y, D-H1FRY).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExportArgs {
@@ -23,10 +24,12 @@ pub(super) struct ExportArgs {
     layout: Option<String>,
     scope: Option<String>,
     profile: Option<String>,
+    #[serde(default)]
+    assets: Option<String>,
 }
 
 /// The shape of the `export` op's arguments.
-pub(super) const EXPORT_SHAPE: &str = "{out, format, layout?, scope?, profile?}";
+pub(super) const EXPORT_SHAPE: &str = "{out, format, layout?, scope?, profile?, assets?}";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,6 +44,7 @@ enum FormatArg {
 enum LayoutArg {
     Mkdocs,
     Techdocs,
+    Single,
 }
 
 /// `text` as one of the closed set `T` names; anything else is the op's argument error.
@@ -91,6 +95,7 @@ pub(super) fn export(cx: &OpContext, a: ExportArgs) -> Result<Value, RdyError> {
         &a.format,
         a.layout.as_deref(),
         a.profile.as_deref(),
+        a.assets.as_deref(),
     )
 }
 
@@ -118,8 +123,9 @@ pub(crate) fn render_static(
     Ok(to_json(&summary))
 }
 
-/// Prints `scope_text` at `out` as `format` (`pdf`, `html` or `md`) and `layout` (`mkdocs` or `techdocs`), and
-/// replies with the print's summary. The scope and the profile read as [`render_static`] reads
+/// Prints `scope_text` at `out` as `format` (`pdf`, `html` or `md`) and `layout` (`mkdocs`,
+/// `techdocs` or `single`), with the single file's `assets` folder, and replies with the print's
+/// summary. The scope and the profile read as [`render_static`] reads
 /// them: with a profile, its selected view and its reference check; without, the full source.
 /// The `export` op and the daemon's `Engine::export` (`rdy_export`) both print through it.
 pub(crate) fn export_print(
@@ -130,8 +136,9 @@ pub(crate) fn export_print(
     format: &str,
     layout: Option<&str>,
     profile: Option<&str>,
+    assets: Option<&str>,
 ) -> Result<Value, RdyError> {
-    use rdy_render::print::{Format, Layout};
+    use rdy_render::print::{ExportLayout, ExportOptions, Format, Layout};
     // a scope that does not resolve is refused before a format that does not parse, as it was
     let scope = match profile {
         Some(_) => None,
@@ -146,12 +153,16 @@ pub(crate) fn export_print(
         .map(closed::<LayoutArg>)
         .transpose()?
         .map(|l| match l {
-            LayoutArg::Mkdocs => Layout::Mkdocs,
-            LayoutArg::Techdocs => Layout::Techdocs,
+            LayoutArg::Mkdocs => ExportLayout::Tree(Layout::Mkdocs),
+            LayoutArg::Techdocs => ExportLayout::Tree(Layout::Techdocs),
+            LayoutArg::Single => ExportLayout::Single,
         });
+    let opts = ExportOptions { layout, assets };
     let summary = match (profile, scope) {
-        (Some(p), _) => rdy_render::print::export_profile(st, scope_text, p, out, format, layout)?,
-        (None, Some(scope)) => rdy_render::print::export(st, &scope, out, format, layout)?,
+        (Some(p), _) => {
+            rdy_render::print::export_profile_with(st, scope_text, p, out, format, &opts)?
+        }
+        (None, Some(scope)) => rdy_render::print::export_with(st, &scope, out, format, &opts)?,
         (None, None) => unreachable!("a scope is resolved whenever no profile is given"),
     };
     Ok(to_json(&summary))

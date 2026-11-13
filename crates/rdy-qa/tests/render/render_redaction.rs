@@ -282,6 +282,30 @@ fn static_outputs(st: &ReadState) -> Outputs {
         out.insert(name, std::fs::read(&f).unwrap());
     }
     out.insert("print: single.html".into(), print::single::single_html(&p));
+    // rfr3: the single Markdown file of the one doc, and its images
+    let single = dir.path().join("single.md");
+    print::export_with(
+        st,
+        &Scope::Canon,
+        &single,
+        print::Format::Md,
+        &print::ExportOptions {
+            layout: Some(print::ExportLayout::Single),
+            assets: Some("single-assets"),
+        },
+    )
+    .unwrap();
+    out.insert("print: single.md".into(), std::fs::read(&single).unwrap());
+    let assets = dir.path().join("single-assets");
+    if assets.is_dir() {
+        for f in walk(&assets) {
+            let name = format!(
+                "print: single-assets/{}",
+                f.strip_prefix(&assets).unwrap().display()
+            );
+            out.insert(name, std::fs::read(&f).unwrap());
+        }
+    }
     out.insert(
         "print: print.pdf".into(),
         print::pdf::pdf_bytes(&p, &Fonts::load()).0,
@@ -1028,6 +1052,7 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             "view:ed: plan.html",
             "tag:v1.0.0: plan.html",
             "print: single.html",
+            "print: single.md",
             "print: print.pdf",
             "mcp: rdy_read canon",
             "mcp: rdy_read view:ed",
@@ -1053,6 +1078,11 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
             "{adapter}: the picture is an asset"
         );
         assert!(held["print: print.pdf"].contains("picture"), "{adapter}");
+        assert!(
+            held.iter()
+                .any(|(k, h)| k.starts_with("print: single-assets/") && h.contains("picture")),
+            "{adapter}: the single Markdown file's picture is its asset"
+        );
         // the single-file HTML embeds the picture as a base64 data URI, which the detector reads
         assert!(
             held["print: single.html"].contains("picture"),

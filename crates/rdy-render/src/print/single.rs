@@ -31,6 +31,7 @@ pub fn write_single_html(p: &Print, out: &Path) -> Result<PrintSummary, RdyError
     Ok(PrintSummary {
         out: out.display().to_string(),
         format: "html",
+        layout: None,
         docs: count(PageKind::Doc),
         folders: count(PageKind::Folder),
         assets: p.light_blobs().len(),

@@ -8,7 +8,7 @@
 //! paragraph in bold), `dl`/`dt`/`dd` (a term in bold, then its text) and `details`/`summary`
 //! (a diagram's source: a code block in the diagram's language). Any other element adds its
 //! text as plain runs; an element [`unseen`] names adds nothing.
-use super::{Href, PBlock, Run};
+use super::{Href, PBlock, RefOf, Run};
 use crate::llms::{attr, decode, unseen};
 use rdy_model::Hash;
 use std::cell::RefCell;
@@ -193,6 +193,8 @@ struct Style {
     italic: bool,
     code: bool,
     link: Option<Href>,
+    /// The reference these words are (the single Markdown file's source, `data-rdy-ref`).
+    ref_of: Option<RefOf>,
 }
 
 impl Style {
@@ -204,6 +206,7 @@ impl Style {
             code: self.code,
             link: self.link.clone(),
             image: None,
+            ref_of: self.ref_of.clone(),
         }
     }
 }
@@ -259,6 +262,7 @@ pub(crate) fn tidy(runs: Vec<Run>) -> Vec<Run> {
                     && p.italic == r.italic
                     && p.code == r.code
                     && p.link == r.link
+                    && p.ref_of == r.ref_of
                     && p.image.is_none()
                     && r.image.is_none() =>
             {
@@ -362,9 +366,27 @@ struct Reader<'a> {
     page: &'a str,
     /// The site file of each figure read, in the order of the figures.
     figures: RefCell<Vec<String>>,
+    /// The single Markdown file's reading (D-ESHXM rule 4): no caption, label or pill, a term
+    /// as its text, and each reference's id read from its mark.
+    single: bool,
+}
+
+/// An element the single Markdown file leaves out (D-ESHXM rule 4): a code block's label, a
+/// block's marker (an "Example" label, a type's eyebrow), a status pill or line, a caption.
+fn label(name: &str, tag: &str) -> bool {
+    (name == "div" && has_class(tag, "code-head"))
+        || (name == "span" && (has_class(tag, "marker") || has_class(tag, "status")))
+        || (name == "p" && has_class(tag, "block-status"))
+        || matches!(name, "caption" | "figcaption")
 }
 
 impl Reader<'_> {
+    /// Whether this reading leaves the element out: what no reader sees, and in the single
+    /// Markdown file's reading a label.
+    fn skips(&self, name: &str, tag: &str) -> bool {
+        unseen(name, tag) || (self.single && label(name, tag))
+    }
+
     /// The blob an image's `src` names; the file it names it by is the file of a figure.
     fn figure_blob(&self, src: &str) -> Option<Hash> {
         let (h, file) = asset_of(&decode(src), self.page)?;
@@ -377,7 +399,7 @@ impl Reader<'_> {
         for n in nodes {
             match n {
                 Node::Text(t) => out.push(style.run(collapse(t))),
-                Node::Elem { name, tag, .. } if unseen(name, tag) => {}
+                Node::Elem { name, tag, .. } if self.skips(name, tag) => {}
                 Node::Elem {
                     name,
                     tag,
@@ -385,6 +407,14 @@ impl Reader<'_> {
                 } => {
                     let kids: Vec<&Node> = children.iter().collect();
                     let mut s = style.clone();
+                    if self.single
+                        && let Some(target) = attr(tag, "data-rdy-ref")
+                    {
+                        s.ref_of = Some(RefOf {
+                            block: String::new(),
+                            target: decode(target),
+                        });
+                    }
                     match name.as_str() {
                         "br" => {
                             out.push(style.run("\n".into()));
@@ -477,7 +507,7 @@ impl Reader<'_> {
             }
             return;
         };
-        if unseen(name, tag) {
+        if self.skips(name, tag) {
             return;
         }
         let kids: Vec<&Node> = children.iter().collect();
@@ -542,6 +572,7 @@ impl Reader<'_> {
                 match find(children, "img") {
                     Some(Node::Elem { tag: img, .. }) => {
                         let caption = find(children, "figcaption")
+                            .filter(|_| !self.single)
                             .map(|c| match c {
                                 Node::Elem { children, .. } => self.runs(children, &plain),
                                 Node::Text(_) => vec![],
@@ -616,6 +647,7 @@ impl Reader<'_> {
             "aside" => {
                 flush(out, pending);
                 let (label, rest) = split_marker(children);
+                let label = label.filter(|_| !self.single);
                 out.push(PBlock::Callout {
                     anchor: id_of(tag),
                     label: label.unwrap_or_default(),
@@ -625,6 +657,7 @@ impl Reader<'_> {
             "div" if has_class(tag, "normative") => {
                 flush(out, pending);
                 let (marker, rest) = split_marker(children);
+                let marker = marker.filter(|_| !self.single);
                 let mut inner = self.blocks(&rest, ctx);
                 if let Some(m) = marker.filter(|m| !m.is_empty()) {
                     let lead = vec![
@@ -635,6 +668,7 @@ impl Reader<'_> {
                             code: false,
                             link: None,
                             image: None,
+                            ref_of: None,
                         },
                         plain.run(" ".into()),
                     ];
@@ -690,7 +724,7 @@ impl Reader<'_> {
                 continue;
             };
             match name.as_str() {
-                "caption" => caption.extend(self.runs(children, &plain)),
+                "caption" if !self.single => caption.extend(self.runs(children, &plain)),
                 "thead" | "tbody" => {
                     for r in children {
                         if let Node::Elem { name, children, .. } = r
@@ -724,8 +758,9 @@ impl Reader<'_> {
 
     /// A list of terms: each term in bold, then its text in the same paragraph.
     fn terms(&self, children: &[Node], ctx: &Ctx, out: &mut Vec<PBlock>) {
+        // a term is its text in the single Markdown file (D-ESHXM rule 9)
         let bold = Style {
-            bold: true,
+            bold: !self.single,
             ..Style::default()
         };
         let mut term: Option<(Option<String>, Vec<Run>)> = None;
@@ -738,7 +773,7 @@ impl Reader<'_> {
             else {
                 continue;
             };
-            if unseen(name, tag) {
+            if self.skips(name, tag) {
                 continue;
             }
             match name.as_str() {
@@ -797,11 +832,23 @@ pub fn from_html(html: &str, page: &str) -> Vec<PBlock> {
 /// [`from_html`], and the site file of each [`PBlock::Figure`] it reads, in the order of the
 /// figures: the files a reader of the page sees as images (a download link names none).
 pub(crate) fn from_html_with_figures(html: &str, page: &str) -> (Vec<PBlock>, Vec<String>) {
+    read(html, page, false)
+}
+
+/// [`from_html_with_figures`] as the single Markdown file reads (D-ESHXM rule 4): no caption,
+/// label or pill, a term as its text, and each reference's id from its `data-rdy-ref` mark
+/// ([`RefOf::target`]; the caller names the block).
+pub(crate) fn from_html_single(html: &str, page: &str) -> (Vec<PBlock>, Vec<String>) {
+    read(html, page, true)
+}
+
+fn read(html: &str, page: &str, single: bool) -> (Vec<PBlock>, Vec<String>) {
     let nodes = parse(html);
     let kids: Vec<&Node> = nodes.iter().collect();
     let reader = Reader {
         page,
         figures: RefCell::default(),
+        single,
     };
     let blocks = reader.blocks(&kids, &Ctx::default());
     (blocks, reader.figures.into_inner())
@@ -911,6 +958,7 @@ mod tests {
             code: false,
             link: None,
             image: None,
+            ref_of: None,
         }
     }
 
@@ -932,6 +980,7 @@ mod tests {
         Run {
             link: Some(href),
             image: None,
+            ref_of: None,
             ..run(text)
         }
     }

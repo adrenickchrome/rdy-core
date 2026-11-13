@@ -17,6 +17,7 @@ pub mod layout;
 pub mod md;
 pub mod pdf;
 pub mod single;
+pub mod single_md;
 
 pub use md::Layout;
 
@@ -41,6 +42,34 @@ pub enum Format {
     Md,
 }
 
+/// The layout of a Markdown export: a tree's layout, or one doc as one file (D-ESHXM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportLayout {
+    /// The Markdown tree, laid out as the layout says.
+    Tree(Layout),
+    /// One doc as one Markdown file ([`single_md`]).
+    Single,
+}
+
+impl ExportLayout {
+    /// The layout as the CLI and the tools name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExportLayout::Tree(l) => l.name(),
+            ExportLayout::Single => single_md::LAYOUT,
+        }
+    }
+}
+
+/// What an export asks for besides its scope, path and format: its layout, and the single
+/// Markdown file's assets folder (D-6PR3Y), relative to the folder of `out`, as the caller
+/// wrote it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExportOptions<'a> {
+    pub layout: Option<ExportLayout>,
+    pub assets: Option<&'a str>,
+}
+
 /// Prints `scope` as `format` at `out` (D-EVRNM: `rdy export` and `rdy_export`). A layout
 /// applies to the Markdown tree only; `None` lays it out plainly. Refuses `inflight`. O29's path
 /// rules (`check_out`) come before the print is built, the same for every format. The writer of
@@ -53,11 +82,44 @@ pub fn export(
     format: Format,
     layout: Option<Layout>,
 ) -> Result<PrintSummary, RdyError> {
-    check_layout(format, layout)?;
+    export_with(
+        rdy,
+        scope,
+        out,
+        format,
+        &ExportOptions {
+            layout: layout.map(ExportLayout::Tree),
+            assets: None,
+        },
+    )
+}
+
+/// [`export`] with its options: also the single Markdown file and its assets folder (D-ESHXM,
+/// D-6PR3Y, D-H1FRY). The layout's refusal comes first, then the assets refusal, then O29's
+/// path rules; the single file's paths are checked before the print is built.
+pub fn export_with(
+    rdy: &ReadState,
+    scope: &Scope,
+    out: &Path,
+    format: Format,
+    opts: &ExportOptions,
+) -> Result<PrintSummary, RdyError> {
+    check_options(format, opts)?;
     // O29 before the print is built: no format writes into the store
-    check_out(&rdy.root().join(".rdy"), out)?;
-    let p = build(rdy, scope)?;
-    write(&p, out, format, layout)
+    let rdy_dir = rdy.root().join(".rdy");
+    check_out(&rdy_dir, out)?;
+    match opts.layout {
+        Some(ExportLayout::Single) => {
+            let paths = single_md::check_paths(&rdy_dir, out, opts.assets)?;
+            rdy_engine::refuse_inflight_export(scope)?;
+            let (p, facts) = build_single(prepare::source(rdy, scope, Purpose::Print)?)?;
+            single_md::write(&p, &facts, &paths)
+        }
+        layout => {
+            let p = build(rdy, scope)?;
+            write(&p, out, format, tree_layout(layout))
+        }
+    }
 }
 
 /// Prints the publication profile `profile` (an id or key) at `scope_text` (`canon`,
@@ -74,19 +136,72 @@ pub fn export_profile(
     format: Format,
     layout: Option<Layout>,
 ) -> Result<PrintSummary, RdyError> {
-    check_layout(format, layout)?;
-    check_out(&read.root().join(".rdy"), out)?;
-    let p = build_profile(read, scope_text, profile)?;
-    write(&p, out, format, layout)
+    export_profile_with(
+        read,
+        scope_text,
+        profile,
+        out,
+        format,
+        &ExportOptions {
+            layout: layout.map(ExportLayout::Tree),
+            assets: None,
+        },
+    )
 }
 
-/// A layout applies to the Markdown tree only.
-fn check_layout(format: Format, layout: Option<Layout>) -> Result<(), RdyError> {
-    if let Some(layout) = layout.filter(|_| !matches!(format, Format::Md)) {
+/// [`export_profile`] with its options, as [`export_with`] takes them.
+pub fn export_profile_with(
+    read: &ReadState,
+    scope_text: &str,
+    profile: &str,
+    out: &Path,
+    format: Format,
+    opts: &ExportOptions,
+) -> Result<PrintSummary, RdyError> {
+    check_options(format, opts)?;
+    let rdy_dir = read.root().join(".rdy");
+    check_out(&rdy_dir, out)?;
+    match opts.layout {
+        Some(ExportLayout::Single) => {
+            let paths = single_md::check_paths(&rdy_dir, out, opts.assets)?;
+            let (p, facts) = build_single(crate::publication::prepare(
+                read,
+                scope_text,
+                profile,
+                Purpose::Print,
+            )?)?;
+            single_md::write(&p, &facts, &paths)
+        }
+        layout => {
+            let p = build_profile(read, scope_text, profile)?;
+            write(&p, out, format, tree_layout(layout))
+        }
+    }
+}
+
+/// The tree layout of a layout that is not the single file.
+fn tree_layout(layout: Option<ExportLayout>) -> Option<Layout> {
+    match layout {
+        Some(ExportLayout::Tree(l)) => Some(l),
+        _ => None,
+    }
+}
+
+/// A layout applies to the Markdown format only, and comes first (D-H1FRY); the assets folder
+/// applies to the single Markdown file only.
+fn check_options(format: Format, opts: &ExportOptions) -> Result<(), RdyError> {
+    if let Some(layout) = opts.layout.filter(|_| !matches!(format, Format::Md)) {
         return Err(RdyError::new(
             E_BAD_INPUT,
             format!("--layout {} applies to the md format only", layout.name()),
             "drop --layout, or export with --format md",
+        ));
+    }
+    if opts.assets.is_some() && opts.layout != Some(ExportLayout::Single) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "--assets applies to --format md --layout single only",
+            "drop --assets, or export with --format md --layout single",
         ));
     }
     Ok(())
@@ -323,6 +438,17 @@ pub struct Run {
     pub code: bool,
     pub link: Option<Href>,
     pub image: Option<String>,
+    /// The reference these words are, in the single Markdown file's print alone (D-ESHXM rule 8,
+    /// D-6PR3Y rule 6): its block and the id it names. None in every other print.
+    pub ref_of: Option<RefOf>,
+}
+
+/// Where a reference of the single Markdown file's print stands: the block whose text holds it,
+/// and the token it names (an id).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefOf {
+    pub block: String,
+    pub target: String,
 }
 
 /// Where a link leads: a page of the print and its anchor, or a place outside it.
@@ -340,6 +466,9 @@ pub enum Href {
 pub struct PrintSummary {
     pub out: String,
     pub format: &'static str,
+    /// The single Markdown file's layout (`single`); no other reply has the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<&'static str>,
     pub docs: usize,
     pub folders: usize,
     pub assets: usize,
@@ -383,6 +512,23 @@ pub fn build_profile(read: &ReadState, scope_text: &str, profile: &str) -> Resul
 /// read, and a publication's print from what `publication::prepare_resolved` read: it reads no
 /// source. A publication's `Prepared` has an empty `rdy_dir`, which no writer places by.
 pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
+    build_from_as(prepared, false).map(|(p, _)| p)
+}
+
+/// The print of the single Markdown file (D-ESHXM): [`build_from`] read without captions,
+/// labels or pills, with each doc's links as its file writes them and the facts of its
+/// figures and warnings.
+fn build_single(prepared: Prepared) -> Result<(Print, single_md::Facts), RdyError> {
+    crate::inline::with_ref_markup(|| build_from_as(prepared, true))
+}
+
+fn build_from_as(prepared: Prepared, single: bool) -> Result<(Print, single_md::Facts), RdyError> {
+    let read_html = if single {
+        ir::from_html_single
+    } else {
+        ir::from_html_with_figures
+    };
+    let mut facts = single_md::Facts::default();
     let Prepared {
         m,
         g,
@@ -498,10 +644,11 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         let at = ctx.page_url.as_str();
         let mut figures = vec![];
         let from_html = |html: &str, figures: &mut Vec<String>| {
-            let (blocks, files) = ir::from_html_with_figures(html, at);
+            let (blocks, files) = read_html(html, at);
             figures.extend(files);
             blocks
         };
+        let mut doc_facts = single_md::DocFacts::default();
         let mut blocks = vec![];
         match kind {
             PageKind::Folder => {
@@ -524,6 +671,12 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
                     if let Some(a) = &d.lede_anchor {
                         ir::set_anchor(&mut lede, a);
                     }
+                    if single
+                        && let Some(doc) = id.parse::<BlockId>().ok().and_then(|i| m.get(&i))
+                        && let Some(l) = page::lede_of(m, doc)
+                    {
+                        single_md::name_refs(&mut lede, &l.id.to_string());
+                    }
                     blocks.extend(lede);
                 }
                 // a collapsed section keeps its extent: the items under it, up to the next item
@@ -539,6 +692,16 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
                         from_html(item.md_html.as_ref().unwrap_or(&item.html), &mut figures);
                     if !item.anchor.is_empty() {
                         ir::set_anchor(&mut b, &item.anchor);
+                    }
+                    if single {
+                        single_md::name_refs(&mut b, &item.id);
+                        let mut shown = BTreeSet::new();
+                        figure_blobs(&b, &mut shown);
+                        if !shown.is_empty() {
+                            doc_facts
+                                .figures
+                                .push((item.id.clone(), shown.into_iter().collect()));
+                        }
                     }
                     if item.collapsed && matches!(b.first(), Some(PBlock::Heading { .. })) {
                         let PBlock::Heading {
@@ -585,6 +748,9 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
                     .or_insert_with(|| (file, media_type.clone()));
             }
         }
+        if single && *kind == PageKind::Doc {
+            facts.docs.insert(ctx.page_url.clone(), doc_facts);
+        }
         docs.push(PrintDoc {
             kind: *kind,
             id: id.clone(),
@@ -593,6 +759,48 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
             depth: depth_of(&ctx.page_url, *kind),
             blocks,
         });
+    }
+    // the single file's links (D-ESHXM rule 8): before the print's own normalization, which
+    // would drop a reference's target, each doc's references and own-page fragments lead to
+    // the slug of the heading at or above their target, or read as their words
+    if single {
+        for d in docs.iter_mut().filter(|d| d.kind == PageKind::Doc) {
+            let Some(doc_id) = d.id.parse::<BlockId>().ok() else {
+                continue;
+            };
+            let doc_path = m.path_of(&doc_id).unwrap_or_default();
+            let page = d.page.clone();
+            let place_of = |token: &str| -> Option<(String, Option<String>)> {
+                let id = token.parse::<BlockId>().ok()?;
+                m.get(&id)?;
+                if id == doc_id {
+                    return Some((page.clone(), None));
+                }
+                site.url_of(&id).map(|u| (u.page, u.anchor))
+            };
+            let anchor_of = |a: &str| -> String {
+                match a.parse::<BlockId>() {
+                    Ok(id) if m.get(&id).is_some() => site
+                        .url_of(&id)
+                        .filter(|u| u.page == page)
+                        .and_then(|u| u.anchor)
+                        .unwrap_or_else(|| a.to_string()),
+                    _ => a.to_string(),
+                }
+            };
+            let places = single_md::Places::of(&d.title, &d.blocks);
+            let targets = single_md::Targets {
+                doc_path: &doc_path,
+                page: &page,
+                place_of: &place_of,
+                anchor_of: &anchor_of,
+            };
+            let mut warnings = vec![];
+            single_md::resolve(&mut d.blocks, &places, &targets, &mut warnings);
+            if let Some(f) = facts.docs.get_mut(&page) {
+                f.warnings = warnings;
+            }
+        }
     }
     // a link leads to a page of the print and an anchor a block of that page has: a link to a
     // page the print leaves out reads as its words; a block's id (the site's id anchor) reads as
@@ -663,7 +871,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
             },
         );
     }
-    Ok(Print {
+    let print = Print {
         title: site_name.clone(),
         description: description.clone(),
         label,
@@ -674,7 +882,8 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         // the site build's warnings: a summary page a doc keeps, and the glossary's
         warnings: history.warnings,
         rdy_dir,
-    })
+    };
+    Ok((print, facts))
 }
 
 /// Puts a finished `fold` into the fold still open above it, else into the page's `blocks`.

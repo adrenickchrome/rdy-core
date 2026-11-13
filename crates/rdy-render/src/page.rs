@@ -1422,7 +1422,7 @@ fn doc_parts(
     };
     let lede = lede_block.map(lede_html);
     let lede_md = lede_block
-        .filter(|p| inline::may_hold_image(&p.body))
+        .filter(|p| inline::may_hold_image(&p.body) || inline::ref_markup())
         .map(|p| inline::with_image_markup(|| lede_html(p)))
         .filter(|md| lede.as_ref() != Some(md));
     let mut doc_body = DocBody {
@@ -1522,8 +1522,9 @@ fn doc_parts(
             html::block_html(b, &ctx)
         };
         // the print model's and Copy's source, rendered again only when a remote image may be
-        // in the block's text (a diagram's or code block's body is never text)
-        let md_html = (!removed && may_hold_image(b))
+        // in the block's text (a diagram's or code block's body is never text), or when the
+        // single Markdown file reads each reference's id ([`inline::with_ref_markup`])
+        let md_html = (!removed && (may_hold_image(b) || inline::ref_markup()))
             .then(|| inline::with_image_markup(|| html::block_html(b, &ctx)))
             .filter(|md| *md != html);
         items.push(Item {

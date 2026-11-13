@@ -933,6 +933,7 @@ mod tests {
             code: false,
             link: None,
             image: None,
+            ref_of: None,
         }
     }
 
@@ -1460,6 +1461,7 @@ mod tests {
         let ext = Run {
             link: Some(Href::External("https://example.org/".into())),
             image: None,
+            ref_of: None,
             ..run("out")
         };
         let mut p = print(vec![

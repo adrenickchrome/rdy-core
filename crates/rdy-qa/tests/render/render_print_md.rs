@@ -394,6 +394,7 @@ fn run(text: &str) -> Run {
         code: false,
         link: None,
         image: None,
+        ref_of: None,
     }
 }
 
