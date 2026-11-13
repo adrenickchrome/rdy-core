@@ -2106,6 +2106,11 @@ fn publication_project() -> tempfile::TempDir {
         blob(&mut r, b"a dark"),
     );
     let (light_c, dark_c) = (blob(&mut r, b"c"), blob(&mut r, b"c dark"));
+    let (light_d, dark_d, dark_d2) = (
+        blob(&mut r, b"d"),
+        blob(&mut r, b"d dark"),
+        blob(&mut r, b"d dark 2"),
+    );
     let figures = write(
         &mut r,
         "work",
@@ -2114,13 +2119,17 @@ fn publication_project() -> tempfile::TempDir {
                 "blob": light_a, "media_type": "image/png", "alt": "Figure A"}},
             {"op": "create", "type": "figure", "id": "$fc", "parent": guide, "fields": {
                 "blob": light_c, "media_type": "image/png",
-                "dark_blob": dark_c, "dark_media_type": "image/png", "alt": "Figure C"}}
+                "dark_blob": dark_c, "dark_media_type": "image/png", "alt": "Figure C"}},
+            {"op": "create", "type": "figure", "id": "$fd", "parent": guide, "fields": {
+                "blob": light_d, "media_type": "image/png",
+                "dark_blob": dark_d, "dark_media_type": "image/png", "alt": "Figure D"}}
         ]),
     )
     .expect("the figures");
-    let (fig_a, fig_c) = (
+    let (fig_a, fig_c, fig_d) = (
         figures.created["$fa"].clone(),
         figures.created["$fc"].clone(),
+        figures.created["$fd"].clone(),
     );
     write(
         &mut r,
@@ -2147,7 +2156,8 @@ fn publication_project() -> tempfile::TempDir {
             {"op": "create", "type": "note", "parent": guide, "body": "Second planned note.", "fields": {"planned": true}},
             {"op": "update", "id": late, "fields": {"planned": true}},
             {"op": "update", "id": fig_a, "fields": {"blob": light_a2, "dark_blob": dark_a, "dark_media_type": "image/png"}},
-            {"op": "update", "id": fig_c, "unset": ["dark_blob", "dark_media_type"]}
+            {"op": "update", "id": fig_c, "unset": ["dark_blob", "dark_media_type"]},
+            {"op": "update", "id": fig_d, "fields": {"dark_blob": dark_d2}}
         ]),
     )
     .expect("the second change");
@@ -6672,15 +6682,12 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/plan/items",
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
-    "cli/publication check against/stdout/disclosure/added_attachments",
     "cli/publication check against/stdout/disclosure/added_docs",
-    "cli/publication check against/stdout/disclosure/changed_attachments",
     "cli/publication check against/stdout/disclosure/changed_docs",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
     "cli/publication check against/stdout/disclosure/redactions",
-    "cli/publication check against/stdout/disclosure/removed_attachments",
     "cli/publication check against/stdout/references/links_outside/rows",
     "cli/publication check against/stdout/references/rows",
     "cli/publication check against/stdout/warnings",
@@ -6809,15 +6816,12 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
-    "mcp/rdy_publication_check against/ok/disclosure/added_attachments",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
-    "mcp/rdy_publication_check against/ok/disclosure/changed_attachments",
     "mcp/rdy_publication_check against/ok/disclosure/changed_docs",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
     "mcp/rdy_publication_check against/ok/disclosure/redactions",
-    "mcp/rdy_publication_check against/ok/disclosure/removed_attachments",
     "mcp/rdy_publication_check against/ok/references/links_outside/rows",
     "mcp/rdy_publication_check against/ok/references/rows",
     "mcp/rdy_publication_check against/ok/warnings",

@@ -281,7 +281,8 @@ fn hd5_image_diagnostics_name_the_entrys_type() {
 
 /// rfr2 (D-3DAX4): a figure's dark image enters through a file as its light image does: commit
 /// stores both, infers both media types and rewrites both paths to hashes; checkout projects
-/// both blobs; a dark path that is missing or untyped is refused with the dark field's name.
+/// both blobs, never through a linked `_blobs`; a dark path that is missing or untyped is refused
+/// with the dark field's name.
 #[test]
 fn rfr2_working_copy_resolves_both_image_paths() {
     let (s, seed) = seeded();
@@ -327,6 +328,18 @@ fn rfr2_working_copy_resolves_both_image_paths() {
         std::fs::read(at(&s, &format!("_blobs/{dark}.png"))).unwrap(),
         b"\x89PNG dark chart"
     );
+    // a linked _blobs directory: neither image is written through it
+    std::fs::remove_dir_all(at(&s, "_blobs")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    rdy_qa::platform::symlink(outside.path(), &at(&s, "_blobs")).unwrap();
+    let _ = json(&s, &["checkout", "--force"]);
+    assert_eq!(
+        std::fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "a blob was written outside the working copy"
+    );
+    std::fs::remove_file(at(&s, "_blobs")).unwrap();
+    ok(&s, &["checkout", "--force"]);
 
     // a missing dark image names its path
     add_figure(
