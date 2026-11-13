@@ -160,7 +160,8 @@ fn rfr3_list_parts_keep_paragraphs_code_and_nested_order() {
     let st = r.read();
     let m = st.materialized(&Scope::Canon).unwrap();
     let p = m.get(&ids["$p"]).unwrap();
-    let written = PARTS.replace("REF", &ids["$q"].to_string());
+    // the placeholder sits in list code, which the write reads as literal text (fix round 1)
+    let written = PARTS.replace("REF", "$q");
     assert_eq!(p.body, written, "the body is stored as written");
     let again = rdy_model::Block {
         body: written.clone(),
@@ -272,9 +273,10 @@ fn copy_text(page: &str) -> String {
 #[test]
 fn rfr3_list_code_is_literal_in_every_reader() {
     let (_d, mut r) = tiny();
-    let (ids, _) = parts_project(&mut r);
+    parts_project(&mut r);
     let st = r.read();
-    let rf = format!("{{{{{}}}}}", ids["$q"]);
+    // the placeholder in the code is literal: the write left it as written (fix round 1)
+    let rf = "{{$q}}".to_string();
     let json_code = format!("{{\"a\": \"{rf}\", \"b\": \"*not em* <b>\"}}\n~~~");
 
     // the site: the code block's body, literal; the ref in it is no link and no marker
@@ -384,4 +386,52 @@ fn rfr3_list_code_is_literal_in_every_reader() {
     let full = std::fs::read_to_string(out.path().join("llms-full.txt")).unwrap();
     assert!(full.contains("rdy init ~/p && cd ~/p"), "{full}");
     assert!(full.contains(&rf), "{full}");
+}
+
+/// rfr3 fix round 1 (D-7M4TR rule 5): code in a list item is literal on write too. An unknown
+/// id, a key that no block holds and a placeholder of the same write stay as written in the code:
+/// no E_UNKNOWN_REF, no rewrite and no graph edge. The same tokens outside the code are still
+/// references, and a fence outside a list item stays text, so a ref in it is still read.
+#[test]
+fn rfr3_list_code_refs_are_not_read_on_write() {
+    let (_d, mut r) = tiny();
+    let code = "   ```\n   {{d-ZZZZZ}} {{NOPE-9}} {{$q}} \\{{x}}\n   ```";
+    let src = format!("1. See {{{{$q}}}}.\n\n{code}\n2. Next");
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "steps", "title": "Steps", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Try it"}},
+            {"op": "create", "type": "prose", "id": "$q", "parent": "$s", "body": "The target block."},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": src},
+        ]),
+    )
+    .unwrap_or_else(|e| panic!("a ref in list code is no ref: {e}"));
+    land(&mut r, "w1").unwrap();
+    let q = BlockId::parse(&w.created["$q"]).unwrap();
+    let p = BlockId::parse(&w.created["$p"]).unwrap();
+    let block = r.read().block(&Scope::Canon, &p).unwrap();
+    // the paragraph's placeholder is rewritten; the code keeps its bytes
+    assert_eq!(
+        block.body,
+        format!("1. See {{{{{q}}}}}.\n\n{code}\n2. Next")
+    );
+    // only the paragraph's reference is a graph edge
+    let tokens: Vec<String> = block.ref_tokens().into_iter().collect();
+    assert_eq!(tokens, vec![q.to_string()]);
+    // rdy_read's text keeps the code as stored, the escape too
+    let shown = rdy_model::entity::render_refs(&block.body, rdy_model::RefMode::Strict, &|s| {
+        s.token.clone()
+    });
+    assert_eq!(shown, format!("1. See {q}.\n\n{code}\n2. Next"));
+
+    // a fence outside a list item stays text: the ref in it is read and refused
+    let e = write(
+        &mut r,
+        "w2",
+        json!([{"op": "create", "type": "prose", "parent": w.created["$s"], "body": "```\n{{d-ZZZZZ}}\n```"}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_UNKNOWN_REF", "{e}");
 }

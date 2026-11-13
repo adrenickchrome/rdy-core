@@ -307,14 +307,26 @@ impl RefSpan {
 }
 
 /// The references in `text`, in order, under `mode`.
+///
+/// In [`RefMode::Strict`], fenced code in a list item is literal (D-7M4TR): no reference is read
+/// in the ranges [`crate::list_parts::code_ranges`] gives, the ranges the renderer shows as code.
+/// A `{{` before such a range whose `}}` lies in it is no reference either.
 pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
     let mut out = vec![];
     if mode == RefMode::Off {
         return out;
     }
+    let code = match mode {
+        RefMode::Strict => crate::list_parts::code_ranges(text),
+        _ => vec![],
+    };
     let mut pos = 0;
     while let Some(found) = text[pos..].find("{{") {
         let start = pos + found;
+        if let Some(c) = code.iter().find(|c| c.contains(&start)) {
+            pos = c.end;
+            continue;
+        }
         if text[..start].ends_with('\\') {
             pos = start + 2;
             continue;
@@ -323,6 +335,10 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
             break;
         };
         let end = start + 2 + len + 2;
+        if code.iter().any(|c| c.start < end && start < c.end) {
+            pos = start + 2;
+            continue;
+        }
         let inner = &text[start + 2..start + 2 + len];
         let (token, display) = match inner.split_once('|') {
             Some((t, d)) => (t.trim(), Some(d.trim()).filter(|d| !d.is_empty())),
