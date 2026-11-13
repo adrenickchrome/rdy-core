@@ -1914,3 +1914,118 @@ fn pub4_asset_limits_precede_byte_reads() {
         "the first doc's figure fails first"
     );
 }
+
+/// rfr2 (D-TBDA1): a paired figure's two rows. `available` describes each row's blob; the
+/// selection identity is the selected ids and versions, so a dark blob that arrives moves only
+/// its row's availability; both rows count toward the attachment rows; the dark blob counts
+/// toward the per-blob and total bounds before any byte is read, distinct blobs once.
+#[test]
+fn rfr2_both_rows_count_toward_the_limits_and_availability() {
+    let (_dir, mut r) = project();
+    let light = r.store_mut().put_blob(b"light").unwrap();
+    let dark_bytes = b"the dark image";
+    let dark = rdy_store::Store::blob_hash(dark_bytes);
+    let fig = |id: &str, order: &str, dark: Option<Hash>| {
+        let mut b = blk(id, "figure", Some("d-H0ST1"), order);
+        b.fields.insert("blob".into(), s(&light.to_string()));
+        b.fields.insert("media_type".into(), s("image/png"));
+        b.fields.insert("alt".into(), s("a figure"));
+        if let Some(d) = dark {
+            b.fields.insert("dark_blob".into(), s(&d.to_string()));
+            b.fields.insert("dark_media_type".into(), s("image/png"));
+        }
+        b
+    };
+    let m = synth(vec![
+        named(blk("d-ADM1N", "doc", None, "a"), "admin"),
+        profile_block("pf-H0ST1", "d-ADM1N", "hostkey1", "org", &["d-H0ST1"]),
+        named(blk("d-H0ST1", "doc", None, "b"), "host"),
+        fig("fg-BBBB1", "a", Some(dark)),
+        fig("fg-AAAA1", "b", None),
+    ]);
+    let rows = |res: &Resolved| {
+        res.attachments
+            .iter()
+            .map(|a| (a.block.to_string(), a.variant, a.blob, a.available))
+            .collect::<Vec<_>>()
+    };
+    let st = r.read();
+    let before = publication::resolve_in_for_tests(&st, &m, "hostkey1").unwrap();
+    let dark_row = Some(publication::AttachmentVariant::Dark);
+    assert_eq!(
+        rows(&before),
+        vec![
+            ("fg-AAAA1".to_string(), None, light, true),
+            ("fg-BBBB1".to_string(), None, light, true),
+            ("fg-BBBB1".to_string(), dark_row, dark, false),
+        ]
+    );
+    // a figure with an unavailable row is read as a whole or not at all: its light image is
+    // not read for it, and the light-only figure's (the same blob) is read once
+    let reads = publication::blob_reads_for_tests();
+    let assets = publication::load_assets(&st, &before).unwrap();
+    assert_eq!(publication::blob_reads_for_tests() - reads, 1);
+    assert_eq!(assets.keys().copied().collect::<Vec<_>>(), vec![light]);
+    drop(st);
+    r.store_mut().put_blob(dark_bytes).unwrap();
+    let st = r.read();
+    let after = publication::resolve_in_for_tests(&st, &m, "hostkey1").unwrap();
+    let d = publication::disclosure_diff(&before, &after).unwrap();
+    assert_eq!(d.before_selection_identity, d.after_selection_identity);
+    assert_eq!(
+        d.changed_attachments
+            .iter()
+            .map(|c| (
+                c.block.to_string(),
+                c.variant,
+                c.before_available,
+                c.after_available
+            ))
+            .collect::<Vec<_>>(),
+        vec![("fg-BBBB1".to_string(), dark_row, false, true)]
+    );
+    assert!(d.added_attachments.is_empty() && d.removed_attachments.is_empty());
+
+    // both rows count toward the attachment rows: 3 passes, 2 refuses
+    for (n, ok) in [(3usize, true), (2, false)] {
+        let _g = publication::override_limits_for_tests(Limits {
+            attachments: n,
+            ..Limits::default()
+        });
+        let got = publication::resolve_in_for_tests(&st, &m, "hostkey1");
+        match ok {
+            true => assert!(got.is_ok(), "{n}"),
+            false => assert_limit(&got.unwrap_err(), "attachments", 2, "rows"),
+        }
+    }
+    // the dark blob's bound and the distinct total, before any byte is read
+    let total = (b"light".len() + dark_bytes.len()) as u64;
+    for (blob, assets, err) in [
+        (dark_bytes.len() as u64, total, None),
+        (
+            dark_bytes.len() as u64 - 1,
+            total,
+            Some(("blob", dark_bytes.len() as u64 - 1)),
+        ),
+        (
+            dark_bytes.len() as u64,
+            total - 1,
+            Some(("assets", total - 1)),
+        ),
+    ] {
+        let _g = publication::override_limits_for_tests(Limits {
+            blob,
+            assets,
+            ..Limits::default()
+        });
+        let reads = publication::blob_reads_for_tests();
+        let got = publication::load_assets(&st, &after);
+        match err {
+            None => assert_eq!(got.unwrap().len(), 2),
+            Some((part, n)) => {
+                assert_limit(&got.unwrap_err(), part, n, "bytes");
+                assert_eq!(publication::blob_reads_for_tests(), reads, "{part}");
+            }
+        }
+    }
+}

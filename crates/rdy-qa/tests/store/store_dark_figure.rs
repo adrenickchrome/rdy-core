@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 /// The blake3 of the inventory text of the native store files, set when they were written. A
 /// change here needs a founder decision, and after publication it is never allowed.
-const INVENTORY_BLAKE3: &str = "";
+const INVENTORY_BLAKE3: &str = "5306a06810f7d7868dbde0d7ae49fda558057a5d27b792378d159665cd81ed69";
 
 const DUMP: &str = "v4-f1-e1-figure-dark.rdydump";
 const DUMP_EXPECT: &str = "v4-f1-e1-figure-dark.expect.json";

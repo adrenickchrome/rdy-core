@@ -978,6 +978,7 @@ fn store_row() -> Value {
             "check_request": "a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or Fail, or an ANSWER with act AcceptVerdict",
             "content_hash_v2": "baseline: every store this rdy writes",
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
+            "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",

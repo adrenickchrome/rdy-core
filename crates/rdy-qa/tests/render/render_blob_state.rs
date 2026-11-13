@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The notice a page writes in place of removed content.
-const NOTICE_HTML: &str = "<p class=\"redacted\">Content removed.</p>";
+pub(crate) const NOTICE_HTML: &str = "<p class=\"redacted\">Content removed.</p>";
 
-fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, BlockId> {
+pub(crate) fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, BlockId> {
     let w = write(r, view, ops).unwrap_or_else(|e| panic!("write to {view}: {e}"));
     w.created
         .iter()
@@ -29,7 +29,7 @@ fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, BlockId> {
 }
 
 /// The paths of `files` whose bytes hold `bytes`.
-fn carries(files: &BTreeMap<String, Vec<u8>>, bytes: &[u8]) -> Vec<String> {
+pub(crate) fn carries(files: &BTreeMap<String, Vec<u8>>, bytes: &[u8]) -> Vec<String> {
     files
         .iter()
         .filter(|(_, b)| b.windows(bytes.len()).any(|w| w == bytes))
@@ -37,7 +37,7 @@ fn carries(files: &BTreeMap<String, Vec<u8>>, bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn page(files: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
+pub(crate) fn page(files: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
     String::from_utf8(
         files
             .get(path)
@@ -48,7 +48,7 @@ fn page(files: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
 }
 
 /// Applies one approved removal of `targets` to the closed project at `dir`, then opens it.
-fn redact(dir: &Path, targets: Vec<RedactTarget>) -> (Rdy, Hash) {
+pub(crate) fn redact(dir: &Path, targets: Vec<RedactTarget>) -> (Rdy, Hash) {
     let f = authorized_batch_fixture(
         &dir.join(".rdy/store"),
         &[RequestSpec::new("redact", targets)],
@@ -58,7 +58,7 @@ fn redact(dir: &Path, targets: Vec<RedactTarget>) -> (Rdy, Hash) {
 }
 
 /// A generic picture's bytes: a PNG signature and a distinct tail.
-fn picture(tail: &str) -> Vec<u8> {
+pub(crate) fn picture(tail: &str) -> Vec<u8> {
     let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
     b.extend_from_slice(tail.as_bytes());
     b

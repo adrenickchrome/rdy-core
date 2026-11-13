@@ -7,6 +7,7 @@ mod io_asbuilt_publication;
 mod io_authors;
 mod io_check_fixture;
 mod io_clone;
+mod io_dark_figure;
 mod io_decision_basis;
 mod io_dump;
 mod io_dump_chain_surfaces;

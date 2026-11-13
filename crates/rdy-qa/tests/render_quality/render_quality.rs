@@ -347,7 +347,7 @@ fn struct1_no_link_has_an_underscore_directory() {
 }
 
 /// A value that names another origin: a scheme or a protocol-relative `//`.
-fn external(v: &str) -> bool {
+pub(crate) fn external(v: &str) -> bool {
     let v = v.trim();
     if v.starts_with("//") {
         return true;
@@ -362,6 +362,15 @@ fn external(v: &str) -> bool {
         })
         .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()));
     scheme.is_some_and(|s| !s.eq_ignore_ascii_case("mailto"))
+}
+
+/// The URL of each candidate in a `srcset` value: the text before its width or density
+/// descriptor, one candidate per comma.
+pub(crate) fn srcset_urls(v: &str) -> Vec<String> {
+    v.split(',')
+        .filter_map(|c| c.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Every `url(...)` argument and `@import` target in `text`.
@@ -401,6 +410,12 @@ fn struct1_nothing_names_another_origin() {
         for attr in ["href", "src", "action"] {
             for v in attrs(text, attr) {
                 assert!(!external(&unescape(v)), "{rel}: {attr}={v}");
+            }
+        }
+        // rfr2 (rule L): each candidate of a `srcset` names a resource too
+        for v in attrs(text, "srcset") {
+            for u in srcset_urls(&unescape(v)) {
+                assert!(!external(&u), "{rel}: srcset={v}");
             }
         }
         for u in css_urls(text) {
