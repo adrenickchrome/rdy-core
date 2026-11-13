@@ -1082,6 +1082,45 @@ pub fn launcher_is_executable(meta: &fs::Metadata) -> bool {
     meta.permissions().mode() & 0o100 != 0
 }
 
+/// Fixes glibc's large-block threshold at [`super::MALLOC_MMAP_THRESHOLD`] for this process, at
+/// daemon start (TASK-2307). glibc moves the threshold up to the size of each mapped block that
+/// is freed, up to 32 MiB. After the first site build frees its figures, later figure buffers of a
+/// few MiB came from the heap arenas, which keep freed memory and fragment, so the daemon grew
+/// after each landing and the unused pages went to swap. A fixed threshold also stops the moving
+/// one: each block of 1 MiB or more gets its own mapping and goes back to the system when freed.
+/// Nothing on other Unix systems. Returns whether the setting was applied.
+#[allow(unsafe_code)]
+pub fn fix_malloc_threshold() -> bool {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let threshold =
+            libc::c_int::try_from(super::MALLOC_MMAP_THRESHOLD).unwrap_or(libc::c_int::MAX);
+        // SAFETY: mallopt only sets an allocator parameter. glibc marks it MT-Unsafe; the daemon
+        // calls it once at start, right after detach, before it starts its threads (KNOWN-ISSUES
+        // 2419 covers an in-process start).
+        unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, threshold) == 1 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        false
+    }
+}
+
+/// The bytes glibc's malloc holds in blocks with their own mapping (`mallinfo2().hblkhd`), on
+/// Linux with glibc; `None` elsewhere. Tests read it to prove [`fix_malloc_threshold`].
+#[allow(unsafe_code)]
+pub fn malloc_mapped_bytes() -> Option<usize> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallinfo2 only reads the allocator's counters
+        Some(unsafe { libc::mallinfo2() }.hblkhd)
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::sys::{

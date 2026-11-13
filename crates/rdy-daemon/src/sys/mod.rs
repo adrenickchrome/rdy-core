@@ -53,6 +53,8 @@
 //!   quoted as data ([`code_launcher`]), and the launcher's executable bit
 //!   (`make_launcher_executable`, `launcher_is_executable`; Windows has none: Git for Windows runs
 //!   an extensionless `commit-msg` through its own shell).
+//! - the allocator's large-block threshold on Linux with glibc (`fix_malloc_threshold`) and its
+//!   mapped-bytes counter (`malloc_mapped_bytes`); both do nothing elsewhere.
 
 pub mod records;
 mod site_socket;
@@ -66,6 +68,10 @@ pub(crate) use site_socket::configure_site_socket;
 pub use unix::*;
 #[cfg(windows)]
 pub use windows::*;
+
+/// The size from which glibc's malloc gives each block its own mapping, on Linux with glibc
+/// (`fix_malloc_threshold`): 1 MiB, the store's blob chunk.
+pub const MALLOC_MMAP_THRESHOLD: usize = 1024 * 1024;
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("rdy_daemon::sys has no implementation for this platform (FW-XP1 D-1RXEA)");
