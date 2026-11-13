@@ -25,6 +25,10 @@
 //! longer required, the `machine_name` parameter of `rdy_auth` says its host-name default, and
 //! the fix of a host name that is no machine name is a new template.
 //!
+//! Task 4 adds the release README assembly as the QA command `qa-release-readme` alone: no
+//! product command, tool, flag, code or format moves, so its list is empty and the closed delta
+//! stays the delta of the tasks before it.
+//!
 //! Every changed member of the current fixture is in exactly one task's list or in
 //! `DERIVED_CHANGES`, which follows the standard pack's current digest; each task's test checks
 //! the whole closed list and the content of its own members.
@@ -232,6 +236,10 @@ const RIDER_E_CHANGES: &[&str] = &[
     "added /errors_warnings/templates/MACHINE_NAME_HOST_FIX",
 ];
 
+/// Task 4: no member of `readme-from-rdy-v1.json` moves. The release README assembly is a QA
+/// command (`qa-release-readme`), never a product surface.
+const RFR4_CHANGES: &[&str] = &[];
+
 /// Every changed member of the current fixture against `m4bc-v1.json` is in one task's list or
 /// in `DERIVED_CHANGES`, and none else moved: a member that is not listed is byte-identical.
 fn assert_closed(old: &Value, new: &Value) {
@@ -242,6 +250,7 @@ fn assert_closed(old: &Value, new: &Value) {
         RFR2_CHANGES,
         RFR3_CHANGES,
         RIDER_E_CHANGES,
+        RFR4_CHANGES,
         DERIVED_CHANGES,
     ]
     .concat()
@@ -755,4 +764,82 @@ fn si13_contract_moves_only_the_optional_machine_name() {
             "\"pass a machine name with --machine-name, or machine_name in rdy_auth start\""
         ))
     );
+}
+
+/// Task 4 (D-81YJG, O5): the final closed delta against the predecessor holds every earlier
+/// task's change and nothing of Task 4's, every frozen baseline keeps its bytes, and no product
+/// command or tool assembles a release.
+#[test]
+fn rfr4_contract_keeps_all_previous_surfaces() {
+    for (name, digest) in [
+        ("m4bc-v1.json", M4BC_V1_SHA),
+        (
+            "release-1.json",
+            "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6",
+        ),
+        (
+            "repo-links-v1.json",
+            "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27",
+        ),
+        (
+            "mcp-http-v1.json",
+            "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de",
+        ),
+        (
+            "m4a-v1.json",
+            "49ca6b3f9cab4e97445c1de5df5a513fe97ceee3971d9ae17853307bc9922a71",
+        ),
+    ] {
+        assert_eq!(sha(name), digest, "{name} is frozen");
+    }
+    let (old, new) = (read("m4bc-v1.json"), read("readme-from-rdy-v1.json"));
+    assert!(RFR4_CHANGES.is_empty(), "Task 4 moves no contract member");
+    assert_closed(&old, &new);
+
+    // every surface of the predecessor is still there: nothing listed is a removal of a command,
+    // a tool or a code, apart from the export's rows among what is not probed (Task 3)
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    for change in found.iter().filter(|c| c.starts_with("removed ")) {
+        assert!(
+            change.contains("/derived_identities/")
+                || change.ends_with("/not_probed_commands/export")
+                || change.ends_with("/result_fields_not_captured/rdy_export")
+                || change.ends_with("/id=machine_name/required"),
+            "{change}"
+        );
+    }
+
+    // no product command or tool for release assembly
+    fn names(c: &Value, path: &str, out: &mut Vec<String>) {
+        for s in c["subcommands"].as_array().into_iter().flatten() {
+            let at = format!("{path} {}", s["name"].as_str().expect("a name"));
+            out.push(at.trim().to_string());
+            names(s, &at, out);
+        }
+    }
+    let mut commands = vec![];
+    names(&new["cli"]["tree"], "", &mut commands);
+    assert!(commands.iter().any(|c| c == "export"), "the tree is read");
+    let tools: Vec<String> = new["mcp"]["tools"]
+        .as_object()
+        .expect("the tools")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        tools.iter().any(|t| t == "rdy_export"),
+        "the tools are read"
+    );
+    for name in commands.iter().chain(&tools) {
+        for word in ["readme", "release", "assemble"] {
+            assert!(!name.contains(word), "{name} names {word}");
+        }
+    }
+    let text = new.to_string();
+    assert!(
+        !text.contains("qa-release-readme"),
+        "the QA command is no surface"
+    );
+    assert!(!text.contains("readme.sha256"), "the sidecar is no surface");
 }
