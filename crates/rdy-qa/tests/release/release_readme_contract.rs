@@ -21,6 +21,10 @@
 //! refusals and warning, and the export probes that replace the export's rows among the commands
 //! and tools that are not probed.
 //!
+//! Rider (e), D-VRH3Z, makes the machine name of a hub sign-in optional: `--machine-name` is no
+//! longer required, the `machine_name` parameter of `rdy_auth` says its host-name default, and
+//! the fix of a host name that is no machine name is a new template.
+//!
 //! Every changed member of the current fixture is in exactly one task's list or in
 //! `DERIVED_CHANGES`, which follows the standard pack's current digest; each task's test checks
 //! the whole closed list and the content of its own members.
@@ -220,16 +224,30 @@ const RFR3_CHANGES: &[&str] = &[
     "removed /cli/runtime/not_probed_commands/export",
 ];
 
+/// Rider (e), D-VRH3Z: its members of `readme-from-rdy-v1.json` that differ from
+/// `m4bc-v1.json`.
+const RIDER_E_CHANGES: &[&str] = &[
+    "removed /cli/tree/subcommands/name=auth/subcommands/name=sign-in/args/id=machine_name/required",
+    "changed /mcp/tools/rdy_auth/input_schema/properties/machine_name/description",
+    "added /errors_warnings/templates/MACHINE_NAME_HOST_FIX",
+];
+
 /// Every changed member of the current fixture against `m4bc-v1.json` is in one task's list or
 /// in `DERIVED_CHANGES`, and none else moved: a member that is not listed is byte-identical.
 fn assert_closed(old: &Value, new: &Value) {
     let mut found = vec![];
     leaves(&keyed(old), &keyed(new), "", &mut found);
-    let mut want: Vec<String> = [RFR1_CHANGES, RFR2_CHANGES, RFR3_CHANGES, DERIVED_CHANGES]
-        .concat()
-        .iter()
-        .map(|p| (*p).to_string())
-        .collect();
+    let mut want: Vec<String> = [
+        RFR1_CHANGES,
+        RFR2_CHANGES,
+        RFR3_CHANGES,
+        RIDER_E_CHANGES,
+        DERIVED_CHANGES,
+    ]
+    .concat()
+    .iter()
+    .map(|p| (*p).to_string())
+    .collect();
     found.sort();
     want.sort();
     assert_eq!(
@@ -685,5 +703,56 @@ fn rfr3_contract_adds_only_single_export() {
     assert!(
         old.pointer("/mcp/result_fields_not_captured/rdy_export")
             .is_some()
+    );
+}
+
+/// Rider (e), D-VRH3Z: the sign-in's machine name is optional, with the host name as its default,
+/// and nothing else of `auth sign-in` or `rdy_auth` moved.
+#[test]
+fn si13_contract_moves_only_the_optional_machine_name() {
+    assert_eq!(sha("m4bc-v1.json"), M4BC_V1_SHA, "m4bc-v1.json is frozen");
+    let (old, new) = (read("m4bc-v1.json"), read("readme-from-rdy-v1.json"));
+    assert_closed(&old, &new);
+    let sign_in = |v: &Value| -> Value {
+        let auth = v["cli"]["tree"]["subcommands"]
+            .as_array()
+            .and_then(|a| a.iter().find(|c| c["name"] == "auth"))
+            .expect("auth");
+        auth["subcommands"]
+            .as_array()
+            .and_then(|a| a.iter().find(|c| c["name"] == "sign-in"))
+            .expect("auth sign-in")
+            .clone()
+    };
+    let machine = |v: &Value| -> Value {
+        sign_in(v)["args"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["id"] == "machine_name"))
+            .expect("--machine-name")
+            .clone()
+    };
+    assert_eq!(machine(&old)["required"], true);
+    let mut was = machine(&old);
+    was.as_object_mut().unwrap().remove("required");
+    assert_eq!(machine(&new), was, "only required moved");
+    let at = "/mcp/tools/rdy_auth/input_schema/properties/machine_name/description";
+    assert_eq!(
+        new.pointer(at),
+        Some(&Value::from(
+            "This machine's name on the hub: 1 to 64 characters; the host name by default. start only."
+        ))
+    );
+    let mut schema = new["mcp"]["tools"]["rdy_auth"].clone();
+    schema["input_schema"]["properties"]["machine_name"]["description"] =
+        old.pointer(at).cloned().expect("the old description");
+    assert_eq!(
+        schema, old["mcp"]["tools"]["rdy_auth"],
+        "the schema is otherwise unchanged"
+    );
+    assert_eq!(
+        new.pointer("/errors_warnings/templates/MACHINE_NAME_HOST_FIX"),
+        Some(&Value::from(
+            "\"pass a machine name with --machine-name, or machine_name in rdy_auth start\""
+        ))
     );
 }

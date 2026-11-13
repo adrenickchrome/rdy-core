@@ -2,7 +2,8 @@
 //! part: `windows_io` makes the positioned reads and writes, hole punches and allocated-bytes
 //! queries; `windows_security` makes private objects and no-follow opens; `windows_dir` makes the
 //! opens, entry kinds, listings, creates, removals, renames and child processes anchored to an
-//! open directory; `windows_durable` makes the directory flushes and write-through renames.
+//! open directory, and reads the host name; `windows_durable` makes the directory flushes and
+//! write-through renames.
 //! Permission-mode changes (`set_mode_at`) have no Windows form: Windows has no permission modes,
 //! and a private Windows create already gives the object its private descriptor.
 

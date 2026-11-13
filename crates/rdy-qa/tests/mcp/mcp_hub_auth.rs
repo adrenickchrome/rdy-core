@@ -710,3 +710,53 @@ fn hsa8_chat_sign_out_is_local_first_whatever_the_settings() {
         assert_eq!(hub.finish(), 0);
     }
 }
+
+/// The default machine name by D-VRH3Z's rule, computed here: this machine's host name cut to
+/// its first 64 characters, when that passes the machine name check; else `None`.
+fn host_default() -> Option<String> {
+    let cut: String = rdy_store::pio::host_name()?.chars().take(64).collect();
+    rdy_engine::hub_types::check_machine_name(&cut)
+        .ok()
+        .map(|()| cut)
+}
+
+/// D-VRH3Z: `rdy_auth start` without machine_name names the host name default on its card, and
+/// the answer with the same default starts the sign-in.
+#[test]
+fn si11_mcp_start_defaults_the_machine_name_to_the_host_name() {
+    let home = tempfile::tempdir().unwrap();
+    let mut hub = Server::start();
+    let o = hub.origin().to_string();
+    configure(home.path(), &[(&o, hub.ca_pem())]);
+    let (_p, mut c) = chat(home.path());
+    session(&mut c, "agent:claude", Some("r7"));
+    let r = auth(&mut c, json!({"op": "start", "install": o}));
+    let Some(machine) = host_default() else {
+        let (code, _) = refused(r);
+        assert_eq!(code, "E_BAD_INPUT");
+        assert_eq!(hub.finish(), 0);
+        return;
+    };
+    let v = ok(r);
+    assert_eq!(v["state"], "confirmation_required");
+    assert_eq!(v["card"], card(&o, &machine));
+    let hash = Hash::of(card(&o, &machine).as_bytes()).to_string();
+    assert_eq!(v["card_hash"], hash);
+    queue_start(&mut hub);
+    let v = ok(auth(
+        &mut c,
+        json!({"op": "start", "install": o, "card_hash": hash, "answer": "confirm",
+            "evidence": "yes, sign me in", "question": "Sign in to this hub?"}),
+    ));
+    assert_eq!(v["state"], "pending");
+    assert_eq!(
+        routes(&hub.requests()),
+        [route("GET", META), route("POST", "/auth/device")]
+    );
+    let saved = read_creds(home.path());
+    let Some(Credential::Pending(p)) = saved.get(&Origin::parse(&o).unwrap()) else {
+        panic!("a pending sign-in");
+    };
+    assert_eq!(p.machine_name, machine);
+    assert_eq!(hub.finish(), 0);
+}

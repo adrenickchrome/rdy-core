@@ -609,8 +609,8 @@ impl<'a> PublishService<'a> {
             Ok(c) => c,
             Err(e) => return Err(self.fail(&mut run, e)),
         };
-        // 4. access, discovery, state
-        let first = match self.credentials().access(&install, &claim) {
+        // 4. access (a due pending sign-in is checked once first, D-VRH3Z), discovery, state
+        let first = match self.credentials().access_on_use(&install, &claim) {
             Ok(g) => g,
             Err(e) => return Err(self.fail(&mut run, e)),
         };

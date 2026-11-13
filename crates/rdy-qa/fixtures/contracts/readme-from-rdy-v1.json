@@ -15693,7 +15693,6 @@
                   "id": "machine_name",
                   "long": "machine-name",
                   "num_args": "1",
-                  "required": true,
                   "value_names": [
                     "MACHINE_NAME"
                   ]
@@ -19613,6 +19612,7 @@
       "LOAD_CHAIN_FIX": "\"pass the full dump, then each increment in chain order\"",
       "LOCKED_FIX": "\"add an instruction on top of it, or ask the set's owners to change it there: rdy_write a new instruction / rdy new instruction\"",
       "LOST_FIX": "\"run rdy status: it finishes the commit if the store recorded it\"",
+      "MACHINE_NAME_HOST_FIX": "\"pass a machine name with --machine-name, or machine_name in rdy_auth start\"",
       "MCP_HUMAN_CLAIM_FIX": "\"claim your own agent: actor, and relay the person's words with rdy_answer\"",
       "NAME_DOC_FIX": "\"pass doc: rdy_policy {op: \\\"init\\\", doc} / rdy policy init --doc <doc>\"",
       "NEIGHBOR_ENTITY_FIX": "\"update the block for the removed values\"",
@@ -24621,7 +24621,7 @@
               ]
             },
             "machine_name": {
-              "description": "This machine's name on the hub: 1 to 64 characters. start only.",
+              "description": "This machine's name on the hub: 1 to 64 characters; the host name by default. start only.",
               "type": [
                 "string",
                 "null"
