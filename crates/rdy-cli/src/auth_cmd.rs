@@ -40,7 +40,7 @@ use rdy_mcp::tools::{
 use rdy_model::Role;
 use rdy_schema::Issue;
 use serde_json::{Value, json};
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::process::{Command, ExitCode, Stdio};
 
 /// The person's answer to the sign-in card.
@@ -55,8 +55,7 @@ pub(crate) struct SignInArgs {
     /// The install's HTTPS origin.
     #[arg(long)]
     install: String,
-    /// This machine's name on the hub: 1 to 64 characters (default: the host name, cut to 64
-    /// characters).
+    /// This machine's name on the hub: 1 to 64 characters; the host name by default.
     #[arg(long)]
     machine_name: Option<String>,
     /// The card hash the first call printed, to answer that card.
@@ -423,6 +422,10 @@ pub(crate) trait Console {
     fn write(&mut self, text: &str);
 }
 
+/// The most bytes of one answer read from the terminal; a longer line is cut there, which no
+/// answer word is.
+const MAX_ANSWER_BYTES: u64 = 4096;
+
 /// This process's standard streams; only `IsTerminal` tells a terminal.
 pub(crate) struct StdConsole;
 
@@ -437,7 +440,11 @@ impl Console for StdConsole {
 
     fn read_line(&mut self) -> Option<String> {
         let mut line = String::new();
-        match std::io::stdin().lock().read_line(&mut line) {
+        match std::io::stdin()
+            .lock()
+            .take(MAX_ANSWER_BYTES)
+            .read_line(&mut line)
+        {
             Ok(0) | Err(_) => None,
             Ok(_) => {
                 let end = line.trim_end_matches(['\n', '\r']).len();

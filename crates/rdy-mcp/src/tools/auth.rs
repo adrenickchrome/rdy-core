@@ -86,8 +86,7 @@ pub struct AuthParams {
     pub op: AuthOp,
     /// The install's HTTPS origin. start, state and sign_out only.
     pub install: Option<String>,
-    /// This machine's name on the hub: 1 to 64 characters (default: the host name, cut to 64
-    /// characters). start only.
+    /// This machine's name on the hub: 1 to 64 characters; the host name by default. start only.
     pub machine_name: Option<String>,
     /// The card_hash of the card the person answered. start only, with answer.
     pub card_hash: Option<String>,
