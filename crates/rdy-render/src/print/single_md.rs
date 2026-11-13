@@ -174,6 +174,9 @@ impl Places {
     }
 }
 
+/// A place on the site: a page, and its anchor (none for the page itself).
+pub(crate) type Place = (String, Option<String>);
+
 /// What the build tells [`resolve`] about a doc's targets.
 pub(crate) struct Targets<'a> {
     /// The doc's path in the tree, as the warnings name it.
@@ -182,7 +185,7 @@ pub(crate) struct Targets<'a> {
     pub(crate) page: &'a str,
     /// Where a reference's token leads: a page and its anchor (none for the page itself), or
     /// none when it has no place on the site.
-    pub(crate) place_of: &'a dyn Fn(&str) -> Option<(String, Option<String>)>,
+    pub(crate) place_of: &'a dyn Fn(&str) -> Option<Place>,
     /// The anchor a link's fragment on the doc's page names: a block id names its block's
     /// anchor.
     pub(crate) anchor_of: &'a dyn Fn(&str) -> String,
