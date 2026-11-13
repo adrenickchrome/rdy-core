@@ -143,7 +143,7 @@
   // fold from its summary, and every word in it stays on the page.
   function foldTarget(hash) {
     var id = (hash || '').replace(/^#/, '');
-    if (!id) return null;
+    if (!id || !document.getElementById) return null;
     try {
       id = decodeURIComponent(id);
     } catch (e) {}
@@ -168,10 +168,12 @@
     if (el && openFolds(el) && el.scrollIntoView) el.scrollIntoView();
   }
 
-  reveal(window.location.hash);
-  window.addEventListener('hashchange', function () {
-    reveal(window.location.hash);
-  });
+  reveal(window.location ? window.location.hash : '');
+  if (window.addEventListener) {
+    window.addEventListener('hashchange', function () {
+      reveal(window.location.hash);
+    });
+  }
   // A link to a place on this page opens its folds before the browser scrolls to it, also when
   // the address already ends there (no hashchange).
   document.addEventListener('click', function (event) {
@@ -180,7 +182,7 @@
     if (!href) return;
     var at = href.indexOf('#');
     if (at < 0) return;
-    var here = String(window.location.href).split('#')[0];
+    var here = String(window.location && window.location.href).split('#')[0];
     var path = href.slice(0, at);
     if (path === '' || String(a.href || '').split('#')[0] === here) reveal(href.slice(at));
   });

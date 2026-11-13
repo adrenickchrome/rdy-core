@@ -234,26 +234,30 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the as-built plan's Task 5 (FW-AB1): only `assets/site.css` moved (the status
 /// line's `.block-status` and `.status` rules); with the old stylesheet every digest is the one
 /// before. The fixture holds no planned or since content, so no page text moved.
+/// Re-taken for the README plan's Task 1 (D-3VVNC): `assets/site.css` gained the fold rules and
+/// `js/theme.js` (bundled in `assets/app.js`) the fold opener, so every scope's digest moved; the
+/// fixture holds no collapsed section, so no page text moved. With the old assets every digest is
+/// the one before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "d7cc2cd1f4d8d89129862129ec6167c357753cfaaa70ea3fddc990b95e1afe5b",
-        "40290db35d723b46a08d39c0b156bc9cef5d2cc4f443b89400b351e03d042823",
+        "2b10d834482590b16585c32af5af3274f2f66f79e7e65840f9e958f51ff5deca",
+        "ae28167483d7fa70a0e0bac0f721cbf4e38da46f0ae1b6d5d45a8224ce947aca",
     ),
     (
         "tag",
-        "30204f754f4cc45428d58e559e680635db007d34ccb340aeb011e0b195b63e70",
-        "699863c23c1fa81e78514be6e6c277690925204fb6f46bab8e69e3fa36dbfec9",
+        "5fcb4c3ef58e70d09487715a7a072651b87f5d3260a2e401961ab55a4fc83f30",
+        "48c77ba5615bb59f85cab55800274e97350bc1e3e4aa7eceb54e88416d18456d",
     ),
     (
         "view",
-        "229adf5b033004e35dfb06e054ad3c7551f94394703034a921167119a601b4f5",
-        "4c4eff0e95f25c3c2e479d71a90b60b31bdcd4bffb170f62252fbde9e2133cb6",
+        "9f3e6399a8012bd7d8cc674b34000115ea598d6beeb5085e07392e7c20b48dfe",
+        "cc2900cb7682d375764d05ee52ee7138b6c7b23f91c0ef114f1483318fd45d99",
     ),
     (
         "proposal",
-        "4574d619541814c3ebf6aaefdf310a4cca4c97fb2823195acf78f498ea1ec47f",
-        "9f79b0a78d193e9430ffdd2fe07390ac02d31d9604c831f175a3c43dc0412c56",
+        "6103aaecc95bac2dbc6791bbacf9a7a089f3a04cf8a1ff54987900c4a75d58a5",
+        "cb68c6bac4807fb192d36c1b556d408754a2a89685cb3aa0ee7bd600c1792881",
     ),
 ];
 
@@ -291,6 +295,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// Re-taken for the repo_link block type (rpl4): it joins every resolved pack, so the pack's
 /// digest and the version's hash move. Only the proposal scope moved; the site digests and the
 /// other three scopes kept their bytes.
+/// Re-taken for the section field `collapsed` (README plan Task 1): it joins the standard pack, so
+/// the pack's digest and the version's hash move. Only the proposal scope moved; the other three
+/// scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -325,11 +332,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "4e5330534ae3f411cc1d97efa332f266f96e25ab7ccb180dd79c2d79ba3d0aeb",
-            "dbc96556bb27893f5f115f3ccda7d2f9a8662035e75605fa5aeca7073db8aa71",
-            "b8552585944c9a964f54dbd9b3fd155711fda4199d02c2a10bfc00fe678a6e49",
-            "8e137652ed0d1ce4d3c16ca336a90a114851257acdc218b024792745d7458d1d",
-            "6c66cdb1d92dcc28dfa136615f8c60685e0fb2d8c5fe4e9000f6a16c79b0e9f9",
+            "3fe21c547fcb19f1f899bc175566816ed99385b67b591979a3f4d4c3b82ba61e",
+            "e75abb3e225a40185b660686b0999b5214e782d9a4a3fe29b4273d9f51420679",
+            "7d683cb4779e612e308dcc2d35930c8afd14aea0513fc9791102a1b779b6da8b",
+            "c7bbe482ff321ed36dfee7f9be19eae282024df839419781b59efe95d9ee3802",
+            "53fb36a375fc1f45900e84c6aeb1641474235f96c952cfe337b3186151e26d65",
         ],
     ),
 ];
