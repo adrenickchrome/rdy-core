@@ -338,7 +338,7 @@ fn rfr2_working_copy_resolves_both_image_paths() {
         0,
         "a blob was written outside the working copy"
     );
-    std::fs::remove_file(at(&s, "_blobs")).unwrap();
+    rdy_qa::platform::remove_dir_link(&at(&s, "_blobs")).unwrap();
     ok(&s, &["checkout", "--force"]);
 
     // a missing dark image names its path

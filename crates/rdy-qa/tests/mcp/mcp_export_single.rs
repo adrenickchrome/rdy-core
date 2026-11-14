@@ -154,9 +154,11 @@ fn rfr3_mcp_single_matches_cli_on_both_transports() {
     let ep = Endpoint::of(&url, token.trim_end());
     let (a, b) = (short_tempdir(), short_tempdir());
     let both = |c: &mut McpClient, args: &dyn Fn(&Path) -> Value| {
-        // each transport names its own folder in a message
+        // each transport names its own folder in a message; the folder is matched as JSON
+        // writes it, so a Windows path's backslashes match too
         let named = |v: (bool, Value), d: &Path| {
-            let t = v.1.to_string().replace(d.to_str().unwrap(), "<dir>");
+            let dir = serde_json::to_string(d.to_str().unwrap()).unwrap();
+            let t = v.1.to_string().replace(dir.trim_matches('"'), "<dir>");
             (v.0, serde_json::from_str::<Value>(&t).unwrap())
         };
         let x = named(stdio(c, args(a.path())), a.path());
