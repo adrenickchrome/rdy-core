@@ -258,3 +258,17 @@ pub struct DisclosureTotals {
     pub decisions_updated: u64,
     pub new_references: u64,
 }
+
+/// The review of a comparison, before any projection cuts an outer list: the totals over the
+/// complete comparison, and every changed, added and removed doc row and every row outside docs.
+/// The inner lists are cut already, by the limits both projections share: a changed doc's
+/// changes by its share of the change budget. Rows follow each side's reading order; rows outside
+/// docs follow the comparison's id order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DisclosureReview {
+    pub totals: DisclosureTotals,
+    pub changed_docs: Vec<ChangedDocReview>,
+    pub added_docs: Vec<DocSummary>,
+    pub removed_docs: Vec<RemovedDocReview>,
+    pub changed_outside_docs: Vec<OutsideReview>,
+}

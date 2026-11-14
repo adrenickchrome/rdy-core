@@ -180,9 +180,16 @@ fn top_folder(side: &dyn PublicationReviewSide, doc: &BlockId) -> Option<String>
     top.and_then(|e| e.title.clone())
 }
 
+/// The blocks a doc's size counts on `side` ([`DocSize::blocks`]): each block it shows below
+/// it, at any depth, in page order. Sections and figures are among them; decisions are not.
+pub(super) fn sized_blocks(side: &dyn PublicationReviewSide, doc: &BlockId) -> Vec<BlockId> {
+    Contents::of(side, doc).blocks
+}
+
 /// Everything `doc` shows below it on one side, in page order: the full lists, before any cut.
 struct Contents {
-    blocks: u64,
+    /// The blocks the size counts.
+    blocks: Vec<BlockId>,
     sections: u64,
     outline: Vec<String>,
     decisions: Vec<String>,
@@ -196,7 +203,7 @@ impl Contents {
     /// folder, and visits each block once.
     fn of(side: &dyn PublicationReviewSide, doc: &BlockId) -> Contents {
         let mut c = Contents {
-            blocks: 0,
+            blocks: vec![],
             sections: 0,
             outline: vec![],
             decisions: vec![],
@@ -222,7 +229,7 @@ impl Contents {
             if tree::is_tree_type(ty) || !visible_type(ty) {
                 continue;
             }
-            c.blocks += 1;
+            c.blocks.push(id.clone());
             match ty {
                 "section" => {
                     c.sections += 1;
@@ -276,7 +283,7 @@ impl Contents {
     fn size(&self) -> DocSize {
         DocSize {
             sections: self.sections,
-            blocks: self.blocks,
+            blocks: self.blocks.len() as u64,
             decisions: self.decisions.len() as u64,
             figures: self.figures.len() as u64,
         }

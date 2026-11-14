@@ -9,7 +9,13 @@
 //! the shared-sibling rule of the review chips (p-9M1DK): a new parent, a new home, or a new
 //! order key with a new index among the siblings both sides hold. A block that moves to another
 //! doc, or between a doc and the content outside docs, gets its one counted row at its new home;
-//! its old doc lists and counts a `removed` row (D-0C4TB). Decisions count apart from these rows.
+//! its old doc lists and counts a `removed` row (D-0C4TB). Decisions count apart from these rows:
+//! a decision has no `moved` kind, so one that leaves a doc counts `removed` there and `added` at
+//! its new home.
+//!
+//! The content outside docs takes the part of a doc for moves to and from it
+//! ([`outside_reviews`]). Its rows count by their parts with sibling place left out; a version
+//! change with no changed part keeps its row, counts nothing and is `record_only` (D-BND1J).
 //!
 //! Rows follow the review index's "Changes on this page" order: the doc's own row, the lede,
 //! then each block in page order, with each removed block before the block it stood before
@@ -17,9 +23,9 @@
 //! and keep D-0C4TB's hard limits in Unicode scalar values: 200 for an excerpt and 300 for the
 //! pieces of one diff, with the "…" and a code span's backticks inside the limit.
 
-use super::diff::DisclosureDiff;
+use super::diff::{ChangedFolder, DisclosureDiff};
 use super::review_model::{
-    ChangeRow, ChangedDocReview, DiffOp, DiffPiece, ReviewChange, ReviewCounts,
+    ChangeRow, ChangedDocReview, DiffOp, DiffPiece, OutsideReview, ReviewChange, ReviewCounts,
 };
 use super::review_side::{
     BlockParts, PartName, PublicationReviewSide, ShownBlock, backticked, changed_parts,
@@ -29,7 +35,7 @@ use crate::reader::inline::{Ch, Decoder};
 use crate::reader::review::{removed_line_places, visible_type};
 use crate::reader::shape::shared_places;
 use crate::worddiff::{self, Op, Piece, Unit};
-use rdy_model::{BlockId, Hash, tree};
+use rdy_model::{BlockId, Hash, decision, tree};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -54,7 +60,7 @@ const ELLIPSIS: char = '\u{2026}';
 /// The review rows of every changed doc of `diff`, in the candidate's reading order: depth
 /// first, siblings by their order keys, a doc with no page in its place. `before` and `after`
 /// are the two sides of `diff`, each viewed with the removals of both. The lists are complete:
-/// no row is cut here, and no decision row is built here.
+/// no row is cut here, and no decision row is built here; the counts count the decisions too.
 pub fn changed_doc_reviews(
     diff: &DisclosureDiff,
     before: &dyn PublicationReviewSide,
@@ -92,7 +98,10 @@ struct Sides<'s> {
 }
 
 /// The block `id` as `side` shows it on the page: a block a reader sees, never a doc or folder.
-fn content<'s>(side: &'s dyn PublicationReviewSide, id: &BlockId) -> Option<&'s ShownBlock> {
+pub(super) fn content<'s>(
+    side: &'s dyn PublicationReviewSide,
+    id: &BlockId,
+) -> Option<&'s ShownBlock> {
     side.shown(id)
         .filter(|s| visible_type(&s.block_type) && !tree::is_tree_type(&s.block_type))
 }
@@ -164,7 +173,8 @@ impl Sides<'_> {
             .and_then(|t| t.title.clone())
             .filter(|t| title.as_ref() != Some(t));
         let changes = self.changes(doc);
-        let counts = self.counts(&changes);
+        let mut counts = self.counts(&changes);
+        self.count_decisions(doc, &mut counts);
         ChangedDocReview {
             id: doc.clone(),
             title,
@@ -275,34 +285,210 @@ impl Sides<'_> {
     fn counts(&self, rows: &[ChangeRow]) -> ReviewCounts {
         let mut c = ReviewCounts::default();
         for r in rows {
-            match r.change {
-                ReviewChange::Added => c.added += 1,
-                ReviewChange::Removed => c.removed += 1,
-                ReviewChange::Updated => c.updated += 1,
-                ReviewChange::Moved => c.moved += 1,
-            }
-            match (r.block_type.as_str(), r.change) {
-                ("section", ReviewChange::Added) => c.sections_added += 1,
-                ("section", ReviewChange::Removed) => c.sections_removed += 1,
-                ("figure", ReviewChange::Added) => c.figures_added += images(self.after, &r.id),
-                ("figure", ReviewChange::Removed) => {
-                    c.figures_removed += images(self.before, &r.id)
-                }
-                ("figure", ReviewChange::Updated) => {
-                    let (old, new) = (image_map(self.before, &r.id), image_map(self.after, &r.id));
-                    for v in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
-                        match (old.get(v), new.get(v)) {
-                            (Some(o), Some(n)) if o != n => c.figures_changed += 1,
-                            (None, Some(_)) => c.figures_added += 1,
-                            (Some(_), None) => c.figures_removed += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
+            count_row(
+                &mut c,
+                self.before,
+                self.after,
+                &r.block_type,
+                &r.id,
+                r.change,
+            );
         }
         c
+    }
+
+    /// Adds the decisions of `doc` to its counts (D-0C4TB): `added` for a decision the doc
+    /// holds only in the candidate, `removed` for one it holds only in the baseline, and
+    /// `updated` for one whose title, statement or status changed. A decision that moves inside
+    /// the doc counts nothing; one that moves to another home counts at both.
+    fn count_decisions(&self, doc: &BlockId, c: &mut ReviewCounts) {
+        let held = |side: &dyn PublicationReviewSide, id: &BlockId| {
+            side.shown(id).is_some_and(|s| {
+                s.block_type == decision::DECISION && s.home_doc.as_ref() == Some(doc)
+            })
+        };
+        for (id, _) in walk(self.after, doc) {
+            if !held(self.after, id) {
+                continue;
+            }
+            if !held(self.before, id) {
+                c.decisions_added += 1;
+            } else if !self.changed(id).is_empty() {
+                c.decisions_updated += 1;
+            }
+        }
+        for (id, _) in walk(self.before, doc) {
+            if held(self.before, id) && !held(self.after, id) {
+                c.decisions_removed += 1;
+            }
+        }
+    }
+
+    /// The parts of `id` that differ between the sides.
+    fn changed(&self, id: &BlockId) -> Vec<PartName> {
+        let none = BlockParts::default();
+        changed_parts(
+            self.before.parts(id).unwrap_or(&none),
+            self.after.parts(id).unwrap_or(&none),
+        )
+    }
+
+    /// The row of a block outside docs that the comparison lists (D-BND1J, D-0C4TB). A decision
+    /// compares its title, statement and status, and is `added` or `removed` when it enters or
+    /// leaves the content outside docs. Another block a reader sees compares the part table with
+    /// sibling place left out; it took a new place only when it moved in from a doc, and leaving
+    /// for a doc is `removed`. A version change with no changed part, or of a block no reader
+    /// sees, keeps its row with `change` `None`, an empty `what` and `record_only` true.
+    fn outside(&self, id: &BlockId) -> OutsideReview {
+        let (b, a) = (self.before.shown(id), self.after.shown(id));
+        let (bo, ao) = (
+            b.filter(|x| x.home_doc.is_none()),
+            a.filter(|x| x.home_doc.is_none()),
+        );
+        let block_type = a.or(b).map_or_else(String::new, |s| s.block_type.clone());
+        let counted = block_type == decision::DECISION
+            || (visible_type(&block_type) && !tree::is_tree_type(&block_type));
+        let (change, what) = match (bo, ao) {
+            _ if !counted => (None, vec![]),
+            (Some(_), Some(_)) => {
+                let parts = self.changed(id);
+                match parts.is_empty() {
+                    true => (None, vec![]),
+                    false => (Some(ReviewChange::Updated), what_of(&parts, false)),
+                }
+            }
+            (None, Some(_))
+                if block_type != decision::DECISION && content(self.before, id).is_some() =>
+            {
+                let parts = self.changed(id);
+                match parts.is_empty() {
+                    true => (Some(ReviewChange::Moved), vec![]),
+                    false => (Some(ReviewChange::Updated), what_of(&parts, true)),
+                }
+            }
+            (None, Some(_)) => (Some(ReviewChange::Added), vec![]),
+            (Some(_), None) => (Some(ReviewChange::Removed), vec![]),
+            (None, None) => (None, vec![]),
+        };
+        // a removed block reads the baseline's label; every other row the candidate's
+        let shown = match change {
+            Some(ReviewChange::Removed) => b.or(a),
+            _ => a.or(b),
+        };
+        OutsideReview {
+            id: id.clone(),
+            block_type,
+            label: shown.map_or_else(String::new, |s| s.label.clone()),
+            record_only: change.is_none(),
+            change,
+            what,
+            decision: None,
+        }
+    }
+
+    /// What happened to folder `f` (D-0C4TB): `added` or `removed` when one side selects it;
+    /// else `updated` when its title, name or description changed, `moved` when it took a new
+    /// place among its siblings, and `None` when neither changed (a new path alone).
+    fn folder(&self, f: &ChangedFolder) -> Option<ReviewChange> {
+        match (f.before_version, f.after_version) {
+            (None, Some(_)) => Some(ReviewChange::Added),
+            (Some(_), None) => Some(ReviewChange::Removed),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                let (b, a) = (self.before.shown(&f.id)?, self.after.shown(&f.id)?);
+                if !self.changed(&f.id).is_empty() {
+                    Some(ReviewChange::Updated)
+                } else {
+                    self.moved(b, a).then_some(ReviewChange::Moved)
+                }
+            }
+        }
+    }
+}
+
+/// The rows outside docs of `diff` (D-BND1J, D-0C4TB), one for each version change the
+/// comparison lists, in its id order. `before` and `after` are its two sides, each viewed with
+/// the removals of both. A block that moves between a doc and the content outside docs gets its
+/// one counted row at its new place: here for a move out of a doc, in the doc for a move in. A
+/// decision's own decision fields are left `None` here.
+pub fn outside_reviews(
+    diff: &DisclosureDiff,
+    before: &dyn PublicationReviewSide,
+    after: &dyn PublicationReviewSide,
+) -> Vec<OutsideReview> {
+    let sides = Sides {
+        before,
+        after,
+        places: RefCell::new(HashMap::new()),
+    };
+    diff.changed_outside_docs
+        .iter()
+        .map(|o| sides.outside(&o.id))
+        .collect()
+}
+
+/// What happened to each changed folder of `diff`, in its id order (D-0C4TB): see
+/// [`Sides::folder`].
+pub(super) fn folder_changes(
+    diff: &DisclosureDiff,
+    before: &dyn PublicationReviewSide,
+    after: &dyn PublicationReviewSide,
+) -> Vec<Option<ReviewChange>> {
+    let sides = Sides {
+        before,
+        after,
+        places: RefCell::new(HashMap::new()),
+    };
+    diff.changed_folders
+        .iter()
+        .map(|f| sides.folder(f))
+        .collect()
+}
+
+/// Adds one row of block `id` with type `block_type` to `c`. A decision counts in the decision
+/// counts only. Another block counts once by its kind; a section counts as a section too, and a
+/// figure by attachment image, light and dark each: an updated figure counts each image whose
+/// blob or availability changed, and each image it gained or lost.
+pub(super) fn count_row(
+    c: &mut ReviewCounts,
+    before: &dyn PublicationReviewSide,
+    after: &dyn PublicationReviewSide,
+    block_type: &str,
+    id: &BlockId,
+    change: ReviewChange,
+) {
+    if block_type == decision::DECISION {
+        match change {
+            ReviewChange::Added => c.decisions_added += 1,
+            ReviewChange::Removed => c.decisions_removed += 1,
+            ReviewChange::Updated => c.decisions_updated += 1,
+            ReviewChange::Moved => {}
+        }
+        return;
+    }
+    match change {
+        ReviewChange::Added => c.added += 1,
+        ReviewChange::Removed => c.removed += 1,
+        ReviewChange::Updated => c.updated += 1,
+        ReviewChange::Moved => c.moved += 1,
+    }
+    match (block_type, change) {
+        ("section", ReviewChange::Added) => c.sections_added += 1,
+        ("section", ReviewChange::Removed) => c.sections_removed += 1,
+        ("figure", ReviewChange::Added) => c.figures_added += images(after, id),
+        ("figure", ReviewChange::Removed) => c.figures_removed += images(before, id),
+        ("figure", ReviewChange::Updated) => {
+            let (old, new) = (image_map(before, id), image_map(after, id));
+            for v in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
+                match (old.get(v), new.get(v)) {
+                    (Some(o), Some(n)) if o != n => c.figures_changed += 1,
+                    (None, Some(_)) => c.figures_added += 1,
+                    (Some(_), None) => c.figures_removed += 1,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
