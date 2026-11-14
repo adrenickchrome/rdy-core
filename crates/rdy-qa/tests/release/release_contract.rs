@@ -9555,3 +9555,254 @@ fn m4bc5_contract_diff_is_only_basis_and_import_additions() {
         new["mcp"]["tools"]["rdy_import"]
     );
 }
+
+/// sdl7 (SD1 Task 7; D-RP6SM, D-918YB, D-7K4Z0, D-8T7PA): the members of `sd1-v1.json` that
+/// differ from its predecessor `readme-from-rdy-v1.json`, as `added|changed <path>` in the
+/// fixtures' keyed paths (see [`m4a5_keyed`]), each with the reason it moves. Closed: the
+/// registered feature and kind 30 (store), the feature-gated frame kind and the new dump members
+/// (dump), the sync kind and the new stream members (sync). The upgrade, compact, redaction,
+/// probe and agent-guide surfaces hold nothing else: their rows are the predecessor's.
+const SDL7_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /dump_load/feature_frame_kinds",
+        "the feature-gated dump frame kinds are captured: foreign_copy (29, already released) and snapshot_delta (30); the dump header and format number stay",
+    ),
+    (
+        "added /dump_load/fixture_digests/v4-f1-e1-snapshot-delta.expect.json",
+        "the first-use dump pair of the feature, frozen once",
+    ),
+    (
+        "added /dump_load/fixture_digests/v4-f1-e1-snapshot-delta.rdydump",
+        "the first-use dump of the feature, frozen once",
+    ),
+    (
+        "added /store/creation_baseline/features/name=snapshot_delta",
+        "a new store lists snapshot_delta from its first batch",
+    ),
+    (
+        "changed /store/creation_baseline_text",
+        "the FORMAT text of a new store names the third feature",
+    ),
+    (
+        "added /store/encoding_versions/first/SNAPSHOT_DELTA",
+        "kind 30 starts at encoding 1",
+    ),
+    (
+        "added /store/encoding_versions/latest/SNAPSHOT_DELTA",
+        "kind 30 stays at encoding 1",
+    ),
+    (
+        "changed /store/encoding_versions/registered",
+        "the registered (kind, encoding) pairs gain kind 30 encoding 1",
+    ),
+    (
+        "added /store/feature_rules/snapshot_delta",
+        "the activation rule of the feature, in words",
+    ),
+    (
+        "added /store/features/name=snapshot_delta",
+        "the registry gains the incompatible feature snapshot_delta",
+    ),
+    (
+        "added /store/kind_ids/SNAPSHOT_DELTA",
+        "kind 30 is assigned",
+    ),
+    (
+        "added /store/ordinals/others/ImpactKind",
+        "the removal report's ImpactKind gains SnapshotDelta at the end (ordinal 15)",
+    ),
+    (
+        "changed /store/registered_names",
+        "the registry's names gain snapshot_delta",
+    ),
+    (
+        "added /sync/fixture_digests/v2-f1-e1-snapshot-delta.expect.json",
+        "the first-use sync pair of the feature, frozen once",
+    ),
+    (
+        "added /sync/fixture_digests/v2-f1-e1-snapshot-delta.rdysync",
+        "the first-use sync batch of the feature, frozen once",
+    ),
+    ("changed /sync/sync_kinds", "SYNC_KINDS gains kind 30"),
+];
+
+/// The SHA-256 of the predecessor `readme-from-rdy-v1.json`, which this successor copies first.
+const SDL7_PREDECESSOR_SHA: &str =
+    "883debf0ad6ba99e983662a92ddb8c7f044306cea027ca835994b39b5187dc16";
+
+/// sdl7: `sd1-v1.json` is the byte-copied predecessor with the snapshot-delta surfaces added and
+/// nothing else changed. Every changed member is in [`SDL7_CHANGES`] with its reason; the
+/// predecessor keeps its bytes. The behaviours the successor records are checked live: a new
+/// store lists the feature from its first batch; an empty legacy store's upgrade turns the
+/// feature on with the one step and no delta; an upload's held base delta is a typed
+/// prerequisite; and the compact report names kind 30.
+#[test]
+fn sdl7_contract_changes_only_delta_surfaces() {
+    let (old_bytes, old) = m4a5_fixture("readme-from-rdy-v1.json");
+    let (_, new) = m4a5_fixture("sd1-v1.json");
+    let sha = |bytes: &[u8]| -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_eq!(
+        sha(&old_bytes),
+        SDL7_PREDECESSOR_SHA,
+        "readme-from-rdy-v1.json is frozen"
+    );
+    let mut found = vec![];
+    m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
+    let mut want: Vec<String> = SDL7_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    found.sort();
+    want.sort();
+    assert_eq!(
+        found, want,
+        "every changed path of sd1-v1.json is listed with its reason, and none else"
+    );
+    // nothing the predecessor records is gone
+    assert!(
+        found.iter().all(|f| !f.starts_with("removed ")),
+        "{found:#?}"
+    );
+    // every other row is the predecessor's: no tool, command, error, config or pack moved
+    for member in [
+        "/cli",
+        "/config",
+        "/derived_identities",
+        "/errors_warnings",
+        "/inventory_version",
+        "/markdown_exports",
+        "/mcp",
+        "/schema_packs",
+        "/signatures",
+        "/site_urls",
+        "/working_copy",
+    ] {
+        assert_eq!(new.pointer(member), old.pointer(member), "{member} moved");
+    }
+    // the feature row and the registry
+    let features = new["store"]["features"].as_array().expect("features");
+    let row = features
+        .iter()
+        .find(|f| f["name"] == json!("snapshot_delta"))
+        .expect("the registered feature");
+    assert_eq!(row["class"], json!("incompatible"));
+    assert_eq!(new["store"]["kind_ids"]["SNAPSHOT_DELTA"], json!(30));
+    assert_eq!(
+        new["store"]["encoding_versions"]["first"]["SNAPSHOT_DELTA"],
+        json!(1)
+    );
+    // the format numbers, the magic and the manifest grammar do not move (the scalar store
+    // format stays 19, the dump format 4 and the tag-history stream format 2)
+    for pointer in [
+        "/dump_load/dump_format",
+        "/dump_load/magic",
+        "/sync/stream_format",
+        "/sync/magic",
+        "/store/activation",
+        "/store/manifest",
+    ] {
+        let was = old.pointer(pointer);
+        assert!(was.is_some(), "{pointer} is a member");
+        assert_eq!(new.pointer(pointer), was, "{pointer}");
+    }
+    assert_eq!(new["dump_load"]["dump_format"], json!(4));
+    assert_eq!(new["sync"]["stream_format"], json!(2));
+
+    // first-batch activation: a new store lists the feature, and a project open plans no upgrade
+    let baseline = baseline_features();
+    let mut sorted: Vec<&str> = baseline.features.iter().map(|f| f.name.as_str()).collect();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        ["content_hash_v2", "object_encoding", "snapshot_delta"]
+    );
+    let t = tempfile::tempdir().unwrap();
+    let fresh = t.path().join("fresh");
+    rdy_engine::Rdy::init(&fresh, "rdy-standard")
+        .unwrap()
+        .close()
+        .unwrap();
+    {
+        let s = rdy_store::Store::open_with_policy(
+            &rdy_engine::maintenance::store_dir(&fresh),
+            rdy_store::OpenPolicy::RequireCurrent,
+        )
+        .unwrap();
+        assert!(s.features().has("snapshot_delta"));
+    }
+    let plan = rdy_engine::maintenance::run(&fresh, true).unwrap();
+    assert!(plan.steps.is_empty() && !plan.changed, "{plan:?}");
+
+    // an empty legacy store's upgrade report: the one step, one batch, a receipt and no delta
+    let legacy = t.path().join("legacy");
+    {
+        let _legacy = rdy_store::format::legacy_writer_for_tests();
+        rdy_engine::Rdy::init(&legacy, "rdy-standard")
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+    let report = rdy_engine::maintenance::run(&legacy, false).unwrap();
+    assert!(report.changed, "{report:?}");
+    assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+    assert!(report.batch.is_some() && report.receipt.is_some());
+    {
+        let s = rdy_store::Store::open_with_policy(
+            &rdy_engine::maintenance::store_dir(&legacy),
+            rdy_store::OpenPolicy::RequireCurrent,
+        )
+        .unwrap();
+        assert!(s.features().has("snapshot_delta"));
+        assert!(s.reader().project_landings().unwrap().is_empty(), "empty");
+    }
+
+    // held-base prerequisite: the upload of the next landing names the held base delta
+    let recipe = rdy_qa::snapshot_delta_fixture::Recipe {
+        blocks: 5,
+        landings: 4,
+        sets: 2,
+    };
+    let hist = recipe.build();
+    let mut src = rdy_store::Store::create(&t.path().join("src")).unwrap();
+    hist.write_into(&mut src).unwrap();
+    let v1 = src.put_tag(&hist.tag("v1.0.0", 2)).unwrap();
+    let v2 = src.put_tag(&hist.tag("v2.0.0", 3)).unwrap();
+    let reader = src.reader();
+    let known: std::collections::BTreeSet<_> =
+        rdy_store::closure::closure(&reader, v1, &Default::default())
+            .unwrap()
+            .records
+            .into_iter()
+            .collect();
+    let next = rdy_store::closure::closure(&reader, v2, &known).unwrap();
+    assert!(
+        next.prerequisites
+            .iter()
+            .any(|k| k.kind == kinds::SNAPSHOT_DELTA && k.hash == hist.deltas[2]),
+        "the held base delta is a prerequisite: {:?}",
+        next.prerequisites
+    );
+    assert!(
+        next.records
+            .iter()
+            .any(|k| k.kind == kinds::SNAPSHOT_DELTA && k.hash == hist.deltas[3]),
+        "the new landing's delta travels"
+    );
+
+    // compact rows: kind 30 is a row of its own, in the dry-run and unsupported goldens
+    for file in ["rdy_compact--dry-run.json", "rdy_compact--unsupported.json"] {
+        let g: Value = serde_json::from_str(
+            &std::fs::read_to_string(qa_root().join("tests/golden/mcp").join(file)).unwrap(),
+        )
+        .unwrap();
+        let text = g.to_string();
+        assert!(text.contains("\"snapshot_delta\""), "{file}");
+        assert!(
+            !text.contains("\"name\":\"snapshot\""),
+            "{file}: no kind 5 row"
+        );
+        let _ = rows;
+    }
+}
