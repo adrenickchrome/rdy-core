@@ -1630,7 +1630,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);
     let impacts = every!(ImpactKind: BlockVersion, Change, Landing, Tag, View, Proposal,
         StateSnapshot, AuditText, Review, Tension, Answer, Assessment, Dispute, DisputeResolution,
-        CheckRequest);
+        CheckRequest, SnapshotDelta);
     let relations = every!(ImpactRelation: Removed, Embeds, References, Quotes);
     let copies = every!(CopyKind: Render, Export, Dump, Clone, Published, WorkingCopy);
     let statuses = every!(CopyStatus: Unknown);
@@ -1644,7 +1644,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             statuses.len(),
             support.len()
         ),
-        (4, 15, 4, 6, 1, 2)
+        (4, 16, 4, 6, 1, 2)
     );
     let request = |reason_class: ReasonClass, inside: Vec<ImpactRow>, outside: Vec<CopyRow>| {
         let mut r = redaction();
