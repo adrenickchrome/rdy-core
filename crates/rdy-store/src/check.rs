@@ -1238,6 +1238,53 @@ impl StoreReader {
         Ok(out)
     }
 
+    /// The held landings of this project, off canon included: every held LANDING except the
+    /// records of verified foreign-removal proofs, which stay outside canon and outside the
+    /// project's own rules (see [`Authorities`]). The foreign log rules check those proofs.
+    pub fn project_landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {
+        let proof_keys = self.foreign_proof_keys()?;
+        let mut held = vec![];
+        self.for_each_object_of(kinds::LANDING, |h| {
+            held.push(h);
+            Ok(())
+        })?;
+        let mut out = Vec::with_capacity(held.len());
+        for h in held {
+            let key = crate::object_refs::ObjectKey {
+                kind: kinds::LANDING,
+                hash: h,
+            };
+            if !proof_keys.contains(&key) {
+                out.push((h, self.landing(&h)?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The keys of the verified foreign-removal proofs' records (as
+    /// [`Self::foreign_authorities`] finds them); empty without `foreign_copy`.
+    fn foreign_proof_keys(&self) -> Result<BTreeSet<crate::object_refs::ObjectKey>, StoreError> {
+        if !self
+            .store_features()?
+            .has(crate::format::FEATURE_FOREIGN_COPY)
+        {
+            return Ok(BTreeSet::new());
+        }
+        let mut hashes = vec![];
+        self.for_each_object_of(kinds::FOREIGN, |h| {
+            hashes.push(h);
+            Ok(())
+        })?;
+        let mut removals: Vec<RemovalOf> = vec![];
+        for h in hashes {
+            let e = self.foreign_entry(&h)?;
+            if let ForeignEvent::Removal { proof, versions } = e.event {
+                removals.push((h, e.repo, proof, versions));
+            }
+        }
+        Ok(self.foreign_authorities(&removals)?.proof_keys)
+    }
+
     /// The BLOCK versions that local changes create or update to. Empty when `needed` is false.
     fn local_versions(&self, needed: bool) -> Result<BTreeSet<Hash>, StoreError> {
         let mut out = BTreeSet::new();
