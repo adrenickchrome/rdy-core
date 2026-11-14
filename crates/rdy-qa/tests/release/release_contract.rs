@@ -2200,6 +2200,36 @@ fn cli_publication_probes(seen: &mut Seen, env: &[(String, String)]) {
     }
 }
 
+/// drv6 (D-RDH1C, D-MCH70): the publication check over the command line on a project whose
+/// review fills every list (`rdy_qa::disclosure_review`): a first check and a comparison under
+/// one label, so the label's shape holds `included` and `disclosure` both populated. The old
+/// probes keep their inputs.
+fn cli_review_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let dir = rdy_qa::disclosure_review::review_project();
+    let profile = rdy_qa::disclosure_review::PROFILE;
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "publication check review rows",
+        &["publication", "check", "--profile", profile],
+    );
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "publication check review rows",
+        &[
+            "publication",
+            "check",
+            "--profile",
+            profile,
+            "--against",
+            rdy_qa::disclosure_review::V1,
+        ],
+    );
+}
+
 /// rpl34: a citing project that holds every state `rdy links` reports: the live link `core` with
 /// two deliveries (its adopted cited claim, its pins, a changed cited claim), the revoked link
 /// `old`, and, after both links leave canon, the delivered repo that no live link names. It is
@@ -2850,6 +2880,7 @@ fn cli_runtime() -> Value {
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
+    cli_review_probes(&mut seen, &env);
     cli_links_probes(&mut seen, &env);
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
@@ -4381,6 +4412,32 @@ fn mcp_publication_probes(seen: &mut Seen) {
     }
 }
 
+/// drv6: the review probes over the chat tool, as the CLI probes run them.
+fn mcp_review_probes(seen: &mut Seen) {
+    let dir = rdy_qa::disclosure_review::review_project();
+    let profile = rdy_qa::disclosure_review::PROFILE;
+    let mut c = isolated_mcp(dir.path());
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:drv", "run": "drv", "role": "reader"}),
+    );
+    assert!(opened.is_ok(), "the reader session opens");
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_publication_check",
+        "rdy_publication_check review rows",
+        json!({"profile": profile}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_publication_check",
+        "rdy_publication_check review rows",
+        json!({"profile": profile, "against": rdy_qa::disclosure_review::V1}),
+    );
+}
+
 /// rfr3: `rdy_export` runs in the daemon, so its probes go through the proxy of a served project
 /// (which stops its daemon at drop): the single file's result and a refusal under one label, and
 /// a tree export's result.
@@ -4581,6 +4638,7 @@ fn mcp_row() -> Value {
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
     mcp_publication_probes(&mut seen);
+    mcp_review_probes(&mut seen);
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
     mcp_export_probes(&mut seen);
@@ -6859,6 +6917,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
 /// empty; the warnings of its hooks are in `hooks`. m4bc5: the Markdown import's reply holds the
 /// same empty write-report arrays as the format-3 import's, and its refusal states no issue rows.
+/// drv6: the old publication probes' docs hold no section and no decision, and their profiles
+/// cite no decision outside the selection, so the review's outline, decision titles, decision
+/// rows and dropped decisions are empty there; the review rows probe fills each of them.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -6913,13 +6974,18 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
     "cli/publication check against/stdout/disclosure/added_docs",
+    "cli/publication check against/stdout/disclosure/changed_docs[]/decisions",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
     "cli/publication check against/stdout/disclosure/redactions",
+    "cli/publication check against/stdout/references/dropped_decisions/rows",
     "cli/publication check against/stdout/references/links_outside/rows",
     "cli/publication check against/stdout/references/rows",
     "cli/publication check against/stdout/warnings",
+    "cli/publication check first/stdout/included/rows[]/decision_titles",
+    "cli/publication check first/stdout/included/rows[]/outline",
+    "cli/publication check first/stdout/references/dropped_decisions/rows",
     "cli/publication check first/stdout/references/links_outside/rows",
     "cli/publication check first/stdout/references/rows",
     "cli/publication check first/stdout/warnings",
@@ -7048,13 +7114,18 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_docs[]/decisions",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
     "mcp/rdy_publication_check against/ok/disclosure/redactions",
+    "mcp/rdy_publication_check against/ok/references/dropped_decisions/rows",
     "mcp/rdy_publication_check against/ok/references/links_outside/rows",
     "mcp/rdy_publication_check against/ok/references/rows",
     "mcp/rdy_publication_check against/ok/warnings",
+    "mcp/rdy_publication_check first/ok/included/rows[]/decision_titles",
+    "mcp/rdy_publication_check first/ok/included/rows[]/outline",
+    "mcp/rdy_publication_check first/ok/references/dropped_decisions/rows",
     "mcp/rdy_publication_check first/ok/references/links_outside/rows",
     "mcp/rdy_publication_check first/ok/references/rows",
     "mcp/rdy_publication_check first/ok/warnings",

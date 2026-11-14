@@ -11,7 +11,8 @@
 //! The publication review reads each side through one seam ([`PublicationReviewSide`], D-W4YAE)
 //! and fills owned rows ([`review_model`]). A reader view ([`ReaderReviewSide`]) reads a resolved
 //! side; its compared parts are authored values ([`ReaderPartValue`], D-MCH70). An added, removed
-//! or included doc reads its own side for its summary ([`doc_reviews`]).
+//! or included doc reads its own side for its summary ([`doc_reviews`]). One JSON form
+//! ([`review_json`]) writes the review for chat, the CLI and the adapter.
 
 mod diff;
 mod hidden;
@@ -20,6 +21,7 @@ mod release;
 mod report;
 mod review_changes;
 mod review_docs;
+mod review_json;
 mod review_labels;
 mod review_limits;
 pub mod review_model;
@@ -39,6 +41,7 @@ pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, sh
 pub use review_docs::{
     DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_reviews, doc_summary, included,
 };
+pub use review_json::{PublicationReview, ReviewJson, review_json};
 pub use review_labels::{
     DECISIONS_MAX, dropped_decisions, first_attachments, reference_labels, reference_review,
 };

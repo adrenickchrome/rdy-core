@@ -404,9 +404,25 @@ fn hpb8_reference_summary_matches_report_projection() {
         let summary = publication::reference_summary(&resolved.references);
         for against in [None, Some("canon")] {
             let v = publication::check(&r.read(), "site", None, against, None).unwrap();
-            assert_eq!(summary, v["references"], "{n} {against:?}");
-            // the same keys in the same order, byte for byte
-            assert_eq!(summary.to_string(), v["references"].to_string());
+            // the review's old fields are the old summary, byte for byte
+            let old = old_fields(&v["references"]);
+            assert_eq!(summary, old, "{n} {against:?}");
+            assert_eq!(summary.to_string(), old.to_string());
+            // the review adds the labels apart: each row's source, its doc and its target
+            for row in v["references"]["rows"].as_array().unwrap() {
+                assert_eq!(row["source_doc_title"], "In", "{row}");
+                assert_eq!(row["target_label"], "Out", "{row}");
+                assert!(
+                    row["source_label"]
+                        .as_str()
+                        .is_some_and(|l| l.starts_with("Ref ")),
+                    "{row}"
+                );
+            }
+            assert_eq!(
+                v["references"]["dropped_decisions"],
+                json!({"rows": [], "omitted_rows": 0})
+            );
         }
         let keys: Vec<&str> = summary
             .as_object()
@@ -456,4 +472,23 @@ fn hpb8_reference_summary_matches_report_projection() {
             assert_eq!(row["occurrences"], want.occurrences);
         }
     }
+}
+
+/// The members of a review's `references` that the old summary has: no dropped decisions and no
+/// row labels.
+fn old_fields(review: &Value) -> Value {
+    let mut v = review.clone();
+    let m = v.as_object_mut().unwrap();
+    m.remove("dropped_decisions");
+    let strip = |rows: &mut Value| {
+        for row in rows.as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            for label in ["source_label", "source_doc_title", "target_label"] {
+                row.remove(label);
+            }
+        }
+    };
+    strip(&mut m["rows"]);
+    strip(&mut m["links_outside"]["rows"]);
+    v
 }

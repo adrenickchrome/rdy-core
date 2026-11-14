@@ -125,7 +125,7 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
         assert_eq!(cli.to_string(), mcp.to_string(), "{profile} {against:?}");
     }
 
-    // the text: four lines, then the comparison
+    // the text: four lines, then the comparison and one line for each doc row (D-MCH70)
     let t = stdout(&s.rdy(&[
         "publication",
         "check",
@@ -136,10 +136,14 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
     ]));
     assert_eq!(
         t,
-        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nLinks outside selection: 0.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 changed blocks outside docs, 0 attachment changes, 1 new references.\n"
+        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nLinks outside selection: 0.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 changed blocks outside docs, 0 attachment changes, 1 new references.\nNew B (1 block)\n"
     );
+    // a first check: four lines, then the included totals
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "site"]));
-    assert_eq!(t.lines().count(), 4, "{t}");
+    assert_eq!(
+        t,
+        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nLinks outside selection: 0.\nIncluded: 2 docs, 1 folder, 0 sections, 2 blocks, 0 decisions, 0 figures.\n"
+    );
     // a public profile that refers outside its selection is blocked, and the command succeeds
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "open"]));
     assert!(t.starts_with("Publication profile open: blocked.\n"), "{t}");
@@ -153,10 +157,11 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
 }
 
 /// The closed keys of the report (RULING F4, D-KQ4CA): nothing rides beside them.
-const REPORT_KEYS: [&str; 10] = [
+const REPORT_KEYS: [&str; 11] = [
     "against",
     "disclosure",
     "hidden_planned",
+    "included",
     "profile",
     "references",
     "release",
@@ -541,9 +546,21 @@ fn relc4_cli_hides_empty_lines_and_names_new_counts() {
         lines[4], "Hidden as planned: 4 blocks in 4 docs.",
         "{later}"
     );
+    // the newly hidden line ends the summary; the review's doc lines follow it (D-MCH70)
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("Newly hidden"))
+        .unwrap_or_else(|| panic!("no newly hidden line: {later}"));
     assert_eq!(
-        lines.last().copied(),
-        Some("Newly hidden as planned: 2 blocks in 2 docs."),
+        lines[at], "Newly hidden as planned: 2 blocks in 2 docs.",
+        "{later}"
+    );
+    assert!(
+        lines[at + 1..]
+            .iter()
+            .all(|l| ["Edited ", "New ", "Removed "]
+                .iter()
+                .any(|w| l.starts_with(w))),
         "{later}"
     );
     // a baseline that already hides everything: the new list is empty, so its line is absent

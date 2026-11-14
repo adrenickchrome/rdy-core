@@ -376,6 +376,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
             "against",
             "disclosure",
             "hidden_planned",
+            "included",
             "profile",
             "references",
             "release",
@@ -408,6 +409,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
     assert_eq!(
         keys(&v["references"]),
         [
+            "dropped_decisions",
             "excluded",
             "links_outside",
             "missing",
@@ -424,8 +426,23 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
             "location",
             "occurrences",
             "source",
-            "target"
+            "source_doc_title",
+            "source_label",
+            "target",
+            "target_label"
         ]
+    );
+    assert_eq!(
+        keys(&v["references"]["dropped_decisions"]),
+        ["omitted_rows", "rows"]
+    );
+    // a comparison has no included list; a first publication has no comparison
+    assert!(v["included"].is_null());
+    let first = publication::check(&r.read(), "open", None, None, None).unwrap();
+    assert!(first["disclosure"].is_null());
+    assert_eq!(
+        keys(&first["included"]),
+        ["docs", "folders", "omitted_rows", "rows", "totals"]
     );
     assert_eq!(v["profile"]["audience"], "public");
     assert_eq!(v["profile"]["trail"], false);
@@ -536,6 +553,7 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
     );
     assert_eq!(refs["rows"], json!([]));
     assert_eq!(v["warnings"], json!([]));
+    // the review labels each link row from the candidate (D-44NMT, D-RDH1C)
     assert_eq!(
         refs["links_outside"],
         json!({
@@ -546,14 +564,24 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
                 "target": decision,
                 "classification": "excluded",
                 "occurrences": 1,
+                "source_label": "The claim has no ref.",
+                "source_doc_title": "In",
+                "target_label": "The ruling.",
             }],
             "omitted_rows": 0,
         })
     );
-    // the summary every surface shows carries the same object
+    // the old summary keeps its facts: it is the review's link object without the labels
     let resolved = publication::resolve(&r.read(), &Scope::Canon, "open").unwrap();
+    let mut old = refs["links_outside"].clone();
+    for row in old["rows"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        for label in ["source_label", "source_doc_title", "target_label"] {
+            row.remove(label);
+        }
+    }
     assert_eq!(
         publication::reference_summary(&resolved.references)["links_outside"],
-        refs["links_outside"]
+        old
     );
 }

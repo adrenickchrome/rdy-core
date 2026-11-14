@@ -3,13 +3,19 @@
 //! projected to one bounded JSON report. The MCP tool, the ctl op and the command line all call
 //! [`check`]. It is a source inspection: it writes nothing, authorizes nothing and finds no
 //! previous publication; which baseline was published is the hub's record (D-WDKWQ). Its
-//! candidate may be a view or a proposal version (D-CWC91); its baseline stays stable.
+//! candidate may be a view or a proposal version (D-CWC91); its baseline stays stable. Its
+//! `references`, `disclosure` and `included` members are the review's one JSON form
+//! ([`super::review_json`], D-RDH1C); [`reference_summary`] stays the old summary for the
+//! callers that show no review.
 
-use super::diff::{DisclosureDiff, disclosure_diff};
+use super::diff::disclosure_diff;
 use super::hidden::HiddenList;
 use super::references::{CheckStatus, ReferenceReport};
 use super::release;
+use super::review_json::{PublicationReview, ReviewJson, review_json};
+use super::review_limits::{ReviewProjection, compact_len};
 use super::select::{Resolved, bad_inspection_scope, resolve, resolve_inspection};
+use super::source::ReadPublicationSource;
 use crate::error::*;
 use crate::{ReadState, Scope};
 use rdy_model::{Hash, tree};
@@ -117,11 +123,11 @@ fn listed<T>(items: &[T], row: impl Fn(&T) -> Value) -> (Value, usize) {
     )
 }
 
-fn hash_or_null(h: Option<Hash>) -> Value {
+pub(super) fn hash_or_null(h: Option<Hash>) -> Value {
     h.map_or(Value::Null, |h| json!(h.to_string()))
 }
 
-fn reference_row(r: &super::ReferenceRow) -> Value {
+pub(super) fn reference_row(r: &super::ReferenceRow) -> Value {
     json!({
         "source": r.source.to_string(),
         "location": r.location,
@@ -153,7 +159,7 @@ pub fn reference_summary(r: &ReferenceReport) -> Value {
     })
 }
 
-fn doc_row(x: &super::DocEntry) -> Value {
+pub(super) fn doc_row(x: &super::DocEntry) -> Value {
     json!({
         "id": x.id.to_string(),
         "path": x.path,
@@ -162,7 +168,7 @@ fn doc_row(x: &super::DocEntry) -> Value {
     })
 }
 
-fn hidden_json(h: &HiddenList) -> Value {
+pub(super) fn hidden_json(h: &HiddenList) -> Value {
     json!({
         "docs": h.docs,
         "blocks": h.blocks,
@@ -177,127 +183,12 @@ fn hidden_json(h: &HiddenList) -> Value {
     })
 }
 
-fn disclosure_json(d: &DisclosureDiff) -> Value {
-    let mut omitted = serde_json::Map::new();
-    let mut put = |name: &str, (rows, left): (Value, usize)| {
-        omitted.insert(name.to_string(), json!(left));
-        rows
-    };
-    let added_docs = put("added_docs", listed(&d.added_docs, doc_row));
-    let removed_docs = put("removed_docs", listed(&d.removed_docs, doc_row));
-    let changed_docs = put(
-        "changed_docs",
-        listed(&d.changed_docs, |x| {
-            json!({
-                "id": x.id.to_string(),
-                "before_path": x.before_path,
-                "after_path": x.after_path,
-                "before_digest": x.before_digest.to_string(),
-                "after_digest": x.after_digest.to_string(),
-                "redacted": x.redacted,
-            })
-        }),
-    );
-    let changed_folders = put(
-        "changed_folders",
-        listed(&d.changed_folders, |x| {
-            json!({
-                "id": x.id.to_string(),
-                "before_version": hash_or_null(x.before_version),
-                "after_version": hash_or_null(x.after_version),
-                "before_path": x.before_path,
-                "after_path": x.after_path,
-                "redacted": x.redacted,
-            })
-        }),
-    );
-    let changed_outside_docs = put(
-        "changed_outside_docs",
-        listed(&d.changed_outside_docs, |x| {
-            json!({
-                "id": x.id.to_string(),
-                "before_version": hash_or_null(x.before_version),
-                "after_version": hash_or_null(x.after_version),
-                "redacted": x.redacted,
-            })
-        }),
-    );
-    // a light row keeps its fields and has no `variant`; a dark row adds `variant: "dark"`
-    // (D-TBDA1)
-    let attachment = |x: &super::AttachmentEntry| {
-        let mut row = json!({
-            "block": x.block.to_string(),
-            "home_doc": x.home_doc.to_string(),
-            "blob": x.blob.to_string(),
-            "available": x.available,
-        });
-        if let Some(v) = x.variant {
-            row["variant"] = json!(v.as_str());
-        }
-        row
-    };
-    let added_attachments = put(
-        "added_attachments",
-        listed(&d.added_attachments, attachment),
-    );
-    let removed_attachments = put(
-        "removed_attachments",
-        listed(&d.removed_attachments, attachment),
-    );
-    let changed_attachments = put(
-        "changed_attachments",
-        listed(&d.changed_attachments, |x| {
-            let mut row = json!({
-                "block": x.block.to_string(),
-                "before_home_doc": x.before_home_doc.to_string(),
-                "after_home_doc": x.after_home_doc.to_string(),
-                "before_blob": x.before_blob.to_string(),
-                "after_blob": x.after_blob.to_string(),
-                "before_available": x.before_available,
-                "after_available": x.after_available,
-            });
-            if let Some(v) = x.variant {
-                row["variant"] = json!(v.as_str());
-            }
-            row
-        }),
-    );
-    let new_references = put("new_references", listed(&d.new_references, reference_row));
-    let redactions = put(
-        "redactions",
-        listed(&d.redactions, |h| json!(h.to_string())),
-    );
-    json!({
-        "profile_id": d.profile_id.as_ref().map(ToString::to_string),
-        "audience": d.audience.as_str(),
-        "before_profile_version": hash_or_null(d.before_profile_version),
-        "after_profile_version": hash_or_null(d.after_profile_version),
-        "before_selection_hash": d.before_selection_hash.to_string(),
-        "after_selection_hash": d.after_selection_hash.to_string(),
-        "before_selection_identity": d.before_selection_identity.to_string(),
-        "after_selection_identity": d.after_selection_identity.to_string(),
-        "profile_changed": d.profile_changed,
-        "added_docs": added_docs,
-        "removed_docs": removed_docs,
-        "changed_docs": changed_docs,
-        "changed_folders": changed_folders,
-        "changed_outside_docs": changed_outside_docs,
-        "added_attachments": added_attachments,
-        "removed_attachments": removed_attachments,
-        "changed_attachments": changed_attachments,
-        "new_references": new_references,
-        "new_reference_count": d.new_reference_count,
-        "redactions": redactions,
-        "newly_hidden_planned": hidden_json(&d.newly_hidden_planned),
-        "omitted": omitted,
-    })
-}
-
 fn report_json(
     r: &Resolved,
     scope: &Side,
-    against: Option<(&Side, &DisclosureDiff)>,
+    against: Option<&Side>,
     release: Option<(CheckStatus, Value)>,
+    review: ReviewJson,
 ) -> Value {
     let (entries, omitted_entries) = listed(&r.entries, |e| {
         json!({
@@ -327,7 +218,7 @@ fn report_json(
             "trail": r.profile.trail,
         },
         "scope": scope.json(),
-        "against": against.map(|(s, _)| s.json()),
+        "against": against.map(Side::json),
         "selection": {
             "hash": r.selection_hash.to_string(),
             "identity": r.selection_identity.to_string(),
@@ -338,10 +229,11 @@ fn report_json(
             "entries": entries,
             "omitted_entries": omitted_entries,
         },
-        "references": reference_summary(&r.references),
+        "references": review.references,
         "release": release.map(|(_, v)| v),
         "hidden_planned": hidden_json(&r.hidden_planned.full()),
-        "disclosure": against.map(|(_, d)| disclosure_json(d)),
+        "disclosure": review.disclosure,
+        "included": review.included,
         "warnings": warnings,
     })
 }
@@ -354,9 +246,13 @@ fn fit(report: Value, max: usize) -> Result<Value, RdyError> {
 
 /// [`fit`], with `reserve` of the `max` bytes kept for what the caller adds; the refusal names `max`.
 fn fit_reserving(report: Value, max: usize, reserve: usize) -> Result<Value, RdyError> {
-    // serializing a `Value` cannot fail: its keys are strings
-    let size = serde_json::to_vec(&report).map_or(usize::MAX, |b| b.len());
-    if size.saturating_add(reserve) > max {
+    // the size check stops at the first byte over the room left, so it never allocates the
+    // serialized report
+    let fits = max
+        .checked_sub(reserve)
+        .and_then(|room| compact_len(&report, room))
+        .is_some();
+    if !fits {
         return Err(RdyError::new(
             E_LIMIT,
             format!("Publication report exceeds the limit of {max} bytes."),
@@ -400,23 +296,39 @@ pub fn check_reserving(
     let candidate = candidate(read, scope)?;
     let after = resolve_inspection(read, &candidate.scope, profile)?;
     let checked = release.as_ref().map(|v| release::report(&after, v));
-    let Some(text) = against else {
-        return fit_reserving(
-            report_json(&after, &candidate, None, checked),
-            REPORT_BYTES,
-            reserve,
-        );
+    let baseline = against.map(|text| baseline(read, text)).transpose()?;
+    let before = match &baseline {
+        Some(side) => {
+            let stable = after
+                .profile
+                .id
+                .as_ref()
+                .map_or_else(|| profile.to_string(), ToString::to_string);
+            let before = resolve(read, &side.scope, &stable)?;
+            let diff = disclosure_diff(&before, &after)?;
+            Some((before, diff))
+        }
+        None => None,
     };
-    let baseline = baseline(read, text)?;
-    let stable = after
-        .profile
-        .id
-        .as_ref()
-        .map_or_else(|| profile.to_string(), ToString::to_string);
-    let before = resolve(read, &baseline.scope, &stable)?;
-    let diff = disclosure_diff(&before, &after)?;
+    // the review reads the candidate's whole source state, for the labels of reference targets
+    let source_state = read.materialized(&candidate.scope)?;
+    let (title, description) = (read.project_name(), read.project_description());
+    let source =
+        ReadPublicationSource::with_settings(read, read.pack(), &title, description.as_deref());
+    let review = PublicationReview::build(
+        &source,
+        &source_state,
+        &after,
+        before.as_ref().map(|(b, d)| (b, d)),
+    )?;
+    let json = review_json(
+        ReviewProjection::Report,
+        &after.references,
+        before.as_ref().map(|(_, d)| d),
+        &review,
+    );
     fit_reserving(
-        report_json(&after, &candidate, Some((&baseline, &diff)), checked),
+        report_json(&after, &candidate, baseline.as_ref(), checked, json),
         REPORT_BYTES,
         reserve,
     )
