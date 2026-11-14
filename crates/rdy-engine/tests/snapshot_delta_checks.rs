@@ -97,10 +97,13 @@ fn tag_hash(r: &Rdy, name: &str) -> Hash {
         .1
 }
 
+/// The delta to bend, by landing index, and how.
+type Bend<'a> = Option<(usize, &'a dyn Fn(&mut SnapshotDelta))>;
+
 /// Appends each canon landing's delta, oldest first, from its held SNAPSHOT; the delta of the
 /// landing at index `bend.0` is changed by `bend.1` first (the next delta names the changed
 /// one as its base). Returns the deltas' hashes in landing order.
-fn add_deltas(r: &mut Rdy, bend: Option<(usize, &dyn Fn(&mut SnapshotDelta))>) -> Vec<Hash> {
+fn add_deltas(r: &mut Rdy, bend: Bend<'_>) -> Vec<Hash> {
     let mut chain = r.store().landings().unwrap();
     chain.reverse();
     let mut items = vec![];
