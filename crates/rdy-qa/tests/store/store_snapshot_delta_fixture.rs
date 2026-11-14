@@ -179,8 +179,9 @@ fn write_new(p: &Path, bytes: &[u8]) {
     out.sync_all().unwrap();
 }
 
-/// What the sync batch `bytes` holds, as the released sync expect files state it: the header,
-/// each record and the trailer's totals.
+/// What the sync batch `bytes` holds, as the released tag-history expect files state it (the
+/// form `rdy-store/tests/foreign_compatibility.rs` reads): the header, each record and the
+/// trailer's totals.
 fn stream_facts(bytes: &[u8]) -> Value {
     let (mut rd, header) = StreamReader::open(bytes).unwrap();
     let mut records = vec![];
@@ -189,18 +190,22 @@ fn stream_facts(bytes: &[u8]) -> Value {
             StreamRecord::Present { key, payload, .. } => json!({
                 "kind": key.kind,
                 "hash": key.hash.to_string(),
-                "raw_kind": r.raw_kind(),
                 "form": "present",
                 "len": payload.len(),
             }),
             StreamRecord::Dropped {
-                key, original_len, ..
+                key,
+                original_len,
+                apply,
+                residue,
+                ..
             } => json!({
                 "kind": key.kind,
                 "hash": key.hash.to_string(),
-                "raw_kind": r.raw_kind(),
                 "form": "dropped",
                 "len": original_len,
+                "apply": apply.to_string(),
+                "residue": residue.map(|h| h.to_string()),
             }),
         });
     }

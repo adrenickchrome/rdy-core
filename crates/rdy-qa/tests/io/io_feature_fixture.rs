@@ -537,7 +537,7 @@ const FIRST_USE: &[FirstUse] = &[
             ),
             (
                 "v2-f1-e1-snapshot-delta.expect.json",
-                "9ea6e78a08706987b5b96f5f41755e029beff5f17e99239dec2c9d61cbb7bbfe",
+                "8aaa56853f67f2b25db4f2174097602c38cef0e7291c98ba9d68735dcab28e3c",
             ),
         ],
         native: "fixtures/store/snapshot-delta-1/expect.json",

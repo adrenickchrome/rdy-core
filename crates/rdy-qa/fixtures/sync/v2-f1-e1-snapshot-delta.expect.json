@@ -92,162 +92,139 @@
         "form": "present",
         "hash": "669df1191db5edeb471818ae2782b1ca3071bc4d1d07e7adbed670158a6c91cb",
         "kind": 1,
-        "len": 63,
-        "raw_kind": 1
+        "len": 63
       },
       {
         "form": "present",
         "hash": "1208e671cde93a6c450d3c731e356fcae8fb62629b141ea3d6790012eb528a0a",
         "kind": 1,
-        "len": 68,
-        "raw_kind": 1
+        "len": 68
       },
       {
         "form": "present",
         "hash": "c412a274c917fc4ef51661f4b776d49e4fbbe20e4bd4fdbc3b1ba55944b79769",
         "kind": 1,
-        "len": 63,
-        "raw_kind": 1
+        "len": 63
       },
       {
         "form": "present",
         "hash": "81065ccebb0842ee421ce5f941a4a39166dcac8416f6ca510b71953e58048e5b",
         "kind": 1,
-        "len": 85,
-        "raw_kind": 1
+        "len": 85
       },
       {
         "form": "present",
         "hash": "a7d357e889dd42ab4b278b1cba8ccdcaccaf7e252560fee174e3b370a0f26840",
         "kind": 1,
-        "len": 45,
-        "raw_kind": 1
+        "len": 45
       },
       {
         "form": "present",
         "hash": "5477d5801a9e58dddd64b7c91401f538123c3cfc9705661b47eaec96c00eba3a",
         "kind": 2,
-        "len": 232,
-        "raw_kind": 130
+        "len": 232
       },
       {
         "form": "present",
         "hash": "2364b5f27d70beabba9d3fcd12069b56db9b75ab9b0f0d5f9633b72bec0f49ba",
         "kind": 2,
-        "len": 233,
-        "raw_kind": 130
+        "len": 233
       },
       {
         "form": "present",
         "hash": "f8fb906f33fdbc2f786afdb35f8b31b461800d16639f45c0c91f686200e0d121",
         "kind": 2,
-        "len": 109,
-        "raw_kind": 130
+        "len": 109
       },
       {
         "form": "present",
         "hash": "2b8d096501b7953c65f784789bb06524c97416162936734239653f878428d919",
         "kind": 3,
-        "len": 78,
-        "raw_kind": 3
+        "len": 78
       },
       {
         "form": "present",
         "hash": "b6c63d34c27cbedd1dd2723e4cded7ea90ca7bd4ad8eb125984b40f433ee8c6c",
         "kind": 25,
-        "len": 1128,
-        "raw_kind": 153
+        "len": 1128
       },
       {
         "form": "present",
         "hash": "b4bae5c5ee47133d618c8580fda90190356ecb7675c7ee1c804866dceaacef72",
         "kind": 4,
-        "len": 195,
-        "raw_kind": 132
+        "len": 195
       },
       {
         "form": "present",
         "hash": "57d96dc9f7f3ee9a78ed6eb7e08f83a3e1cd6ff7426d7cddf1866ffb5eb33f8c",
         "kind": 3,
-        "len": 110,
-        "raw_kind": 3
+        "len": 110
       },
       {
         "form": "present",
         "hash": "568cd493b4ca19b4fdfebf0655e9485482f52428e811c93f8ddf21e16afbef10",
         "kind": 25,
-        "len": 1290,
-        "raw_kind": 153
+        "len": 1290
       },
       {
         "form": "present",
         "hash": "76f0ff4dd58b07df7035d04eff1f7b5cab1634df09ad05bc3ab7b57c3f2ce496",
         "kind": 4,
-        "len": 227,
-        "raw_kind": 132
+        "len": 227
       },
       {
         "form": "present",
         "hash": "fb7e8b835228772431ea6bf35f37c11cf4b53dba3d84b2b06f735e337c9e400e",
         "kind": 3,
-        "len": 110,
-        "raw_kind": 3
+        "len": 110
       },
       {
         "form": "present",
         "hash": "1f1dc12188ab62764a130b50310317e644e0829db65bbcbb0631b712b01b67c6",
         "kind": 25,
-        "len": 955,
-        "raw_kind": 153
+        "len": 955
       },
       {
         "form": "present",
         "hash": "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce",
         "kind": 4,
-        "len": 227,
-        "raw_kind": 132
+        "len": 227
       },
       {
         "form": "present",
         "hash": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e",
         "kind": 9,
-        "len": 61,
-        "raw_kind": 9
+        "len": 61
       },
       {
         "form": "present",
         "hash": "d7ff1b15eba55f7bc22e7a638778be6c4d4fce08a5272fa79a6432879ea842a2",
         "kind": 24,
-        "len": 62,
-        "raw_kind": 24
+        "len": 62
       },
       {
         "form": "present",
         "hash": "c3cd02437a0580367fe8292db73aaa448253f5f731871f9189837d85be4e897a",
         "kind": 24,
-        "len": 252,
-        "raw_kind": 24
+        "len": 252
       },
       {
         "form": "present",
         "hash": "0ba1f96ad77bc7c693e39d9991f288769ccc8b806f89aade08bfd3125ce94911",
         "kind": 30,
-        "len": 189,
-        "raw_kind": 158
+        "len": 189
       },
       {
         "form": "present",
         "hash": "142d992aafb60f7af715fd0ba974a8fe008a7e482a39b4460bf1c18450488742",
         "kind": 30,
-        "len": 181,
-        "raw_kind": 158
+        "len": 181
       },
       {
         "form": "present",
         "hash": "95e715dd7b4148f06bd0156f13d3fe9804a9dc38c7578e5c9e14bbddce4e5b4c",
         "kind": 30,
-        "len": 109,
-        "raw_kind": 158
+        "len": 109
       }
     ],
     "totals": {
