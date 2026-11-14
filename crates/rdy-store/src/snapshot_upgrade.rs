@@ -261,6 +261,9 @@ pub(crate) fn check_batch(
     Ok(())
 }
 
+/// A delta the take made, with its frame: its raw kind and payload.
+pub(crate) type MadeDelta = (SnapshotDelta, (u8, Vec<u8>));
+
 /// The take's action (`crate::take_batch`): one canonical delta for each new landing of a legacy
 /// upload (`landings`, read through `source`, the union over the holder), in chain order. A
 /// landing's base is its `prev`'s delta: made here for a new `prev`, else the holder's own, whose
@@ -271,7 +274,7 @@ pub(crate) fn take_deltas(
     reader: &StoreReader,
     source: &mut dyn ObjectSource,
     landings: &[Hash],
-) -> Result<Vec<(SnapshotDelta, (u8, Vec<u8>))>, StreamError> {
+) -> Result<Vec<MadeDelta>, StreamError> {
     let held = |e: StoreError, landing: Hash| {
         crate::closure::store_error(
             e,

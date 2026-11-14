@@ -307,8 +307,11 @@ fn complete(dir: &Path) {
     s.close().unwrap();
 }
 
+/// Each held landing's `prev`, `state` and full map.
+type Held = BTreeMap<Hash, (Option<Hash>, Hash, BTreeMap<BlockId, Hash>)>;
+
 /// Each held landing's `prev` and full map, read before the upgrade.
-fn maps(dir: &Path) -> BTreeMap<Hash, (Option<Hash>, Hash, BTreeMap<BlockId, Hash>)> {
+fn maps(dir: &Path) -> Held {
     let s = Store::open(dir).unwrap();
     let r = s.reader();
     let mut out = BTreeMap::new();
@@ -321,9 +324,7 @@ fn maps(dir: &Path) -> BTreeMap<Hash, (Option<Hash>, Hash, BTreeMap<BlockId, Has
 
 /// The deltas the step must write for `maps`, in its order: a landing after its `prev`, the
 /// ready ones by hash, each against its `prev`'s map (the empty map at a root).
-fn expected(
-    maps: &BTreeMap<Hash, (Option<Hash>, Hash, BTreeMap<BlockId, Hash>)>,
-) -> Vec<SnapshotDelta> {
+fn expected(maps: &Held) -> Vec<SnapshotDelta> {
     let mut left: BTreeMap<Hash, Option<Hash>> =
         maps.iter().map(|(h, (p, _, _))| (*h, *p)).collect();
     let mut made: BTreeMap<Hash, Hash> = BTreeMap::new();
