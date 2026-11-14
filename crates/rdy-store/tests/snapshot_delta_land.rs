@@ -735,7 +735,7 @@ fn sdl6_first_delta_activates_the_feature_atomically() {
     assert_eq!(f.required_rdy, SNAPSHOT_DELTA_REQUIRED_RDY);
     assert_eq!(
         refs[0],
-        format::legacy_baseline_features().merged(&[f.clone()]),
+        format::legacy_baseline_features().merged(std::slice::from_ref(&f)),
         "every other feature is kept"
     );
     // no earlier batch names it

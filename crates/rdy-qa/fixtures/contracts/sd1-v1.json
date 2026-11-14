@@ -18370,6 +18370,16 @@
         }
       }
     },
+    "feature_frame_kinds": [
+      [
+        "foreign_copy",
+        29
+      ],
+      [
+        "snapshot_delta",
+        30
+      ]
+    ],
     "fixture_digests": {
       "v1-s10.expect.json": "6227 33adfacbc275c65fdaaafb74ae67e7e98eb541578555ecdb287245f48190d7c6",
       "v1-s10.rdydump": "30502 1aeddacd0344896487769b3398e43b301d0d2817ce7000684d2b62c4d4d7baf2",
@@ -18451,6 +18461,8 @@
       "v4-f1-e1-holder-chain.expect.json": "279579 00847ad6d0dc7baa07147e1cd5efc43240012eb338e3e6174ad2010a0060da1f",
       "v4-f1-e1-holder.expect.json": "151701 21663e97caff9a1230e52a2a19d7ba73660bda44d32f19ec27317348e74b0a30",
       "v4-f1-e1-holder.rdydump": "72881 4e6001ad4f964b71009736244700b9b7f906b3b3531037c7e72268a6e0889842",
+      "v4-f1-e1-snapshot-delta.expect.json": "13645 917e36512b6a05848dbf36cb12066da12c632c0e43bfca21fd9a394885ed0a36",
+      "v4-f1-e1-snapshot-delta.rdydump": "13655 f92ef939bd0054285f7ac442390afc64b2ea753a0944301c8785d8d615fe3ceb",
       "v4-f1-e1.expect.json": "457228 26dd1b3eac47340d062b8293d29012f433de440c40d646b535c03b4f20795082",
       "v4-f1-e1.rdydump": "232974 35b141c49c82442ea87a3b2919796f277e91779ffd1f1fc1471bd40547d7fea0"
     },
@@ -30060,11 +30072,16 @@
           "class": "incompatible",
           "name": "object_encoding",
           "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
         }
       ],
       "manifest_version": 1
     },
-    "creation_baseline_text": "rdy store features 1\n{\"manifest_version\":1,\"features\":[{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"}]}\n",
+    "creation_baseline_text": "rdy store features 1\n{\"manifest_version\":1,\"features\":[{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},{\"name\":\"snapshot_delta\",\"class\":\"incompatible\",\"required_rdy\":\"0.52.0\"}]}\n",
     "current_frame_kinds": [
       1,
       2,
@@ -30119,6 +30136,7 @@
         "REVIEW": 0,
         "SIGNATURE": 0,
         "SNAPSHOT": 0,
+        "SNAPSHOT_DELTA": 1,
         "TAG": 0,
         "TENSION": 0,
         "TRANSITION": 0,
@@ -30150,6 +30168,7 @@
         "REVIEW": 0,
         "SIGNATURE": 0,
         "SNAPSHOT": 0,
+        "SNAPSHOT_DELTA": 1,
         "TAG": 0,
         "TENSION": 0,
         "TRANSITION": 0,
@@ -30221,6 +30240,10 @@
         [
           29,
           1
+        ],
+        [
+          30,
+          1
         ]
       ],
       "versioned_flag": 128
@@ -30234,6 +30257,7 @@
       "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
       "object_encoding": "any frame of encoding 1 or more",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
+      "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
       "view_replay": "a CHANGE whose links.replayed_from is set"
     },
     "features": [
@@ -30279,6 +30303,11 @@
       },
       {
         "class": "incompatible",
+        "name": "snapshot_delta",
+        "required_rdy": "0.52.0"
+      },
+      {
+        "class": "incompatible",
         "name": "view_replay",
         "required_rdy": "0.26.0"
       }
@@ -30308,6 +30337,7 @@
       "REVIEW": 17,
       "SIGNATURE": 11,
       "SNAPSHOT": 5,
+      "SNAPSHOT_DELTA": 30,
       "TAG": 9,
       "TENSION": 18,
       "TRANSITION": 19,
@@ -30589,6 +30619,7 @@
       "foreign_copy",
       "object_encoding",
       "plan_tension",
+      "snapshot_delta",
       "view_replay"
     ],
     "sources": [
@@ -30682,6 +30713,8 @@
       "v2-f1-e0.rdysync": "8536 bd76ed879f89470f01b0c96734a5b43c8a4a41848f6184713edc279e7f568077",
       "v2-f1-e1-ck.expect.json": "15574 c728a7deb8f066a523b990dd0266fe30b6bdbdc974cff005076dcbb62a0379e6",
       "v2-f1-e1-ck.rdysync": "5792 9ffaffb4df66be3b35b42e1acad1d96b9b855f6a31b52f58f299f462ee06bce3",
+      "v2-f1-e1-snapshot-delta.expect.json": "12069 8aaa56853f67f2b25db4f2174097602c38cef0e7291c98ba9d68735dcab28e3c",
+      "v2-f1-e1-snapshot-delta.rdysync": "7439 c6b332bcfba05ba97676bf76911bac1598ea3030e3dad15b06b123a8c2f1fa4c",
       "v2-f1-e1.expect.json": "119223 8c5369c80a9be4d8da3c6d6e8e7457a7ab35da89616964480efbd167dae6fd70",
       "v2-f1-e1.rdysync": "70239 7e6d2097cead2408ec60a99add09e4138dcbf729b6eff1b25c36b19c76334ddc",
       "v3-f1-e1-link-delivery.expect.json": "6549 c42da926057a2f54c614520103b32592c0f3ac213d8dcfe53cbdfb4b05f250ae",
@@ -30760,7 +30793,8 @@
       25,
       26,
       27,
-      28
+      28,
+      30
     ],
     "trailer_fields": [
       "records: u64",
