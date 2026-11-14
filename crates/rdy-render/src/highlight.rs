@@ -11,6 +11,7 @@
 //! is written out as plain. Text is escaped as it is emitted and the source is never escaped
 //! first, so the patterns never see entities.
 use crate::html::escape;
+use rdy_engine::reader::labels;
 use regex::Regex;
 use std::fmt::Write;
 use std::sync::OnceLock;
@@ -44,10 +45,9 @@ const fn rule(pat: &'static str, class: &'static str) -> Rule {
 const KEYWORDS: &str = "@keywords";
 
 struct Lang {
-    /// Every name the language goes by in a code block's `lang`, lower case.
-    names: &'static [&'static str],
-    /// What a reader calls it.
-    human: &'static str,
+    /// The language's own name in the engine's language table ([`labels::language`]), which
+    /// holds every name it goes by and what a reader calls it.
+    name: &'static str,
     keywords: &'static [&'static str],
     rules: &'static [Rule],
 }
@@ -75,8 +75,7 @@ fn shell_word(w: &str) -> &'static str {
 
 const LANGS: &[Lang] = &[
     Lang {
-        names: &["python", "py", "python3"],
-        human: "Python",
+        name: "python",
         keywords: &[
             "match", "case", "if", "else", "elif", "for", "in", "while", "def", "class", "return",
             "import", "from", "as", "pass", "raise", "not", "and", "or", "is", "None", "True",
@@ -107,8 +106,7 @@ const LANGS: &[Lang] = &[
         ],
     },
     Lang {
-        names: &["yaml", "yml"],
-        human: "YAML",
+        name: "yaml",
         keywords: &["true", "false", "null"],
         rules: &[
             rule(r"\B(#[^\n]*)", "tk-c"),
@@ -124,8 +122,7 @@ const LANGS: &[Lang] = &[
         ],
     },
     Lang {
-        names: &["json"],
-        human: "JSON",
+        name: "json",
         keywords: &["true", "false", "null"],
         rules: &[
             rule(r#"("(?:\\.|[^"\\\n])*")\s*:"#, "tk-f"),
@@ -135,8 +132,7 @@ const LANGS: &[Lang] = &[
         ],
     },
     Lang {
-        names: &["rust", "rs"],
-        human: "Rust",
+        name: "rust",
         keywords: &[
             "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
             "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
@@ -175,8 +171,7 @@ const LANGS: &[Lang] = &[
         ],
     },
     Lang {
-        names: &["sh", "bash", "zsh", "shell", "console"],
-        human: "Shell",
+        name: "sh",
         keywords: &[],
         rules: &[
             rule(r"(\$\{[^}\n]*\}|\$\w+|\$[#?!@*$])", "tk-d"),
@@ -194,8 +189,7 @@ const LANGS: &[Lang] = &[
         ],
     },
     Lang {
-        names: &["toml"],
-        human: "TOML",
+        name: "toml",
         keywords: &["true", "false"],
         rules: &[
             rule(r"\B(#[^\n]*)", "tk-c"),
@@ -219,22 +213,10 @@ const LANGS: &[Lang] = &[
     },
 ];
 
-/// Languages a reader names that have no highlighting.
-const PLAIN_NAMES: &[(&[&str], &str)] = &[
-    (&["peg"], "Grammar"),
-    (&["mermaid"], "Mermaid"),
-    (&["d2"], "D2"),
-    (&["", "text", "txt", "plain"], "Text"),
-    (&["html"], "HTML"),
-    (&["css"], "CSS"),
-    (&["js", "javascript"], "JavaScript"),
-    (&["ts", "typescript"], "TypeScript"),
-    (&["sql"], "SQL"),
-    (&["md", "markdown"], "Markdown"),
-];
-
+/// The highlighted language `name` names (any case, trimmed), by the engine's one table.
 fn lookup(name: &str) -> Option<usize> {
-    LANGS.iter().position(|l| l.names.contains(&name))
+    let name = labels::language(name)?;
+    LANGS.iter().position(|l| l.name == name)
 }
 
 /// One language's rules joined into a single pattern.
@@ -276,7 +258,7 @@ fn compiled(i: usize) -> &'static Regex {
 /// The code as HTML: escaped, with tokens wrapped in `<span class="tk-…">`. A language that is
 /// not in the table comes back as escaped text only.
 pub fn html(lang: &str, code: &str) -> String {
-    let Some(i) = lookup(&lang.trim().to_lowercase()) else {
+    let Some(i) = lookup(lang) else {
         return escape(code);
     };
     let rules = LANGS[i].rules;
@@ -308,23 +290,9 @@ pub fn html(lang: &str, code: &str) -> String {
     out
 }
 
-/// The language as a reader names it, for the code label.
+/// The language as a reader names it, for the code label ([`labels::human_name`]).
 pub fn human_name(lang: &str) -> String {
-    let name = lang.trim().to_lowercase();
-    if let Some(i) = lookup(&name) {
-        return LANGS[i].human.to_string();
-    }
-    if let Some((_, human)) = PLAIN_NAMES
-        .iter()
-        .find(|(names, _)| names.contains(&name.as_str()))
-    {
-        return (*human).to_string();
-    }
-    let mut chars = lang.trim().chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
+    labels::human_name(lang)
 }
 
 #[cfg(test)]
@@ -426,8 +394,8 @@ mod tests {
     #[test]
     fn hl1_every_language_compiles_with_one_group_per_rule() {
         for (i, l) in LANGS.iter().enumerate() {
-            assert_eq!(compiled(i).captures_len(), l.rules.len() + 1, "{}", l.human);
-            assert_eq!(html(l.names[0], ""), "");
+            assert_eq!(compiled(i).captures_len(), l.rules.len() + 1, "{}", l.name);
+            assert_eq!(html(l.name, ""), "");
         }
     }
     #[test]

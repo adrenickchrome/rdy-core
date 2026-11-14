@@ -1672,7 +1672,7 @@ fn fold_extents(items: &mut [Item], body: &mut DocBody) {
     }
 }
 
-/// The group's label of `b` as `site` reads it, cut to [`toc::LABEL_MAX`], as escaped HTML: the
+/// The group's label of `b` as `site` reads it, cut to [`rdy_engine::reader::labels::LABEL_MAX`], as escaped HTML: the
 /// notice when `b` reads as removed content (as its page shows it, [`Shared::shows_removed`]);
 /// else the start of its text with each code span as code when its label is that
 /// ([`Site::label_coded`], ruling task-2); else its label.

@@ -57,7 +57,7 @@ impl Link {
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
 /// reader may not see, so the marker's own words stand in for it.
-pub const UNRESOLVED: &str = "unresolved reference";
+pub use rdy_engine::reader::text::UNRESOLVED;
 
 /// A label as HTML ([`inline::label_html`] on the page being written): escaped, its code spans
 /// as `<code>` and its references as links. A newline is a `<br>`.

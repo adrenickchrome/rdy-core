@@ -3,16 +3,15 @@ use crate::html::{self, Link};
 use crate::inline;
 use crate::site::{Site, rel};
 use rdy_engine::Materialized;
+use rdy_engine::reader::text::decision_statement_source;
 use rdy_graph::{DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, Graph};
 use rdy_model::decision::{self, ANSWERS, REVOKES, SUPERSEDES};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::reference::{format_ref, head, snippet};
 use rdy_model::{Block, BlockId, FieldValue};
 use rdy_schema::{Pack, Trait};
-use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::LazyLock;
 
 /// One line of a block's trail: when it happened and what, as plain words.
 #[derive(Clone, Debug, Serialize)]
@@ -31,9 +30,6 @@ pub struct Event {
 pub struct Trail {
     pub events: Vec<Event>,
 }
-
-static REVOKE_PREFIX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^Revoke [A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}: ").expect("regex"));
 
 const MONTHS: [&str; 12] = [
     "January",
@@ -78,14 +74,6 @@ fn display_date(at: Option<&str>) -> String {
 fn day_key(at: Option<&str>) -> Option<String> {
     at.and_then(date_parts)
         .map(|(y, m, d)| format!("{y:04}-{m:02}-{d:02}"))
-}
-
-fn capitalised(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().chain(c).collect(),
-        None => String::new(),
-    }
 }
 
 /// `{a}`, `{a} and {b}`, `{a}, {b} and {c}`.
@@ -142,15 +130,7 @@ impl Cx<'_> {
     /// The statement as a reader sees it: a revocation shows its reason, not the id it names.
     fn statement(&self, d: &Block) -> String {
         // a removed decision's statement is the notice (D-3M81W)
-        if d.is_redacted() {
-            return CONTENT_REMOVED.to_string();
-        }
-        let raw = d.field_str("statement").unwrap_or("");
-        if self.links_out(&d.id, REVOKES) {
-            capitalised(&REVOKE_PREFIX.replace(raw, ""))
-        } else {
-            raw.to_string()
-        }
+        decision_statement_source(d, self.links_out(&d.id, REVOKES))
     }
 
     /// A sentence `of` holds (a statement, an option, a prompt), as spans.

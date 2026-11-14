@@ -1,10 +1,11 @@
 //! The site's shape: which page every folder, doc and block lives on, where on the page, and
 //! the order a reader walks the docs in.
-use crate::changes::{Ch, Decoder};
+use crate::changes::Ch;
 use crate::inline::{self, Form};
+use rdy_engine::reader::labels;
+use rdy_engine::reader::text::{self as reader, Reading};
 use rdy_engine::{E_PATH_CLASH, Materialized, RdyError};
-use rdy_model::redaction::CONTENT_REMOVED;
-use rdy_model::{Block, BlockId, RefMode, decision, entity, tree};
+use rdy_model::{Block, BlockId, RefMode, decision, tree};
 use rdy_schema::Pack;
 use regex::Regex;
 use std::cell::RefCell;
@@ -41,52 +42,17 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
-/// Supporting text: off the site (FW-D10). It has no anchor; a link to it leads to its doc's
-/// page.
-pub const RATIONALE: &str = "rationale";
-
-/// A publication profile: administrative, off every site and print output, removed or not. It
-/// has no item, anchor, permalink, search entry or text of its own; a link to it leads to its
-/// doc's page and reads as that doc.
-pub const PUBLICATION_PROFILE: &str = "publication_profile";
-
-/// Whether `b` is supporting content off the site and every print: a rationale (FW-D10), or a
-/// finding or a source, which live only in the store (D-Z8P09). None has an anchor or a place in
-/// the text; a link to one leads to its doc's page.
-pub fn is_off_site(b: &Block) -> bool {
-    matches!(
-        b.block_type.as_str(),
-        RATIONALE | rdy_schema::supporting::FINDING | rdy_schema::supporting::SOURCE
-    )
-}
-
-/// Whether `b` is a publication profile ([`PUBLICATION_PROFILE`]).
-pub fn is_profile(b: &Block) -> bool {
-    b.block_type == PUBLICATION_PROFILE
-}
+#[cfg(test)]
+pub use rdy_engine::reader::text::RATIONALE;
+pub use rdy_engine::reader::text::{PUBLICATION_PROFILE, is_off_site, is_profile};
 
 /// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
 const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
 
-/// How many references deep a label reads its references' labels; past it a reference reads
-/// as `…` (a title that names a block whose title names it back stops here).
-const LABEL_DEPTH: usize = 3;
-
-/// The key a reference typed as a key (`{{id|@key}}`) reads as, if the target has one. A doc, a
-/// folder or a section has a title a reader knows it by, so a key-typed reference to one reads as
-/// that title, as `{{id}}` does (FW-F2b); a value reads as its value (FW-EN2); any other keyed
-/// block reads as its key (FW-F2a). A publication profile's key is its own text, off the site:
-/// a key-typed reference to one reads as its doc, as `{{id}}` does.
-pub fn typed_key(b: &Block) -> Option<&str> {
-    match b.block_type.as_str() {
-        tree::DOC | tree::FOLDER | "section" | entity::VALUE | PUBLICATION_PROFILE => None,
-        _ => b.field_str("key"),
-    }
-}
+pub use rdy_engine::reader::labels::typed_key;
 
 /// The id inside a longer text, as the leak scan reads it.
-pub(crate) static ID_INSIDE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b").expect("a pattern"));
+pub(crate) use rdy_engine::reader::labels::ID_INSIDE;
 
 /// One disagreement of the disagreements page: entries with the same sentence and the same pages
 /// are one group (ls11). A group of one entry keeps that entry's blocks; a group of more has one
@@ -722,12 +688,6 @@ impl<'a> Site<'a> {
             && self.dropped_decisions.contains(id)
     }
 
-    /// Whether the output drops the reference `span` with the parentheses it empties: it has no
-    /// display words and [`Site::drops`] its target.
-    fn drops_ref(&self, span: &rdy_model::RefSpan) -> bool {
-        span.display.is_none() && BlockId::parse(&span.token).is_ok_and(|id| self.drops(&id))
-    }
-
     /// Sets the entries of the disagreements page: only blocks that have a place on the site, in
     /// reading order of their docs, except that the lead of an entry (the "this page" of its
     /// sentence) comes first. Entries with the same sentence and the same pages are one group
@@ -999,85 +959,14 @@ impl<'a> Site<'a> {
     }
 
     fn label_uncached(&self, b: &Block, depth: usize) -> String {
-        let label = match label_from(b) {
-            // a publication profile, removed or not, has no words on the site: it is called by
-            // its doc, where a link to it leads
-            LabelFrom::Profile => {
-                return self
-                    .doc_of(&b.id)
-                    .map(|d| self.label_at(d, depth))
-                    .unwrap_or_default();
-            }
-            // a removed block is called by the notice, never by its id path or old words
-            // (D-3M81W)
-            LabelFrom::Removed => return CONTENT_REMOVED.to_string(),
-            LabelFrom::Value(v) => return self.as_written_at(&v, depth),
-            LabelFrom::Said(t) => self.words_at(t, depth),
-            LabelFrom::TreeName => self
-                .m
-                .name_of(&b.id)
-                .map(|n| name_as_title(&n, &b.id))
-                .unwrap_or_default(),
-            LabelFrom::Code => {
-                let k = self.number(b);
-                // for a named profile, a language that holds a reference reads as its words
-                // exactly, never worded as a language's name
-                let lang = b
-                    .field_str("lang")
-                    .map(|l| (l, self.as_written_at(l, depth)));
-                match lang.filter(|(_, w)| !w.trim().is_empty()) {
-                    Some((l, w)) if self.reads_ref_words(l) => format!("{} code {k}", w.trim()),
-                    Some((_, w)) => format!("{} code {k}", crate::highlight::human_name(&w)),
-                    None => format!("Code {k}"),
-                }
-            }
-            LabelFrom::Diagram => match b.field_str("alt").filter(|a| !a.trim().is_empty()) {
-                Some(a) => upper_first(&self.words_at(a, depth)),
-                None => format!("Diagram {}", self.number(b)),
-            },
-            LabelFrom::Summary => self.summary_at(b, depth, true),
-        };
-        if label.trim().is_empty() {
-            "Untitled".to_string()
-        } else {
-            label
-        }
+        labels::label(self, b, depth)
     }
 
-    /// [`Site::label`] as characters with their code spans ([`Site::plain_coded`], read back)
-    /// when the label is the start of `b`'s text (its summary words, [`LabelFrom::Summary`] and
-    /// [`summary_from`]), so that a code span there stays code (ruling task-2). `None` when the
-    /// label is a title, a name, a tree name, a value, a code or diagram label, a figure's source
-    /// text, the notice, or empty (`Untitled`): [`Site::label`] then gives it. Uncut. Each
-    /// id-shaped run of the plain characters reads as one plain `…`, as in [`Site::label`], even
-    /// when a code span holds or splits it.
+    /// [`Site::label`] as characters with their code spans ([`labels::label_coded`]) when the
+    /// label is the start of `b`'s text, so that a code span there stays code (ruling task-2).
+    /// `None` when [`Site::label`] gives the label. Uncut.
     pub(crate) fn label_coded(&self, b: &Block) -> Option<Vec<Ch>> {
-        if !matches!(label_from(b), LabelFrom::Summary) {
-            return None;
-        }
-        // an unresolved reference keeps its token, then every id-shaped word is `…`, as the
-        // label's summary reads it
-        let read = |text: &str, mode: RefMode, form: Form| {
-            let coded = self.plain_coded(text, mode, form, &|token| token.to_string());
-            Decoder::default().read(&coded)
-        };
-        let blank = |chars: &[Ch]| chars.iter().all(|c| c.0.is_whitespace());
-        let chars = match summary_from(b) {
-            SummaryFrom::Said(t, form) => read(t, RefMode::Strict, form),
-            // source is not Markdown: it holds no code span
-            SummaryFrom::Text {
-                body: Some(_),
-                source: true,
-                ..
-            } => return None,
-            SummaryFrom::Text { body, tail, .. } => body
-                .map(|t| read(t, RefMode::for_body(&b.block_type), Form::Body))
-                .filter(|w| !blank(w))
-                .or_else(|| tail.map(|t| read(t, RefMode::Strict, Form::Label)))
-                .unwrap_or_default(),
-        };
-        let chars = hide_ids(&chars);
-        (!blank(&chars)).then_some(chars)
+        labels::label_coded(self, b)
     }
 
     /// `b`'s number among the blocks of its kind in its doc (see `numbers`); 1 when it has none.
@@ -1094,38 +983,20 @@ impl<'a> Site<'a> {
     }
 
     fn words_at(&self, text: &str, depth: usize) -> String {
-        self.plain(text, RefMode::Strict, Form::Label, depth, &|_| {
-            crate::html::UNRESOLVED.to_string()
-        })
+        reader::words(self, text, depth)
     }
 
     /// A field read as written (a value and its unit, a code language, a profile's title):
-    /// unchanged for a source output; for a named profile, each reference in it reads as
-    /// [`Site::ref_text`] says (the display words, the target's key or label, else the profile's
-    /// unavailable words), never its token, and nothing else changes but `\{{` as `{{`.
+    /// unchanged for a source output; for a named profile, each reference in it reads as words,
+    /// never its token ([`reader::as_written`]).
     pub(crate) fn as_written(&self, text: &str) -> String {
-        self.as_written_at(text, 0)
+        reader::as_written(self, text, 0)
     }
 
-    /// Whether a field read as written ([`Site::as_written`]) holds a reference that a named
-    /// profile reads as words. Always false for a source output.
-    fn reads_ref_words(&self, text: &str) -> bool {
-        self.unavailable.is_some() && !rdy_model::ref_spans(text, RefMode::Strict).is_empty()
-    }
-
-    fn as_written_at(&self, text: &str, depth: usize) -> String {
-        match self.unavailable {
-            None => text.to_string(),
-            Some(_) => inline::source_plain(text, RefMode::Strict, &|span| {
-                self.ref_text(span, depth, &|_| String::new())
-            }),
-        }
-    }
-
-    /// `text` as plain words in `form` ([`inline::plain_refs_every`]): a reference reads as
-    /// `ref_text` says (the notice for a removed target, else its display text, else the target's
-    /// key when typed as one and the target has one, else its label), or as `unresolved(token)`
-    /// when it leads nowhere.
+    /// `text` as plain words in `form` ([`reader::plain`]): a reference reads as
+    /// [`reader::ref_text`] says (the notice for a removed target, else its display text, else
+    /// the target's key when typed as one and the target has one, else its label), or as
+    /// `unresolved(token)` when it leads nowhere.
     pub fn plain(
         &self,
         text: &str,
@@ -1134,17 +1005,11 @@ impl<'a> Site<'a> {
         depth: usize,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs_every(
-            text,
-            mode,
-            form,
-            &|span| self.ref_text(span, depth, unresolved),
-            &|span| self.drops_ref(span),
-        )
+        reader::plain(self, text, mode, form, depth, unresolved)
     }
 
     /// As [`Site::plain`], but each code span of `text` stands between the code marks
-    /// ([`inline::plain_refs_coded`]): a word diff keeps a code span code (the task-6 ruling).
+    /// ([`reader::plain_coded`]): a word diff keeps a code span code (the task-6 ruling).
     /// A reference reads as plain words, as on the page.
     pub(crate) fn plain_coded(
         &self,
@@ -1153,60 +1018,7 @@ impl<'a> Site<'a> {
         form: Form,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs_coded(
-            text,
-            mode,
-            form,
-            &|span| self.ref_text(span, 0, unresolved),
-            &|span| self.drops_ref(span),
-        )
-    }
-
-    /// What a reference reads as in plain words: the notice when its target is removed, whatever
-    /// display text the author gave (D-3M81W); else its display text; else [`Site::ref_words`].
-    fn ref_text(
-        &self,
-        span: &rdy_model::RefSpan,
-        depth: usize,
-        unresolved: &dyn Fn(&str) -> String,
-    ) -> String {
-        let target = BlockId::parse(&span.token)
-            .ok()
-            .and_then(|id| self.m.get(&id));
-        if target.is_some_and(|t| t.is_redacted()) {
-            return CONTENT_REMOVED.to_string();
-        }
-        match &span.display {
-            Some(d) => d.clone(),
-            None => self.ref_words(span, depth, unresolved),
-        }
-    }
-
-    /// The words a reference with no display text reads as: its target's current key when typed
-    /// as one and the target has one, else the target's label, or `unresolved(token)` when it
-    /// leads nowhere.
-    fn ref_words(
-        &self,
-        span: &rdy_model::RefSpan,
-        depth: usize,
-        unresolved: &dyn Fn(&str) -> String,
-    ) -> String {
-        match BlockId::parse(&span.token)
-            .ok()
-            .and_then(|id| self.m.get(&id))
-        {
-            Some(_) if depth >= LABEL_DEPTH => "…".to_string(),
-            Some(t) => match typed_key(t).filter(|k| span.key_typed && !k.is_empty()) {
-                Some(k) => k.to_string(),
-                None => self.label_at(t, depth + 1),
-            },
-            // a decision outside a named profile's selection: no words of its own (D-7M0YF)
-            None if self.drops_ref(span) => String::new(),
-            None => match self.unavailable {
-                Some(words) => words.to_string(),
-                None => unresolved(&span.token),
-            },
-        }
+        reader::plain_coded(self, text, mode, form, unresolved)
     }
 
     /// `b`'s one-line summary as a reader reads it: its statement, prompt, name or title, else
@@ -1231,60 +1043,16 @@ impl<'a> Site<'a> {
     }
 
     fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
-        // a publication profile, removed or not, has no words on the site: a trail's reference
-        // to one reads as its doc, where the reference leads (as its label does)
-        if is_profile(b) {
-            return self
-                .doc_of(&b.id)
-                .map(|d| self.summary_words(d, depth, keep_token))
-                .unwrap_or_default();
-        }
-        if b.is_redacted() {
-            return CONTENT_REMOVED.to_string();
-        }
-        let unresolved_of = |token: &str| match keep_token {
-            true => token.to_string(),
-            false => crate::html::UNRESOLVED.to_string(),
-        };
-        let read = |text: &str, mode: RefMode, form: Form| {
-            let words = self.plain(text, mode, form, depth, &unresolved_of);
-            words.split_whitespace().collect::<Vec<_>>().join(" ")
-        };
-        let (body, source, tail) = match summary_from(b) {
-            SummaryFrom::Said(t, form) => return read(t, RefMode::Strict, form),
-            SummaryFrom::Text { body, source, tail } => (body, source, tail),
-        };
-        let mode = RefMode::for_body(&b.block_type);
-        let text = match body {
-            // source is not Markdown: its words are its text, each reference in it (none in
-            // code) read as on the drawn diagram, so no id is quoted
-            Some(t) if source => {
-                let words = inline::source_plain(t, mode, &|span| {
-                    self.ref_text(span, depth, &unresolved_of)
-                });
-                words.split_whitespace().collect::<Vec<_>>().join(" ")
-            }
-            Some(t) => read(t, mode, Form::Body),
-            None => String::new(),
-        };
-        if !text.is_empty() {
-            return text;
-        }
-        tail.map(|t| read(t, RefMode::Strict, Form::Label))
-            .unwrap_or_default()
+        labels::summary_words(self, b, depth, keep_token)
     }
 
-    /// A folder's description as plain words on one line: it is running text (spans), a reference
-    /// with no display text reads as its target's label, one that leads nowhere as nothing.
+    /// A folder's description as plain words on one line ([`reader::description_words`]).
     pub(crate) fn description_words(&self, text: &str) -> String {
-        let words = self.plain(text, RefMode::Strict, Form::Spans, 0, &|_| String::new());
-        words.split_whitespace().collect::<Vec<_>>().join(" ")
+        reader::description_words(self, text)
     }
 
     fn summary_at(&self, b: &Block, depth: usize, keep_token: bool) -> String {
-        let words = self.summary_words(b, depth, keep_token);
-        let words = ID_INSIDE.replace_all(&words, "…");
-        words.chars().take(80).collect()
+        labels::summary_at(self, b, depth, keep_token)
     }
 
     /// The text an anchor is made from: a section's title, the name of what a block defines
@@ -1354,131 +1122,43 @@ impl<'a> Site<'a> {
     }
 }
 
-/// What [`Site::label`] calls a block, by the first rule that fits it (one rule for the label and
-/// its coded form, [`Site::label_coded`]).
-enum LabelFrom<'b> {
-    /// A publication profile: its doc's label.
-    Profile,
-    /// A removed block: the notice.
-    Removed,
-    /// A value: its value and unit as written.
-    Value(String),
-    /// Its title, else (not for a doc or folder) its `name` field.
-    Said(&'b str),
-    /// A doc's or folder's tree name, worded as a title.
-    TreeName,
-    /// Code: its language and number.
-    Code,
-    /// A diagram: its alt text or number.
-    Diagram,
-    /// The start of its text: its summary words ([`summary_from`]).
-    Summary,
-}
+/// The site supplies the reader rules' inputs: its blocks, docs, tree names and numbers, and its
+/// cached labels and summaries.
+impl Reading for Site<'_> {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.m.get(id)
+    }
 
-fn label_from(b: &Block) -> LabelFrom<'_> {
-    if is_profile(b) {
-        return LabelFrom::Profile;
+    fn doc_of(&self, id: &BlockId) -> Option<&Block> {
+        Site::doc_of(self, id)
     }
-    if b.is_redacted() {
-        return LabelFrom::Removed;
+
+    fn tree_name(&self, id: &BlockId) -> Option<String> {
+        self.m.name_of(id)
     }
-    if let Some(v) = entity::value_text(b) {
-        return LabelFrom::Value(v);
+
+    fn number(&self, b: &Block) -> usize {
+        Site::number(self, b)
     }
-    let tree = tree::is_tree_type(&b.block_type);
-    let said = b
-        .field_str("title")
-        .filter(|t| !t.is_empty())
-        .or_else(|| b.field_str("name").filter(|t| !t.is_empty() && !tree));
-    match said {
-        Some(t) => LabelFrom::Said(t),
-        None if tree => LabelFrom::TreeName,
-        None if b.block_type == "code" => LabelFrom::Code,
-        None if b.block_type == "diagram" => LabelFrom::Diagram,
-        None => LabelFrom::Summary,
+
+    fn unavailable(&self) -> Option<&'static str> {
+        self.unavailable
+    }
+
+    fn drops(&self, id: &BlockId) -> bool {
+        Site::drops(self, id)
+    }
+
+    fn label_at(&self, b: &Block, depth: usize) -> String {
+        Site::label_at(self, b, depth)
+    }
+
+    fn summary_words(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        Site::summary_words(self, b, depth, keep_token)
     }
 }
 
-/// Where a block's summary words come from ([`Site::summary_words`], [`Site::label_coded`]).
-enum SummaryFrom<'b> {
-    /// The first of its statement, prompt, name and title (a doc's or folder's title, then
-    /// name) that is not empty, read in its form.
-    Said(&'b str, Form),
-    /// Its body when not empty (`source` for code, a diagram or a figure: not Markdown); when
-    /// that reads as nothing, the first of its alt text and caption that is not blank.
-    Text {
-        body: Option<&'b str>,
-        source: bool,
-        tail: Option<&'b str>,
-    },
-}
-
-fn summary_from(b: &Block) -> SummaryFrom<'_> {
-    let said: &[(&str, Form)] = if tree::is_tree_type(&b.block_type) {
-        &[("title", Form::Label), ("name", Form::Label)]
-    } else {
-        &[
-            ("statement", Form::Spans),
-            ("prompt", Form::Spans),
-            ("name", Form::Label),
-            ("title", Form::Label),
-        ]
-    };
-    if let Some((t, form)) = said
-        .iter()
-        .find_map(|(f, form)| b.field_str(f).filter(|s| !s.is_empty()).map(|t| (t, form)))
-    {
-        return SummaryFrom::Said(t, *form);
-    }
-    SummaryFrom::Text {
-        body: (!b.body.is_empty()).then_some(b.body.as_str()),
-        source: matches!(b.block_type.as_str(), "code" | "diagram" | "figure"),
-        tail: ["alt", "caption"]
-            .iter()
-            .find_map(|f| b.field_str(f).filter(|s| !s.trim().is_empty())),
-    }
-}
-
-/// `chars` with each id-shaped run of its plain characters ([`ID_INSIDE`]) read as one plain
-/// `…`, whatever code spans hold or split it.
-fn hide_ids(chars: &[Ch]) -> Vec<Ch> {
-    let plain: String = chars.iter().map(|c| c.0).collect();
-    let starts: Vec<usize> = plain.char_indices().map(|(i, _)| i).collect();
-    let at = |byte: usize| starts.partition_point(|&s| s < byte);
-    let mut out = Vec::with_capacity(chars.len());
-    let mut from = 0;
-    for m in ID_INSIDE.find_iter(&plain) {
-        let (a, z) = (at(m.start()), at(m.end()));
-        out.extend_from_slice(&chars[from..a]);
-        out.push(('…', 0));
-        from = z;
-    }
-    out.extend_from_slice(&chars[from..]);
-    out
-}
-
-/// `s` with its first letter upper-cased.
-fn upper_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
-
-/// A tree name worded as a title: `-` becomes a space, the first letter is upper-cased, and the
-/// name `untitled-<id>` that a doc without a title gets (the one `id` gives) reads as `Untitled`.
-pub(crate) fn name_as_title(name: &str, id: &BlockId) -> String {
-    if name == rdy_model::tree::default_name(None, id) {
-        return "Untitled".to_string();
-    }
-    let words = name.replace('-', " ");
-    let mut chars = words.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
+pub(crate) use rdy_engine::reader::labels::name_as_title;
 
 /// Element ids the page chrome owns (the `<main>` skip-link target, the search box and its
 /// results, the sidebar and its menu button and scrim, the contents list, the version

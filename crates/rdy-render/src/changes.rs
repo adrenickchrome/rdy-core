@@ -57,7 +57,7 @@
 //!    not read here), and the entry stays one Edited entry, moved or not: it counts once.
 use crate::escape;
 use crate::home::{self, ChangeRow};
-use crate::inline::{CODE_CLOSE, CODE_ESC, CODE_OPEN, Form, code_escape};
+use crate::inline::{Form, code_escape};
 use crate::review::{DocChange, Mark, Review};
 use crate::search::own_text_coded;
 use crate::site::{Site, name_as_title, rel, reserved_ids, unique};
@@ -621,40 +621,9 @@ pub fn diff_html(pieces: &[Piece], wrap: &Wrap) -> String {
     out
 }
 
-/// One character of a side's text as a reader reads it, and the code span it is in: `0` for
-/// none, else the span's number on that side (two neighbouring spans stay two elements).
-pub(crate) type Ch = (char, u32);
-
-/// Reads one side's coded text back (rule 7), in order, across the pieces of a diff.
-#[derive(Default)]
-pub(crate) struct Decoder {
-    /// The last character was [`CODE_ESC`]: the next one is authored text.
-    esc: bool,
-    span: u32,
-    spans: u32,
-}
-
-impl Decoder {
-    pub(crate) fn read(&mut self, text: &str) -> Vec<Ch> {
-        let mut out = vec![];
-        for c in text.chars() {
-            if std::mem::take(&mut self.esc) {
-                out.push((c, self.span));
-                continue;
-            }
-            match c {
-                CODE_ESC => self.esc = true,
-                CODE_OPEN => {
-                    self.spans += 1;
-                    self.span = self.spans;
-                }
-                CODE_CLOSE => self.span = 0,
-                _ => out.push((c, self.span)),
-            }
-        }
-        out
-    }
-}
+/// One character of a side's text as a reader reads it, and the code span it is in; reads one
+/// side's coded text back (rule 7) ([`rdy_engine::reader::inline`]).
+pub(crate) use rdy_engine::reader::inline::{Ch, Decoder};
 
 /// Characters as runs, escaped, each run of a code span in a `<code>` element.
 pub(crate) fn runs_html(out: &mut String, chars: &[Ch]) {
