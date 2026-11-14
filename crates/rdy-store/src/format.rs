@@ -69,6 +69,9 @@ pub const FOREIGN_COPY_REQUIRED_RDY: &str = "0.48.0";
 /// The first rdy that knows [`FEATURE_FIGURE_DARK`] (D-MKSFF): the release that first ships a
 /// figure's dark image. It never moves.
 pub const FIGURE_DARK_REQUIRED_RDY: &str = "0.51.0";
+/// The first rdy that knows [`FEATURE_SNAPSHOT_DELTA`] (D-RP6SM, D-918YB): the release that
+/// ships snapshot deltas. It never moves.
+pub const SNAPSHOT_DELTA_REQUIRED_RDY: &str = "0.52.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -91,6 +94,10 @@ pub const FEATURE_FOREIGN_COPY: &str = "foreign_copy";
 /// A figure's dark image (D-MKSFF, D-3DAX4): a `figure` block that sets `dark_blob`, alone or in
 /// a change's create or update. It stays on once a record uses it, whatever is removed later.
 pub const FEATURE_FIGURE_DARK: &str = "figure_dark";
+/// Snapshot deltas (D-RP6SM, D-918YB, D-7K4Z0): a SNAPSHOT_DELTA record, the snapshot of one
+/// landing as the difference from the previous landing's map. Its first use activates it. Not
+/// in [`REGISTERED_FEATURES`] yet: only [`stage_snapshot_delta_for_tests`] registers it.
+pub const FEATURE_SNAPSHOT_DELTA: &str = "snapshot_delta";
 
 /// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF), sorted by name. Each is
 /// `incompatible` and needs its own minimum ([`required_rdy`]).
@@ -113,6 +120,7 @@ pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
         FEATURE_FIGURE_DARK => FIGURE_DARK_REQUIRED_RDY,
+        FEATURE_SNAPSHOT_DELTA => SNAPSHOT_DELTA_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -867,7 +875,9 @@ pub enum ParseFailure {
 
 /// The registered class of feature `name`, if this rdy registers it. Allocates nothing.
 fn known_class(name: &str) -> Option<FeatureClass> {
-    if REGISTERED_FEATURES.contains(&name) {
+    if REGISTERED_FEATURES.contains(&name)
+        || (name == FEATURE_SNAPSHOT_DELTA && snapshot_delta_staged())
+    {
         return Some(FeatureClass::Incompatible);
     }
     TEST_FEATURES.with(|t| {
@@ -894,6 +904,9 @@ pub fn baseline_features() -> StoreFeatures {
 /// while a test holds it.
 pub fn registered_features() -> Vec<StoreFeature> {
     let mut out: Vec<StoreFeature> = REGISTERED_FEATURES.iter().map(|n| registered(n)).collect();
+    if snapshot_delta_staged() {
+        out.push(registered(FEATURE_SNAPSHOT_DELTA));
+    }
     TEST_FEATURES.with(|t| out.extend(t.borrow().iter().map(|(f, _)| f.clone())));
     out
 }
@@ -917,7 +930,9 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///   assessment part or a `foreign_version` target), or a `repo_link` block, alone or in a
 ///   change;
 /// - `figure_dark`: a `figure` block that sets `dark_blob`, alone or in a change's create or
-///   update ([`is_dark_figure`]).
+///   update ([`is_dark_figure`]);
+/// - `snapshot_delta`: a SNAPSHOT_DELTA (a frame of it splits only while its kind is staged,
+///   [`stage_snapshot_delta_for_tests`]).
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -1009,6 +1024,7 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
             }
         }
         kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
+        kinds::SNAPSHOT_DELTA => add(FEATURE_SNAPSHOT_DELTA),
         kinds::REVIEW => {
             use rdy_model::Verdict;
             use rdy_model::review::{ReviewSubjectV1, ReviewV1};
@@ -1064,6 +1080,44 @@ pub fn inject_test_feature(class: FeatureClass, trigger: u8) -> TestFeature {
         )]
     });
     TestFeature(())
+}
+
+thread_local! {
+    /// How many [`StagedSnapshotDelta`] guards this thread holds.
+    static SNAPSHOT_DELTA_STAGED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread holds a [`stage_snapshot_delta_for_tests`] guard: then kind 30
+/// (SNAPSHOT_DELTA) is registered at encoding 1 (`crate::codec`), feature
+/// [`FEATURE_SNAPSHOT_DELTA`] is registered and required by every delta, and kind 30 is a dump
+/// feature kind (`crate::dump::feature_frame_kinds`) and a sync kind
+/// (`crate::sync_stream::sync_kinds`).
+pub(crate) fn snapshot_delta_staged() -> bool {
+    SNAPSHOT_DELTA_STAGED.with(|n| n.get() > 0)
+}
+
+/// While held, this thread stages snapshot deltas ([`stage_snapshot_delta_for_tests`]). Guards
+/// nest: the registries go back when the last one drops. It stays on the thread that took it.
+#[doc(hidden)]
+#[must_use]
+pub struct StagedSnapshotDelta(std::marker::PhantomData<*const ()>);
+
+impl Drop for StagedSnapshotDelta {
+    fn drop(&mut self) {
+        SNAPSHOT_DELTA_STAGED.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// Test hook: registers snapshot deltas on this thread until the guard drops: kind 30 at
+/// encoding 1 with `rdy_model::SnapshotDelta`, feature [`FEATURE_SNAPSHOT_DELTA`] in
+/// [`registered_features`] and [`required_features`], and kind 30 in the dump's feature frame
+/// kinds and the sync kinds. Another thread, a spawned one included, sees none of it. No
+/// environment, CLI or MCP path reaches it, and production registers none of it until the
+/// writer ships.
+#[doc(hidden)]
+pub fn stage_snapshot_delta_for_tests() -> StagedSnapshotDelta {
+    SNAPSHOT_DELTA_STAGED.with(|n| n.set(n.get() + 1));
+    StagedSnapshotDelta(std::marker::PhantomData)
 }
 
 /// The store a dump's frames are of: a scalar store format (dump formats 1 to 3) or a feature

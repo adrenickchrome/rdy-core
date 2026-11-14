@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/readme-from-rdy-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sd1-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -99,10 +99,11 @@ fn workspace_root() -> PathBuf {
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
 /// `mcp-http-v1.json`, `m4a-v1.json` and `m4bc-v1.json`, all frozen) with the additions since. A
-/// capture writes this file, never a baseline. It starts as a byte copy of `m4bc-v1.json`, whose
-/// bytes `rfr1_contract_adds_only_collapsed` pins; a later contract change is a successor fixture.
+/// capture writes this file, never a baseline. It starts as a byte copy of its predecessor
+/// `readme-from-rdy-v1.json`, which `release_readme_contract.rs` keeps frozen; a later contract
+/// change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/readme-from-rdy-v1.json")
+    qa_root().join("fixtures/contracts/sd1-v1.json")
 }
 
 fn capture_mode() -> bool {

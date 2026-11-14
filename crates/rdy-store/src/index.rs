@@ -79,6 +79,11 @@ const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatur
 /// A landing's hash (32 bytes) -> its seal's hash (32 bytes) and the seal's location (`loc_key`):
 /// the first sealed PLAN that names the landing (kind PLAN, p-CST21).
 const PLAN_SEALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_seals");
+/// A landing's hash (32 bytes) -> its snapshot delta's hash (32 bytes) and the delta's location
+/// (`loc_key`): the first SNAPSHOT_DELTA frame that names the landing (kind SNAPSHOT_DELTA,
+/// D-RP6SM), derived from that frame alone. A later copy of the same delta keeps the row; a
+/// distinct delta of the same landing is refused.
+const SNAPSHOT_DELTAS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapshot_deltas");
 /// A decision id's string bytes, a 0x00 byte, then its landing's location (`loc_key`) -> the
 /// seal's hash and the seal's location: every seal that names the decision, in landing order.
 const PLAN_DECISIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_decisions");
@@ -250,6 +255,13 @@ pub enum IndexEntry {
     PlanSeal {
         landing: Hash,
         seal: Hash,
+        at: Location,
+    },
+    /// SNAPSHOT_DELTA `delta`, at `at`, records the snapshot of landing `landing`: the first
+    /// frame of a landing's delta is kept, and a distinct delta of the same landing is refused.
+    SnapshotDelta {
+        landing: Hash,
+        delta: Hash,
         at: Location,
     },
     /// Sealed PLAN `seal`, at `at`, names `decision`; its landing is at `landing_at`.
@@ -506,6 +518,7 @@ pub struct IndexDump {
     pub holder_counts: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_depths: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_waits: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub snapshot_deltas: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The `meta` value of the first briefed change's location, if any.
     pub first_briefed_change: Option<Vec<u8>>,
 }
@@ -1210,6 +1223,12 @@ impl Index {
                 "the index has no capacity counts; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the snapshot delta table: no landing's delta is ever read as absent
+        if has(OBJECTS.name()) && !has(SNAPSHOT_DELTAS.name()) {
+            return Err(StoreError::Db(
+                "the index has no snapshot delta table; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1242,6 +1261,7 @@ impl Index {
             w.open_table(HOLDER_COUNTS).map_err(db)?;
             w.open_table(LANDING_DEPTHS).map_err(db)?;
             w.open_table(LANDING_WAITS).map_err(db)?;
+            w.open_table(SNAPSHOT_DELTAS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1336,6 +1356,8 @@ impl Index {
             // and the dispute tables only for a batch with a dispute or a resolution
             let mut disputes: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             let mut resolutions: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            // and the snapshot delta table only for a batch with a delta
+            let mut deltas: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
             // the capacity counts (TASK-2340): the keys whose frame just indexed was their first,
@@ -1468,6 +1490,29 @@ impl Index {
                         };
                         t.insert(&signature_key(subject, signature)[..], &[][..])
                             .map_err(db)?;
+                    }
+                    IndexEntry::SnapshotDelta { landing, delta, at } => {
+                        let t = match &mut deltas {
+                            Some(t) => t,
+                            None => deltas.insert(w.open_table(SNAPSHOT_DELTAS).map_err(db)?),
+                        };
+                        let kept = match t.get(&landing.0[..]).map_err(db)? {
+                            Some(v) => Some(hash_at_from(v.value(), "snapshot delta entry")?.0),
+                            None => None,
+                        };
+                        match kept {
+                            // a repeated physical copy of the same delta is no second delta
+                            Some(k) if k == *delta => {}
+                            Some(_) => {
+                                return Err(StoreError::Decode(format!(
+                                    "landing {landing}: expected exactly one snapshot delta"
+                                )));
+                            }
+                            None => {
+                                t.insert(&landing.0[..], &hash_at_value(delta, at)[..])
+                                    .map_err(db)?;
+                            }
+                        }
                     }
                     IndexEntry::PlanSeal { landing, seal, at } => {
                         if plans.is_none() {
@@ -1846,6 +1891,7 @@ impl Index {
             holder_counts: dump_table(&r, HOLDER_COUNTS)?,
             landing_depths: dump_table(&r, LANDING_DEPTHS)?,
             landing_waits: dump_table(&r, LANDING_WAITS)?,
+            snapshot_deltas: dump_table(&r, SNAPSHOT_DELTAS)?,
             first_briefed_change: r
                 .open_table(META)
                 .map_err(db)?
@@ -1879,6 +1925,16 @@ impl Index {
             .map_err(db)?
             .map(|v| u64_from(v.value()))
             .transpose()
+    }
+
+    /// The snapshot delta of `landing` and its location, if one is indexed ([`SNAPSHOT_DELTAS`]).
+    pub fn snapshot_delta(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SNAPSHOT_DELTAS).map_err(db)?;
+        match t.get(&landing.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_at_from(v.value(), "snapshot delta entry")?)),
+            None => Ok(None),
+        }
     }
 
     /// The seal of `landing` and its location, if one is indexed.

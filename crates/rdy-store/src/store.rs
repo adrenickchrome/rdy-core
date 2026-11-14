@@ -876,9 +876,28 @@ fn frame_entries(
         kinds::DISPUTE_RESOLUTION => out.push(resolution_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
         kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
+        kinds::SNAPSHOT_DELTA => out.push(snapshot_delta_entry(hash, loc, &o)?),
         _ => {}
     }
     Ok(out)
+}
+
+/// The entry of the SNAPSHOT_DELTA `hash` at `at`, split as `o`: the landing it records, from the
+/// frame alone. Its body is read with the bounded decoder (a delta may come from another store);
+/// one that does not decode is `record <hash> (kind 30): <reason>`.
+pub(crate) fn snapshot_delta_entry(
+    hash: Hash,
+    at: Location,
+    o: &crate::codec::ObjectBytes<'_>,
+) -> Result<IndexEntry, StoreError> {
+    let d: rdy_model::SnapshotDelta = crate::codec::decode_bounded_split(o).map_err(|e| {
+        crate::carried_records::refusal(&hash, kinds::SNAPSHOT_DELTA, &e.to_string())
+    })?;
+    Ok(IndexEntry::SnapshotDelta {
+        landing: d.landing,
+        delta: hash,
+        at,
+    })
 }
 
 /// What a replay's plan entries read of earlier objects: the index being built and the log, with
@@ -3812,6 +3831,15 @@ impl StoreReader {
                     None => Err(StoreError::corrupt_at(loc)),
                 }
             })
+    }
+
+    /// The snapshot delta of `landing` and its location, if the index holds one: the first
+    /// SNAPSHOT_DELTA frame that names it.
+    pub fn snapshot_delta_of(
+        &self,
+        landing: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        self.index().snapshot_delta(landing)
     }
 
     /// The first object written with hash `h`, whatever its kind, and that kind. A payload a

@@ -65,6 +65,11 @@ pub const CHECK_REQUEST: u8 = 28;
 /// delivery, a revocation or a removal from one source, outside canon. Its first encoding is 1.
 /// Registered only: no writer yet.
 pub const FOREIGN: u8 = 29;
+/// One landing's snapshot as the difference from the previous landing's map
+/// (`rdy_model::SnapshotDelta`, D-RP6SM): it names its landing, so the index maps each landing to
+/// its delta from the frame alone. Its first and only encoding is 1, raw kind `30 | 0x80`.
+/// Registered only while a test holds `crate::format::stage_snapshot_delta_for_tests`.
+pub const SNAPSHOT_DELTA: u8 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {
