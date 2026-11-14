@@ -194,7 +194,11 @@ fn ha14_early_batch_returns_keys_without_root() {
     let (mut reader, _) = StreamReader::open(f.bytes.as_slice()).unwrap();
     let mut leaves: Vec<StreamRecord> = Vec::new();
     while let Some(rec) = reader.next().unwrap() {
-        if rec.refs().unwrap().is_empty() {
+        if rec
+            .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+            .unwrap()
+            .is_empty()
+        {
             leaves.push(rec);
         }
     }

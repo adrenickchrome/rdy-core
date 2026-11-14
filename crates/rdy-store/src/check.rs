@@ -1356,7 +1356,8 @@ impl StoreReader {
             }
             Ok(None)
         };
-        for kind in crate::object_refs::PORTABLE_KINDS {
+        let features = crate::snapshot::held_features(self)?;
+        for &kind in crate::object_refs::portable_kinds() {
             if crate::object_refs::may_name_foreign(kind) || kind == kinds::BLOB_CHUNK {
                 continue;
             }
@@ -1375,7 +1376,7 @@ impl StoreReader {
                     Err(StoreError::Redacted { .. }) => continue,
                     Err(e) => return Err(e),
                 };
-                let refs = crate::object_refs::refs_of(raw, &payload)
+                let refs = crate::object_refs::refs_of(&features, raw, &payload)
                     .map_err(|e| bad(format!("object {key}: {e}")))?;
                 for r in refs {
                     if let Some(what) = names_foreign(r.kind, &r.hash)? {

@@ -975,7 +975,13 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         .chain([secret])
         .collect();
     for (kind, payload) in &present {
-        for r in rdy_store::object_refs::refs_of(*kind, payload).unwrap() {
+        for r in rdy_store::object_refs::refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            *kind,
+            payload,
+        )
+        .unwrap()
+        {
             match r.kind {
                 Some(k) if !in_batch.contains(&key(k, r.hash)) => {
                     prerequisites.insert(key(k, r.hash));

@@ -91,4 +91,11 @@ impl<S: ObjectSource> ObjectSource for Features<S> {
         }
         Ok(r)
     }
+
+    fn snapshot_delta_of(
+        &mut self,
+        landing: &rdy_model::Hash,
+    ) -> Result<Option<rdy_model::Hash>, StreamError> {
+        self.inner.snapshot_delta_of(landing)
+    }
 }

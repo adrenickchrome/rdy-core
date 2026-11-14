@@ -1018,3 +1018,981 @@ fn sdl2_fold_refuses_cycles_missing_bases_and_wrong_kinds() {
 fn ls_map(l: &Landed) -> BTreeMap<BlockId, Hash> {
     l.delta.set.iter().cloned().collect()
 }
+
+// ---------------------------------------------------------------------------------------------
+// sdl3: feature-aware links, delta attachments and the shared chain checks
+
+use rdy_model::{Block, Change, ChangeLinks, Op, Tag};
+use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
+use rdy_store::format::StoreFeatures;
+use rdy_store::object_refs::{ObjectRef, portable_refs_of};
+use rdy_store::snapshot::{check_snapshot_chains, record_chain_applications_for_tests};
+use rdy_store::stream_error::StreamError;
+use rdy_store::sync_proof::ObjectSource;
+use rdy_store::sync_stream::{RecordFeatures, StreamHeader, check_batch};
+use rdy_store::take_batch::{BatchTaken, TagChoice, TakeError, UploadFacts, UploadTarget};
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::path::PathBuf;
+
+/// No feature: the links of a history before snapshot deltas.
+fn legacy() -> StoreFeatures {
+    StoreFeatures::of(vec![])
+}
+
+/// A manifest that lists `snapshot_delta`.
+fn with_deltas() -> StoreFeatures {
+    legacy().merged(&[format::StoreFeature {
+        name: FEATURE_SNAPSHOT_DELTA.into(),
+        class: format::FeatureClass::Incompatible,
+        required_rdy: SNAPSHOT_DELTA_REQUIRED_RDY.into(),
+    }])
+}
+
+fn prov3(actor: &str, role: Role) -> Provenance {
+    Provenance {
+        actor: actor.into(),
+        run: None,
+        role,
+        at_ms: 1,
+    }
+}
+
+fn block3(n: usize) -> Block {
+    Block {
+        id: nid(n),
+        block_type: "claim".into(),
+        parent: None,
+        order: "V".into(),
+        fields: BTreeMap::new(),
+        body: format!("block {n}"),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+        foreign: Default::default(),
+        read_identity: None,
+    }
+}
+
+/// A source project: landings on canon, each creating one block, with a tag `v{i}` at each
+/// landing index of `tags`.
+struct Proj {
+    dir: tempfile::TempDir,
+    path: PathBuf,
+    repo: rdy_model::RepoId,
+    landings: Vec<Hash>,
+    tags: Vec<Hash>,
+}
+
+impl Proj {
+    fn new() -> Proj {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("src");
+        let s = Store::create(&path).unwrap();
+        let repo = s.repo_id().unwrap().unwrap();
+        drop(s);
+        Proj {
+            dir,
+            path,
+            repo,
+            landings: vec![],
+            tags: vec![],
+        }
+    }
+
+    /// Lands `n` more landings, then tags the last one.
+    fn land(&mut self, n: usize) -> Hash {
+        let mut s = Store::open(&self.path).unwrap();
+        for _ in 0..n {
+            let i = self.landings.len();
+            let change = Change {
+                view: "work".into(),
+                ops: vec![Op::Create { block: block3(i) }],
+                deps: vec![],
+                provenance: prov3("agent:w", Role::Writer),
+                justification: None,
+                message: String::new(),
+                links: ChangeLinks::default(),
+                read_identity: None,
+            };
+            s.commit_to_view("work", change).unwrap();
+            let p = s
+                .propose("work", "next", prov3("agent:w", Role::Writer))
+                .unwrap();
+            self.landings
+                .push(s.land(&p, prov3("human:alice", Role::Approver)).unwrap());
+        }
+        let tag = s
+            .put_tag(&Tag {
+                name: format!("v{}", self.tags.len() + 1),
+                landing: *self.landings.last().unwrap(),
+                message: None,
+                tagged_by: prov3("human:alice", Role::Approver),
+            })
+            .unwrap();
+        self.tags.push(tag);
+        tag
+    }
+
+    /// Appends the delta of each landing that has none, oldest first, from its held SNAPSHOT:
+    /// the store then lists `snapshot_delta`. Returns the deltas in landing order.
+    fn upgrade(&self) -> Vec<Hash> {
+        let mut s = Store::open(&self.path).unwrap();
+        let mut items = vec![];
+        let mut out = vec![];
+        let mut prev: Option<(BTreeMap<BlockId, Hash>, Hash)> = None;
+        for l in &self.landings {
+            let rec = s.landing(l).unwrap();
+            let m = s.get::<StateSnapshot>(&rec.state).unwrap().blocks;
+            let d = match s.snapshot_delta_of(l).unwrap() {
+                Some((d, _)) => d,
+                None => {
+                    let empty = BTreeMap::new();
+                    let (before, base) = match &prev {
+                        Some((m, d)) => (m, Some(*d)),
+                        None => (&empty, None),
+                    };
+                    let d = diff_snapshots(*l, base, before, &m);
+                    items.push(codec::item_new(kinds::SNAPSHOT_DELTA, &d));
+                    d.id()
+                }
+            };
+            out.push(d);
+            prev = Some((m, d));
+        }
+        if !items.is_empty() {
+            s.write(items).unwrap();
+        }
+        out
+    }
+
+    fn open(&self) -> (Store, rdy_store::StoreReader) {
+        let s = Store::open(&self.path).unwrap();
+        let r = s.reader();
+        (s, r)
+    }
+
+    fn target(&self, i: usize) -> UploadTarget {
+        let (s, _) = self.open();
+        UploadTarget {
+            tag: format!("v{}", i + 1),
+            landing: s.read_tag(&self.tags[i]).unwrap().landing,
+        }
+    }
+
+    /// One batch file of the records of tag `i`'s closure the receiver does not know, with
+    /// the header features of the source store.
+    fn batch(
+        &self,
+        i: usize,
+        known: &BTreeSet<ObjectKey>,
+        name: &str,
+    ) -> (PathBuf, Vec<ObjectKey>) {
+        let (s, r) = self.open();
+        let c = closure(&r, self.tags[i], known).unwrap();
+        drop((s, r));
+        let path = self.dir.path().join(format!("{name}.rdysync"));
+        self.write(&c.records, c.prerequisites, i, &path);
+        (path, c.records)
+    }
+
+    /// A batch of `records` with `prerequisites` at tag `i`, its header the store's features.
+    fn write(&self, records: &[ObjectKey], prerequisites: Vec<ObjectKey>, i: usize, path: &Path) {
+        let (_s, r) = self.open();
+        let header = StreamHeader::tag_history(
+            r.store_features().unwrap(),
+            self.repo,
+            self.tags[i],
+            prerequisites,
+        );
+        let mut source = StoreSource {
+            reader: &r,
+            end: END_OF_LOG,
+        };
+        write_batch(&mut source, &header, records, File::create(path).unwrap()).unwrap();
+    }
+
+    fn holder(&self, name: &str) -> Store {
+        Store::create_holder(&self.dir.path().join(name), self.repo).unwrap()
+    }
+}
+
+fn incoming(_: &mut dyn ObjectSource, _: &UploadFacts) -> Result<TagChoice, StreamError> {
+    Ok(TagChoice::Incoming)
+}
+
+fn take(
+    h: &mut Store,
+    paths: &[PathBuf],
+    target: &UploadTarget,
+) -> Result<BatchTaken, TakeError<StreamError>> {
+    let files: Vec<File> = paths.iter().map(|p| File::open(p).unwrap()).collect();
+    h.take_batches(&files, target, incoming)
+}
+
+fn stream_err(e: TakeError<StreamError>) -> StreamError {
+    match e {
+        TakeError::Stream(e) => e,
+        other => panic!("not a stream refusal: {other:?}"),
+    }
+}
+
+/// Every key the store holds of the portable kinds, as a receiver that holds it knows it.
+fn held_keys(s: &Store) -> BTreeSet<ObjectKey> {
+    let r = s.reader();
+    let mut out = BTreeSet::new();
+    for &kind in rdy_store::object_refs::portable_kinds() {
+        r.for_each_object_of(kind, |h| {
+            out.insert(ObjectKey { kind, hash: h });
+            Ok(())
+        })
+        .unwrap();
+    }
+    out
+}
+
+fn kind_of(keys: &[ObjectKey], kind: u8) -> Vec<Hash> {
+    keys.iter()
+        .filter(|k| k.kind == kind)
+        .map(|k| k.hash)
+        .collect()
+}
+
+#[test]
+fn sdl3_links_follow_the_record_source_features() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let (d1, d2) = chain();
+    let rec = landing_rec(None, d1.full, 1);
+    let (raw, landing) = codec::item_new(kinds::LANDING, &rec);
+    let snapshot = ObjectRef {
+        kind: Some(kinds::SNAPSHOT),
+        hash: rec.state,
+    };
+    // a landing's bytes alone no longer give its links: its state is one only without the
+    // feature, exactly as before
+    let old = portable_refs_of(&legacy(), raw, &landing).unwrap();
+    let new = portable_refs_of(&with_deltas(), raw, &landing).unwrap();
+    assert!(old.contains(&snapshot));
+    assert!(!new.contains(&snapshot));
+    let mut want = new.clone();
+    want.push(snapshot);
+    want.sort();
+    let mut got = old.clone();
+    got.sort();
+    assert_eq!(got, want, "the state edge is the only difference");
+    // a delta links to its landing, its base and its set versions; never its full or drop ids
+    let o = codec::encode_new(kinds::SNAPSHOT_DELTA, &d2);
+    for f in [legacy(), with_deltas()] {
+        let mut links = portable_refs_of(&f, o.raw_kind(), &o.payload).unwrap();
+        links.sort();
+        let mut want = vec![
+            ObjectRef {
+                kind: Some(kinds::LANDING),
+                hash: d2.landing,
+            },
+            ObjectRef {
+                kind: Some(kinds::SNAPSHOT_DELTA),
+                hash: d1.id(),
+            },
+        ];
+        want.extend(d2.set.iter().map(|(_, v)| ObjectRef {
+            kind: Some(kinds::BLOCK),
+            hash: *v,
+        }));
+        want.sort();
+        assert_eq!(links, want);
+        assert!(!links.iter().any(|l| l.hash == d2.full));
+    }
+    let o1 = codec::encode_new(kinds::SNAPSHOT_DELTA, &d1);
+    assert_eq!(
+        portable_refs_of(&with_deltas(), o1.raw_kind(), &o1.payload)
+            .unwrap()
+            .iter()
+            .filter(|l| l.kind == Some(kinds::SNAPSHOT_DELTA))
+            .count(),
+        0,
+        "a first delta has no base"
+    );
+    // a stream record's links follow the features its caller names
+    let (_, r) = record_of(kinds::LANDING, Hash::of(&landing), &rec);
+    assert_eq!(r.refs(&legacy()).unwrap(), old);
+    assert_eq!(r.refs(&with_deltas()).unwrap(), new);
+
+    // an export of a delta history: the header keeps the source's features, and the record
+    // features the export notes are the ones the check reports
+    let mut p = Proj::new();
+    p.land(3);
+    p.upgrade();
+    let (s, rd) = p.open();
+    let features = rd.store_features().unwrap();
+    assert!(features.has(FEATURE_SNAPSHOT_DELTA));
+    let c = closure(&rd, p.tags[0], &BTreeSet::new()).unwrap();
+    let header = StreamHeader::tag_history(features.clone(), p.repo, p.tags[0], vec![]);
+    struct Noting<'a> {
+        inner: StoreSource<'a>,
+        seen: RecordFeatures,
+    }
+    impl ObjectSource for Noting<'_> {
+        fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
+            let r = self.inner.record(key)?;
+            if let Some(r) = &r {
+                self.seen.add(r);
+            }
+            Ok(r)
+        }
+    }
+    let mut noting = Noting {
+        inner: StoreSource {
+            reader: &rd,
+            end: END_OF_LOG,
+        },
+        seen: RecordFeatures::default(),
+    };
+    let mut bytes = vec![];
+    write_batch(&mut noting, &header, &c.records, &mut bytes).unwrap();
+    let exported = noting.seen.finish();
+    let report = check_batch(&bytes[..]).unwrap();
+    assert_eq!(
+        report.header.features, features,
+        "header features unchanged"
+    );
+    assert_eq!(report.record_features, exported);
+    assert!(report.record_features.has(FEATURE_SNAPSHOT_DELTA));
+    assert!(report.record_features.has(format::FEATURE_OBJECT_ENCODING));
+    assert_eq!(report.keys, c.records);
+    drop(s);
+}
+
+#[test]
+fn sdl3_closure_attaches_deltas_without_snapshot_edges() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let mut p = Proj::new();
+    p.land(4);
+    // without the feature, the closure is what it was: each landing's SNAPSHOT, no delta
+    let (_s, r) = p.open();
+    let before = closure(&r, p.tags[0], &BTreeSet::new()).unwrap();
+    assert_eq!(kind_of(&before.records, kinds::SNAPSHOT).len(), 4);
+    assert!(kind_of(&before.records, kinds::SNAPSHOT_DELTA).is_empty());
+    drop((_s, r));
+
+    let deltas = p.upgrade();
+    let (_s, r) = p.open();
+    let c = closure(&r, p.tags[0], &BTreeSet::new()).unwrap();
+    // no SNAPSHOT merely because the old object stays held; one delta per landing
+    assert!(kind_of(&c.records, kinds::SNAPSHOT).is_empty());
+    assert_eq!(kind_of(&c.records, kinds::SNAPSHOT_DELTA).len(), 4);
+    assert!(c.prerequisites.is_empty());
+    let at = |k: ObjectKey| c.records.iter().position(|x| *x == k).unwrap();
+    for (i, d) in deltas.iter().enumerate() {
+        let dk = key3(kinds::SNAPSHOT_DELTA, *d);
+        // a delta after its landing and its base delta
+        assert!(at(dk) > at(key3(kinds::LANDING, p.landings[i])));
+        if i > 0 {
+            assert!(at(dk) > at(key3(kinds::SNAPSHOT_DELTA, deltas[i - 1])));
+        }
+    }
+    // the same records, less the SNAPSHOTs, plus the deltas
+    let old: BTreeSet<ObjectKey> = before
+        .records
+        .iter()
+        .filter(|k| k.kind != kinds::SNAPSHOT)
+        .copied()
+        .collect();
+    let new: BTreeSet<ObjectKey> = c
+        .records
+        .iter()
+        .filter(|k| k.kind != kinds::SNAPSHOT_DELTA)
+        .copied()
+        .collect();
+    assert_eq!(old, new);
+}
+
+fn key3(kind: u8, hash: Hash) -> ObjectKey {
+    ObjectKey { kind, hash }
+}
+
+#[test]
+fn sdl3_known_landings_add_no_attachment_prerequisite() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let mut p = Proj::new();
+    p.land(3);
+    let deltas = p.upgrade();
+    let (_s, r) = p.open();
+    // every landing known, no delta: no delta is emitted or named
+    let landings: BTreeSet<ObjectKey> = p
+        .landings
+        .iter()
+        .map(|l| key3(kinds::LANDING, *l))
+        .collect();
+    let c = closure(&r, p.tags[0], &landings).unwrap();
+    assert!(kind_of(&c.records, kinds::SNAPSHOT_DELTA).is_empty());
+    assert!(kind_of(&c.prerequisites, kinds::SNAPSHOT_DELTA).is_empty());
+    assert!(
+        c.prerequisites.iter().all(|k| landings.contains(k)),
+        "only known landings: {:?}",
+        c.prerequisites
+    );
+    // the root landing and its delta known: the rest emitted, and the held base delta is the
+    // new delta's typed prerequisite, as the root landing is the next landing's
+    let mut known = BTreeSet::new();
+    known.insert(key3(kinds::LANDING, p.landings[0]));
+    known.insert(key3(kinds::SNAPSHOT_DELTA, deltas[0]));
+    let c = closure(&r, p.tags[0], &known).unwrap();
+    let mut emitted = kind_of(&c.records, kinds::SNAPSHOT_DELTA);
+    emitted.sort();
+    let mut want = vec![deltas[1], deltas[2]];
+    want.sort();
+    assert_eq!(emitted, want);
+    let mut pre = c.prerequisites.clone();
+    pre.retain(|k| matches!(k.kind, kinds::LANDING | kinds::SNAPSHOT_DELTA));
+    assert_eq!(
+        pre,
+        vec![
+            key3(kinds::LANDING, p.landings[0]),
+            key3(kinds::SNAPSHOT_DELTA, deltas[0])
+        ]
+    );
+}
+
+#[test]
+fn sdl3_upload_checks_attachments_across_files() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let mut p = Proj::new();
+    p.land(3);
+    let deltas = p.upgrade();
+    let (_s, r) = p.open();
+    let all: Vec<ObjectKey> = closure(&r, p.tags[0], &BTreeSet::new()).unwrap().records;
+    drop((_s, r));
+    // the last landing in one file, its delta in another: one take checks the whole upload
+    let last_delta = key3(kinds::SNAPSHOT_DELTA, deltas[2]);
+    let first: BTreeSet<ObjectKey> = all.iter().filter(|k| **k != last_delta).copied().collect();
+    let everything: BTreeSet<ObjectKey> = all.iter().copied().collect();
+    let part = |keep: &BTreeSet<ObjectKey>, name: &str| {
+        let known: BTreeSet<ObjectKey> = everything.difference(keep).copied().collect();
+        let (path, records) = p.batch(0, &known, name);
+        assert_eq!(records.iter().copied().collect::<BTreeSet<_>>(), *keep);
+        path
+    };
+    let a = part(&first, "split-a");
+    // a held landing attaches nothing, so the delta's own file lists what it links to
+    let b = p.dir.path().join("split-b.rdysync");
+    let (_s, r) = p.open();
+    let (raw, payload) = r.get_raw(&deltas[2]).unwrap();
+    drop((_s, r));
+    // and its root, which every file of an upload names
+    let links: Vec<ObjectKey> = portable_refs_of(&with_deltas(), raw, &payload)
+        .unwrap()
+        .into_iter()
+        .map(|l| key3(l.kind.unwrap(), l.hash))
+        .chain([key3(kinds::TAG, p.tags[0])])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert!(links.contains(&key3(kinds::LANDING, p.landings[2])));
+    p.write(&[last_delta], links, 0, &b);
+
+    let mut h = p.holder("split");
+    take(&mut h, &[b.clone(), a.clone()], &p.target(0)).unwrap();
+    assert!(
+        h.reader()
+            .snapshot_delta_of(&p.landings[2])
+            .unwrap()
+            .is_some()
+    );
+    h.reader().check_holder().unwrap();
+    // a full resend is a no-op
+    let (whole, _) = p.batch(0, &BTreeSet::new(), "whole");
+    let again = take(&mut h, &[whole.clone()], &p.target(0)).unwrap();
+    assert_eq!(again.new_objects, 0);
+
+    // the first file alone: the last landing has no delta, incoming or held
+    let mut h2 = p.holder("missing");
+    let e = stream_err(take(&mut h2, &[a.clone()], &p.target(0)).unwrap_err());
+    assert_eq!(e.code, "E_BAD_RECORD");
+    assert_eq!(
+        e.message,
+        format!(
+            "landing {}: expected exactly one snapshot delta",
+            p.landings[2]
+        )
+    );
+    assert_eq!(
+        e.fix,
+        "upload the history as its source project exported it"
+    );
+    assert_eq!(e.object, Some(key3(kinds::LANDING, p.landings[2])));
+    assert_eq!(h2.reader().holder_counts().unwrap().0, 0, "nothing written");
+
+    // a root landing already held: a later upload of the new history only
+    let mut p2 = p;
+    p2.land(2);
+    p2.upgrade();
+    let known = held_keys(&h);
+    let (next, records) = p2.batch(1, &known, "next");
+    assert_eq!(kind_of(&records, kinds::SNAPSHOT_DELTA).len(), 2);
+    take(&mut h, &[next], &p2.target(1)).unwrap();
+    h.reader().check_holder().unwrap();
+}
+
+#[test]
+fn sdl3_held_base_delta_is_a_typed_prerequisite() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let mut p = Proj::new();
+    p.land(1);
+    let d0 = p.upgrade()[0];
+    let mut h = p.holder("h");
+    let (first, _) = p.batch(0, &BTreeSet::new(), "first");
+    take(&mut h, &[first], &p.target(0)).unwrap();
+    p.land(1);
+    let deltas = p.upgrade();
+    assert_eq!(deltas[0], d0);
+    let known = held_keys(&h);
+    let (_s, r) = p.open();
+    let c = closure(&r, p.tags[1], &known).unwrap();
+    drop((_s, r));
+    let base = key3(kinds::SNAPSHOT_DELTA, d0);
+    assert!(
+        c.prerequisites.contains(&base),
+        "the held base, by its own kind"
+    );
+    assert!(!c.records.contains(&base));
+    // with the typed prerequisite: accepted
+    let ok = p.dir.path().join("with.rdysync");
+    p.write(&c.records, c.prerequisites.clone(), 1, &ok);
+    // without it: the existing refusal of a record that names an object the batch neither
+    // holds nor lists
+    let mut fewer = c.prerequisites.clone();
+    fewer.retain(|k| *k != base);
+    let bad = p.dir.path().join("without.rdysync");
+    p.write(&c.records, fewer, 1, &bad);
+    let e = check_batch(File::open(&bad).unwrap()).unwrap_err();
+    let e2 = stream_err(take(&mut h, &[bad], &p.target(1)).unwrap_err());
+    assert_eq!((e.code, &e.message), (e2.code, &e2.message));
+    assert_eq!(e.code, "E_BAD_RECORD", "{e:?}");
+    assert!(
+        e.message.ends_with(&format!("unlisted dependency 30:{d0}")),
+        "{}",
+        e.message
+    );
+    take(&mut h, &[ok], &p.target(1)).unwrap();
+    h.reader().check_holder().unwrap();
+}
+
+// the chain checks over records, so each rule can be bent alone
+
+/// Stores `value` of `kind` in `src` under its own hash.
+fn put_rec<T: serde::Serialize + 'static>(
+    src: &mut BTreeMap<ObjectKey, StreamRecord>,
+    kind: u8,
+    value: &T,
+) -> Hash {
+    let o = codec::encode_new(kind, value);
+    let hash = o.hash();
+    let key = ObjectKey { kind, hash };
+    src.insert(
+        key,
+        StreamRecord::Present {
+            key,
+            encoding: o.version,
+            payload: o.payload,
+        },
+    );
+    hash
+}
+
+/// A landing tree as records: each entry of `spec` is a landing on its parent (an index of an
+/// earlier entry), with its map; each landing has its delta from its parent's map.
+struct Tree {
+    src: BTreeMap<ObjectKey, StreamRecord>,
+    ls: Vec<(Hash, LandingRecord)>,
+    ds: Vec<SnapshotDelta>,
+}
+
+fn tree(spec: &[(Option<usize>, BTreeMap<BlockId, Hash>)]) -> Tree {
+    let mut t = Tree {
+        src: BTreeMap::new(),
+        ls: vec![],
+        ds: vec![],
+    };
+    let empty = BTreeMap::new();
+    for (i, (parent, m)) in spec.iter().enumerate() {
+        let rec = landing_rec(parent.map(|p| t.ls[p].0), snapshot_map_id(m), i as i64);
+        let l = put_rec(&mut t.src, kinds::LANDING, &rec);
+        let before = parent.map_or(&empty, |p| &spec[p].1);
+        let d = diff_snapshots(l, parent.map(|p| t.ds[p].id()), before, m);
+        put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &d);
+        t.ls.push((l, rec));
+        t.ds.push(d);
+    }
+    t
+}
+
+/// The chain checks of `ls` over `src`: the landings visited with their maps, in order, the
+/// rule-6 block reads, and the result.
+#[allow(clippy::type_complexity)]
+fn chains(
+    src: &mut BTreeMap<ObjectKey, StreamRecord>,
+    ls: &[(Hash, LandingRecord)],
+    deltas: bool,
+) -> (
+    Vec<(Hash, BTreeMap<BlockId, Hash>)>,
+    usize,
+    Result<(), StreamError>,
+) {
+    let refs: Vec<(Hash, &LandingRecord)> = ls.iter().map(|(h, r)| (*h, r)).collect();
+    let mut visited = vec![];
+    let mut reads = 0usize;
+    let mut s = RecordSnapshots::new(src);
+    let r = check_snapshot_chains(
+        &mut s,
+        deltas,
+        &refs,
+        &mut |s: &mut RecordSnapshots<'_, '_>, v: &Hash| {
+            reads += 1;
+            let key = ObjectKey {
+                kind: kinds::BLOCK,
+                hash: *v,
+            };
+            Ok(s.source()
+                .record(key)?
+                .and_then(|r| r.typed::<Block>())
+                .map(|b| b.unwrap().id))
+        },
+        &mut |_, l, _, m| {
+            visited.push((*l, m.clone()));
+            Ok(())
+        },
+    );
+    (visited, reads, r)
+}
+
+fn refused(r: Result<(), StreamError>) -> String {
+    let e = r.unwrap_err();
+    assert_eq!(e.code, "E_BAD_RECORD", "{e:?}");
+    assert_eq!(
+        e.fix,
+        "upload the history as its source project exported it"
+    );
+    e.message
+}
+
+#[test]
+fn sdl3_six_rules_reject_each_independent_violation() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let maps = six_maps();
+    let spec: Vec<(Option<usize>, BTreeMap<BlockId, Hash>)> = (0usize..3)
+        .map(|i| (i.checked_sub(1), maps[i].clone()))
+        .collect();
+    let good = tree(&spec);
+    let mut src = good.src.clone();
+    let (visited, _, r) = chains(&mut src, &good.ls, true);
+    r.unwrap();
+    assert_eq!(visited.len(), 3);
+
+    // the second landing's delta replaced by `edit` of it
+    let bent = |edit: &dyn Fn(&mut SnapshotDelta)| {
+        let mut t = tree(&spec);
+        let old = t.ds[1].id();
+        t.src.remove(&key3(kinds::SNAPSHOT_DELTA, old));
+        let mut d = t.ds[1].clone();
+        edit(&mut d);
+        let dh = put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &d);
+        // the next delta keeps naming the old one as its base: only the bent rule moves
+        let (_, _, r) = chains(&mut t.src, &t.ls[..2], true);
+        (t, dh, refused(r))
+    };
+    let l1 = good.ls[1].0;
+    // 1. a delta that names another landing leaves its own landing with none
+    let (_, _, m) = bent(&|d| d.landing = h(0x61));
+    assert_eq!(
+        m,
+        format!("landing {l1}: expected exactly one snapshot delta")
+    );
+    // 2. a wrong full
+    let (_, dh, m) = bent(&|d| d.full = h(0x62));
+    assert_eq!(
+        m,
+        format!("snapshot delta {dh}: landing or full hash does not match")
+    );
+    // 3. a missing base, and an extra base on a first landing
+    let (_, dh, m) = bent(&|d| d.base = None);
+    assert_eq!(
+        m,
+        format!("snapshot delta {dh}: base does not match the previous landing")
+    );
+    let (_, dh, m) = bent(&|d| d.base = Some(h(0x63)));
+    assert_eq!(
+        m,
+        format!("snapshot delta {dh}: base does not match the previous landing")
+    );
+    let mut t = tree(&spec);
+    t.src.remove(&key3(kinds::SNAPSHOT_DELTA, t.ds[0].id()));
+    let mut d0 = t.ds[0].clone();
+    d0.base = Some(h(0x64));
+    let dh = put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &d0);
+    let (_, _, r) = chains(&mut t.src, &t.ls[..1], true);
+    assert_eq!(
+        refused(r),
+        format!("snapshot delta {dh}: base does not match the previous landing")
+    );
+    // 4. a redundant operation (a drop of an absent id)
+    let (_, dh, m) = bent(&|d| d.drop.push(id("Z-00099")));
+    assert_eq!(
+        m,
+        format!("snapshot delta {dh}: set or drop is not canonical")
+    );
+    // 5. a canonical delta that folds to another map
+    let (_, dh, m) = bent(&|d| d.set.push((id("Z-00099"), h(9))));
+    assert_eq!(
+        m,
+        format!("snapshot delta {dh}: folded map does not match full")
+    );
+    // duplicate deltas: a second distinct delta of one landing
+    let mut t = tree(&spec);
+    let mut twin = t.ds[1].clone();
+    twin.set.push((id("Z-00098"), h(8)));
+    twin.full = t.ls[1].1.state;
+    put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &twin);
+    let (_, _, r) = chains(&mut t.src, &t.ls, true);
+    assert_eq!(
+        refused(r),
+        format!("landing {l1}: expected exactly one snapshot delta")
+    );
+    // a missing delta
+    let mut t = tree(&spec);
+    t.src.remove(&key3(kinds::SNAPSHOT_DELTA, t.ds[2].id()));
+    let (_, _, r) = chains(&mut t.src, &t.ls, true);
+    assert_eq!(
+        refused(r),
+        format!("landing {}: expected exactly one snapshot delta", t.ls[2].0)
+    );
+    // a cycle: two landings, each the other's prev (keys that are not their hashes)
+    let (x, y) = (h(0x71), h(0x72));
+    let rx = landing_rec(Some(y), snapshot_map_id(&maps[0]), 1);
+    let ry = landing_rec(Some(x), snapshot_map_id(&maps[0]), 2);
+    let mut cyc: BTreeMap<ObjectKey, StreamRecord> = [
+        record_of(kinds::LANDING, x, &rx),
+        record_of(kinds::LANDING, y, &ry),
+    ]
+    .into_iter()
+    .collect();
+    let (visited, _, r) = chains(&mut cyc, &[(x, rx.clone()), (y, ry.clone())], true);
+    assert!(visited.is_empty());
+    assert_eq!(refused(r), format!("dependency cycle through {x}"));
+    // 6. a set version that is a version of another block
+    let mut t = tree(&spec[..1]);
+    let other = block3(7);
+    let v = put_rec(&mut t.src, kinds::BLOCK, &other);
+    let mut m1 = maps[0].clone();
+    m1.insert(id("Q-00001"), v);
+    let rec = landing_rec(Some(t.ls[0].0), snapshot_map_id(&m1), 9);
+    let l = put_rec(&mut t.src, kinds::LANDING, &rec);
+    let d = diff_snapshots(l, Some(t.ds[0].id()), &maps[0], &m1);
+    let dh = put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &d);
+    t.ls.push((l, rec));
+    let (_, _, r) = chains(&mut t.src, &t.ls, true);
+    assert_eq!(
+        refused(r),
+        format!("snapshot delta {dh}: block Q-00001 names version {v} of another block")
+    );
+    // the same version under its own block passes
+    let mut t = tree(&spec[..1]);
+    let own = Block {
+        id: id("Q-00001"),
+        ..block3(7)
+    };
+    let v = put_rec(&mut t.src, kinds::BLOCK, &own);
+    let mut m1 = maps[0].clone();
+    m1.insert(id("Q-00001"), v);
+    let rec = landing_rec(Some(t.ls[0].0), snapshot_map_id(&m1), 9);
+    let l = put_rec(&mut t.src, kinds::LANDING, &rec);
+    let d = diff_snapshots(l, Some(t.ds[0].id()), &maps[0], &m1);
+    put_rec(&mut t.src, kinds::SNAPSHOT_DELTA, &d);
+    t.ls.push((l, rec));
+    let (_, _, r) = chains(&mut t.src, &t.ls, true);
+    r.unwrap();
+
+    // the store's check (a project's fsck and the holder check) refuses the same way
+    let (_d, _p, mut s) = store();
+    let ls = history(&mut s, &maps[..1], &[]);
+    let rec = landing_rec(Some(ls[0].hash), snapshot_map_id(&maps[1]), 1);
+    let l = s.put(kinds::LANDING, &rec).unwrap();
+    let mut d = diff_snapshots(l, Some(ls[0].delta_hash), &maps[0], &maps[1]);
+    d.full = h(0x62);
+    let dh = s.put(kinds::SNAPSHOT_DELTA, &d).unwrap();
+    let refs: Vec<(Hash, &LandingRecord)> = vec![(ls[0].hash, &ls[0].rec), (l, &rec)];
+    match s.reader().check_snapshot_chains(&refs) {
+        Err(StoreError::Decode(m)) => assert_eq!(
+            m,
+            format!("snapshot delta {dh}: landing or full hash does not match")
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+
+    // without the feature, the held SNAPSHOT must be stored canonically
+    let (_d, _p, mut s) = store();
+    let snap = StateSnapshot {
+        blocks: map(&[("A-00001", 1)]),
+    };
+    let mut padded = vec![0x81, 0x00];
+    padded.extend(text("A-00001", false));
+    padded.extend([1u8; 32]);
+    let state = s.write(vec![(kinds::SNAPSHOT, padded)]).unwrap()[0];
+    assert_ne!(state, snap.id());
+    let rec = landing_rec(None, state, 1);
+    let l = s.put(kinds::LANDING, &rec).unwrap();
+    match s.reader().check_snapshot_chains(&[(l, &rec)]) {
+        Err(StoreError::Decode(m)) => {
+            assert_eq!(m, format!("landing {l}: snapshot {state} is not canonical"))
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+}
+
+#[test]
+fn sdl3_chain_checks_visit_each_landing_and_set_once() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let maps = six_maps();
+    // a chain with a fork at landing 1 (two branches), a no-op landing that repeats a full
+    // hash, and a branch that goes back to an earlier map
+    let mut fork = maps[1].clone();
+    fork.insert(id("F-00001"), h(40));
+    let mut fork2 = fork.clone();
+    fork2.remove(&id("A-00001"));
+    let spec: Vec<(Option<usize>, BTreeMap<BlockId, Hash>)> = vec![
+        (None, maps[0].clone()),
+        (Some(0), maps[1].clone()),
+        (Some(1), maps[2].clone()),
+        (Some(2), maps[3].clone()),
+        (Some(3), maps[4].clone()), // the no-op: the same full hash as landing 3
+        (Some(1), fork.clone()),    // the fork's second branch
+        (Some(5), fork2.clone()),
+        (Some(1), maps[1].clone()), // a third branch: back to the fork's own map
+    ];
+    let t = tree(&spec);
+    let mut src = t.src.clone();
+    let applied = record_chain_applications_for_tests();
+    let (visited, reads, r) = chains(&mut src, &t.ls, true);
+    r.unwrap();
+    // each landing once, with its own map, each delta applied once
+    assert_eq!(visited.len(), spec.len());
+    let got: BTreeMap<Hash, BTreeMap<BlockId, Hash>> = visited.into_iter().collect();
+    for (i, (l, _)) in t.ls.iter().enumerate() {
+        assert_eq!(got[l], spec[i].1, "landing {i}");
+    }
+    let mut once = applied.take();
+    assert_eq!(once.len(), spec.len());
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), spec.len());
+    // only set entries are read for rule 6
+    let sets: usize = t.ds.iter().map(|d| d.set.len()).sum();
+    assert_eq!(reads, sets);
+    // the landings in any order: the same answer
+    let mut rev = t.ls.clone();
+    rev.reverse();
+    let mut src = t.src.clone();
+    let (visited, _, r) = chains(&mut src, &rev, true);
+    r.unwrap();
+    assert_eq!(visited.len(), spec.len());
+    assert_eq!(applied.take().len(), spec.len());
+
+    // a long chain is walked iteratively, each delta once
+    let long: Vec<(Option<usize>, BTreeMap<BlockId, Hash>)> = (0..300)
+        .map(|i| {
+            let m: BTreeMap<BlockId, Hash> =
+                [(nid(i % 7), h((i % 250) as u8 + 1))].into_iter().collect();
+            (i.checked_sub(1), m)
+        })
+        .collect();
+    let t = tree(&long);
+    let mut src = t.src.clone();
+    let (visited, _, r) = chains(&mut src, &t.ls, true);
+    r.unwrap();
+    assert_eq!(visited.len(), 300);
+    assert_eq!(applied.take().len(), 300);
+}
+
+#[test]
+fn sdl3_capacity_counts_match_holder_check_after_delta_upgrade() {
+    use rdy_store::take_batch::{HolderCapacity, set_holder_capacity_for_tests};
+    let _staged = stage_snapshot_delta_for_tests();
+    let mut p = Proj::new();
+    p.land(2);
+    // three holders take the legacy history first: its SNAPSHOTs stay held
+    let (legacy_batch, records) = p.batch(0, &BTreeSet::new(), "legacy");
+    assert_eq!(kind_of(&records, kinds::SNAPSHOT).len(), 2);
+    let mut hs: Vec<Store> = (0..3).map(|i| p.holder(&format!("h{i}"))).collect();
+    for h in &mut hs {
+        take(h, &[legacy_batch.clone()], &p.target(0)).unwrap();
+    }
+    let legacy_counts = hs[0].reader().holder_counts().unwrap();
+    // the source upgrades and lands once more; the receivers take the delta history
+    p.land(1);
+    p.upgrade();
+    let (delta_batch, records) = p.batch(1, &held_keys(&hs[0]), "deltas");
+    assert!(kind_of(&records, kinds::SNAPSHOT).is_empty());
+    assert_eq!(kind_of(&records, kinds::SNAPSHOT_DELTA).len(), 3);
+    take(&mut hs[0], &[delta_batch.clone()], &p.target(1)).unwrap();
+    let h = &mut hs[0];
+    assert!(h.features().has(FEATURE_SNAPSHOT_DELTA));
+    let (objects, edges) = h.reader().holder_counts().unwrap();
+    // the held SNAPSHOTs count nothing now, and no landing links its state
+    let table = h.index_dump_for_tests().unwrap().holder_counts;
+    let count = |k: &[u8]| u64::from_le_bytes(table[k].clone().try_into().unwrap());
+    assert_eq!(count(b"snapshot_objects"), 2, "the two unreached SNAPSHOTs");
+    assert_eq!(count(b"objects") - objects, 2);
+    assert_eq!(count(b"state_edges"), 3, "one state link per landing");
+    assert!(count(b"edges") > edges);
+    assert!(objects > legacy_counts.0);
+    // equal to what the holder check reads: it passes at the counts and not one below
+    let depth = 3;
+    h.reader()
+        .check_holder_bounded_for_tests(depth, objects as usize, edges as usize)
+        .unwrap();
+    let below = |o: u64, e: u64| match h
+        .reader()
+        .check_holder_bounded_for_tests(depth, o as usize, e as usize)
+    {
+        Err(e) => rdy_store::check_holder::holder_check_limit(&e)
+            .unwrap()
+            .to_string(),
+        Ok(_) => panic!("passed below the counts"),
+    };
+    assert_eq!(
+        below(objects - 1, edges),
+        format!("{} objects", objects - 1)
+    );
+    assert_eq!(below(objects, edges - 1), format!("{} edges", edges - 1));
+    // a fresh reindex derives both tables the same
+    let before = h.index_dump_for_tests().unwrap();
+    h.reindex().unwrap();
+    let after = h.index_dump_for_tests().unwrap();
+    assert_eq!(before.holder_counts, after.holder_counts);
+    assert_eq!(before.landing_depths, after.landing_depths);
+    assert_eq!(h.reader().holder_counts().unwrap(), (objects, edges));
+
+    // the take's guard uses the manifest after its batch: it accepts at those counts and
+    // refuses one below, on holders that took the same legacy history
+    set_holder_capacity_for_tests(Some(HolderCapacity {
+        landing_depth: depth as u64,
+        objects,
+        edges,
+    }));
+    let ok = take(&mut hs[1], &[delta_batch.clone()], &p.target(1));
+    set_holder_capacity_for_tests(Some(HolderCapacity {
+        landing_depth: depth as u64,
+        objects,
+        edges: edges - 1,
+    }));
+    let refused = take(&mut hs[2], &[delta_batch.clone()], &p.target(1));
+    set_holder_capacity_for_tests(None);
+    ok.unwrap();
+    let e = stream_err(refused.unwrap_err());
+    assert_eq!(e.code, "E_LIMIT", "{e:?}");
+    assert!(
+        e.message.ends_with(&format!("{} edges", edges - 1)),
+        "{}",
+        e.message
+    );
+    assert_eq!(hs[1].reader().holder_counts().unwrap(), (objects, edges));
+}

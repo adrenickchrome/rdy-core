@@ -725,7 +725,7 @@ fn ok4_zero_encoding_ids_survive_current_structs() {
             }
         }
         // refs_of reads the frozen shape too
-        refs_of(raw, &payload).unwrap();
+        refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload).unwrap();
     }
     // a new change of the same content is a new object of encoding 1
     let latest = codec::encode(kinds::CHANGE, &c).unwrap();
@@ -1036,7 +1036,10 @@ fn ok4_reference_identities_are_not_object_edges() {
     let r = s.reader();
     let edges = |k: ObjectKey| -> BTreeSet<ObjectRef> {
         let (raw, payload) = frame_of(&r, k);
-        refs_of(raw, &payload).unwrap().into_iter().collect()
+        refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload)
+            .unwrap()
+            .into_iter()
+            .collect()
     };
     let one = |kind: u8, hash: Hash| ObjectRef {
         kind: Some(kind),
@@ -1092,7 +1095,7 @@ fn ok4_reference_identities_are_not_object_edges() {
     replay.links.replayed_from = Some(c.c2);
     let (raw, payload) = codec::item(kinds::CHANGE, &replay).unwrap();
     assert_eq!(
-        refs_of(raw, &payload).unwrap(),
+        refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload).unwrap(),
         vec![one(kinds::CHANGE, c.c2)]
     );
     assert!(replay.deps.is_empty());

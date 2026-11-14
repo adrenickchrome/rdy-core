@@ -70,9 +70,21 @@ impl Rdy {
         let verified = self.store.verify_report()?;
         let frames = verified.frames;
         let landings = self.store.landings()?;
-        for (_, rec) in &landings {
-            self.store.get::<rdy_model::StateSnapshot>(&rec.state)?;
+        // every held landing's snapshot, off canon too, by the chain checks a holder check, a
+        // take and a load share (`rdy_store::snapshot::check_snapshot_chains`)
+        let mut held: Vec<rdy_model::Hash> = Vec::new();
+        self.store
+            .for_each_object_of(rdy_store::kinds::LANDING, |h| {
+                held.push(h);
+                Ok(())
+            })?;
+        let mut all: Vec<(rdy_model::Hash, rdy_model::LandingRecord)> = Vec::new();
+        for h in held {
+            all.push((h, self.store.landing(&h)?));
         }
+        let refs: Vec<(rdy_model::Hash, &rdy_model::LandingRecord)> =
+            all.iter().map(|(h, r)| (*h, r)).collect();
+        self.store.check_snapshot_chains(&refs)?;
         let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
         let versions = self.check_tags(&chain)?;
         let objects = self.store.check_objects()?;

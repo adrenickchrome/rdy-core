@@ -769,15 +769,21 @@ pub(crate) fn resolution_entry(
 /// The object links of the present frame of raw kind `raw` and stored payload `payload`, as the
 /// holder check counts them (`portable_refs_of` over the stored frame), for the holder's edge
 /// count (TASK-2340); None for a kind that is not portable or has no links. A frame whose links
-/// do not decode counts none: the holder check refuses it as damage, never as a bound.
+/// do not decode counts none: the holder check refuses it as damage, never as a bound. The count
+/// follows no feature (a landing counts its `state`); a holder under `snapshot_delta` takes the
+/// SNAPSHOT edges back off (`Index::holder_counts_under`).
 pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEntry> {
     let kind = crate::codec::logical_kind(raw);
     if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
         return None;
     }
-    let links = crate::object_refs::portable_refs_of(raw, payload)
-        .ok()?
-        .len() as u64;
+    let links = crate::object_refs::portable_refs_of(
+        &crate::format::StoreFeatures::of(vec![]),
+        raw,
+        payload,
+    )
+    .ok()?
+    .len() as u64;
     (links > 0).then_some(IndexEntry::Links { kind, hash, links })
 }
 
@@ -4054,10 +4060,12 @@ impl StoreReader {
     }
 
     /// The capacity counts the index derives (TASK-2340): the distinct portable objects stored
-    /// and the sum of their object links, as the holder check counts links. Upper bounds of what
-    /// the holder check reads; a reindex rebuilds them from the log.
+    /// and the sum of their object links, as the holder check of this store's features counts
+    /// them (`Index::holder_counts_under`). Upper bounds of what the holder check reads; a
+    /// reindex rebuilds them from the log.
     pub fn holder_counts(&self) -> Result<(u64, u64), StoreError> {
-        self.index().holder_counts()
+        let features = crate::snapshot::held_features(self)?;
+        self.index().holder_counts_under(&features)
     }
 
     /// The chain depth of landing `landing` the index derives (TASK-2340): one with no `prev`,

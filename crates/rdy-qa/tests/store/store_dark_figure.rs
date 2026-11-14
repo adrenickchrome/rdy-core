@@ -115,7 +115,9 @@ fn batches(r: &Rdy) -> Vec<Batch> {
                 }
                 return Ok(());
             }
-            for o in refs_of(kind, payload).unwrap_or_default() {
+            for o in refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload)
+                .unwrap_or_default()
+            {
                 if o.kind == Some(kinds::BLOB_MANIFEST) {
                     cur.blobs.push(o.hash);
                 }
@@ -301,12 +303,13 @@ fn rfr2_both_variants_remain_reachable() {
             },
             r.store().log_end(),
             |_, kind, _, payload, _| {
-                let blobs: Vec<Hash> = refs_of(kind, payload)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|o| o.kind == Some(kinds::BLOB_MANIFEST))
-                    .map(|o| o.hash)
-                    .collect();
+                let blobs: Vec<Hash> =
+                    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|o| o.kind == Some(kinds::BLOB_MANIFEST))
+                        .map(|o| o.hash)
+                        .collect();
                 if blobs.contains(&dark) {
                     match rdy_store::codec::logical_kind(kind) {
                         kinds::BLOCK => block_refs.push(blobs),
@@ -333,7 +336,8 @@ fn rfr2_both_variants_remain_reachable() {
     r.store()
         .for_each_frame_from(end, r.store().log_end(), |_, kind, _, payload, _| {
             if rdy_store::codec::logical_kind(kind) == kinds::CHANGE {
-                last = refs_of(kind, payload).unwrap();
+                last =
+                    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload).unwrap();
             }
             Ok(())
         })

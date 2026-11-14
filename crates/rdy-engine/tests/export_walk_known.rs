@@ -117,7 +117,7 @@ fn bounds(records: u64, edges: u64) -> WalkBounds {
 /// link is its key; an untyped one is the one portable object of its hash (kind 0 when none).
 fn links_of(r: &Rdy, k: ObjectKey) -> BTreeSet<ObjectKey> {
     let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
-    refs_of(raw, &payload)
+    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload)
         .unwrap()
         .into_iter()
         .map(|l| match l.kind {

@@ -242,7 +242,10 @@ fn split(r: &Rdy, tag: Hash, held: &BTreeSet<ObjectKey>, n: usize) -> Vec<Vec<u8
             let mut needed = BTreeSet::new();
             for k in &records {
                 let rec = source.record(*k).unwrap().unwrap();
-                for l in rec.refs().unwrap() {
+                for l in rec
+                    .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+                    .unwrap()
+                {
                     needed.insert(resolve(l));
                 }
                 needed.extend(rec.proof());

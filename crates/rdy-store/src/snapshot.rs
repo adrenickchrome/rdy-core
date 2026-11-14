@@ -20,6 +20,7 @@
 //! A cached map holds block ids and version hashes only: a block body is read through the
 //! current removal-aware source each time, so a cache hit never serves removed content.
 use crate::bounded::{COLLECTION_ELEMENTS, MAX_ELEMENTS, RecordError};
+use crate::format::StoreFeatures;
 use crate::kinds;
 use crate::object_refs::ObjectKey;
 use crate::stream_error::{LIMIT_HISTORY_DEPTH, StreamError};
@@ -28,7 +29,7 @@ use rdy_model::{
     BlockId, Hash, LandingRecord, SnapshotDelta, SnapshotDeltaError, StateSnapshot,
     fold_snapshot_delta, snapshot_map_id,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -81,6 +82,15 @@ pub enum FoldRefusal {
     TooDeep(Hash),
     /// Delta `.0` would grow the map past [`MAX_ELEMENTS`] entries.
     TooLarge(Hash),
+    /// Delta `delta`'s `set` entry for block `id` names `version`, a version of another block
+    /// (rule 6).
+    WrongBlock {
+        delta: Hash,
+        id: BlockId,
+        version: Hash,
+    },
+    /// The SNAPSHOT `state` of `landing` is not stored as the canonical encoding of its map.
+    NotCanonicalSnapshot { landing: Hash, state: Hash },
 }
 
 impl FoldRefusal {
@@ -110,6 +120,14 @@ impl FoldRefusal {
                 "snapshot delta {d}: exceeds {}",
                 RecordError::limit(COLLECTION_ELEMENTS, MAX_ELEMENTS)
             ),
+            FoldRefusal::WrongBlock { delta, id, version } => {
+                format!(
+                    "snapshot delta {delta}: block {id} names version {version} of another block"
+                )
+            }
+            FoldRefusal::NotCanonicalSnapshot { landing, state } => {
+                format!("landing {landing}: snapshot {state} is not canonical")
+            }
         }
     }
 
@@ -121,6 +139,8 @@ impl FoldRefusal {
             }
             FoldRefusal::MissingMap { state, .. } => (kinds::SNAPSHOT, *state),
             FoldRefusal::MissingDelta { landing } => (kinds::LANDING, *landing),
+            FoldRefusal::NotCanonicalSnapshot { state, .. } => (kinds::SNAPSHOT, *state),
+            FoldRefusal::WrongBlock { delta, .. } => (kinds::SNAPSHOT_DELTA, *delta),
             FoldRefusal::Identity { delta }
             | FoldRefusal::Base { delta }
             | FoldRefusal::NotCanonical { delta, .. }
@@ -146,6 +166,10 @@ pub trait SnapshotSource {
         landing: &Hash,
         state: &Hash,
     ) -> Result<Option<StateSnapshot>, Self::Error>;
+
+    /// Whether the held SNAPSHOT `state` is stored as the canonical encoding of its map; None
+    /// when the source holds no SNAPSHOT of that hash.
+    fn held_snapshot_canonical(&mut self, state: &Hash) -> Result<Option<bool>, Self::Error>;
 
     /// The hash of the delta that records landing `landing`; None when the source holds none.
     fn delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, Self::Error>;
@@ -466,6 +490,11 @@ impl<'a, 's> RecordSnapshots<'a, 's> {
     pub fn new(source: &'a mut (dyn ObjectSource + 's)) -> RecordSnapshots<'a, 's> {
         RecordSnapshots { source }
     }
+
+    /// The record source the snapshots are read through.
+    pub fn source(&mut self) -> &mut (dyn ObjectSource + 's) {
+        &mut *self.source
+    }
 }
 
 impl SnapshotSource for RecordSnapshots<'_, '_> {
@@ -493,6 +522,22 @@ impl SnapshotSource for RecordSnapshots<'_, '_> {
                 hash: *state,
             },
         )
+    }
+
+    fn held_snapshot_canonical(&mut self, state: &Hash) -> Result<Option<bool>, StreamError> {
+        let key = ObjectKey {
+            kind: kinds::SNAPSHOT,
+            hash: *state,
+        };
+        match self.source.record(key)? {
+            Some(r @ crate::sync_stream::StreamRecord::Present { .. }) => {
+                let crate::sync_stream::StreamRecord::Present { payload, .. } = &r else {
+                    unreachable!("a present record")
+                };
+                Ok(Some(canonical_snapshot(r.raw_kind(), payload)))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
@@ -612,6 +657,14 @@ impl SnapshotSource for StoreSnapshots<'_> {
         }
     }
 
+    fn held_snapshot_canonical(&mut self, state: &Hash) -> Result<Option<bool>, crate::StoreError> {
+        match self.reader.get_kind_raw(kinds::SNAPSHOT, state) {
+            Ok((raw, payload)) => Ok(Some(canonical_snapshot(raw, &payload))),
+            Err(crate::StoreError::NotFound(h)) if h == *state => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, crate::StoreError> {
         Ok(self.reader.snapshot_delta_of(landing)?.map(|(h, _)| h))
     }
@@ -636,5 +689,354 @@ impl SnapshotSource for StoreSnapshots<'_> {
             FoldRefusal::MissingMap { state, .. } => crate::StoreError::NotFound(state),
             r => crate::StoreError::Decode(r.detail()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// the chain checks (D-7K4Z0): a project's fsck, the holder check, a take and a load
+
+/// The detail of a SNAPSHOT whose bytes are not the canonical encoding of its map, met before a
+/// landing that names it is resolved (a batch record, a dump frame).
+pub fn noncanonical_snapshot(state: &Hash) -> String {
+    format!("snapshot {state}: bytes are not canonical")
+}
+
+/// Whether `payload`, a SNAPSHOT frame of raw kind `raw`, is the canonical encoding of the map it
+/// decodes to (`crate::codec::decode_canonical`). Bytes that do not decode are not.
+pub(crate) fn canonical_snapshot(raw: u8, payload: &[u8]) -> bool {
+    crate::codec::decode_canonical::<StateSnapshot>(raw, payload).is_ok()
+}
+
+/// The features a held history's links follow (`crate::object_refs`): the store's
+/// `meta/store_features` manifest, or no feature for a log that holds none yet.
+pub fn held_features(reader: &crate::StoreReader) -> Result<StoreFeatures, crate::StoreError> {
+    match reader.get_ref(crate::format::REF_STORE_FEATURES)? {
+        Some(v) => crate::format::decode_features(&v),
+        None => Ok(StoreFeatures::of(vec![])),
+    }
+}
+
+thread_local! {
+    /// The deltas [`check_snapshot_chains`] applied on this thread, while a test records them.
+    static CHAIN_APPLIED: RefCell<Option<Vec<Hash>>> = const { RefCell::new(None) };
+}
+
+/// While held, this thread records each delta [`check_snapshot_chains`] applies (a test hook:
+/// a check applies each landing's delta once).
+#[doc(hidden)]
+#[must_use]
+pub struct ChainApplications(std::marker::PhantomData<*const ()>);
+
+impl Drop for ChainApplications {
+    fn drop(&mut self) {
+        CHAIN_APPLIED.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+impl ChainApplications {
+    /// The deltas applied since the last call, in the order applied.
+    pub fn take(&self) -> Vec<Hash> {
+        CHAIN_APPLIED.with(|c| {
+            c.borrow_mut()
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+        })
+    }
+}
+
+/// Test hook: records each delta [`check_snapshot_chains`] applies on this thread until the
+/// guard drops.
+#[doc(hidden)]
+pub fn record_chain_applications_for_tests() -> ChainApplications {
+    CHAIN_APPLIED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    ChainApplications(std::marker::PhantomData)
+}
+
+/// How a chain check reads rule 6: the block a set entry's version belongs to (a removed version
+/// through its stub), or None when no record describes it (nothing to check).
+pub type BlockOf<'a, S, E> = dyn FnMut(&mut S, &Hash) -> Result<Option<BlockId>, E> + 'a;
+
+/// What a chain check hands its caller for each landing it checked: the landing, its record and
+/// its full map, in chain order.
+pub type VisitMap<'a, S, E> =
+    dyn FnMut(&mut S, &Hash, &LandingRecord, &BlockMap) -> Result<(), E> + 'a;
+
+/// One edit a fold made, to undo it at a fork: the block id and the version it held before.
+type Edit = (BlockId, Option<Hash>);
+
+/// Checks the snapshots of `landings`, read through `source`, and hands each landing's full map
+/// to `visit` once it passes. Every boundary that reads a landing shares it: a project's fsck,
+/// the holder check, a take and a load.
+///
+/// With `deltas` (the history lists `snapshot_delta`), each landing keeps the six rules:
+///
+/// 1. it has exactly one SNAPSHOT_DELTA;
+/// 2. the delta names it, and its `full` is the landing's `state`;
+/// 3. its `base` is the previous landing's delta, absent exactly at the first landing;
+/// 4. its sorted, disjoint `set` and `drop` hold no redundant operation;
+/// 5. its folded map hashes to `full` (the canonical SNAPSHOT bytes);
+/// 6. each `set` version belongs to its block (`block_of`; a removed version by its stub).
+///
+/// The chains are walked oldest first, from each landing whose `prev` is not among `landings`
+/// (its map read by [`read_snapshot`], the empty map at a first landing), with one running map
+/// per walk. Each landing is checked once, forks and repeated full hashes included; a fork's
+/// branches undo their own edits to give back the map of the fork, which is not checked again.
+/// Only the `set` entries are read for rule 6: an entry a landing kept was checked where it was
+/// set. The walk is iterative, and a walk's map is released when it ends. A landing that no walk
+/// reaches is on a cycle (`dependency cycle through {l}`), and a walk deeper than
+/// [`MAX_FOLD_DEPTH`] is refused.
+///
+/// Without `deltas`, each landing's held SNAPSHOT is its map, and it must be stored as the
+/// canonical encoding of that map (`landing {l}: snapshot {s} is not canonical`).
+pub fn check_snapshot_chains<S, E>(
+    source: &mut S,
+    deltas: bool,
+    landings: &[(Hash, &LandingRecord)],
+    block_of: &mut BlockOf<'_, S, E>,
+    visit: &mut VisitMap<'_, S, E>,
+) -> Result<(), E>
+where
+    S: SnapshotSource + ?Sized,
+    E: From<S::Error>,
+{
+    let mut order: Vec<(Hash, &LandingRecord)> = landings.to_vec();
+    order.sort_unstable_by_key(|(h, _)| *h);
+    order.dedup_by_key(|(h, _)| *h);
+    if !deltas {
+        for (l, rec) in &order {
+            let map = legacy_map(source, l, rec)?;
+            visit(source, l, rec, &map)?;
+        }
+        return Ok(());
+    }
+    let pos: HashMap<Hash, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, (h, _))| (*h, i))
+        .collect();
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, (_, rec)) in order.iter().enumerate() {
+        match rec.prev.and_then(|p| pos.get(&p).copied()) {
+            // a landing that is its own `prev` is on a cycle: no walk reaches it
+            Some(j) if j == i => {}
+            Some(j) => kids[j].push(i),
+            None => roots.push(i),
+        }
+    }
+    drop(pos);
+    let mut visited = 0usize;
+    let mut reached = vec![false; order.len()];
+    for r in roots {
+        let (l, rec) = order[r];
+        // the map and delta of the landing before the walk: none at a first landing, else the
+        // source's own read of a landing outside the set
+        let (mut map, before) = match rec.prev {
+            None => (BlockMap::new(), None),
+            Some(p) => {
+                let m = read_snapshot(source, None, &p)?.blocks;
+                (m, source.delta_of(&p)?)
+            }
+        };
+        let mut undo: Vec<Edit> = Vec::new();
+        let dh = check_landing(source, &l, rec, before, &mut map, None, block_of)?;
+        reached[r] = true;
+        visited += 1;
+        visit(source, &l, rec, &map)?;
+        // each frame: the landing, its delta, its next child and the undo mark of a fork
+        let mut stack: Vec<(usize, Hash, usize, Option<usize>)> = vec![(r, dh, 0, None)];
+        let mut marks = 0usize;
+        while let Some(top) = stack.last_mut() {
+            let (at, delta, next, mark) = (top.0, top.1, top.2, top.3);
+            let Some(&c) = kids[at].get(next) else {
+                stack.pop();
+                // back at a fork: its map again, from the branch's own edits
+                if let Some(&(_, _, _, Some(m))) = stack.last() {
+                    revert(&mut map, &mut undo, m);
+                }
+                continue;
+            };
+            top.2 += 1;
+            // a fork with branches left keeps a mark to come back to
+            if next + 1 < kids[at].len() {
+                if mark.is_none() {
+                    marks += 1;
+                }
+                top.3 = Some(undo.len());
+            } else if mark.is_some() {
+                marks -= 1;
+                top.3 = None;
+            }
+            let (cl, crec) = order[c];
+            if stack.len() >= MAX_FOLD_DEPTH {
+                return Err(source.refused(FoldRefusal::TooDeep(cl)).into());
+            }
+            let edits = (marks > 0).then_some(&mut undo);
+            let cdh = check_landing(source, &cl, crec, Some(delta), &mut map, edits, block_of)?;
+            reached[c] = true;
+            visited += 1;
+            visit(source, &cl, crec, &map)?;
+            stack.push((c, cdh, 0, None));
+        }
+    }
+    if visited < order.len() {
+        let i = reached
+            .iter()
+            .position(|r| !r)
+            .expect("an unreached landing");
+        return Err(source.refused(FoldRefusal::Cycle(order[i].0)).into());
+    }
+    Ok(())
+}
+
+/// Undoes the edits after `mark`, newest first.
+fn revert(map: &mut BlockMap, undo: &mut Vec<Edit>, mark: usize) {
+    while undo.len() > mark {
+        let (id, old) = undo.pop().expect("an edit");
+        match old {
+            Some(v) => map.insert(id, v),
+            None => map.remove(&id),
+        };
+    }
+}
+
+/// The six rules of landing `landing` (record `rec`), whose previous landing's delta is
+/// `before`, on `map`, the previous landing's map, which it then folds to this landing's. With
+/// `edits`, the fold notes what it changes so a fork can undo it. Returns the landing's delta.
+fn check_landing<S, E>(
+    source: &mut S,
+    landing: &Hash,
+    rec: &LandingRecord,
+    before: Option<Hash>,
+    map: &mut BlockMap,
+    edits: Option<&mut Vec<Edit>>,
+    block_of: &mut BlockOf<'_, S, E>,
+) -> Result<Hash, E>
+where
+    S: SnapshotSource + ?Sized,
+    E: From<S::Error>,
+{
+    // 1. exactly one delta (the source refuses a second distinct one when it associates them)
+    let Some(dh) = source.delta_of(landing)? else {
+        return Err(source
+            .refused(FoldRefusal::MissingDelta { landing: *landing })
+            .into());
+    };
+    let delta = source.delta(&dh)?;
+    // 2. its landing and full
+    if delta.landing != *landing || delta.full != rec.state {
+        return Err(source.refused(FoldRefusal::Identity { delta: dh }).into());
+    }
+    // 3. its base: the previous landing's delta, absent exactly at the first landing
+    let base_ok = match rec.prev {
+        None => delta.base.is_none(),
+        Some(_) => delta.base.is_some() && delta.base == before,
+    };
+    if !base_ok {
+        return Err(source.refused(FoldRefusal::Base { delta: dh }).into());
+    }
+    let grows = delta
+        .set
+        .iter()
+        .filter(|(k, _)| !map.contains_key(k))
+        .count();
+    if map.len().saturating_sub(delta.drop.len()) + grows > MAX_ELEMENTS {
+        return Err(source.refused(FoldRefusal::TooLarge(dh)).into());
+    }
+    // 4. canonical against the previous map; the fold checks the form before it changes a key
+    let olds: Vec<Edit> = match &edits {
+        Some(_) => delta
+            .drop
+            .iter()
+            .chain(delta.set.iter().map(|(k, _)| k))
+            .map(|k| (k.clone(), map.get(k).copied()))
+            .collect(),
+        None => Vec::new(),
+    };
+    if let Err(error) = fold_snapshot_delta(map, &delta) {
+        return Err(source
+            .refused(FoldRefusal::NotCanonical { delta: dh, error })
+            .into());
+    }
+    if let Some(undo) = edits {
+        undo.extend(olds);
+    }
+    // 5. the folded map is `full`
+    if snapshot_map_id(map) != rec.state {
+        return Err(source.refused(FoldRefusal::Mismatch { delta: dh }).into());
+    }
+    // 6. each set version is a version of its block
+    for (id, version) in &delta.set {
+        if let Some(of) = block_of(source, version)?
+            && of != *id
+        {
+            return Err(source
+                .refused(FoldRefusal::WrongBlock {
+                    delta: dh,
+                    id: id.clone(),
+                    version: *version,
+                })
+                .into());
+        }
+    }
+    CHAIN_APPLIED.with(|c| {
+        if let Some(v) = c.borrow_mut().as_mut() {
+            v.push(dh);
+        }
+    });
+    Ok(dh)
+}
+
+/// A landing's map without the feature: its held SNAPSHOT, which must be stored canonically.
+fn legacy_map<S, E>(source: &mut S, landing: &Hash, rec: &LandingRecord) -> Result<BlockMap, E>
+where
+    S: SnapshotSource + ?Sized,
+    E: From<S::Error>,
+{
+    let missing = FoldRefusal::MissingMap {
+        landing: *landing,
+        state: rec.state,
+    };
+    let Some(s) = source.held_snapshot(landing, &rec.state)? else {
+        return Err(source.refused(missing).into());
+    };
+    match source.held_snapshot_canonical(&rec.state)? {
+        Some(true) => Ok(s.blocks),
+        None => Err(source.refused(missing).into()),
+        Some(false) => Err(source
+            .refused(FoldRefusal::NotCanonicalSnapshot {
+                landing: *landing,
+                state: rec.state,
+            })
+            .into()),
+    }
+}
+
+impl crate::StoreReader {
+    /// The chain checks of `landings` ([`check_snapshot_chains`]) over this store, with its
+    /// features: every landing a project holds (off canon too) for its fsck, or every landing
+    /// a holder check read. A version a removal erased reads as its stub; one no residue
+    /// describes, or one the store does not hold, has nothing to check. A refusal is `StoreError::Decode` with the rule's text.
+    pub fn check_snapshot_chains(
+        &self,
+        landings: &[(Hash, &LandingRecord)],
+    ) -> Result<(), crate::StoreError> {
+        let deltas = held_features(self)?.has(crate::format::FEATURE_SNAPSHOT_DELTA);
+        let mut source = StoreSnapshots { reader: self };
+        check_snapshot_chains(
+            &mut source,
+            deltas,
+            landings,
+            &mut |s: &mut StoreSnapshots<'_>, v: &Hash| match s.reader.get_block(v) {
+                Ok(b) => Ok(Some(b.id)),
+                // a version a removal erased with no residue, or one the store does not hold
+                // (its own check refuses a missing object), has nothing to check
+                Err(crate::StoreError::Redacted { .. }) => Ok(None),
+                Err(crate::StoreError::NotFound(h)) if h == *v => Ok(None),
+                Err(e) => Err(e),
+            },
+            &mut |_, _, _, _| Ok(()),
+        )
     }
 }

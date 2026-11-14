@@ -893,28 +893,50 @@ fn rpl3_new_shapes_refuse_without_feature() {
         hash,
     };
     assert_eq!(
-        refs_of(shapes[3].1.0, &shapes[3].1.1).unwrap(),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            shapes[3].1.0,
+            &shapes[3].1.1
+        )
+        .unwrap(),
         vec![some(kinds::FOREIGN, h(64))]
     );
     assert_eq!(
-        refs_of(shapes[5].1.0, &shapes[5].1.1).unwrap(),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            shapes[5].1.0,
+            &shapes[5].1.1
+        )
+        .unwrap(),
         vec![some(kinds::FOREIGN, h(66))]
     );
     assert!(
-        refs_of(shapes[10].1.0, &shapes[10].1.1)
-            .unwrap()
-            .iter()
-            .any(|r| *r == some(kinds::BLOCK, h(54)))
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            shapes[10].1.0,
+            &shapes[10].1.1
+        )
+        .unwrap()
+        .iter()
+        .any(|r| *r == some(kinds::BLOCK, h(54)))
     );
     assert!(
-        refs_of(shapes[10].1.0, &shapes[10].1.1)
-            .unwrap()
-            .contains(&some(kinds::FOREIGN, h(56)))
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            shapes[10].1.0,
+            &shapes[10].1.1
+        )
+        .unwrap()
+        .contains(&some(kinds::FOREIGN, h(56)))
     );
     assert!(
-        refs_of(shapes[11].1.0, &shapes[11].1.1)
-            .unwrap()
-            .contains(&some(kinds::BLOCK, h(61)))
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            shapes[11].1.0,
+            &shapes[11].1.1
+        )
+        .unwrap()
+        .contains(&some(kinds::BLOCK, h(61)))
     );
     // a released encoding never carries a foreign shape: each body framed at the released
     // encoding is refused by every reader, so no foreign shape slips past the feature
@@ -953,7 +975,11 @@ fn rpl3_new_shapes_refuse_without_feature() {
             _ => codec::decode_record::<Redaction>(r, &p).is_err(),
         };
         assert!(refused, "{name}: a released encoding cannot hold it");
-        assert_eq!(refs_of(r, &p), Err(RecordError::Decode), "{name}");
+        assert_eq!(
+            refs_of(&rdy_store::format::StoreFeatures::of(vec![]), r, &p),
+            Err(RecordError::Decode),
+            "{name}"
+        );
     }
     // the frozen carried-proof decoder keeps the released targets: a carried record that names
     // a cited version does not decode, whole or in place
@@ -1042,7 +1068,11 @@ fn rpl3_new_shapes_refuse_without_feature() {
     for (name, kind, version, body) in &no_shape {
         let p = payload(*version, body);
         let r = raw(*kind, *version);
-        assert_eq!(refs_of(r, &p), Err(RecordError::Decode), "{name}");
+        assert_eq!(
+            refs_of(&rdy_store::format::StoreFeatures::of(vec![]), r, &p),
+            Err(RecordError::Decode),
+            "{name}"
+        );
         let o = codec::split(r, &p).unwrap();
         let refused = match *kind {
             kinds::BLOCK => codec::decode_split::<Block>(&o).is_err(),
@@ -1162,7 +1192,11 @@ fn rpl3_unknown_encoding_is_bounded() {
         } else {
             RecordError::UnknownVersion
         };
-        assert_eq!(refs_of(r, &p).unwrap_err(), refused, "{name}");
+        assert_eq!(
+            refs_of(&rdy_store::format::StoreFeatures::of(vec![]), r, &p).unwrap_err(),
+            refused,
+            "{name}"
+        );
         match codec::decode_record::<ForeignEntry>(r, &p) {
             Err(StoreError::Format { message, fix }) => {
                 assert_eq!(
@@ -1197,7 +1231,15 @@ fn rpl3_unknown_encoding_is_bounded() {
         RecordError::Kind
     );
     // FOREIGN is registered, not portable yet: refs_of refuses it as a kind
-    assert_eq!(refs_of(entry.0, &entry.1).unwrap_err(), RecordError::Kind);
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            entry.0,
+            &entry.1
+        )
+        .unwrap_err(),
+        RecordError::Kind
+    );
     // a hostile list length is refused before a collection grows
     let mut hostile = postcard_of(&repo(7));
     hostile.push(0); // source: Link
@@ -1311,9 +1353,27 @@ fn rpl32_portable_refs_leave_out_an_assessments_foreign_part() {
     };
     let foreign = codec::item_new(kinds::ASSESSMENT, &foreign_assessment());
     let local = codec::item_new(kinds::ASSESSMENT, &AssessmentV2::of(&assessment()));
-    let all = refs_of(foreign.0, &foreign.1).unwrap();
-    let portable = portable_refs_of(foreign.0, &foreign.1).unwrap();
-    assert_eq!(portable, refs_of(local.0, &local.1).unwrap());
+    let all = refs_of(
+        &rdy_store::format::StoreFeatures::of(vec![]),
+        foreign.0,
+        &foreign.1,
+    )
+    .unwrap();
+    let portable = portable_refs_of(
+        &rdy_store::format::StoreFeatures::of(vec![]),
+        foreign.0,
+        &foreign.1,
+    )
+    .unwrap();
+    assert_eq!(
+        portable,
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            local.0,
+            &local.1
+        )
+        .unwrap()
+    );
     assert!(!portable.contains(&some(kinds::BLOCK, h(54))));
     assert!(!portable.contains(&some(kinds::FOREIGN, h(56))));
     let mut back = portable.clone();
@@ -1323,12 +1383,27 @@ fn rpl32_portable_refs_leave_out_an_assessments_foreign_part() {
     // a record without a foreign part has the same edges both ways, and a FOREIGN entry is
     // refused as a kind both ways
     assert_eq!(
-        portable_refs_of(local.0, &local.1).unwrap(),
-        refs_of(local.0, &local.1).unwrap()
+        portable_refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            local.0,
+            &local.1
+        )
+        .unwrap(),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            local.0,
+            &local.1
+        )
+        .unwrap()
     );
     let entry = codec::item_new(kinds::FOREIGN, &delivery());
     assert_eq!(
-        portable_refs_of(entry.0, &entry.1).unwrap_err(),
+        portable_refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            entry.0,
+            &entry.1
+        )
+        .unwrap_err(),
         RecordError::Kind
     );
 }

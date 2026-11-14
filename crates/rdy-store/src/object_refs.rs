@@ -17,12 +17,20 @@
 //! BLOCK version of each foreign reach row and the FOREIGN entry of each foreign tension side).
 //! The source store's own checks (a write's held objects, fsck) read every edge ([`refs_of`]).
 //! The record's bytes and identity are the same either way.
+//!
+//! A landing's bytes alone no longer give its links (SD1, D-7K4Z0): every reader passes the
+//! features of the history the record belongs to (an incoming stream's declared features, or a
+//! held store's own). Under the `snapshot_delta` feature a landing's `state` is an identity hash,
+//! not a SNAPSHOT edge; its map travels as its SNAPSHOT_DELTA, which links to its landing, its
+//! `base` delta and the version of each `set` entry (its `full` hash and `drop` ids are no
+//! links). Without the feature, `state` links to the landing's SNAPSHOT exactly as before.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
+use crate::format::{FEATURE_SNAPSHOT_DELTA, StoreFeatures};
 use crate::kinds::{
     self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
     CHECK_REQUEST, DISPUTE, DISPUTE_RESOLUTION, FOREIGN, INTENT, LANDING, PLAN, PROPOSAL,
-    REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, TAG, TENSION,
-    TRANSITION, VIEW_OP,
+    REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, SNAPSHOT_DELTA,
+    TAG, TENSION, TRANSITION, VIEW_OP,
 };
 use crate::transition::{Cause, Side, SideV1, TransitionsV1, Why};
 use crate::view::{ViewOp, ViewOpKind};
@@ -36,7 +44,7 @@ use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::signature::Signature;
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Answer, AnswerAct, Block, Change, ChangeLinks, FieldValue, Hash,
-    Intent, LandingRecord, Op, Proposal, StateSnapshot, Tag,
+    Intent, LandingRecord, Op, Proposal, SnapshotDelta, StateSnapshot, Tag,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -71,9 +79,49 @@ pub const PORTABLE_KINDS: [u8; 24] = [
     kinds::CHECK_REQUEST,
 ];
 
-/// Whether `kind` is an assigned portable object kind.
+/// [`PORTABLE_KINDS`] and SNAPSHOT_DELTA, ascending: the list while this thread stages snapshot
+/// deltas (`crate::format::stage_snapshot_delta_for_tests`).
+const STAGED_PORTABLE_KINDS: [u8; 25] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::SNAPSHOT,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+    kinds::REDACTION,
+    kinds::REDACTION_RESIDUE,
+    kinds::REDACTION_APPLY,
+    kinds::PLAN,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+    kinds::SNAPSHOT_DELTA,
+];
+
+/// The portable object kinds on this thread: [`PORTABLE_KINDS`], and SNAPSHOT_DELTA while
+/// snapshot deltas are staged. Ascending.
+pub fn portable_kinds() -> &'static [u8] {
+    if crate::format::snapshot_delta_staged() {
+        &STAGED_PORTABLE_KINDS
+    } else {
+        &PORTABLE_KINDS
+    }
+}
+
+/// Whether `kind` is an assigned portable object kind ([`portable_kinds`]).
 pub fn is_portable(kind: u8) -> bool {
-    PORTABLE_KINDS.contains(&kind)
+    portable_kinds().contains(&kind)
 }
 
 /// The closed list of kinds whose records may name a FOREIGN entry or a BLOCK version that only a
@@ -122,26 +170,40 @@ pub struct ObjectRef {
     pub hash: Hash,
 }
 
-/// The objects the record of raw kind `kind` with stored bytes `payload` names, sorted by (kind,
-/// hash) with `None` first and without repeats. The frame is split first (`crate::codec`): its
-/// body, of any encoding its kind registers, is read as the current type. `Kind` for a kind that
-/// is not an assigned portable kind; `Decode` or `Limit` for bytes that are not exactly one
-/// bounded record of the kind; an encoding version refusal of the codec's own.
-pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
-    edges_of(kind, payload, true)
+/// The objects the record of raw kind `kind` with stored bytes `payload` names, in a history of
+/// `features`, sorted by (kind, hash) with `None` first and without repeats. The frame is split
+/// first (`crate::codec`): its body, of any encoding its kind registers, is read as the current
+/// type. `Kind` for a kind that is not an assigned portable kind; `Decode` or `Limit` for bytes
+/// that are not exactly one bounded record of the kind; an encoding version refusal of the
+/// codec's own. Under `snapshot_delta` a landing's `state` is no edge (see the module docs).
+pub fn refs_of(
+    features: &StoreFeatures,
+    kind: u8,
+    payload: &[u8],
+) -> Result<Vec<ObjectRef>, RecordError> {
+    edges_of(features, kind, payload, true)
 }
 
 /// The objects a receiver needs before the record: [`refs_of`] less its foreign-only edges, an
 /// assessment's foreign part (the held BLOCK version of each foreign reach row and the FOREIGN
 /// entry of each foreign tension side). A tag's closure, a sync batch's dependency check, a
 /// take's completeness check and a holder's check read these: foreign content is never a tag's
-/// history (D-FK58A). The same refusals as [`refs_of`].
-pub fn portable_refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
-    edges_of(kind, payload, false)
+/// history (D-FK58A). The same refusals and the same `features` rule as [`refs_of`].
+pub fn portable_refs_of(
+    features: &StoreFeatures,
+    kind: u8,
+    payload: &[u8],
+) -> Result<Vec<ObjectRef>, RecordError> {
+    edges_of(features, kind, payload, false)
 }
 
-/// The edges of one record; `foreign` keeps the foreign-only ones.
-fn edges_of(kind: u8, payload: &[u8], foreign: bool) -> Result<Vec<ObjectRef>, RecordError> {
+/// The edges of one record in a history of `features`; `foreign` keeps the foreign-only ones.
+fn edges_of(
+    features: &StoreFeatures,
+    kind: u8,
+    payload: &[u8],
+    foreign: bool,
+) -> Result<Vec<ObjectRef>, RecordError> {
     if !is_portable(crate::codec::logical_kind(kind)) {
         return Err(RecordError::Kind);
     }
@@ -150,6 +212,7 @@ fn edges_of(kind: u8, payload: &[u8], foreign: bool) -> Result<Vec<ObjectRef>, R
     let mut e = Edges {
         out: Vec::new(),
         foreign,
+        deltas: features.has(FEATURE_SNAPSHOT_DELTA),
     };
     match kind {
         BLOCK => e.block(&crate::codec::decode_bounded_split::<Block>(&split)?)?,
@@ -161,6 +224,12 @@ fn edges_of(kind: u8, payload: &[u8], foreign: bool) -> Result<Vec<ObjectRef>, R
         SNAPSHOT => {
             let s = bounded::decode::<StateSnapshot>(payload)?;
             e.all(BLOCK, s.blocks.values());
+        }
+        SNAPSHOT_DELTA => {
+            let d = crate::codec::decode_bounded_split::<SnapshotDelta>(&split)?;
+            e.one(LANDING, d.landing);
+            e.opt(SNAPSHOT_DELTA, d.base);
+            e.all(BLOCK, d.set.iter().map(|(_, v)| v));
         }
         BLOB_CHUNK => {
             if payload.len() > MAX_CHUNK_BYTES {
@@ -230,10 +299,12 @@ fn edges_of(kind: u8, payload: &[u8], foreign: bool) -> Result<Vec<ObjectRef>, R
     Ok(out)
 }
 
-/// The edges found so far, unsorted, and whether the foreign-only ones count.
+/// The edges found so far, unsorted, whether the foreign-only ones count, and whether the
+/// history lists `snapshot_delta` (a landing's `state` is then no edge).
 struct Edges {
     out: Vec<ObjectRef>,
     foreign: bool,
+    deltas: bool,
 }
 
 impl Edges {
@@ -371,7 +442,10 @@ impl Edges {
         self.opt(PROPOSAL, l.approved_version);
         self.opt(LANDING, l.prev);
         self.all(LANDING, &l.rebased_from);
-        self.one(SNAPSHOT, l.state);
+        // under the feature the map travels as the landing's delta, a reverse attachment
+        if !self.deltas {
+            self.one(SNAPSHOT, l.state);
+        }
         self.all(CHANGE, &l.changes);
         self.alt(&l.chosen);
         for h in &l.checks {

@@ -683,7 +683,13 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     let records = records_of(&bytes);
     for (i, k) in order.iter().enumerate() {
         if let r @ StreamRecord::Present { payload, .. } = &records[k] {
-            for e in refs_of(r.raw_kind(), payload).unwrap() {
+            for e in refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                r.raw_kind(),
+                payload,
+            )
+            .unwrap()
+            {
                 if let Some(kind) = e.kind {
                     assert!(
                         position(order, key(kind, e.hash)) < i,
@@ -1265,7 +1271,12 @@ fn ha5_attachments_reach_a_fixed_point_without_identity_cycles() {
         else {
             panic!("a residue travels whole")
         };
-        let refs = refs_of(rec.raw_kind(), payload).unwrap();
+        let refs = refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            rec.raw_kind(),
+            payload,
+        )
+        .unwrap();
         assert!(
             !refs
                 .iter()

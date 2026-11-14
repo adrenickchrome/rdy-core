@@ -1391,7 +1391,8 @@ impl Store {
         // carried bindings do not find passes them, and a landing that named the record would
         // then give a closure that does not resolve
         let edges =
-            crate::object_refs::refs_of(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
+            crate::object_refs::refs_of(&crate::snapshot::held_features(self)?, item.0, &item.1)
+                .map_err(|e| refuse(&e.to_string()))?;
         // each batch frame hashed once, whatever the number of edges
         let pending: std::collections::BTreeSet<(u8, Hash)> = batch
             .iter()

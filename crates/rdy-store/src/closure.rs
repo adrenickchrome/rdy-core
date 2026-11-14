@@ -82,8 +82,8 @@ use crate::stream_error::{
 use crate::sync_proof::ObjectSource;
 use crate::sync_stream::{
     HEADER_FIXED, KEY_LEN, MAGIC, MAX_EDGES, MAX_HISTORY_DEPTH, MAX_PREREQUISITES, MAX_RECORDS,
-    MAX_STREAM_BYTES, SYNC_KINDS, StreamHeader, StreamRecord, StreamTotals, StreamWriter,
-    TRAILER_LEN, depth_of,
+    MAX_STREAM_BYTES, StreamHeader, StreamRecord, StreamTotals, StreamWriter, TRAILER_LEN,
+    depth_of,
 };
 use rdy_model::{Answer, AnswerAct, Hash, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -257,8 +257,13 @@ fn walk<'a>(
         kind: kinds::TAG,
         hash: tag,
     };
+    let features = reader
+        .store_features()
+        .map_err(|e| store_error(e, Some(root)))?;
     let mut w = Walk {
         source: StoreSource { reader, end },
+        deltas: features.has(crate::format::FEATURE_SNAPSHOT_DELTA),
+        features,
         root,
         nodes: BTreeMap::new(),
         seen: HashSet::new(),
@@ -544,6 +549,10 @@ fn outside_closure(k: ObjectKey) -> StreamError {
 /// The walk of one closure.
 struct Walk<'a> {
     source: StoreSource<'a>,
+    /// The source store's features: the links a record names follow them.
+    features: crate::format::StoreFeatures,
+    /// Whether the features list `snapshot_delta`: each landing attaches its delta.
+    deltas: bool,
     root: ObjectKey,
     /// The records found so far, known records included; an emitted record with the keys it
     /// needs, a known record with none (its links are released once reached).
@@ -629,7 +638,7 @@ impl Walk<'_> {
             return Err(StreamError::unresolved(0, 0, k));
         };
         let refs = record
-            .refs()
+            .refs(&self.features)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
         let mut children = Vec::new();
         children
@@ -695,7 +704,7 @@ impl Walk<'_> {
             return Ok(ObjectKey { kind, hash: r.hash });
         }
         let mut found = None;
-        for &kind in &SYNC_KINDS {
+        for &kind in crate::sync_stream::sync_kinds() {
             if self.source.holds(kind, &r.hash)? {
                 if found.is_some() {
                     return Err(StreamError::bad_record(0, 0, Reason::AmbiguousObjectKind)
@@ -743,6 +752,21 @@ impl Walk<'_> {
                     out.push(ObjectKey {
                         kind: kinds::PLAN,
                         hash: seal,
+                    });
+                }
+                // an emitted landing's delta under `snapshot_delta` (D-7K4Z0): the landing does
+                // not name it, so it follows as a reverse attachment and adds no prerequisite;
+                // a known landing's delta is the receiver's, and an emitted landing with no
+                // delta is refused, as the receiver would refuse it
+                if k.kind == kinds::LANDING && self.deltas && !self.known.contains(&k) {
+                    let Some(d) = self.source.snapshot_delta_of(&k.hash)? else {
+                        return Err(crate::snapshot::stream_refusal(
+                            crate::snapshot::FoldRefusal::MissingDelta { landing: k.hash },
+                        ));
+                    };
+                    out.push(ObjectKey {
+                        kind: kinds::SNAPSHOT_DELTA,
+                        hash: d,
                     });
                 }
                 if k == self.root {

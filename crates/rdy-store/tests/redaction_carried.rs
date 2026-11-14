@@ -913,7 +913,12 @@ fn hc3_sync_never_treats_carried_as_approval() {
     let rec = src.record(false);
     let bytes = postcard::to_allocvec(&rec).unwrap();
     // a carried record is no portable object: it has no links and never travels
-    let e = refs_of(kinds::REDACTION_CARRIED, &bytes).unwrap_err();
+    let e = refs_of(
+        &rdy_store::format::StoreFeatures::of(vec![]),
+        kinds::REDACTION_CARRIED,
+        &bytes,
+    )
+    .unwrap_err();
     assert_eq!(e.to_string(), "unknown kind");
     let to = src.loaded("to", std::slice::from_ref(&rec));
     let s = Store::open(&to).unwrap();

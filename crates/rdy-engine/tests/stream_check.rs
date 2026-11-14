@@ -124,7 +124,7 @@ fn payload(r: &Rdy, key: ObjectKey) -> Vec<u8> {
 /// `refs_of` the stored frame of `key`: its raw kind and payload.
 fn refs_of_stored(r: &Rdy, key: ObjectKey) -> Vec<rdy_store::object_refs::ObjectRef> {
     let (raw, payload) = r.store().get_kind_raw(key.kind, &key.hash).unwrap();
-    refs_of(raw, &payload).unwrap()
+    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload).unwrap()
 }
 
 /// What a check refused: its code, message and fix.

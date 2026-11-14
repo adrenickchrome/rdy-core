@@ -47,7 +47,9 @@ use rdy_schema::Pack;
 use rdy_store::check_holder;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
-use rdy_store::snapshot::{CacheTag, MapCache, RecordSnapshots, read_landing_snapshot};
+use rdy_store::snapshot::{
+    CacheTag, MapCache, RecordSnapshots, check_snapshot_chains, read_landing_snapshot,
+};
 use rdy_store::stream_error::LIMIT_TOTAL_BYTES;
 use rdy_store::stream_source::CheckedStream;
 use rdy_store::sync_proof::ObjectSource;
@@ -909,10 +911,15 @@ fn at_object(e: RdyError, key: ObjectKey) -> RdyError {
     })
 }
 
-/// Checks the snapshot of every landing of the upload that the receiver does not hold. A
-/// snapshot several landings share is checked once. The blocks of the last snapshot that the
-/// next one names are kept for it, so a history whose landings share most blocks reads each
-/// shared version about once; nothing older is kept.
+/// Checks the snapshot of every landing of the upload that the receiver does not hold, by the
+/// chain checks every boundary shares (`rdy_store::snapshot::check_snapshot_chains`): under the
+/// upload's `snapshot_delta` feature, the six rules of each new landing's delta, walked oldest
+/// first with one running map, so each delta is applied once and no landing's map is folded
+/// from an empty start; without it, each held SNAPSHOT stored canonically. A version a delta
+/// sets is read once, for rule 6 and for the snapshot's blocks. A snapshot several landings
+/// share has its blocks checked once. The blocks of the last snapshot that the next one names
+/// are kept for it, so a history whose landings share most blocks reads each shared version
+/// about once; nothing older is kept.
 ///
 /// Every block is charged to the snapshot's resource budget (`SnapshotBudget`: selection, text,
 /// references, graph) before it is kept, the kept ones from the last snapshot first, so the
@@ -943,33 +950,75 @@ fn check_landings(
         }
         None => None,
     };
-    let mut kept = None;
-    let mut checked: HashSet<Hash> = HashSet::new();
-    let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
-    // the maps this check builds, for this source only (a later landing folds from them)
-    let maps = MapCache::new();
+    // the new landings: the receiver holds the others, and they were checked when taken
+    let mut new: Vec<(Hash, LandingRecord)> = Vec::new();
     for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
         if held.holds(key)? {
             continue;
         }
-        let Some(landing) = typed::<LandingRecord>(source, *key)? else {
-            continue;
-        };
-        if !checked.insert(landing.state) {
-            continue;
+        if let Some(landing) = typed::<LandingRecord>(source, *key)? {
+            new.push((key.hash, landing));
         }
-        let (snapshot, blocks) =
-            snapshot_blocks(source, Some(&maps), key.hash, &landing, &mut last)?;
-        if keep_state == Some(landing.state) {
-            kept = Some(CheckedSnapshot {
-                state: landing.state,
-                snapshot,
-                blocks: blocks.clone(),
-            });
-        }
-        last = blocks;
     }
+    let landings: Vec<(Hash, &LandingRecord)> = new.iter().map(|(h, l)| (*h, l)).collect();
+    let deltas = facts
+        .features
+        .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA);
+    let mut kept = None;
+    let mut checked: HashSet<Hash> = HashSet::new();
+    let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
+    // the versions rule 6 read for the landing being checked, kept for its blocks
+    let fresh: RefCell<BTreeMap<Hash, Block>> = RefCell::new(BTreeMap::new());
+    let mut snapshots = RecordSnapshots::new(source);
+    check_snapshot_chains(
+        &mut snapshots,
+        deltas,
+        &landings,
+        &mut |s: &mut RecordSnapshots<'_, '_>, version: &Hash| {
+            let block = read_block(s.source(), *version).map_err(ChainError::Rdy)?;
+            let id = block.as_ref().map(|b| b.id.clone());
+            if let Some(b) = block {
+                fresh.borrow_mut().insert(*version, b);
+            }
+            Ok(id)
+        },
+        &mut |s, _, landing, map| {
+            let mut fresh = std::mem::take(&mut *fresh.borrow_mut());
+            if !checked.insert(landing.state) {
+                return Ok(());
+            }
+            let blocks = map_blocks(s.source(), &landing.state, map, &mut last, &mut fresh)
+                .map_err(ChainError::Rdy)?;
+            if keep_state == Some(landing.state) {
+                kept = Some(CheckedSnapshot {
+                    state: landing.state,
+                    snapshot: StateSnapshot {
+                        blocks: map.clone(),
+                    },
+                    blocks: blocks.clone(),
+                });
+            }
+            last = blocks;
+            Ok(())
+        },
+    )
+    .map_err(|e| match e {
+        ChainError::Stream(e) => to_rdy(e),
+        ChainError::Rdy(e) => e,
+    })?;
     Ok(kept)
+}
+
+/// A refusal of [`check_landings`]: a chain rule's (a stream error) or a block check's.
+enum ChainError {
+    Stream(StreamError),
+    Rdy(RdyError),
+}
+
+impl From<StreamError> for ChainError {
+    fn from(e: StreamError) -> Self {
+        ChainError::Stream(e)
+    }
 }
 
 /// The tag of a map cache that one check owns for one source: nothing else shares it.
@@ -1014,8 +1063,24 @@ fn snapshot_blocks(
         record,
     )
     .map_err(to_rdy)?;
+    let blocks = map_blocks(source, &state, &snapshot.blocks, last, &mut BTreeMap::new())?;
+    Ok((snapshot, blocks))
+}
+
+/// The blocks of map `map` (snapshot `state`'s), by version, as [`snapshot_blocks`] reads them:
+/// the blocks of `last` it names first (charged first), then the versions of `fresh` (read
+/// already, for rule 6), then each other version read through `source`. Each entry must name a
+/// version of its own block; a removed version no residue describes reads as nothing. `last`
+/// and `fresh` are left empty.
+fn map_blocks(
+    source: &mut dyn ObjectSource,
+    state: &Hash,
+    map: &BTreeMap<BlockId, Hash>,
+    last: &mut BTreeMap<Hash, Block>,
+    fresh: &mut BTreeMap<Hash, Block>,
+) -> Result<BTreeMap<Hash, Block>, RdyError> {
     // the kept blocks are this snapshot's only, charged before any other is read
-    let named: HashSet<&Hash> = snapshot.blocks.values().collect();
+    let named: HashSet<&Hash> = map.values().collect();
     last.retain(|v, _| named.contains(v));
     drop(named);
     let mut budget = SnapshotBudget::new();
@@ -1023,17 +1088,20 @@ fn snapshot_blocks(
         budget.charge(b)?;
     }
     let mut blocks: BTreeMap<Hash, Block> = BTreeMap::new();
-    for (id, version) in &snapshot.blocks {
+    for (id, version) in map {
         let (block, charged) = match last.remove(version) {
             Some(b) => (b, true),
-            None => match read_block(source, *version)? {
+            None => match fresh.remove(version) {
                 Some(b) => (b, false),
-                // a removed version no residue describes reads as nothing
-                None => continue,
+                None => match read_block(source, *version)? {
+                    Some(b) => (b, false),
+                    // a removed version no residue describes reads as nothing
+                    None => continue,
+                },
             },
         };
         if block.id != *id {
-            return Err(foreign_version(&state, id, version, &block.id));
+            return Err(foreign_version(state, id, version, &block.id));
         }
         if !charged {
             budget.charge(&block)?;
@@ -1041,8 +1109,9 @@ fn snapshot_blocks(
         blocks.insert(*version, block);
     }
     last.clear();
+    fresh.clear();
     check_snapshot_limits(blocks.values(), |h| manifest(source, *h))?;
-    Ok((snapshot, blocks))
+    Ok(blocks)
 }
 
 /// The state of landing `landing`, read through `source` (a take's upload over its holder, with

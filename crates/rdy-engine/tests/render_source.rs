@@ -248,7 +248,10 @@ fn rebatch(repo: RepoId, root: Hash, records: &[StreamRecord]) -> Vec<u8> {
     let mut needed = BTreeSet::new();
     for r in records {
         // a record over its decode bounds names nothing here: the reader refuses it
-        for l in r.refs().unwrap_or_default() {
+        for l in r
+            .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+            .unwrap_or_default()
+        {
             needed.insert(resolve(l));
         }
         needed.extend(r.proof());

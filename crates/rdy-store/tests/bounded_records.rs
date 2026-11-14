@@ -163,14 +163,26 @@ fn ha1_lengths_are_refused_before_visitors_allocate() {
     );
 
     // Through refs_of: a snapshot's map and a signature's statement bytes.
-    let (r, bytes) = measured(|| unit(refs_of(SNAPSHOT, &varint(1 << 40))));
+    let (r, bytes) = measured(|| {
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            SNAPSHOT,
+            &varint(1 << 40),
+        ))
+    });
     assert_eq!(r, limit(COLLECTION_ELEMENTS, 100_000));
     assert!(bytes < 4096, "a refused snapshot allocated {bytes} bytes");
     let mut sig = vec![9u8; 32];
     sig.extend(varint(9));
     sig.extend(b"rdy-sig-1");
     sig.extend(varint(1 << 50));
-    let (r, bytes) = measured(|| unit(refs_of(SIGNATURE, &sig)));
+    let (r, bytes) = measured(|| {
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            SIGNATURE,
+            &sig,
+        ))
+    });
     assert_eq!(r, limit(COLLECTION_ELEMENTS, 100_000));
     assert!(bytes < 4096, "a refused signature allocated {bytes} bytes");
 }
@@ -226,11 +238,19 @@ fn ha1_depth_and_total_values_are_bounded() {
     // each list adds two (the list and its element's enum), so 30 lists end at depth 63 and 31
     // at depth 65.
     assert_eq!(
-        refs_of(rdy_store::kinds::BLOCK, &nested_field_block(30)),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            rdy_store::kinds::BLOCK,
+            &nested_field_block(30)
+        ),
         Ok(vec![])
     );
     assert_eq!(
-        unit(refs_of(rdy_store::kinds::BLOCK, &nested_field_block(31))),
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            rdy_store::kinds::BLOCK,
+            &nested_field_block(31)
+        )),
         limit(NESTING, 64)
     );
 
@@ -307,21 +327,39 @@ fn ha1_values_count_containers_and_leaves_not_scalars() {
         bounded::decode::<rdy_model::StateSnapshot>(&bytes).as_ref(),
         Ok(&snapshot)
     );
-    assert_eq!(refs_of(SNAPSHOT, &bytes).map(|r| r.len()), Ok(100_000));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            SNAPSHOT,
+            &bytes
+        )
+        .map(|r| r.len()),
+        Ok(100_000)
+    );
 }
 
 #[test]
 fn ha1_decode_requires_one_complete_record() {
     let full = postcard::to_allocvec(&tag()).unwrap();
     assert_eq!(bounded::decode::<Tag>(&full), Ok(tag()));
-    assert_eq!(refs_of(TAG, &full).map(|r| r.len()), Ok(1));
+    assert_eq!(
+        refs_of(&rdy_store::format::StoreFeatures::of(vec![]), TAG, &full).map(|r| r.len()),
+        Ok(1)
+    );
     for cut in 0..full.len() {
         assert_eq!(
             unit(bounded::decode::<Tag>(&full[..cut])),
             Err(RecordError::Decode),
             "a tag cut at {cut} bytes"
         );
-        assert_eq!(unit(refs_of(TAG, &full[..cut])), Err(RecordError::Decode));
+        assert_eq!(
+            unit(refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                TAG,
+                &full[..cut]
+            )),
+            Err(RecordError::Decode)
+        );
     }
     let mut trailing = full.clone();
     trailing.push(0);
@@ -329,7 +367,14 @@ fn ha1_decode_requires_one_complete_record() {
         unit(bounded::decode::<Tag>(&trailing)),
         Err(RecordError::Decode)
     );
-    assert_eq!(unit(refs_of(TAG, &trailing)), Err(RecordError::Decode));
+    assert_eq!(
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            TAG,
+            &trailing
+        )),
+        Err(RecordError::Decode)
+    );
 
     // An invalid enum discriminant, a malformed varint, invalid UTF-8 and a bad option tag.
     assert_eq!(
@@ -360,12 +405,30 @@ fn ha1_decode_requires_one_complete_record() {
         unit(bounded::decode::<Tag>(&big)),
         limit(RECORD_BYTES, 16_777_216)
     );
-    assert_eq!(unit(refs_of(TAG, &big)), limit(RECORD_BYTES, 16_777_216));
+    assert_eq!(
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            TAG,
+            &big
+        )),
+        limit(RECORD_BYTES, 16_777_216)
+    );
 
     // A raw chunk has no typed decode, only its own bound.
-    assert_eq!(refs_of(BLOB_CHUNK, &vec![0xab; 1_048_576]), Ok(vec![]));
     assert_eq!(
-        unit(refs_of(BLOB_CHUNK, &vec![0xab; 1_048_577])),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOB_CHUNK,
+            &vec![0xab; 1_048_576]
+        ),
+        Ok(vec![])
+    );
+    assert_eq!(
+        unit(refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOB_CHUNK,
+            &vec![0xab; 1_048_577]
+        )),
         limit("chunk bytes", 1_048_576)
     );
 }
@@ -703,14 +766,18 @@ fn ha1_field_nesting_bound_fits_the_deepest_embedding_record() {
         for update in [true, false] {
             let at = embedding_change(MAX_FIELD_NESTING, map, update);
             assert!(
-                refs_of(change, &at).is_ok(),
+                refs_of(&rdy_store::format::StoreFeatures::of(vec![]), change, &at).is_ok(),
                 "map {map} update {update}: {:?}",
-                refs_of(change, &at)
+                refs_of(&rdy_store::format::StoreFeatures::of(vec![]), change, &at)
             );
         }
         let over = embedding_change(MAX_FIELD_NESTING + 1, map, true);
         assert_eq!(
-            unit(refs_of(change, &over)),
+            unit(refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                change,
+                &over
+            )),
             limit(NESTING, 64),
             "map {map}"
         );
@@ -779,7 +846,13 @@ fn cp3_hostile_plan_hints_do_not_allocate_from_the_hint() {
             bytes < 4096,
             "{what}: a refused hint allocated {bytes} bytes"
         );
-        let (r, bytes) = measured(|| unit(refs_of(PLAN, &b)));
+        let (r, bytes) = measured(|| {
+            unit(refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                PLAN,
+                &b,
+            ))
+        });
         assert_eq!(
             r,
             limit(COLLECTION_ELEMENTS, 100_000),

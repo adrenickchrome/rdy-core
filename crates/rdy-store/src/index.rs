@@ -1,4 +1,5 @@
 use crate::error::{StoreError, db};
+use crate::kinds;
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
 use redb::{
@@ -113,13 +114,23 @@ const DISPUTE_RESOLUTIONS: TableDefinition<&[u8], &[u8]> =
 /// (a later frame of the same key adds nothing, in the same commit or a later one). Both are
 /// u64 little-endian. They are upper bounds of what the holder check reads
 /// (`crate::check_holder`): it reads at most every held object, and follows each one's links
-/// once. The edge count follows the holder check's own counting; a change to that counting (a
-/// future snapshot_delta feature) is recounted by a reindex.
+/// once. The edge count follows the holder check's own counting with no feature (a landing links
+/// its `state`). Three more keys, each written once it is not zero, keep what a holder under
+/// `snapshot_delta` takes back off ([`Index::holder_counts_under`]): `snapshot_objects` (the
+/// SNAPSHOT keys among `objects`), `snapshot_edges` (their links among `edges`) and
+/// `state_edges` (the landings among `objects` whose links were charged, each of which links
+/// its `state` once). Under the feature the holder check reaches no SNAPSHOT through a landing.
 const HOLDER_COUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_counts");
 /// The [`HOLDER_COUNTS`] key of the object count.
 const OBJECTS_COUNT_KEY: &[u8] = b"objects";
 /// The [`HOLDER_COUNTS`] key of the edge count.
 const EDGES_COUNT_KEY: &[u8] = b"edges";
+/// The [`HOLDER_COUNTS`] key of the SNAPSHOT objects among the object count.
+const SNAPSHOT_OBJECTS_KEY: &[u8] = b"snapshot_objects";
+/// The [`HOLDER_COUNTS`] key of the SNAPSHOT links among the edge count.
+const SNAPSHOT_EDGES_KEY: &[u8] = b"snapshot_edges";
+/// The [`HOLDER_COUNTS`] key of the landing `state` links among the edge count.
+const STATE_EDGES_KEY: &[u8] = b"state_edges";
 /// A landing's hash (32 bytes) -> its chain depth, u64 little-endian (TASK-2340): one for a
 /// landing with no `prev`, else its `prev`'s depth plus one, the chain length the holder check
 /// reads. Only a landing whose whole chain the index holds has a row; one whose `prev` has no
@@ -1366,6 +1377,8 @@ impl Index {
             // the frames split across commits
             let mut first: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
             let (mut add_objects, mut add_edges) = (0u64, 0u64);
+            // what a holder under `snapshot_delta` takes back off (see [`HOLDER_COUNTS`])
+            let (mut add_snapshots, mut add_snapshot_edges, mut add_states) = (0u64, 0u64, 0u64);
             let mut depths: Option<LandingDepthTables<'_>> = None;
             for e in entries {
                 match e {
@@ -1375,6 +1388,7 @@ impl Index {
                         let new = typed.insert(&key[..], &at[..]).map_err(db)?.is_none();
                         if new && crate::object_refs::is_portable(*kind) {
                             add_objects += 1;
+                            add_snapshots += u64::from(*kind == kinds::SNAPSHOT);
                             first.insert(key);
                         } else {
                             first.remove(&key);
@@ -1387,6 +1401,11 @@ impl Index {
                     IndexEntry::Links { kind, hash, links } => {
                         if first.remove(&typed_key(*kind, hash)) {
                             add_edges += links;
+                            match *kind {
+                                kinds::SNAPSHOT => add_snapshot_edges += links,
+                                kinds::LANDING => add_states += 1,
+                                _ => {}
+                            }
                         }
                     }
                     IndexEntry::LandingDepth { landing, prev } => {
@@ -1631,7 +1650,14 @@ impl Index {
                 for (key, add) in [
                     (OBJECTS_COUNT_KEY, add_objects),
                     (EDGES_COUNT_KEY, add_edges),
+                    (SNAPSHOT_OBJECTS_KEY, add_snapshots),
+                    (SNAPSHOT_EDGES_KEY, add_snapshot_edges),
+                    (STATE_EDGES_KEY, add_states),
                 ] {
+                    // the feature's counts are written once they are not zero
+                    if add == 0 && key != OBJECTS_COUNT_KEY && key != EDGES_COUNT_KEY {
+                        continue;
+                    }
                     let was = counts
                         .get(key)
                         .map_err(db)?
@@ -1914,6 +1940,33 @@ impl Index {
                 .map(|v| v.unwrap_or(0))
         };
         Ok((get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?))
+    }
+
+    /// The capacity counts ([`Index::holder_counts`]) as the holder check of a store with
+    /// `features` counts them: under `snapshot_delta` a landing's `state` is no link, and no
+    /// SNAPSHOT is reached through one, so each counts zero objects and links.
+    pub fn holder_counts_under(
+        &self,
+        features: &crate::format::StoreFeatures,
+    ) -> Result<(u64, u64), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(HOLDER_COUNTS).map_err(db)?;
+        let get = |key: &[u8]| -> Result<u64, StoreError> {
+            t.get(key)
+                .map_err(db)?
+                .map(|v| u64_from(v.value()))
+                .transpose()
+                .map(|v| v.unwrap_or(0))
+        };
+        let (objects, edges) = (get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?);
+        if !features.has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+            return Ok((objects, edges));
+        }
+        let off = get(SNAPSHOT_EDGES_KEY)?.saturating_add(get(STATE_EDGES_KEY)?);
+        Ok((
+            objects.saturating_sub(get(SNAPSHOT_OBJECTS_KEY)?),
+            edges.saturating_sub(off),
+        ))
     }
 
     /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it and its whole

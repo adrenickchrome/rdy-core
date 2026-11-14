@@ -2028,7 +2028,10 @@ pub fn split_batch(full: &[u8], parts: usize) -> Vec<Vec<u8>> {
             let mine: BTreeSet<ObjectKey> = part.iter().map(StreamRecord::key).collect();
             let mut needed = BTreeSet::new();
             for rec in part {
-                for l in rec.refs().unwrap() {
+                for l in rec
+                    .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+                    .unwrap()
+                {
                     needed.insert(resolve(l));
                 }
                 needed.extend(rec.proof());

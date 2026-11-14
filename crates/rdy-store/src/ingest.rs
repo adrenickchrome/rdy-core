@@ -375,6 +375,21 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                     .ok_or_else(|| dump_error(chain_text::OVERFLOW.into()))?;
             }
         }
+        // every present SNAPSHOT is the canonical encoding of its map, with or without the
+        // snapshot_delta feature (D-7K4Z0): a load refuses one before it writes the batch
+        for (i, f) in b.frames.iter().enumerate() {
+            if let Frame::Present {
+                kind,
+                hash,
+                payload,
+            } = f
+                && crate::codec::logical_kind(*kind) == kinds::SNAPSHOT
+                && !matches!(actions.get(i), Some(FrameAction::Zero { .. }))
+                && !crate::snapshot::canonical_snapshot(*kind, payload)
+            {
+                return Err(dump_error(crate::snapshot::noncanonical_snapshot(hash)));
+            }
+        }
         self.check_refs(b)?;
         self.check_holder_frames(b)?;
         let end = self.log().end();

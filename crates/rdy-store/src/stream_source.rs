@@ -25,15 +25,14 @@
 //! as its dropped identity, never as its bytes.
 use crate::bounded;
 use crate::error::StoreError;
+use crate::format::StoreFeatures;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef};
 use crate::plan::Place as PlanPlace;
 use crate::segment::HEADER;
 use crate::stream_error::{LIMIT_GRAPH_EDGES, LIMIT_OBJECT_RECORDS, Reason, StreamError};
 use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
-use crate::sync_stream::{
-    MAX_EDGES, MAX_RECORDS, SYNC_KINDS, StreamHeader, StreamRecord, check_batch_with,
-};
+use crate::sync_stream::{MAX_EDGES, MAX_RECORDS, StreamHeader, StreamRecord, check_batch_with};
 use crate::take_batch::UploadFacts;
 use rdy_model::redaction::{Redaction, RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
@@ -91,12 +90,21 @@ pub(crate) trait Records {
     fn in_memory(&self, _key: &ObjectKey) -> bool {
         true
     }
+    /// The delta the holder holds for `landing`; None for a source with no holder.
+    fn held_delta_of(&mut self, _landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        Ok(None)
+    }
 }
 
-/// The forward links of one record: its references, then its removal proof.
-fn record_links(key: ObjectKey, record: &StreamRecord) -> Result<Vec<ObjectRef>, StreamError> {
+/// The forward links of one record, under the features of the stream or store that holds it:
+/// its references, then its removal proof.
+pub(crate) fn record_links(
+    key: ObjectKey,
+    record: &StreamRecord,
+    features: &StoreFeatures,
+) -> Result<Vec<ObjectRef>, StreamError> {
     let mut links = record
-        .refs()
+        .refs(features)
         .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
     links.extend(record.proof().map(|k| ObjectRef {
         kind: Some(k.kind),
@@ -105,8 +113,9 @@ fn record_links(key: ObjectKey, record: &StreamRecord) -> Result<Vec<ObjectRef>,
     Ok(links)
 }
 
-/// Any record source, every answer read through [`ObjectSource::record`].
-struct Plain<'a>(&'a mut dyn ObjectSource);
+/// Any record source, every answer read through [`ObjectSource::record`], its links under the
+/// features its headers declare.
+struct Plain<'a>(&'a mut dyn ObjectSource, StoreFeatures);
 
 impl Records for Plain<'_> {
     fn object_source(&mut self) -> &mut dyn ObjectSource {
@@ -119,7 +128,7 @@ impl Records for Plain<'_> {
 
     fn links(&mut self, key: ObjectKey) -> Result<Option<Vec<ObjectRef>>, StreamError> {
         match self.0.record(key)? {
-            Some(r) => record_links(key, &r).map(Some),
+            Some(r) => record_links(key, &r, &self.1).map(Some),
             None => Ok(None),
         }
     }
@@ -168,7 +177,7 @@ pub(crate) fn resolve(
         return Ok(ObjectKey { kind, hash: r.hash });
     }
     let mut found = None;
-    for &kind in &SYNC_KINDS {
+    for &kind in crate::sync_stream::sync_kinds() {
         let k = ObjectKey { kind, hash: r.hash };
         if rec.has(&k)? {
             if found.is_some() {
@@ -206,6 +215,8 @@ struct Attachments {
     checks: HashMap<ObjectKey, Vec<ObjectKey>>,
     /// Check reviews by the request they answer.
     verdicts: HashMap<Hash, Vec<ObjectKey>>,
+    /// Snapshot deltas by the landing they record (D-7K4Z0).
+    deltas: HashMap<Hash, Vec<ObjectKey>>,
 }
 
 /// Collects the incoming records' attachments: every answer, signature, request and apply they
@@ -231,6 +242,7 @@ fn attachments(
                 | kinds::DISPUTE_RESOLUTION
                 | kinds::CHECK_REQUEST
                 | kinds::REVIEW
+                | kinds::SNAPSHOT_DELTA
         )
     });
     for k in keys.copied() {
@@ -287,6 +299,11 @@ fn attachments(
                     }
                 }
             }
+            kinds::SNAPSHOT_DELTA => {
+                if let Some(d) = typed::<rdy_model::SnapshotDelta>(source, k)? {
+                    a.deltas.entry(d.landing).or_default().push(k);
+                }
+            }
             kinds::REVIEW => {
                 if let Some(rdy_model::ReviewSubject::Check { request }) =
                     typed::<rdy_model::Review>(source, k)?.map(|r| r.subject)
@@ -334,11 +351,45 @@ fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
         .collect()
 }
 
+/// Under a stream that declares `snapshot_delta` (`features`), checks the deltas of the whole
+/// upload (`keys`, every file's incoming keys): each incoming landing has exactly one delta,
+/// incoming or the holder's, and an incoming delta of a landing the holder holds with another
+/// delta is refused (`landing {l}: expected exactly one snapshot delta`). The closure walk may
+/// end early; this check does not. The chains themselves are the publication check's
+/// (`crate::snapshot::check_snapshot_chains`). Without the feature it checks nothing.
+pub(crate) fn check_snapshot_deltas(
+    rec: &mut dyn Records,
+    features: &StoreFeatures,
+    keys: &[ObjectKey],
+) -> Result<(), StreamError> {
+    if !features.has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+        return Ok(());
+    }
+    let refused = |landing: Hash| {
+        crate::snapshot::stream_refusal(crate::snapshot::FoldRefusal::MissingDelta { landing })
+    };
+    let incoming = crate::snapshot::associate_deltas(keys, |k| typed(rec.object_source(), k))?;
+    for (landing, delta) in &incoming {
+        if let Some(held) = rec.held_delta_of(landing)?
+            && held != *delta
+        {
+            return Err(refused(*landing));
+        }
+    }
+    for k in keys.iter().filter(|k| k.kind == kinds::LANDING) {
+        if !incoming.contains_key(&k.hash) && rec.held_delta_of(&k.hash)?.is_none() {
+            return Err(refused(k.hash));
+        }
+    }
+    Ok(())
+}
+
 /// Checks that every incoming key is in the root's closure (D-BPYN8: "a take adds a stream's
 /// closure and its tag in one batch"; the take's step 5): reached from the root by forward
 /// links (through every record of the source), or attached as the closure attaches it
 /// (`crate::closure`): answers of reached landings and tags, signatures of reached landings and
-/// of the root, the root's relay answer (O11), the sealed plans of reached landings, requests of
+/// of the root, the root's relay answer (O11), the sealed plans and snapshot deltas of reached
+/// landings, requests of
 /// reached carriers, applies whose request names a reached object, the disputes of reached
 /// landings and the resolutions of reached disputes, and the check requests of reached changes
 /// and proposal versions and the reviews of reached requests. The first incoming key outside it, in key order, is
@@ -415,6 +466,7 @@ fn walk_closure(
         }
         if k.kind == kinds::LANDING {
             links.extend(att.seals.get(&k.hash).into_iter().flatten());
+            links.extend(att.deltas.get(&k.hash).into_iter().flatten());
         }
         if k.kind == kinds::CHANGE {
             links.extend(att.requests.get(&k.hash).into_iter().flatten());
@@ -997,6 +1049,7 @@ fn complete(
     let root_key = header.root();
     let root = root_tag(rec, root_key)?;
     check_closure(rec, root_key, &root, &keys)?;
+    check_snapshot_deltas(rec, &header.features, &keys)?;
     // the typed context of the plans and plan answers
     check_typed_context(rec, None, &keys)?;
     // the approvals: every apply's proof
@@ -1046,6 +1099,7 @@ fn complete(
             root,
             objects: keys,
             relay_answers: relay,
+            features: header.features.clone(),
         },
         incoming,
         approved,
@@ -1069,7 +1123,10 @@ pub fn check_complete(
     headers: &[StreamHeader],
     input_keys: &[ObjectKey],
 ) -> Result<UploadFacts, StreamError> {
-    let mut rec = Plain(source);
+    let features = headers
+        .first()
+        .map_or_else(|| StoreFeatures::of(vec![]), |h| h.features.clone());
+    let mut rec = Plain(source, features);
     let mut drops =
         |rec: &mut dyn Records, key: &ObjectKey| match rec.object_source().record(*key)? {
             Some(StreamRecord::Dropped {
@@ -1114,6 +1171,8 @@ struct Indexed<R> {
     /// Each landing's snapshot delta, built once from the typed delta records the stream holds
     /// (`crate::snapshot`): a stream has no index to ask.
     deltas: RefCell<Option<BTreeMap<Hash, Hash>>>,
+    /// The features the stream's header declares: its records' links follow them.
+    features: StoreFeatures,
 }
 
 impl<R: Read + Seek> Indexed<R> {
@@ -1255,7 +1314,7 @@ impl<R: Read + Seek> Records for Indexed<R> {
             // a chunk names nothing; its bytes are not read for that
             Some(Place::Present { .. }) if key.kind == kinds::BLOB_CHUNK => Ok(Some(vec![])),
             Some(_) => match self.read(key)? {
-                Some(r) => record_links(key, &r).map(Some),
+                Some(r) => record_links(key, &r, &self.features).map(Some),
                 None => Ok(None),
             },
         }
@@ -1324,6 +1383,7 @@ impl<R: Read + Seek> CheckedStream<R> {
             masked: BTreeMap::new(),
             removed: BTreeMap::new(),
             deltas: RefCell::new(None),
+            features: report.header.features.clone(),
         };
         // the index answers the dropped representations, with no read
         let dropped: BTreeMap<ObjectKey, Drop> = records
