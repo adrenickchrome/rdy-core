@@ -1920,18 +1920,20 @@
                 "changed_outside_docs": [
                   {
                     "after_version": "string",
-                    "before_version": "null",
+                    "before_version": "null|string",
                     "block_type": "string",
                     "change": "string",
-                    "excerpt": "string",
+                    "excerpt?": "string",
                     "id": "string",
                     "label": "string",
                     "record_only": "bool",
                     "redacted": "bool",
-                    "status_from": "null",
-                    "status_to": "string",
-                    "title": "string",
-                    "what": []
+                    "status_from?": "null",
+                    "status_to?": "string",
+                    "title?": "string",
+                    "what": [
+                      "string"
+                    ]
                   }
                 ],
                 "new_reference_count": "number",
@@ -22884,18 +22886,20 @@
               "changed_outside_docs": [
                 {
                   "after_version": "string",
-                  "before_version": "null",
+                  "before_version": "null|string",
                   "block_type": "string",
                   "change": "string",
-                  "excerpt": "string",
+                  "excerpt?": "string",
                   "id": "string",
                   "label": "string",
                   "record_only": "bool",
                   "redacted": "bool",
-                  "status_from": "null",
-                  "status_to": "string",
-                  "title": "string",
-                  "what": []
+                  "status_from?": "null",
+                  "status_to?": "string",
+                  "title?": "string",
+                  "what": [
+                    "string"
+                  ]
                 }
               ],
               "new_reference_count": "number",
