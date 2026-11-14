@@ -158,16 +158,25 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Every file under `dir`, by its path relative to `dir`, dotfiles included.
+/// Every file under `dir`, by its path relative to `dir`, dotfiles included. A link is not
+/// followed: its entry holds its target as written (on Windows, this account may not be allowed
+/// to follow a link it made).
 fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for e in std::fs::read_dir(at).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
+            let e = e.unwrap();
+            let (p, kind) = (e.path(), e.file_type().unwrap());
+            if kind.is_dir() {
                 walk(root, &p, out);
             } else {
                 let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
-                out.insert(rel.replace('\\', "/"), std::fs::read(&p).unwrap());
+                let bytes = if kind.is_symlink() {
+                    let target = std::fs::read_link(&p).unwrap();
+                    target.to_string_lossy().into_owned().into_bytes()
+                } else {
+                    std::fs::read(&p).unwrap()
+                };
+                out.insert(rel.replace('\\', "/"), bytes);
             }
         }
     }

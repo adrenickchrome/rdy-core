@@ -651,10 +651,12 @@ pub fn replace_rdy_dir(dir: &Path) {
     std::fs::create_dir(&rdy).expect("a fresh .rdy");
 }
 
-/// On Windows a short-lived handle (the daemon's own read, or a scanner) can hold a file in the old
-/// `.rdy` for a moment, so the delete fails with a sharing violation and succeeds once the handle
-/// closes. KNOWN-ISSUES 2255.
-fn remove_dir_all_retrying(path: &Path) {
+/// Deletes the directory `path` and everything in it. On Windows a short-lived handle (the
+/// daemon's own read, or a scanner) can hold a file in it for a moment, and a daemon that is
+/// draining deletes its own `daemon.pid` and `daemon.sock` at the same time; a file whose delete
+/// is pending refuses every open (Access is denied). The delete succeeds once the handle closes.
+/// KNOWN-ISSUES 2255.
+pub fn remove_dir_all_retrying(path: &Path) {
     // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_DIR_NOT_EMPTY (a delete still pending).
     const RETRY: [i32; 3] = [5, 32, 145];
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -667,7 +669,7 @@ fn remove_dir_all_retrying(path: &Path) {
             {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => panic!("delete the old .rdy: {e:?}"),
+            Err(e) => panic!("delete {}: {e:?}", path.display()),
         }
     }
 }

@@ -4,7 +4,8 @@
 use rdy_daemon::{Attempt, Hello, PROTO_VERSION, Proto, RunDir, connect};
 use rdy_engine::Rdy;
 use rdy_qa::daemon::{
-    dead_endpoint, endpoint_live, human_command, short_tempdir, wait_endpoint_gone,
+    dead_endpoint, endpoint_live, human_command, remove_dir_all_retrying, short_tempdir,
+    wait_endpoint_gone,
 };
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -400,7 +401,9 @@ fn df3_a_project_check_during_a_delete_makes_nothing_in_the_project() {
         !endpoint.start_lock().exists(),
         "the check made a start lock in a project being deleted"
     );
-    std::fs::remove_dir_all(&project).unwrap();
+    // the daemon drains meanwhile and deletes its own run files: on Windows a file whose
+    // delete is pending refuses the open of this delete for a moment
+    remove_dir_all_retrying(&project);
     assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
     wait_endpoint_gone(&endpoint);
 
@@ -414,7 +417,9 @@ fn df3_a_project_check_during_a_delete_makes_nothing_in_the_project() {
         !endpoint.path().exists(),
         "the check made a run directory in a project being deleted"
     );
-    std::fs::remove_dir_all(&project).unwrap();
+    // the daemon drains meanwhile and deletes its own run files: on Windows a file whose
+    // delete is pending refuses the open of this delete for a moment
+    remove_dir_all_retrying(&project);
     assert_eq!(run.wait().unwrap(), rdy_daemon::ExitReason::ProjectGone);
     wait_endpoint_gone(&endpoint);
 }
