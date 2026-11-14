@@ -208,7 +208,8 @@ fn rfr2_feature_activates_in_the_first_durable_batch() {
     assert_eq!(f.class, FeatureClass::Incompatible);
     assert_eq!(f.required_rdy, FIGURE_DARK_REQUIRED_RDY);
     assert_eq!(FIGURE_DARK_REQUIRED_RDY, "0.51.0");
-    assert_eq!(reg.len(), 9);
+    // nine before snapshot_delta (SD1 Task 6)
+    assert_eq!(reg.len(), 10);
 
     // a store with no dark figure never turns it on: light figures, edits, landings, tags
     let (d, mut r, s, light, _dark) = base();
@@ -586,9 +587,11 @@ fn rfr2_dark_fixture_keeps_hashes_landings_and_tags() {
     let (_base, root) = foreign_fixture::project_copy(&dir);
     let store = opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().unwrap().keys() {
-        assert_eq!(store[member], want["store"][member], "{member}");
-    }
+    // the writer open ran the snapshot-delta step (SD1 Task 6): the recorded source, then its
+    // one upgrade batch; figure_dark and its minimum stay as recorded
+    let r = Rdy::open(&root).unwrap();
+    foreign_fixture::assert_upgraded_facts(&r, &want["store"], "figure-dark-1");
+    r.close().unwrap();
     let world = &want["world"];
     let light: Hash = world["light"].as_str().unwrap().parse().unwrap();
     let dark: Hash = world["dark"].as_str().unwrap().parse().unwrap();
@@ -613,7 +616,7 @@ fn rfr2_dark_fixture_keeps_hashes_landings_and_tags() {
     assert_eq!(r.store().get_blob(&dark).unwrap(), DARK);
     assert_eq!(
         foreign_fixture::store_facts(&r)["objects"],
-        want["store"]["objects"]
+        store["objects"]
     );
     r.close().unwrap();
     rdy_qa::invariants::check_all(&Rdy::open(&root).unwrap())

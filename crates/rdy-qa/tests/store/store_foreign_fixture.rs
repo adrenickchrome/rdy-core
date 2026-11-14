@@ -273,11 +273,13 @@ fn rpl33_frozen_native_foreign_store_rebuilds_and_passes_fsck() {
 
     // the open of a copy: the index is rebuilt, fsck passes, every recorded fact reads back
     let (_base, root) = foreign_fixture::project_copy(&dir);
-    let (store, foreign) = opened_facts(&root);
+    let (_store, foreign) = opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().unwrap().keys() {
-        assert_eq!(store[member], want["store"][member], "{member}");
-    }
+    // the writer open ran the snapshot-delta step (SD1 Task 6): the recorded source, then its
+    // one upgrade batch (no delta for the removal proof's landing record)
+    let r = Rdy::open(&root).unwrap();
+    foreign_fixture::assert_upgraded_facts(&r, &want["store"], "foreign-copy-1");
+    r.close().unwrap();
     assert_eq!(foreign, want["foreign"], "the foreign copy");
 
     // what the fixture promises: both sources (one revoked), deliveries, a revocation and a

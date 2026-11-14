@@ -43,10 +43,17 @@ use rdy_store::dump::{
     DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, DumpStore, DumpWriter, ENCODED_DROPPED_LEN,
     Frame, READS, rec,
 };
-use rdy_store::format::{StoreFeatures, baseline_features, registered_features};
+use rdy_store::format::{
+    FEATURE_SNAPSHOT_DELTA, REF_STORE_FEATURES, StoreFeatures, baseline_features,
+    registered_features,
+};
 use rdy_store::kinds;
+use rdy_store::kinds::RefUpdate;
+use rdy_store::object_refs::ObjectKey;
+use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use rdy_store::sync_stream::STREAM_FORMAT;
+use rdy_store::sync_stream::{StreamReader, StreamRecord};
 use serde_json::{Value, json};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -307,7 +314,7 @@ fn read_sync_expect(n: &Names) -> Value {
 /// The current wire formats have a complete registered set, every member of it on disk with its
 /// pinned blake3 (`ha17_` and `ok1_` both ask).
 pub(crate) fn assert_written_set_is_registered() {
-    let now = chain_fixture::current_formats();
+    let now = complete_set_formats(&chain_fixture::current_formats());
     let set = SETS
         .iter()
         .find(|s| {
@@ -459,7 +466,13 @@ fn e1_encodings() -> Value {
 struct FirstUse {
     name: &'static str,
     dump: &'static [(&'static str, &'static str)],
+    /// Its sync members with their blake3: none for a feature frozen with a dump pair alone.
+    sync: &'static [(&'static str, &'static str)],
     native: &'static str,
+    /// Whether a new store writes the feature from its first batch (`baseline_features`): its
+    /// expect files then name the written formats, and the complete sets pin the written formats
+    /// less it ([`complete_set_formats`]).
+    baseline: bool,
 }
 
 /// The per-feature first-use fixtures, oldest first. One, once registered, never leaves this
@@ -468,6 +481,10 @@ struct FirstUse {
 /// store `store/foreign-copy-1`, whose own tests are `rpl33_` in the release and store areas.
 /// `figure_dark` (D-MKSFF, README from rdy Task 2): the dump pair `v4-f1-e1-figure-dark` and the
 /// native store `store/figure-dark-1`, whose own tests are `rfr2_` in the release and store areas.
+/// `snapshot_delta` (D-918YB, SD1 Task 6), the first feature a new store writes from its first
+/// batch that a complete set does not hold: the dump pair `v4-f1-e1-snapshot-delta`, the sync pair
+/// `v2-f1-e1-snapshot-delta` and the native store `store/snapshot-delta-1`, whose own tests are
+/// `sdl6_` in the store area.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -481,7 +498,9 @@ const FIRST_USE: &[FirstUse] = &[
                 "1d74a9af451d64935717c941b16fb656888f740ff655bb6a681ef00b0b72afd3",
             ),
         ],
+        sync: &[],
         native: "fixtures/store/foreign-copy-1/expect.json",
+        baseline: false,
     },
     FirstUse {
         name: "figure_dark",
@@ -495,9 +514,50 @@ const FIRST_USE: &[FirstUse] = &[
                 "de7494771ae5abb3ee975a270b222d0e22b63eff45077bba96fc7ceb9f50f7ba",
             ),
         ],
+        sync: &[],
         native: "fixtures/store/figure-dark-1/expect.json",
+        baseline: false,
+    },
+    FirstUse {
+        name: "snapshot_delta",
+        dump: &[
+            (
+                "v4-f1-e1-snapshot-delta.rdydump",
+                "f92ef939bd0054285f7ac442390afc64b2ea753a0944301c8785d8d615fe3ceb",
+            ),
+            (
+                "v4-f1-e1-snapshot-delta.expect.json",
+                "917e36512b6a05848dbf36cb12066da12c632c0e43bfca21fd9a394885ed0a36",
+            ),
+        ],
+        sync: &[
+            (
+                "v2-f1-e1-snapshot-delta.rdysync",
+                "c6b332bcfba05ba97676bf76911bac1598ea3030e3dad15b06b123a8c2f1fa4c",
+            ),
+            (
+                "v2-f1-e1-snapshot-delta.expect.json",
+                "9ea6e78a08706987b5b96f5f41755e029beff5f17e99239dec2c9d61cbb7bbfe",
+            ),
+        ],
+        native: "fixtures/store/snapshot-delta-1/expect.json",
+        baseline: true,
     },
 ];
+
+/// The formats the complete sets pin for the written formats `now`: `now` less each
+/// [`FIRST_USE`] feature a new store writes from its first batch. Each of those is frozen in
+/// its own first-use members, whose expect files name `now` itself.
+pub(crate) fn complete_set_formats(now: &Value) -> Value {
+    let mut v = now.clone();
+    let features = v["features"]["features"].as_array_mut().unwrap();
+    features.retain(|f| {
+        !FIRST_USE
+            .iter()
+            .any(|u| u.baseline && f["name"] == json!(u.name))
+    });
+    v
+}
 
 /// The dump members of every per-feature first-use fixture.
 fn first_use_members() -> Vec<&'static str> {
@@ -521,17 +581,36 @@ fn all_features() -> StoreFeatures {
             .iter()
             .find(|r| r.name == f.name)
             .unwrap_or_else(|| panic!("{}: a first-use feature is registered", f.name));
-        assert!(
-            !baseline_features()
+        // a feature a new store writes is frozen here only when it says so: its members then
+        // name the written formats
+        assert_eq!(
+            baseline_features()
                 .features
                 .iter()
                 .any(|b| b.name == f.name),
-            "{}: a new store writes it, so a complete set must cover it",
+            f.baseline,
+            "{}: a new store writes it, so a complete set or its own baseline members cover it",
             f.name
         );
         for (name, digest) in f.dump {
             let bytes = std::fs::read(fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(Hash::of(&bytes).to_string(), *digest, "{name}");
+        }
+        for (name, digest) in f.sync {
+            let bytes = std::fs::read(sync_fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(Hash::of(&bytes).to_string(), *digest, "{name}");
+        }
+        if f.baseline {
+            let now = chain_fixture::current_formats();
+            for (name, _) in f.dump.iter().filter(|(n, _)| n.ends_with(".expect.json")) {
+                assert_eq!(read_expect(name)["formats"], now, "{name}");
+            }
+            for (name, _) in f.sync.iter().filter(|(n, _)| n.ends_with(".expect.json")) {
+                let v: Value =
+                    serde_json::from_str(&std::fs::read_to_string(sync_fixture(name)).unwrap())
+                        .unwrap();
+                assert_eq!(v["formats"], now, "{name}");
+            }
         }
         let dump = f
             .dump
@@ -689,16 +768,89 @@ const E1_HELD: &[&[u8]] = &[
     chain_fixture::E1_OLD_CANARY.as_bytes(),
 ];
 
-/// The data frames past `end` in the store at `dir`: none, since a dump of the current format
-/// needs no upgrade batch.
-fn nothing_after(dir: &Path, end: Location, holder: bool, what: &str) {
+/// The upgrade batch past `end` in the store at `dir`, which a load of a complete set's files
+/// appends since SD1 Task 6 (every set predates `snapshot_delta`): the snapshot delta of each
+/// landing, then one move of `meta/store_features` to the source manifest (`source`, as the
+/// expect file pins it) with `snapshot_delta` merged in, then its marker. Returns the delta count
+/// and the manifest written.
+fn delta_upgrade_after(
+    dir: &Path,
+    end: Location,
+    holder: bool,
+    source: &Value,
+    what: &str,
+) -> (u64, Vec<u8>) {
     let r = s18::open(dir, holder);
+    let mut tail = vec![];
+    r.store()
+        .reader()
+        .for_each_record_from(end, r.store().log_end(), |_, f, _| {
+            match f {
+                StoredFrame::Present { kind, payload, .. } => tail.push((kind, payload.to_vec())),
+                StoredFrame::Dropped { kind, .. } => tail.push((kind, vec![])),
+            }
+            Ok(())
+        })
+        .unwrap();
+    let deltas = chain_fixture::take_delta_head(&mut tail, r.store());
+    assert!(deltas > 0, "{what}: the set holds landings");
     assert_eq!(
-        r.store().log_end(),
-        end,
-        "{what}: a load of the current format appends nothing after the source log"
+        tail.len(),
+        2,
+        "{what}: one ref frame and its marker: {tail:?}"
+    );
+    assert_eq!(tail[0].0, kinds::REF_UPDATE, "{what}");
+    assert_eq!(tail[1].0, kinds::BATCH_COMMIT, "{what}");
+    let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
+    assert_eq!(u.name, REF_STORE_FEATURES, "{what}");
+    // the source manifest with the feature merged in
+    let source: StoreFeatures = serde_json::from_value(source.clone()).unwrap();
+    let conv = rdy_qa::chain_fixture::conversion_features();
+    assert_eq!(
+        StoreFeatures::parse(&u.value).unwrap(),
+        source.merged(&conv),
+        "{what}: the source manifest and snapshot_delta"
     );
     r.close().unwrap();
+    (deltas, u.value)
+}
+
+/// The frozen store facts `want` (`{"facts": ...}` as `s18::store_facts` writes them) as this
+/// rdy reads them after the upgrade batch of `deltas` snapshot deltas and the manifest ref move
+/// to `manifest`.
+fn store_as_read_now(want: &Value, deltas: u64, manifest: &[u8]) -> Value {
+    let mut want = want.clone();
+    want["facts"]["refs"][REF_STORE_FEATURES] = json!(s18::hex(manifest));
+    want["features"]["manifest"] = json!(StoreFeatures::parse(manifest).unwrap());
+    let objects = &mut want["facts"]["objects"];
+    let n = &mut objects[kinds::REF_UPDATE.to_string()];
+    *n = json!(n.as_u64().unwrap() + 1);
+    let raw = kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED;
+    objects[raw.to_string()] = json!(deltas);
+    let fsck = want["facts"]["fsck"].as_object_mut().unwrap();
+    for member in ["frames", "checked_payloads"] {
+        // a redaction count is in the report only while a redaction is active
+        if let Some(n) = fsck.get_mut(member) {
+            *n = json!(n.as_u64().unwrap() + 1 + deltas);
+        }
+    }
+    want
+}
+
+/// The frozen facts of a whole load (`{"end", "summary", "segments", "store"}`) as this rdy
+/// reads them: the store's after the upgrade batch past `end` in `dir`, which this checks.
+pub(crate) fn whole_as_read_now(
+    want: &Value,
+    dir: &Path,
+    end: Location,
+    holder: bool,
+    what: &str,
+) -> Value {
+    let source = &want["store"]["features"]["manifest"];
+    let (deltas, manifest) = delta_upgrade_after(dir, end, holder, source, what);
+    let mut want = want.clone();
+    want["store"] = store_as_read_now(&want["store"], deltas, &manifest);
+    want
 }
 
 /// Every member of `set` keeps its pinned blake3, and the writer refuses it.
@@ -742,11 +894,13 @@ fn ok1_written_wire_format_has_a_complete_fixture_set() {
     // the latest-encoding map of object encoding 1
     assert_eq!(now["encodings"], e1_encodings());
     assert_written_set_is_registered();
-    // every expect file of the set names the same formats
+    // every expect file of the set names the same formats, less the features its own first-use
+    // members freeze (SD1: `snapshot_delta`)
+    let set_formats = complete_set_formats(&now);
     for name in E1.expects() {
-        assert_eq!(read_expect(name)["formats"], now, "{name}");
+        assert_eq!(read_expect(name)["formats"], set_formats, "{name}");
     }
-    assert_eq!(read_sync_expect(&E1)["formats"], now);
+    assert_eq!(read_sync_expect(&E1)["formats"], set_formats);
     // the registered set's manifests hold every registered feature, through first use
     let all = json!({"features": all_features()});
     for name in [E1.full, E1.holder] {
@@ -788,12 +942,15 @@ fn ok13_the_written_format_has_a_fixture() {
     let now = chain_fixture::current_formats();
     assert_eq!(now["dump_format"], json!(DUMP_FORMAT));
     assert_eq!(now["stream_format"], json!(STREAM_FORMAT));
-    // exactly one registered set matches the written formats, and it is the newest
+    // exactly one registered set matches the written formats, and it is the newest: the
+    // formats less each feature a new store writes that its own first-use members freeze
+    // (`all_features` checks those members against `now` itself)
+    let set_formats = complete_set_formats(&now);
     let matching: Vec<&FeatureSet> = SETS
         .iter()
         .filter(|s| {
             fixture(s.names.full_expect).exists()
-                && read_expect(s.names.full_expect)["formats"] == now
+                && read_expect(s.names.full_expect)["formats"] == set_formats
         })
         .collect();
     assert_eq!(matching.len(), 1, "one complete set matches {now}");
@@ -804,10 +961,10 @@ fn ok13_the_written_format_has_a_fixture() {
     assert_eq!(set.sync.len(), 2);
     assert_written_set_is_registered();
     // the sync pair is current too: its expect file and its batch name the written formats
-    assert_eq!(read_sync_expect(set.names)["formats"], now);
+    assert_eq!(read_sync_expect(set.names)["formats"], set_formats);
     // every expect file of the set names the written formats
     for name in set.names.expects() {
-        assert_eq!(read_expect(name)["formats"], now, "{name}");
+        assert_eq!(read_expect(name)["formats"], set_formats, "{name}");
     }
     // the manifest: every registered feature, through first use, in the set's full fixtures
     let all = json!({"features": all_features()});
@@ -981,16 +1138,23 @@ fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, move
         );
         drop(w);
         let got = s18::whole_facts_of(&s, &files, &to, input.holder);
+        // the set predates snapshot_delta: one upgrade batch follows the source log
+        let want = whole_as_read_now(
+            &expect["whole"],
+            &to,
+            s18::chain_end(&files),
+            input.holder,
+            what,
+        );
         if moves {
             assert_eq!(
                 without_moves(&got),
-                without_moves(&expect["whole"]),
+                without_moves(&want),
                 "{what}: the whole load"
             );
         } else {
-            assert_eq!(got, expect["whole"], "{what}: the whole load");
+            assert_eq!(got, want, "{what}: the whole load");
         }
-        nothing_after(&to, s18::chain_end(&files), input.holder, what);
         for c in input.canaries {
             assert!(
                 !s18::holds(&to, c),
@@ -1039,16 +1203,22 @@ fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, move
         if files.len() > 1 {
             let to = d.path().join(format!("{what}-alone"));
             let got = s18::whole_facts(&files[..1], &to, input.holder);
+            let want = whole_as_read_now(
+                &expect["full_alone"],
+                &to,
+                s18::chain_end(&files[..1]),
+                input.holder,
+                what,
+            );
             if moves {
                 assert_eq!(
                     without_moves(&got),
-                    without_moves(&expect["full_alone"]),
+                    without_moves(&want),
                     "{what}: the full dump alone"
                 );
             } else {
-                assert_eq!(got, expect["full_alone"], "{what}: the full dump alone");
+                assert_eq!(got, want, "{what}: the full dump alone");
             }
-            nothing_after(&to, s18::chain_end(&files[..1]), input.holder, what);
         }
         // each fixed stop: its position, its carried batch byte for byte, and its facts
         for name in input.stops {
@@ -1072,11 +1242,17 @@ fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, move
             for c in &missing {
                 assert!(!s18::holds(&to, c), "{what}");
             }
-            let got = s18::stop_facts_of(&s, selector, &to, input.holder, None);
+            // the carried batch ends where the expect file pins it; the upgrade batch follows
+            let end = s18::loc_of(&want["end"]);
+            let got = s18::stop_facts_of(&s, selector, &to, input.holder, Some(end));
+            let source = &want["store"]["features"]["manifest"];
+            let (deltas, manifest) = delta_upgrade_after(&to, end, input.holder, source, &what);
+            let mut want = want.clone();
+            want["store"] = store_as_read_now(&want["store"], deltas, &manifest);
             if moves {
-                assert_eq!(without_moves(&got), without_moves(want), "{what}");
+                assert_eq!(without_moves(&got), without_moves(&want), "{what}");
             } else {
-                assert_eq!(&got, want, "{what}");
+                assert_eq!(got, want, "{what}");
             }
             let r = s18::open(&to, input.holder);
             r.fsck().unwrap();
@@ -1106,23 +1282,129 @@ fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, move
     );
     let loaded = d.path().join("sync-holder");
     s18::chain_load(&[fixture(n.holder)], &loaded, None);
-    assert_eq!(
-        export_sync_tag(&loaded, n.sync_tag),
-        bytes,
-        "the current export of the tag is the frozen batch, byte for byte"
-    );
+    // the loaded holder holds a delta of each landing (SD1 Task 6): its export is the frozen
+    // batch's records, each with its raw kind and bytes, in order, with each landing's delta
+    // added, and its header lists the feature
+    let now = export_sync_tag(&loaded, n.sync_tag);
+    assert_exports_with_deltas(&now, &bytes);
     let (h, _, taken) = take_split(&bytes, &d.path().join("sync-take"));
     h.close().unwrap();
+    // the new holder lists snapshot_delta from its first batch, so the take adds a delta of
+    // each landing (SD1 Task 6); less those, the take is the frozen one
+    let (taken, deltas) = taken_without_deltas(&taken);
+    let landings = expect["stream"]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == json!(kinds::LANDING))
+        .count();
+    assert_eq!(deltas, landings as u64, "one delta per landing taken");
+    let manifest = |v: &Value| {
+        let text = v["holder"]["refs"][REF_STORE_FEATURES].as_str().unwrap();
+        let bytes: Vec<u8> = (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect();
+        StoreFeatures::parse(&bytes).unwrap()
+    };
+    let got = manifest(&taken);
+    assert!(got.has(FEATURE_SNAPSHOT_DELTA));
     if moves {
         // the take writes this rdy's baseline manifest into its new holder: the holder's
         // manifest ref and its ref updates differ from the frozen take's, which wrote none
-        assert_eq!(
-            without_manifest(&taken),
-            without_manifest(&expect["taken"]),
-            "the take and what the holder reads"
-        );
+        assert_eq!(got, baseline_features());
     } else {
-        assert_eq!(taken, expect["taken"], "the take and what the holder reads");
+        let conv = rdy_qa::chain_fixture::conversion_features();
+        assert_eq!(got, manifest(&expect["taken"]).merged(&conv));
+    }
+    // the manifest moves differ in their value: the ref and its updates are compared above
+    assert_eq!(
+        without_manifest(&taken),
+        without_manifest(&expect["taken"]),
+        "the take and what the holder reads"
+    );
+}
+
+/// The take facts `got` (a take of a frozen pre-delta batch into a new holder) less what the
+/// snapshot-delta conversion adds: each landing's delta (its key, its object count, its frame
+/// and checked payload, and its record taken and frame written). Returns them and the delta
+/// count.
+pub(crate) fn taken_without_deltas(got: &Value) -> (Value, u64) {
+    let raw = (kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED).to_string();
+    let mut v = got.clone();
+    let n = v["holder"]["objects"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&raw)
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let prefix = format!("{raw}:");
+    v["holder"]["identity"]["keys"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|k| !k.as_str().unwrap().starts_with(&prefix));
+    for m in ["frames", "checked_payloads"] {
+        if let Some(x) = v["holder"]["fsck"].get_mut(m) {
+            *x = json!(x.as_u64().unwrap() - n);
+        }
+    }
+    for m in ["records_taken", "frames_written"] {
+        let x = &mut v["outcome"][m];
+        *x = json!(x.as_u64().unwrap() - n);
+    }
+    (v, n)
+}
+
+/// The records of the sync batch `bytes`: each key with its raw kind and its payload (none for a
+/// dropped record), in wire order, and the header's features.
+fn batch_records(bytes: &[u8]) -> (Vec<(ObjectKey, u8, Option<Vec<u8>>)>, StoreFeatures) {
+    let (mut rd, header) = StreamReader::open(bytes).unwrap();
+    let mut out = vec![];
+    while let Some(r) = rd.next().unwrap() {
+        let payload = match &r {
+            StreamRecord::Present { payload, .. } => Some(payload.clone()),
+            StreamRecord::Dropped { .. } => None,
+        };
+        out.push((r.key(), r.raw_kind(), payload));
+    }
+    rd.finish().unwrap();
+    (out, header.features)
+}
+
+/// `now`, this rdy's export of a frozen batch's tag (`frozen`, written before SD1), holds every
+/// record of `frozen` but its SNAPSHOTs, in its order with its raw kind and bytes, and adds only
+/// a delta of each landing; its header lists the frozen features and `snapshot_delta`.
+fn assert_exports_with_deltas(now: &[u8], frozen: &[u8]) {
+    let (got, got_features) = batch_records(now);
+    let (old, old_features) = batch_records(frozen);
+    let kept: Vec<_> = got
+        .iter()
+        .filter(|(k, ..)| k.kind != kinds::SNAPSHOT_DELTA)
+        .cloned()
+        .collect();
+    // a landing's state travels as its delta now: the held legacy SNAPSHOTs stay in the store
+    // and leave the export
+    let old_kept: Vec<_> = old
+        .iter()
+        .filter(|(k, ..)| k.kind != kinds::SNAPSHOT)
+        .cloned()
+        .collect();
+    assert!(
+        old_kept.len() < old.len(),
+        "the frozen batch holds snapshots"
+    );
+    assert_eq!(
+        kept, old_kept,
+        "every other frozen record, in order, byte for byte"
+    );
+    let landings = old
+        .iter()
+        .filter(|(k, ..)| k.kind == kinds::LANDING)
+        .count();
+    assert_eq!(got.len() - kept.len(), landings, "one delta per landing");
+    assert!(got_features.has(FEATURE_SNAPSHOT_DELTA));
+    for f in &old_features.features {
+        assert!(got_features.has(&f.name), "{}", f.name);
     }
 }
 

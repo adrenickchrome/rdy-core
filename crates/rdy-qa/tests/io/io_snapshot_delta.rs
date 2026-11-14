@@ -337,3 +337,31 @@ fn sdl6_pre_delta_take_keeps_every_identity() {
         h.store().check_holder().unwrap();
     }
 }
+
+/// A converted store whose source manifest has no `object_encoding` (the `v4-f1-e0` dumps name
+/// no feature) lists it beside `snapshot_delta`: its deltas are encoding-1 records. So its own
+/// dump names every feature its records use, and loads again with the same objects.
+#[test]
+fn sdl6_a_converted_featureless_store_dumps_and_loads_again() {
+    let file = fixtures().join("dump").join("v4-f1-e0.rdydump");
+    let t = tempfile::tempdir().unwrap();
+    let to = t.path().join("p");
+    load(&file, &to).unwrap();
+    let s = Store::open_with_policy(&store_dir(&to), OpenPolicy::RequireCurrent).unwrap();
+    for f in [
+        rdy_store::format::FEATURE_OBJECT_ENCODING,
+        FEATURE_SNAPSHOT_DELTA,
+    ] {
+        assert!(s.features().has(f), "{f}");
+    }
+    let before = store_objects(&s);
+    drop(s);
+    let out = t.path().join("again.rdydump");
+    let r = Rdy::open(&to).unwrap();
+    r.read().dump(&out).unwrap();
+    r.close().unwrap();
+    let again = t.path().join("again");
+    load(&out, &again).unwrap_or_else(|e| panic!("a load of the converted store's dump: {e:?}"));
+    let s = Store::open_with_policy(&store_dir(&again), OpenPolicy::RequireCurrent).unwrap();
+    assert_eq!(store_objects(&s), before);
+}

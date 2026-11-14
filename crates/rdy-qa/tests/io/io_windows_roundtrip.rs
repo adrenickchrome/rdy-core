@@ -417,7 +417,8 @@ fn wx28b_windows_and_unix_dumps_have_identical_content_hashes() {
             dumps.push(std::fs::read(&out).unwrap());
         }
         let again = scratch.path().join("again");
-        load(&scratch.path().join("out0.rdydump"), &again).unwrap();
+        load(&scratch.path().join("out0.rdydump"), &again)
+            .unwrap_or_else(|e| panic!("{}: a load of its dump: {e:?}", f.name));
         let out = scratch.path().join("again.rdydump");
         let r = Rdy::open(&again).unwrap();
         r.read().dump(&out).unwrap();

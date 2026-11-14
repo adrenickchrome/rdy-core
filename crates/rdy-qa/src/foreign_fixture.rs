@@ -422,6 +422,120 @@ pub fn store_facts(r: &Rdy) -> Value {
     })
 }
 
+/// The store facts `want` ([`store_facts`] of a store frozen before snapshot deltas) against
+/// `r`, the same store after this rdy's writer open ran the snapshot-delta step (SD1 Task 6,
+/// D-918YB): the source log up to its recorded end reads as recorded (its object keys, removed
+/// objects, tags, landings, signatures and raw encodings), and the one upgrade batch after it
+/// holds a delta of each project landing and its ref moves (the manifest, with `snapshot_delta`
+/// merged into the recorded one, and the upgrade receipt). Every other count grows by that
+/// batch alone.
+pub fn assert_upgraded_facts(r: &Rdy, want: &Value, what: &str) {
+    use rdy_store::format::StoreFeatures;
+    let end = Location {
+        segment: want["log_end"][0].as_u64().unwrap() as u32,
+        offset: want["log_end"][1].as_u64().unwrap(),
+    };
+    let got = store_facts(r);
+    // the source prefix
+    let prefix = every_kind::identity_facts(r, Some(end));
+    assert_eq!(prefix["keys"], want["object_keys"], "{what}: object keys");
+    assert_eq!(
+        prefix["redacted"], want["redacted"],
+        "{what}: removed objects"
+    );
+    assert_eq!(
+        every_kind::feature_facts(r, end)["encodings"],
+        want["raw_encodings"],
+        "{what}: raw encodings"
+    );
+    for member in ["tags", "landings", "signatures", "redacted"] {
+        assert_eq!(got[member], want[member], "{what}: {member}");
+    }
+    // the upgrade batch after it: the deltas, then the ref moves, then its marker
+    let (mut deltas, mut refs, mut markers, mut other) = (0u64, 0u64, 0u64, vec![]);
+    r.store()
+        .reader()
+        .for_each_record_from(end, r.store().log_end(), |_, f, _| {
+            let kind = match f {
+                StoredFrame::Present { kind, .. } | StoredFrame::Dropped { kind, .. } => kind,
+            };
+            match rdy_store::codec::logical_kind(kind) {
+                kinds::SNAPSHOT_DELTA => deltas += 1,
+                kinds::REF_UPDATE => refs += 1,
+                kinds::BATCH_COMMIT => markers += 1,
+                k => other.push(k),
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(other.is_empty(), "{what}: the upgrade adds {other:?}");
+    assert_eq!(markers, 1, "{what}: one upgrade batch");
+    let landings = r.store().reader().project_landings().unwrap();
+    assert_eq!(
+        deltas,
+        landings.len() as u64,
+        "{what}: one delta per landing"
+    );
+    for (l, _) in &landings {
+        assert!(
+            r.store().reader().snapshot_delta_of(l).unwrap().is_some(),
+            "{what}: landing {l} has its delta"
+        );
+    }
+    let conv = crate::chain_fixture::conversion_features();
+    let source: StoreFeatures = serde_json::from_value(want["manifest"].clone()).unwrap();
+    assert_eq!(
+        got["manifest"],
+        json!(source.merged(&conv)),
+        "{what}: the manifest with snapshot_delta"
+    );
+    // the counts: the batch's frames and its marker
+    let added = deltas + refs;
+    let n = |v: &Value| v.as_u64().unwrap();
+    assert_eq!(
+        n(&got["frames"]),
+        n(&want["frames"]) + added,
+        "{what}: frames"
+    );
+    assert_eq!(
+        n(&got["batches"]),
+        n(&want["batches"]) + 1,
+        "{what}: batches"
+    );
+    let raw = (kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED).to_string();
+    let mut objects = want["objects"].clone();
+    let r8 = kinds::REF_UPDATE.to_string();
+    objects[&r8] = json!(n(&objects[&r8]) + refs);
+    objects[&raw] = json!(deltas);
+    assert_eq!(got["objects"], objects, "{what}: objects");
+    let mut fsck = want["fsck"].clone();
+    for member in ["frames", "checked_payloads"] {
+        if let Some(x) = fsck.get_mut(member) {
+            *x = json!(n(x) + added);
+        }
+    }
+    assert_eq!(got["fsck"], fsck, "{what}: fsck");
+    // the refs: the recorded ones, with the manifest and the receipt moved
+    let (gr, wr) = (
+        got["refs"].as_object().unwrap(),
+        want["refs"].as_object().unwrap(),
+    );
+    for (name, v) in wr {
+        if name != rdy_store::format::REF_STORE_FEATURES {
+            assert_eq!(gr.get(name), Some(v), "{what}: ref {name}");
+        }
+    }
+    let moved: Vec<&String> = gr
+        .iter()
+        .filter(|(k, v)| wr.get(*k) != Some(*v))
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        moved.len() as u64 <= refs,
+        "{what}: only the upgrade's refs moved: {moved:?}"
+    );
+}
+
 /// The foreign copy of `r`: every FOREIGN entry by hash, each source with its newest entry and
 /// whether it is revoked, the canon repo links, the canon blocks with a foreign part, the Adopt
 /// answers, and the BLOCK versions that read as removed.

@@ -343,7 +343,22 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
         "the repo, purpose, root and prerequisites"
     );
     assert_eq!(now[17..49], Hash::of(now_header).0);
-    let (then_frames, now_frames) = (raw_frames(&bytes), raw_frames(&now));
+    // the loaded holder holds a delta of each landing (SD1 Task 6): its export carries those in
+    // place of the fixture's SNAPSHOTs, which stay held; every other record is the fixture's
+    let is_delta = |k: u8| rdy_store::codec::logical_kind(k) == kinds::SNAPSHOT_DELTA;
+    let then_all = raw_frames(&bytes);
+    let landings = then_all
+        .iter()
+        .filter(|(k, _)| *k == kinds::LANDING)
+        .count();
+    let then_frames: Vec<_> = then_all
+        .into_iter()
+        .filter(|(k, _)| *k != kinds::SNAPSHOT)
+        .collect();
+    let now_all = raw_frames(&now);
+    let deltas = now_all.iter().filter(|(k, _)| is_delta(*k)).count();
+    assert_eq!(deltas, landings, "one delta per landing");
+    let now_frames: Vec<_> = now_all.into_iter().filter(|(k, _)| !is_delta(*k)).collect();
     assert_eq!(then_frames.len(), now_frames.len());
     for ((tk, tp), (nk, np)) in then_frames.iter().zip(&now_frames) {
         assert_eq!(tk, nk, "every record keeps its kind");
@@ -360,11 +375,16 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
     let (rh, records, totals) = read_batch(&now);
     let digest = totals["digest"].as_str().unwrap().to_string();
     assert_ne!(digest, expect["totals"]["digest"], "the header is covered");
-    assert_eq!(
-        stream_facts(&now),
-        current_facts(&expect, totals["bytes"].as_u64().unwrap(), &digest),
-        "the header, every record and the totals"
-    );
+    let mut got = stream_facts(&now);
+    got["records"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| r["kind"] != json!(kinds::SNAPSHOT_DELTA));
+    let mut want = current_facts(&expect, totals["bytes"].as_u64().unwrap(), &digest);
+    let kept = want["records"].as_array_mut().unwrap();
+    kept.retain(|r| r["kind"] != json!(kinds::SNAPSHOT));
+    want["totals"]["records"] = json!(kept.len() + deltas);
+    assert_eq!(got, want, "the header, every record and the totals");
     // the placeholders keep their removed objects' identities: the prose's versions, the changes
     // that embed them, and the blob's chunk, which has no residue
     let dropped: BTreeSet<u8> = records
@@ -459,8 +479,42 @@ fn at_current_format(h: &Rdy, mut got: Value) -> Value {
             .collect()
     };
     let (now, then) = (keys(&got), keys(&want));
-    let new: Vec<&String> = now.difference(&then).collect();
-    let gone: Vec<&String> = then.difference(&now).collect();
+    // SD1 Task 6: the current batch carries a delta of each landing in place of the frozen
+    // take's SNAPSHOTs, so the holder holds those deltas and none of the SNAPSHOTs
+    let delta_prefix = format!("{}:", kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED);
+    let snapshot_prefix = format!("{}:", kinds::SNAPSHOT);
+    let deltas = now
+        .difference(&then)
+        .filter(|k| k.starts_with(&delta_prefix))
+        .count() as u64;
+    let snapshots = then
+        .difference(&now)
+        .filter(|k| k.starts_with(&snapshot_prefix))
+        .count() as u64;
+    assert!(deltas > 0 && snapshots > 0, "{deltas} {snapshots}");
+    let raw = (kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED).to_string();
+    let objects = got["holder"]["objects"].as_object_mut().unwrap();
+    assert_eq!(objects.remove(&raw), Some(json!(deltas)));
+    let s5 = kinds::SNAPSHOT.to_string();
+    assert_eq!(want["holder"]["objects"][&s5], json!(snapshots));
+    objects.insert(s5, json!(snapshots));
+    let swap = |v: &mut Value| *v = json!(v.as_u64().unwrap() - deltas + snapshots);
+    for m in ["frames", "checked_payloads"] {
+        if let Some(x) = got["holder"]["fsck"].get_mut(m) {
+            swap(x);
+        }
+    }
+    for m in ["records_taken", "frames_written"] {
+        swap(&mut got["outcome"][m]);
+    }
+    let new: Vec<&String> = now
+        .difference(&then)
+        .filter(|k| !k.starts_with(&delta_prefix))
+        .collect();
+    let gone: Vec<&String> = then
+        .difference(&now)
+        .filter(|k| !k.starts_with(&snapshot_prefix))
+        .collect();
     // the holder's features ref update, and each later ref update, whose salt (the log end it
     // was written at) moved with the longer first batch
     assert_eq!(new.len(), gone.len(), "{new:?} {gone:?}");
@@ -547,9 +601,23 @@ fn ha17_split_batches_take_at_different_offsets() {
         "the batches hold the fixture's records, split at record boundaries"
     );
     let (h, root, got) = take_split(&bytes, &to.path().join("take"));
+    // the batch reports split the current batch, whose records are not the frozen take's (a
+    // delta of each landing in place of its SNAPSHOTs, SD1 Task 6): each report's keys are its
+    // part's, in order, and the rest of the take is compared without them
+    let reports = got["batches"].as_array().unwrap();
+    assert_eq!(reports.len(), PARTS);
+    let reported: Vec<Value> = reports
+        .iter()
+        .flat_map(|b| b["keys"].as_array().unwrap().clone())
+        .collect();
+    assert_eq!(json!(reported), json!(held));
+    let without_reports = |mut v: Value| {
+        v.as_object_mut().unwrap().remove("batches");
+        v
+    };
     assert_eq!(
-        at_current_format(&h, got.clone()),
-        without_batch_digests(expect["taken"].clone()),
+        without_reports(at_current_format(&h, got.clone())),
+        without_reports(without_batch_digests(expect["taken"].clone())),
         "the take and what the holder reads"
     );
     assert_eq!(got["outcome"]["unchanged"], false);

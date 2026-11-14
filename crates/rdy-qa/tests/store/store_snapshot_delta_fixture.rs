@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 /// The blake3 of the inventory text of the native store files, set when they were written. A
 /// change here needs a founder decision, and after publication it is never allowed.
-const INVENTORY_BLAKE3: &str = "";
+const INVENTORY_BLAKE3: &str = "d4f7163f8f968aa820c65878ae5fd82e238a17a2f449eb5d95c061a6a8b81f17";
 
 const DUMP: &str = "v4-f1-e1-snapshot-delta.rdydump";
 const DUMP_EXPECT: &str = "v4-f1-e1-snapshot-delta.expect.json";
@@ -449,21 +449,17 @@ fn sdl6_snapshot_delta_fixture_keeps_hashes_landings_and_tags() {
     ] {
         assert!(!text.contains(bad), "the expect file names {bad}");
     }
-    // the manifest: the new-store baseline, snapshot_delta at its fixed minimum
+    // the manifest: the new-store baseline from the first batch (snapshot_delta at its fixed
+    // minimum), and what the writes then used
     let reg = registered_features()
         .into_iter()
         .find(|f| f.name == FEATURE_SNAPSHOT_DELTA)
         .unwrap();
-    assert_eq!(
-        want["store"]["manifest"],
-        json!(rdy_store::format::baseline_features())
-    );
-    assert!(
-        want["store"]["manifest"]["features"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(reg))
-    );
+    let held = want["store"]["manifest"]["features"].as_array().unwrap();
+    for f in rdy_store::format::baseline_features().features {
+        assert!(held.contains(&json!(f)), "the manifest holds {}", f.name);
+    }
+    assert!(held.contains(&json!(reg)));
 
     // the open of a copy reads back every recorded fact, and plans no upgrade step
     let (_base, root) = foreign_fixture::project_copy(&dir);

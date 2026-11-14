@@ -101,13 +101,18 @@ pub const SNAPSHOT_DELTA_STEP: &str = "snapshot_delta";
 
 /// The snapshot-delta step (D-918YB, D-8T7PA): from any manifest without `snapshot_delta`, it
 /// merges the feature in and keeps every other feature; its batch holds one delta of every held
-/// landing (none for a store with no landing). Readers do not require it. This rdy registers
-/// it ([`registered_steps`]).
+/// landing (none for a store with no landing). A delta is an encoding-1 record, so the step
+/// merges `object_encoding` in too, for a source manifest that does not name it (a feature store
+/// that never wrote a versioned record). Readers do not require it. This rdy registers it
+/// ([`registered_steps`]).
 pub fn snapshot_delta_step() -> UpgradeStep {
     UpgradeStep {
         id: SNAPSHOT_DELTA_STEP.into(),
         from: StoreFeatures::of(vec![]),
-        to: StoreFeatures::of(vec![format::registered(format::FEATURE_SNAPSHOT_DELTA)]),
+        to: StoreFeatures::of(vec![
+            format::registered(format::FEATURE_OBJECT_ENCODING),
+            format::registered(format::FEATURE_SNAPSHOT_DELTA),
+        ]),
         action: StepAction::SnapshotDelta,
         required: false,
     }
