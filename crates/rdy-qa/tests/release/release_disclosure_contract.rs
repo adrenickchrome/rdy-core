@@ -322,7 +322,7 @@ fn drv6_contract_changes_only_review_results() {
         assert_eq!(mcp[tool]["ok"], cli[command]["stdout"], "{tool}");
     }
 
-    // the review probe fills every list but one: no other array in its shape is empty
+    // the review probe fills every list: no array in its shape is empty
     fn empty(path: &str, v: &Value, out: &mut Vec<String>) {
         match v {
             Value::Array(a) if a.is_empty() => out.push(path.to_string()),
@@ -339,8 +339,7 @@ fn drv6_contract_changes_only_review_results() {
         &mcp["rdy_publication_check review rows"]["ok"],
         &mut none,
     );
-    // an added row names no changed part, so the one added row outside docs has an empty `what`
-    assert_eq!(none, ["/disclosure/|null/changed_outside_docs[]/what"]);
+    assert!(none.is_empty(), "{none:?}");
     // its first check and its comparison are both in the shape
     let review = &mcp["rdy_publication_check review rows"]["ok"];
     for member in ["included", "disclosure"] {

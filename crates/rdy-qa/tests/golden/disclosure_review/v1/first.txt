@@ -1,5 +1,5 @@
 Publication profile review: warning.
-21 blocks in 2 docs and 1 folders.
+22 blocks in 2 docs and 1 folders.
 References outside selection: 2.
 Links outside selection: 1.
 Hidden as planned: 2 blocks in 2 docs.

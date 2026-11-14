@@ -14,7 +14,8 @@
 //! - `setup` (added at `v2.0.0`, in `guides`): a section, prose with a code span, a decision, a
 //!   figure with a dark image, a new reference outside the selection and a new planned note.
 //! - `old` (in `guides` at `v1.0.0`, moved out of the selection at `v2.0.0`): a removed doc.
-//! - `guides`: its title changes at `v2.0.0`.
+//! - `guides`: its title changes at `v2.0.0`, and the prompt of a question it holds outside docs
+//!   changes too. A decision at the root is new, cited by a new claim in `intro`.
 //! - canon removes the second new claim, the second new decision and the doc `setup`. A removal
 //!   removes every version of its block, so it shows at both tags too.
 //!
@@ -91,11 +92,13 @@ fn build(removals: bool) -> tempfile::TempDir {
             {"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro", "doc_type": "page"}},
             {"op": "create", "type": "folder", "id": "$guides", "fields": {"name": "guides", "title": "Guides"}},
             {"op": "create", "type": "doc", "id": "$old", "parent": "$guides", "fields": {"name": "old", "title": "Old", "doc_type": "page"}},
-            {"op": "create", "type": "prose", "parent": "$old", "body": "Old words."}
+            {"op": "create", "type": "prose", "parent": "$old", "body": "Old words."},
+            {"op": "create", "type": "question", "id": "$ask", "parent": "$guides", "fields": {"prompt": "Which guide first?"}}
         ]),
     );
     let id = |k: &str| w.created[k].clone();
     let (admin, intro, guides, old) = (id("$admin"), id("$intro"), id("$guides"), id("$old"));
+    let ask = id("$ask");
     let (notes, dout, droot) = (id("$notes"), id("$dout"), id("$droot"));
     let w = ok(
         &mut r,
@@ -144,6 +147,7 @@ fn build(removals: bool) -> tempfile::TempDir {
             {"op": "update", "id": fc, "fields": {"blob": light_c2}},
             {"op": "delete", "id": fr},
             {"op": "update", "id": guides, "fields": {"title": "User guides"}},
+            {"op": "update", "id": ask, "fields": {"prompt": "Which guide comes first?"}},
             {"op": "move", "id": old},
             {"op": "create", "type": "doc", "id": "$setup", "parent": guides, "fields": {"name": "setup", "title": "Setup", "doc_type": "page"}},
             {"op": "create", "type": "section", "id": "$install", "parent": "$setup", "fields": {"title": "Install"}},

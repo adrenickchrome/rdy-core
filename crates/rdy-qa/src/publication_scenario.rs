@@ -66,6 +66,24 @@ impl Row {
     }
 }
 
+/// The members of a reported reference row that [`Row::json`] states. The review adds the labels
+/// `source_label`, `source_doc_title` and `target_label` (D-0C4TB), which this leaves out; an
+/// absent member stays absent.
+pub fn row_facts(v: &Value) -> Value {
+    let keys = [
+        "source",
+        "location",
+        "target",
+        "classification",
+        "occurrences",
+    ];
+    Value::Object(
+        keys.iter()
+            .filter_map(|k| v.get(*k).map(|x| ((*k).to_string(), x.clone())))
+            .collect(),
+    )
+}
+
 /// What the fixture built, and what follows from how it was built.
 #[derive(Clone, Debug)]
 pub struct Scenario {
@@ -791,7 +809,10 @@ pub fn audit(f: &Frozen, s: &Scenario, stage: Stage, print: Option<&str>) -> Vec
             refs["excluded"], refs["missing"]
         ),
     );
-    let mut rows: Vec<Value> = refs["rows"].as_array().cloned().unwrap_or_default();
+    let mut rows: Vec<Value> = refs["rows"]
+        .as_array()
+        .map(|a| a.iter().map(row_facts).collect())
+        .unwrap_or_default();
     rows.sort_by_key(Value::to_string);
     let mut expect: Vec<Value> = match stage {
         Stage::Source => s.rows.iter().map(Row::json).collect(),
@@ -804,7 +825,7 @@ pub fn audit(f: &Frozen, s: &Scenario, stage: Stage, print: Option<&str>) -> Vec
     );
     let mut links: Vec<Value> = refs["links_outside"]["rows"]
         .as_array()
-        .cloned()
+        .map(|a| a.iter().map(row_facts).collect())
         .unwrap_or_default();
     links.sort_by_key(Value::to_string);
     let expect_links: Vec<Value> = s.link_rows.iter().map(Row::json).collect();

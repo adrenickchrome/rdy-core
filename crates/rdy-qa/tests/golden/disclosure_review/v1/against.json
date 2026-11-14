@@ -1,23 +1,23 @@
 {
   "against": {
     "kind": "landing",
-    "landing": "0df289c99d4417838873cd6abf4ab06a40a97cb450d5efc0280e0d3122cf031c"
+    "landing": "67c5e9f52193175f1f01d98daf517c9eef9c424b8a0e78257cbce98b28c1ca18"
   },
   "disclosure": {
     "added_attachments": [
       {
         "available": true,
         "blob": "40b22831bd4b63eaba43b075db9008256ec641f2edf6a732fab3a0a19c30f317",
-        "block": "fg-YABJ2",
-        "home_doc": "d-G7F9P",
+        "block": "fg-CQ8YW",
+        "home_doc": "d-PBTCC",
         "home_doc_title": "Setup",
         "label": "Figure N"
       },
       {
         "available": true,
         "blob": "c8231e5c4a651d6ed417313856c9a9d14ae8f557d61abd0731e5bcf876733f8f",
-        "block": "fg-YABJ2",
-        "home_doc": "d-G7F9P",
+        "block": "fg-CQ8YW",
+        "home_doc": "d-PBTCC",
         "home_doc_title": "Setup",
         "label": "Figure N",
         "variant": "dark"
@@ -28,7 +28,7 @@
         "decision_titles": [
           "Pin versions"
         ],
-        "digest": "747e15128f1abe86209d122c73be5a0cc16e079dc3c6b97d9cc898204728ceab",
+        "digest": "5124e7e6fc0266f75f621a815bedc63555cc9d69c75f8dab2b7f9fc79678d75b",
         "figures": [
           {
             "label": "Figure N"
@@ -39,7 +39,7 @@
           }
         ],
         "folder": "User guides",
-        "id": "d-G7F9P",
+        "id": "d-PBTCC",
         "lede": "Install with `cargo`.",
         "omitted_decision_titles": 0,
         "omitted_figures": 0,
@@ -59,13 +59,13 @@
         "title": "Setup"
       }
     ],
-    "after_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
-    "after_selection_hash": "3f75e843fa2ba1a27351bf168dafb31b543a7b6a6fa1ade969063e125b78244e",
-    "after_selection_identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
+    "after_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
+    "after_selection_hash": "9ddaa68aac661e51849ec207ca9f9155a4d53581e06881afde35701cc6837aa3",
+    "after_selection_identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
     "audience": "org",
-    "before_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
-    "before_selection_hash": "982f9a8f3ab0a6e96412653dea7e43a3f13b4dc21bfd3931aa108740dfa9f646",
-    "before_selection_identity": "605bd5b25feadf7b7d6bd9844008549dd2b0d9d189dcefdbea521d9fa52423c9",
+    "before_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
+    "before_selection_hash": "6d8d897a07b3a7d81c0022d87ce2c37436a0a00e42e0d5b801e7e170072f8ec4",
+    "before_selection_identity": "ce742884c785caf0efb9f8df593b4b295a980f4cd18df8602c1be2db649e0803",
     "changed_attachments": [
       {
         "after_available": true,
@@ -76,15 +76,15 @@
         "before_blob": "54d59969154eabe23fb95dccb6536461c8097886c2fa9aca81c2b6c3de269243",
         "before_home_doc": "d-EDWWE",
         "before_home_doc_title": "Intro",
-        "block": "fg-ZCCNV",
+        "block": "fg-6FQ2R",
         "label": "Figure C"
       }
     ],
     "changed_docs": [
       {
-        "after_digest": "0d2ad9112360db742516df41e162b6a1cef1338f92258be95d2717f21963fc0c",
+        "after_digest": "6340ca13fa4b326e94c7679016254cc5d67c8486377aff04fbb091de319b25fc",
         "after_path": "intro",
-        "before_digest": "f0e4a658e0344eff97547872b6211829206dd8daf73ae7b26ec1cad5e2f4ca23",
+        "before_digest": "dc08758c0f5d06167e33221781339cc54af7d43eac966480c3c1f19b216981a8",
         "before_page": "intro.html",
         "before_path": "intro",
         "before_title": null,
@@ -107,7 +107,7 @@
               }
             ],
             "excerpt": "Run `rdy init` first, then read the guide.",
-            "id": "p-5S4PN",
+            "id": "p-7YA08",
             "label": "Run `rdy init` first, then read the guide.",
             "redacted": false,
             "section": "Start",
@@ -120,7 +120,7 @@
             "change": "added",
             "diff": null,
             "excerpt": "The root claim.",
-            "id": "c-X2XSR",
+            "id": "c-SQ780",
             "label": "The root claim.",
             "redacted": false,
             "section": "Start",
@@ -131,7 +131,7 @@
             "change": "added",
             "diff": null,
             "excerpt": "A claim to remove.",
-            "id": "c-SQ780",
+            "id": "c-G7F9P",
             "label": "A claim to remove.",
             "redacted": false,
             "section": "Start",
@@ -142,7 +142,7 @@
             "change": "removed",
             "diff": null,
             "excerpt": "Figure R",
-            "id": "fg-ZQC2V",
+            "id": "fg-ZCCNV",
             "label": "Figure R",
             "redacted": false,
             "section": null,
@@ -153,7 +153,7 @@
             "change": "updated",
             "diff": null,
             "excerpt": "Figure C",
-            "id": "fg-ZCCNV",
+            "id": "fg-6FQ2R",
             "label": "Figure C",
             "redacted": false,
             "section": null,
@@ -180,7 +180,7 @@
           {
             "change": "updated",
             "excerpt": "Keep rows in order.",
-            "id": "D-7YA08",
+            "id": "D-V726J",
             "status_from": "live",
             "status_to": "superseded",
             "title": "Keep rows",
@@ -191,7 +191,7 @@
           {
             "change": "added",
             "excerpt": "Keep rows in id order.",
-            "id": "D-GC0XG",
+            "id": "D-BMHX1",
             "status_from": null,
             "status_to": "live",
             "title": "Keep rows by id",
@@ -200,7 +200,7 @@
           {
             "change": "added",
             "excerpt": "Name each page.",
-            "id": "D-BMHX1",
+            "id": "D-X2XSR",
             "status_from": null,
             "status_to": "live",
             "title": "Name pages",
@@ -243,6 +243,19 @@
         "status_to": "live",
         "title": "Root ruling",
         "what": []
+      },
+      {
+        "after_version": "9f4fed1ab150758c26fb919ebaa3a44475a9fbf22f1ba328c00ef6c247f31396",
+        "before_version": "8e6e2156a16fc274132f8c7949999bc581c767da8e3a8820247c206004953518",
+        "block_type": "question",
+        "change": "updated",
+        "id": "Q-R59GS",
+        "label": "Which guide comes first?",
+        "record_only": false,
+        "redacted": false,
+        "what": [
+          "text"
+        ]
       }
     ],
     "new_reference_count": 1,
@@ -251,7 +264,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-CQ8YW",
+        "source": "p-FC2N0",
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -264,7 +277,7 @@
       "omitted_rows": 0,
       "rows": [
         {
-          "doc": "d-G7F9P",
+          "doc": "d-PBTCC",
           "doc_hidden": false,
           "hidden_blocks": 1,
           "redacted": false,
@@ -285,13 +298,13 @@
       "removed_docs": 0
     },
     "profile_changed": false,
-    "profile_id": "pf-T5C82",
+    "profile_id": "pf-GC0XG",
     "redactions": [],
     "removed_attachments": [
       {
         "available": true,
         "blob": "2fbe4022560397f3ebd8359f330e326ac293f3f6c03db63f7356f94ce89f81bc",
-        "block": "fg-ZQC2V",
+        "block": "fg-ZCCNV",
         "home_doc": "d-EDWWE",
         "home_doc_title": "Intro",
         "label": "Figure R"
@@ -317,7 +330,7 @@
       "blocks_added": 7,
       "blocks_moved": 0,
       "blocks_removed": 3,
-      "blocks_updated": 3,
+      "blocks_updated": 4,
       "decisions_added": 4,
       "decisions_removed": 0,
       "decisions_updated": 1,
@@ -346,7 +359,7 @@
         "title": "Intro"
       },
       {
-        "doc": "d-G7F9P",
+        "doc": "d-PBTCC",
         "doc_hidden": false,
         "hidden_blocks": 1,
         "redacted": false,
@@ -357,11 +370,11 @@
   "included": null,
   "profile": {
     "audience": "org",
-    "id": "pf-T5C82",
+    "id": "pf-GC0XG",
     "key": "review",
     "title": "Review",
     "trail": true,
-    "version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48"
+    "version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22"
   },
   "references": {
     "dropped_decisions": {
@@ -382,7 +395,7 @@
           "classification": "excluded",
           "location": "/links/decided_by/0",
           "occurrences": 1,
-          "source": "c-QB8ZC",
+          "source": "c-T5C82",
           "source_doc_title": "Intro",
           "source_label": "The outside claim.",
           "target": "D-NM6P2",
@@ -397,7 +410,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-6FQ2R",
+        "source": "p-4357S",
         "source_doc_title": "Intro",
         "source_label": "See Notes.",
         "target": "d-4K5SS",
@@ -407,7 +420,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-CQ8YW",
+        "source": "p-FC2N0",
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -420,22 +433,17 @@
   "release": null,
   "scope": {
     "kind": "landing",
-    "landing": "9c815779f2dcbaf0cf7715ca1e9adcf5deb66f28f71f8da8f6e0676b9c1273a3"
+    "landing": "d422768a97ba8341aaad3fccf158c34692b5be2535dc3070a9aca374ea4b8eb6"
   },
   "selection": {
     "attachments": 4,
-    "blocks": 21,
+    "blocks": 22,
     "docs": 2,
     "entries": [
       {
-        "id": "D-7YA08",
-        "redaction": null,
-        "version": "1cfb4350e40c23f4cd5dc3cd752670db62e361db9f3fa60ff6124cfd4eb147aa"
-      },
-      {
         "id": "D-BMHX1",
         "redaction": null,
-        "version": "667525059f1934b42a8c3ec4a2f471e8fcf5b90eec5b2b197a427aa443b85200"
+        "version": "970cddfeb51f3e13cdc08f283e63ea577fc0d51fec6f705fdc7b3fb36b840ec7"
       },
       {
         "id": "D-ENGKQ",
@@ -443,29 +451,39 @@
         "version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd"
       },
       {
-        "id": "D-FXP25",
+        "id": "D-V726J",
         "redaction": null,
-        "version": "d534c3365acb76f552582a7b28a8bc11564efaf3859102008785459503476fde"
+        "version": "021bd77a5f9b8aa8191102aa95b11142a1d5857ac8f7856f2c13ef4bbea47ce9"
       },
       {
-        "id": "D-GC0XG",
+        "id": "D-X2XSR",
         "redaction": null,
-        "version": "83fa0f910460fe3677cbfc46443baa96a70ae9f03f8e5fadfc357b7d639850b0"
+        "version": "406bf0cae785485b5f30d40bf77a31915d2e16919ce7f8ef6fc0440421b8b2af"
       },
       {
-        "id": "c-QB8ZC",
+        "id": "D-YABJ2",
         "redaction": null,
-        "version": "2d702719b6a98119f0a44976ff4e47cb2312134ca3af1ef44e18711ab1258f9f"
+        "version": "01d79c5681a2127001fbd28a6a9f01b378af80a0d31f8a8dd101fdd0d8f953b8"
+      },
+      {
+        "id": "Q-R59GS",
+        "redaction": null,
+        "version": "9f4fed1ab150758c26fb919ebaa3a44475a9fbf22f1ba328c00ef6c247f31396"
+      },
+      {
+        "id": "c-G7F9P",
+        "redaction": null,
+        "version": "0ba7d0a57ecf7a7406abcfe7351d5988a8a05939fb1341982875dcdd7f427b1a"
       },
       {
         "id": "c-SQ780",
         "redaction": null,
-        "version": "16aecc0cc57838684f0e50a87464841e2198ae52402cdd74e5abe6f6c693ebdf"
+        "version": "e3a75ff85fcdd8a62c50c81aee80d9e3e57531ed60e46a33e2a56998a6904385"
       },
       {
-        "id": "c-X2XSR",
+        "id": "c-T5C82",
         "redaction": null,
-        "version": "93a040f658674f753372be827fd696d23748567dc1cbd63d0aca08c508f334fa"
+        "version": "93682cb55cb6d23341828f06dc8cb83f34226a1852981d1120bb37693173a55f"
       },
       {
         "id": "d-EDWWE",
@@ -473,9 +491,9 @@
         "version": "e612d399805ff43ca2887c2bc48e49a8cce0a98cf9febc1d62e8eb8d65e7eb32"
       },
       {
-        "id": "d-G7F9P",
+        "id": "d-PBTCC",
         "redaction": null,
-        "version": "6a558df0d355656805ac24a8e29ec801f927b191dbd387962e668605d7d836b0"
+        "version": "84e049096eacdee06d4ff5475910ea56f6e8347bc30520157486572c72b46cf7"
       },
       {
         "id": "fd-MJE28",
@@ -483,59 +501,59 @@
         "version": "e2b83c9f8f9bcd6d1700e1a558f98ff3fd55308f4fa38ea4284e52a69ce635aa"
       },
       {
-        "id": "fg-HYB5B",
+        "id": "fg-6FQ2R",
         "redaction": null,
-        "version": "7a42ed11cc8391b3dcd4a593fd412ff1b56617e849e61fefbccd5dabc29663f8"
+        "version": "8eb673a9f3325fafaf85a0e84775484a8be652d778103f959b71ebd80476efe5"
       },
       {
-        "id": "fg-YABJ2",
+        "id": "fg-CQ8YW",
         "redaction": null,
-        "version": "1d25a8a10b174c01c5393e5786cfb10579957788ba5efeafe60270bc2eefdb02"
+        "version": "5648dcf57e96e34fa87af1268529305f4052f6ee41f694a5f1ae4f237fb7c867"
       },
       {
-        "id": "fg-ZCCNV",
+        "id": "fg-ZQC2V",
         "redaction": null,
-        "version": "853b30fae9a79eefe3a6180b11321a61efdd73118abec8800578f93164b2e963"
+        "version": "4b6f44c304321ea052563378368f73730c1d5f69b343fe8122ebda09d13eaf69"
       },
       {
         "id": "p-4357S",
         "redaction": null,
-        "version": "d49adfee726b58ccb904ddd7399bd2ef7ea7ddd1fb0a36534c973e700370d244"
+        "version": "f58ea49890adc3215c10f0dd3e4aafae590955396f4a3fed31fa39000f0ddbcc"
       },
       {
-        "id": "p-5S4PN",
+        "id": "p-7YA08",
         "redaction": null,
-        "version": "0ed5ef52312a5806bc87a1f27459ebd7b84b515063998e3827d3e7b74b616d72"
+        "version": "16e2532590ce502d9f5a22396cf795ffabaa81fab95d4dd86a7e844eed8e55f9"
       },
       {
-        "id": "p-6FQ2R",
+        "id": "p-FC2N0",
         "redaction": null,
-        "version": "de64c9330ecfb718a23829e90a4dbaa75f3fb1606351fe6737487f9dcc3985f7"
+        "version": "9330219bdd2f35e9cfb6eefd4d2622f0d6c6455f4471d46d9d271e69b1c7d977"
       },
       {
-        "id": "p-CQ8YW",
+        "id": "p-FXP25",
         "redaction": null,
-        "version": "12639b08d404e65f012d3c4143a913dccddf0cf5481b2cbe8242bc0f811b0bef"
+        "version": "467a738ffa1838b555e8d11f75b7f9067cdde2945506d3a2f01763c972b0c765"
       },
       {
-        "id": "p-RWFT6",
+        "id": "p-QB8ZC",
         "redaction": null,
-        "version": "c9a389f8af7748c384a02e127a540c0ff070f53913d789f787619f1dd3ea8eeb"
+        "version": "8de62cbaafa5a56c0eb207794cfa393d81052cd1109cddc636688fd534286ffc"
       },
       {
-        "id": "s-PBTCC",
+        "id": "s-5S4PN",
         "redaction": null,
-        "version": "825c6cafe2f6e82af6fc8d9d789d79e125ec03783dd1fd0f50ae44759c276c20"
+        "version": "d98738b706d765df4869dd6f93cc97c8de672c32252677026c5b16431c53345b"
       },
       {
-        "id": "s-R59GS",
+        "id": "s-RWFT6",
         "redaction": null,
-        "version": "34710cc079386a471005814bbe74e8e3f2edb4ec4ace24bd3e60c5259ddfcda9"
+        "version": "839d9f91e9bf6ab63a292383ac39d80d05cd13aa6c9b1d8659a045e7763f0eea"
       }
     ],
     "folders": 1,
-    "hash": "3f75e843fa2ba1a27351bf168dafb31b543a7b6a6fa1ade969063e125b78244e",
-    "identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
+    "hash": "9ddaa68aac661e51849ec207ca9f9155a4d53581e06881afde35701cc6837aa3",
+    "identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
     "omitted_entries": 0
   },
   "status": "warning",

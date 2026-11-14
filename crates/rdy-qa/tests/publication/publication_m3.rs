@@ -36,8 +36,13 @@ fn session(s: &Served, run: &str, role: &str, view: Option<&str>) -> McpClient {
 }
 
 /// The report's rows of one array, sorted for comparison with the fixture's.
+/// The rows of `v` with the members the fixture states, sorted. The review's labels are pinned
+/// apart (D-0C4TB).
 fn sorted_rows(v: &Value) -> Vec<Value> {
-    let mut rows = v.as_array().cloned().unwrap_or_default();
+    let mut rows: Vec<Value> = v
+        .as_array()
+        .map(|a| a.iter().map(row_facts).collect())
+        .unwrap_or_default();
     rows.sort_by_key(Value::to_string);
     rows
 }
@@ -133,10 +138,31 @@ fn mg6_check_matches_visible_refs_and_reports_hidden_links() {
             );
         }
         // a decision outside the selection is dropped, in every spelling the author used
-        // (bare, `@key`, display words and an empty citation): it is no row and no link
-        let named = refs.to_string();
+        // (bare, `@key`, display words and an empty citation): it is no row and no link. The
+        // review names it in its own dropped decision list (D-0C4TB)
+        let named = json!([refs["rows"], refs["links_outside"]]).to_string();
         for d in &sc.dropped_decisions {
             assert!(!named.contains(d.as_str()), "{profile}: {d} in {named}");
+        }
+        let dropped: BTreeSet<&str> = refs["dropped_decisions"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        let want: BTreeSet<&str> = sc.dropped_decisions.iter().map(String::as_str).collect();
+        assert_eq!(dropped, want, "{profile}");
+        // every review row is labelled: its source, and its source doc when it has one
+        for r in refs["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(refs["links_outside"]["rows"].as_array().unwrap())
+        {
+            assert!(!r["source_label"].as_str().unwrap().is_empty(), "{r}");
+            for k in ["source_doc_title", "target_label"] {
+                assert!(r.get(k).is_some(), "{k}: {r}");
+            }
         }
         assert!(!named.contains("out-rule"), "{profile}");
         // a missing target is still counted, as `missing`
@@ -238,10 +264,15 @@ fn mg6_check_matches_visible_refs_and_reports_hidden_links() {
         canon["selection"]["identity"]
     );
     assert_eq!(drift["references"]["rows"], canon["references"]["rows"]);
-    assert_eq!(
-        drift["references"]["links_outside"],
-        canon["references"]["links_outside"]
+    let dr = &drift["references"];
+    let (dl, cl) = (
+        &drift["references"]["links_outside"],
+        &canon["references"]["links_outside"],
     );
+    assert_eq!(dl["count"], cl["count"]);
+    assert_eq!(sorted_rows(&dl["rows"]), sorted_rows(&cl["rows"]));
+    // the edge's label reads the candidate: the edited target (D-0C4TB)
+    assert_eq!(dl["rows"][0]["target_label"], "XPROSECANARY words, edited.");
     let sus = c.call("rdy_suspects", json!({"scope": "view:drift"})).ok();
     let items = sus["items"].as_array().unwrap_or_else(|| panic!("{sus}"));
     assert!(
@@ -250,8 +281,10 @@ fn mg6_check_matches_visible_refs_and_reports_hidden_links() {
             .any(|i| i["block"] == sc.id("$cA") && i["target"] == sc.id("$xp")),
         "the claim is suspect after its hidden target changed: {sus}"
     );
-    // the suspect is not a counted reference and not a leak
-    assert!(!drift["references"].to_string().contains(sc.id("$decOut")));
+    // the suspect is not a counted reference and not a link outside; the review names the
+    // dropped decision only in its own list (D-0C4TB)
+    let counted = json!([dr["rows"], dl["rows"]]).to_string();
+    assert!(!counted.contains(sc.id("$decOut")), "{counted}");
 }
 
 #[test]
@@ -632,7 +665,7 @@ fn mg6_profile_check_is_read_only_and_has_cli_parity() {
     assert!(o.status.success(), "{t}");
     assert_eq!(
         t,
-        "Publication profile pubp: blocked.\n15 blocks in 2 docs and 0 folders.\nReferences outside selection: 8.\nLinks outside selection: 1.\n"
+        "Publication profile pubp: blocked.\n15 blocks in 2 docs and 0 folders.\nReferences outside selection: 8.\nLinks outside selection: 1.\nIncluded: 2 docs, 0 folders, 2 sections, 11 blocks, 0 decisions, 1 figure.\n"
     );
     let org_text =
         String::from_utf8_lossy(&s.rdy(&["publication", "check", "--profile", "orgp"]).stdout)
