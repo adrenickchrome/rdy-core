@@ -250,7 +250,8 @@ class Boundaries(unittest.TestCase):
             for job, block in jobs_of(text_of(name)).items():
                 if (job_permissions(block) or {}).get('id-token') == 'write':
                     holders.setdefault(name, []).append(job)
-        self.assertEqual(holders, {'release.yml': ['sign'], 'release-sign.yml': ['claims', 'sign']})
+        self.assertEqual(holders, {'release.yml': ['sign'], 'release-sign.yml': ['claims', 'sign'],
+                                   'release-candidate.yml': ['sign']})
         caller = jobs_of(text_of('release.yml'))
         callee = jobs_of(text_of('release-sign.yml'))
         self.assertIn('    uses: adrenickchrome/rdy-core/.github/workflows/release-sign.yml@', caller['sign'])
@@ -292,11 +293,21 @@ class Boundaries(unittest.TestCase):
             self.assertNotIn('id-token', job_permissions(caller[job]))
             self.assertNotIn('create-github-app-token', caller[job])
         self.assertEqual(job_permissions(caller['promote']), {'actions': 'read', 'contents': 'read'})
-        # The candidate workflow has no secret, no OIDC, no environment and no write.
+        # The candidate workflow has no secret and no repository write. Only its sign job holds OIDC and an
+        # environment (release-sign-ci), and that job builds nothing.
         candidate = code_of(text_of('release-candidate.yml'))
-        for word in ('secrets.', 'id-token', 'environment:'):
-            self.assertNotIn(word, candidate)
-        self.assertNotRegex(candidate, r': write\b')
+        self.assertNotIn('secrets.', candidate)
+        self.assertNotRegex(candidate, r'contents: write\b')
+        candidate_jobs = jobs_of(text_of('release-candidate.yml'))
+        for job, block in candidate_jobs.items():
+            with self.subTest(job=job):
+                holds = job == 'sign'
+                self.assertEqual((job_permissions(block) or {}).get('id-token') == 'write', holds)
+                self.assertEqual('environment: release-sign-ci' in block, holds)
+                self.assertEqual('environment:' in block, holds)
+        self.assertEqual(job_permissions(candidate_jobs['sign']), {'contents': 'read', 'id-token': 'write'})
+        for word in ('cargo', 'qa-release-package', 'candidate.py', 'secrets.'):
+            self.assertNotIn(word, candidate_jobs['sign'])
         # The lane: one fixed group for the caller.
         self.assertIn('group: rdy-core-release-authority\n  cancel-in-progress: false', text_of('release.yml'))
         for name in RELEASE_FILES:
@@ -342,7 +353,9 @@ class Boundaries(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_rsig8_candidate_never_exports_test_trust(self):
-        code = code_of(text_of('release-candidate.yml'))
+        # The sign job holds the real release key's public line and verifies the real signature; every
+        # other candidate job stays free of trust material.
+        code = ''.join(b for j, b in jobs_of(text_of('release-candidate.yml')).items() if j != 'sign')
         for word in ('rehearse', 'allowed_signers', 'SHA256SUMS.sig', 'ssh-keygen', 'rdy-release', 'trust'):
             self.assertNotIn(word, code, word)
         self.assertNotIn('rehearse', text_of('release.yml'))
