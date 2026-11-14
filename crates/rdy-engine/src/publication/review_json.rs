@@ -12,7 +12,7 @@ use super::diff::DisclosureDiff;
 use super::references::{ReferenceReport, ReferenceRow};
 use super::report::{doc_row, hash_or_null, hidden_json, reference_row};
 use super::review_docs::included;
-use super::review_labels::{reference_labels, reference_review};
+use super::review_labels::{first_attachments, reference_labels, reference_review};
 use super::review_limits::{ReviewProjection, disclosure_review};
 use super::review_model::{
     AttachmentLabels, DisclosureReview, Included, OutsideReview, ReferenceLabels, ReferenceReview,
@@ -36,6 +36,9 @@ pub struct PublicationReview {
     pub new_references: Vec<ReferenceLabels>,
     pub disclosure: Option<DisclosureReview>,
     pub included: Option<Included>,
+    /// The labels of a first publication's attachments, in the order of its resolution's
+    /// attachment rows; empty with a comparison.
+    pub first_attachments: Vec<AttachmentLabels>,
 }
 
 impl PublicationReview {
@@ -63,6 +66,7 @@ impl PublicationReview {
                 new_references: vec![],
                 disclosure: None,
                 included: Some(included(&after_side)),
+                first_attachments: first_attachments(&after_side),
             },
             Some((before, diff)) => {
                 let before_side = ReaderReviewSide::new(before, &removals);
@@ -71,6 +75,7 @@ impl PublicationReview {
                     new_references: reference_labels(&diff.new_references, &lookup),
                     disclosure: Some(disclosure_review(diff, &before_side, &after_side)),
                     included: None,
+                    first_attachments: vec![],
                 }
             }
         })

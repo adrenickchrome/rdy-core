@@ -47,7 +47,7 @@ pub use review_labels::{
 };
 pub use review_limits::{
     ADAPTER_REVIEW_BYTES, CHANGE_BUDGET, CHANGES_MAX, ReviewProjection, change_shares, compact_len,
-    disclosure_review,
+    disclosure_review, fit_within,
 };
 pub use review_side::{
     BlockParts, DecisionFacts, PartName, PublicationReviewSide, ReaderPartValue, ReaderReviewSide,

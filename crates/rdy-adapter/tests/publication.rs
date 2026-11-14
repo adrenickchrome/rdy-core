@@ -736,18 +736,24 @@ fn hpb8_first_review_lists_all_docs_and_attachments() {
     let first = check
         .first_attachments
         .expect("a first review lists attachments");
+    // the old row members stay in the wrapper, and the labels come with them (D-9BWMV)
+    let entries: Vec<_> = first.iter().map(|x| x.entry.clone()).collect();
     assert_eq!(
-        first, want.attachments,
+        entries, want.attachments,
         "the resolution's rows, in its order"
     );
     assert!(
-        first
+        first.iter().all(|x| !x.label.is_empty()),
+        "every attachment has a label"
+    );
+    assert!(
+        entries
             .windows(2)
             .all(|w| (&w[0].home_doc, &w[0].block, &w[0].blob)
                 < (&w[1].home_doc, &w[1].block, &w[1].blob)),
         "sorted by (home doc, block, blob)"
     );
-    let rows: std::collections::BTreeMap<BlockId, (BlockId, Hash, bool)> = first
+    let rows: std::collections::BTreeMap<BlockId, (BlockId, Hash, bool)> = entries
         .iter()
         .map(|x| (x.block.clone(), (x.home_doc.clone(), x.blob, x.available)))
         .collect();
@@ -964,7 +970,13 @@ fn hpb8_implicit_review_has_null_identity_and_org() {
     assert_eq!(p.docs, docs, "every doc of the tag");
     assert!(p.docs.contains(&fx.a) && p.docs.contains(&fx.b) && p.docs.contains(&fx.c));
     assert_eq!(check.comparison, None);
-    assert_eq!(check.first_attachments, Some(want.attachments.clone()));
+    let first: Vec<_> = check
+        .first_attachments
+        .expect("a first review lists attachments")
+        .into_iter()
+        .map(|x| x.entry)
+        .collect();
+    assert_eq!(first, want.attachments);
     // the implicit profile's record has a null version and binds by its identity
     let prev = record("v1.0.0", p);
     assert_eq!(prev.profile_version, None);

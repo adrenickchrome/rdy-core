@@ -372,3 +372,72 @@ fn drv6_predecessor_fixtures_keep_their_bytes() {
         "no fixture is added or removed beside the successor"
     );
 }
+
+/// The members the whole plan adds to the contract: Task 1c's (none) and Task 6's. Task 7 is a
+/// Rust-only step: the adapter's review adds no MCP, CLI, store or error surface.
+fn owned_leaves() -> Vec<String> {
+    let mut want: Vec<String> = DRV1_CHANGES.iter().map(|p| (*p).to_string()).collect();
+    want.extend(drv6_changes());
+    want.sort();
+    want
+}
+
+/// drv7 (D-TXFHR, D-RDH1C): the union of every change of the current fixture against the last
+/// frozen predecessor is exactly the leaves the plan owns. Nothing is removed, and each change
+/// is in the two probe prefixes of the publication check or in its two new review probes: no
+/// other tool, command, error, store or dump member moves.
+#[test]
+fn drv7_contract_delta_is_exactly_the_owned_leaves() {
+    let (old, new) = (read(PREDECESSOR), read(SUCCESSOR));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    found.sort();
+    assert_eq!(found, owned_leaves(), "the delta is the owned leaves");
+
+    let prefixes: Vec<&str> = FIRST
+        .iter()
+        .chain(AGAINST.iter())
+        .chain(REVIEW_PROBES.iter())
+        .copied()
+        .collect();
+    for leaf in &found {
+        let path = leaf.split_once(' ').map_or("", |(_, p)| p);
+        assert!(
+            !leaf.starts_with("removed ") && prefixes.iter().any(|p| path.starts_with(p)),
+            "{leaf} is outside the publication check's probes"
+        );
+    }
+    for section in ["errors_warnings", "store", "dump_load"] {
+        assert_eq!(old[section], new[section], "{section} does not move");
+    }
+    let tools = "/mcp/tools";
+    assert_eq!(at(&old, tools), at(&new, tools), "no tool or schema moves");
+}
+
+/// The sha256 of the pre-change hash vectors (Task 1c).
+const HASH_VECTORS_SHA: &str = "8ba2e3981ccfa3309b39ab2e2c0eab414bc180091c239b11fb71906437cee963";
+
+/// The sha256 of the part vectors (Task 1c).
+const PART_VECTORS_SHA: &str = "751fdfa5d8fe12af1ea2e64b54f7c003ddde9d50d6b9b9cdee8bd048b279dcdb";
+
+/// drv7 (D-B2AC3): the hash vectors that the engine's guard compares with, the part vectors and
+/// every frozen predecessor keep their bytes, `readme-from-rdy-v1.json` included.
+#[test]
+fn drv7_hash_vectors_and_predecessors_stay_frozen() {
+    for (name, digest) in FROZEN {
+        assert_eq!(sha(name), *digest, "{name} is frozen");
+    }
+    assert_eq!(sha(PREDECESSOR), PREDECESSOR_SHA);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rdy-engine/tests/fixtures");
+    for (name, digest) in [
+        ("disclosure-review-hashes-v1.json", HASH_VECTORS_SHA),
+        ("disclosure-review-parts-v1.json", PART_VECTORS_SHA),
+    ] {
+        let bytes = std::fs::read(fixtures.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let got: String = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, digest, "{name} is frozen");
+    }
+}

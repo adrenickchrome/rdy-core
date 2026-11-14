@@ -93,18 +93,23 @@ impl ReviewProjection {
     /// [`ReviewProjection::max_bytes`]; else `E_LIMIT`, and no part of the value. The size check
     /// stops at the first byte over the limit, so it never allocates the serialized value.
     pub fn fit<T: Serialize>(self, value: T, reserve: usize) -> Result<T, RdyError> {
-        let max = self.max_bytes();
-        match max
-            .checked_sub(reserve)
-            .and_then(|room| compact_len(&value, room))
-        {
-            Some(_) => Ok(value),
-            None => Err(RdyError::new(
-                E_LIMIT,
-                format!("Publication report exceeds the limit of {max} bytes."),
-                "Reduce the selection or compare smaller profiles.",
-            )),
-        }
+        fit_within(value, self.max_bytes(), reserve)
+    }
+}
+
+/// `value` when its compact JSON, with `reserve` bytes kept for what the caller adds, fits `max`
+/// bytes; else `E_LIMIT` naming `max`, and no part of the value.
+pub fn fit_within<T: Serialize>(value: T, max: usize, reserve: usize) -> Result<T, RdyError> {
+    match max
+        .checked_sub(reserve)
+        .and_then(|room| compact_len(&value, room))
+    {
+        Some(_) => Ok(value),
+        None => Err(RdyError::new(
+            E_LIMIT,
+            format!("Publication report exceeds the limit of {max} bytes."),
+            "Reduce the selection or compare smaller profiles.",
+        )),
     }
 }
 
