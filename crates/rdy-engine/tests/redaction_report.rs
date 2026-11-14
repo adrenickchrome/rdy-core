@@ -943,8 +943,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 29; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=29).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 30; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=30).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -976,12 +976,14 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::DISPUTE_RESOLUTION,
             kinds::CHECK_REQUEST,
             kinds::FOREIGN,
+            kinds::SNAPSHOT_DELTA,
         ],
         ASSIGNED_KINDS
     );
     for k in ASSIGNED_KINDS {
         let want = match k {
             kinds::SNAPSHOT
+            | kinds::SNAPSHOT_DELTA
             | kinds::BLOB_CHUNK
             | kinds::BLOB_MANIFEST
             | kinds::BATCH_COMMIT
@@ -1003,7 +1005,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     for k in 25..=28 {
         assert_eq!(text_policy(k), Some(TextPolicy::Strings), "kind {k}");
     }
-    for k in [0, 12, 127, 255] {
+    // a snapshot delta holds ids and version hashes only
+    assert_eq!(kinds::SNAPSHOT_DELTA, 30);
+    assert_eq!(text_policy(30), Some(TextPolicy::NoText));
+    for k in [0, 12, 31, 127, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type

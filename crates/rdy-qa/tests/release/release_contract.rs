@@ -900,6 +900,10 @@ fn store_row() -> Value {
             "UpdateImplementation": ordinal(&PlanKind::UpdateImplementation),
             "Tension": ordinal(&PlanKind::Tension),
         },
+        // the removal report's row kind appended for snapshot deltas (index 15)
+        "ImpactKind": {
+            "SnapshotDelta": ordinal(&rdy_model::redaction::ImpactKind::SnapshotDelta),
+        },
         "PlanOutcome": {
             "Updated": ordinal(&PlanOutcome::Updated), "Relinked": ordinal(&PlanOutcome::Relinked),
             "Repinned": ordinal(&PlanOutcome::Repinned), "Reaffirmed": ordinal(&PlanOutcome::Reaffirmed),

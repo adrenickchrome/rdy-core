@@ -71,6 +71,7 @@ pub fn kind_name(k: ImpactKind) -> &'static str {
         ImpactKind::Dispute => "dispute",
         ImpactKind::DisputeResolution => "dispute_resolution",
         ImpactKind::CheckRequest => "check_request",
+        ImpactKind::SnapshotDelta => "snapshot_delta",
     }
 }
 
