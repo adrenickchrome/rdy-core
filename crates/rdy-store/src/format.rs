@@ -95,13 +95,14 @@ pub const FEATURE_FOREIGN_COPY: &str = "foreign_copy";
 /// a change's create or update. It stays on once a record uses it, whatever is removed later.
 pub const FEATURE_FIGURE_DARK: &str = "figure_dark";
 /// Snapshot deltas (D-RP6SM, D-918YB, D-7K4Z0): a SNAPSHOT_DELTA record, the snapshot of one
-/// landing as the difference from the previous landing's map. Its first use activates it. Not
-/// in [`REGISTERED_FEATURES`] yet: only [`stage_snapshot_delta_for_tests`] registers it.
+/// landing as the difference from the previous landing's map. A new store and a new holder list
+/// it from their first batch ([`baseline_features`]); in a legacy store, its first use or the
+/// registered upgrade step (`crate::upgrade::snapshot_delta_step`) activates it.
 pub const FEATURE_SNAPSHOT_DELTA: &str = "snapshot_delta";
 
-/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF), sorted by name. Each is
-/// `incompatible` and needs its own minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 9] = [
+/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM), sorted by
+/// name. Each is `incompatible` and needs its own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 10] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -110,12 +111,14 @@ pub const REGISTERED_FEATURES: [&str; 9] = [
     FEATURE_FOREIGN_COPY,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
+    FEATURE_SNAPSHOT_DELTA,
     FEATURE_VIEW_REPLAY,
 ];
 
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
-/// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`, [`FEATURE_REQUIRED_RDY`] for
-/// the seven of O11.
+/// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
+/// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`FEATURE_REQUIRED_RDY`] for the seven
+/// of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
@@ -875,9 +878,7 @@ pub enum ParseFailure {
 
 /// The registered class of feature `name`, if this rdy registers it. Allocates nothing.
 fn known_class(name: &str) -> Option<FeatureClass> {
-    if REGISTERED_FEATURES.contains(&name)
-        || (name == FEATURE_SNAPSHOT_DELTA && snapshot_delta_staged())
-    {
+    if REGISTERED_FEATURES.contains(&name) {
         return Some(FeatureClass::Incompatible);
     }
     TEST_FEATURES.with(|t| {
@@ -888,9 +889,25 @@ fn known_class(name: &str) -> Option<FeatureClass> {
     })
 }
 
-/// The features a new store, and a legacy dump's load, start with: content-2 identity and
-/// versioned encodings, which every store this rdy writes uses.
+/// The features a new store and a new holder start with, in their first batch (D-8T7PA):
+/// content-2 identity, versioned encodings and snapshot deltas, which every store this rdy
+/// creates uses. A legacy load starts with [`legacy_baseline_features`] instead.
 pub fn baseline_features() -> StoreFeatures {
+    StoreFeatures {
+        manifest_version: 1,
+        features: vec![
+            registered(FEATURE_CONTENT_HASH_V2),
+            registered(FEATURE_OBJECT_ENCODING),
+            registered(FEATURE_SNAPSHOT_DELTA),
+        ],
+    }
+}
+
+/// The features a store that predates snapshot deltas is taken to have when nothing records
+/// its own: a legacy dump's load, and a store whose log or `FORMAT` names no manifest. They
+/// are content-2 identity and versioned encodings; `snapshot_delta` waits for the one upgrade
+/// tail or batch (`crate::upgrade::snapshot_delta_step`).
+pub fn legacy_baseline_features() -> StoreFeatures {
     StoreFeatures {
         manifest_version: 1,
         features: vec![
@@ -900,13 +917,55 @@ pub fn baseline_features() -> StoreFeatures {
     }
 }
 
+/// The features [`crate::Store::create`] and [`crate::Store::create_holder`] start with:
+/// [`baseline_features`], or [`legacy_baseline_features`] on a thread that writes as the last
+/// rdy before snapshot deltas did ([`legacy_writer_for_tests`]).
+pub(crate) fn creation_baseline() -> StoreFeatures {
+    if legacy_writer() {
+        legacy_baseline_features()
+    } else {
+        baseline_features()
+    }
+}
+
+thread_local! {
+    /// How many [`LegacyWriter`] guards this thread holds.
+    static LEGACY_WRITER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread holds a [`legacy_writer_for_tests`] guard.
+pub(crate) fn legacy_writer() -> bool {
+    LEGACY_WRITER.with(|n| n.get() > 0)
+}
+
+/// While held, this thread writes as the last rdy before snapshot deltas did
+/// ([`legacy_writer_for_tests`]). Guards nest. It stays on the thread that took it.
+#[doc(hidden)]
+#[must_use]
+pub struct LegacyWriter(std::marker::PhantomData<*const ()>);
+
+impl Drop for LegacyWriter {
+    fn drop(&mut self) {
+        LEGACY_WRITER.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// Test hook: until the guard drops, this thread writes histories as the last rdy before
+/// snapshot deltas did, so a test can make a legacy source: a new store or holder starts with
+/// [`legacy_baseline_features`], a landing writes its full SNAPSHOT and no delta, and this rdy
+/// plans no upgrade step (a test's own registry, `crate::upgrade::with_registry_for_tests`,
+/// still wins). Every reader, check, load and take is this rdy's own. Another thread sees none
+/// of it. No environment, CLI or MCP path reaches it.
+#[doc(hidden)]
+pub fn legacy_writer_for_tests() -> LegacyWriter {
+    LEGACY_WRITER.with(|n| n.set(n.get() + 1));
+    LegacyWriter(std::marker::PhantomData)
+}
+
 /// The features this rdy registers ([`REGISTERED_FEATURES`]), and the injected test feature
 /// while a test holds it.
 pub fn registered_features() -> Vec<StoreFeature> {
     let mut out: Vec<StoreFeature> = REGISTERED_FEATURES.iter().map(|n| registered(n)).collect();
-    if snapshot_delta_staged() {
-        out.push(registered(FEATURE_SNAPSHOT_DELTA));
-    }
     TEST_FEATURES.with(|t| out.extend(t.borrow().iter().map(|(f, _)| f.clone())));
     out
 }
@@ -931,8 +990,7 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///   change;
 /// - `figure_dark`: a `figure` block that sets `dark_blob`, alone or in a change's create or
 ///   update ([`is_dark_figure`]);
-/// - `snapshot_delta`: a SNAPSHOT_DELTA (a frame of it splits only while its kind is staged,
-///   [`stage_snapshot_delta_for_tests`]).
+/// - `snapshot_delta`: a SNAPSHOT_DELTA.
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -1080,44 +1138,6 @@ pub fn inject_test_feature(class: FeatureClass, trigger: u8) -> TestFeature {
         )]
     });
     TestFeature(())
-}
-
-thread_local! {
-    /// How many [`StagedSnapshotDelta`] guards this thread holds.
-    static SNAPSHOT_DELTA_STAGED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Whether this thread holds a [`stage_snapshot_delta_for_tests`] guard: then kind 30
-/// (SNAPSHOT_DELTA) is registered at encoding 1 (`crate::codec`), feature
-/// [`FEATURE_SNAPSHOT_DELTA`] is registered and required by every delta, and kind 30 is a dump
-/// feature kind (`crate::dump::feature_frame_kinds`) and a sync kind
-/// (`crate::sync_stream::sync_kinds`).
-pub(crate) fn snapshot_delta_staged() -> bool {
-    SNAPSHOT_DELTA_STAGED.with(|n| n.get() > 0)
-}
-
-/// While held, this thread stages snapshot deltas ([`stage_snapshot_delta_for_tests`]). Guards
-/// nest: the registries go back when the last one drops. It stays on the thread that took it.
-#[doc(hidden)]
-#[must_use]
-pub struct StagedSnapshotDelta(std::marker::PhantomData<*const ()>);
-
-impl Drop for StagedSnapshotDelta {
-    fn drop(&mut self) {
-        SNAPSHOT_DELTA_STAGED.with(|n| n.set(n.get().saturating_sub(1)));
-    }
-}
-
-/// Test hook: registers snapshot deltas on this thread until the guard drops: kind 30 at
-/// encoding 1 with `rdy_model::SnapshotDelta`, feature [`FEATURE_SNAPSHOT_DELTA`] in
-/// [`registered_features`] and [`required_features`], and kind 30 in the dump's feature frame
-/// kinds and the sync kinds. Another thread, a spawned one included, sees none of it. No
-/// environment, CLI or MCP path reaches it, and production registers none of it until the
-/// writer ships.
-#[doc(hidden)]
-pub fn stage_snapshot_delta_for_tests() -> StagedSnapshotDelta {
-    SNAPSHOT_DELTA_STAGED.with(|n| n.set(n.get() + 1));
-    StagedSnapshotDelta(std::marker::PhantomData)
 }
 
 /// The store a dump's frames are of: a scalar store format (dump formats 1 to 3) or a feature

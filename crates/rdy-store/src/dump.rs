@@ -1532,33 +1532,23 @@ pub fn current_frame_kinds() -> &'static [u8] {
 /// The kinds a store feature adds to a dump-4 batch's frames, each with its feature: a frame of
 /// one stands only in a dump whose manifest names the feature. Repo links (D-FK58A): FOREIGN,
 /// with `foreign_copy`, which also lets a frame take its kind's optional encoding
-/// (`crate::codec::OPTIONAL`).
-pub const FEATURE_FRAME_KINDS: [(&str, u8); 1] =
-    [(crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN)];
-
-/// [`FEATURE_FRAME_KINDS`] with SNAPSHOT_DELTA, with `snapshot_delta`: the list while this
-/// thread stages snapshot deltas (`crate::format::stage_snapshot_delta_for_tests`).
-const STAGED_FEATURE_FRAME_KINDS: [(&str, u8); 2] = [
+/// (`crate::codec::OPTIONAL`). Snapshot deltas (D-RP6SM): SNAPSHOT_DELTA, with
+/// `snapshot_delta`.
+pub const FEATURE_FRAME_KINDS: [(&str, u8); 2] = [
     (crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN),
     (crate::format::FEATURE_SNAPSHOT_DELTA, kinds::SNAPSHOT_DELTA),
 ];
 
-/// The kinds a store feature adds to a dump-4 batch's frames on this thread:
-/// [`FEATURE_FRAME_KINDS`], and SNAPSHOT_DELTA while snapshot deltas are staged.
+/// [`FEATURE_FRAME_KINDS`].
 pub fn feature_frame_kinds() -> &'static [(&'static str, u8)] {
-    if crate::format::snapshot_delta_staged() {
-        &STAGED_FEATURE_FRAME_KINDS
-    } else {
-        &FEATURE_FRAME_KINDS
-    }
+    &FEATURE_FRAME_KINDS
 }
 
 /// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
 /// store's kinds, where a marked raw kind needs a kind that registers versioned encodings. In a
 /// dump of the latest store whose manifest names `foreign_copy` (`foreign`), the kinds and the
 /// optional encodings that feature adds may stand too; likewise SNAPSHOT_DELTA in one whose
-/// manifest names `snapshot_delta` (`delta`), while that kind is a feature frame kind
-/// ([`feature_frame_kinds`]).
+/// manifest names `snapshot_delta` (`delta`) ([`FEATURE_FRAME_KINDS`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FrameKinds {
     Legacy(&'static [u8]),

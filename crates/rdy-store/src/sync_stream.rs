@@ -168,35 +168,7 @@ const PRELUDE: u64 = MAGIC.len() as u64 + 4;
 /// The store kinds an object frame may have: the portable kinds less TRANSITION, a batch's own
 /// local record (no FILE, REF_UPDATE, BATCH_COMMIT or TRANSITION is portable). Ascending. A
 /// kind-None link resolves among these.
-pub const SYNC_KINDS: [u8; 23] = [
-    kinds::BLOCK,
-    kinds::CHANGE,
-    kinds::PROPOSAL,
-    kinds::LANDING,
-    kinds::SNAPSHOT,
-    kinds::BLOB_CHUNK,
-    kinds::BLOB_MANIFEST,
-    kinds::TAG,
-    kinds::ANSWER,
-    kinds::SIGNATURE,
-    kinds::VIEW_OP,
-    kinds::INTENT,
-    kinds::ALT_SET,
-    kinds::REVIEW,
-    kinds::TENSION,
-    kinds::REDACTION,
-    kinds::REDACTION_RESIDUE,
-    kinds::REDACTION_APPLY,
-    kinds::PLAN,
-    kinds::ASSESSMENT,
-    kinds::DISPUTE,
-    kinds::DISPUTE_RESOLUTION,
-    kinds::CHECK_REQUEST,
-];
-
-/// [`SYNC_KINDS`] and SNAPSHOT_DELTA: the list while this thread stages snapshot deltas
-/// (`crate::format::stage_snapshot_delta_for_tests`). Ascending.
-const STAGED_SYNC_KINDS: [u8; 24] = [
+pub const SYNC_KINDS: [u8; 24] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -223,14 +195,9 @@ const STAGED_SYNC_KINDS: [u8; 24] = [
     kinds::SNAPSHOT_DELTA,
 ];
 
-/// The store kinds an object frame may have on this thread: [`SYNC_KINDS`], and SNAPSHOT_DELTA
-/// while snapshot deltas are staged. Ascending.
+/// [`SYNC_KINDS`].
 pub fn sync_kinds() -> &'static [u8] {
-    if crate::format::snapshot_delta_staged() {
-        &STAGED_SYNC_KINDS
-    } else {
-        &SYNC_KINDS
-    }
+    &SYNC_KINDS
 }
 
 /// Whether an object frame of `kind` may stand in a sync batch ([`sync_kinds`]).

@@ -101,8 +101,8 @@ pub const SNAPSHOT_DELTA_STEP: &str = "snapshot_delta";
 
 /// The snapshot-delta step (D-918YB, D-8T7PA): from any manifest without `snapshot_delta`, it
 /// merges the feature in and keeps every other feature; its batch holds one delta of every held
-/// landing (none for a store with no landing). Readers do not require it. The registry lists
-/// it once the delta writer ships; until then a test passes it in.
+/// landing (none for a store with no landing). Readers do not require it. This rdy registers
+/// it ([`registered_steps`]).
 pub fn snapshot_delta_step() -> UpgradeStep {
     UpgradeStep {
         id: SNAPSHOT_DELTA_STEP.into(),
@@ -147,11 +147,14 @@ pub struct UpgradeReport {
     pub pending: bool,
 }
 
-/// This rdy's upgrade steps. The first release registers none.
-const REGISTRY: &[UpgradeStep] = &[];
+/// This rdy's upgrade steps, in execution order: the snapshot-delta step
+/// ([`snapshot_delta_step`]).
+fn registered_steps() -> Vec<UpgradeStep> {
+    vec![snapshot_delta_step()]
+}
 
 thread_local! {
-    /// This thread's steps in place of [`REGISTRY`] ([`with_registry_for_tests`]).
+    /// This thread's steps in place of this rdy's ([`with_registry_for_tests`]).
     static OVERRIDE: RefCell<Option<Vec<UpgradeStep>>> = const { RefCell::new(None) };
 }
 
@@ -170,11 +173,17 @@ pub fn with_registry_for_tests<T>(registry: &[UpgradeStep], f: impl FnOnce() -> 
     f()
 }
 
-/// This rdy's steps on this thread: [`REGISTRY`], or a test's ([`with_registry_for_tests`]).
+/// This rdy's steps on this thread: [`registered_steps`], or a test's
+/// ([`with_registry_for_tests`]); none while the thread writes as the last rdy before snapshot
+/// deltas did (`crate::format::legacy_writer_for_tests`).
 fn registry() -> Vec<UpgradeStep> {
-    OVERRIDE
-        .with(|o| o.borrow().clone())
-        .unwrap_or_else(|| REGISTRY.to_vec())
+    OVERRIDE.with(|o| o.borrow().clone()).unwrap_or_else(|| {
+        if format::legacy_writer() {
+            vec![]
+        } else {
+            registered_steps()
+        }
+    })
 }
 
 /// Whether this rdy registers any upgrade step. With none, an open plans nothing.

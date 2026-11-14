@@ -17,7 +17,6 @@ use rdy_engine::*;
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::codec;
-use rdy_store::format::stage_snapshot_delta_for_tests;
 use rdy_store::kinds;
 use rdy_store::snapshot::{folded_deltas_for_tests, record_chain_applications_for_tests};
 use rdy_store::stream_error::StreamError;
@@ -200,7 +199,6 @@ fn raw_take(
 
 #[test]
 fn sdl3_publication_check_folds_each_delta_once() {
-    let _staged = stage_snapshot_delta_for_tests();
     let (dir, mut r, landings, tag) = project(200);
     let deltas = add_deltas(&mut r, None);
     assert_eq!(deltas.len(), 200);
@@ -288,7 +286,6 @@ fn boundaries(r: &mut Rdy, dir: &Path, tag: Hash, name: &str) -> [Option<String>
 
 #[test]
 fn sdl3_fsck_holder_take_and_load_agree() {
-    let _staged = stage_snapshot_delta_for_tests();
     // a good delta history passes every boundary
     let (dir, mut r, _, tag) = project(3);
     add_deltas(&mut r, None);

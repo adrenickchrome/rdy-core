@@ -11,9 +11,7 @@ use rdy_model::{
 };
 use rdy_store::bounded::RecordError;
 use rdy_store::codec;
-use rdy_store::format::{
-    self, FEATURE_SNAPSHOT_DELTA, SNAPSHOT_DELTA_REQUIRED_RDY, stage_snapshot_delta_for_tests,
-};
+use rdy_store::format::{self, FEATURE_SNAPSHOT_DELTA, SNAPSHOT_DELTA_REQUIRED_RDY};
 use rdy_store::index::{Index, IndexEntry};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::segment::Location;
@@ -83,28 +81,20 @@ fn sdl1_delta_encoding_is_one_and_hashes_stored_bytes() {
     assert_eq!(kinds::SNAPSHOT_DELTA, 30);
     let (d1, _) = chain();
     let body = postcard::to_allocvec(&d1).unwrap();
-    // without the guard the kind is not registered: no encoding of it splits
-    assert_eq!(codec::latest(kinds::SNAPSHOT_DELTA), 0);
     assert_eq!(codec::first(kinds::SNAPSHOT_DELTA), 1, "never encoding 0");
     let mut payload = vec![1u8, 0];
     payload.extend(&body);
-    assert_eq!(
-        codec::split(30 | 0x80, &payload).unwrap_err(),
-        RecordError::UnknownVersion
-    );
+    // an unmarked raw 30 is encoding 0, which the kind never has
     assert_eq!(
         codec::split(30, &body).unwrap_err(),
         RecordError::UnknownVersion
     );
-    match codec::decode_record::<SnapshotDelta>(158, &payload) {
-        Err(StoreError::Format { message, .. }) => assert_eq!(
-            message,
-            "the store holds an object this rdy cannot read: kind SNAPSHOT_DELTA, encoding 1"
-        ),
-        other => panic!("an unstaged delta decoded: {other:?}"),
-    }
+    assert_eq!(codec::split(30 | 0x80, &payload).unwrap().kind, 30);
+    assert_eq!(
+        codec::decode_record::<SnapshotDelta>(158, &payload).unwrap(),
+        d1
+    );
 
-    let _staged = stage_snapshot_delta_for_tests();
     assert_eq!(
         codec::latest(kinds::SNAPSHOT_DELTA),
         SNAPSHOT_DELTA_ENCODING
@@ -155,7 +145,8 @@ fn sdl1_delta_encoding_is_one_and_hashes_stored_bytes() {
 
     // a write stores the bytes under that hash and turns the feature on in the same batch
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::create(&d.path().join("s")).unwrap();
+    // a store that predates snapshot deltas: the first delta turns the feature on
+    let mut s = Store::create_legacy_for_tests(&d.path().join("s")).unwrap();
     assert!(!s.features().has(FEATURE_SNAPSHOT_DELTA));
     let hashes = s.write(vec![o.clone().into_item()]).unwrap();
     assert_eq!(hashes, vec![d1.id()]);
@@ -267,7 +258,6 @@ fn sdl1_snapshot_canonical_bytes_reject_decode_aliases() {
     }
 
     // a delta's bytes are held to the same rule at the same boundary
-    let _staged = stage_snapshot_delta_for_tests();
     let (d1, _) = chain();
     let payload = codec::encode_new(kinds::SNAPSHOT_DELTA, &d1).payload;
     // landing (32), base tag (1), full (32): the prefix and the set's length follow
@@ -286,7 +276,6 @@ fn sdl1_snapshot_canonical_bytes_reject_decode_aliases() {
 
 #[test]
 fn sdl1_delta_index_rebuilds_from_frames_alone() {
-    let _staged = stage_snapshot_delta_for_tests();
     let (d1, d2) = chain();
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("s");
@@ -363,7 +352,6 @@ fn sdl1_delta_index_rebuilds_from_frames_alone() {
 
 #[test]
 fn sdl1_delta_index_refuses_distinct_duplicates() {
-    let _staged = stage_snapshot_delta_for_tests();
     let (d1, _) = chain();
     // another delta for the same landing: other bytes, another hash
     let other = SnapshotDelta {
@@ -441,112 +429,6 @@ fn sdl1_delta_index_refuses_distinct_duplicates() {
 fn check_closed(path: &Path) {
     let s = Store::open(path).unwrap();
     s.verify().unwrap();
-}
-
-#[test]
-fn sdl1_staging_guard_is_thread_local_and_restores_registries() {
-    let (d1, _) = chain();
-    let body = postcard::to_allocvec(&d1).unwrap();
-    let mut payload = vec![1u8, 0];
-    payload.extend(&body);
-    let names = || -> Vec<String> {
-        format::registered_features()
-            .into_iter()
-            .map(|f| f.name)
-            .collect()
-    };
-    let off = |when: &str| {
-        assert_eq!(names().len(), 9, "{when}");
-        assert!(
-            !names().contains(&FEATURE_SNAPSHOT_DELTA.to_string()),
-            "{when}"
-        );
-        assert!(
-            format::required_features(158, &payload).is_empty(),
-            "{when}"
-        );
-        assert_eq!(codec::latest(kinds::SNAPSHOT_DELTA), 0, "{when}");
-        assert!(codec::split(158, &payload).is_err(), "{when}");
-        assert!(!rdy_store::sync_stream::is_sync_kind(30), "{when}");
-        assert!(
-            !rdy_store::sync_stream::sync_kinds().contains(&30),
-            "{when}"
-        );
-        assert_eq!(rdy_store::sync_stream::sync_kinds().len(), 23, "{when}");
-        assert_eq!(
-            rdy_store::dump::feature_frame_kinds(),
-            &rdy_store::dump::FEATURE_FRAME_KINDS[..],
-            "{when}"
-        );
-        let unknown = format::StoreFeatures::of(vec![format::StoreFeature {
-            name: FEATURE_SNAPSHOT_DELTA.into(),
-            class: format::FeatureClass::Incompatible,
-            required_rdy: SNAPSHOT_DELTA_REQUIRED_RDY.into(),
-        }]);
-        match format::check_features(&unknown) {
-            Err(StoreError::Format { message, .. }) => assert_eq!(
-                message,
-                format!("store feature snapshot_delta needs rdy {SNAPSHOT_DELTA_REQUIRED_RDY}"),
-                "{when}"
-            ),
-            other => panic!("{when}: an unstaged rdy knows snapshot_delta: {other:?}"),
-        }
-    };
-    let on = || {
-        assert_eq!(names().len(), 10);
-        assert!(names().contains(&FEATURE_SNAPSHOT_DELTA.to_string()));
-        let used: Vec<String> = format::required_features(158, &payload)
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
-        assert_eq!(
-            used,
-            vec![
-                format::FEATURE_OBJECT_ENCODING.to_string(),
-                FEATURE_SNAPSHOT_DELTA.to_string()
-            ]
-        );
-        assert_eq!(codec::latest(kinds::SNAPSHOT_DELTA), 1);
-        assert_eq!(codec::split(158, &payload).unwrap().kind, 30);
-        assert!(rdy_store::sync_stream::is_sync_kind(30));
-        assert_eq!(rdy_store::sync_stream::sync_kinds().len(), 24);
-        assert_eq!(rdy_store::sync_stream::sync_kinds().last(), Some(&30));
-        assert!(
-            rdy_store::dump::feature_frame_kinds()
-                .contains(&(FEATURE_SNAPSHOT_DELTA, kinds::SNAPSHOT_DELTA))
-        );
-        let manifest = format::baseline_features().merged(&[format::StoreFeature {
-            name: FEATURE_SNAPSHOT_DELTA.into(),
-            class: format::FeatureClass::Incompatible,
-            required_rdy: SNAPSHOT_DELTA_REQUIRED_RDY.into(),
-        }]);
-        assert_eq!(
-            format::check_features(&manifest).unwrap(),
-            format::StoreAccess::ReadWrite
-        );
-    };
-    off("before");
-    {
-        let _outer = stage_snapshot_delta_for_tests();
-        on();
-        // another thread never sees this thread's guard
-        std::thread::scope(|sc| sc.spawn(|| off("on another thread")).join().unwrap());
-        {
-            let _inner = stage_snapshot_delta_for_tests();
-            on();
-        }
-        // the inner guard's drop keeps the outer one
-        on();
-    }
-    off("after");
-    // the baseline a new store starts with is unchanged by the guard
-    let _staged = stage_snapshot_delta_for_tests();
-    let base: Vec<String> = format::baseline_features()
-        .features
-        .into_iter()
-        .map(|f| f.name)
-        .collect();
-    assert_eq!(base, vec!["content_hash_v2", "object_encoding"]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -656,7 +538,8 @@ fn store() -> (tempfile::TempDir, std::path::PathBuf, Store) {
 
 #[test]
 fn sdl2_snapshot_read_prefers_held_map_then_folds() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let (_d, _p, mut s) = store();
     let maps = six_maps();
     // only landing 2 holds its SNAPSHOT
@@ -709,7 +592,8 @@ fn sdl2_snapshot_read_prefers_held_map_then_folds() {
 
 #[test]
 fn sdl2_cold_warm_and_evicted_reads_are_equal() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let (_d, _p, mut s) = store();
     let maps = six_maps();
     let ls = history(&mut s, &maps, &[]);
@@ -752,7 +636,8 @@ fn sdl2_cold_warm_and_evicted_reads_are_equal() {
 
 #[test]
 fn sdl2_cache_cap_and_source_epochs_do_not_change_reads() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let (_d, path, mut s) = store();
     let maps = six_maps();
     let ls = history(&mut s, &maps, &[]);
@@ -871,7 +756,8 @@ fn record_of<T: serde::Serialize + 'static>(
 
 #[test]
 fn sdl2_fold_refuses_cycles_missing_bases_and_wrong_kinds() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let maps = six_maps();
     let decode = |r: Result<StateSnapshot, StoreError>| match r {
         Err(StoreError::Decode(m)) => m,
@@ -1259,7 +1145,8 @@ fn kind_of(keys: &[ObjectKey], kind: u8) -> Vec<Hash> {
 
 #[test]
 fn sdl3_links_follow_the_record_source_features() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let (d1, d2) = chain();
     let rec = landing_rec(None, d1.full, 1);
     let (raw, landing) = codec::item_new(kinds::LANDING, &rec);
@@ -1364,7 +1251,8 @@ fn sdl3_links_follow_the_record_source_features() {
 
 #[test]
 fn sdl3_closure_attaches_deltas_without_snapshot_edges() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let mut p = Proj::new();
     p.land(4);
     // without the feature, the closure is what it was: each landing's SNAPSHOT, no delta
@@ -1412,7 +1300,8 @@ fn key3(kind: u8, hash: Hash) -> ObjectKey {
 
 #[test]
 fn sdl3_known_landings_add_no_attachment_prerequisite() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let mut p = Proj::new();
     p.land(3);
     let deltas = p.upgrade();
@@ -1455,7 +1344,8 @@ fn sdl3_known_landings_add_no_attachment_prerequisite() {
 
 #[test]
 fn sdl3_upload_checks_attachments_across_files() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let mut p = Proj::new();
     p.land(3);
     let deltas = p.upgrade();
@@ -1535,7 +1425,8 @@ fn sdl3_upload_checks_attachments_across_files() {
 
 #[test]
 fn sdl3_held_base_delta_is_a_typed_prerequisite() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let mut p = Proj::new();
     p.land(1);
     let d0 = p.upgrade()[0];
@@ -1677,7 +1568,8 @@ fn refused(r: Result<(), StreamError>) -> String {
 
 #[test]
 fn sdl3_six_rules_reject_each_independent_violation() {
-    let _staged = stage_snapshot_delta_for_tests();
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     let maps = six_maps();
     let spec: Vec<(Option<usize>, BTreeMap<BlockId, Hash>)> = (0usize..3)
         .map(|i| (i.checked_sub(1), maps[i].clone()))
@@ -1850,7 +1742,6 @@ fn sdl3_six_rules_reject_each_independent_violation() {
 
 #[test]
 fn sdl3_chain_checks_visit_each_landing_and_set_once() {
-    let _staged = stage_snapshot_delta_for_tests();
     let maps = six_maps();
     // a chain with a fork at landing 1 (two branches), a no-op landing that repeats a full
     // hash, and a branch that goes back to an earlier map
@@ -1914,8 +1805,9 @@ fn sdl3_chain_checks_visit_each_landing_and_set_once() {
 
 #[test]
 fn sdl3_capacity_counts_match_holder_check_after_delta_upgrade() {
+    // a history the last rdy before snapshot deltas wrote: deltas are added by hand
+    let _legacy = format::legacy_writer_for_tests();
     use rdy_store::take_batch::{HolderCapacity, set_holder_capacity_for_tests};
-    let _staged = stage_snapshot_delta_for_tests();
     let mut p = Proj::new();
     p.land(2);
     // three holders take the legacy history first: its SNAPSHOTs stay held

@@ -11,7 +11,7 @@ use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::format::{
     self, FEATURE_FIGURE_DARK, FEATURE_SNAPSHOT_DELTA, FEATURES_FILE, FIGURE_DARK_REQUIRED_RDY,
     FeatureClass, REF_STORE_FEATURES, REF_UPGRADE, SNAPSHOT_DELTA_REQUIRED_RDY, StoreFeature,
-    StoreFeatures, UpgradeReceipt, stage_snapshot_delta_for_tests,
+    StoreFeatures, UpgradeReceipt,
 };
 use rdy_store::holder::StoreMode;
 use rdy_store::snapshot_upgrade::UPGRADE_BATCH;
@@ -355,7 +355,6 @@ fn expected(maps: &Held) -> Vec<SnapshotDelta> {
 
 #[test]
 fn sdl5_upgrade_writes_objects_features_and_receipt_once() {
-    let _staged = stage_snapshot_delta_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -493,7 +492,6 @@ fn sdl5_upgrade_writes_objects_features_and_receipt_once() {
 
 #[test]
 fn sdl5_upgrade_covers_off_canon_and_holder_forks() {
-    let _staged = stage_snapshot_delta_for_tests();
     // a project: canon, a second root, a fork off canon's first landing and a landing on it
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), true);
@@ -615,7 +613,6 @@ fn reordered(map: &BTreeMap<BlockId, Hash>) -> Vec<u8> {
 
 #[test]
 fn sdl5_noncanonical_legacy_snapshot_leaves_store_readable() {
-    let _staged = stage_snapshot_delta_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -731,7 +728,6 @@ fn inject(fault: Fault) -> impl for<'a> FnMut(Phase<'a>) -> std::io::Result<()> 
 
 #[test]
 fn sdl5_every_interruption_preserves_acknowledged_bytes() {
-    let _staged = stage_snapshot_delta_for_tests();
     for fault in [
         Fault::Copy,
         Fault::Sync,
@@ -819,7 +815,6 @@ fn sdl5_upgrade_child() {
         return;
     };
     let phase = std::env::var("RDY_SDL5_PHASE").unwrap();
-    let _staged = stage_snapshot_delta_for_tests();
     let mut copies = 0;
     let r = with_hook_for_tests(
         move |p: Phase<'_>| {
@@ -881,7 +876,6 @@ fn kill_at(dir: &Path, phase: &str) {
 
 #[test]
 fn sdl5_restart_finishes_without_a_second_upgrade_batch() {
-    let _staged = stage_snapshot_delta_for_tests();
     for phase in [
         "copy",
         "backup_complete",
@@ -976,7 +970,6 @@ fn sdl5_restart_finishes_without_a_second_upgrade_batch() {
 
 #[test]
 fn sdl5_upgrade_batch_rejects_unregistered_objects_and_refs() {
-    let _staged = stage_snapshot_delta_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -1110,7 +1103,6 @@ fn sdl5_upgrade_batch_rejects_unregistered_objects_and_refs() {
 
 #[test]
 fn sdl5_current_manifest_open_does_not_walk_the_log() {
-    let _staged = stage_snapshot_delta_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -1239,7 +1231,6 @@ fn take_into(dir: &Path, batch: &Path, target: &UploadTarget) -> Result<(), Stri
 
 #[test]
 fn sdl5_legacy_take_into_upgraded_holder_counts_no_snapshot_edges() {
-    let _staged = stage_snapshot_delta_for_tests();
     let src = source(3);
     let base = tempfile::tempdir().unwrap();
     let batch = base.path().join("legacy.rdysync");

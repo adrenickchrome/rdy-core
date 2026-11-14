@@ -1127,7 +1127,6 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
 /// get, and a rewritten ruling there passed.
 #[test]
 fn sdl2_frozen_audit_reads_delta_only_history() {
-    let _staged = rdy_store::format::stage_snapshot_delta_for_tests();
     let dir = tempfile::tempdir().unwrap();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();

@@ -397,7 +397,6 @@ fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::form
 /// maintenance runs it: one batch with each held landing's delta, both forks included.
 #[test]
 fn sdl5_adapter_open_reads_a_legacy_holder_and_maintenance_runs_the_step() {
-    let _staged = rdy_store::format::stage_snapshot_delta_for_tests();
     let steps = vec![rdy_store::upgrade::snapshot_delta_step()];
     let root = tempfile::tempdir().unwrap();
     let dir = divergent_holder(root.path(), RepoId([5; 16]));

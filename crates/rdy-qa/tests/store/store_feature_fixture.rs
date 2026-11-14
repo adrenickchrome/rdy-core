@@ -359,7 +359,6 @@ fn open_read_only_copy() {
 /// which knows no such feature, opens for reading and changes no byte, and the maintenance
 /// refuses the store (`E_STORE_READ_ONLY`) before it writes anything.
 fn read_only_copy_runs_no_optional_step() {
-    let _staged = rdy_store::format::stage_snapshot_delta_for_tests();
     let steps = vec![rdy_store::upgrade::snapshot_delta_step()];
     let (_base, root) = project_copy(&fixture_dir());
     rdy_store::upgrade::with_registry_for_tests(&steps, || {

@@ -19,7 +19,6 @@ use rdy_engine::render_source::materialize_landing_for_tests;
 use rdy_engine::*;
 use rdy_model::*;
 use rdy_store::codec;
-use rdy_store::format::stage_snapshot_delta_for_tests;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::segment::Location;
@@ -234,7 +233,6 @@ fn facts(fx: &Fx) -> Vec<(String, String)> {
 
 #[test]
 fn sdl2_all_state_scopes_read_delta_only_history() {
-    let _staged = stage_snapshot_delta_for_tests();
     let mut fx = fixture();
     let before = facts(&fx);
     assert_eq!(add_deltas(&mut fx.r), 3);
@@ -361,7 +359,6 @@ fn tag_hash(r: &Rdy, name: &str) -> Hash {
 
 #[test]
 fn sdl2_stream_and_store_materialization_are_equal() {
-    let _staged = stage_snapshot_delta_for_tests();
     let mut fx = fixture();
     add_deltas(&mut fx.r);
     fx.r.store().fold_held_snapshots_for_tests(true);
@@ -452,7 +449,6 @@ fn remove(r: &mut Rdy, target: &BlockId) {
 
 #[test]
 fn sdl2_removed_versions_read_as_stubs_after_cache_hits() {
-    let _staged = stage_snapshot_delta_for_tests();
     let mut fx = fixture();
     // warm the map cache: canon and a historical landing, each read twice
     cold(&mut fx.r);

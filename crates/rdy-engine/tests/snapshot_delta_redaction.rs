@@ -16,7 +16,6 @@ use rdy_model::redaction::{ImpactKind, ImpactRelation, ImpactRow};
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::codec;
-use rdy_store::format::stage_snapshot_delta_for_tests;
 use rdy_store::kinds;
 use rdy_store::snapshot::folded_deltas_for_tests;
 use rdy_store::sync_stream::StreamHeader;
@@ -243,7 +242,6 @@ fn two_landings() -> Two {
 #[test]
 fn sdl4_unchanged_versions_affect_later_landings_and_tags() {
     let _clock = pin_clock(1_000_000);
-    let _staged = stage_snapshot_delta_for_tests();
     let mut t = two_landings();
     let deltas = add_deltas(&mut t.r);
     // the first delta sets the version; the second sets only the new folder
@@ -354,7 +352,6 @@ fn add_deltas_after(r: &mut Rdy, held: &[SnapshotDelta]) -> Vec<SnapshotDelta> {
 #[test]
 fn sdl4_delta_rows_and_held_snapshot_rows_coexist() {
     let _clock = pin_clock(1_000_000);
-    let _staged = stage_snapshot_delta_for_tests();
     let mut t = two_landings();
     let target = [format!("{}@{}", t.prose, t.v)];
     let before = t.r.read().redaction_report(&input(&target, true)).unwrap();
@@ -413,7 +410,6 @@ fn sdl4_delta_rows_and_held_snapshot_rows_coexist() {
 #[test]
 fn sdl4_upgrade_makes_a_prepared_removal_stale() {
     let _clock = pin_clock(1_000_000);
-    let _staged = stage_snapshot_delta_for_tests();
     let mut t = two_landings();
     let target = vec![format!("{}@{}", t.prose, t.v)];
     let res =
@@ -471,7 +467,6 @@ fn picture(tail: &str) -> Vec<u8> {
 #[test]
 fn sdl4_removal_reports_keep_dark_and_removed_references() {
     let _clock = pin_clock(1_000_000);
-    let _staged = stage_snapshot_delta_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(&dir.path().join("src"), "rdy-standard").unwrap();
     let light = r.store_mut().put_blob(&picture("light")).unwrap();

@@ -1314,7 +1314,7 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         };
-        format::write_format_file(dir, &format::baseline_features())?;
+        format::write_format_file(dir, &format::creation_baseline())?;
         synced.push(dir.to_path_buf());
         Store::open_current_format(dir, synced, None, None)
     }
@@ -1339,6 +1339,19 @@ impl Store {
         format::write_format_file(dir, &store.features)?;
         store.synced.push(dir.to_path_buf());
         Ok(store)
+    }
+
+    /// Test hook: [`Store::create`] of a store that predates snapshot deltas, as an older rdy
+    /// made it: its `FORMAT` and its first batch name [`format::legacy_baseline_features`], and
+    /// it opens with no upgrade, so the writer's open does not activate the feature first. No
+    /// CLI, MCP, config or environment path reaches it.
+    #[doc(hidden)]
+    pub fn create_legacy_for_tests(dir: &Path) -> Result<Store, StoreError> {
+        crate::follower::refuse_follower(dir)?;
+        let mut synced = fsutil::create_dir_durable(dir)?;
+        format::write_format_file(dir, &format::legacy_baseline_features())?;
+        synced.push(dir.to_path_buf());
+        Store::open_current_format(dir, synced, None, None)
     }
 
     /// Opens an existing store with [`OpenPolicy::AutoUpgrade`]. Opening never creates or
@@ -1927,7 +1940,7 @@ impl Store {
             open: None,
             stale_index: false,
             creation,
-            features: format::baseline_features(),
+            features: format::legacy_baseline_features(),
             held_features: None,
             accept_pending: upgrade_pending,
             completion_pending: false,
@@ -2119,7 +2132,7 @@ impl Store {
             open: None,
             stale_index: false,
             creation,
-            features: format::baseline_features(),
+            features: format::legacy_baseline_features(),
             held_features: None,
             accept_pending: false,
             completion_pending: false,
@@ -2326,12 +2339,13 @@ impl Store {
                 }
             }
             None => {
-                // the features FORMAT mirrors (a new store's baseline), or the baseline for a
-                // holder, whose FORMAT comes after this batch
+                // the features FORMAT mirrors (a new store's baseline), or the new-store
+                // baseline for a holder, whose FORMAT comes after this batch; a store with no
+                // FORMAT predates snapshot deltas
                 let features = match holder {
-                    Some(_) => format::baseline_features(),
+                    Some(_) => format::creation_baseline(),
                     None => format::read_format_file(&self.dir)?
-                        .unwrap_or_else(format::baseline_features),
+                        .unwrap_or_else(format::legacy_baseline_features),
                 };
                 // one batch of the features and the repo id (D-DAGNB): set_refs refuses meta/
                 // refs

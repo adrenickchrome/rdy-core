@@ -504,9 +504,23 @@ impl Store {
             .merge_checked_with(&prev_state, &changes, adoption.as_ref())?
             .0
             .state;
-        let snapshot = crate::codec::item_new(kinds::SNAPSHOT, &state);
-        let sid = Hash::of(&snapshot.1);
-        items.push(snapshot);
+        // the landing's `state` is the hash of the map's canonical SNAPSHOT bytes (encoding 0);
+        // the SNAPSHOT itself is not written: the landing's delta (step 6c) records the map
+        let sid = rdy_model::snapshot_map_id(&state.blocks);
+        let legacy = crate::format::legacy_writer();
+        if legacy {
+            items.push(crate::codec::item_new(kinds::SNAPSHOT, &state));
+        }
+        // the previous landing's delta, the new delta's `base`: a store with landings and no
+        // delta for its head needs the snapshot-delta upgrade before a landing
+        let base = match prev_head {
+            Some(h) if !legacy => Some(
+                self.snapshot_delta_of(&h)?
+                    .ok_or(StoreError::UpgradeRequired)?
+                    .0,
+            ),
+            _ => None,
+        };
         // 6. the landing. A removal landing names the requests of the carriers it lands in
         // `checks`, sorted and without repeats: its hash, and so a signed tag, commits to the
         // exact removal set (D-CC90E), and no other request of the same carrier can reuse the
@@ -576,6 +590,14 @@ impl Store {
         let lid = Hash::of(&lframe.1);
         let landing_record = landing;
         items.push(lframe);
+        // 6c. the landing's delta (D-RP6SM): made from the final landing hash, every field of
+        // the record settled, and the previous landing's delta; written in the landing's batch,
+        // after it. The merge ran once: the delta is the difference of its two maps
+        if !legacy {
+            let delta = rdy_model::diff_snapshots(lid, base, &prev_state.blocks, &state.blocks);
+            debug_assert_eq!(delta.full, sid);
+            items.push(crate::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        }
         // 6b. the set's next version, chosen by this landing
         let mut alt_ref = None;
         let alt_version = match (&req.alt, alt_prev) {

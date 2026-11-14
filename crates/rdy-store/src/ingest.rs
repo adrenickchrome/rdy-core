@@ -10,12 +10,12 @@
 //! the source passes it here too.
 //!
 //! A dump of a scalar store format (dump formats 1 to 3) gets one more batch after its own:
-//! `upgrade` appends it, and it sets `meta/store_features` to the baseline features
-//! (`crate::format::baseline_features`; FW-UP1, in its smallest form), merged with every feature
-//! the ingested records use (`crate::format::required_features`, their first use). The historical
-//! `meta/store_format` refs the dump holds stay as they are, and no frame is re-encoded
-//! (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch gives it one
-//! (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
+//! `upgrade` appends it, and it sets `meta/store_features` to the legacy baseline features
+//! (`crate::format::legacy_baseline_features`; FW-UP1, in its smallest form), merged with every
+//! feature the ingested records use (`crate::format::required_features`, their first use). The
+//! historical `meta/store_format` refs the dump holds stay as they are, and no frame is
+//! re-encoded (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch
+//! gives it one (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
 //! manifest, which the load keeps, unknown compatible features included. That manifest must name
 //! every feature the ingested records use; a dump that under-reports one is refused.
 //!
@@ -235,7 +235,7 @@ impl Ingest {
             Some(f) => f,
             None => match &self.features_ref {
                 Some(v) => format::decode_features(v)?,
-                None => format::baseline_features(),
+                None => format::legacy_baseline_features(),
             },
         };
         format::write_format_file(&self.dir, &features)?;
@@ -768,8 +768,8 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                 format::LAST_SCALAR_STORE_FORMAT
             )));
         }
-        // the baseline, and every feature the ingested records use (their first use)
-        let mut features = format::baseline_features().merged(&self.used);
+        // the legacy baseline, and every feature the ingested records use (their first use)
+        let mut features = format::legacy_baseline_features().merged(&self.used);
         // and the snapshot deltas in the same one tail batch, when this rdy converts them
         let mut deltas = vec![];
         if let Some(converted) = self.conversion(&features)? {

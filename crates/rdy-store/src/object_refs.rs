@@ -52,36 +52,7 @@ use std::fmt;
 /// Every assigned portable object kind, ascending: what [`refs_of`] accepts and what a kind-None
 /// edge may resolve to. Kind 12 is unassigned; REF_UPDATE (8), BATCH_COMMIT (14) and
 /// REDACTION_CARRIED (23) are local.
-pub const PORTABLE_KINDS: [u8; 24] = [
-    kinds::BLOCK,
-    kinds::CHANGE,
-    kinds::PROPOSAL,
-    kinds::LANDING,
-    kinds::SNAPSHOT,
-    kinds::BLOB_CHUNK,
-    kinds::BLOB_MANIFEST,
-    kinds::TAG,
-    kinds::ANSWER,
-    kinds::SIGNATURE,
-    kinds::VIEW_OP,
-    kinds::INTENT,
-    kinds::ALT_SET,
-    kinds::REVIEW,
-    kinds::TENSION,
-    kinds::TRANSITION,
-    kinds::REDACTION,
-    kinds::REDACTION_RESIDUE,
-    kinds::REDACTION_APPLY,
-    kinds::PLAN,
-    kinds::ASSESSMENT,
-    kinds::DISPUTE,
-    kinds::DISPUTE_RESOLUTION,
-    kinds::CHECK_REQUEST,
-];
-
-/// [`PORTABLE_KINDS`] and SNAPSHOT_DELTA, ascending: the list while this thread stages snapshot
-/// deltas (`crate::format::stage_snapshot_delta_for_tests`).
-const STAGED_PORTABLE_KINDS: [u8; 25] = [
+pub const PORTABLE_KINDS: [u8; 25] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -109,14 +80,9 @@ const STAGED_PORTABLE_KINDS: [u8; 25] = [
     kinds::SNAPSHOT_DELTA,
 ];
 
-/// The portable object kinds on this thread: [`PORTABLE_KINDS`], and SNAPSHOT_DELTA while
-/// snapshot deltas are staged. Ascending.
+/// [`PORTABLE_KINDS`].
 pub fn portable_kinds() -> &'static [u8] {
-    if crate::format::snapshot_delta_staged() {
-        &STAGED_PORTABLE_KINDS
-    } else {
-        &PORTABLE_KINDS
-    }
+    &PORTABLE_KINDS
 }
 
 /// Whether `kind` is an assigned portable object kind ([`portable_kinds`]).

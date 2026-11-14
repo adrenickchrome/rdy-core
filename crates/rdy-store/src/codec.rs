@@ -24,9 +24,7 @@
 //!   encoding 0.
 //!
 //! SNAPSHOT_DELTA (kind 30) has no encoding 0 either: its first and only encoding is 1, raw kind
-//! `30 | 0x80`. Production does not register it yet; while a test holds
-//! `crate::format::stage_snapshot_delta_for_tests`, this thread registers it at encoding 1 and
-//! decodes it as `rdy_model::SnapshotDelta`.
+//! `30 | 0x80`, decoded as `rdy_model::SnapshotDelta`.
 //!
 //! Every other kind's latest encoding is 0. An encoding-0 CHANGE, LANDING or REDACTION_RESIDUE
 //! body decodes through its frozen type (`rdy_model::encoding::Legacy*V0`), never directly into
@@ -172,6 +170,10 @@ pub const REGISTERED: &[(u8, u16)] = &[
     (kinds::DISPUTE_RESOLUTION, 1),
     (kinds::CHECK_REQUEST, 1),
     (kinds::FOREIGN, 1),
+    (
+        kinds::SNAPSHOT_DELTA,
+        rdy_model::encoding::SNAPSHOT_DELTA_ENCODING,
+    ),
 ];
 
 /// The optional encodings repo links register (D-FK58A, store feature `foreign_copy`): (logical
@@ -214,25 +216,13 @@ pub fn first(kind: u8) -> u16 {
     }
 }
 
-/// The encoding a staged kind registers on this thread (`crate::format::
-/// stage_snapshot_delta_for_tests`): SNAPSHOT_DELTA at
-/// [`rdy_model::encoding::SNAPSHOT_DELTA_ENCODING`] while the guard is held.
-fn staged(kind: u8) -> u16 {
-    if kind == kinds::SNAPSHOT_DELTA && crate::format::snapshot_delta_staged() {
-        rdy_model::encoding::SNAPSHOT_DELTA_ENCODING
-    } else {
-        0
-    }
-}
-
-/// The latest encoding production registers for logical kind `kind` ([`REGISTERED`], or a staged
-/// kind's on this thread), else 0.
+/// The latest encoding production registers for logical kind `kind` ([`REGISTERED`]), else 0.
 fn registered_latest(kind: u8) -> u16 {
     REGISTERED
         .iter()
         .filter(|(k, _)| *k == kind)
         .map(|(_, v)| *v)
-        .fold(staged(kind), u16::max)
+        .fold(0, u16::max)
 }
 
 thread_local! {
@@ -1095,23 +1085,18 @@ mod tests {
             kinds::SNAPSHOT_DELTA,
             TypeId::of::<rdy_model::StateSnapshot>()
         ));
-        assert_eq!(registered_latest(kinds::SNAPSHOT_DELTA), 0);
-        assert_eq!(newest(kinds::SNAPSHOT_DELTA), 0);
-        {
-            let _staged = crate::format::stage_snapshot_delta_for_tests();
-            assert_eq!(registered_latest(kinds::SNAPSHOT_DELTA), 1);
-            assert_eq!(newest(kinds::SNAPSHOT_DELTA), 1);
-            // a staged encoding is a registered one, not a test hook's
-            assert!(!is_test_version(kinds::SNAPSHOT_DELTA, 1));
-            assert_eq!(raw_kind(kinds::SNAPSHOT_DELTA, 1), 158);
-            assert!(frame(kinds::SNAPSHOT_DELTA, 1, vec![]).is_ok());
-            assert_eq!(
-                frame(kinds::SNAPSHOT_DELTA, 0, vec![]),
-                Err(RecordError::UnknownVersion)
-            );
-        }
-        assert_eq!(latest(kinds::SNAPSHOT_DELTA), 0);
-        // the released registry is unchanged
-        assert!(!REGISTERED.iter().any(|(k, _)| *k == kinds::SNAPSHOT_DELTA));
+        // kind 30 is registered at encoding 1 (the delta writer ships), and has no encoding 0
+        assert_eq!(registered_latest(kinds::SNAPSHOT_DELTA), 1);
+        assert_eq!(newest(kinds::SNAPSHOT_DELTA), 1);
+        assert_eq!(latest(kinds::SNAPSHOT_DELTA), 1);
+        // a registered encoding, not a test hook's
+        assert!(!is_test_version(kinds::SNAPSHOT_DELTA, 1));
+        assert_eq!(raw_kind(kinds::SNAPSHOT_DELTA, 1), 158);
+        assert!(frame(kinds::SNAPSHOT_DELTA, 1, vec![]).is_ok());
+        assert_eq!(
+            frame(kinds::SNAPSHOT_DELTA, 0, vec![]),
+            Err(RecordError::UnknownVersion)
+        );
+        assert!(REGISTERED.contains(&(kinds::SNAPSHOT_DELTA, 1)));
     }
 }
