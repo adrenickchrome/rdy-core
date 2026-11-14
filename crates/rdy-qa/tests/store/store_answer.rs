@@ -384,7 +384,7 @@ fn again<T: Serialize + DeserializeOwned>(payload: &[u8]) -> Vec<u8> {
 
 #[test]
 fn di1_no_existing_kind_changes_its_bytes() {
-    let (frames, _, format) = fixture_frames("v1-s10.rdydump");
+    let (frames, log_end, format) = fixture_frames("v1-s10.rdydump");
     assert_eq!(format, 10);
     let mut seen = BTreeSet::new();
     for f in &frames {
@@ -427,10 +427,40 @@ fn di1_no_existing_kind_changes_its_bytes() {
         !want.contains(&kinds::ANSWER),
         "ANSWER is new in store format 11"
     );
+    // current coverage (SD1 Task 6): the load of that fixture adds kind 30, whose encoding-1
+    // bytes are canonical; the frozen kinds above keep theirs
+    let to = tempfile::tempdir().unwrap();
+    let dir = to.path().join("p");
+    load(&fixture("v1-s10.rdydump"), &dir).unwrap();
+    let r = Rdy::open(&dir).unwrap();
+    let mut deltas = 0;
+    r.store()
+        .reader()
+        .for_each_frame_from(log_end, r.store().log_end(), |_, raw, _, payload, _| {
+            if rdy_store::codec::logical_kind(raw) == kinds::SNAPSHOT_DELTA {
+                let d: SnapshotDelta = rdy_store::codec::decode_record(raw, payload).unwrap();
+                let again = rdy_store::codec::item(kinds::SNAPSHOT_DELTA, &d).unwrap();
+                assert_eq!(
+                    again,
+                    (raw, payload.to_vec()),
+                    "a delta's bytes are canonical"
+                );
+                deltas += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        deltas,
+        r.store().reader().project_landings().unwrap().len(),
+        "one delta per landing"
+    );
+    r.close().unwrap();
 }
 
 /// Guard beside `dl8_the_v1_fixture_loads_with_every_hash`: a load of the v1-s10 fixture into
-/// a feature store appends one `meta/store_features` batch and nothing else (FW-UP1, D-WWAK7).
+/// a feature store appends one `meta/store_features` batch and nothing else (FW-UP1, D-WWAK7):
+/// its snapshot deltas, its refs and its marker (SD1 Task 6).
 #[test]
 fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     let to = tempfile::tempdir().unwrap();
@@ -446,6 +476,9 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
             Ok(())
         })
         .unwrap();
+    // the batch's snapshot deltas lead it, one per landing (SD1 Task 6, D-918YB)
+    let deltas = rdy_qa::chain_fixture::take_delta_head(&mut tail, r.store());
+    assert!(deltas >= 1, "the fixture has landings");
     // RULING F2 (Export and clone): a log with no repo id gets one in the upgrade batch.
     assert_eq!(tail.len(), 3, "two ref frames and their marker: {tail:?}");
     assert_eq!(tail[0].0, kinds::REF_UPDATE);

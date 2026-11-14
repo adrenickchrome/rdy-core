@@ -250,7 +250,10 @@ fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
     );
     let t = Store::open(&to).unwrap();
     assert_eq!(report.end, t.log_end());
-    let after = frames_after(&t, src_end);
+    // the batch's snapshot deltas lead it, one per landing (SD1 Task 6, D-918YB)
+    let mut after = frames_after(&t, src_end);
+    let deltas = rdy_qa::chain_fixture::take_delta_head(&mut after, &t);
+    assert!(deltas >= 1, "the rolling store has landings");
     assert_eq!(after.len(), 2, "one ref frame and its marker: {after:?}");
     assert_eq!(after[0].0, kinds::REF_UPDATE);
     let u: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
@@ -345,7 +348,10 @@ fn ec2_an_upgrade_of_a_log_with_no_repo_id_writes_the_format_and_a_new_repo_id_i
     let to = base.path().join("dst");
     let log_end = upgraded_s11(&to);
     let t = Store::open(&to).unwrap();
-    let after = frames_after(&t, log_end);
+    // the batch's snapshot deltas lead it, one per landing (SD1 Task 6, D-918YB)
+    let mut after = frames_after(&t, log_end);
+    let deltas = rdy_qa::chain_fixture::take_delta_head(&mut after, &t);
+    assert!(deltas >= 1, "the fixture has landings");
     assert_eq!(after.len(), 3, "two ref frames and one marker: {after:?}");
     assert_eq!(after[0].0, kinds::REF_UPDATE);
     let f: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
@@ -358,7 +364,11 @@ fn ec2_an_upgrade_of_a_log_with_no_repo_id_writes_the_format_and_a_new_repo_id_i
     assert_eq!(after[2].0, kinds::BATCH_COMMIT);
     let m: BatchCommit = postcard::from_bytes(&after[2].1).unwrap();
     assert_eq!(m.start, log_end, "one batch, from the fixture's log end");
-    assert_eq!(m.frames, 2, "one batch of both refs");
+    assert_eq!(
+        u64::from(m.frames),
+        2 + deltas,
+        "one batch of the deltas and both refs"
+    );
     assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), Some(r.value));
     t.check_objects().unwrap();
 }

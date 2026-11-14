@@ -791,6 +791,36 @@ pub fn dump_load_facts(p: &Path, to: &Path) -> Value {
     v
 }
 
+/// A load of the frozen dump `p` into the new project `to`, against `want` ([`dump_load_facts`]
+/// recorded before snapshot deltas): fsck passes after a reindex, the load's summary and the
+/// foreign copy read as recorded, and the store reads as recorded in its source prefix, then
+/// holds the one upgrade tail of the load ([`assert_upgraded_facts`], SD1 Task 6).
+pub fn assert_upgraded_dump_load(p: &Path, to: &Path, want: &Value, what: &str) {
+    let s = rdy_engine::load::load(p, to).unwrap_or_else(|e| panic!("{what}: load: {e:?}"));
+    let mut r = Rdy::open(to).unwrap();
+    r.reindex().unwrap();
+    let report = r
+        .fsck()
+        .unwrap_or_else(|e| panic!("{what}: fsck failed: {e:?}"));
+    assert!(report.warnings.is_empty(), "{what}: {:?}", report.warnings);
+    let summary = json!({
+        "dump_format": s.dump_format,
+        "batches": s.batches,
+        "frames": s.frames,
+        "landings": s.landings,
+        "tags": s.tags,
+        "views": s.views,
+    });
+    assert_eq!(summary, want["summary"], "{what}: the load's summary");
+    assert_eq!(
+        foreign_facts(&r),
+        want["foreign"],
+        "{what}: the foreign copy"
+    );
+    assert_upgraded_facts(&r, &want["store"], what);
+    r.close().unwrap();
+}
+
 /// What the link delivery `bytes` states: its frames as the released sync expect files state
 /// them (`stream`: the header, each object record and the trailer's totals), its delivery check
 /// (`delivery`: `check_delivery`'s report), its selection identity (D-C94DV) recomputed from the

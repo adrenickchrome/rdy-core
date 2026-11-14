@@ -208,6 +208,32 @@ pub const V15_KINDS: [u8; 20] = [
     kinds::REDACTION_APPLY,
 ];
 
+/// The object kinds that `project` holds as this rdy writes it (SD1 Task 6, D-918YB):
+/// `V15_KINDS` with each landing's `SNAPSHOT_DELTA` (kind 30) in place of its `SNAPSHOT` (kind 5),
+/// in numeric order. Unlike the lists above, this one follows the current writer.
+pub const WRITER_KINDS: [u8; 20] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::REF_UPDATE,
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+    kinds::REDACTION,
+    kinds::REDACTION_RESIDUE,
+    kinds::REDACTION_APPLY,
+    kinds::SNAPSHOT_DELTA,
+];
+
 /// The removed term's body: a selected canary, held only by the removed payloads.
 pub const CANARY_BODY: &str = "Kestrel body canary.";
 /// The removed term's name field: a selected canary, held only by the removed payloads.

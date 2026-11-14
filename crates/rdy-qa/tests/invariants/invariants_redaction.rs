@@ -855,8 +855,11 @@ fn rdx15_missing_content_needs_exact_authorization() {
     }
 }
 
+/// The legacy reference case (SD1 Task 6): a store whose landings write their full SNAPSHOT.
+/// `rdx15_snapshot_deltas_are_references` is the case of this rdy's writer.
 #[test]
 fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let mut p = landed();
     let reader = p.r.read().reader().clone();
     let rec: LandingRecord = reader.get_typed(kinds::LANDING, &p.landing).unwrap();
@@ -968,6 +971,99 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     let _ = p.sibling;
 }
 
+/// rdx15 with this rdy's writer (SD1 Task 6, D-918YB): a landing holds no SNAPSHOT; the report
+/// names its snapshot delta (and its landing and tag) as references it cannot erase. After the
+/// approved removal the delta's bytes are fixed, the landing's state still reads the original
+/// version, and the removal's own landing adds one delta and no SNAPSHOT.
+#[test]
+fn rdx15_snapshot_deltas_are_references() {
+    let mut p = landed();
+    let reader = p.r.read().reader().clone();
+    let rec: LandingRecord = reader.get_typed(kinds::LANDING, &p.landing).unwrap();
+    assert!(
+        !reader.has_kind(kinds::SNAPSHOT, &rec.state).unwrap(),
+        "no SNAPSHOT"
+    );
+    let (delta, _) = reader
+        .snapshot_delta_of(&p.landing)
+        .unwrap()
+        .expect("the landing has its delta");
+    let delta_bytes = reader.get_kind(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+    let version = canon_version(&p.r, &p.prose);
+    let deltas_before = count_kind(&p.r, kinds::SNAPSHOT_DELTA);
+    drop(reader);
+    let dry =
+        p.r.read()
+            .redaction_report(&RedactInput {
+                dry_run: true,
+                ..input(vec![p.prose.to_string()])
+            })
+            .unwrap();
+    let has = |kind: ImpactKind, record: &str| {
+        dry.inside.iter().any(|i| {
+            i.kind == kind
+                && i.record == record
+                && i.relation == ImpactRelation::References
+                && !i.erasable
+        })
+    };
+    assert!(
+        has(ImpactKind::SnapshotDelta, &delta.to_string()),
+        "{:?}",
+        dry.inside
+    );
+    assert!(
+        !dry.inside
+            .iter()
+            .any(|i| i.kind == ImpactKind::StateSnapshot),
+        "no SNAPSHOT row: {:?}",
+        dry.inside
+    );
+    assert!(has(ImpactKind::Landing, &p.landing.to_string()));
+    assert!(has(ImpactKind::Tag, "v1.0.0"));
+    assert_eq!(dry.assessment, AssessmentSupport::Carried);
+    let s = agent(1);
+    let res = p.r.redact(&s, input(vec![p.prose.to_string()])).unwrap();
+    let prop =
+        p.r.propose(&s, &s.default_view(), "Remove", Some("Removes the code."))
+            .unwrap();
+    p.r.land(&approver(), &prop.id).unwrap();
+    let st = p.r.read();
+    let reader = st.reader();
+    assert_eq!(
+        reader.redaction_of(kinds::BLOCK, &version).unwrap(),
+        res.redaction,
+        "the removal is active"
+    );
+    let after = reader.get_kind(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+    assert_eq!(after, delta_bytes, "the delta's bytes are fixed");
+    assert_eq!(
+        reader.snapshot_at(&p.landing).unwrap().blocks.get(&p.prose),
+        Some(&version),
+        "the landing's state still names the original version"
+    );
+    let req = reader.redaction_request(&res.redaction.unwrap()).unwrap();
+    assert!(
+        req.manifest
+            .inside
+            .iter()
+            .any(|i| i.kind == ImpactKind::SnapshotDelta && i.record == delta.to_string())
+    );
+    let head = st.canon_head().unwrap();
+    let removal: LandingRecord = p.r.store().get_typed(kinds::LANDING, &head).unwrap();
+    assert_eq!(removal.state, rec.state, "the canon state is unchanged");
+    assert_eq!(
+        count_kind(&p.r, kinds::SNAPSHOT),
+        0,
+        "no SNAPSHOT is written"
+    );
+    assert_eq!(
+        count_kind(&p.r, kinds::SNAPSHOT_DELTA),
+        deltas_before + 1,
+        "the removal's landing has its own delta"
+    );
+}
+
 /// How many frames of `kind` the log holds.
 fn count_kind(r: &Rdy, kind: u8) -> usize {
     let st = r.read();
@@ -977,7 +1073,8 @@ fn count_kind(r: &Rdy, kind: u8) -> usize {
             let k = match f {
                 StoredFrame::Present { kind, .. } | StoredFrame::Dropped { kind, .. } => kind,
             };
-            n += usize::from(k == kind);
+            // by logical kind: a frame of any encoding (`rdy_store::codec`)
+            n += usize::from(rdy_store::codec::logical_kind(k) == kind);
             Ok(())
         })
         .unwrap();
@@ -1079,31 +1176,41 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
     // an unremoved frozen change still fails: a canon landing whose state holds a rewritten
     // ruling, forged with raw writes (no engine or store writer lands one), is compared with the
     // version that reads in full
+    // the head's map is the store's one map read, and the forged landing carries its own
+    // snapshot delta, as the writer lands each landing (SD1 Task 6), so only the frozen rule
+    // is broken
     let head = r.read().canon_head().unwrap();
     let rec: LandingRecord = r.store().get_typed(kinds::LANDING, &head).unwrap();
-    let mut snap: StateSnapshot = r.store().get_typed(kinds::SNAPSHOT, &rec.state).unwrap();
+    let head_map = r.store().snapshot_at(&head).unwrap().blocks;
+    let (head_delta, _) = r
+        .store()
+        .reader()
+        .snapshot_delta_of(&head)
+        .unwrap()
+        .expect("the head landing has its delta");
     let mut ruling = r.store().get_block(&v2).unwrap();
     ruling.fields.insert(
         "statement".into(),
         rdy_model::FieldValue::Str("Ship daily".into()),
     );
     let block = postcard::to_allocvec(&ruling).unwrap();
-    snap.blocks.insert(dec.clone(), Hash::of(&block));
-    let snap_bytes = postcard::to_allocvec(&snap).unwrap();
+    let mut map = head_map.clone();
+    map.insert(dec.clone(), Hash::of(&block));
     let forged = LandingRecord {
         prev: Some(head),
-        state: Hash::of(&snap_bytes),
+        state: rdy_model::snapshot_map_id(&map),
         changes: vec![],
         read_identity: None,
         ..rec
     };
     let landing = postcard::to_allocvec(&forged).unwrap();
     let forged_id = Hash::of(&landing);
+    let delta = rdy_model::diff_snapshots(forged_id, Some(head_delta), &head_map, &map);
     r.store_mut()
         .write(vec![
             (kinds::BLOCK, block),
-            (kinds::SNAPSHOT, snap_bytes),
             (kinds::LANDING, landing),
+            rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta),
         ])
         .unwrap();
     r.store_mut()
@@ -1150,24 +1257,15 @@ fn sdl2_frozen_audit_reads_delta_only_history() {
     let dec = BlockId::parse(&d.created["$decision"]).unwrap();
     land(&mut r, "seed").unwrap();
     let v1 = canon_version(&r, &dec);
-    // each canon landing's delta, from its held SNAPSHOT
-    let mut chain = r.store().landings().unwrap();
-    chain.reverse();
-    let mut items = vec![];
-    let mut prev: Option<(BTreeMap<BlockId, Hash>, Hash)> = None;
-    for (landing, rec) in &chain {
-        let map = r.store().get::<StateSnapshot>(&rec.state).unwrap().blocks;
-        let empty = BTreeMap::new();
-        let (before, base) = match &prev {
-            Some((m, d)) => (m, Some(*d)),
-            None => (&empty, None),
-        };
-        let delta = rdy_model::diff_snapshots(*landing, base, before, &map);
-        items.push(rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
-        prev = Some((map, delta.id()));
-    }
-    r.store_mut().write(items).unwrap();
-    let (head_map, head_delta) = prev.unwrap();
+    // the writer lands each canon landing's delta (SD1 Task 6): the head's map and delta
+    let head = r.read().canon_head().unwrap();
+    let head_map = r.store().snapshot_at(&head).unwrap().blocks;
+    let (head_delta, _) = r
+        .store()
+        .reader()
+        .snapshot_delta_of(&head)
+        .unwrap()
+        .expect("the head landing has its delta");
     // a canon landing whose map holds a rewritten ruling, with its delta and no SNAPSHOT,
     // forged with raw writes (no writer lands one)
     let head = r.read().canon_head().unwrap();

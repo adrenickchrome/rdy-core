@@ -790,14 +790,15 @@ fn store_row() -> Value {
         ("DISPUTE_RESOLUTION", kinds::DISPUTE_RESOLUTION),
         ("CHECK_REQUEST", kinds::CHECK_REQUEST),
         ("FOREIGN", kinds::FOREIGN),
+        ("SNAPSHOT_DELTA", kinds::SNAPSHOT_DELTA),
     ]
     .into_iter()
     .map(|(n, k)| (n.to_string(), k))
     .collect();
     assert_eq!(
         kind_ids.values().max(),
-        Some(&kinds::FOREIGN),
-        "the kind ids end at FOREIGN"
+        Some(&kinds::SNAPSHOT_DELTA),
+        "the kind ids end at SNAPSHOT_DELTA"
     );
     let latest: BTreeMap<String, u16> = kind_ids
         .iter()
@@ -987,6 +988,7 @@ fn store_row() -> Value {
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
+            "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
             "view_replay": "a CHANGE whose links.replayed_from is set",
         },
         "encoding_versions": {
