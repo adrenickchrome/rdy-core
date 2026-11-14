@@ -6919,7 +6919,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// same empty write-report arrays as the format-3 import's, and its refusal states no issue rows.
 /// drv6: the old publication probes' docs hold no section and no decision, and their profiles
 /// cite no decision outside the selection, so the review's outline, decision titles, decision
-/// rows and dropped decisions are empty there; the review rows probe fills each of them.
+/// rows and dropped decisions are empty there; the review rows probe fills each of them. Its one
+/// row outside docs is an added decision, and an added row names no changed part, so its `what`
+/// is empty.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -6989,6 +6991,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/publication check first/stdout/references/links_outside/rows",
     "cli/publication check first/stdout/references/rows",
     "cli/publication check first/stdout/warnings",
+    "cli/publication check review rows/stdout/disclosure/|null/changed_outside_docs[]/what",
     "cli/remote list/stdout/remotes",
     "cli/remote list/stdout/warnings",
     "cli/review request/stdout/case/code",
@@ -7129,6 +7132,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_publication_check first/ok/references/links_outside/rows",
     "mcp/rdy_publication_check first/ok/references/rows",
     "mcp/rdy_publication_check first/ok/warnings",
+    "mcp/rdy_publication_check review rows/ok/disclosure/|null/changed_outside_docs[]/what",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",
     "mcp/rdy_review run/ok/case/code",

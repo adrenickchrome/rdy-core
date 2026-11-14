@@ -1431,6 +1431,8 @@
                   "blob": "string",
                   "block": "string",
                   "home_doc": "string",
+                  "home_doc_title": "string",
+                  "label": "string",
                   "variant?": "string"
                 }
               ],
@@ -1447,10 +1449,13 @@
                   "after_available": "bool",
                   "after_blob": "string",
                   "after_home_doc": "string",
+                  "after_home_doc_title": "string",
                   "before_available": "bool",
                   "before_blob": "string",
                   "before_home_doc": "string",
+                  "before_home_doc_title": "string",
                   "block": "string",
+                  "label": "string",
                   "variant?": "string"
                 }
               ],
@@ -1459,9 +1464,46 @@
                   "after_digest": "string",
                   "after_path": "string",
                   "before_digest": "string",
+                  "before_page": "string",
                   "before_path": "string",
+                  "before_title": "null",
+                  "changes": [
+                    {
+                      "block_type": "string",
+                      "change": "string",
+                      "diff": "null",
+                      "excerpt": "string",
+                      "id": "string",
+                      "label": "string",
+                      "redacted": "bool",
+                      "section": "null",
+                      "what": [
+                        "string"
+                      ]
+                    }
+                  ],
+                  "counts": {
+                    "added": "number",
+                    "decisions_added": "number",
+                    "decisions_removed": "number",
+                    "decisions_updated": "number",
+                    "figures_added": "number",
+                    "figures_changed": "number",
+                    "figures_removed": "number",
+                    "moved": "number",
+                    "removed": "number",
+                    "sections_added": "number",
+                    "sections_removed": "number",
+                    "updated": "number"
+                  },
+                  "decisions": [],
                   "id": "string",
-                  "redacted": "bool"
+                  "omitted_changes": "number",
+                  "omitted_decisions": "number",
+                  "page": "string",
+                  "record_only": "bool",
+                  "redacted": "bool",
+                  "title": "string"
                 }
               ],
               "changed_folders": [],
@@ -1503,17 +1545,46 @@
                   "blob": "string",
                   "block": "string",
                   "home_doc": "string",
+                  "home_doc_title": "string",
+                  "label": "string",
                   "variant?": "string"
                 }
               ],
               "removed_docs": [
                 {
+                  "before_page": "string",
                   "digest": "string",
                   "id": "string",
                   "path": "string",
-                  "redacted": "bool"
+                  "redacted": "bool",
+                  "size": {
+                    "blocks": "number",
+                    "decisions": "number",
+                    "figures": "number",
+                    "sections": "number"
+                  },
+                  "title": "string"
                 }
-              ]
+              ],
+              "totals": {
+                "blocks_added": "number",
+                "blocks_moved": "number",
+                "blocks_removed": "number",
+                "blocks_updated": "number",
+                "decisions_added": "number",
+                "decisions_removed": "number",
+                "decisions_updated": "number",
+                "docs_added": "number",
+                "docs_changed": "number",
+                "docs_record_only": "number",
+                "docs_removed": "number",
+                "figures_added": "number",
+                "figures_changed": "number",
+                "figures_removed": "number",
+                "new_references": "number",
+                "sections_added": "number",
+                "sections_removed": "number"
+              }
             },
             "hidden_planned": {
               "blocks": "number",
@@ -1529,6 +1600,7 @@
                 }
               ]
             },
+            "included": "null",
             "profile": {
               "audience": "string",
               "id": "string",
@@ -1538,6 +1610,10 @@
               "version": "string"
             },
             "references": {
+              "dropped_decisions": {
+                "omitted_rows": "number",
+                "rows": []
+              },
               "excluded": "number",
               "links_outside": {
                 "count": "number",
@@ -1596,6 +1672,45 @@
                 }
               ]
             },
+            "included": {
+              "docs": "number",
+              "folders": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "decision_titles": [],
+                  "figures": [
+                    {
+                      "label": "string",
+                      "variant?": "string"
+                    }
+                  ],
+                  "folder": "null",
+                  "id": "string",
+                  "lede": "string",
+                  "omitted_decision_titles": "number",
+                  "omitted_figures": "number",
+                  "omitted_outline": "number",
+                  "outline": [],
+                  "page": "string",
+                  "size": {
+                    "blocks": "number",
+                    "decisions": "number",
+                    "figures": "number",
+                    "sections": "number"
+                  },
+                  "title": "string"
+                }
+              ],
+              "totals": {
+                "blocks": "number",
+                "decisions": "number",
+                "docs": "number",
+                "figures": "number",
+                "folders": "number",
+                "sections": "number"
+              }
+            },
             "profile": {
               "audience": "string",
               "id": "string",
@@ -1605,6 +1720,10 @@
               "version": "string"
             },
             "references": {
+              "dropped_decisions": {
+                "omitted_rows": "number",
+                "rows": []
+              },
               "excluded": "number",
               "links_outside": {
                 "count": "number",
@@ -1640,6 +1759,412 @@
             },
             "status": "string",
             "warnings": []
+          }
+        },
+        "publication check review rows": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "against": {
+              "|null": {
+                "kind": "string",
+                "landing": "string"
+              }
+            },
+            "disclosure": {
+              "|null": {
+                "added_attachments": [
+                  {
+                    "available": "bool",
+                    "blob": "string",
+                    "block": "string",
+                    "home_doc": "string",
+                    "home_doc_title": "null",
+                    "label": "string",
+                    "variant?": "string"
+                  }
+                ],
+                "added_docs": [
+                  {
+                    "decision_titles": [
+                      "string"
+                    ],
+                    "digest": "string",
+                    "figures": [
+                      {
+                        "label": "string",
+                        "variant?": "string"
+                      }
+                    ],
+                    "folder": "string",
+                    "id": "string",
+                    "lede": "string",
+                    "omitted_decision_titles": "number",
+                    "omitted_figures": "number",
+                    "omitted_outline": "number",
+                    "outline": [
+                      "string"
+                    ],
+                    "page": "string",
+                    "path": "string",
+                    "redacted": "bool",
+                    "size": {
+                      "blocks": "number",
+                      "decisions": "number",
+                      "figures": "number",
+                      "sections": "number"
+                    },
+                    "title": "null"
+                  }
+                ],
+                "after_profile_version": "string",
+                "after_selection_hash": "string",
+                "after_selection_identity": "string",
+                "audience": "string",
+                "before_profile_version": "string",
+                "before_selection_hash": "string",
+                "before_selection_identity": "string",
+                "changed_attachments": [
+                  {
+                    "after_available": "bool",
+                    "after_blob": "string",
+                    "after_home_doc": "string",
+                    "after_home_doc_title": "string",
+                    "before_available": "bool",
+                    "before_blob": "string",
+                    "before_home_doc": "string",
+                    "before_home_doc_title": "string",
+                    "block": "string",
+                    "label": "string"
+                  }
+                ],
+                "changed_docs": [
+                  {
+                    "after_digest": "string",
+                    "after_path": "string",
+                    "before_digest": "string",
+                    "before_page": "string",
+                    "before_path": "string",
+                    "before_title": "null",
+                    "changes": [
+                      {
+                        "block_type": "string",
+                        "change": "string",
+                        "diff": {
+                          "|null": [
+                            {
+                              "op": "string",
+                              "text": "string"
+                            }
+                          ]
+                        },
+                        "excerpt": "null|string",
+                        "id": "string",
+                        "label": "string",
+                        "redacted": "bool",
+                        "section": "null|string",
+                        "what": [
+                          "string"
+                        ]
+                      }
+                    ],
+                    "counts": {
+                      "added": "number",
+                      "decisions_added": "number",
+                      "decisions_removed": "number",
+                      "decisions_updated": "number",
+                      "figures_added": "number",
+                      "figures_changed": "number",
+                      "figures_removed": "number",
+                      "moved": "number",
+                      "removed": "number",
+                      "sections_added": "number",
+                      "sections_removed": "number",
+                      "updated": "number"
+                    },
+                    "decisions": [
+                      {
+                        "change": "string",
+                        "excerpt": "null|string",
+                        "id": "string",
+                        "status_from": "null|string",
+                        "status_to": "null|string",
+                        "title": "string",
+                        "what": [
+                          "string"
+                        ]
+                      }
+                    ],
+                    "id": "string",
+                    "omitted_changes": "number",
+                    "omitted_decisions": "number",
+                    "page": "string",
+                    "record_only": "bool",
+                    "redacted": "bool",
+                    "title": "string"
+                  }
+                ],
+                "changed_folders": [
+                  {
+                    "after_path": "string",
+                    "after_version": "string",
+                    "before_path": "string",
+                    "before_title": "string",
+                    "before_version": "string",
+                    "id": "string",
+                    "redacted": "bool",
+                    "title": "string"
+                  }
+                ],
+                "changed_outside_docs": [
+                  {
+                    "after_version": "string",
+                    "before_version": "null",
+                    "block_type": "string",
+                    "change": "string",
+                    "excerpt": "string",
+                    "id": "string",
+                    "label": "string",
+                    "record_only": "bool",
+                    "redacted": "bool",
+                    "status_from": "null",
+                    "status_to": "string",
+                    "title": "string",
+                    "what": []
+                  }
+                ],
+                "new_reference_count": "number",
+                "new_references": [
+                  {
+                    "classification": "string",
+                    "location": "string",
+                    "occurrences": "number",
+                    "source": "string",
+                    "source_doc_title": "null",
+                    "source_label": "string",
+                    "target": "string",
+                    "target_label": "string"
+                  }
+                ],
+                "newly_hidden_planned": {
+                  "blocks": "number",
+                  "docs": "number",
+                  "omitted_rows": "number",
+                  "rows": [
+                    {
+                      "doc": "string",
+                      "doc_hidden": "bool",
+                      "hidden_blocks": "number",
+                      "redacted": "bool",
+                      "title": "string"
+                    }
+                  ]
+                },
+                "omitted": {
+                  "added_attachments": "number",
+                  "added_docs": "number",
+                  "changed_attachments": "number",
+                  "changed_docs": "number",
+                  "changed_folders": "number",
+                  "changed_outside_docs": "number",
+                  "new_references": "number",
+                  "redactions": "number",
+                  "removed_attachments": "number",
+                  "removed_docs": "number"
+                },
+                "profile_changed": "bool",
+                "profile_id": "string",
+                "redactions": [
+                  "string"
+                ],
+                "removed_attachments": [
+                  {
+                    "available": "bool",
+                    "blob": "string",
+                    "block": "string",
+                    "home_doc": "string",
+                    "home_doc_title": "string",
+                    "label": "string"
+                  }
+                ],
+                "removed_docs": [
+                  {
+                    "before_page": "string",
+                    "digest": "string",
+                    "id": "string",
+                    "path": "string",
+                    "redacted": "bool",
+                    "size": {
+                      "blocks": "number",
+                      "decisions": "number",
+                      "figures": "number",
+                      "sections": "number"
+                    },
+                    "title": "string"
+                  }
+                ],
+                "totals": {
+                  "blocks_added": "number",
+                  "blocks_moved": "number",
+                  "blocks_removed": "number",
+                  "blocks_updated": "number",
+                  "decisions_added": "number",
+                  "decisions_removed": "number",
+                  "decisions_updated": "number",
+                  "docs_added": "number",
+                  "docs_changed": "number",
+                  "docs_record_only": "number",
+                  "docs_removed": "number",
+                  "figures_added": "number",
+                  "figures_changed": "number",
+                  "figures_removed": "number",
+                  "new_references": "number",
+                  "sections_added": "number",
+                  "sections_removed": "number"
+                }
+              }
+            },
+            "hidden_planned": {
+              "blocks": "number",
+              "docs": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "doc": "string",
+                  "doc_hidden": "bool",
+                  "hidden_blocks": "number",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ]
+            },
+            "included": {
+              "|null": {
+                "docs": "number",
+                "folders": "number",
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "decision_titles": [
+                      "string"
+                    ],
+                    "figures": [
+                      {
+                        "label": "string",
+                        "variant?": "string"
+                      }
+                    ],
+                    "folder": "null|string",
+                    "id": "string",
+                    "lede": "string",
+                    "omitted_decision_titles": "number",
+                    "omitted_figures": "number",
+                    "omitted_outline": "number",
+                    "outline": [
+                      "string"
+                    ],
+                    "page": "string",
+                    "size": {
+                      "blocks": "number",
+                      "decisions": "number",
+                      "figures": "number",
+                      "sections": "number"
+                    },
+                    "title": "null|string"
+                  }
+                ],
+                "totals": {
+                  "blocks": "number",
+                  "decisions": "number",
+                  "docs": "number",
+                  "figures": "number",
+                  "folders": "number",
+                  "sections": "number"
+                }
+              }
+            },
+            "profile": {
+              "audience": "string",
+              "id": "string",
+              "key": "string",
+              "title": "string",
+              "trail": "bool",
+              "version": "string"
+            },
+            "references": {
+              "dropped_decisions": {
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "id": "string",
+                    "title": "string"
+                  }
+                ]
+              },
+              "excluded": "number",
+              "links_outside": {
+                "count": "number",
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "classification": "string",
+                    "location": "string",
+                    "occurrences": "number",
+                    "source": "string",
+                    "source_doc_title": "string",
+                    "source_label": "string",
+                    "target": "string",
+                    "target_label": "string"
+                  }
+                ]
+              },
+              "missing": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "classification": "string",
+                  "location": "string",
+                  "occurrences": "number",
+                  "source": "string",
+                  "source_doc_title": "null|string",
+                  "source_label": "string",
+                  "target": "string",
+                  "target_label": "string"
+                }
+              ],
+              "status": "string",
+              "total": "number"
+            },
+            "release": "null",
+            "scope": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "selection": {
+              "attachments": "number",
+              "blocks": "number",
+              "docs": "number",
+              "entries": [
+                {
+                  "id": "string",
+                  "redaction": "null|string",
+                  "version": "string"
+                }
+              ],
+              "folders": "number",
+              "hash": "string",
+              "identity": "string",
+              "omitted_entries": "number"
+            },
+            "status": "string",
+            "warnings": [
+              {
+                "code": "string",
+                "fix": "string",
+                "message": "string"
+              }
+            ]
           }
         },
         "q": {
@@ -21876,6 +22401,8 @@
                 "blob": "string",
                 "block": "string",
                 "home_doc": "string",
+                "home_doc_title": "string",
+                "label": "string",
                 "variant?": "string"
               }
             ],
@@ -21892,10 +22419,13 @@
                 "after_available": "bool",
                 "after_blob": "string",
                 "after_home_doc": "string",
+                "after_home_doc_title": "string",
                 "before_available": "bool",
                 "before_blob": "string",
                 "before_home_doc": "string",
+                "before_home_doc_title": "string",
                 "block": "string",
+                "label": "string",
                 "variant?": "string"
               }
             ],
@@ -21904,9 +22434,46 @@
                 "after_digest": "string",
                 "after_path": "string",
                 "before_digest": "string",
+                "before_page": "string",
                 "before_path": "string",
+                "before_title": "null",
+                "changes": [
+                  {
+                    "block_type": "string",
+                    "change": "string",
+                    "diff": "null",
+                    "excerpt": "string",
+                    "id": "string",
+                    "label": "string",
+                    "redacted": "bool",
+                    "section": "null",
+                    "what": [
+                      "string"
+                    ]
+                  }
+                ],
+                "counts": {
+                  "added": "number",
+                  "decisions_added": "number",
+                  "decisions_removed": "number",
+                  "decisions_updated": "number",
+                  "figures_added": "number",
+                  "figures_changed": "number",
+                  "figures_removed": "number",
+                  "moved": "number",
+                  "removed": "number",
+                  "sections_added": "number",
+                  "sections_removed": "number",
+                  "updated": "number"
+                },
+                "decisions": [],
                 "id": "string",
-                "redacted": "bool"
+                "omitted_changes": "number",
+                "omitted_decisions": "number",
+                "page": "string",
+                "record_only": "bool",
+                "redacted": "bool",
+                "title": "string"
               }
             ],
             "changed_folders": [],
@@ -21948,17 +22515,46 @@
                 "blob": "string",
                 "block": "string",
                 "home_doc": "string",
+                "home_doc_title": "string",
+                "label": "string",
                 "variant?": "string"
               }
             ],
             "removed_docs": [
               {
+                "before_page": "string",
                 "digest": "string",
                 "id": "string",
                 "path": "string",
-                "redacted": "bool"
+                "redacted": "bool",
+                "size": {
+                  "blocks": "number",
+                  "decisions": "number",
+                  "figures": "number",
+                  "sections": "number"
+                },
+                "title": "string"
               }
-            ]
+            ],
+            "totals": {
+              "blocks_added": "number",
+              "blocks_moved": "number",
+              "blocks_removed": "number",
+              "blocks_updated": "number",
+              "decisions_added": "number",
+              "decisions_removed": "number",
+              "decisions_updated": "number",
+              "docs_added": "number",
+              "docs_changed": "number",
+              "docs_record_only": "number",
+              "docs_removed": "number",
+              "figures_added": "number",
+              "figures_changed": "number",
+              "figures_removed": "number",
+              "new_references": "number",
+              "sections_added": "number",
+              "sections_removed": "number"
+            }
           },
           "hidden_planned": {
             "blocks": "number",
@@ -21974,6 +22570,7 @@
               }
             ]
           },
+          "included": "null",
           "profile": {
             "audience": "string",
             "id": "string",
@@ -21983,6 +22580,10 @@
             "version": "string"
           },
           "references": {
+            "dropped_decisions": {
+              "omitted_rows": "number",
+              "rows": []
+            },
             "excluded": "number",
             "links_outside": {
               "count": "number",
@@ -22038,6 +22639,45 @@
               }
             ]
           },
+          "included": {
+            "docs": "number",
+            "folders": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "decision_titles": [],
+                "figures": [
+                  {
+                    "label": "string",
+                    "variant?": "string"
+                  }
+                ],
+                "folder": "null",
+                "id": "string",
+                "lede": "string",
+                "omitted_decision_titles": "number",
+                "omitted_figures": "number",
+                "omitted_outline": "number",
+                "outline": [],
+                "page": "string",
+                "size": {
+                  "blocks": "number",
+                  "decisions": "number",
+                  "figures": "number",
+                  "sections": "number"
+                },
+                "title": "string"
+              }
+            ],
+            "totals": {
+              "blocks": "number",
+              "decisions": "number",
+              "docs": "number",
+              "figures": "number",
+              "folders": "number",
+              "sections": "number"
+            }
+          },
           "profile": {
             "audience": "string",
             "id": "string",
@@ -22047,6 +22687,10 @@
             "version": "string"
           },
           "references": {
+            "dropped_decisions": {
+              "omitted_rows": "number",
+              "rows": []
+            },
             "excluded": "number",
             "links_outside": {
               "count": "number",
@@ -22082,6 +22726,409 @@
           },
           "status": "string",
           "warnings": []
+        }
+      },
+      "rdy_publication_check review rows": {
+        "ok": {
+          "against": {
+            "|null": {
+              "kind": "string",
+              "landing": "string"
+            }
+          },
+          "disclosure": {
+            "|null": {
+              "added_attachments": [
+                {
+                  "available": "bool",
+                  "blob": "string",
+                  "block": "string",
+                  "home_doc": "string",
+                  "home_doc_title": "null",
+                  "label": "string",
+                  "variant?": "string"
+                }
+              ],
+              "added_docs": [
+                {
+                  "decision_titles": [
+                    "string"
+                  ],
+                  "digest": "string",
+                  "figures": [
+                    {
+                      "label": "string",
+                      "variant?": "string"
+                    }
+                  ],
+                  "folder": "string",
+                  "id": "string",
+                  "lede": "string",
+                  "omitted_decision_titles": "number",
+                  "omitted_figures": "number",
+                  "omitted_outline": "number",
+                  "outline": [
+                    "string"
+                  ],
+                  "page": "string",
+                  "path": "string",
+                  "redacted": "bool",
+                  "size": {
+                    "blocks": "number",
+                    "decisions": "number",
+                    "figures": "number",
+                    "sections": "number"
+                  },
+                  "title": "null"
+                }
+              ],
+              "after_profile_version": "string",
+              "after_selection_hash": "string",
+              "after_selection_identity": "string",
+              "audience": "string",
+              "before_profile_version": "string",
+              "before_selection_hash": "string",
+              "before_selection_identity": "string",
+              "changed_attachments": [
+                {
+                  "after_available": "bool",
+                  "after_blob": "string",
+                  "after_home_doc": "string",
+                  "after_home_doc_title": "string",
+                  "before_available": "bool",
+                  "before_blob": "string",
+                  "before_home_doc": "string",
+                  "before_home_doc_title": "string",
+                  "block": "string",
+                  "label": "string"
+                }
+              ],
+              "changed_docs": [
+                {
+                  "after_digest": "string",
+                  "after_path": "string",
+                  "before_digest": "string",
+                  "before_page": "string",
+                  "before_path": "string",
+                  "before_title": "null",
+                  "changes": [
+                    {
+                      "block_type": "string",
+                      "change": "string",
+                      "diff": {
+                        "|null": [
+                          {
+                            "op": "string",
+                            "text": "string"
+                          }
+                        ]
+                      },
+                      "excerpt": "null|string",
+                      "id": "string",
+                      "label": "string",
+                      "redacted": "bool",
+                      "section": "null|string",
+                      "what": [
+                        "string"
+                      ]
+                    }
+                  ],
+                  "counts": {
+                    "added": "number",
+                    "decisions_added": "number",
+                    "decisions_removed": "number",
+                    "decisions_updated": "number",
+                    "figures_added": "number",
+                    "figures_changed": "number",
+                    "figures_removed": "number",
+                    "moved": "number",
+                    "removed": "number",
+                    "sections_added": "number",
+                    "sections_removed": "number",
+                    "updated": "number"
+                  },
+                  "decisions": [
+                    {
+                      "change": "string",
+                      "excerpt": "null|string",
+                      "id": "string",
+                      "status_from": "null|string",
+                      "status_to": "null|string",
+                      "title": "string",
+                      "what": [
+                        "string"
+                      ]
+                    }
+                  ],
+                  "id": "string",
+                  "omitted_changes": "number",
+                  "omitted_decisions": "number",
+                  "page": "string",
+                  "record_only": "bool",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ],
+              "changed_folders": [
+                {
+                  "after_path": "string",
+                  "after_version": "string",
+                  "before_path": "string",
+                  "before_title": "string",
+                  "before_version": "string",
+                  "id": "string",
+                  "redacted": "bool",
+                  "title": "string"
+                }
+              ],
+              "changed_outside_docs": [
+                {
+                  "after_version": "string",
+                  "before_version": "null",
+                  "block_type": "string",
+                  "change": "string",
+                  "excerpt": "string",
+                  "id": "string",
+                  "label": "string",
+                  "record_only": "bool",
+                  "redacted": "bool",
+                  "status_from": "null",
+                  "status_to": "string",
+                  "title": "string",
+                  "what": []
+                }
+              ],
+              "new_reference_count": "number",
+              "new_references": [
+                {
+                  "classification": "string",
+                  "location": "string",
+                  "occurrences": "number",
+                  "source": "string",
+                  "source_doc_title": "null",
+                  "source_label": "string",
+                  "target": "string",
+                  "target_label": "string"
+                }
+              ],
+              "newly_hidden_planned": {
+                "blocks": "number",
+                "docs": "number",
+                "omitted_rows": "number",
+                "rows": [
+                  {
+                    "doc": "string",
+                    "doc_hidden": "bool",
+                    "hidden_blocks": "number",
+                    "redacted": "bool",
+                    "title": "string"
+                  }
+                ]
+              },
+              "omitted": {
+                "added_attachments": "number",
+                "added_docs": "number",
+                "changed_attachments": "number",
+                "changed_docs": "number",
+                "changed_folders": "number",
+                "changed_outside_docs": "number",
+                "new_references": "number",
+                "redactions": "number",
+                "removed_attachments": "number",
+                "removed_docs": "number"
+              },
+              "profile_changed": "bool",
+              "profile_id": "string",
+              "redactions": [
+                "string"
+              ],
+              "removed_attachments": [
+                {
+                  "available": "bool",
+                  "blob": "string",
+                  "block": "string",
+                  "home_doc": "string",
+                  "home_doc_title": "string",
+                  "label": "string"
+                }
+              ],
+              "removed_docs": [
+                {
+                  "before_page": "string",
+                  "digest": "string",
+                  "id": "string",
+                  "path": "string",
+                  "redacted": "bool",
+                  "size": {
+                    "blocks": "number",
+                    "decisions": "number",
+                    "figures": "number",
+                    "sections": "number"
+                  },
+                  "title": "string"
+                }
+              ],
+              "totals": {
+                "blocks_added": "number",
+                "blocks_moved": "number",
+                "blocks_removed": "number",
+                "blocks_updated": "number",
+                "decisions_added": "number",
+                "decisions_removed": "number",
+                "decisions_updated": "number",
+                "docs_added": "number",
+                "docs_changed": "number",
+                "docs_record_only": "number",
+                "docs_removed": "number",
+                "figures_added": "number",
+                "figures_changed": "number",
+                "figures_removed": "number",
+                "new_references": "number",
+                "sections_added": "number",
+                "sections_removed": "number"
+              }
+            }
+          },
+          "hidden_planned": {
+            "blocks": "number",
+            "docs": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "doc": "string",
+                "doc_hidden": "bool",
+                "hidden_blocks": "number",
+                "redacted": "bool",
+                "title": "string"
+              }
+            ]
+          },
+          "included": {
+            "|null": {
+              "docs": "number",
+              "folders": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "decision_titles": [
+                    "string"
+                  ],
+                  "figures": [
+                    {
+                      "label": "string",
+                      "variant?": "string"
+                    }
+                  ],
+                  "folder": "null|string",
+                  "id": "string",
+                  "lede": "string",
+                  "omitted_decision_titles": "number",
+                  "omitted_figures": "number",
+                  "omitted_outline": "number",
+                  "outline": [
+                    "string"
+                  ],
+                  "page": "string",
+                  "size": {
+                    "blocks": "number",
+                    "decisions": "number",
+                    "figures": "number",
+                    "sections": "number"
+                  },
+                  "title": "null|string"
+                }
+              ],
+              "totals": {
+                "blocks": "number",
+                "decisions": "number",
+                "docs": "number",
+                "figures": "number",
+                "folders": "number",
+                "sections": "number"
+              }
+            }
+          },
+          "profile": {
+            "audience": "string",
+            "id": "string",
+            "key": "string",
+            "title": "string",
+            "trail": "bool",
+            "version": "string"
+          },
+          "references": {
+            "dropped_decisions": {
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "id": "string",
+                  "title": "string"
+                }
+              ]
+            },
+            "excluded": "number",
+            "links_outside": {
+              "count": "number",
+              "omitted_rows": "number",
+              "rows": [
+                {
+                  "classification": "string",
+                  "location": "string",
+                  "occurrences": "number",
+                  "source": "string",
+                  "source_doc_title": "string",
+                  "source_label": "string",
+                  "target": "string",
+                  "target_label": "string"
+                }
+              ]
+            },
+            "missing": "number",
+            "omitted_rows": "number",
+            "rows": [
+              {
+                "classification": "string",
+                "location": "string",
+                "occurrences": "number",
+                "source": "string",
+                "source_doc_title": "null|string",
+                "source_label": "string",
+                "target": "string",
+                "target_label": "string"
+              }
+            ],
+            "status": "string",
+            "total": "number"
+          },
+          "release": "null",
+          "scope": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "selection": {
+            "attachments": "number",
+            "blocks": "number",
+            "docs": "number",
+            "entries": [
+              {
+                "id": "string",
+                "redaction": "null|string",
+                "version": "string"
+              }
+            ],
+            "folders": "number",
+            "hash": "string",
+            "identity": "string",
+            "omitted_entries": "number"
+          },
+          "status": "string",
+          "warnings": [
+            {
+              "code": "string",
+              "fix": "string",
+              "message": "string"
+            }
+          ]
         }
       },
       "rdy_query": {
