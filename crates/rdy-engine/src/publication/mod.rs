@@ -10,7 +10,8 @@
 //!
 //! The publication review reads each side through one seam ([`PublicationReviewSide`], D-W4YAE)
 //! and fills owned rows ([`review_model`]). A reader view ([`ReaderReviewSide`]) reads a resolved
-//! side; its compared parts are authored values ([`ReaderPartValue`], D-MCH70).
+//! side; its compared parts are authored values ([`ReaderPartValue`], D-MCH70). An added, removed
+//! or included doc reads its own side for its summary ([`doc_reviews`]).
 
 mod diff;
 mod hidden;
@@ -18,6 +19,7 @@ mod references;
 mod release;
 mod report;
 mod review_changes;
+mod review_docs;
 pub mod review_model;
 mod review_side;
 mod select;
@@ -32,6 +34,9 @@ pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
 pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, short_diff};
+pub use review_docs::{
+    DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_reviews, doc_summary, included,
+};
 pub use review_side::{
     BlockParts, DecisionFacts, PartName, PublicationReviewSide, ReaderPartValue, ReaderReviewSide,
     ReferenceLookup, ReviewRemovals, SelectionFacts, ShownBlock, TreeFacts, change_label,
