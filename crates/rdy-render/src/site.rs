@@ -3,8 +3,9 @@
 use crate::changes::Ch;
 use crate::inline::{self, Form};
 use rdy_engine::reader::labels;
+use rdy_engine::reader::shape::{self, Shape};
 use rdy_engine::reader::text::{self as reader, Reading};
-use rdy_engine::{E_PATH_CLASH, Materialized, RdyError};
+use rdy_engine::{Materialized, RdyError};
 use rdy_model::{Block, BlockId, RefMode, decision, tree};
 use rdy_schema::Pack;
 use regex::Regex;
@@ -42,12 +43,7 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
-#[cfg(test)]
-pub use rdy_engine::reader::text::RATIONALE;
 pub use rdy_engine::reader::text::{PUBLICATION_PROFILE, is_off_site, is_profile};
-
-/// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
-const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
 
 pub use rdy_engine::reader::labels::typed_key;
 
@@ -85,98 +81,15 @@ pub struct OutsideQuestions {
     pub questions: Vec<BlockId>,
 }
 
-/// The page the generated glossary owns: a top-level doc of this name has no place on the site.
-pub const GLOSSARY_NAME: &str = "glossary";
-
-/// Two siblings whose names match ignoring case: their pages would be one file on a file system
-/// that ignores case. Names are unique ignoring case among siblings, but a removed doc or folder
-/// is named by its id (D-3M81W), which a sibling's name may match. As checkout does, a build that
-/// writes files refuses with `E_PATH_CLASH`, and the fix names the sibling a person can rename:
-/// the removed one has no name to change.
-#[derive(Clone, Debug)]
-struct PathClash {
-    /// The removed doc or folder of the pair, if one is.
-    removed: Option<(BlockId, bool)>,
-    /// The sibling the fix names (the second of the pair when neither is removed).
-    other: BlockId,
-    /// The first of the pair, when neither is removed.
-    first: BlockId,
-    /// The name of `other`.
-    name: String,
-}
-
-impl PathClash {
-    fn of(
-        m: &Materialized,
-        names: &BTreeMap<BlockId, String>,
-        first: &BlockId,
-        second: &BlockId,
-    ) -> PathClash {
-        let removed = |id: &BlockId| {
-            m.get(id)
-                .filter(|b| b.is_redacted())
-                .map(|b| (b.id.clone(), b.block_type == tree::FOLDER))
-        };
-        let (removed, other) = match (removed(first), removed(second)) {
-            (Some(r), _) => (Some(r), second),
-            (None, Some(r)) => (Some(r), first),
-            (None, None) => (None, second),
-        };
-        PathClash {
-            removed,
-            other: other.clone(),
-            first: first.clone(),
-            name: names.get(other).cloned().unwrap_or_default(),
-        }
-    }
-
-    fn error(&self, verb: &str) -> RdyError {
-        let PathClash {
-            removed,
-            other,
-            first,
-            name,
-        } = self;
-        match removed {
-            Some((id, folder)) => {
-                let (what, file) = match folder {
-                    true => ("folder", "directory"),
-                    false => ("doc", "file"),
-                };
-                RdyError::new(
-                    E_PATH_CLASH,
-                    format!(
-                        "{other} is named {name:?}, which matches the {file} name of redacted {what} {id} (ignoring case), so they cannot both be written as files"
-                    ),
-                    format!(
-                        "rename {other} (a redacted {what}'s {file} is named by its id), then {verb} again"
-                    ),
-                )
-            }
-            None => RdyError::new(
-                E_PATH_CLASH,
-                format!(
-                    "{first} and {other} are both named {name:?} (ignoring case) under the same parent, so they cannot both be written as files"
-                ),
-                format!("rename one of them, then {verb} again"),
-            ),
-        }
-    }
-}
-
 pub struct Site<'a> {
     pub m: &'a Materialized,
-    /// Every folder's and doc's tree path.
-    paths: BTreeMap<BlockId, String>,
+    /// The site's shape: pages, reading order, numbers and path clashes
+    /// ([`rdy_engine::reader::shape`]).
+    shape: Shape<'a>,
     /// Every block inside a doc that has a page, by the anchor it has on that page.
     pub anchors: BTreeMap<BlockId, String>,
-    /// Every table, code and diagram block's number among the blocks of its kind in its doc,
-    /// from 1 in reading order: what its caption and its label count by.
-    pub numbers: BTreeMap<BlockId, usize>,
     /// Every doc in reading order: depth-first, siblings by their order.
     pub order: Vec<BlockId>,
-    /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
-    tree: Vec<BlockId>,
     /// The block each decision's permalink and references lead to: the first block it governs
     /// in reading order.
     governs: BTreeMap<BlockId, BlockId>,
@@ -199,13 +112,8 @@ pub struct Site<'a> {
     /// Whether a top-level doc named `glossary` (in any case) was left off the site: the
     /// generated glossary owns `glossary.html` (D-Y4884).
     pub glossary_doc_dropped: bool,
-    /// The docs left off the site for that reason: their terms are still listed, unlinked.
-    glossary_docs: Vec<BlockId>,
     /// The project's name: the label of the glossary's group of top-level docs.
     project: String,
-    /// The first two siblings, in tree order, whose names match ignoring case (see
-    /// [`Site::path_clash`]).
-    path_clash: Option<PathClash>,
     /// The navigation's lists, computed once: every folder's children that have a page, in
     /// order, under `Some(folder)`; the top-level docs that have a page under `None`.
     nav_lists: BTreeMap<Option<BlockId>, Vec<&'a Block>>,
@@ -213,8 +121,6 @@ pub struct Site<'a> {
     top_folders: Vec<&'a Block>,
     /// Each folder's and doc's place in its navigation list (see `nav_lists`).
     nav_pos: BTreeMap<BlockId, usize>,
-    /// The folder or doc whose page each page is (the first in tree order that has it).
-    page_owner: BTreeMap<String, BlockId>,
     /// The docs the previous/next pager walks: `order` less the docs left out of navigation.
     pager_order: Vec<BlockId>,
     /// Each doc's place in `pager_order`.
@@ -226,8 +132,6 @@ pub struct Site<'a> {
     /// Every label worked out so far, by block and reference depth: a label is read many times
     /// per render (links, hovers, crumbs, the navigation, the search, the twins).
     labels: RefCell<HashMap<(BlockId, usize), String>>,
-    /// Every doc's blocks in reading order (see `blocks_of`), walked once.
-    doc_blocks: BTreeMap<BlockId, Vec<&'a Block>>,
     /// Every summary's words worked out so far (see `summary_words`).
     summaries: RefCell<HashMap<(BlockId, usize, bool), String>>,
     /// Every block's place worked out so far (see `url_of`): a block is linked from its doc page,
@@ -275,86 +179,9 @@ impl<'a> Site<'a> {
         unavailable: Option<&'static str>,
         dropped_decisions: BTreeSet<BlockId>,
     ) -> Site<'a> {
-        // `level` folders are above `parent`'s children; only a damaged store nests deeper than
-        // MAX_FOLDER_DEPTH, and what lies below it gets no page
-        #[allow(clippy::too_many_arguments)]
-        fn walk(
-            m: &Materialized,
-            parent: Option<&BlockId>,
-            prefix: &str,
-            level: usize,
-            out: &mut BTreeMap<BlockId, String>,
-            order: &mut Vec<BlockId>,
-            tree_order: &mut Vec<BlockId>,
-            dropped: &mut Vec<BlockId>,
-            clash: &mut Option<PathClash>,
-        ) {
-            if level > tree::MAX_FOLDER_DEPTH {
-                return;
-            }
-            let names = m.names_under(parent);
-            let mut used: BTreeMap<String, &BlockId> = BTreeMap::new();
-            for b in m.children(parent) {
-                let Some(name) = names.get(&b.id) else {
-                    continue;
-                };
-                // two siblings whose names match ignoring case would be one file where case is
-                // ignored: the first such pair in tree order refuses a build that writes files
-                if let Some(other) = used.insert(name.to_ascii_lowercase(), &b.id)
-                    && clash.is_none()
-                {
-                    *clash = Some(PathClash::of(m, &names, other, &b.id));
-                }
-                // the generated glossary owns `glossary.html`: a top-level doc of that name, in
-                // any case (names and many file systems ignore case), has no page, no place in
-                // the navigation, and its blocks are not linked
-                if parent.is_none()
-                    && b.block_type == tree::DOC
-                    && name.eq_ignore_ascii_case(GLOSSARY_NAME)
-                {
-                    dropped.push(b.id.clone());
-                    continue;
-                }
-                let path = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}/{name}")
-                };
-                out.insert(b.id.clone(), path.clone());
-                tree_order.push(b.id.clone());
-                if b.block_type == tree::FOLDER {
-                    walk(
-                        m,
-                        Some(&b.id),
-                        &path,
-                        level + 1,
-                        out,
-                        order,
-                        tree_order,
-                        dropped,
-                        clash,
-                    );
-                } else if b.block_type == tree::DOC {
-                    order.push(b.id.clone());
-                }
-            }
-        }
-        let mut paths = BTreeMap::new();
-        let mut order = vec![];
-        let mut tree_order = vec![];
-        let mut dropped = vec![];
-        let mut path_clash = None;
-        walk(
-            m,
-            None,
-            "",
-            0,
-            &mut paths,
-            &mut order,
-            &mut tree_order,
-            &mut dropped,
-            &mut path_clash,
-        );
+        let shape = Shape::build(m);
+        let order = shape.docs().to_vec();
+        let tree_order = shape.tree();
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
         let mut nav_hidden: BTreeSet<BlockId> = order
@@ -376,13 +203,13 @@ impl<'a> Site<'a> {
             let mut kids = m
                 .children(Some(id))
                 .into_iter()
-                .filter(|c| tree::is_tree_type(&c.block_type) && paths.contains_key(&c.id))
+                .filter(|c| tree::is_tree_type(&c.block_type) && shape.page(&c.id).is_some())
                 .peekable();
             if kids.peek().is_some() && kids.all(|c| nav_hidden.contains(&c.id)) {
                 nav_hidden.insert(id.clone());
             }
         }
-        for id in &tree_order {
+        for id in tree_order {
             let Some(b) = m.get(id) else { continue };
             if !tree::is_tree_type(&b.block_type) || nav_hidden.contains(id) {
                 continue;
@@ -395,13 +222,12 @@ impl<'a> Site<'a> {
             nav_pos.insert(b.id.clone(), list.len());
             list.push(b);
         }
+        let glossary_doc_dropped = !shape.glossary_docs().is_empty();
         let mut site = Site {
             m,
-            paths,
+            shape,
             anchors: BTreeMap::new(),
-            numbers: BTreeMap::new(),
             order,
-            tree: tree_order,
             governs: BTreeMap::new(),
             open_questions: vec![],
             question_anchors: BTreeMap::new(),
@@ -410,19 +236,15 @@ impl<'a> Site<'a> {
             terms: vec![],
             term_anchors: BTreeMap::new(),
             term_groups: vec![],
-            glossary_doc_dropped: !dropped.is_empty(),
-            glossary_docs: dropped,
-            path_clash,
+            glossary_doc_dropped,
             project: project.to_string(),
             nav_lists,
             top_folders,
             nav_pos,
-            page_owner: BTreeMap::new(),
             pager_order: vec![],
             order_pos: BTreeMap::new(),
             nav_hidden,
             labels: RefCell::default(),
-            doc_blocks: BTreeMap::new(),
             summaries: RefCell::default(),
             urls: RefCell::default(),
             docs: RefCell::default(),
@@ -431,18 +253,6 @@ impl<'a> Site<'a> {
             #[cfg(test)]
             doc_calls: Default::default(),
         };
-        site.doc_blocks = site
-            .order
-            .iter()
-            .map(|d| (d.clone(), Self::walk_blocks(m, d)))
-            .collect();
-        let mut page_owner = BTreeMap::new();
-        for id in &site.tree {
-            if let Some(p) = site.page(id) {
-                page_owner.entry(p).or_insert_with(|| id.clone());
-            }
-        }
-        site.page_owner = page_owner;
         site.pager_order = site
             .order
             .iter()
@@ -454,7 +264,6 @@ impl<'a> Site<'a> {
             order_pos.entry(d.clone()).or_insert(i);
         }
         site.order_pos = order_pos;
-        site.compute_numbers();
         site.compute_anchors();
         site.compute_governed();
         site.compute_collected();
@@ -463,33 +272,7 @@ impl<'a> Site<'a> {
 
     /// Every block under `doc`, in reading order.
     fn blocks_of(&self, doc: &BlockId) -> &[&'a Block] {
-        self.doc_blocks.get(doc).map_or(&[], Vec::as_slice)
-    }
-
-    /// Every block under `doc`, in reading order, walked from the store.
-    fn walk_blocks(m: &'a Materialized, doc: &BlockId) -> Vec<&'a Block> {
-        let mut out = vec![];
-        let mut stack: Vec<&Block> = m.children(Some(doc)).into_iter().rev().collect();
-        while let Some(b) = stack.pop() {
-            out.push(b);
-            stack.extend(m.children(Some(&b.id)).into_iter().rev());
-        }
-        out
-    }
-
-    fn compute_numbers(&mut self) {
-        let mut numbers = BTreeMap::new();
-        for doc in &self.order {
-            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            for b in self.blocks_of(doc) {
-                if NUMBERED.contains(&b.block_type.as_str()) {
-                    let n = counts.entry(b.block_type.as_str()).or_default();
-                    *n += 1;
-                    numbers.insert(b.id.clone(), *n);
-                }
-            }
-        }
-        self.numbers = numbers;
+        self.shape.blocks_of(doc)
     }
 
     fn compute_anchors(&mut self) {
@@ -589,7 +372,8 @@ impl<'a> Site<'a> {
         // project root's. A group walks its folder's (or the root's) children depth-first,
         // skipping docs and folders, so a doc's questions are never listed twice.
         let folders = self
-            .tree
+            .shape
+            .tree()
             .iter()
             .filter_map(|id| self.m.get(id))
             .filter(|b| b.block_type == tree::FOLDER)
@@ -616,9 +400,10 @@ impl<'a> Site<'a> {
         // a top-level doc that gave way to the generated glossary has no page, but its terms are
         // still listed, unlinked, in the project's group (ruling task-12)
         let hidden: Vec<&'a Block> = self
-            .glossary_docs
+            .shape
+            .glossary_docs()
             .iter()
-            .flat_map(|d| Self::walk_blocks(self.m, d))
+            .flat_map(|d| shape::doc_blocks(self.m, d))
             .filter(|b| b.block_type == "term")
             .collect();
         terms.extend(hidden.into_iter().map(|b| (b, None)));
@@ -635,7 +420,8 @@ impl<'a> Site<'a> {
         }
         let mut groups = vec![];
         let tops = self
-            .tree
+            .shape
+            .tree()
             .iter()
             .filter_map(|id| self.m.get(id))
             .filter(|b| b.parent.is_none() && b.block_type == tree::FOLDER)
@@ -812,22 +598,18 @@ impl<'a> Site<'a> {
 
     /// Whether a doc or folder already has the page at `page`.
     pub(crate) fn page_taken(&self, page: &str) -> bool {
-        self.page_owner.contains_key(page)
+        self.shape.page_taken(page)
     }
 
     /// The refusal of a build that writes the site's pages as files, when two siblings' names
     /// match ignoring case (see [`PathClash`]); `verb` is the command to run again.
     pub fn path_clash(&self, verb: &str) -> Option<RdyError> {
-        self.path_clash.as_ref().map(|c| c.error(verb))
+        self.shape.path_clash().map(|c| c.error(verb))
     }
 
     /// The page of a folder or doc.
     pub fn page(&self, id: &BlockId) -> Option<String> {
-        let p = self.paths.get(id)?;
-        Some(match self.m.get(id)?.block_type == tree::FOLDER {
-            true => format!("{p}/index.html"),
-            false => format!("{p}.html"),
-        })
+        self.shape.page(id)
     }
 
     /// The folders and docs with a page that the navigation lists under `parent` (a folder), or
@@ -850,7 +632,7 @@ impl<'a> Site<'a> {
 
     /// Every folder and doc that has a page, in tree order.
     pub fn tree_pages(&self) -> impl Iterator<Item = &BlockId> {
-        self.tree.iter()
+        self.shape.tree().iter()
     }
 
     /// The doc that holds `id` (itself for a doc), as `Materialized::doc_of` finds it, each
@@ -971,7 +753,7 @@ impl<'a> Site<'a> {
 
     /// `b`'s number among the blocks of its kind in its doc (see `numbers`); 1 when it has none.
     pub fn number(&self, b: &Block) -> usize {
-        self.numbers.get(&b.id).copied().unwrap_or(1)
+        self.shape.number(&b.id).unwrap_or(1)
     }
 
     /// A field's text as a reader reads it, as a label ([`Form::Label`]): a code span's text, a
@@ -1489,7 +1271,7 @@ mod tests {
             let site = Site::new(&m, &pack, "Project");
             for verb in ["render", "export"] {
                 let e = site.path_clash(verb).expect("a refusal");
-                assert_eq!(e.code, E_PATH_CLASH);
+                assert_eq!(e.code, rdy_engine::E_PATH_CLASH);
                 assert_eq!(
                     e.message,
                     format!(

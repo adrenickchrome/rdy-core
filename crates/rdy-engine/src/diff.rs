@@ -357,22 +357,10 @@ impl<'a> SiblingPlaces<'a> {
     /// sides hold there.
     fn reordered(&mut self, parent: Option<&BlockId>, id: &BlockId) -> bool {
         let (from, to) = (self.from, self.to);
-        let places = self.by_parent.entry(parent.cloned()).or_insert_with(|| {
-            let old: Vec<&BlockId> = from.children(parent).iter().map(|b| &b.id).collect();
-            let new: Vec<&BlockId> = to.children(parent).iter().map(|b| &b.id).collect();
-            let in_new: BTreeSet<&BlockId> = new.iter().copied().collect();
-            let in_old: BTreeSet<&BlockId> = old.iter().copied().collect();
-            let mut out: BTreeMap<BlockId, (usize, usize)> = BTreeMap::new();
-            for (i, id) in old.into_iter().filter(|id| in_new.contains(id)).enumerate() {
-                out.insert(id.clone(), (i, 0));
-            }
-            for (i, id) in new.into_iter().filter(|id| in_old.contains(id)).enumerate() {
-                if let Some(slot) = out.get_mut(id) {
-                    slot.1 = i;
-                }
-            }
-            out
-        });
+        let places = self
+            .by_parent
+            .entry(parent.cloned())
+            .or_insert_with(|| crate::reader::shape::sibling_places(from, to, parent));
         places.get(id).is_some_and(|(a, b)| a != b)
     }
 }

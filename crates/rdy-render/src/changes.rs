@@ -443,16 +443,7 @@ fn side_of<'m>(id: &BlockId, sides: &Sides<'m>) -> Option<(&'m Block, &'m Materi
 
 /// Each block's place in the depth-first reading order of `m`.
 fn positions(m: &Materialized) -> BTreeMap<BlockId, usize> {
-    let mut out = BTreeMap::new();
-    let mut stack: Vec<&Block> = m.children(None).into_iter().rev().collect();
-    while let Some(b) = stack.pop() {
-        if out.contains_key(&b.id) {
-            continue;
-        }
-        out.insert(b.id.clone(), out.len());
-        stack.extend(m.children(Some(&b.id)).into_iter().rev());
-    }
-    out
+    rdy_engine::reader::shape::reading_positions(m)
 }
 
 /// A field's text as a reader reads it, when it has any: as a label, or, `coded`, with each code

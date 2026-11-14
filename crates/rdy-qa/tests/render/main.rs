@@ -13,6 +13,7 @@ mod render_diagram_environment;
 mod render_diagrams;
 mod render_disagree;
 mod render_disagree_group;
+mod render_disclosure_reader;
 mod render_dx2;
 mod render_font_parity;
 mod render_glossary;

@@ -1859,16 +1859,10 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
         sh.m.doc_of(&b.id)
             .map(|d| sh.site.label(d))
             .unwrap_or_default();
-    let mut cur = b.parent.as_ref().and_then(|p| sh.m.get(p));
-    // a damaged store may loop: never walk more steps than there are blocks
-    for _ in 0..=sh.m.len() {
-        let Some(p) = cur else { break };
-        if p.block_type == "section" {
-            return (doc, sh.site.label(p));
-        }
-        cur = p.parent.as_ref().and_then(|p| sh.m.get(p));
-    }
-    (doc, String::new())
+    let section = rdy_engine::reader::shape::section_of(&sh.m, &b.id)
+        .map(|s| sh.site.label(s))
+        .unwrap_or_default();
+    (doc, section)
 }
 
 fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {

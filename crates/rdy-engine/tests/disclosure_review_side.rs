@@ -706,3 +706,195 @@ fn drv1_reader_text_and_language_names_match_render() {
     assert_eq!(labels::language(" YML "), Some("yaml"));
     assert_eq!(labels::language("zig"), None);
 }
+
+// Task 1b: the removal projection, the shape and the count rule moved into
+// `rdy_engine::reader::shape` and `rdy_engine::reader::review`.
+
+fn hash(n: u8) -> rdy_model::Hash {
+    rdy_model::Hash([n; 32])
+}
+
+/// One doc with two prose blocks, a reference to the first, and two figures with a light and a
+/// dark image each.
+fn masking_fixture() -> Materialized {
+    let doc = Some("d-MMMMM");
+    let sec = Some("s-MMMMM");
+    let blocks = vec![
+        block(
+            "d-MMMMM",
+            "doc",
+            None,
+            "a0",
+            &[("name", s("masked")), ("doc_type", s("overview"))],
+            "",
+        ),
+        block(
+            "p-KKKKK",
+            "prose",
+            doc,
+            "a0",
+            &[],
+            "Leading words before any section.",
+        ),
+        block(
+            "s-MMMMM",
+            "section",
+            doc,
+            "a1",
+            &[("title", s("Masked part"))],
+            "",
+        ),
+        block("p-PPPPP", "prose", sec, "a0", &[], "Words a removal names."),
+        block("p-NNNNN", "prose", sec, "a1", &[], "See {{p-PPPPP}} here."),
+        block(
+            "x-PPPPP",
+            "figure",
+            sec,
+            "a2",
+            &[
+                ("alt", s("Light image lost")),
+                ("blob", s(&hash(11).to_string())),
+                ("dark_blob", s(&hash(12).to_string())),
+            ],
+            "",
+        ),
+        block(
+            "x-MMMMM",
+            "figure",
+            sec,
+            "a3",
+            &[
+                ("alt", s("Dark image lost")),
+                ("blob", s(&hash(13).to_string())),
+                ("dark_blob", s(&hash(14).to_string())),
+            ],
+            "",
+        ),
+        block(
+            "x-NNNNN",
+            "figure",
+            sec,
+            "a4",
+            &[
+                ("alt", s("Both images kept")),
+                ("blob", s(&hash(15).to_string())),
+                ("dark_blob", s(&hash(16).to_string())),
+            ],
+            "",
+        ),
+    ];
+    Materialized::build(
+        rdy_model::StateSnapshot::default(),
+        blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
+    )
+}
+
+/// D-Z8Q4N: a removal matches a block by its recorded version, never by its id alone. D-TBDA1:
+/// a figure whose light or dark image lost content reads as removed, and the other image never
+/// stands in. The mask applies before any reader fact: the label, the text, a label reached
+/// through a reference, the reading order and the count rule all read the stub.
+#[test]
+fn drv1_removed_versions_and_either_image_mask_reader_facts() {
+    use rdy_engine::reader::review::{between_states, figure_blobs, mask_removed};
+    use rdy_engine::reader::shape::{Shape, section_of};
+
+    let m = masking_fixture();
+    let v = |i: &str| m.version_of(&id(i)).expect("a version");
+    // nothing to remove: no projection
+    assert!(mask_removed(&m, &BTreeMap::new(), &BTreeMap::new()).is_none());
+    // a removal of another version of p-KKKKK masks nothing: it matches by version
+    let mut stale = m.get(&id("p-KKKKK")).unwrap().clone();
+    stale.body = "An older version.".into();
+    let other_version = BTreeMap::from([(stale.version_hash(), hash(90))]);
+    assert_ne!(stale.version_hash(), v("p-KKKKK"));
+    assert!(mask_removed(&m, &other_version, &BTreeMap::new()).is_none());
+
+    assert_eq!(
+        figure_blobs(m.get(&id("x-PPPPP")).unwrap()),
+        vec![hash(11), hash(12)],
+        "light first"
+    );
+    let versions = BTreeMap::from([(v("p-PPPPP"), hash(91))]);
+    // the light image of one figure and the dark image of another lost content
+    let blobs = BTreeMap::from([(hash(11), hash(92)), (hash(14), hash(93))]);
+    let masked = mask_removed(&m, &versions, &blobs).expect("a projection");
+
+    let removed = ["p-PPPPP", "x-PPPPP", "x-MMMMM"];
+    let kept = ["d-MMMMM", "p-KKKKK", "s-MMMMM", "p-NNNNN", "x-NNNNN"];
+    let requests = [hash(91), hash(92), hash(93)];
+    for (i, request) in removed.iter().zip(requests) {
+        let (was, is) = (m.get(&id(i)).unwrap(), masked.get(&id(i)).unwrap());
+        assert!(is.is_redacted(), "{i}");
+        assert_eq!(is.redaction(), Some(request), "{i}");
+        // the stub keeps its id, type, parent, order and recorded version
+        assert_eq!(
+            (&is.block_type, &is.parent, &is.order),
+            (&was.block_type, &was.parent, &was.order),
+            "{i}"
+        );
+        assert_eq!(masked.version_of(&id(i)), m.version_of(&id(i)), "{i}");
+        // no authored word survives: no alt, no file names, no body
+        assert!(is.fields.is_empty(), "{i}");
+        assert_eq!(is.body, CONTENT_REMOVED, "{i}");
+        assert!(figure_blobs(is).is_empty(), "{i}");
+    }
+    for i in kept {
+        assert_eq!(masked.get(&id(i)), m.get(&id(i)), "{i}");
+    }
+
+    // reader facts read the stub: its label is the notice, and so is a label reached through a
+    // reference to it
+    let side = Side::new(&masked);
+    for i in removed {
+        let b = masked.get(&id(i)).unwrap();
+        assert_eq!(labels::label(&side, b, 0), CONTENT_REMOVED, "{i}");
+        // the search's text of a stub is the notice alone
+        assert_eq!(text::own_text(&side, b), CONTENT_REMOVED, "{i}");
+    }
+    let refers = masked.get(&id("p-NNNNN")).unwrap();
+    assert_eq!(
+        labels::label(&side, refers, 0),
+        format!("See {CONTENT_REMOVED} here.")
+    );
+    let before = Side::new(&m);
+    assert_eq!(
+        labels::label(&before, m.get(&id("p-NNNNN")).unwrap(), 0),
+        "See Words a removal names. here."
+    );
+    assert_eq!(
+        labels::label(&side, masked.get(&id("x-NNNNN")).unwrap(), 0),
+        "Both images kept"
+    );
+
+    // the shape keeps every place: the doc's page, the reading order and the sections
+    let (shape, was) = (Shape::build(&masked), Shape::build(&m));
+    assert_eq!(shape.page(&id("d-MMMMM")).as_deref(), Some("masked.html"));
+    let order = |s: &Shape| -> Vec<String> {
+        s.blocks_of(&id("d-MMMMM"))
+            .iter()
+            .map(|b| b.id.to_string())
+            .collect()
+    };
+    assert_eq!(order(&shape), order(&was));
+    assert_eq!(
+        section_of(&masked, &id("x-MMMMM")).map(|s| s.id.to_string()),
+        Some("s-MMMMM".into())
+    );
+    assert_eq!(section_of(&masked, &id("p-KKKKK")), None, "a leading block");
+
+    // a stub keeps its recorded version, so the count rule counts no change for the removal
+    // itself; a side's later edit counts against the masked side, and the masked blocks stay
+    // uncounted
+    assert_eq!(between_states(&m, &masked).changed_blocks(), 0);
+    let mut edited = m.get(&id("p-KKKKK")).unwrap().clone();
+    edited.body = "Leading words, edited.".into();
+    let next = masked.with(&[rdy_model::Op::Update {
+        base: v("p-KKKKK"),
+        block: edited,
+    }]);
+    let rv = between_states(&masked, &next);
+    let changed: Vec<String> = rv.changed_set().iter().map(|b| b.to_string()).collect();
+    assert_eq!(changed, vec!["p-KKKKK"]);
+    let doc = rv.doc(&id("d-MMMMM")).expect("the doc changed");
+    assert_eq!((doc.edited, doc.new, doc.removed), (1, 0, 0));
+}
