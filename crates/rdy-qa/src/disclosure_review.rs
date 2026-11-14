@@ -7,18 +7,18 @@
 //! three removals:
 //!
 //! - `intro` (changed): an updated prose with a code span, a decision that a new one supersedes,
-//!   a second new decision,
-//!   a new claim that links a decision at the root, a figure whose image changes, a removed
-//!   figure, a reference outside the selection, a decision cited outside the selection, and a
-//!   link edge outside it. One planned note is hidden at both tags.
+//!   a second new decision, a new claim that links a decision at the root, a second new claim,
+//!   a figure whose image changes, a removed figure, a reference outside the selection, a
+//!   decision cited outside the selection, and a link edge outside it. One planned note is
+//!   hidden at both tags.
 //! - `setup` (added at `v2.0.0`, in `guides`): a section, prose with a code span, a decision, a
 //!   figure with a dark image, a new reference outside the selection and a new planned note.
 //! - `old` (in `guides` at `v1.0.0`, moved out of the selection at `v2.0.0`): a removed doc.
 //! - `guides`: its title changes at `v2.0.0`.
+//! - canon removes the second new claim, the second new decision and the doc `setup`. A removal
+//!   removes every version of its block, so it shows at both tags too.
 //!
 //! Every decision is built, so no decision makes the blocks beside it planned.
-//! - canon removes the new claim, the second new decision and the doc `setup`. A removal
-//!   removes every version of its block, so it shows at both tags too.
 use crate::fixtures::{approver, land, project, write, writer};
 use rdy_engine::pin_clock;
 use rdy_engine::redaction::RedactInput;
@@ -138,8 +138,9 @@ fn build(removals: bool) -> tempfile::TempDir {
              "links": {"supersedes": [{"target": d1}]}},
             {"op": "create", "type": "decision", "id": "$dn", "parent": start,
              "fields": {"title": "Name pages", "statement": "Name each page.", "status": "proposed", "built": "0.1.0"}},
-            {"op": "create", "type": "claim", "id": "$c2", "parent": start, "body": "The root claim.",
+            {"op": "create", "type": "claim", "parent": start, "body": "The root claim.",
              "links": {"decided_by": [{"target": droot}]}},
+            {"op": "create", "type": "claim", "id": "$c3", "parent": start, "body": "A claim to remove."},
             {"op": "update", "id": fc, "fields": {"blob": light_c2}},
             {"op": "delete", "id": fr},
             {"op": "update", "id": guides, "fields": {"title": "User guides"}},
@@ -159,7 +160,7 @@ fn build(removals: bool) -> tempfile::TempDir {
     let (setup, named, claim) = (
         w.created["$setup"].clone(),
         w.created["$dn"].clone(),
-        w.created["$c2"].clone(),
+        w.created["$c3"].clone(),
     );
     land(&mut r, "work").expect("the second landing");
     r.tag(&approver(), "v2.0.0", None, None).expect("v2.0.0");

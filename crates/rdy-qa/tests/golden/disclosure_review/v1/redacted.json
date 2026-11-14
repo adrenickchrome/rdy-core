@@ -8,16 +8,16 @@
       {
         "available": true,
         "blob": "40b22831bd4b63eaba43b075db9008256ec641f2edf6a732fab3a0a19c30f317",
-        "block": "fg-FXP25",
-        "home_doc": "d-SQ780",
+        "block": "fg-YABJ2",
+        "home_doc": "d-G7F9P",
         "home_doc_title": null,
         "label": "Figure N"
       },
       {
         "available": true,
         "blob": "c8231e5c4a651d6ed417313856c9a9d14ae8f557d61abd0731e5bcf876733f8f",
-        "block": "fg-FXP25",
-        "home_doc": "d-SQ780",
+        "block": "fg-YABJ2",
+        "home_doc": "d-G7F9P",
         "home_doc_title": null,
         "label": "Figure N",
         "variant": "dark"
@@ -28,7 +28,7 @@
         "decision_titles": [
           "Pin versions"
         ],
-        "digest": "cc2adf9a32327a9b6c0f39376305ca09b7e33e4e2e9f8079920590df08b527aa",
+        "digest": "e43957491ae31890949f897a19e9457db24888c033384b359051108e62fe67f3",
         "figures": [
           {
             "label": "Figure N"
@@ -39,7 +39,7 @@
           }
         ],
         "folder": "User guides",
-        "id": "d-SQ780",
+        "id": "d-G7F9P",
         "lede": "Install with `cargo`.",
         "omitted_decision_titles": 0,
         "omitted_figures": 0,
@@ -47,8 +47,8 @@
         "outline": [
           "Install"
         ],
-        "page": "guides/d-SQ780.html",
-        "path": "guides/d-SQ780",
+        "page": "guides/d-G7F9P.html",
+        "path": "guides/d-G7F9P",
         "redacted": true,
         "size": {
           "blocks": 4,
@@ -60,8 +60,8 @@
       }
     ],
     "after_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
-    "after_selection_hash": "cfeeeeb41bc91e88a610582fafeea531564098b0d9bfb9a8f7c4d69c9ec4dc75",
-    "after_selection_identity": "5da20866e879968aa8d4863429659ac2390ee84fc63df9b91122ca60b6e5c691",
+    "after_selection_hash": "17e8a76dd385870493a98f6ab84663810673c06ff7ca315cabfd3989c9aacfed",
+    "after_selection_identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
     "audience": "org",
     "before_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
     "before_selection_hash": "982f9a8f3ab0a6e96412653dea7e43a3f13b4dc21bfd3931aa108740dfa9f646",
@@ -82,7 +82,7 @@
     ],
     "changed_docs": [
       {
-        "after_digest": "61ea18c646c54577a4d84488f089083b775b5959568ef7d304fc201a4718ce83",
+        "after_digest": "dc89456e71e497c8334244b37d620fe524c279457849814228974d322d08a906",
         "after_path": "intro",
         "before_digest": "f0e4a658e0344eff97547872b6211829206dd8daf73ae7b26ec1cad5e2f4ca23",
         "before_page": "intro.html",
@@ -119,8 +119,19 @@
             "block_type": "claim",
             "change": "added",
             "diff": null,
-            "excerpt": null,
+            "excerpt": "The root claim.",
             "id": "c-X2XSR",
+            "label": "The root claim.",
+            "redacted": false,
+            "section": "Start",
+            "what": []
+          },
+          {
+            "block_type": "claim",
+            "change": "added",
+            "diff": null,
+            "excerpt": null,
+            "id": "c-SQ780",
             "label": "Content removed.",
             "redacted": true,
             "section": "Start",
@@ -152,7 +163,7 @@
           }
         ],
         "counts": {
-          "added": 1,
+          "added": 2,
           "decisions_added": 2,
           "decisions_removed": 0,
           "decisions_updated": 1,
@@ -217,14 +228,30 @@
         "title": "User guides"
       }
     ],
-    "changed_outside_docs": [],
+    "changed_outside_docs": [
+      {
+        "after_version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd",
+        "before_version": null,
+        "block_type": "decision",
+        "change": "added",
+        "excerpt": "A ruling at the root.",
+        "id": "D-ENGKQ",
+        "label": "Root ruling",
+        "record_only": false,
+        "redacted": false,
+        "status_from": null,
+        "status_to": "live",
+        "title": "Root ruling",
+        "what": []
+      }
+    ],
     "new_reference_count": 1,
     "new_references": [
       {
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-YABJ2",
+        "source": "p-CQ8YW",
         "source_doc_title": null,
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -237,11 +264,11 @@
       "omitted_rows": 0,
       "rows": [
         {
-          "doc": "d-SQ780",
+          "doc": "d-G7F9P",
           "doc_hidden": false,
           "hidden_blocks": 1,
           "redacted": true,
-          "title": "d-SQ780"
+          "title": "d-G7F9P"
         }
       ]
     },
@@ -260,9 +287,9 @@
     "profile_changed": false,
     "profile_id": "pf-T5C82",
     "redactions": [
-      "06751a256efd87da44448fb4ba26c265b7e35ee1ddabab5ad9b0893a88aa9168",
-      "89705d789a9d560ad09460426b6038d31c2f54f4d6f772b6310f9a31c9047021",
-      "8f1308c2f5ca3486907e540b43da07d301e0fea711419ea03a3f28486ebba4a6"
+      "03d26b699ed5e6b5fd745453628d89eaf5aec425995725506466cf5b74b9f70e",
+      "7d155c42a58d367a1706deb247e4753299254834e117bcee5ffad1c4d9e5b54d",
+      "7fee55e9b9ea9a832bf26fc8ef2c3f1f87d67028db7a0479e1a04d88a1ef0cd5"
     ],
     "removed_attachments": [
       {
@@ -291,11 +318,11 @@
       }
     ],
     "totals": {
-      "blocks_added": 6,
+      "blocks_added": 7,
       "blocks_moved": 0,
       "blocks_removed": 3,
       "blocks_updated": 3,
-      "decisions_added": 3,
+      "decisions_added": 4,
       "decisions_removed": 0,
       "decisions_updated": 1,
       "docs_added": 1,
@@ -323,11 +350,11 @@
         "title": "Intro"
       },
       {
-        "doc": "d-SQ780",
+        "doc": "d-G7F9P",
         "doc_hidden": false,
         "hidden_blocks": 1,
         "redacted": true,
-        "title": "d-SQ780"
+        "title": "d-G7F9P"
       }
     ]
   },
@@ -384,7 +411,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-YABJ2",
+        "source": "p-CQ8YW",
         "source_doc_title": null,
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -397,11 +424,11 @@
   "release": null,
   "scope": {
     "kind": "canon",
-    "landing": "f8229084be7e71c75cff04b77bfb711013b2f37941cc268c180497954da6fdfb"
+    "landing": "a7e802762040800dba4070ec6fbe9ebb100be16b901488365b89988e8fea5c1c"
   },
   "selection": {
     "attachments": 4,
-    "blocks": 19,
+    "blocks": 21,
     "docs": 2,
     "entries": [
       {
@@ -411,8 +438,18 @@
       },
       {
         "id": "D-BMHX1",
-        "redaction": "06751a256efd87da44448fb4ba26c265b7e35ee1ddabab5ad9b0893a88aa9168",
+        "redaction": "7d155c42a58d367a1706deb247e4753299254834e117bcee5ffad1c4d9e5b54d",
         "version": "667525059f1934b42a8c3ec4a2f471e8fcf5b90eec5b2b197a427aa443b85200"
+      },
+      {
+        "id": "D-ENGKQ",
+        "redaction": null,
+        "version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd"
+      },
+      {
+        "id": "D-FXP25",
+        "redaction": null,
+        "version": "d534c3365acb76f552582a7b28a8bc11564efaf3859102008785459503476fde"
       },
       {
         "id": "D-GC0XG",
@@ -420,18 +457,18 @@
         "version": "83fa0f910460fe3677cbfc46443baa96a70ae9f03f8e5fadfc357b7d639850b0"
       },
       {
-        "id": "D-RWFT6",
-        "redaction": null,
-        "version": "3aec8f9b2aea9f1fb03d904c4e9969d1b231fa8212856b25c8cd31f801069c43"
-      },
-      {
         "id": "c-QB8ZC",
         "redaction": null,
         "version": "2d702719b6a98119f0a44976ff4e47cb2312134ca3af1ef44e18711ab1258f9f"
       },
       {
+        "id": "c-SQ780",
+        "redaction": "7fee55e9b9ea9a832bf26fc8ef2c3f1f87d67028db7a0479e1a04d88a1ef0cd5",
+        "version": "16aecc0cc57838684f0e50a87464841e2198ae52402cdd74e5abe6f6c693ebdf"
+      },
+      {
         "id": "c-X2XSR",
-        "redaction": "89705d789a9d560ad09460426b6038d31c2f54f4d6f772b6310f9a31c9047021",
+        "redaction": null,
         "version": "93a040f658674f753372be827fd696d23748567dc1cbd63d0aca08c508f334fa"
       },
       {
@@ -440,9 +477,9 @@
         "version": "e612d399805ff43ca2887c2bc48e49a8cce0a98cf9febc1d62e8eb8d65e7eb32"
       },
       {
-        "id": "d-SQ780",
-        "redaction": "8f1308c2f5ca3486907e540b43da07d301e0fea711419ea03a3f28486ebba4a6",
-        "version": "73ade7b9db76489813665720c8571b86f5da77494b9f28ff9ec6e5582d7845e6"
+        "id": "d-G7F9P",
+        "redaction": "03d26b699ed5e6b5fd745453628d89eaf5aec425995725506466cf5b74b9f70e",
+        "version": "6a558df0d355656805ac24a8e29ec801f927b191dbd387962e668605d7d836b0"
       },
       {
         "id": "fd-MJE28",
@@ -450,14 +487,14 @@
         "version": "e2b83c9f8f9bcd6d1700e1a558f98ff3fd55308f4fa38ea4284e52a69ce635aa"
       },
       {
-        "id": "fg-FXP25",
-        "redaction": null,
-        "version": "73f7652c1532a6913343211ffd8f051b1724b3011b9e62b12dad08f3372b3695"
-      },
-      {
         "id": "fg-HYB5B",
         "redaction": null,
         "version": "7a42ed11cc8391b3dcd4a593fd412ff1b56617e849e61fefbccd5dabc29663f8"
+      },
+      {
+        "id": "fg-YABJ2",
+        "redaction": null,
+        "version": "1d25a8a10b174c01c5393e5786cfb10579957788ba5efeafe60270bc2eefdb02"
       },
       {
         "id": "fg-ZCCNV",
@@ -480,19 +517,19 @@
         "version": "de64c9330ecfb718a23829e90a4dbaa75f3fb1606351fe6737487f9dcc3985f7"
       },
       {
-        "id": "p-PBTCC",
+        "id": "p-CQ8YW",
         "redaction": null,
-        "version": "adafe85aaaa2d7ad349457b99be798bd31579892fb18afe650ef99c90f713e25"
+        "version": "12639b08d404e65f012d3c4143a913dccddf0cf5481b2cbe8242bc0f811b0bef"
       },
       {
-        "id": "p-YABJ2",
+        "id": "p-RWFT6",
         "redaction": null,
-        "version": "927d5b4f1edf4049c664bba28bf6ab04fe9fa8f1f7180714d67b4553beaada09"
+        "version": "c9a389f8af7748c384a02e127a540c0ff070f53913d789f787619f1dd3ea8eeb"
       },
       {
-        "id": "s-G7F9P",
+        "id": "s-PBTCC",
         "redaction": null,
-        "version": "12b4f7fe8f2d568bfcb6a308f758de8122a19109bd602fb7cb5bad9d64cdcf01"
+        "version": "825c6cafe2f6e82af6fc8d9d789d79e125ec03783dd1fd0f50ae44759c276c20"
       },
       {
         "id": "s-R59GS",
@@ -501,8 +538,8 @@
       }
     ],
     "folders": 1,
-    "hash": "cfeeeeb41bc91e88a610582fafeea531564098b0d9bfb9a8f7c4d69c9ec4dc75",
-    "identity": "5da20866e879968aa8d4863429659ac2390ee84fc63df9b91122ca60b6e5c691",
+    "hash": "17e8a76dd385870493a98f6ab84663810673c06ff7ca315cabfd3989c9aacfed",
+    "identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
     "omitted_entries": 0
   },
   "status": "warning",

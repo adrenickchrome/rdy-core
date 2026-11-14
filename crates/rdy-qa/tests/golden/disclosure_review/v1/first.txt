@@ -1,6 +1,6 @@
 Publication profile review: warning.
-20 blocks in 2 docs and 1 folders.
+21 blocks in 2 docs and 1 folders.
 References outside selection: 2.
 Links outside selection: 1.
 Hidden as planned: 2 blocks in 2 docs.
-Included: 2 docs, 1 folder, 2 sections, 12 blocks, 4 decisions, 4 figures.
+Included: 2 docs, 1 folder, 2 sections, 13 blocks, 4 decisions, 4 figures.

@@ -8,16 +8,16 @@
       {
         "available": true,
         "blob": "40b22831bd4b63eaba43b075db9008256ec641f2edf6a732fab3a0a19c30f317",
-        "block": "fg-FXP25",
-        "home_doc": "d-SQ780",
+        "block": "fg-YABJ2",
+        "home_doc": "d-G7F9P",
         "home_doc_title": "Setup",
         "label": "Figure N"
       },
       {
         "available": true,
         "blob": "c8231e5c4a651d6ed417313856c9a9d14ae8f557d61abd0731e5bcf876733f8f",
-        "block": "fg-FXP25",
-        "home_doc": "d-SQ780",
+        "block": "fg-YABJ2",
+        "home_doc": "d-G7F9P",
         "home_doc_title": "Setup",
         "label": "Figure N",
         "variant": "dark"
@@ -28,7 +28,7 @@
         "decision_titles": [
           "Pin versions"
         ],
-        "digest": "9b100ee69a68c74ecc9853696a2c22f0e1e28399b2ba278e2cb31f673fe7966a",
+        "digest": "747e15128f1abe86209d122c73be5a0cc16e079dc3c6b97d9cc898204728ceab",
         "figures": [
           {
             "label": "Figure N"
@@ -39,7 +39,7 @@
           }
         ],
         "folder": "User guides",
-        "id": "d-SQ780",
+        "id": "d-G7F9P",
         "lede": "Install with `cargo`.",
         "omitted_decision_titles": 0,
         "omitted_figures": 0,
@@ -60,8 +60,8 @@
       }
     ],
     "after_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
-    "after_selection_hash": "831762d7a6366cd20353381c6d7d03179b9e3ac5ab50812399f700000f0bf30b",
-    "after_selection_identity": "cafbc1251ef483b214631ed0a2476cb88ff892edf67af8fce29cf6fd61be3878",
+    "after_selection_hash": "3f75e843fa2ba1a27351bf168dafb31b543a7b6a6fa1ade969063e125b78244e",
+    "after_selection_identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
     "audience": "org",
     "before_profile_version": "e6e050dbd00b13f5b7e4de3e1f2989353a35378335b8736fc7e2a0cdefeedd48",
     "before_selection_hash": "982f9a8f3ab0a6e96412653dea7e43a3f13b4dc21bfd3931aa108740dfa9f646",
@@ -82,7 +82,7 @@
     ],
     "changed_docs": [
       {
-        "after_digest": "53a53139fb1590479abde1dbe344d20a048f23f996678372515db0f6f5fdf4a7",
+        "after_digest": "0d2ad9112360db742516df41e162b6a1cef1338f92258be95d2717f21963fc0c",
         "after_path": "intro",
         "before_digest": "f0e4a658e0344eff97547872b6211829206dd8daf73ae7b26ec1cad5e2f4ca23",
         "before_page": "intro.html",
@@ -127,6 +127,17 @@
             "what": []
           },
           {
+            "block_type": "claim",
+            "change": "added",
+            "diff": null,
+            "excerpt": "A claim to remove.",
+            "id": "c-SQ780",
+            "label": "A claim to remove.",
+            "redacted": false,
+            "section": "Start",
+            "what": []
+          },
+          {
             "block_type": "figure",
             "change": "removed",
             "diff": null,
@@ -152,7 +163,7 @@
           }
         ],
         "counts": {
-          "added": 1,
+          "added": 2,
           "decisions_added": 2,
           "decisions_removed": 0,
           "decisions_updated": 1,
@@ -240,7 +251,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-YABJ2",
+        "source": "p-CQ8YW",
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -253,7 +264,7 @@
       "omitted_rows": 0,
       "rows": [
         {
-          "doc": "d-SQ780",
+          "doc": "d-G7F9P",
           "doc_hidden": false,
           "hidden_blocks": 1,
           "redacted": false,
@@ -303,7 +314,7 @@
       }
     ],
     "totals": {
-      "blocks_added": 6,
+      "blocks_added": 7,
       "blocks_moved": 0,
       "blocks_removed": 3,
       "blocks_updated": 3,
@@ -335,7 +346,7 @@
         "title": "Intro"
       },
       {
-        "doc": "d-SQ780",
+        "doc": "d-G7F9P",
         "doc_hidden": false,
         "hidden_blocks": 1,
         "redacted": false,
@@ -396,7 +407,7 @@
         "classification": "excluded",
         "location": "body",
         "occurrences": 1,
-        "source": "p-YABJ2",
+        "source": "p-CQ8YW",
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -409,11 +420,11 @@
   "release": null,
   "scope": {
     "kind": "landing",
-    "landing": "0a32d6ca24f6dc023473a4623aabfce21a4b51df708bbc3d0cb942a82f58a8cc"
+    "landing": "9c815779f2dcbaf0cf7715ca1e9adcf5deb66f28f71f8da8f6e0676b9c1273a3"
   },
   "selection": {
     "attachments": 4,
-    "blocks": 20,
+    "blocks": 21,
     "docs": 2,
     "entries": [
       {
@@ -432,19 +443,24 @@
         "version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd"
       },
       {
+        "id": "D-FXP25",
+        "redaction": null,
+        "version": "d534c3365acb76f552582a7b28a8bc11564efaf3859102008785459503476fde"
+      },
+      {
         "id": "D-GC0XG",
         "redaction": null,
         "version": "83fa0f910460fe3677cbfc46443baa96a70ae9f03f8e5fadfc357b7d639850b0"
       },
       {
-        "id": "D-RWFT6",
-        "redaction": null,
-        "version": "3aec8f9b2aea9f1fb03d904c4e9969d1b231fa8212856b25c8cd31f801069c43"
-      },
-      {
         "id": "c-QB8ZC",
         "redaction": null,
         "version": "2d702719b6a98119f0a44976ff4e47cb2312134ca3af1ef44e18711ab1258f9f"
+      },
+      {
+        "id": "c-SQ780",
+        "redaction": null,
+        "version": "16aecc0cc57838684f0e50a87464841e2198ae52402cdd74e5abe6f6c693ebdf"
       },
       {
         "id": "c-X2XSR",
@@ -457,9 +473,9 @@
         "version": "e612d399805ff43ca2887c2bc48e49a8cce0a98cf9febc1d62e8eb8d65e7eb32"
       },
       {
-        "id": "d-SQ780",
+        "id": "d-G7F9P",
         "redaction": null,
-        "version": "73ade7b9db76489813665720c8571b86f5da77494b9f28ff9ec6e5582d7845e6"
+        "version": "6a558df0d355656805ac24a8e29ec801f927b191dbd387962e668605d7d836b0"
       },
       {
         "id": "fd-MJE28",
@@ -467,14 +483,14 @@
         "version": "e2b83c9f8f9bcd6d1700e1a558f98ff3fd55308f4fa38ea4284e52a69ce635aa"
       },
       {
-        "id": "fg-FXP25",
-        "redaction": null,
-        "version": "73f7652c1532a6913343211ffd8f051b1724b3011b9e62b12dad08f3372b3695"
-      },
-      {
         "id": "fg-HYB5B",
         "redaction": null,
         "version": "7a42ed11cc8391b3dcd4a593fd412ff1b56617e849e61fefbccd5dabc29663f8"
+      },
+      {
+        "id": "fg-YABJ2",
+        "redaction": null,
+        "version": "1d25a8a10b174c01c5393e5786cfb10579957788ba5efeafe60270bc2eefdb02"
       },
       {
         "id": "fg-ZCCNV",
@@ -497,19 +513,19 @@
         "version": "de64c9330ecfb718a23829e90a4dbaa75f3fb1606351fe6737487f9dcc3985f7"
       },
       {
-        "id": "p-PBTCC",
+        "id": "p-CQ8YW",
         "redaction": null,
-        "version": "adafe85aaaa2d7ad349457b99be798bd31579892fb18afe650ef99c90f713e25"
+        "version": "12639b08d404e65f012d3c4143a913dccddf0cf5481b2cbe8242bc0f811b0bef"
       },
       {
-        "id": "p-YABJ2",
+        "id": "p-RWFT6",
         "redaction": null,
-        "version": "927d5b4f1edf4049c664bba28bf6ab04fe9fa8f1f7180714d67b4553beaada09"
+        "version": "c9a389f8af7748c384a02e127a540c0ff070f53913d789f787619f1dd3ea8eeb"
       },
       {
-        "id": "s-G7F9P",
+        "id": "s-PBTCC",
         "redaction": null,
-        "version": "12b4f7fe8f2d568bfcb6a308f758de8122a19109bd602fb7cb5bad9d64cdcf01"
+        "version": "825c6cafe2f6e82af6fc8d9d789d79e125ec03783dd1fd0f50ae44759c276c20"
       },
       {
         "id": "s-R59GS",
@@ -518,8 +534,8 @@
       }
     ],
     "folders": 1,
-    "hash": "831762d7a6366cd20353381c6d7d03179b9e3ac5ab50812399f700000f0bf30b",
-    "identity": "cafbc1251ef483b214631ed0a2476cb88ff892edf67af8fce29cf6fd61be3878",
+    "hash": "3f75e843fa2ba1a27351bf168dafb31b543a7b6a6fa1ade969063e125b78244e",
+    "identity": "b2ccb5de5e42d666309eef522fc664ef6de7edec6bc1adffc81fd3a37bc16d67",
     "omitted_entries": 0
   },
   "status": "warning",

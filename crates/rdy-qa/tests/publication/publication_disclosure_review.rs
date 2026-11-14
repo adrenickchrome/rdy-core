@@ -255,7 +255,7 @@ fn drv6_first_against_and_redacted_reviews_match_goldens() {
         "Outside ruling"
     );
     assert_eq!(d["changed_outside_docs"][0]["title"], "Root ruling", "{d}");
-    // canon removes the new claim, the second new decision and the added doc
+    // canon removes the second new claim, the second new decision and the added doc
     let rd = &redacted["disclosure"];
     let row = &rd["changed_docs"][0];
     let gone: Vec<&Value> = row["changes"]
