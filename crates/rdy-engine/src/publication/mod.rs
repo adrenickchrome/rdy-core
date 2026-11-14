@@ -7,12 +7,18 @@
 //! live site and the publication check (D-CWC91); durable output keeps [`resolve`].
 //! [`resolve_source`] makes the same selection through a [`PublicationSource`], with no store
 //! open.
+//!
+//! The publication review reads each side through one seam ([`PublicationReviewSide`], D-W4YAE)
+//! and fills owned rows ([`review_model`]). A reader view ([`ReaderReviewSide`]) reads a resolved
+//! side; its compared parts are authored values ([`ReaderPartValue`], D-MCH70).
 
 mod diff;
 mod hidden;
 mod references;
 mod release;
 mod report;
+pub mod review_model;
+mod review_side;
 mod select;
 mod source;
 
@@ -24,6 +30,16 @@ pub use hidden::{HiddenList, HiddenPlanned, HiddenRow};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
+pub use review_side::{
+    BlockParts, DecisionFacts, PartName, PublicationReviewSide, ReaderPartValue, ReaderReviewSide,
+    ReferenceLookup, ReviewRemovals, SelectionFacts, ShownBlock, TreeFacts, change_label,
+    changed_parts, text_fields,
+};
+#[allow(
+    unused_imports,
+    reason = "the baseline view of the sync client hashes its parts with the same encoder"
+)]
+pub(crate) use review_side::{CanonicalNumber, rfc8785};
 pub use select::{
     AttachmentEntry, AttachmentVariant, DocEntry, IMPLICIT_ORG, Limits, ProfileFacts,
     PublicationWarning, Resolved, ResolvedProfile, SelectionEntry, ShownStatus,

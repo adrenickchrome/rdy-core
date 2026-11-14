@@ -1,0 +1,2206 @@
+{
+  "description": "Each part of a block is its authored value by the closed part table, in tagged form. canonical is the RFC 8785 text of the tagged form (keys by UTF-16 code units, JSON.stringify escapes); hash is BLAKE3 over its UTF-8 bytes, as 64 lower-case hex digits.",
+  "absent": {
+    "tagged": [
+      "absent"
+    ],
+    "canonical": "[\"absent\"]",
+    "hash": "cd235ab8a368562ac0a9a273c481f528baf3f1d12cda5ec47b88272c8e9d7931"
+  },
+  "cases": [
+    {
+      "case": "prose-links-pins-status",
+      "kind": "block",
+      "status": "since 1.2.0",
+      "block": {
+        "block_type": "prose",
+        "body": "Plain prose: café ✓ 日本語 😀.",
+        "fields": {
+          "everyday": {
+            "Str": "A job."
+          }
+        },
+        "id": "p-AAAAA",
+        "links": {
+          "references": [
+            {
+              "target": "t-BBBBB",
+              "part": null
+            },
+            {
+              "target": "t-AAAAA",
+              "part": "name"
+            }
+          ],
+          "decided_by": [
+            {
+              "target": "D-AAAAA",
+              "part": null
+            }
+          ]
+        },
+        "order": "a0",
+        "parent": "s-AAAAA",
+        "pins": {
+          "t-AAAAA": [
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34,
+            34
+          ]
+        }
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Plain prose: café ✓ 日本語 😀."
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Plain prose: café ✓ 日本語 😀.\"]}]",
+          "hash": "f83595be9ee21be708f58cd936cc6f1be1c60a62606e75933e3604d6dd99bd3b"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "prose"
+          ],
+          "canonical": "[\"str\",\"prose\"]",
+          "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {
+              "references": [
+                "list",
+                [
+                  [
+                    "map",
+                    {
+                      "target": [
+                        "str",
+                        "t-BBBBB"
+                      ]
+                    }
+                  ],
+                  [
+                    "map",
+                    {
+                      "target": [
+                        "str",
+                        "t-AAAAA"
+                      ],
+                      "part": [
+                        "str",
+                        "name"
+                      ]
+                    }
+                  ]
+                ]
+              ],
+              "decided_by": [
+                "list",
+                [
+                  [
+                    "map",
+                    {
+                      "target": [
+                        "str",
+                        "D-AAAAA"
+                      ]
+                    }
+                  ]
+                ]
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"decided_by\":[\"list\",[[\"map\",{\"target\":[\"str\",\"D-AAAAA\"]}]]],\"references\":[\"list\",[[\"map\",{\"target\":[\"str\",\"t-BBBBB\"]}],[\"map\",{\"part\":[\"str\",\"name\"],\"target\":[\"str\",\"t-AAAAA\"]}]]]}]",
+          "hash": "6755db0d8e02afa2b97b0d889dfd674022e6efc4b529481dc17b09c04c62018f"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "since 1.2.0"
+          ],
+          "canonical": "[\"str\",\"since 1.2.0\"]",
+          "hash": "f19d91d7e80ef525016448da7cab01f5ea670c8db64665db47a95e535b78a235"
+        },
+        {
+          "part": "field:everyday",
+          "tagged": [
+            "str",
+            "A job."
+          ],
+          "canonical": "[\"str\",\"A job.\"]",
+          "hash": "78ae27af94fc937722781a17bb228c92760d5a8e6105bc7b62a2493175658384"
+        }
+      ]
+    },
+    {
+      "case": "prose-structural-names",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "prose",
+        "body": "Body words.",
+        "fields": {
+          "title": "Null",
+          "type": {
+            "Str": "custom type"
+          },
+          "links": {
+            "Str": "custom links"
+          },
+          "body": {
+            "Str": "custom body"
+          },
+          "order": {
+            "Str": "custom order"
+          },
+          "status": {
+            "Str": "custom status"
+          },
+          "note": "Null"
+        },
+        "id": "p-AAAAB",
+        "links": {},
+        "order": "a1",
+        "parent": "s-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Body words."
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Body words.\"]}]",
+          "hash": "d14ef1e2bff46197f4f5108a707b7c55c7c8f819ec985389a1e18c1323be0967"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "prose"
+          ],
+          "canonical": "[\"str\",\"prose\"]",
+          "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:body",
+          "tagged": [
+            "str",
+            "custom body"
+          ],
+          "canonical": "[\"str\",\"custom body\"]",
+          "hash": "a2514bdf683502b02a74a5c97ba252d13be74ec239f0e0a80a16e34c575a2b37"
+        },
+        {
+          "part": "field:links",
+          "tagged": [
+            "str",
+            "custom links"
+          ],
+          "canonical": "[\"str\",\"custom links\"]",
+          "hash": "bc4257aabc1ae3019916c52d128908b435a03b14c4d2bc16a608a9264fc5357d"
+        },
+        {
+          "part": "field:note",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:order",
+          "tagged": [
+            "str",
+            "custom order"
+          ],
+          "canonical": "[\"str\",\"custom order\"]",
+          "hash": "d77ee56eef0ac7a234462ebb9a3b17fce04e4c9f867a0f526a69aaa922b3ef97"
+        },
+        {
+          "part": "field:status",
+          "tagged": [
+            "str",
+            "custom status"
+          ],
+          "canonical": "[\"str\",\"custom status\"]",
+          "hash": "2e251689f766d172260b8a303e0646c4113903e28a89f017e3035daab0deb00e"
+        },
+        {
+          "part": "field:type",
+          "tagged": [
+            "str",
+            "custom type"
+          ],
+          "canonical": "[\"str\",\"custom type\"]",
+          "hash": "9f0ab0cd6fd5dcf715c33c46226849ce0149293661e5d54aa1da8be225e6b26e"
+        }
+      ]
+    },
+    {
+      "case": "prose-typed-values",
+      "kind": "block",
+      "status": "planned",
+      "block": {
+        "block_type": "prose",
+        "body": "",
+        "fields": {
+          "flag": {
+            "Bool": true
+          },
+          "off": {
+            "Bool": false
+          },
+          "safe": {
+            "Int": 9007199254740991
+          },
+          "past": {
+            "Int": 9007199254740993
+          },
+          "below": {
+            "Int": -9007199254740993
+          },
+          "min": {
+            "Int": -9223372036854775808
+          },
+          "max": {
+            "Int": 9223372036854775807
+          },
+          "zero": {
+            "Int": 0
+          },
+          "list": {
+            "List": [
+              {
+                "Str": "a"
+              },
+              {
+                "Int": 1
+              },
+              "Null",
+              {
+                "List": []
+              }
+            ]
+          },
+          "map": {
+            "Map": {
+              "｡": {
+                "Str": "half-width full stop"
+              },
+              "😀": {
+                "Str": "emoji"
+              },
+              "a": {
+                "Map": {}
+              },
+              "z": {
+                "List": [
+                  {
+                    "Bool": false
+                  }
+                ]
+              }
+            }
+          },
+          "controls": {
+            "Str": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f\"\\/é "
+          }
+        },
+        "id": "p-AAAAC",
+        "links": {},
+        "order": "a2",
+        "parent": "s-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"\"]}]",
+          "hash": "7eed559d0a2f8865541fca582f493eac4966512c4bfa7e31742030ff96076f98"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "prose"
+          ],
+          "canonical": "[\"str\",\"prose\"]",
+          "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "planned"
+          ],
+          "canonical": "[\"str\",\"planned\"]",
+          "hash": "32e256c577d0bf4167e8455985a7990bbdcb70860a815d6e5d1fd193ee693e25"
+        },
+        {
+          "part": "field:below",
+          "tagged": [
+            "int",
+            "-9007199254740993"
+          ],
+          "canonical": "[\"int\",\"-9007199254740993\"]",
+          "hash": "c90fcebcff916736e8af57c23c34f8db05f47c514c3bd7a1abad33b1de359977"
+        },
+        {
+          "part": "field:controls",
+          "tagged": [
+            "str",
+            "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f\"\\/é "
+          ],
+          "canonical": "[\"str\",\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\\"\\\\/é \"]",
+          "hash": "7bc17dba8c881690555c223a6af43dc775dbf3b2a52c7edee20bccab6b1373c4"
+        },
+        {
+          "part": "field:flag",
+          "tagged": [
+            "bool",
+            true
+          ],
+          "canonical": "[\"bool\",true]",
+          "hash": "246f34dc6f2563edd2ffcdb428f3d5277e0c95308a0864482be2939cfb5d5213"
+        },
+        {
+          "part": "field:list",
+          "tagged": [
+            "list",
+            [
+              [
+                "str",
+                "a"
+              ],
+              [
+                "int",
+                "1"
+              ],
+              [
+                "null"
+              ],
+              [
+                "list",
+                []
+              ]
+            ]
+          ],
+          "canonical": "[\"list\",[[\"str\",\"a\"],[\"int\",\"1\"],[\"null\"],[\"list\",[]]]]",
+          "hash": "a32ea9c0014c36b89e94d1d5e17e20913bf70e99d65ab9cf38dad73eb86a8351"
+        },
+        {
+          "part": "field:map",
+          "tagged": [
+            "map",
+            {
+              "｡": [
+                "str",
+                "half-width full stop"
+              ],
+              "😀": [
+                "str",
+                "emoji"
+              ],
+              "a": [
+                "map",
+                {}
+              ],
+              "z": [
+                "list",
+                [
+                  [
+                    "bool",
+                    false
+                  ]
+                ]
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"a\":[\"map\",{}],\"z\":[\"list\",[[\"bool\",false]]],\"😀\":[\"str\",\"emoji\"],\"｡\":[\"str\",\"half-width full stop\"]}]",
+          "hash": "cdb4e6c598a01e4b7d80f6b9e9def6d86daaaaf30b970ec7329b2a099572e70d"
+        },
+        {
+          "part": "field:max",
+          "tagged": [
+            "int",
+            "9223372036854775807"
+          ],
+          "canonical": "[\"int\",\"9223372036854775807\"]",
+          "hash": "d78bfbcb191155eb8088ae23e81e97f8f3bcd4c5b0267ab9a7c16f4542ee55f0"
+        },
+        {
+          "part": "field:min",
+          "tagged": [
+            "int",
+            "-9223372036854775808"
+          ],
+          "canonical": "[\"int\",\"-9223372036854775808\"]",
+          "hash": "0031cd1a0ad77ffc7c44a8056aa45f4525c473a0ba43bbd4103ed49223010e88"
+        },
+        {
+          "part": "field:off",
+          "tagged": [
+            "bool",
+            false
+          ],
+          "canonical": "[\"bool\",false]",
+          "hash": "7b33067d18c76f76171fa0ffc3b8704437f58ad8fc9b9614b20c85a75aa2a897"
+        },
+        {
+          "part": "field:past",
+          "tagged": [
+            "int",
+            "9007199254740993"
+          ],
+          "canonical": "[\"int\",\"9007199254740993\"]",
+          "hash": "835696663dd0f80f9a2e94ed8b4fdadfdc4acb511dd06899cd8d649c4560e6c3"
+        },
+        {
+          "part": "field:safe",
+          "tagged": [
+            "int",
+            "9007199254740991"
+          ],
+          "canonical": "[\"int\",\"9007199254740991\"]",
+          "hash": "78395edba57ba55f5b4f6606694aae04dc4f6429f3b07e4f96a355c313992e53"
+        },
+        {
+          "part": "field:zero",
+          "tagged": [
+            "int",
+            "0"
+          ],
+          "canonical": "[\"int\",\"0\"]",
+          "hash": "7642de45c0415a159ca91b764fc11b95e42f0d5b138866bdb8676ceb3007a5f0"
+        }
+      ]
+    },
+    {
+      "case": "term",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "term",
+        "body": "A wallet holds **funds**.",
+        "fields": {
+          "name": {
+            "Str": "Wallet"
+          },
+          "title": {
+            "Str": "Wallet term"
+          },
+          "key": {
+            "Str": "wallet"
+          }
+        },
+        "id": "t-AAAAA",
+        "links": {},
+        "order": "b0",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "str",
+            "Wallet term"
+          ],
+          "canonical": "[\"str\",\"Wallet term\"]",
+          "hash": "207a37572139bef1684de1e9e8409ebb13cde3568f6a053b6b906341fb67e5fd"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "A wallet holds **funds**."
+              ],
+              "name": [
+                "str",
+                "Wallet"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"A wallet holds **funds**.\"],\"name\":[\"str\",\"Wallet\"]}]",
+          "hash": "cc2f8450d502b782920eb0c576e324012db8d81ca13a80467836636487a444ed"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "term"
+          ],
+          "canonical": "[\"str\",\"term\"]",
+          "hash": "de8d0557c2179e597af5f7da782365410df01662c05c249d99381bb1117e135e"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:key",
+          "tagged": [
+            "str",
+            "wallet"
+          ],
+          "canonical": "[\"str\",\"wallet\"]",
+          "hash": "1bff243386d731819f9af0dcc6cc134ef8f1e1c9ca839603963f8fdd6f55dff6"
+        }
+      ]
+    },
+    {
+      "case": "component",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "component",
+        "body": "Keeps rows.",
+        "fields": {
+          "name": {
+            "Str": "Ledger"
+          }
+        },
+        "id": "c-AAAAA",
+        "links": {},
+        "order": "b1",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Keeps rows."
+              ],
+              "name": [
+                "str",
+                "Ledger"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Keeps rows.\"],\"name\":[\"str\",\"Ledger\"]}]",
+          "hash": "82cc571e393fb066a150cfc288d9416abf5433f8ccf4d0cf95d08161c89c3f26"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "component"
+          ],
+          "canonical": "[\"str\",\"component\"]",
+          "hash": "398965b95b82103e0a14d1dbd3085e6445c9cbaa035f65aaffa94960f0d48ded"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "actor-without-name",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "actor",
+        "body": "An actor.",
+        "fields": {},
+        "id": "a-AAAAA",
+        "links": {},
+        "order": "b2",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "An actor."
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"An actor.\"]}]",
+          "hash": "38b9fa8af08802a58df69830637c28bc9c9c86cb93b36faf4108fa771e8a6009"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "actor"
+          ],
+          "canonical": "[\"str\",\"actor\"]",
+          "hash": "f76b1520752fa24e57993e4118fc8dcb07cee9b73ce2696fa87ffad572553dee"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "interface",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "interface",
+        "body": "",
+        "fields": {
+          "name": {
+            "Str": "Port"
+          }
+        },
+        "id": "i-AAAAA",
+        "links": {},
+        "order": "b3",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ],
+              "name": [
+                "str",
+                "Port"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"name\":[\"str\",\"Port\"]}]",
+          "hash": "8d5afd96e2c1d7c7b69ae975151a1c50fc827ba39dc791da97f5beb56d85c820"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "interface"
+          ],
+          "canonical": "[\"str\",\"interface\"]",
+          "hash": "9dbaa46761424ea55d2d814fa4fd3085630bba6f2e80f605ca3ed7f871bdc588"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "entity",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "entity",
+        "body": "Holds money.",
+        "fields": {
+          "name": {
+            "Str": "Account"
+          },
+          "everyday": {
+            "Str": "A bank account."
+          }
+        },
+        "id": "e-AAAAA",
+        "links": {},
+        "order": "b4",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Holds money."
+              ],
+              "name": [
+                "str",
+                "Account"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Holds money.\"],\"name\":[\"str\",\"Account\"]}]",
+          "hash": "79570c9a998995a0d742067fee5ec116d6efe7c1f7d44d79047ec1222fed1dc8"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "entity"
+          ],
+          "canonical": "[\"str\",\"entity\"]",
+          "hash": "048c43cc23e14dd1a32ebb1e23a47022d5a821c25728349ec50640c7b4d2a7a8"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:everyday",
+          "tagged": [
+            "str",
+            "A bank account."
+          ],
+          "canonical": "[\"str\",\"A bank account.\"]",
+          "hash": "38b287d683604db3210592434a879fca16e52a7b9f12e7eda0cc5feb1bed3968"
+        }
+      ]
+    },
+    {
+      "case": "value-past-safe-integer",
+      "kind": "block",
+      "status": "since 2.0.0",
+      "block": {
+        "block_type": "value",
+        "body": "",
+        "fields": {
+          "name": {
+            "Str": "Limit"
+          },
+          "value": {
+            "Int": 9007199254740993
+          },
+          "unit": {
+            "Str": "bytes"
+          }
+        },
+        "id": "v-AAAAA",
+        "links": {},
+        "order": "b5",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ],
+              "name": [
+                "str",
+                "Limit"
+              ],
+              "value": [
+                "int",
+                "9007199254740993"
+              ],
+              "unit": [
+                "str",
+                "bytes"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"name\":[\"str\",\"Limit\"],\"unit\":[\"str\",\"bytes\"],\"value\":[\"int\",\"9007199254740993\"]}]",
+          "hash": "50622d2183166624e4e313149e7ad6b2b5a066b33d8abf54b83d2749be8d34f3"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "value"
+          ],
+          "canonical": "[\"str\",\"value\"]",
+          "hash": "75f9d64012193e20e2ea48737f0a42cc0891a9d54b0aca4e8669e756a16eedbf"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "since 2.0.0"
+          ],
+          "canonical": "[\"str\",\"since 2.0.0\"]",
+          "hash": "cb16fbdabf038329ffd4fdc602dbb965b572d383052c1fa51cfe03eba51e6be3"
+        }
+      ]
+    },
+    {
+      "case": "value-string-without-unit",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "value",
+        "body": "A count.",
+        "fields": {
+          "name": {
+            "Str": "Count"
+          },
+          "value": {
+            "Str": "12"
+          }
+        },
+        "id": "v-AAAAB",
+        "links": {},
+        "order": "b6",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "A count."
+              ],
+              "name": [
+                "str",
+                "Count"
+              ],
+              "value": [
+                "str",
+                "12"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"A count.\"],\"name\":[\"str\",\"Count\"],\"value\":[\"str\",\"12\"]}]",
+          "hash": "f6ad9d00c1fcc43ae9cf7b29b6f30eccd024ba6e264f72dd238a06cf0c65caf2"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "value"
+          ],
+          "canonical": "[\"str\",\"value\"]",
+          "hash": "75f9d64012193e20e2ea48737f0a42cc0891a9d54b0aca4e8669e756a16eedbf"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "question",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "question",
+        "body": "",
+        "fields": {
+          "prompt": {
+            "Str": "Which store?"
+          },
+          "options": {
+            "List": [
+              {
+                "Str": "one"
+              },
+              {
+                "Str": "two"
+              }
+            ]
+          }
+        },
+        "id": "q-AAAAA",
+        "links": {},
+        "order": "b7",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ],
+              "prompt": [
+                "str",
+                "Which store?"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"prompt\":[\"str\",\"Which store?\"]}]",
+          "hash": "6bb564a03d4e94d7d300bd2a98393df2f6af1a32c8b73f708882ca1ac9c5adc5"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "question"
+          ],
+          "canonical": "[\"str\",\"question\"]",
+          "hash": "4f0355a5aca1f1399705ec706226b080ffa61854b428e8a080365da57bf3c52b"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:options",
+          "tagged": [
+            "list",
+            [
+              [
+                "str",
+                "one"
+              ],
+              [
+                "str",
+                "two"
+              ]
+            ]
+          ],
+          "canonical": "[\"list\",[[\"str\",\"one\"],[\"str\",\"two\"]]]",
+          "hash": "1917fae671ffaaf0ed3a067b38eeddbc8e905ecb95d0f934e0545b79a0a2fd24"
+        }
+      ]
+    },
+    {
+      "case": "diagram",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "diagram",
+        "body": "graph TD; A-->B",
+        "fields": {
+          "alt": {
+            "Str": "Flow of rows"
+          },
+          "syntax": {
+            "Str": "mermaid"
+          }
+        },
+        "id": "g-AAAAA",
+        "links": {},
+        "order": "b8",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "graph TD; A-->B"
+              ],
+              "alt": [
+                "str",
+                "Flow of rows"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"alt\":[\"str\",\"Flow of rows\"],\"body\":[\"str\",\"graph TD; A-->B\"]}]",
+          "hash": "3dad34d5107628fc916268eafdf09d41197ba14f36f66fc7811082163b8856ea"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "diagram"
+          ],
+          "canonical": "[\"str\",\"diagram\"]",
+          "hash": "8c08887aef33877b059f595b7501259edc8b9b7ca81b7f86dca80e7774e814ba"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:syntax",
+          "tagged": [
+            "str",
+            "mermaid"
+          ],
+          "canonical": "[\"str\",\"mermaid\"]",
+          "hash": "68c84fdce14e9ded2ce2efd4ac76aa30ae4fcecf6101cc88cbe75441a904a4c0"
+        }
+      ]
+    },
+    {
+      "case": "figure-light-and-dark",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "figure",
+        "body": "",
+        "fields": {
+          "alt": {
+            "Str": "A chart"
+          },
+          "blob": {
+            "Str": "abababababababababababababababababababababababababababababababab"
+          },
+          "media_type": {
+            "Str": "image/png"
+          },
+          "dark_blob": {
+            "Str": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          },
+          "caption": {
+            "Str": "Chart caption"
+          }
+        },
+        "id": "fg-AAAAA",
+        "links": {},
+        "order": "b9",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ],
+              "alt": [
+                "str",
+                "A chart"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"alt\":[\"str\",\"A chart\"],\"body\":[\"str\",\"\"]}]",
+          "hash": "ca6ab3bfd843588733ed617d97aa82ea6b5382cb1229fd442801177fc9c17f20"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "figure"
+          ],
+          "canonical": "[\"str\",\"figure\"]",
+          "hash": "9aa1e511d2266ab3c69bcfb80b41be54167683b0ddcaac8cc6eb31436f414e5d"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:blob",
+          "tagged": [
+            "str",
+            "abababababababababababababababababababababababababababababababab"
+          ],
+          "canonical": "[\"str\",\"abababababababababababababababababababababababababababababababab\"]",
+          "hash": "f839a9ff7cba85392827c03f7bb6cb4b361785e91b598e048c0f2fb33c2cd76e"
+        },
+        {
+          "part": "field:caption",
+          "tagged": [
+            "str",
+            "Chart caption"
+          ],
+          "canonical": "[\"str\",\"Chart caption\"]",
+          "hash": "095861f2d149bc38b62b85c6f6180f62f0b140b1c67fa899becf5e2a59d90c3a"
+        },
+        {
+          "part": "field:dark_blob",
+          "tagged": [
+            "str",
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          ],
+          "canonical": "[\"str\",\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"]",
+          "hash": "993f940e56bf6d294ca16a014173be53b977fd0eea04875e8460d9bd1cbdb3db"
+        },
+        {
+          "part": "field:media_type",
+          "tagged": [
+            "str",
+            "image/png"
+          ],
+          "canonical": "[\"str\",\"image/png\"]",
+          "hash": "25000fed067b762548467c692f9ed836f35ac85d0ba8d74223098b54a38839d2"
+        }
+      ]
+    },
+    {
+      "case": "table",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "table",
+        "body": "",
+        "fields": {
+          "title": {
+            "Str": "Rates"
+          },
+          "columns": {
+            "List": [
+              {
+                "Str": "a"
+              },
+              {
+                "Str": "b"
+              }
+            ]
+          },
+          "rows": {
+            "List": [
+              {
+                "List": [
+                  {
+                    "Str": "1"
+                  },
+                  {
+                    "Int": 2
+                  }
+                ]
+              },
+              {
+                "List": [
+                  {
+                    "Str": "3"
+                  },
+                  "Null"
+                ]
+              }
+            ]
+          }
+        },
+        "id": "tb-AAAAA",
+        "links": {},
+        "order": "c0",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "str",
+            "Rates"
+          ],
+          "canonical": "[\"str\",\"Rates\"]",
+          "hash": "6b423c1fdbb777861935276b89e455a624286d3dabf92542bad05eb09b2643f5"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                ""
+              ],
+              "columns": [
+                "list",
+                [
+                  [
+                    "str",
+                    "a"
+                  ],
+                  [
+                    "str",
+                    "b"
+                  ]
+                ]
+              ],
+              "rows": [
+                "list",
+                [
+                  [
+                    "list",
+                    [
+                      [
+                        "str",
+                        "1"
+                      ],
+                      [
+                        "int",
+                        "2"
+                      ]
+                    ]
+                  ],
+                  [
+                    "list",
+                    [
+                      [
+                        "str",
+                        "3"
+                      ],
+                      [
+                        "null"
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"columns\":[\"list\",[[\"str\",\"a\"],[\"str\",\"b\"]]],\"rows\":[\"list\",[[\"list\",[[\"str\",\"1\"],[\"int\",\"2\"]]],[\"list\",[[\"str\",\"3\"],[\"null\"]]]]]}]",
+          "hash": "a43954d176f5f694e8fbc6128fe03fbf9a71dc67da8b8b8bb54f41462d210074"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "table"
+          ],
+          "canonical": "[\"str\",\"table\"]",
+          "hash": "842e8d51fe6e10ebfe50d5be3bec1ec97c904f473cd85db8498981a2ca7636dc"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "flow",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "flow",
+        "body": "Steps.",
+        "fields": {
+          "name": {
+            "Str": "Sign in"
+          },
+          "steps": {
+            "List": [
+              {
+                "Str": "Open"
+              },
+              {
+                "Str": "Type"
+              },
+              {
+                "Str": "Send"
+              }
+            ]
+          }
+        },
+        "id": "f-AAAAA",
+        "links": {},
+        "order": "c1",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Steps."
+              ],
+              "name": [
+                "str",
+                "Sign in"
+              ],
+              "steps": [
+                "list",
+                [
+                  [
+                    "str",
+                    "Open"
+                  ],
+                  [
+                    "str",
+                    "Type"
+                  ],
+                  [
+                    "str",
+                    "Send"
+                  ]
+                ]
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Steps.\"],\"name\":[\"str\",\"Sign in\"],\"steps\":[\"list\",[[\"str\",\"Open\"],[\"str\",\"Type\"],[\"str\",\"Send\"]]]}]",
+          "hash": "e914c9f5b71402fd1b1ddcf22a554708580401f6dbaba9931c9ac2f680742fbd"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "flow"
+          ],
+          "canonical": "[\"str\",\"flow\"]",
+          "hash": "92aca126ddb87c7c7c44cae80c245bc513c8216dddfd6ca351b042e32de6d190"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "code-other-type",
+      "kind": "block",
+      "status": null,
+      "block": {
+        "block_type": "code",
+        "body": "fn main() {}\n",
+        "fields": {
+          "lang": {
+            "Str": "rust"
+          }
+        },
+        "id": "k-AAAAA",
+        "links": {},
+        "order": "c2",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "fn main() {}\n"
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"fn main() {}\\n\"]}]",
+          "hash": "2ccccebb37953a47493dac6a7b07ad592541d60d49f7e785c0ea4bc10479e68f"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "code"
+          ],
+          "canonical": "[\"str\",\"code\"]",
+          "hash": "fb7dd4acd4c8dba94ab1d475d050d8f1d28b6ee8ad0ff735bda9a8a9d0a3026a"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {}
+          ],
+          "canonical": "[\"map\",{}]",
+          "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:lang",
+          "tagged": [
+            "str",
+            "rust"
+          ],
+          "canonical": "[\"str\",\"rust\"]",
+          "hash": "f03969378f5080b0dcde6373cd6b4cdd1074cc330c33e5e3f306b4ff06f1239f"
+        }
+      ]
+    },
+    {
+      "case": "doc",
+      "kind": "doc",
+      "status": null,
+      "block": {
+        "block_type": "doc",
+        "body": "Doc body.",
+        "fields": {
+          "title": {
+            "Str": "Payments guide"
+          },
+          "name": {
+            "Str": "payments"
+          },
+          "description": {
+            "Str": "How payments work."
+          },
+          "doc_type": {
+            "Str": "overview"
+          }
+        },
+        "id": "d-AAAAA",
+        "links": {},
+        "order": "a0",
+        "parent": "fd-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "str",
+            "Payments guide"
+          ],
+          "canonical": "[\"str\",\"Payments guide\"]",
+          "hash": "20d9be4a351a7d9047a07e5a04d1ca4e56c95d3bd7ccd0a508f6144ca5319288"
+        },
+        {
+          "part": "field:description",
+          "tagged": [
+            "str",
+            "How payments work."
+          ],
+          "canonical": "[\"str\",\"How payments work.\"]",
+          "hash": "24aa9c73fd01f7f91cb211d278186e9736679c9d9049860d318690b7343dd2f7"
+        },
+        {
+          "part": "field:name",
+          "tagged": [
+            "str",
+            "payments"
+          ],
+          "canonical": "[\"str\",\"payments\"]",
+          "hash": "985bbb32f244696a139c07142fc3d91d84966524e718ef9aec2e8c640b0910eb"
+        }
+      ]
+    },
+    {
+      "case": "folder-without-title",
+      "kind": "folder",
+      "status": null,
+      "block": {
+        "block_type": "folder",
+        "body": "",
+        "fields": {
+          "name": {
+            "Str": "guide"
+          }
+        },
+        "id": "fd-AAAAA",
+        "links": {},
+        "order": "a0",
+        "parent": null,
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:name",
+          "tagged": [
+            "str",
+            "guide"
+          ],
+          "canonical": "[\"str\",\"guide\"]",
+          "hash": "e46bf2ecdc7fb046f0d55f8e4aea6dc17d0c40d9640f4d87f7f0ab340f91f32b"
+        }
+      ]
+    },
+    {
+      "case": "folder-with-description",
+      "kind": "folder",
+      "status": null,
+      "block": {
+        "block_type": "folder",
+        "body": "",
+        "fields": {
+          "title": {
+            "Str": "Reference"
+          },
+          "name": {
+            "Str": "reference"
+          },
+          "description": "Null"
+        },
+        "id": "fd-AAAAB",
+        "links": {},
+        "order": "a1",
+        "parent": null,
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "str",
+            "Reference"
+          ],
+          "canonical": "[\"str\",\"Reference\"]",
+          "hash": "75b91715ecc6f71c3d37fdbff518afca241fa395aa4db72e967b68168e30e3c4"
+        },
+        {
+          "part": "field:description",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "field:name",
+          "tagged": [
+            "str",
+            "reference"
+          ],
+          "canonical": "[\"str\",\"reference\"]",
+          "hash": "0a102a8cf51a1142a2a431f669abbb06e0dc3a6ec155b8a3c8077a5ad7dc4677"
+        }
+      ]
+    },
+    {
+      "case": "decision-without-title",
+      "kind": "decision",
+      "status": "live",
+      "block": {
+        "block_type": "decision",
+        "body": "",
+        "fields": {
+          "statement": {
+            "Str": "Keep `ledger` rows."
+          },
+          "rationale": {
+            "Str": "Audits need them."
+          },
+          "decided_at": {
+            "Str": "2026-01-01"
+          }
+        },
+        "id": "D-AAAAA",
+        "links": {
+          "supersedes": [
+            {
+              "target": "D-AAAAB",
+              "part": null
+            }
+          ]
+        },
+        "order": "c3",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "statement",
+          "tagged": [
+            "str",
+            "Keep `ledger` rows."
+          ],
+          "canonical": "[\"str\",\"Keep `ledger` rows.\"]",
+          "hash": "30d866d00aa13830c9307f72c2c5737e216f0548bd7f7dad45a2b8d9fd430e7a"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "live"
+          ],
+          "canonical": "[\"str\",\"live\"]",
+          "hash": "98b9337c1cf2cbd1b183d20c484a7cdd027206a29466b9c6559555a2eaee9e81"
+        }
+      ]
+    },
+    {
+      "case": "decision-with-title",
+      "kind": "decision",
+      "status": "superseded",
+      "block": {
+        "block_type": "decision",
+        "body": "",
+        "fields": {
+          "title": {
+            "Str": "Ledger rule"
+          },
+          "statement": {
+            "Str": "Keep rows."
+          }
+        },
+        "id": "D-AAAAB",
+        "links": {},
+        "order": "c4",
+        "parent": "d-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "str",
+            "Ledger rule"
+          ],
+          "canonical": "[\"str\",\"Ledger rule\"]",
+          "hash": "ab83ac408769ca53d000aa7ffe9b878c8d7522f206a7dfc6b6f8d4d80fde69ce"
+        },
+        {
+          "part": "statement",
+          "tagged": [
+            "str",
+            "Keep rows."
+          ],
+          "canonical": "[\"str\",\"Keep rows.\"]",
+          "hash": "6ac47d41638c515970a0ab49b082d0b52625a203388010c29df5ce025b8dc79f"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "superseded"
+          ],
+          "canonical": "[\"str\",\"superseded\"]",
+          "hash": "eb3c0fff67082b02ac85c40ccb7a67e04093ae4d7c9551577efc10730b8c1d50"
+        }
+      ]
+    },
+    {
+      "case": "decision-without-statement",
+      "kind": "decision",
+      "status": null,
+      "block": {
+        "block_type": "decision",
+        "body": "",
+        "fields": {
+          "title": "Null"
+        },
+        "id": "D-AAAAC",
+        "links": {},
+        "order": "a2",
+        "parent": null,
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "statement",
+          "tagged": [
+            "absent"
+          ],
+          "canonical": "[\"absent\"]",
+          "hash": "cd235ab8a368562ac0a9a273c481f528baf3f1d12cda5ec47b88272c8e9d7931"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "outside-prose",
+      "kind": "outside",
+      "status": null,
+      "block": {
+        "block_type": "prose",
+        "body": "Prose outside a doc.",
+        "fields": {},
+        "id": "p-AAAAD",
+        "links": {
+          "references": [
+            {
+              "target": "d-AAAAA",
+              "part": null
+            }
+          ]
+        },
+        "order": "b0",
+        "parent": "fd-AAAAA",
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "text",
+          "tagged": [
+            "map",
+            {
+              "body": [
+                "str",
+                "Prose outside a doc."
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"body\":[\"str\",\"Prose outside a doc.\"]}]",
+          "hash": "1ede9eae478548a9c26d20ac4ba249000b5a19019fc661bb090f9611538b2b36"
+        },
+        {
+          "part": "type",
+          "tagged": [
+            "str",
+            "prose"
+          ],
+          "canonical": "[\"str\",\"prose\"]",
+          "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+        },
+        {
+          "part": "links",
+          "tagged": [
+            "map",
+            {
+              "references": [
+                "list",
+                [
+                  [
+                    "map",
+                    {
+                      "target": [
+                        "str",
+                        "d-AAAAA"
+                      ]
+                    }
+                  ]
+                ]
+              ]
+            }
+          ],
+          "canonical": "[\"map\",{\"references\":[\"list\",[[\"map\",{\"target\":[\"str\",\"d-AAAAA\"]}]]]}]",
+          "hash": "59f1047d31b673fccedc7c51d9bd9f7fca6524c26d77463393769caaf74612e8"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        }
+      ]
+    },
+    {
+      "case": "outside-decision",
+      "kind": "outside",
+      "status": "proposed",
+      "block": {
+        "block_type": "decision",
+        "body": "",
+        "fields": {
+          "statement": {
+            "Str": "Ship the review."
+          }
+        },
+        "id": "D-AAAAD",
+        "links": {},
+        "order": "a3",
+        "parent": null,
+        "pins": {}
+      },
+      "parts": [
+        {
+          "part": "title",
+          "tagged": [
+            "null"
+          ],
+          "canonical": "[\"null\"]",
+          "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+        },
+        {
+          "part": "statement",
+          "tagged": [
+            "str",
+            "Ship the review."
+          ],
+          "canonical": "[\"str\",\"Ship the review.\"]",
+          "hash": "d8be3de678836019814e7c8043925c4c6f8e34f5830568b5433c68a2084762a2"
+        },
+        {
+          "part": "status",
+          "tagged": [
+            "str",
+            "proposed"
+          ],
+          "canonical": "[\"str\",\"proposed\"]",
+          "hash": "8617ea4fbe098d47152bbcf1a11677fe900304338070120814e3c5012a8d512b"
+        }
+      ]
+    }
+  ]
+}

@@ -114,8 +114,9 @@ pub struct DisclosureDiff {
     pub newly_hidden_planned: HiddenList,
 }
 
-/// The removed versions either side holds, each with the request that removed it.
-fn removed_versions(sides: [&Resolved; 2]) -> BTreeMap<Hash, Hash> {
+/// The removed versions any of `sides` holds, each with the request that removed it. The
+/// comparison and the review's removal projection (`review_side`) read the same set.
+pub(super) fn removed_versions(sides: &[&Resolved]) -> BTreeMap<Hash, Hash> {
     sides
         .iter()
         .flat_map(|r| r.entries.iter())
@@ -233,7 +234,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
 
     // names: the removed versions of both sides, then each side's paths with those names
     // replaced, before any row is built
-    let removed = removed_versions([before, after]);
+    let removed = removed_versions(&[before, after]);
     let b_names = shown(before, &removed)?;
     let a_names = shown(after, &removed)?;
 
