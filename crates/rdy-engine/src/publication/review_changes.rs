@@ -81,11 +81,14 @@ pub fn changed_doc_reviews(
     docs.into_iter().map(|(_, d)| d).collect()
 }
 
+/// Each shared sibling's (old, new) index among the siblings both sides hold, by block id.
+type SharedPlaces = BTreeMap<BlockId, (usize, usize)>;
+
 /// The two sides of one comparison, with each parent's shared sibling places worked out once.
 struct Sides<'s> {
     before: &'s dyn PublicationReviewSide,
     after: &'s dyn PublicationReviewSide,
-    places: RefCell<HashMap<Option<BlockId>, BTreeMap<BlockId, (usize, usize)>>>,
+    places: RefCell<HashMap<Option<BlockId>, SharedPlaces>>,
 }
 
 /// The block `id` as `side` shows it on the page: a block a reader sees, never a doc or folder.
