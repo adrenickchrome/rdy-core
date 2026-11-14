@@ -214,8 +214,6 @@ fn count_changed(
     counted.into_iter().cloned().collect()
 }
 
-/// The scope a draft is read against: canon at the landing the view is based on, or canon itself
-
 /// The changes from state `from` to state `to` (spv2, D-CWC91): a review of a profile reads each
 /// side's selected state, and an empty side is [`Materialized::default`]. A doc or folder that
 /// enters the selection is New and one that leaves it is removed, even when its authored version
