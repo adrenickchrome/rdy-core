@@ -1355,9 +1355,11 @@ pub(crate) fn taken_without_deltas(got: &Value) -> (Value, u64) {
     (v, n)
 }
 
-/// The records of the sync batch `bytes`: each key with its raw kind and its payload (none for a
-/// dropped record), in wire order, and the header's features.
-fn batch_records(bytes: &[u8]) -> (Vec<(ObjectKey, u8, Option<Vec<u8>>)>, StoreFeatures) {
+/// One record of a sync batch: its key, its raw kind and its payload (none for a dropped record).
+type BatchRecord = (ObjectKey, u8, Option<Vec<u8>>);
+
+/// The records of the sync batch `bytes`, in wire order, and the header's features.
+fn batch_records(bytes: &[u8]) -> (Vec<BatchRecord>, StoreFeatures) {
     let (mut rd, header) = StreamReader::open(bytes).unwrap();
     let mut out = vec![];
     while let Some(r) = rd.next().unwrap() {
