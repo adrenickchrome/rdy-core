@@ -556,6 +556,8 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
         id: "add_zz".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![added]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     {
         let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
@@ -609,6 +611,8 @@ fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
             class: FeatureClass::ReadOnlyCompatible,
             required_rdy: TEST_FEATURE_RDY.into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     {
         let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
@@ -651,6 +655,8 @@ fn ok9_a_plan_that_cannot_be_made_never_opens() {
         id: "add_test".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![feature(TEST_FEATURE, FeatureClass::Incompatible)]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     let _known = inject_test_feature(FeatureClass::Incompatible, kinds::INTENT);
     // a stray link in the store: the planner refuses its backup; nothing opens or changes
@@ -688,6 +694,8 @@ fn ok9_a_plan_that_cannot_be_made_never_opens() {
         id: "add_unknown".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![feature("zz_unknown", FeatureClass::Incompatible)]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         let e = Store::open_with_registry_for_tests(&dir, policy, &unknown)

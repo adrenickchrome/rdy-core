@@ -64,6 +64,8 @@ fn registry_of(feature: StoreFeature) -> Vec<UpgradeStep> {
         id: format!("add_{}", feature.name),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![feature]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 
@@ -594,6 +596,8 @@ fn ok11_a_moved_plan_is_e_upgrade_moved() {
         id: "add_assessment_too".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![assessment()]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     let before = tree(base.path());
     let e = apply_planned_with_registry_for_tests(&root, &planned, &other).unwrap_err();

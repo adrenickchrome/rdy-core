@@ -245,6 +245,8 @@ fn mh6_seed_accepts_current_feature_subsets_and_refuses_upgrades() {
             class: FeatureClass::Compatible,
             required_rdy: "100.2.0".into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     let e = follower::seed_with_registry_for_tests(&file, &target, &registry).unwrap_err();
     assert_eq!(triple(&e), ("E_DUMP_CHAIN", FORMAT_MESSAGE, FORMAT_FIX));

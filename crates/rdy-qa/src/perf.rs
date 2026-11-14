@@ -5500,6 +5500,8 @@ fn m3a_registry() -> Vec<rdy_store::upgrade::UpgradeStep> {
             class: FeatureClass::Incompatible,
             required_rdy: TEST_FEATURE_RDY.into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 

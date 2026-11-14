@@ -60,16 +60,22 @@ fn registry() -> Vec<UpgradeStep> {
             id: "alpha".into(),
             from: manifest(vec![test_feature()]),
             to: manifest(vec![test_feature(), compat("zz_extra")]),
+            action: rdy_store::upgrade::StepAction::Manifest,
+            required: true,
         },
         UpgradeStep {
             id: "zeta".into(),
             from: manifest(vec![]),
             to: manifest(vec![test_feature()]),
+            action: rdy_store::upgrade::StepAction::Manifest,
+            required: true,
         },
         UpgradeStep {
             id: "beta".into(),
             from: manifest(vec![]),
             to: manifest(vec![compat("aa_other")]),
+            action: rdy_store::upgrade::StepAction::Manifest,
+            required: true,
         },
     ]
 }

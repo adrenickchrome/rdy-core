@@ -411,6 +411,8 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
             class: FeatureClass::Compatible,
             required_rdy: "100.2.0".into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     {
         // a newer rdy seals its upgrade, then stops before its completion
@@ -494,6 +496,8 @@ fn ok11_a_pending_upgrade_this_rdy_cannot_finish_refuses_the_dry_run() {
             class: FeatureClass::Compatible,
             required_rdy: "100.2.0".into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     {
         let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);

@@ -1420,12 +1420,12 @@ impl Store {
         // give the planner's answers, so the sealed log is not walked on every open. A store
         // that may be pending is planned, so RequireCurrent refuses it before anything is
         // written.
-        let (steps, pending) = match registry {
-            None if !crate::upgrade::has_registered_steps()
-                && !crate::upgrade::may_be_pending(dir) =>
-            {
-                (false, false)
-            }
+        // So is a store whose FORMAT mirror no step applies to (for a reader, no required
+        // step), with no completion pending: an always-registered step forces no walk on a
+        // store that is already current. A test's registry is always planned.
+        let writer = policy == OpenPolicy::AutoUpgrade;
+        let (steps, required, pending) = match registry {
+            None if crate::upgrade::current_without_walk(dir, writer) => (false, false, false),
             _ => match plan_upgrade(dir, registry) {
                 // a pending completion this rdy cannot run (a read-only feature it does not
                 // know): refused with the unfinished-upgrade text, before anything is written
@@ -1438,7 +1438,11 @@ impl Store {
                 {
                     return Err(unfinished_upgrade(&plan.from));
                 }
-                Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
+                Ok(plan) => (
+                    !plan.steps.is_empty(),
+                    plan.requires_upgrade,
+                    plan.pending_check,
+                ),
                 Err(planned @ StoreError::Format { .. }) => {
                     drop(Store::open_current_format_with(
                         dir,
@@ -1453,8 +1457,10 @@ impl Store {
             },
         };
         match policy {
+            // a step readers do not require (the snapshot deltas) leaves the store readable as
+            // it is: only a required step or a sealed upgrade's pending completion refuses
             OpenPolicy::RequireCurrent => {
-                if steps || pending {
+                if required || pending {
                     return Err(StoreError::UpgradeRequired);
                 }
                 Store::open_current_format_with(dir, vec![], held.cloned(), None, false)
@@ -1516,9 +1522,11 @@ impl Store {
         }
         let mark = crate::follower::require_mark(dir)?;
         Store::check_writable_store(dir)?;
-        if crate::upgrade::has_registered_steps() || crate::upgrade::may_be_pending(dir) {
+        // a follower reads its source's prefix as it is: an optional step never runs here, and
+        // only a required one, or a pending completion, refuses the open
+        if !crate::upgrade::current_without_walk(dir, false) {
             let plan = crate::upgrade::inspect_follower(dir)?;
-            if !plan.steps.is_empty() || plan.pending_check {
+            if plan.requires_upgrade || plan.pending_check {
                 return Err(StoreError::UpgradeRequired);
             }
         }
@@ -2374,21 +2382,48 @@ impl Store {
             .has(name)
     }
 
-    /// The upgrade transaction's commit (D-WWAK7): exactly the features ref (`features`) and the
-    /// receipt ref (`receipt`, an [`format::UpgradeReceipt`]'s JSON) in one unheld batch. Refused
-    /// with a held batch open, a receipt that does not validate, a receipt whose `source_end` is
-    /// not the current sealed end, whose `from` is not the current manifest's hash, or whose `to`
-    /// is not `features`' hash. Returns the batch's `BATCH_COMMIT` hash. No public ref write
-    /// passes these checks.
+    /// Test hook: [`Store::commit_upgrade`], with its checks, of the step objects `objects`
+    /// (as a registered step would hand them over) and the two refs.
+    #[doc(hidden)]
+    pub fn commit_upgrade_for_tests(
+        &mut self,
+        features: &StoreFeatures,
+        receipt: &[u8],
+        objects: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Hash, StoreError> {
+        self.commit_upgrade(features, receipt, objects)
+    }
+
+    /// [`Store::commit_upgrade`] of a batch with no step objects.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn commit_upgrade_refs(
+        &mut self,
+        features: &StoreFeatures,
+        receipt: &[u8],
+    ) -> Result<Hash, StoreError> {
+        self.commit_upgrade(features, receipt, vec![])
+    }
+
+    /// The upgrade transaction's commit (D-WWAK7): the registered steps' objects (`objects`),
+    /// then exactly the features ref (`features`) and the receipt ref (`receipt`, an
+    /// [`format::UpgradeReceipt`]'s JSON), in one unheld batch. Refused with a held batch open,
+    /// a receipt that does not validate, a receipt whose `source_end` is not the current sealed
+    /// end, whose `from` is not the current manifest's hash, or whose `to` is not `features`'
+    /// hash; and objects the receipt's steps do not produce
+    /// (`crate::snapshot_upgrade::check_batch`: the snapshot-delta step's deltas, each held
+    /// landing's one, and nothing else). `features` must name every feature the objects use:
+    /// the batch activates no feature of its own. Returns the batch's `BATCH_COMMIT` hash. No
+    /// public ref write passes these checks.
     ///
     /// The marker's sync is the commit point. A failure before it rolls the batch back, as a
     /// failed write does. A failure after it (the index update) keeps the batch: the store's
     /// features become the batch's, the index is rebuilt from the log, and the error is
     /// returned, so the receipt waits for the upgrade's completion.
-    pub(crate) fn commit_upgrade_refs(
+    pub(crate) fn commit_upgrade(
         &mut self,
         features: &StoreFeatures,
         receipt: &[u8],
+        objects: Vec<(u8, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
         if self.open.is_some() {
             return Err(batch_open("before the upgrade batch"));
@@ -2410,10 +2445,24 @@ impl Store {
             ));
         }
         features.validate().map_err(|e| e.store_error())?;
-        let items = self.ref_items(vec![
+        crate::snapshot_upgrade::check_batch(self, &r.steps, &objects)?;
+        // the batch activates no feature of its own: every feature a step object uses is one
+        // the batch's features name
+        let unnamed = objects.iter().any(|(raw, payload)| {
+            format::required_features(*raw, payload)
+                .iter()
+                .any(|f| !features.has(&f.name))
+        });
+        if unnamed {
+            return Err(StoreError::Refused(
+                crate::snapshot_upgrade::UPGRADE_BATCH.into(),
+            ));
+        }
+        let mut items = objects;
+        items.extend(self.ref_items(vec![
             (format::REF_STORE_FEATURES.into(), features.to_json()),
             (format::REF_UPGRADE.into(), receipt.to_vec()),
-        ]);
+        ]));
         // where the batch starts: the end, or the next segment's start when it rolls
         let start = self.log.batch_start(&items);
         let held = self.held;
@@ -3098,7 +3147,13 @@ impl Store {
         }
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
-        let (items, activated, published) = self.first_use(items)?;
+        // the upgrade's batch carries its own features ref, which names every feature its step
+        // objects use (`commit_upgrade`): it activates nothing and never publishes FORMAT early
+        let (items, activated, published) = if how == RefWrite::Upgrade {
+            (items, None, false)
+        } else {
+            self.first_use(items)?
+        };
         let start = self.log.end();
         let mut result = if self.held {
             self.append_held(items)
@@ -5451,6 +5506,17 @@ impl Store {
                     // the removed frame's raw kind, as its source stored it
                     self.log.append_dropped(*raw, &key.hash, *len)?;
                     frames.push((*raw, key.hash));
+                }
+                Write::Generated { key, raw, .. } => {
+                    // a delta the take made for a new legacy landing (`crate::snapshot_upgrade`)
+                    let payload = plan.generated.get(key).ok_or_else(|| {
+                        StoreError::Decode(format!("the take has no bytes for {key}"))
+                    })?;
+                    let (loc, hash) = self.log.append_unrolled(*raw, payload)?;
+                    if !plan.redaction {
+                        entries.extend(entries_for_frame(*raw, hash, loc, payload, &mut r)?);
+                    }
+                    frames.push((*raw, hash));
                 }
             }
         }

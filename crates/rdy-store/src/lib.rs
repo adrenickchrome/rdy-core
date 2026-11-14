@@ -40,6 +40,7 @@ pub mod review;
 pub mod segment;
 pub mod signature;
 pub mod snapshot;
+pub mod snapshot_upgrade;
 pub mod start_lock;
 mod store;
 pub mod stream_error;

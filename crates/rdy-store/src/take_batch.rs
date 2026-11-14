@@ -319,13 +319,19 @@ pub(crate) enum Write {
         len: u32,
         verify: Verify,
     },
+    /// A snapshot delta the take made for a new legacy landing of an upload into a holder that
+    /// holds `snapshot_delta` (`crate::snapshot_upgrade`): its raw kind and length; its bytes
+    /// are the plan's (`Plan::generated`).
+    Generated { key: ObjectKey, raw: u8, len: u32 },
 }
 
 impl Write {
     /// The object the frame writes.
     pub(crate) fn key(&self) -> ObjectKey {
         match self {
-            Write::Present { key, .. } | Write::Dropped { key, .. } => *key,
+            Write::Present { key, .. }
+            | Write::Dropped { key, .. }
+            | Write::Generated { key, .. } => *key,
         }
     }
 
@@ -333,7 +339,7 @@ impl Write {
     pub(crate) fn len(&self) -> u32 {
         match self {
             Write::Present { at, .. } => at.len,
-            Write::Dropped { len, .. } => *len,
+            Write::Dropped { len, .. } | Write::Generated { len, .. } => *len,
         }
     }
 }
@@ -353,6 +359,8 @@ pub(crate) struct Plan {
     pub(crate) tag: Tag,
     /// The holder's merged features when this batch activates any (its last ref sets them).
     pub(crate) features: Option<StoreFeatures>,
+    /// The bytes of each [`Write::Generated`] delta, by its key.
+    pub(crate) generated: BTreeMap<ObjectKey, Vec<u8>>,
 }
 
 /// The holder as the take reads it: its reader, its log's segment files and authorization, the
@@ -822,6 +830,7 @@ fn check_capacity(
     reader: &StoreReader,
     source: &mut UploadSource<'_>,
     writes: &BTreeMap<ObjectKey, (Write, Vec<ObjectKey>)>,
+    generated: &BTreeMap<ObjectKey, Vec<u8>>,
     after: &StoreFeatures,
 ) -> Result<(), StreamError> {
     use crate::check_holder::{
@@ -850,6 +859,15 @@ fn check_capacity(
                 .iter()
                 .filter(|r| !(deltas && r.kind == Some(kinds::SNAPSHOT)))
                 .count() as u64;
+        }
+        // a delta the take made counts its own links under the manifest after the batch, as
+        // the index counts them
+        if let Write::Generated { raw, .. } = w
+            && let Some(payload) = generated.get(key)
+        {
+            edges += portable_refs_of(after, *raw, payload)
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(*key)))?
+                .len() as u64;
         }
     }
     if objects > bounds.objects {
@@ -923,6 +941,16 @@ pub(crate) fn prepare<E>(
     // or not open, refuses the take before anything is read further
     crate::format::check_writable(&header.features)
         .map_err(|e| StreamError::store_format(Some(0), 0, &e))?;
+    // the snapshot deltas (D-918YB, D-8T7PA): a holder without the feature takes no upload that
+    // holds it, empty or not, while this rdy has the step that upgrades the holder: the host
+    // upgrades it first. Refused before anything is read further
+    let sd = crate::format::FEATURE_SNAPSHOT_DELTA;
+    let upload_deltas =
+        header.features.has(sd) || union.values().any(|e| e.needs.iter().any(|f| f.name == sd));
+    let holder_deltas = rx.features.has(sd);
+    if upload_deltas && !holder_deltas && crate::upgrade::converts_deltas() {
+        return Err(TakeError::Store(StoreError::UpgradeRequired));
+    }
     let objects: Vec<ObjectKey> = union.keys().copied().collect();
     let reader = rx.reader;
     let mut source = UploadSource {
@@ -1218,6 +1246,46 @@ pub(crate) fn prepare<E>(
         }
         scan?;
     }
+    // a legacy upload into a holder that holds `snapshot_delta`: the take converts it in this
+    // same batch, one canonical delta for each new landing, in chain order, based on the
+    // holder's own delta where the chain meets the holder (`crate::snapshot_upgrade`). The
+    // upload's SNAPSHOT records are written as they came. A delta the holder holds already is
+    // not written again
+    let mut generated: BTreeMap<ObjectKey, Vec<u8>> = BTreeMap::new();
+    if holder_deltas && !upload_deltas {
+        let landings: Vec<Hash> = writes
+            .iter()
+            .filter(|(k, (w, _))| k.kind == kinds::LANDING && matches!(w, Write::Present { .. }))
+            .map(|(k, _)| k.hash)
+            .collect();
+        for (d, (raw, payload)) in
+            crate::snapshot_upgrade::take_deltas(reader, &mut source, &landings)?
+        {
+            let key = ObjectKey {
+                kind: kinds::SNAPSHOT_DELTA,
+                hash: Hash::of(&payload),
+            };
+            if rx.holds(&key)? || writes.contains_key(&key) {
+                continue;
+            }
+            let len = u32::try_from(payload.len())
+                .map_err(|_| StreamError::limit(None, 0, LIMIT_TOTAL_BYTES))?;
+            new_payload_bytes += u64::from(len);
+            writes.insert(
+                key,
+                (
+                    Write::Generated { key, raw, len },
+                    crate::snapshot_upgrade::delta_children(&d),
+                ),
+            );
+            generated.insert(key, payload);
+        }
+        // the batch keeps the bounds of one batch with the deltas it makes
+        let records = writes.len() as u64;
+        if records > MAX_RECORDS {
+            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS).into());
+        }
+    }
     // the holder keeps the stream's features (unknown compatible ones included) and activates
     // those its new records first use, with the features ref in this same batch (D-WWAK7)
     let mut needs: Vec<StoreFeature> = header.features.features.clone();
@@ -1230,7 +1298,7 @@ pub(crate) fn prepare<E>(
     drop(needs);
     // the holder's capacity: after this batch the holder check (under the manifest the holder
     // holds after it) can still read the whole holder
-    check_capacity(reader, &mut source, &writes, &merged)?;
+    check_capacity(reader, &mut source, &writes, &generated, &merged)?;
     // 8. the caller's check, with removed objects as their drops
     for (k, by) in &approved {
         if let Some((apply, t)) = by.first() {
@@ -1379,5 +1447,6 @@ pub(crate) fn prepare<E>(
         tag_hash,
         tag,
         features,
+        generated,
     })
 }
