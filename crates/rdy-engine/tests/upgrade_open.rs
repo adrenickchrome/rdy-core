@@ -447,6 +447,7 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
         kinds::PROPOSAL,
         kinds::LANDING,
         kinds::SNAPSHOT,
+        kinds::SNAPSHOT_DELTA,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,

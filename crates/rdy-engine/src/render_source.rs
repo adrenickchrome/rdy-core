@@ -967,8 +967,12 @@ fn check_landings(
     let mut kept = None;
     let mut checked: HashSet<Hash> = HashSet::new();
     let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
-    // the versions rule 6 read for the landing being checked, kept for its blocks
+    // the versions rule 6 read for the landing being checked, kept for its blocks; each one is
+    // charged to a snapshot budget before it is kept, so what is kept stays within the limits
+    // of one snapshot (the landing's map holds every version its delta sets; a delta that sets
+    // more than one snapshot may hold is refused here, with the error the map would have)
     let fresh: RefCell<BTreeMap<Hash, Block>> = RefCell::new(BTreeMap::new());
+    let fresh_budget: RefCell<SnapshotBudget> = RefCell::new(SnapshotBudget::new());
     let mut snapshots = RecordSnapshots::new(source);
     check_snapshot_chains(
         &mut snapshots,
@@ -978,11 +982,16 @@ fn check_landings(
             let block = read_block(s.source(), *version).map_err(ChainError::Rdy)?;
             let id = block.as_ref().map(|b| b.id.clone());
             if let Some(b) = block {
+                fresh_budget
+                    .borrow_mut()
+                    .charge(&b)
+                    .map_err(ChainError::Rdy)?;
                 fresh.borrow_mut().insert(*version, b);
             }
             Ok(id)
         },
         &mut |s, _, landing, map| {
+            *fresh_budget.borrow_mut() = SnapshotBudget::new();
             let mut fresh = std::mem::take(&mut *fresh.borrow_mut());
             if !checked.insert(landing.state) {
                 return Ok(());

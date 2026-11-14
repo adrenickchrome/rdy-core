@@ -1372,16 +1372,35 @@ fn hc7_legacy_loads_keep_hashes_and_one_upgrade() {
             );
             assert!(s.stopped_at.is_none() && s.warnings.is_empty(), "{name}");
             assert_eq!(s.batches, source.len() as u64, "{name}");
-            // the source batches with their hashes, then one upgrade batch
+            // the source batches with their hashes, then one upgrade batch: its refs, and
+            // (SD1 Task 6) one snapshot delta for each source landing
             assert_eq!(batches(&to, ORIGIN, Some(log_end)), source, "{name}");
             let tail = batches(&to, log_end, None);
             assert_eq!(tail.len(), 1, "{name}: {tail:?}");
-            assert!(
-                tail[0].frames.iter().all(|f| f.kind() == kinds::REF_UPDATE),
-                "{name}"
-            );
+            assert_upgrade_tail(&tail[0], &source, name);
         }
     }
+}
+
+/// `tail` is a legacy load's one upgrade batch after the `source` batches: ref updates and
+/// (SD1 Task 6) one snapshot delta for each landing of `source`, nothing else.
+fn assert_upgrade_tail(tail: &DumpBatch, source: &[DumpBatch], what: &str) {
+    let landings = source
+        .iter()
+        .flat_map(|b| b.frames.iter())
+        .filter(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::LANDING)
+        .count();
+    let deltas = tail
+        .frames
+        .iter()
+        .filter(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::SNAPSHOT_DELTA)
+        .count();
+    assert!(
+        tail.frames.iter().all(|f| f.kind() == kinds::REF_UPDATE
+            || rdy_store::codec::logical_kind(f.kind()) == kinds::SNAPSHOT_DELTA),
+        "{what}: {tail:?}"
+    );
+    assert_eq!(deltas, landings, "{what}: one delta per landing");
 }
 
 /// Opens the store under `dir` in its own mode.
@@ -1437,9 +1456,10 @@ fn hc7_stop_before_a_migration_upgrade_keeps_the_prefix_format() {
             );
             let tail = batches(&to, end, None);
             let last = tail.last().expect("an upgrade batch");
-            assert!(
-                last.frames.iter().all(|f| f.kind() == kinds::REF_UPDATE),
-                "{name} {at:?}: the upgrade batch is last: {tail:?}"
+            assert_upgrade_tail(
+                last,
+                &batches(&moved, ORIGIN, Some(end)),
+                &format!("{name} {at:?}: the upgrade batch is last"),
             );
             let got = open_any(&to);
             assert_eq!(got.store().repo_id().unwrap(), Some(repo), "{name} {at:?}");

@@ -76,13 +76,14 @@ fn fork(r: &Rdy, root: &Path, name: &str) -> Rdy {
 }
 
 /// The kinds a copy carries into a holder: what a tag's history reaches.
-const COPIED: [u8; 9] = [
+const COPIED: [u8; 10] = [
     kinds::BLOCK,
     kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
     kinds::SNAPSHOT,
+    kinds::SNAPSHOT_DELTA,
     kinds::BLOB_CHUNK,
     kinds::BLOB_MANIFEST,
     kinds::TAG,
@@ -357,12 +358,20 @@ fn ha7_holder_fsck_checks_both_histories() {
     );
     drop(h);
 
-    // the right history's snapshot is missing: its chain is checked too
-    let right_state = d.right.store().landing(&d.l_right).unwrap().state;
+    // the right history's snapshot delta is missing: its chain is checked too (SD1 Task 6: a
+    // landing's state is its delta)
+    let right_delta = d
+        .right
+        .store()
+        .reader()
+        .snapshot_delta_of(&d.l_right)
+        .unwrap()
+        .unwrap()
+        .0;
     let root = tempfile::tempdir().unwrap();
     let mut items = objects(&d.left, &all);
     items.extend(objects(&d.right, &|k, h| {
-        !(k == kinds::SNAPSHOT && *h == right_state)
+        !(k == kinds::SNAPSHOT_DELTA && *h == right_delta)
     }));
     let mut refs = tag_refs(&d.left, &["v1.0.0", "v1.1.0"]);
     refs.extend(tag_refs(&d.right, &["v2.0.0"]));
@@ -375,8 +384,8 @@ fn ha7_holder_fsck_checks_both_histories() {
     assert_eq!(e.code, E_IO, "{e}");
     assert!(
         e.message.ends_with(&format!(
-            "names {}:{right_state}, which is not stored",
-            kinds::SNAPSHOT
+            "landing {}: expected exactly one snapshot delta",
+            d.l_right
         )),
         "{e}"
     );
@@ -567,28 +576,26 @@ fn ha7_holder_accepts_unknown_source_block_types() {
             },
         )
         .unwrap();
+    // structurally valid: its snapshot delta in the same batch (SD1 Task 6)
     let landing = s
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                proposal,
-                prev: None,
-                state,
-                approved_by: prov,
-                changes: vec![c],
-                chosen: None,
-                checks: vec![],
-                assurance: Assurance::Local,
-                relayed_by: None,
-                relay_evidence: None,
-                approved_version: None,
-                rebased_from: vec![],
-                evidence: None,
-                assessment: None,
-                policy: None,
-                read_identity: None,
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            proposal,
+            prev: None,
+            state,
+            approved_by: prov,
+            changes: vec![c],
+            chosen: None,
+            checks: vec![],
+            assurance: Assurance::Local,
+            relayed_by: None,
+            relay_evidence: None,
+            approved_version: None,
+            rebased_from: vec![],
+            evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
+        })
         .unwrap();
     put_tag(&mut h, "v1.0.0", landing);
     h.seal_open().unwrap();
@@ -934,29 +941,27 @@ fn linear_holder(dir: &Path, n: usize) -> (Rdy, Vec<Hash>) {
         .unwrap();
     let mut landings: Vec<Hash> = vec![];
     for _ in 0..n {
+        // structurally valid: each landing's snapshot delta in its batch (SD1 Task 6)
         let l = h
             .store_mut()
-            .put(
-                kinds::LANDING,
-                &LandingRecord {
-                    proposal,
-                    prev: landings.last().copied(),
-                    state,
-                    approved_by: prov.clone(),
-                    changes: vec![],
-                    chosen: None,
-                    checks: vec![],
-                    assurance: Assurance::Local,
-                    relayed_by: None,
-                    relay_evidence: None,
-                    approved_version: None,
-                    rebased_from: vec![],
-                    evidence: None,
-                    assessment: None,
-                    policy: None,
-                    read_identity: None,
-                },
-            )
+            .put_landing_for_tests(&LandingRecord {
+                proposal,
+                prev: landings.last().copied(),
+                state,
+                approved_by: prov.clone(),
+                changes: vec![],
+                chosen: None,
+                checks: vec![],
+                assurance: Assurance::Local,
+                relayed_by: None,
+                relay_evidence: None,
+                approved_version: None,
+                rebased_from: vec![],
+                evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
+            })
             .unwrap();
         put_tag(&mut h, &format!("v{}.0.0", landings.len() + 1), l);
         landings.push(l);
@@ -1093,37 +1098,35 @@ fn ha7_holder_fsck_refuses_a_snapshot_version_of_another_block() {
             },
         )
         .unwrap();
+    // structurally valid: its snapshot delta in the same batch (SD1 Task 6)
     let landing = s
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                proposal,
-                prev: None,
-                state,
-                approved_by: prov,
-                changes: vec![],
-                chosen: None,
-                checks: vec![],
-                assurance: Assurance::Local,
-                relayed_by: None,
-                relay_evidence: None,
-                approved_version: None,
-                rebased_from: vec![],
-                evidence: None,
-                assessment: None,
-                policy: None,
-                read_identity: None,
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            proposal,
+            prev: None,
+            state,
+            approved_by: prov,
+            changes: vec![],
+            chosen: None,
+            checks: vec![],
+            assurance: Assurance::Local,
+            relayed_by: None,
+            relay_evidence: None,
+            approved_version: None,
+            rebased_from: vec![],
+            evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
+        })
         .unwrap();
+    let delta = s.reader().snapshot_delta_of(&landing).unwrap().unwrap().0;
     put_tag(&mut h, "v1.0.0", landing);
     h.seal_open().unwrap();
     let e = h.fsck().unwrap_err();
     assert_eq!(e.code, E_IO, "{e}");
     assert!(
         e.message.ends_with(&format!(
-            "snapshot {state}: block {other} names version {v}, which is a version of {}",
-            block.id
+            "snapshot delta {delta}: block {other} names version {v} of another block"
         )),
         "{e}"
     );

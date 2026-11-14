@@ -229,10 +229,7 @@ fn split(r: &Rdy, tag: Hash, n: usize) -> Vec<Vec<u8>> {
             let mut needed = BTreeSet::new();
             for k in &records {
                 let rec = source.record(*k).unwrap().unwrap();
-                for l in rec
-                    .refs(&rdy_store::format::StoreFeatures::of(vec![]))
-                    .unwrap()
-                {
+                for l in rec.refs(&rdy_store::format::baseline_features()).unwrap() {
                     needed.insert(resolve(l));
                 }
                 needed.extend(rec.proof());
@@ -747,14 +744,11 @@ fn ha13_take_rechecks_dependencies_after_batch_reports() {
     let s = r.store_mut().put(kinds::SNAPSHOT, &snap).unwrap();
     let forged = r
         .store_mut()
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                state: s,
-                read_identity: None,
-                ..rec.clone()
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            state: s,
+            read_identity: None,
+            ..rec.clone()
+        })
         .unwrap();
     let t = r
         .store_mut()
@@ -775,12 +769,23 @@ fn ha13_take_rechecks_dependencies_after_batch_reports() {
         target("v9.0.0", forged),
     )
     .unwrap_err();
+    // SD1 Task 6: the forged landing's state travels as its snapshot delta, which rule 6 names
+    let _ = (s, prose_id);
+    let delta = r
+        .store()
+        .reader()
+        .snapshot_delta_of(&forged)
+        .unwrap()
+        .unwrap()
+        .0;
     assert_eq!(
         (e.code, e.message.as_str()),
         (
             "E_BAD_RECORD",
-            format!("snapshot {s}: block {doc_id} names version {foreign}, which is a version of {prose_id}")
-                .as_str()
+            format!(
+                "snapshot delta {delta}: block {doc_id} names version {foreign} of another block"
+            )
+            .as_str()
         )
     );
     assert_eq!(unchanged(&root, &h), before);
@@ -1465,29 +1470,23 @@ fn ha13_take_keeps_the_landing_and_chain_rules() {
     // a landing whose assurance is relayed, with no relay fields or evidence
     let relayed = r
         .store_mut()
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                assurance: Assurance::Relayed,
-                relayed_by: None,
-                relay_evidence: None,
-                evidence: None,
-                read_identity: None,
-                ..rec.clone()
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            assurance: Assurance::Relayed,
+            relayed_by: None,
+            relay_evidence: None,
+            evidence: None,
+            read_identity: None,
+            ..rec.clone()
+        })
         .unwrap();
     // a landing on top of `l` that lands `l`'s changes again
     let again = r
         .store_mut()
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                prev: Some(l),
-                read_identity: None,
-                ..rec.clone()
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            prev: Some(l),
+            read_identity: None,
+            ..rec.clone()
+        })
         .unwrap();
     let c = rec.changes[0];
     for (name, landing, message) in [
@@ -1572,14 +1571,11 @@ fn ha13_take_keeps_the_blob_chunk_lengths() {
         let s = r.store_mut().put(kinds::SNAPSHOT, &snap).unwrap();
         let landing = r
             .store_mut()
-            .put(
-                kinds::LANDING,
-                &LandingRecord {
-                    state: s,
-                    read_identity: None,
-                    ..rec.clone()
-                },
-            )
+            .put_landing_for_tests(&LandingRecord {
+                state: s,
+                read_identity: None,
+                ..rec.clone()
+            })
             .unwrap();
         let (_, batch) = forged_upload(&mut r, name, landing, rec.approved_by.clone());
         let before = unchanged(&root, &h);

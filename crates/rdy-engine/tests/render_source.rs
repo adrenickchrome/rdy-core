@@ -249,7 +249,7 @@ fn rebatch(repo: RepoId, root: Hash, records: &[StreamRecord]) -> Vec<u8> {
     for r in records {
         // a record over its decode bounds names nothing here: the reader refuses it
         for l in r
-            .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+            .refs(&rdy_store::format::baseline_features())
             .unwrap_or_default()
         {
             needed.insert(resolve(l));

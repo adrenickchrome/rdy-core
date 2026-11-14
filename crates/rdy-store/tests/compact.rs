@@ -32,7 +32,7 @@ const CENSUS: &str =
     "disk allocation could not be read after punching; on_disk_bytes is the count before this call";
 
 /// The closed table of the report's names, by numeric kind.
-const NAMES: [(u8, &str); 27] = [
+const NAMES: [(u8, &str); 28] = [
     (1, "block"),
     (2, "change"),
     (3, "proposal"),
@@ -60,6 +60,7 @@ const NAMES: [(u8, &str); 27] = [
     (26, "dispute"),
     (27, "dispute_resolution"),
     (28, "check_request"),
+    (30, "snapshot_delta"),
 ];
 
 fn block(id: &str, body: &str) -> Block {

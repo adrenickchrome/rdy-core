@@ -359,7 +359,7 @@ mod hub {
             let mut needed: BTreeSet<ObjectKey> = BTreeSet::new();
             for rec in part {
                 let refs = rec
-                    .refs(&rdy_store::format::StoreFeatures::of(vec![]))
+                    .refs(&rdy_store::format::baseline_features())
                     .map_err(|e| {
                         RdyError::new("E_BAD_RECORD", e.to_string(), "export the history again")
                     })?;

@@ -48,7 +48,16 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
         keys,
         ["dump", "rdy", "reads", "reads_features", "store", "stream"]
     );
-    // ok4: the baseline names content-2 identity and object encodings
+    // ok4: the baseline names content-2 identity, object encodings and snapshot deltas (SD1)
+    let names: Vec<&str> = f.store.features.iter().map(|x| x.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            rdy_store::format::FEATURE_CONTENT_HASH_V2,
+            rdy_store::format::FEATURE_OBJECT_ENCODING,
+            rdy_store::format::FEATURE_SNAPSHOT_DELTA
+        ]
+    );
     assert_eq!(
         v["store"],
         serde_json::to_value(rdy_store::format::baseline_features()).unwrap()

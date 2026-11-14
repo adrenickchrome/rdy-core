@@ -5,7 +5,8 @@
 //! the bounds. With nothing known, everything the walk finds is charged, as before.
 //!
 //! The source has one doc of many prose blocks and a long history: each landing changes one
-//! block, so each landing's snapshot links to every block. `v1` is tagged after most of it; `v2`
+//! block, so each landing's snapshot links to every block (a legacy source, written before
+//! snapshot deltas). `v1` is tagged after most of it; `v2`
 //! a few landings later. The receiver of the incremental upload holds `v1`'s closure.
 mod common;
 
@@ -63,7 +64,13 @@ fn tag_hash(r: &Rdy, name: &str) -> Hash {
 
 /// The source: [`BLOCKS`] prose blocks landed, then [`OLD_LANDINGS`] landings of one block each
 /// and tag `v1`, then [`NEW_LANDINGS`] more and tag `v2`. Returns the project and both tags.
+///
+/// SD1 Task 6: the source is written as the last rdy before snapshot deltas wrote it (a legacy
+/// store whose landings each name a full SNAPSHOT), which is the history shape these bounds
+/// were set for: a delta names only the versions its landing changed. The walk reads it as any
+/// reader of a legacy store does.
 fn source() -> (tempfile::TempDir, Rdy, Hash, Hash) {
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let mut ops = vec![json!({"op": "create", "type": "doc", "id": "$d",

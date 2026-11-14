@@ -59,13 +59,14 @@ fn land_tag(r: &mut Rdy, id: Option<&str>, body: &str, name: &str) -> String {
 }
 
 fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
-    const COPIED: [u8; 9] = [
+    const COPIED: [u8; 10] = [
         kinds::BLOCK,
         kinds::ASSESSMENT,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
         kinds::SNAPSHOT,
+        kinds::SNAPSHOT_DELTA,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,
@@ -399,7 +400,12 @@ fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::form
 fn sdl5_adapter_open_reads_a_legacy_holder_and_maintenance_runs_the_step() {
     let steps = vec![rdy_store::upgrade::snapshot_delta_step()];
     let root = tempfile::tempdir().unwrap();
-    let dir = divergent_holder(root.path(), RepoId([5; 16]));
+    // a holder the last rdy before snapshot deltas wrote (SD1 Task 6: a new one lists the
+    // feature from its first batch)
+    let dir = {
+        let _legacy = rdy_store::format::legacy_writer_for_tests();
+        divergent_holder(root.path(), RepoId([5; 16]))
+    };
     let segments = |dir: &Path| tree(&dir.join(".rdy/store/segments"));
     let before = segments(&dir);
     rdy_store::upgrade::with_registry_for_tests(&steps, || {

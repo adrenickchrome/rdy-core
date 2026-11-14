@@ -75,13 +75,14 @@ fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::form
     rdy_store::format::StoreFeatures::of(f)
 }
 
-const COPIED: [u8; 9] = [
+const COPIED: [u8; 10] = [
     kinds::BLOCK,
     kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
     kinds::SNAPSHOT,
+    kinds::SNAPSHOT_DELTA,
     kinds::BLOB_CHUNK,
     kinds::BLOB_MANIFEST,
     kinds::TAG,

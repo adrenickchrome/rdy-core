@@ -462,13 +462,28 @@ pub(crate) fn first_start_logs_moves(dir: &Path, holder: bool, what: &str) -> us
     n
 }
 
+/// The data frames of an upgrade batch: its ref updates and its snapshot deltas (SD1 Task 6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Upgrade {
+    pub(crate) refs: u64,
+    pub(crate) deltas: u64,
+}
+
+impl Upgrade {
+    /// Every data frame of the batch.
+    pub(crate) fn frames(self) -> u64 {
+        self.refs + self.deltas
+    }
+}
+
 /// Past a fixture's log end (a fixture of store format `fixture_format`, which holds its repo
-/// id), a load holds only the upgrade batch to a feature store, which holds
-/// `meta/store_features` alone: the baseline features. Returns the number of data frames past
-/// the end.
-pub(crate) fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> u64 {
-    let tail = tail(r, log_end);
+/// id), a load holds only the upgrade batch to a feature store: one snapshot delta for each
+/// landing, then `meta/store_features` alone, the baseline features. Returns the data frames
+/// past the end.
+pub(crate) fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> Upgrade {
+    let mut tail = tail(r, log_end);
     assert!(fixture_format >= 12, "a fixture that holds its repo id");
+    let deltas = rdy_qa::chain_fixture::take_delta_head(&mut tail, r.store());
     assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
     assert_eq!(tail[0].0, kinds::REF_UPDATE);
     let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
@@ -481,9 +496,11 @@ pub(crate) fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> u
         }
     );
     assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
-    tail.iter()
+    let refs = tail
+        .iter()
         .filter(|(kind, _)| *kind != kinds::BATCH_COMMIT)
-        .count() as u64
+        .count() as u64;
+    Upgrade { refs, deltas }
 }
 
 /// Loads the fixture `dump` and checks it against `expect`: the pair, no removed canary in its
@@ -597,7 +614,7 @@ fn load_and_check(dump: &str, expect: &Value, holder: bool) -> (Rdy, tempfile::T
     }
     let mut want_fsck = expect["fsck"].clone();
     for member in ["frames", "checked_payloads"] {
-        want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade);
+        want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade.frames());
     }
     // the unlogged move count is analysis, which the first writable start logs
     // (`first_start_logs_moves`)
@@ -1141,11 +1158,12 @@ fn check_loaded(
     );
     // the loaded store carries the fixture's log, then the upgrade batch of ref updates to a
     // feature store
-    let tail = tail(&r, log_end);
+    let mut tail = tail(&r, log_end);
+    rdy_qa::chain_fixture::take_delta_head(&mut tail, r.store());
     assert!(
         tail.iter()
             .all(|(k, _)| *k == kinds::REF_UPDATE || *k == kinds::BATCH_COMMIT),
-        "{what}: the load adds ref updates only: {tail:?}"
+        "{what}: the load adds its deltas, then ref updates only: {tail:?}"
     );
     assert!(
         !tail.is_empty() && store_format <= rdy_store::format::LAST_SCALAR_STORE_FORMAT,

@@ -383,9 +383,12 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
             Ok(())
         })
         .unwrap();
+    let mut deltas = 0;
     if fixture_format > LAST_SCALAR_STORE_FORMAT {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
     } else {
+        // the deltas of the conversion lead the batch (SD1 Task 6)
+        deltas = rdy_qa::chain_fixture::take_delta_head(&mut tail, r.store());
         assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
         assert_eq!(tail[0].0, kinds::REF_UPDATE);
         let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
@@ -482,7 +485,8 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
     let upgrade = tail
         .iter()
         .filter(|(kind, _)| *kind != kinds::BATCH_COMMIT)
-        .count() as u64;
+        .count() as u64
+        + deltas;
     let mut want_fsck = expect["fsck"].clone();
     for member in ["frames", "checked_payloads"] {
         want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade);
@@ -944,11 +948,23 @@ fn sig10_all_released_pairs_stay_readable() {
                 Ok(())
             })
             .unwrap();
+        // the conversion's snapshot deltas lead the batch (SD1 Task 6)
+        let deltas = tail
+            .iter()
+            .take_while(|k| rdy_store::codec::logical_kind(**k) == kinds::SNAPSHOT_DELTA)
+            .count();
+        assert_eq!(
+            deltas,
+            r.store().reader().project_landings().unwrap().len(),
+            "{}: one delta per landing",
+            f.dump
+        );
         assert!(
-            tail.iter()
+            tail[deltas..]
+                .iter()
                 .all(|k| *k == kinds::REF_UPDATE || *k == kinds::BATCH_COMMIT)
                 && tail.last() == Some(&kinds::BATCH_COMMIT),
-            "{}: the load adds ref updates in one batch, never a signature: {tail:?}",
+            "{}: the load adds its deltas, then ref updates in one batch, never a signature: {tail:?}",
             f.dump
         );
         // no signature exists, and the store checks as one of the current format

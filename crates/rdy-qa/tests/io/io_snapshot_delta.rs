@@ -144,11 +144,12 @@ fn typed_facts(old: &Objects) -> (Vec<(Hash, LandingRecord)>, Vec<Tag>, Vec<Hash
     (landings, tags, subjects)
 }
 
-/// The block map each landing of `old` materializes, from its held SNAPSHOT.
-fn old_maps(old: &Objects) -> BTreeMap<Hash, BTreeMap<BlockId, Hash>> {
+/// The block map each landing of `old` in `of` materializes, from its held SNAPSHOT.
+fn old_maps(old: &Objects, of: &BTreeSet<Hash>) -> BTreeMap<Hash, BTreeMap<BlockId, Hash>> {
     let (landings, ..) = typed_facts(old);
     landings
         .into_iter()
+        .filter(|(h, _)| of.contains(h))
         .map(|(h, l)| {
             let snap = old
                 .get(&(kinds::SNAPSHOT, l.state))
@@ -182,14 +183,31 @@ fn assert_kept(what: &str, old: &Objects, s: &Store) {
     );
     let (landings, tags, subjects) = typed_facts(old);
     assert!(!landings.is_empty(), "{what}: the source has landings");
-    assert_eq!(added.len(), landings.len(), "{what}: one delta per landing");
+    // the project's landings get a delta each; the record of a verified foreign-removal proof
+    // is not one of them and gets none (`StoreReader::project_landings`)
+    let project: BTreeSet<Hash> = s
+        .reader()
+        .project_landings()
+        .unwrap()
+        .into_iter()
+        .map(|(h, _)| h)
+        .collect();
+    assert_eq!(added.len(), project.len(), "{what}: one delta per landing");
     // the old snapshots stay held
     let snapshots = old.keys().filter(|(k, _)| *k == kinds::SNAPSHOT).count();
     assert!(snapshots > 0, "{what}: the source holds its snapshots");
-    let maps = old_maps(old);
+    let maps = old_maps(old, &project);
     for (l, rec) in &landings {
         // the landing record reads back as it was
         assert_eq!(&s.landing(l).unwrap(), rec, "{what}: landing {l}");
+        if !project.contains(l) {
+            assert_eq!(
+                s.reader().snapshot_delta_of(l).unwrap(),
+                None,
+                "{what}: proof record {l} has no delta"
+            );
+            continue;
+        }
         // its delta is new, names it, and folds to the landing's old state
         let (d, _) = s
             .reader()
@@ -276,12 +294,13 @@ fn sdl6_pre_delta_dump_load_keeps_every_identity() {
     }
 }
 
-/// The released sync batches (pre-delta).
-const STREAMS: [&str; 4] = [
-    "v1-s15.rdysync",
+/// The released tag-upload sync batches (pre-delta) this rdy takes. Format 1 (`v1-s15`) is
+/// refused before any record, and a link delivery (`v3-f1-e1-link-delivery`) holds no root tag
+/// to take; each has its own pin.
+const STREAMS: [&str; 3] = [
     "v2-f1-e0.rdysync",
+    "v2-f1-e1-ck.rdysync",
     "v2-f1-e1.rdysync",
-    "v3-f1-e1-link-delivery.rdysync",
 ];
 
 #[test]
@@ -294,7 +313,10 @@ fn sdl6_pre_delta_take_keeps_every_identity() {
             !header.features.has(FEATURE_SNAPSHOT_DELTA),
             "{name}: the stream is pre-delta"
         );
-        let root_tag: Tag = decode(&old[&(header.root().kind, header.root().hash)]);
+        let root_tag: Tag = decode(
+            old.get(&(header.root().kind, header.root().hash))
+                .unwrap_or_else(|| panic!("{name}: the batch holds its root")),
+        );
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("holder");
         let mut h = Rdy::create_holder(&root, header.repo_id).unwrap();

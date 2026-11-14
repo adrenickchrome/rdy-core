@@ -162,11 +162,16 @@ fn ha10_export_is_byte_identical_for_one_snapshot() {
         kind: kinds::TAG,
         hash: v2
     }));
-    // the older tag's batch is a different, smaller one, and its root is the last record
+    // the older tag's batch is a different, smaller one, and its root is the last record but
+    // the snapshot deltas attached after it (SD1 Task 6: a delta is a reverse attachment of its
+    // landing)
     let old = export(&r, v1, &none).unwrap().1;
     assert!(old.keys.len() < a.keys.len());
     assert_eq!(
-        old.keys.last(),
+        old.keys
+            .iter()
+            .rev()
+            .find(|k| k.kind != kinds::SNAPSHOT_DELTA),
         Some(&ObjectKey {
             kind: kinds::TAG,
             hash: v1

@@ -81,7 +81,7 @@ fn source() -> Source {
                 {
                     // the frame's raw kind and stored bytes: a change is encoding 1
                     let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
-                    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload)
+                    refs_of(r.store().features(), raw, &payload)
                         .unwrap()
                         .is_empty()
                 }
