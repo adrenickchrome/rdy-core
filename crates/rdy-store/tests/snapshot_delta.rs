@@ -1501,12 +1501,12 @@ fn sdl3_upload_checks_attachments_across_files() {
     h.reader().check_holder().unwrap();
     // a full resend is a no-op
     let (whole, _) = p.batch(0, &BTreeSet::new(), "whole");
-    let again = take(&mut h, &[whole.clone()], &p.target(0)).unwrap();
+    let again = take(&mut h, std::slice::from_ref(&whole), &p.target(0)).unwrap();
     assert_eq!(again.new_objects, 0);
 
     // the first file alone: the last landing has no delta, incoming or held
     let mut h2 = p.holder("missing");
-    let e = stream_err(take(&mut h2, &[a.clone()], &p.target(0)).unwrap_err());
+    let e = stream_err(take(&mut h2, std::slice::from_ref(&a), &p.target(0)).unwrap_err());
     assert_eq!(e.code, "E_BAD_RECORD");
     assert_eq!(
         e.message,
@@ -1923,7 +1923,7 @@ fn sdl3_capacity_counts_match_holder_check_after_delta_upgrade() {
     assert_eq!(kind_of(&records, kinds::SNAPSHOT).len(), 2);
     let mut hs: Vec<Store> = (0..3).map(|i| p.holder(&format!("h{i}"))).collect();
     for h in &mut hs {
-        take(h, &[legacy_batch.clone()], &p.target(0)).unwrap();
+        take(h, std::slice::from_ref(&legacy_batch), &p.target(0)).unwrap();
     }
     let legacy_counts = hs[0].reader().holder_counts().unwrap();
     // the source upgrades and lands once more; the receivers take the delta history
@@ -1932,7 +1932,7 @@ fn sdl3_capacity_counts_match_holder_check_after_delta_upgrade() {
     let (delta_batch, records) = p.batch(1, &held_keys(&hs[0]), "deltas");
     assert!(kind_of(&records, kinds::SNAPSHOT).is_empty());
     assert_eq!(kind_of(&records, kinds::SNAPSHOT_DELTA).len(), 3);
-    take(&mut hs[0], &[delta_batch.clone()], &p.target(1)).unwrap();
+    take(&mut hs[0], std::slice::from_ref(&delta_batch), &p.target(1)).unwrap();
     let h = &mut hs[0];
     assert!(h.features().has(FEATURE_SNAPSHOT_DELTA));
     let (objects, edges) = h.reader().holder_counts().unwrap();
@@ -1978,13 +1978,13 @@ fn sdl3_capacity_counts_match_holder_check_after_delta_upgrade() {
         objects,
         edges,
     }));
-    let ok = take(&mut hs[1], &[delta_batch.clone()], &p.target(1));
+    let ok = take(&mut hs[1], std::slice::from_ref(&delta_batch), &p.target(1));
     set_holder_capacity_for_tests(Some(HolderCapacity {
         landing_depth: depth as u64,
         objects,
         edges: edges - 1,
     }));
-    let refused = take(&mut hs[2], &[delta_batch.clone()], &p.target(1));
+    let refused = take(&mut hs[2], std::slice::from_ref(&delta_batch), &p.target(1));
     set_holder_capacity_for_tests(None);
     ok.unwrap();
     let e = stream_err(refused.unwrap_err());

@@ -19,7 +19,7 @@ use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::codec;
 use rdy_store::format::stage_snapshot_delta_for_tests;
 use rdy_store::kinds;
-use rdy_store::snapshot::record_chain_applications_for_tests;
+use rdy_store::snapshot::{folded_deltas_for_tests, record_chain_applications_for_tests};
 use rdy_store::stream_error::StreamError;
 use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::StreamHeader;
@@ -209,7 +209,14 @@ fn sdl3_publication_check_folds_each_delta_once() {
         root_snapshot_reuses_for_tests(),
     );
     let applied = record_chain_applications_for_tests();
+    let folded = folded_deltas_for_tests();
     publish(&mut h, &file, target(&r, tag)).unwrap();
+    // no map read folds a chain again: not the check, and not the root's materialization
+    assert_eq!(
+        folded_deltas_for_tests() - folded,
+        0,
+        "no fold from an empty start"
+    );
     // exactly one application of each delta: the chain is walked once, oldest first, and no
     // landing's map is folded from an empty start
     let got = applied.take();
@@ -361,7 +368,7 @@ fn noncanonical(a: &BlockId, va: Hash, b: &BlockId, vb: Hash) -> Vec<(&'static s
 fn sdl3_noncanonical_snapshot_refuses_before_take_or_load_writes() {
     for variant in 0..4 {
         // a fresh project each time: a landing on canon's head whose state is bytes of its map
-        // that are not canonical, tagged `bad`. No feature: the take and the load still check
+        // that are not canonical, tagged `v2.0.0`. No feature: the take and the load still check
         // the bytes
         let (dir, mut r, landings, _) = project(2);
         let m = r
@@ -384,13 +391,15 @@ fn sdl3_noncanonical_snapshot_refuses_before_take_or_load_writes() {
         let mut rec = r.store().landing(&landings[1]).unwrap();
         rec.read_identity = None;
         rec.prev = Some(landings[1]);
+        // it lands nothing again: only its state differs from a landing a take accepts
+        rec.changes = vec![];
         rec.state = state;
         rec.approved_by.at_ms += 1;
         let l = r.store_mut().put(kinds::LANDING, &rec).unwrap();
         let tag = r
             .store_mut()
             .put_tag(&Tag {
-                name: "bad".into(),
+                name: "v2.0.0".into(),
                 landing: l,
                 message: None,
                 tagged_by: Provenance {
