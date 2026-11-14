@@ -30529,6 +30529,9 @@
           "Policy": 0,
           "Relayed": 1
         },
+        "ImpactKind": {
+          "SnapshotDelta": 15
+        },
         "PlanAct": {
           "Confirm": 0,
           "Defer": 1,
