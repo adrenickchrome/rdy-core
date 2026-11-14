@@ -133,9 +133,12 @@ fn project() -> (tempfile::TempDir, Rdy) {
     (dir, r)
 }
 
+/// One edit: the block's id and what it becomes (`None` drops it).
+type Edit<'a> = (&'a str, &'a dyn Fn(Block) -> Option<Block>);
+
 /// `blocks` with each block `edits` names replaced by the edit's result; an edit that gives
 /// `None` drops the block.
-fn edit(blocks: &[Block], edits: &[(&str, &dyn Fn(Block) -> Option<Block>)]) -> Vec<Block> {
+fn edit(blocks: &[Block], edits: &[Edit]) -> Vec<Block> {
     blocks
         .iter()
         .filter_map(|b| match edits.iter().find(|(id, _)| b.id == bid(id)) {
