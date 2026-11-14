@@ -433,6 +433,9 @@ struct UploadSource<'a> {
     union: &'a BTreeMap<ObjectKey, Entry>,
     store: StoreSource<'a>,
     masked: BTreeMap<ObjectKey, (Hash, RemovalObject, u16)>,
+    /// Each landing's delta among the union's records, built once from their typed deltas
+    /// (`crate::snapshot`); a landing the union has no delta of asks the holder.
+    deltas: Option<BTreeMap<Hash, Hash>>,
 }
 
 impl ObjectSource for UploadSource<'_> {
@@ -470,6 +473,24 @@ impl ObjectSource for UploadSource<'_> {
             }
         }
         self.store.record(key)
+    }
+
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        if self.deltas.is_none() {
+            let keys: Vec<ObjectKey> = self
+                .union
+                .keys()
+                .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
+                .copied()
+                .collect();
+            let by =
+                crate::snapshot::associate_deltas(&keys, |k| crate::stream_source::typed(self, k))?;
+            self.deltas = Some(by);
+        }
+        match self.deltas.as_ref().and_then(|by| by.get(landing)) {
+            Some(h) => Ok(Some(*h)),
+            None => self.store.snapshot_delta_of(landing),
+        }
     }
 }
 
@@ -900,6 +921,7 @@ pub(crate) fn prepare<E>(
             end: END_OF_LOG,
         },
         masked: BTreeMap::new(),
+        deltas: None,
     };
     // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
     // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused

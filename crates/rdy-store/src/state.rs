@@ -281,8 +281,16 @@ impl StoreReader {
             .transpose()
     }
 
+    /// The state landing `landing` recorded: the one map read of the store (`crate::snapshot`),
+    /// its held SNAPSHOT or the fold of its deltas, through the store's map cache.
     pub fn snapshot_at(&self, landing: &Hash) -> Result<StateSnapshot, StoreError> {
-        self.get(&self.landing(landing)?.state)
+        let record = self.landing(landing)?;
+        crate::snapshot::read_landing_snapshot(
+            &mut crate::snapshot::StoreSnapshots { reader: self },
+            Some(self.map_cache()),
+            landing,
+            &record,
+        )
     }
 
     /// A parent loop in `state` reachable from `starts`: two blocks on it, each the other's

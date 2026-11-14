@@ -1,18 +1,30 @@
 //! sdl1 (snapshot deltas, D-RP6SM): kind 30, SNAPSHOT_DELTA, at encoding 1 only; the canonical
 //! SNAPSHOT bytes check; the derived `snapshot_deltas` index, built from the delta frames alone;
 //! and the hidden thread-local staging guard that registers the kind until its public activation.
+//!
+//! sdl2: the one map read (`rdy_store::snapshot`): a held SNAPSHOT first, else the fold of the
+//! deltas from the nearest held or cached map; its bounded cache; and its refusals.
 use rdy_model::encoding::SNAPSHOT_DELTA_ENCODING;
-use rdy_model::{BlockId, Hash, SnapshotDelta, StateSnapshot, diff_snapshots};
+use rdy_model::{
+    Assurance, BlockId, Hash, LandingRecord, Provenance, Role, SnapshotDelta, StateSnapshot,
+    diff_snapshots, snapshot_map_id,
+};
 use rdy_store::bounded::RecordError;
 use rdy_store::codec;
 use rdy_store::format::{
     self, FEATURE_SNAPSHOT_DELTA, SNAPSHOT_DELTA_REQUIRED_RDY, stage_snapshot_delta_for_tests,
 };
 use rdy_store::index::{Index, IndexEntry};
+use rdy_store::object_refs::ObjectKey;
 use rdy_store::segment::Location;
+use rdy_store::snapshot::{
+    CacheTag, MapCache, RecordSnapshots, folded_deltas_for_tests, read_snapshot,
+};
+use rdy_store::sync_stream::StreamRecord;
 use rdy_store::{Store, StoreError, kinds};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 const TABLE_GONE: &str = "the index has no snapshot delta table; it is rebuilt from the log";
 
@@ -535,4 +547,474 @@ fn sdl1_staging_guard_is_thread_local_and_restores_registries() {
         .map(|f| f.name)
         .collect();
     assert_eq!(base, vec!["content_hash_v2", "object_encoding"]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// sdl2: the one map read
+
+/// A block id from `n`: prefix `b` and five Crockford digits.
+fn nid(n: usize) -> BlockId {
+    let digits: String = (0..5)
+        .rev()
+        .map(|i| rdy_model::CROCKFORD[(n >> (5 * i)) & 31] as char)
+        .collect();
+    id(&format!("b-{digits}"))
+}
+
+/// A landing record on `prev` with state `state`; `n` keeps landings of one state distinct.
+fn landing_rec(prev: Option<Hash>, state: Hash, n: i64) -> LandingRecord {
+    LandingRecord {
+        proposal: Hash([0xAB; 32]),
+        prev,
+        state,
+        approved_by: Provenance {
+            actor: "human:a".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: n,
+        },
+        changes: vec![],
+        chosen: None,
+        checks: vec![],
+        assurance: Assurance::Local,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+        evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
+    }
+}
+
+/// One landing of a written history: its hash, its record, its delta and the delta's hash.
+#[derive(Clone)]
+struct Landed {
+    hash: Hash,
+    rec: LandingRecord,
+    delta: SnapshotDelta,
+    delta_hash: Hash,
+}
+
+/// Writes a chain with one landing per map of `maps`, each with its delta. The landing at an
+/// index in `held` also gets its SNAPSHOT; no other SNAPSHOT is written.
+fn history(s: &mut Store, maps: &[BTreeMap<BlockId, Hash>], held: &[usize]) -> Vec<Landed> {
+    let mut out: Vec<Landed> = vec![];
+    let empty = BTreeMap::new();
+    for (i, m) in maps.iter().enumerate() {
+        let prev = out.last().cloned();
+        let rec = landing_rec(prev.as_ref().map(|p| p.hash), snapshot_map_id(m), i as i64);
+        if held.contains(&i) {
+            let snap = StateSnapshot { blocks: m.clone() };
+            assert_eq!(s.put(kinds::SNAPSHOT, &snap).unwrap(), rec.state);
+        }
+        let hash = s.put(kinds::LANDING, &rec).unwrap();
+        let before = if i == 0 { &empty } else { &maps[i - 1] };
+        let delta = diff_snapshots(hash, prev.as_ref().map(|p| p.delta_hash), before, m);
+        let delta_hash = s.put(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+        assert_eq!(delta_hash, delta.id());
+        out.push(Landed {
+            hash,
+            rec,
+            delta,
+            delta_hash,
+        });
+    }
+    out
+}
+
+/// Six maps: additions, a change, a drop, a no-op landing and a re-add.
+fn six_maps() -> Vec<BTreeMap<BlockId, Hash>> {
+    let m0 = map(&[("A-00001", 1), ("B-00002", 2)]);
+    let mut m1 = m0.clone();
+    m1.insert(id("C-00003"), h(3));
+    let mut m2 = m1.clone();
+    m2.insert(id("A-00001"), h(4));
+    let mut m3 = m2.clone();
+    m3.remove(&id("B-00002"));
+    let m4 = m3.clone(); // a no-op landing: its own delta, the same full hash
+    let mut m5 = m4.clone();
+    m5.insert(id("B-00002"), h(2));
+    m5.insert(id("D-00004"), h(5));
+    vec![m0, m1, m2, m3, m4, m5]
+}
+
+/// The deltas folded by `f`, and its result.
+fn folds<T>(f: impl FnOnce() -> T) -> (u64, T) {
+    let start = folded_deltas_for_tests();
+    let out = f();
+    (folded_deltas_for_tests() - start, out)
+}
+
+fn store() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("s");
+    let s = Store::create(&path).unwrap();
+    (d, path, s)
+}
+
+#[test]
+fn sdl2_snapshot_read_prefers_held_map_then_folds() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let (_d, _p, mut s) = store();
+    let maps = six_maps();
+    // only landing 2 holds its SNAPSHOT
+    let ls = history(&mut s, &maps, &[2]);
+    assert_eq!(
+        ls[3].rec.state, ls[4].rec.state,
+        "a no-op keeps its full hash"
+    );
+    assert!(ls[4].delta.set.is_empty() && ls[4].delta.drop.is_empty());
+    let r = s.reader();
+    // the held map answers with no fold
+    r.clear_map_cache_for_tests();
+    let (n, got) = folds(|| r.snapshot_at(&ls[2].hash).unwrap());
+    assert_eq!((n, got.blocks), (0, maps[2].clone()));
+    // a later landing folds from the nearest held map: landings 3, 4 and 5
+    r.clear_map_cache_for_tests();
+    let (n, got) = folds(|| r.snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!((n, got.blocks), (3, maps[5].clone()));
+    // an earlier one folds from the empty map before the first landing: landings 0 and 1
+    r.clear_map_cache_for_tests();
+    let (n, got) = folds(|| r.snapshot_at(&ls[1].hash).unwrap());
+    assert_eq!((n, got.blocks), (2, maps[1].clone()));
+    // the first landing's delta holds its whole map
+    assert_eq!(ls[0].delta.set.len(), maps[0].len());
+    assert_eq!(ls[0].delta.base, None);
+    // every landing reads its own map; state_of and the cached reads agree
+    r.clear_map_cache_for_tests();
+    for (l, m) in ls.iter().zip(&maps) {
+        assert_eq!(r.snapshot_at(&l.hash).unwrap().blocks, *m);
+        assert_eq!(r.state_of(Some(l.hash)).unwrap().blocks, *m);
+    }
+    assert_eq!(r.state_of(None).unwrap(), StateSnapshot::default());
+    // while held SNAPSHOTs are set aside, landing 2 folds too, from the first landing
+    r.fold_held_snapshots_for_tests(true);
+    let (n, got) = folds(|| r.snapshot_at(&ls[2].hash).unwrap());
+    assert_eq!((n, got.blocks), (3, maps[2].clone()));
+    r.fold_held_snapshots_for_tests(false);
+    // a landing with no delta reads its held SNAPSHOT as before deltas
+    let legacy = landing_rec(Some(ls[5].hash), snapshot_map_id(&maps[0]), 100);
+    let snap = StateSnapshot {
+        blocks: maps[0].clone(),
+    };
+    s.put(kinds::SNAPSHOT, &snap).unwrap();
+    let lh = s.put(kinds::LANDING, &legacy).unwrap();
+    let r = s.reader();
+    r.fold_held_snapshots_for_tests(true);
+    let (n, got) = folds(|| r.snapshot_at(&lh).unwrap());
+    assert_eq!((n, got), (0, snap));
+}
+
+#[test]
+fn sdl2_cold_warm_and_evicted_reads_are_equal() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let (_d, _p, mut s) = store();
+    let maps = six_maps();
+    let ls = history(&mut s, &maps, &[]);
+    let r = s.reader();
+    r.clear_map_cache_for_tests();
+    let (cold_n, cold) = folds(|| r.snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!(
+        cold_n, 6,
+        "a cold read folds every delta from the first landing"
+    );
+    assert_eq!(cold.blocks, maps[5]);
+    let (warm_n, warm) = folds(|| r.snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!((warm_n, &warm), (0, &cold), "a warm read folds nothing");
+    // a clone of the reader shares the cache
+    let (n, _) = folds(|| r.clone().snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!(n, 0);
+    // a cached earlier map is where a later fold starts
+    r.clear_map_cache_for_tests();
+    let (n, got) = folds(|| r.snapshot_at(&ls[2].hash).unwrap());
+    assert_eq!((n, got.blocks), (3, maps[2].clone()));
+    let (n, got) = folds(|| r.snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!(
+        (n, got),
+        (3, cold.clone()),
+        "folds 3, 4 and 5 from the cached 2"
+    );
+    // the no-op landing 4 shares landing 3's full hash, so 3's cached map answers it
+    let (n, _) = folds(|| r.snapshot_at(&ls[3].hash).unwrap());
+    assert_eq!(n, 1, "landing 3 folds from the cached 2");
+    let (n, got) = folds(|| r.snapshot_at(&ls[4].hash).unwrap());
+    assert_eq!((n, got.blocks), (0, maps[4].clone()));
+    // evicted: with no budget nothing is kept, and every read is cold and equal
+    r.set_map_cache_budget_for_tests(0);
+    assert_eq!(r.map_cache_stats_for_tests(), (0, 0));
+    for _ in 0..2 {
+        let (n, got) = folds(|| r.snapshot_at(&ls[5].hash).unwrap());
+        assert_eq!((n, &got), (6, &cold));
+    }
+}
+
+#[test]
+fn sdl2_cache_cap_and_source_epochs_do_not_change_reads() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let (_d, path, mut s) = store();
+    let maps = six_maps();
+    let ls = history(&mut s, &maps, &[]);
+    let want: Vec<StateSnapshot> = maps
+        .iter()
+        .map(|m| StateSnapshot { blocks: m.clone() })
+        .collect();
+    // the cap: room for about one map, so the oldest entry goes first
+    let r = s.reader();
+    r.clear_map_cache_for_tests();
+    r.snapshot_at(&ls[1].hash).unwrap();
+    let (one, bytes) = r.map_cache_stats_for_tests();
+    assert_eq!(one, 1);
+    r.set_map_cache_budget_for_tests(bytes + bytes / 2);
+    assert_eq!(r.snapshot_at(&ls[2].hash).unwrap(), want[2]);
+    assert_eq!(
+        r.map_cache_stats_for_tests().0,
+        1,
+        "the oldest entry was evicted"
+    );
+    let (n, got) = folds(|| r.snapshot_at(&ls[1].hash).unwrap());
+    assert_eq!(
+        (n, got),
+        (2, want[1].clone()),
+        "landing 1 was the one evicted"
+    );
+    // an entry larger than the budget is not kept; its read still answers
+    r.set_map_cache_budget_for_tests(1);
+    assert_eq!(r.map_cache_stats_for_tests(), (0, 0));
+    assert_eq!(r.snapshot_at(&ls[5].hash).unwrap(), want[5]);
+    assert_eq!(r.map_cache_stats_for_tests(), (0, 0));
+    r.set_map_cache_budget_for_tests(rdy_store::snapshot::MAP_CACHE_BYTES);
+    // a reindex empties the cache; the reads are the same
+    r.snapshot_at(&ls[5].hash).unwrap();
+    assert_eq!(s.map_cache_stats_for_tests().0, 1);
+    s.reindex().unwrap();
+    assert_eq!(s.map_cache_stats_for_tests(), (0, 0));
+    for (l, w) in ls.iter().zip(&want) {
+        assert_eq!(s.snapshot_at(&l.hash).unwrap(), *w);
+    }
+    // a reader taken before the reindex reads through its own index, and its maps are not
+    // served to the store's reader
+    let old = s.reader().clone();
+    s.reindex().unwrap();
+    assert_eq!(old.snapshot_at(&ls[3].hash).unwrap(), want[3]);
+    let (n, _) = folds(|| s.snapshot_at(&ls[3].hash).unwrap());
+    assert_eq!(n, 4, "an entry of another index is never served");
+    drop(old);
+    // a reopen starts with an empty cache; the reads are the same
+    s.close().unwrap();
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.map_cache_stats_for_tests(), (0, 0));
+    let (n, got) = folds(|| s.snapshot_at(&ls[5].hash).unwrap());
+    assert_eq!((n, got), (6, want[5].clone()));
+    // another store with the same landings but no deltas: the first store's maps are never
+    // its answer
+    let (_d2, _p2, mut other) = store();
+    for l in &ls {
+        other.put(kinds::LANDING, &l.rec).unwrap();
+    }
+    assert!(matches!(
+        other.snapshot_at(&ls[5].hash),
+        Err(StoreError::NotFound(h)) if h == ls[5].rec.state
+    ));
+    // the cache's own tags: another source or an older epoch is never served or kept
+    let cache = MapCache::new();
+    let a = CacheTag {
+        source: 1,
+        epoch: 1,
+    };
+    let m = Arc::new(maps[0].clone());
+    cache.insert(a, ls[0].rec.state, Arc::clone(&m));
+    assert_eq!(cache.get(a, &ls[0].rec.state), Some(Arc::clone(&m)));
+    let other_source = CacheTag {
+        source: 2,
+        epoch: 1,
+    };
+    assert_eq!(cache.get(other_source, &ls[0].rec.state), None);
+    let older = CacheTag {
+        source: 1,
+        epoch: 0,
+    };
+    cache.insert(older, ls[1].rec.state, Arc::new(maps[1].clone()));
+    assert_eq!(cache.stats().0, 1, "an older epoch keeps nothing");
+    assert_eq!(cache.get(older, &ls[0].rec.state), None);
+    let newer = CacheTag {
+        source: 1,
+        epoch: 2,
+    };
+    cache.insert(newer, ls[1].rec.state, Arc::new(maps[1].clone()));
+    assert_eq!(
+        cache.get(a, &ls[0].rec.state),
+        None,
+        "a newer epoch drops the older"
+    );
+    assert_eq!(cache.stats().0, 1);
+}
+
+/// The record of `value` of `kind` under the key `hash`, which need not be its hash.
+fn record_of<T: serde::Serialize + 'static>(
+    kind: u8,
+    hash: Hash,
+    value: &T,
+) -> (ObjectKey, StreamRecord) {
+    let o = codec::encode_new(kind, value);
+    let key = ObjectKey { kind, hash };
+    (
+        key,
+        StreamRecord::Present {
+            key,
+            encoding: o.version,
+            payload: o.payload,
+        },
+    )
+}
+
+#[test]
+fn sdl2_fold_refuses_cycles_missing_bases_and_wrong_kinds() {
+    let _staged = stage_snapshot_delta_for_tests();
+    let maps = six_maps();
+    let decode = |r: Result<StateSnapshot, StoreError>| match r {
+        Err(StoreError::Decode(m)) => m,
+        other => panic!("not a decode refusal: {other:?}"),
+    };
+
+    // a missing base: landing 1 has no delta, so landing 2's fold cannot reach a map
+    let (_d, _p, mut s) = store();
+    let mut ls = vec![];
+    let empty = BTreeMap::new();
+    for (i, m) in maps.iter().take(3).enumerate() {
+        let prev: Option<&Landed> = ls.last();
+        let rec = landing_rec(prev.map(|p| p.hash), snapshot_map_id(m), i as i64);
+        let hash = s.put(kinds::LANDING, &rec).unwrap();
+        let before = if i == 0 { &empty } else { &maps[i - 1] };
+        let delta = diff_snapshots(hash, prev.map(|p| p.delta_hash), before, m);
+        if i != 1 {
+            s.put(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+        }
+        ls.push(Landed {
+            hash,
+            rec,
+            delta_hash: delta.id(),
+            delta,
+        });
+    }
+    assert_eq!(
+        decode(s.snapshot_at(&ls[2].hash)),
+        format!(
+            "landing {}: expected exactly one snapshot delta",
+            ls[1].hash
+        )
+    );
+    // with neither its SNAPSHOT nor a delta, a landing of a store without the feature reads as
+    // the missing object it always was
+    let (_d0, _p0, mut legacy) = store();
+    let lone = legacy.put(kinds::LANDING, &ls[0].rec).unwrap();
+    assert!(matches!(
+        legacy.snapshot_at(&lone),
+        Err(StoreError::NotFound(h)) if h == ls[0].rec.state
+    ));
+    // in a store that lists the feature, it needs its delta
+    assert_eq!(
+        decode(s.snapshot_at(&ls[1].hash)),
+        format!(
+            "landing {}: expected exactly one snapshot delta",
+            ls[1].hash
+        )
+    );
+
+    // the chain checks, each on a fresh two-landing history whose second delta is bent
+    let bent = |edit: &dyn Fn(&mut SnapshotDelta, &Landed)| {
+        let (d, p, mut s) = store();
+        let ls = history(&mut s, &maps[..1], &[]);
+        let rec = landing_rec(Some(ls[0].hash), snapshot_map_id(&maps[1]), 1);
+        let hash = s.put(kinds::LANDING, &rec).unwrap();
+        let mut delta = diff_snapshots(hash, Some(ls[0].delta_hash), &maps[0], &maps[1]);
+        edit(&mut delta, &ls[0]);
+        let dh = s.put(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+        (d, p, s, hash, dh)
+    };
+    let (_d, _p, s, l, dh) = bent(&|d, _| d.base = Some(h(77)));
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: base does not match the previous landing")
+    );
+    let (_d, _p, s, l, dh) = bent(&|d, _| d.base = None);
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: base does not match the previous landing")
+    );
+    let (_d, _p, s, l, dh) = bent(&|d, _| d.full = h(78));
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: landing or full hash does not match")
+    );
+    let (_d, _p, s, l, dh) = bent(&|d, _| d.drop.push(id("Z-00099")));
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: set or drop is not canonical")
+    );
+    let (_d, _p, s, l, dh) = bent(&|d, _| d.set.push((id("Z-00099"), h(9))));
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: folded map does not match full")
+    );
+
+    // wrong kinds: a state that names an object of another kind is no map
+    let (_d, _p, mut s) = store();
+    let ls = history(&mut s, &maps[..1], &[]);
+    let rec = landing_rec(None, ls[0].delta_hash, 5);
+    let wrong = s.put(kinds::LANDING, &rec).unwrap();
+    assert_eq!(
+        decode(s.snapshot_at(&wrong)),
+        format!(
+            "{} is not a snapshot (object kind {})",
+            ls[0].delta_hash,
+            30 | 0x80
+        )
+    );
+    // a landing hash that names another kind is not a landing
+    assert!(s.snapshot_at(&ls[0].delta_hash).is_err());
+
+    // growth: a delta that would take the map past 100000 entries is refused before it grows
+    let (_d, _p, mut s) = store();
+    let big0: BTreeMap<BlockId, Hash> = (0..60_000).map(|n| (nid(n), h(1))).collect();
+    let big1: BTreeMap<BlockId, Hash> = (0..100_001).map(|n| (nid(n), h(1))).collect();
+    let ls = history(&mut s, &[big0], &[]);
+    let rec = landing_rec(Some(ls[0].hash), snapshot_map_id(&big1), 1);
+    let l = s.put(kinds::LANDING, &rec).unwrap();
+    let delta = diff_snapshots(l, Some(ls[0].delta_hash), &ls_map(&ls[0]), &big1);
+    let dh = s.put(kinds::SNAPSHOT_DELTA, &delta).unwrap();
+    assert_eq!(
+        decode(s.snapshot_at(&l)),
+        format!("snapshot delta {dh}: exceeds 100000 collection elements")
+    );
+
+    // a cycle: stream records whose landing names itself as its `prev` (the key is not the
+    // record's hash, so no store could hold it); the walk refuses it without recursing
+    let m = maps[0].clone();
+    let x = h(0x51);
+    let mut rec = landing_rec(Some(x), snapshot_map_id(&m), 1);
+    rec.prev = Some(x);
+    let delta = SnapshotDelta {
+        landing: x,
+        base: Some(h(0x52)),
+        full: rec.state,
+        set: vec![],
+        drop: vec![],
+    };
+    let records: BTreeMap<ObjectKey, StreamRecord> = [
+        record_of(kinds::LANDING, x, &rec),
+        record_of(kinds::SNAPSHOT_DELTA, h(0x52), &delta),
+    ]
+    .into_iter()
+    .collect();
+    let mut src = records;
+    let e = read_snapshot(&mut RecordSnapshots::new(&mut src), None, &x).unwrap_err();
+    assert_eq!(e.code, "E_BAD_RECORD");
+    assert_eq!(e.message, format!("dependency cycle through {x}"));
+}
+
+/// The full map a landing's single delta sets (a first landing's).
+fn ls_map(l: &Landed) -> BTreeMap<BlockId, Hash> {
+    l.delta.set.iter().cloned().collect()
 }

@@ -1111,6 +1111,9 @@ struct Indexed<R> {
     masked: BTreeMap<ObjectKey, (Hash, RemovalObject, u16)>,
     /// The request that removed each object an approved request removes or names.
     removed: BTreeMap<ObjectKey, Hash>,
+    /// Each landing's snapshot delta, built once from the typed delta records the stream holds
+    /// (`crate::snapshot`): a stream has no index to ask.
+    deltas: RefCell<Option<BTreeMap<Hash, Hash>>>,
 }
 
 impl<R: Read + Seek> Indexed<R> {
@@ -1202,6 +1205,31 @@ impl<R: Read + Seek> Indexed<R> {
 impl<R: Read + Seek> ObjectSource for Indexed<R> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.read(key)
+    }
+
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        self.delta_of(landing)
+    }
+}
+
+impl<R: Read + Seek> Indexed<R> {
+    /// The delta of `landing` among the stream's records: the association is built from the
+    /// typed delta records on first use and kept for the stream's life.
+    fn delta_of(&self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        if let Some(by) = self.deltas.borrow().as_ref() {
+            return Ok(by.get(landing).copied());
+        }
+        let by = crate::snapshot::associate_deltas(self.index.keys(), |k| {
+            match self.read(k)?.as_ref().and_then(StreamRecord::typed) {
+                Some(r) => r
+                    .map(Some)
+                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k))),
+                None => Ok(None),
+            }
+        })?;
+        let found = by.get(landing).copied();
+        *self.deltas.borrow_mut() = Some(by);
+        Ok(found)
     }
 }
 
@@ -1295,6 +1323,7 @@ impl<R: Read + Seek> CheckedStream<R> {
             index,
             masked: BTreeMap::new(),
             removed: BTreeMap::new(),
+            deltas: RefCell::new(None),
         };
         // the index answers the dropped representations, with no read
         let dropped: BTreeMap<ObjectKey, Drop> = records
@@ -1375,9 +1404,14 @@ impl<R: Read + Seek> CheckedStream<R> {
             kind: kinds::SNAPSHOT,
             hash: landing.state,
         };
-        let snapshot: StateSnapshot = self
-            .typed(snapshot_key)?
-            .ok_or_else(|| StreamError::unresolved(0, 0, snapshot_key))?;
+        // the held SNAPSHOT, or the fold of the stream's deltas (`crate::snapshot`)
+        let mut records: &CheckedStream<R> = self;
+        let snapshot = crate::snapshot::read_landing_snapshot(
+            &mut crate::snapshot::RecordSnapshots::new(&mut records),
+            None,
+            &landing_key.hash,
+            &landing,
+        )?;
         let mut blocks: BTreeMap<BlockId, Block> = BTreeMap::new();
         for (id, version) in &snapshot.blocks {
             let Some(block) = self.block(*version)? else {
@@ -1524,12 +1558,20 @@ impl<R: Read + Seek> ObjectSource for CheckedStream<R> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.records.read(key)
     }
+
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        self.records.delta_of(landing)
+    }
 }
 
 /// A shared checked stream reads as a record source too: every read is through `&self`.
 impl<R: Read + Seek> ObjectSource for &CheckedStream<R> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         self.records.read(key)
+    }
+
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        self.records.delta_of(landing)
     }
 }
 

@@ -110,6 +110,14 @@ struct ReaderShared {
     kind_walks: AtomicU64,
     /// Log frames read by `visit_carried` (a test hook).
     carried_frames_read: AtomicU64,
+    /// Full maps built by `snapshot_at`, by `full` hash (`crate::snapshot`): ids and version
+    /// hashes only, never a block body. Each entry is tagged with the index and removal epoch it
+    /// was read under; `set_index` (reindex) and `advance_epoch` clear it, and a reopen starts
+    /// with an empty one.
+    maps: crate::snapshot::MapCache,
+    /// A test hook: while set, a landing that has a snapshot delta reads its map by the fold,
+    /// as if its SNAPSHOT were not held (`StoreReader::fold_held_snapshots_for_tests`).
+    fold_held: AtomicBool,
     /// The redaction epoch of this store family: zero at open; it advances once per newly synced
     /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
     /// state that predates content removal.
@@ -1871,6 +1879,8 @@ impl Store {
                 refs_read: AtomicU64::new(0),
                 kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
+                maps: crate::snapshot::MapCache::new(),
+                fold_held: AtomicBool::new(false),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -2050,6 +2060,8 @@ impl Store {
                 refs_read: AtomicU64::new(0),
                 kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
+                maps: crate::snapshot::MapCache::new(),
+                fold_held: AtomicBool::new(false),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -2749,6 +2761,8 @@ impl Store {
     /// Makes `index` the store's index, in a new reader that shares everything else with the old.
     fn set_index(&mut self, (shared, tracking): (Arc<ReaderShared>, Arc<Tracking>), index: Index) {
         let epoch = shared.epoch.load(Ordering::Acquire);
+        // maps read through the old index are not this index's
+        shared.maps.clear();
         self.reader = Some(StoreReader {
             index: Arc::new(index),
             shared,
@@ -3842,6 +3856,52 @@ impl StoreReader {
         self.index().snapshot_delta(landing)
     }
 
+    /// This reader's map cache and the tag of what it reads through: its index and its removal
+    /// epoch. Readers of one store share the cache; an entry of another index or epoch is never
+    /// served.
+    pub(crate) fn map_cache(&self) -> (&crate::snapshot::MapCache, crate::snapshot::CacheTag) {
+        (
+            &self.shared.maps,
+            crate::snapshot::CacheTag {
+                source: Arc::as_ptr(&self.index) as usize as u64,
+                epoch: self.epoch,
+            },
+        )
+    }
+
+    /// The entries and bytes the store's map cache holds (a test hook).
+    #[doc(hidden)]
+    pub fn map_cache_stats_for_tests(&self) -> (usize, usize) {
+        self.shared.maps.stats()
+    }
+
+    /// Sets the store's map cache budget in bytes, evicting the oldest entries past it (a test
+    /// hook; production keeps [`crate::snapshot::MAP_CACHE_BYTES`]).
+    #[doc(hidden)]
+    pub fn set_map_cache_budget_for_tests(&self, bytes: usize) {
+        self.shared.maps.set_budget(bytes);
+    }
+
+    /// Empties the store's map cache, as a reopen does (a test hook).
+    #[doc(hidden)]
+    pub fn clear_map_cache_for_tests(&self) {
+        self.shared.maps.clear();
+    }
+
+    /// A test hook for histories written before the delta writer: while `on`, a landing that
+    /// has a snapshot delta reads its map by the fold, as if its SNAPSHOT were not held. A
+    /// landing with no delta still reads its SNAPSHOT. It empties the map cache.
+    #[doc(hidden)]
+    pub fn fold_held_snapshots_for_tests(&self, on: bool) {
+        self.shared.fold_held.store(on, Ordering::Relaxed);
+        self.shared.maps.clear();
+    }
+
+    /// Whether [`StoreReader::fold_held_snapshots_for_tests`] is on.
+    pub(crate) fn folds_held_snapshots(&self) -> bool {
+        self.shared.fold_held.load(Ordering::Relaxed)
+    }
+
     /// The first object written with hash `h`, whatever its kind, and that kind. A payload a
     /// redaction removed is `Redacted`, never a valid object.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
@@ -4713,6 +4773,7 @@ impl Store {
     /// refuses new responses with `RedactedState`.
     fn advance_epoch(&mut self, epoch: u64) {
         self.shared.epoch.store(epoch, Ordering::Release);
+        self.shared.maps.clear();
         if let Some(r) = self.reader.as_mut() {
             r.epoch = epoch;
         }

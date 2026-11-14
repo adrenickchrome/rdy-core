@@ -449,6 +449,20 @@ impl ObjectSource for StoreSource<'_> {
             payload,
         }))
     }
+
+    /// The index's delta of `landing`, when its frame lies before `end`.
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        let key = ObjectKey {
+            kind: kinds::LANDING,
+            hash: *landing,
+        };
+        Ok(self
+            .reader
+            .snapshot_delta_of(landing)
+            .map_err(|e| store_error(e, Some(key)))?
+            .filter(|(_, at)| *at < self.end)
+            .map(|(h, _)| h))
+    }
 }
 
 /// The objects that a carried span of a record before `end` names, while no validated apply of

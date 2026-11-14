@@ -47,6 +47,7 @@ use rdy_schema::Pack;
 use rdy_store::check_holder;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
+use rdy_store::snapshot::{CacheTag, MapCache, RecordSnapshots, read_landing_snapshot};
 use rdy_store::stream_error::LIMIT_TOTAL_BYTES;
 use rdy_store::stream_source::CheckedStream;
 use rdy_store::sync_proof::ObjectSource;
@@ -945,6 +946,8 @@ fn check_landings(
     let mut kept = None;
     let mut checked: HashSet<Hash> = HashSet::new();
     let mut last: BTreeMap<Hash, Block> = BTreeMap::new();
+    // the maps this check builds, for this source only (a later landing folds from them)
+    let maps = MapCache::new();
     for key in facts.objects.iter().filter(|k| k.kind == kinds::LANDING) {
         if held.holds(key)? {
             continue;
@@ -955,7 +958,8 @@ fn check_landings(
         if !checked.insert(landing.state) {
             continue;
         }
-        let (snapshot, blocks) = snapshot_blocks(source, landing.state, &mut last)?;
+        let (snapshot, blocks) =
+            snapshot_blocks(source, Some(&maps), key.hash, &landing, &mut last)?;
         if keep_state == Some(landing.state) {
             kept = Some(CheckedSnapshot {
                 state: landing.state,
@@ -968,6 +972,12 @@ fn check_landings(
     Ok(kept)
 }
 
+/// The tag of a map cache that one check owns for one source: nothing else shares it.
+const LOCAL_MAPS: CacheTag = CacheTag {
+    source: 0,
+    epoch: 0,
+};
+
 /// One snapshot as [`check_landings`] built it through a take's checked source: its hash, its
 /// record and its blocks by version, each charged to the snapshot's budget and the whole kept
 /// within [`check_snapshot_limits`]. A publication take hands the root landing's to
@@ -979,23 +989,31 @@ pub(crate) struct CheckedSnapshot {
     blocks: BTreeMap<Hash, Block>,
 }
 
-/// The blocks of snapshot `state`, by version, read through `source` within the Publications
+/// The blocks of landing `landing`'s snapshot (its record is `record`), by version, read through
+/// `source` within the Publications
 /// limits of one snapshot (see [`check_landings`]): each entry must name a version of its own
 /// block, a removed version reads as its approved residue's stub (and as nothing when no residue
 /// describes it), every block is charged to the snapshot's budget before it is kept, and the
 /// whole snapshot then keeps [`check_snapshot_limits`]. The blocks of `last` that the snapshot
 /// names are reused, charged first; `last` is left empty. Returns the snapshot record too.
+///
+/// The map is the source's one map read (`rdy_store::snapshot`): a held SNAPSHOT, or the fold
+/// of the landing's deltas, through `maps` when given.
 fn snapshot_blocks(
     source: &mut dyn ObjectSource,
-    state: Hash,
+    maps: Option<&MapCache>,
+    landing: Hash,
+    record: &LandingRecord,
     last: &mut BTreeMap<Hash, Block>,
 ) -> Result<(StateSnapshot, BTreeMap<Hash, Block>), RdyError> {
-    let snapshot_key = ObjectKey {
-        kind: kinds::SNAPSHOT,
-        hash: state,
-    };
-    let snapshot = typed::<StateSnapshot>(source, snapshot_key)?
-        .ok_or_else(|| to_rdy(StreamError::unresolved(0, 0, snapshot_key)))?;
+    let state = record.state;
+    let snapshot = read_landing_snapshot(
+        &mut RecordSnapshots::new(source),
+        maps.map(|m| (m, LOCAL_MAPS)),
+        &landing,
+        record,
+    )
+    .map_err(to_rdy)?;
     // the kept blocks are this snapshot's only, charged before any other is read
     let named: HashSet<&Hash> = snapshot.blocks.values().collect();
     last.retain(|v, _| named.contains(v));
@@ -1053,10 +1071,20 @@ pub(crate) fn materialize_landing(
             crate::publication_take::count_root_snapshot_reuse();
             (c.snapshot, c.blocks)
         }
-        _ => snapshot_blocks(source, record.state, &mut BTreeMap::new())?,
+        _ => snapshot_blocks(source, None, landing, &record, &mut BTreeMap::new())?,
     };
     let by_id = blocks.into_values().map(|b| (b.id.clone(), b)).collect();
     Ok(Materialized::build(snapshot, by_id))
+}
+
+/// [`materialize_landing`] with no checked root (a test hook): the state of landing `landing`
+/// read through `source`, its map by the source's one map read.
+#[doc(hidden)]
+pub fn materialize_landing_for_tests(
+    source: &mut dyn ObjectSource,
+    landing: Hash,
+) -> Result<Materialized, RdyError> {
+    materialize_landing(source, landing, None)
 }
 
 // ---------------------------------------------------------------------------------------------

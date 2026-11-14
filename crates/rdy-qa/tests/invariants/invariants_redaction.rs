@@ -1121,6 +1121,99 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
     assert!(e.iter().any(|v| v.rule == "frozen"), "{e:#?}");
 }
 
+/// sdl2 (snapshot deltas, D-RP6SM): the frozen audit reads each landing's map through the
+/// store's one map read, so a canon landing with no SNAPSHOT, whose map only its delta records,
+/// is compared too. Before that read, the audit skipped a landing whose SNAPSHOT it could not
+/// get, and a rewritten ruling there passed.
+#[test]
+fn sdl2_frozen_audit_reads_delta_only_history() {
+    let _staged = rdy_store::format::stage_snapshot_delta_for_tests();
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let (_, section, _) = rdy_qa::fixtures::seed_doc(&mut r, "seed");
+    let d = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: section,
+                statement: "Ship weekly".into(),
+                fields: [("disposition".to_string(), json!("M2d1"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dec = BlockId::parse(&d.created["$decision"]).unwrap();
+    land(&mut r, "seed").unwrap();
+    let v1 = canon_version(&r, &dec);
+    // each canon landing's delta, from its held SNAPSHOT
+    let mut chain = r.store().landings().unwrap();
+    chain.reverse();
+    let mut items = vec![];
+    let mut prev: Option<(BTreeMap<BlockId, Hash>, Hash)> = None;
+    for (landing, rec) in &chain {
+        let map = r.store().get::<StateSnapshot>(&rec.state).unwrap().blocks;
+        let empty = BTreeMap::new();
+        let (before, base) = match &prev {
+            Some((m, d)) => (m, Some(*d)),
+            None => (&empty, None),
+        };
+        let delta = rdy_model::diff_snapshots(*landing, base, before, &map);
+        items.push(rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        prev = Some((map, delta.id()));
+    }
+    r.store_mut().write(items).unwrap();
+    let (head_map, head_delta) = prev.unwrap();
+    // a canon landing whose map holds a rewritten ruling, with its delta and no SNAPSHOT,
+    // forged with raw writes (no writer lands one)
+    let head = r.read().canon_head().unwrap();
+    let rec: LandingRecord = r.store().get_typed(kinds::LANDING, &head).unwrap();
+    let mut ruling = r.store().get_block(&v1).unwrap();
+    ruling.fields.insert(
+        "statement".into(),
+        rdy_model::FieldValue::Str("Ship daily".into()),
+    );
+    let block = postcard::to_allocvec(&ruling).unwrap();
+    let mut map = head_map.clone();
+    map.insert(dec.clone(), Hash::of(&block));
+    let forged = LandingRecord {
+        prev: Some(head),
+        state: rdy_model::snapshot_map_id(&map),
+        changes: vec![],
+        read_identity: None,
+        ..rec
+    };
+    let landing = postcard::to_allocvec(&forged).unwrap();
+    let forged_id = Hash::of(&landing);
+    let delta = rdy_model::diff_snapshots(forged_id, Some(head_delta), &head_map, &map);
+    r.store_mut()
+        .write(vec![
+            (kinds::BLOCK, block),
+            (kinds::LANDING, landing),
+            rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta),
+        ])
+        .unwrap();
+    r.store_mut()
+        .set_refs(vec![("canon".into(), forged_id.0.to_vec())])
+        .unwrap();
+    r.invalidate();
+    assert!(!r.store().has_kind(kinds::SNAPSHOT, &forged.state).unwrap());
+    assert_eq!(r.store().snapshot_at(&forged_id).unwrap().blocks, map);
+    let report = frozen_report(&r);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|v| v.rule == "frozen" && v.block.as_ref() == Some(&dec)),
+        "{report:?}"
+    );
+}
+
 /// A pack whose section may hold only sections and terms (no prose).
 const TERMS_ONLY_PACK: &str = "\
 name: terms

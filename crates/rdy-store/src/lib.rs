@@ -39,6 +39,7 @@ pub mod redaction_io;
 pub mod review;
 pub mod segment;
 pub mod signature;
+pub mod snapshot;
 pub mod start_lock;
 mod store;
 pub mod stream_error;
