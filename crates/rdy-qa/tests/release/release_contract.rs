@@ -1105,6 +1105,12 @@ fn dump_load_row() -> Value {
         "reads_features": dump::READS_FEATURES,
         "released_pairs": pairs,
         "current_frame_kinds": dump::current_frame_kinds(),
+        // the kinds a feature adds to a dump-4 batch, each with its feature (SD1 Task 6:
+        // SNAPSHOT_DELTA with snapshot_delta)
+        "feature_frame_kinds": dump::feature_frame_kinds()
+            .iter()
+            .map(|(f, k)| json!([f, k]))
+            .collect::<Vec<_>>(),
         "container_record_kinds": {
             "HEADER": dump::rec::HEADER, "FILE": dump::rec::FILE, "BATCH": dump::rec::BATCH,
             "DROPPED": dump::rec::DROPPED, "TRAILER": dump::rec::TRAILER,
