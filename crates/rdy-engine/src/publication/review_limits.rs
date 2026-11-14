@@ -19,6 +19,7 @@ use super::review_changes::{
     changed_doc_reviews, content, count_row, folder_changes, outside_reviews,
 };
 use super::review_docs::{doc_reviews, sized_blocks};
+use super::review_labels::{attachment_labels, folder_reviews};
 use super::review_model::{
     ChangedDocReview, DisclosureReview, DisclosureTotals, DocSize, Included, ReviewChange,
     ReviewCounts,
@@ -218,12 +219,17 @@ pub fn disclosure_review(
     }
     let totals = t.totals(diff, &changed_docs);
     share_changes(&mut changed_docs);
+    let attachments = attachment_labels(diff, before, after);
     DisclosureReview {
         totals,
         changed_docs,
         added_docs: docs.added_docs,
         removed_docs: docs.removed_docs,
         changed_outside_docs,
+        changed_folders: folder_reviews(diff, before, after),
+        added_attachments: attachments.added,
+        removed_attachments: attachments.removed,
+        changed_attachments: attachments.changed,
     }
 }
 

@@ -398,6 +398,18 @@ pub fn change_label<R: Reading + ?Sized>(r: &R, b: &Block) -> String {
     }
 }
 
+/// What a decision row calls decision `d` (D-9BWMV, D-0C4TB): the notice for removed content;
+/// else its title; else the change label over its statement ([`change_label`]), never its id.
+pub fn decision_title<R: Reading + ?Sized>(r: &R, d: &Block) -> String {
+    if d.is_redacted() {
+        return CONTENT_REMOVED.to_string();
+    }
+    match d.field_str("title").filter(|t| !t.is_empty()) {
+        Some(_) => labels::label(r, d, 0),
+        None => change_label(r, d),
+    }
+}
+
 /// Coded characters as plain text: each code span's run between backticks.
 pub(super) fn backticked(chars: &[Ch]) -> String {
     let mut out = String::new();
@@ -497,10 +509,10 @@ pub struct ShownBlock {
     pub redacted: bool,
 }
 
-/// A decision as one side shows it. `title` is the site's label: its title, else its statement's
-/// words, never its id, and the notice for a removed decision. `status` is its derived status
-/// tag. `text` is its statement as a reader reads it; `None` for a removed decision or a side
-/// with no reader text.
+/// A decision as one side shows it. `title` is its title, else the change label over its
+/// statement, never its id, and the notice for a removed decision ([`decision_title`]).
+/// `status` is its derived status tag. `text` is its statement as a reader reads it; `None` for
+/// a removed decision or a side with no reader text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecisionFacts {
     pub title: String,
@@ -623,7 +635,7 @@ impl ReaderReviewSide {
                 decisions.insert(
                     b.id.clone(),
                     DecisionFacts {
-                        title: labels::label(&r, b, 0),
+                        title: decision_title(&r, b),
                         status: status.clone(),
                         text: (!redacted).then(|| text::decision_statement(&r, b, revokes)),
                         redacted,
@@ -774,6 +786,18 @@ impl ReferenceLookup {
     pub fn doc_title(&self, id: &BlockId) -> Option<String> {
         let d = self.m.doc_of(id)?;
         (!d.is_redacted()).then(|| labels::label(self, d, 0))
+    }
+
+    /// What a dropped decision row calls decision `id` ([`decision_title`]); `None` for a block
+    /// the source lacks.
+    pub fn decision_title(&self, id: &BlockId) -> Option<String> {
+        let d = self.m.get(id)?;
+        Some(decision_title(self, d))
+    }
+
+    /// The masked source state the lookup reads.
+    pub(super) fn state(&self) -> &Materialized {
+        &self.m
     }
 }
 

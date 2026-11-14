@@ -24,6 +24,7 @@
 //! pieces of one diff, with the "…" and a code span's backticks inside the limit.
 
 use super::diff::{ChangedFolder, DisclosureDiff};
+use super::review_labels::{DECISIONS_MAX, decision_row, doc_decisions};
 use super::review_model::{
     ChangeRow, ChangedDocReview, DiffOp, DiffPiece, OutsideReview, ReviewChange, ReviewCounts,
 };
@@ -59,8 +60,9 @@ const ELLIPSIS: char = '\u{2026}';
 
 /// The review rows of every changed doc of `diff`, in the candidate's reading order: depth
 /// first, siblings by their order keys, a doc with no page in its place. `before` and `after`
-/// are the two sides of `diff`, each viewed with the removals of both. The lists are complete:
-/// no row is cut here, and no decision row is built here; the counts count the decisions too.
+/// are the two sides of `diff`, each viewed with the removals of both. The change rows are
+/// complete: no change row is cut here. The decision rows keep their first [`DECISIONS_MAX`]
+/// and count the rest in `omitted_decisions`. The counts count every row.
 pub fn changed_doc_reviews(
     diff: &DisclosureDiff,
     before: &dyn PublicationReviewSide,
@@ -108,7 +110,10 @@ pub(super) fn content<'s>(
 
 /// Every block `side` shows under `root`, depth first in page order, with its depth below
 /// `root`. A block is visited once, so a damaged parent chain still ends.
-fn walk<'s>(side: &'s dyn PublicationReviewSide, root: &BlockId) -> Vec<(&'s BlockId, usize)> {
+pub(super) fn walk<'s>(
+    side: &'s dyn PublicationReviewSide,
+    root: &BlockId,
+) -> Vec<(&'s BlockId, usize)> {
     let mut out = vec![];
     let mut seen = BTreeSet::new();
     let mut stack: Vec<(&BlockId, usize)> = side
@@ -174,7 +179,19 @@ impl Sides<'_> {
             .filter(|t| title.as_ref() != Some(t));
         let changes = self.changes(doc);
         let mut counts = self.counts(&changes);
-        self.count_decisions(doc, &mut counts);
+        let mut decisions = doc_decisions(self.before, self.after, doc);
+        for d in &decisions {
+            count_row(
+                &mut counts,
+                self.before,
+                self.after,
+                decision::DECISION,
+                &d.id,
+                d.change,
+            );
+        }
+        let omitted_decisions = decisions.len().saturating_sub(DECISIONS_MAX) as u64;
+        decisions.truncate(DECISIONS_MAX);
         ChangedDocReview {
             id: doc.clone(),
             title,
@@ -185,8 +202,8 @@ impl Sides<'_> {
             record_only: counts == ReviewCounts::default(),
             changes,
             omitted_changes: 0,
-            decisions: vec![],
-            omitted_decisions: 0,
+            decisions,
+            omitted_decisions,
         }
     }
 
@@ -297,33 +314,6 @@ impl Sides<'_> {
         c
     }
 
-    /// Adds the decisions of `doc` to its counts (D-0C4TB): `added` for a decision the doc
-    /// holds only in the candidate, `removed` for one it holds only in the baseline, and
-    /// `updated` for one whose title, statement or status changed. A decision that moves inside
-    /// the doc counts nothing; one that moves to another home counts at both.
-    fn count_decisions(&self, doc: &BlockId, c: &mut ReviewCounts) {
-        let held = |side: &dyn PublicationReviewSide, id: &BlockId| {
-            side.shown(id).is_some_and(|s| {
-                s.block_type == decision::DECISION && s.home_doc.as_ref() == Some(doc)
-            })
-        };
-        for (id, _) in walk(self.after, doc) {
-            if !held(self.after, id) {
-                continue;
-            }
-            if !held(self.before, id) {
-                c.decisions_added += 1;
-            } else if !self.changed(id).is_empty() {
-                c.decisions_updated += 1;
-            }
-        }
-        for (id, _) in walk(self.before, doc) {
-            if held(self.before, id) && !held(self.after, id) {
-                c.decisions_removed += 1;
-            }
-        }
-    }
-
     /// The parts of `id` that differ between the sides.
     fn changed(&self, id: &BlockId) -> Vec<PartName> {
         let none = BlockParts::default();
@@ -338,7 +328,8 @@ impl Sides<'_> {
     /// leaves the content outside docs. Another block a reader sees compares the part table with
     /// sibling place left out; it took a new place only when it moved in from a doc, and leaving
     /// for a doc is `removed`. A version change with no changed part, or of a block no reader
-    /// sees, keeps its row with `change` `None`, an empty `what` and `record_only` true.
+    /// sees, keeps its row with `change` `None`, an empty `what` and `record_only` true. A
+    /// decision row with a change carries its decision fields ([`decision_row`]).
     fn outside(&self, id: &BlockId) -> OutsideReview {
         let (b, a) = (self.before.shown(id), self.after.shown(id));
         let (bo, ao) = (
@@ -375,6 +366,9 @@ impl Sides<'_> {
             Some(ReviewChange::Removed) => b.or(a),
             _ => a.or(b),
         };
+        let decision = change
+            .filter(|_| block_type == decision::DECISION)
+            .and_then(|c| decision_row(self.before, self.after, id, c));
         OutsideReview {
             id: id.clone(),
             block_type,
@@ -382,7 +376,7 @@ impl Sides<'_> {
             record_only: change.is_none(),
             change,
             what,
-            decision: None,
+            decision,
         }
     }
 
@@ -410,7 +404,7 @@ impl Sides<'_> {
 /// comparison lists, in its id order. `before` and `after` are its two sides, each viewed with
 /// the removals of both. A block that moves between a doc and the content outside docs gets its
 /// one counted row at its new place: here for a move out of a doc, in the doc for a move in. A
-/// decision's own decision fields are left `None` here.
+/// decision has no `moved` kind: its move gives a removed row and an added row.
 pub fn outside_reviews(
     diff: &DisclosureDiff,
     before: &dyn PublicationReviewSide,

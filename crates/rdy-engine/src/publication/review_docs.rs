@@ -16,6 +16,7 @@
 
 use super::diff::DisclosureDiff;
 use super::review_changes::excerpt;
+use super::review_labels::figure_label;
 use super::review_model::{
     DocSize, DocSummary, FigureEntry, Included, IncludedTotals, RemovedDocReview,
 };
@@ -268,11 +269,7 @@ impl Contents {
         c.figures = images
             .into_iter()
             .map(|a| FigureEntry {
-                label: side
-                    .attachment_label(&a.block)
-                    .or_else(|| side.shown(&a.block).map(|b| b.label.as_str()))
-                    .unwrap_or_default()
-                    .to_string(),
+                label: figure_label(side, &a.block),
                 variant: a.variant,
             })
             .collect();

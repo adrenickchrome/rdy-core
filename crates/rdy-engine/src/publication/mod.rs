@@ -20,6 +20,7 @@ mod release;
 mod report;
 mod review_changes;
 mod review_docs;
+mod review_labels;
 mod review_limits;
 pub mod review_model;
 mod review_side;
@@ -38,6 +39,9 @@ pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, sh
 pub use review_docs::{
     DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_reviews, doc_summary, included,
 };
+pub use review_labels::{
+    DECISIONS_MAX, dropped_decisions, first_attachments, reference_labels, reference_review,
+};
 pub use review_limits::{
     ADAPTER_REVIEW_BYTES, CHANGE_BUDGET, CHANGES_MAX, ReviewProjection, change_shares, compact_len,
     disclosure_review,
@@ -45,7 +49,7 @@ pub use review_limits::{
 pub use review_side::{
     BlockParts, DecisionFacts, PartName, PublicationReviewSide, ReaderPartValue, ReaderReviewSide,
     ReferenceLookup, ReviewRemovals, SelectionFacts, ShownBlock, TreeFacts, change_label,
-    changed_parts, text_fields,
+    changed_parts, decision_title, text_fields,
 };
 #[allow(
     unused_imports,

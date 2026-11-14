@@ -192,7 +192,7 @@ pub struct FolderReview {
 
 /// What a row outside docs adds. A version change with no changed part keeps its row with
 /// `change` `None`, an empty `what` and `record_only` true; it counts nothing (D-BND1J). A
-/// decision also carries its decision fields.
+/// decision row with a change also carries its decision fields; a record-only row has none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OutsideReview {
     pub id: BlockId,
@@ -237,6 +237,16 @@ pub struct DroppedDecisions {
     pub omitted_rows: u64,
 }
 
+/// The labels of one reference report, read from the candidate: one for each row of its
+/// `rows` and of its `links_outside`, in their order, and its dropped decisions with their
+/// titles. The report's status and counts stay as they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ReferenceReview {
+    pub rows: Vec<ReferenceLabels>,
+    pub links_outside: Vec<ReferenceLabels>,
+    pub dropped_decisions: DroppedDecisions,
+}
+
 /// The totals of a comparison, over the complete comparison before any row is cut.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DisclosureTotals {
@@ -262,8 +272,10 @@ pub struct DisclosureTotals {
 /// The review of a comparison, before any projection cuts an outer list: the totals over the
 /// complete comparison, and every changed, added and removed doc row and every row outside docs.
 /// The inner lists are cut already, by the limits both projections share: a changed doc's
-/// changes by its share of the change budget. Rows follow each side's reading order; rows outside
-/// docs follow the comparison's id order.
+/// changes by its share of the change budget, its decisions by their limit. Doc rows follow each
+/// side's reading order. The rows outside docs, the folder rows and the attachment labels follow
+/// the comparison's own order: one for each row of its `changed_outside_docs`,
+/// `changed_folders`, `added_attachments`, `removed_attachments` and `changed_attachments`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DisclosureReview {
     pub totals: DisclosureTotals,
@@ -271,4 +283,8 @@ pub struct DisclosureReview {
     pub added_docs: Vec<DocSummary>,
     pub removed_docs: Vec<RemovedDocReview>,
     pub changed_outside_docs: Vec<OutsideReview>,
+    pub changed_folders: Vec<FolderReview>,
+    pub added_attachments: Vec<AttachmentLabels>,
+    pub removed_attachments: Vec<AttachmentLabels>,
+    pub changed_attachments: Vec<AttachmentLabels>,
 }
