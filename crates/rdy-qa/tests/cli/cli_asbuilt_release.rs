@@ -99,7 +99,7 @@ fn ab6_cli_and_mcp_release_results_match() {
     ]));
     assert_eq!(
         t,
-        "Publication profile open: blocked.\n4 blocks in 1 docs and 0 folders.\nReferences outside selection: 0.\nLinks outside selection: 0.\nRelease: 1.0.0.\nBlocks after release: 2.\nDecisions after release: 1.\n"
+        "Publication profile open: blocked.\n4 blocks in 1 docs and 0 folders.\nReferences outside selection: 0.\nLinks outside selection: 0.\nRelease: 1.0.0.\nBlocks after release: 2.\nDecisions after release: 1.\nIncluded: 1 doc, 0 folders, 0 sections, 2 blocks, 0 decisions, 0 figures.\n"
     );
     let t = stdout(&s.rdy(&[
         "publication",
@@ -125,7 +125,7 @@ fn ab6_cli_and_mcp_release_results_match() {
     ]));
     assert_eq!(
         t,
-        "Publication profile open: clear.\n4 blocks in 1 docs and 0 folders.\nReferences outside selection: 0.\nLinks outside selection: 0.\nRelease: 3.0.0.\nBlocks after release: 0.\nDecisions after release: 0.\n"
+        "Publication profile open: clear.\n4 blocks in 1 docs and 0 folders.\nReferences outside selection: 0.\nLinks outside selection: 0.\nRelease: 3.0.0.\nBlocks after release: 0.\nDecisions after release: 0.\nIncluded: 1 doc, 0 folders, 0 sections, 2 blocks, 0 decisions, 0 figures.\n"
     );
     // no release adds no line, and against alone never makes one
     let t = stdout(&s.rdy(&[
@@ -139,7 +139,14 @@ fn ab6_cli_and_mcp_release_results_match() {
     assert_eq!(t.lines().count(), 6, "{t}");
     assert!(!t.contains("Release"), "{t}");
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "open"]));
-    assert_eq!(t.lines().count(), 4, "{t}");
+    // the four report lines, then the first check's included line (D-MCH70)
+    assert_eq!(t.lines().count(), 5, "{t}");
+    assert!(
+        t.lines()
+            .nth(4)
+            .is_some_and(|l| l.starts_with("Included: 1 doc, ")),
+        "{t}"
+    );
 
     // usage errors: a bad version and a missing value fail with the engine's words
     let out = s.rdy(&[
