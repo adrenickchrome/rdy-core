@@ -308,6 +308,10 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(job_permissions(candidate_jobs['sign']), {'contents': 'read', 'id-token': 'write'})
         for word in ('cargo', 'qa-release-package', 'candidate.py', 'secrets.'):
             self.assertNotIn(word, candidate_jobs['sign'])
+        # A re-run of only the sign job downloads the assembled candidate by id, not by attempt name.
+        self.assertIn('artifact-ids: ${{ needs.assemble.outputs.artifact_id }}', candidate_jobs['sign'])
+        self.assertNotIn('name: rdy-candidate-a${{', candidate_jobs['sign'])
+        self.assertIn('artifact_id: ${{ steps.upload.outputs.artifact-id }}', candidate_jobs['assemble'])
         # The lane: one fixed group for the caller.
         self.assertIn('group: rdy-core-release-authority\n  cancel-in-progress: false', text_of('release.yml'))
         for name in RELEASE_FILES:
