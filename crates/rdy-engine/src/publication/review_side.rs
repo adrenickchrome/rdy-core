@@ -399,7 +399,7 @@ pub fn change_label<R: Reading + ?Sized>(r: &R, b: &Block) -> String {
 }
 
 /// Coded characters as plain text: each code span's run between backticks.
-fn backticked(chars: &[Ch]) -> String {
+pub(super) fn backticked(chars: &[Ch]) -> String {
     let mut out = String::new();
     for run in chars.chunk_by(|a, b| a.1 == b.1) {
         let t: String = run.iter().map(|c| c.0).collect();
@@ -467,7 +467,8 @@ pub struct SelectionFacts {
 
 /// A doc or folder as one side shows it. `title` is its plain title, `None` only when a removal
 /// removed it. `page` is its page relative to the site root, `None` when the site gives it none.
-/// `position` is its place in depth-first reading order, with or without a page.
+/// `position` is its place in depth-first reading order, with or without a page. `lede` is a
+/// doc's lede block, as its page puts it first ([`shape::lede_of`]); `None` for a folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeFacts {
     pub id: BlockId,
@@ -476,6 +477,7 @@ pub struct TreeFacts {
     pub title: Option<String>,
     pub page: Option<String>,
     pub position: Option<usize>,
+    pub lede: Option<BlockId>,
     pub redacted: bool,
 }
 
@@ -520,6 +522,9 @@ pub trait PublicationReviewSide {
     fn tree_entry(&self, id: &BlockId) -> Option<&TreeFacts>;
     /// A block the side shows.
     fn shown(&self, id: &BlockId) -> Option<&ShownBlock>;
+    /// The blocks the side shows under `parent` (the top level for `None`), in sibling order:
+    /// by order key, then by id.
+    fn children(&self, parent: Option<&BlockId>) -> &[BlockId];
     /// The compared parts of a block the side shows.
     fn parts(&self, id: &BlockId) -> Option<&BlockParts>;
     /// A decision the side shows.
@@ -541,6 +546,7 @@ pub struct ReaderReviewSide {
     reading: Vec<BlockId>,
     tree: BTreeMap<BlockId, TreeFacts>,
     shown: BTreeMap<BlockId, ShownBlock>,
+    children: BTreeMap<Option<BlockId>, Vec<BlockId>>,
     parts: BTreeMap<BlockId, BlockParts>,
     decisions: BTreeMap<BlockId, DecisionFacts>,
     text: BTreeMap<BlockId, String>,
@@ -584,6 +590,9 @@ impl ReaderReviewSide {
                         title: (!redacted).then(|| labels::label(&r, b, 0)),
                         page: shape.page(&b.id),
                         position: shape.position(&b.id),
+                        lede: (b.block_type == tree::DOC)
+                            .then(|| shape::lede_of(&state, b).map(|l| l.id.clone()))
+                            .flatten(),
                         redacted,
                     },
                 );
@@ -647,6 +656,17 @@ impl ReaderReviewSide {
                 Some((a.block.clone(), change_label(&r, b)))
             })
             .collect();
+        let children = std::iter::once(None)
+            .chain(state.iter().map(|b| Some(b.id.clone())))
+            .filter_map(|parent| {
+                let kids: Vec<BlockId> = state
+                    .children(parent.as_ref())
+                    .into_iter()
+                    .map(|c| c.id.clone())
+                    .collect();
+                (!kids.is_empty()).then_some((parent, kids))
+            })
+            .collect();
         let reading = shape
             .reading()
             .iter()
@@ -670,6 +690,7 @@ impl ReaderReviewSide {
             reading,
             tree: tree_facts,
             shown,
+            children,
             parts,
             decisions,
             text: texts,
@@ -699,6 +720,12 @@ impl PublicationReviewSide for ReaderReviewSide {
 
     fn shown(&self, id: &BlockId) -> Option<&ShownBlock> {
         self.shown.get(id)
+    }
+
+    fn children(&self, parent: Option<&BlockId>) -> &[BlockId] {
+        self.children
+            .get(&parent.cloned())
+            .map_or(&[], Vec::as_slice)
     }
 
     fn parts(&self, id: &BlockId) -> Option<&BlockParts> {

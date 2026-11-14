@@ -247,9 +247,16 @@ pub fn between_prepared<S: PartialEq>(
 
 /// On the page: neither a decision, its rationale, a finding, a source nor a publication profile.
 fn visible(b: &Block) -> bool {
-    b.block_type != decision::DECISION
-        && !crate::reader::text::is_off_site(b)
-        && !crate::reader::text::is_profile(b)
+    visible_type(&b.block_type)
+}
+
+/// Whether a block of type `block_type` is on the page: no decision, rationale, finding, source
+/// or publication profile. The review counts only these blocks, and the publication review lists
+/// only these.
+pub fn visible_type(block_type: &str) -> bool {
+    block_type != decision::DECISION
+        && !crate::reader::text::off_site_type(block_type)
+        && block_type != crate::reader::text::PUBLICATION_PROFILE
 }
 
 fn ids(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
@@ -441,7 +448,42 @@ fn removed_lines(
     dm: &Materialized,
     bm: &Materialized,
 ) -> Vec<Removed> {
-    let order = blocks_under(bm, doc);
+    let order: Vec<(&BlockId, usize)> = blocks_under(bm, doc)
+        .into_iter()
+        .map(|(b, depth)| (&b.id, depth))
+        .collect();
+    // a block that stays in the doc and is on the page
+    let stays = |id: &BlockId| {
+        dm.get(id).is_some_and(|d| {
+            visible(d) && !tree::is_tree_type(&d.block_type) && doc_id(dm, &d.id) == Some(doc)
+        })
+    };
+    let left = |id: &BlockId| dm.get(id).is_none() || doc_id(dm, id) != Some(doc);
+    let in_line = |id: &BlockId| bm.get(id).is_some_and(visible) && left(id);
+    removed_line_places(&order, &|id| gone.contains(id), &stays, &in_line)
+        .into_iter()
+        .map(|(before, blocks)| Removed {
+            before: before.cloned(),
+            blocks: blocks
+                .into_iter()
+                .filter_map(|id| bm.get(id).cloned())
+                .collect(),
+        })
+        .collect()
+}
+
+/// The places of one base doc's removed lines, read by ids alone, so the draft render and the
+/// publication review place removed blocks by one rule. `order` is every block under the doc in
+/// the base's reading order, with its depth below the doc. A line starts at each `gone` block
+/// that has no gone base ancestor; it holds that block, then each block below it that `in_line`
+/// keeps, in the base's order. It stands before the first block after its subtree that `stays`
+/// in the doc on the page, or at the doc's end (`None`).
+pub fn removed_line_places<'a>(
+    order: &[(&'a BlockId, usize)],
+    gone: &dyn Fn(&BlockId) -> bool,
+    stays: &dyn Fn(&BlockId) -> bool,
+    in_line: &dyn Fn(&BlockId) -> bool,
+) -> Vec<(Option<&'a BlockId>, Vec<&'a BlockId>)> {
     let n = order.len();
     // the end of each block's subtree: the first later block that is not below it
     let mut end = vec![n; n];
@@ -456,40 +498,30 @@ fn removed_lines(
         open.push(i);
     }
     // the first block at or after each position that stays in the doc and is on the page
-    let stays = |b: &Block| {
-        dm.get(&b.id).is_some_and(|d| {
-            visible(d) && !tree::is_tree_type(&d.block_type) && doc_id(dm, &d.id) == Some(doc)
-        })
-    };
     let mut next: Vec<Option<&BlockId>> = vec![None; n + 1];
     for i in (0..n).rev() {
         next[i] = if stays(order[i].0) {
-            Some(&order[i].0.id)
+            Some(order[i].0)
         } else {
             next[i + 1]
         };
     }
-    let left = |b: &Block| dm.get(&b.id).is_none() || doc_id(dm, &b.id) != Some(doc);
     let mut lines = vec![];
     // the end of the last line's subtree: a gone block before it has a gone base ancestor
     let mut inside = 0;
-    for (i, (b, _)) in order.iter().enumerate() {
-        if i < inside || !gone.contains(&b.id) {
+    for (i, (id, _)) in order.iter().enumerate() {
+        if i < inside || !gone(id) {
             continue;
         }
         inside = end[i];
-        let mut blocks = vec![(*b).clone()];
+        let mut blocks = vec![*id];
         blocks.extend(
             order[i + 1..end[i]]
                 .iter()
                 .map(|(c, _)| *c)
-                .filter(|c| visible(c) && left(c))
-                .cloned(),
+                .filter(|c| in_line(c)),
         );
-        lines.push(Removed {
-            before: next[end[i]].cloned(),
-            blocks,
-        });
+        lines.push((next[end[i]], blocks));
     }
     lines
 }

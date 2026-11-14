@@ -17,6 +17,7 @@ mod hidden;
 mod references;
 mod release;
 mod report;
+mod review_changes;
 pub mod review_model;
 mod review_side;
 mod select;
@@ -30,6 +31,7 @@ pub use hidden::{HiddenList, HiddenPlanned, HiddenRow};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
 pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
+pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, short_diff};
 pub use review_side::{
     BlockParts, DecisionFacts, PartName, PublicationReviewSide, ReaderPartValue, ReaderReviewSide,
     ReferenceLookup, ReviewRemovals, SelectionFacts, ShownBlock, TreeFacts, change_label,

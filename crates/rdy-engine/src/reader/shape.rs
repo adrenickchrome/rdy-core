@@ -415,16 +415,52 @@ pub fn sibling_places(
 ) -> BTreeMap<BlockId, (usize, usize)> {
     let old: Vec<&BlockId> = from.children(parent).iter().map(|b| &b.id).collect();
     let new: Vec<&BlockId> = to.children(parent).iter().map(|b| &b.id).collect();
+    shared_places(&old, &new)
+}
+
+/// [`sibling_places`] over two lists of the same parent's children, each in its side's order:
+/// the place of each block both lists hold, among the blocks both hold.
+pub fn shared_places(old: &[&BlockId], new: &[&BlockId]) -> BTreeMap<BlockId, (usize, usize)> {
     let in_new: std::collections::BTreeSet<&BlockId> = new.iter().copied().collect();
     let in_old: std::collections::BTreeSet<&BlockId> = old.iter().copied().collect();
     let mut out: BTreeMap<BlockId, (usize, usize)> = BTreeMap::new();
-    for (i, id) in old.into_iter().filter(|id| in_new.contains(id)).enumerate() {
-        out.insert(id.clone(), (i, 0));
+    for (i, id) in old.iter().filter(|id| in_new.contains(*id)).enumerate() {
+        out.insert((*id).clone(), (i, 0));
     }
-    for (i, id) in new.into_iter().filter(|id| in_old.contains(id)).enumerate() {
+    for (i, id) in new.iter().filter(|id| in_old.contains(*id)).enumerate() {
         if let Some(slot) = out.get_mut(id) {
             slot.1 = i;
         }
     }
     out
+}
+
+/// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
+/// doc), else the first block of the first section when it is such a prose and the doc has more
+/// sections (a one-section doc keeps all its text under its heading); a prose of several
+/// paragraphs or with a list renders in place. A collapsed first section keeps its prose: it
+/// stays in the fold, with its Copy range and its change marks.
+pub fn lede_of<'m>(m: &'m Materialized, doc: &Block) -> Option<&'m Block> {
+    let children = m.children(Some(&doc.id));
+    let one_paragraph =
+        |p: &Block| p.block_type == "prose" && super::inline::is_one_paragraph(&p.body);
+    children
+        .first()
+        .copied()
+        .filter(|p| one_paragraph(p))
+        .or_else(|| {
+            children
+                .first()
+                .filter(|s| {
+                    s.block_type == "section"
+                        && s.fields.get("collapsed") != Some(&rdy_model::FieldValue::Bool(true))
+                        && children
+                            .iter()
+                            .filter(|c| c.block_type == "section")
+                            .count()
+                            > 1
+                })
+                .and_then(|s| m.children(Some(&s.id)).into_iter().next())
+                .filter(|p| one_paragraph(p))
+        })
 }

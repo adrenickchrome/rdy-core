@@ -95,9 +95,11 @@ pub struct DecisionRow {
     pub excerpt: Option<String>,
 }
 
-/// What a changed doc adds to its comparison row. `before_title` and `before_page` are `None`
-/// when they equal the candidate's. `record_only` is true when the digest changed and every
-/// count is zero.
+/// What a changed doc adds to its comparison row. `title` and `page` are the candidate's;
+/// `before_title` is the baseline's title when it differs, else `None`; `before_page` is the
+/// baseline's page (D-RDH1C: each side's render names its page). A page is `None` when that
+/// side's site gives the doc none. `record_only` is true when the digest changed and every count
+/// is zero.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ChangedDocReview {
     pub id: BlockId,

@@ -30,8 +30,13 @@ pub const PUBLICATION_PROFILE: &str = rdy_schema::publication::PROFILE_TYPE;
 /// finding or a source, which live only in the store (D-Z8P09). None has an anchor or a place in
 /// the text; a link to one leads to its doc's page.
 pub fn is_off_site(b: &Block) -> bool {
+    off_site_type(&b.block_type)
+}
+
+/// Whether a block of type `block_type` is supporting content off the site ([`is_off_site`]).
+pub fn off_site_type(block_type: &str) -> bool {
     matches!(
-        b.block_type.as_str(),
+        block_type,
         RATIONALE | rdy_schema::supporting::FINDING | rdy_schema::supporting::SOURCE
     )
 }
