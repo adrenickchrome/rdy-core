@@ -199,6 +199,8 @@ fn raw_take(
 
 #[test]
 fn sdl3_publication_check_folds_each_delta_once() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let (dir, mut r, landings, tag) = project(200);
     let deltas = add_deltas(&mut r, None);
     assert_eq!(deltas.len(), 200);
@@ -286,6 +288,8 @@ fn boundaries(r: &mut Rdy, dir: &Path, tag: Hash, name: &str) -> [Option<String>
 
 #[test]
 fn sdl3_fsck_holder_take_and_load_agree() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     // a good delta history passes every boundary
     let (dir, mut r, _, tag) = project(3);
     add_deltas(&mut r, None);
@@ -366,6 +370,8 @@ fn noncanonical(a: &BlockId, va: Hash, b: &BlockId, vb: Hash) -> Vec<(&'static s
 
 #[test]
 fn sdl3_noncanonical_snapshot_refuses_before_take_or_load_writes() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     for variant in 0..4 {
         // a fresh project each time: a landing on canon's head whose state is bytes of its map
         // that are not canonical, tagged `v2.0.0`. No feature: the take and the load still check

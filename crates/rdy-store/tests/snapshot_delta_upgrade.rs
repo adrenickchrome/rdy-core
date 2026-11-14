@@ -5,7 +5,8 @@
 //! finishes the same upgrade with no second batch; the batch rule admits only the step's objects
 //! and the two refs; an open of a store whose manifest is current walks no log; and a take of a
 //! legacy upload into an upgraded holder converts it in its own batch and counts no SNAPSHOT
-//! edge. The step is passed in as a test registry: production registers none until Task 6.
+//! edge. The step is passed in as a test registry, and each test writes its legacy history as
+//! the last rdy before snapshot deltas did (`format::legacy_writer_for_tests`).
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::format::{
@@ -355,6 +356,8 @@ fn expected(maps: &Held) -> Vec<SnapshotDelta> {
 
 #[test]
 fn sdl5_upgrade_writes_objects_features_and_receipt_once() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -492,6 +495,8 @@ fn sdl5_upgrade_writes_objects_features_and_receipt_once() {
 
 #[test]
 fn sdl5_upgrade_covers_off_canon_and_holder_forks() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     // a project: canon, a second root, a fork off canon's first landing and a landing on it
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), true);
@@ -613,6 +618,8 @@ fn reordered(map: &BTreeMap<BlockId, Hash>) -> Vec<u8> {
 
 #[test]
 fn sdl5_noncanonical_legacy_snapshot_leaves_store_readable() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -728,6 +735,8 @@ fn inject(fault: Fault) -> impl for<'a> FnMut(Phase<'a>) -> std::io::Result<()> 
 
 #[test]
 fn sdl5_every_interruption_preserves_acknowledged_bytes() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     for fault in [
         Fault::Copy,
         Fault::Sync,
@@ -811,6 +820,8 @@ fn sdl5_every_interruption_preserves_acknowledged_bytes() {
 #[test]
 #[ignore]
 fn sdl5_upgrade_child() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let Ok(dir) = std::env::var("RDY_SDL5_DIR") else {
         return;
     };
@@ -876,6 +887,8 @@ fn kill_at(dir: &Path, phase: &str) {
 
 #[test]
 fn sdl5_restart_finishes_without_a_second_upgrade_batch() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     for phase in [
         "copy",
         "backup_complete",
@@ -970,6 +983,8 @@ fn sdl5_restart_finishes_without_a_second_upgrade_batch() {
 
 #[test]
 fn sdl5_upgrade_batch_rejects_unregistered_objects_and_refs() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -1103,6 +1118,8 @@ fn sdl5_upgrade_batch_rejects_unregistered_objects_and_refs() {
 
 #[test]
 fn sdl5_current_manifest_open_does_not_walk_the_log() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let fx = project(base.path(), false);
     let dir = &fx.dir;
@@ -1231,6 +1248,8 @@ fn take_into(dir: &Path, batch: &Path, target: &UploadTarget) -> Result<(), Stri
 
 #[test]
 fn sdl5_legacy_take_into_upgraded_holder_counts_no_snapshot_edges() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = format::legacy_writer_for_tests();
     let src = source(3);
     let base = tempfile::tempdir().unwrap();
     let batch = base.path().join("legacy.rdysync");

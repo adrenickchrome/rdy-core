@@ -241,6 +241,8 @@ fn two_landings() -> Two {
 
 #[test]
 fn sdl4_unchanged_versions_affect_later_landings_and_tags() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let _clock = pin_clock(1_000_000);
     let mut t = two_landings();
     let deltas = add_deltas(&mut t.r);
@@ -351,6 +353,8 @@ fn add_deltas_after(r: &mut Rdy, held: &[SnapshotDelta]) -> Vec<SnapshotDelta> {
 
 #[test]
 fn sdl4_delta_rows_and_held_snapshot_rows_coexist() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let _clock = pin_clock(1_000_000);
     let mut t = two_landings();
     let target = [format!("{}@{}", t.prose, t.v)];
@@ -409,6 +413,8 @@ fn sdl4_delta_rows_and_held_snapshot_rows_coexist() {
 /// then it does not show that the executor makes the request stale.
 #[test]
 fn sdl4_upgrade_makes_a_prepared_removal_stale() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let _clock = pin_clock(1_000_000);
     let mut t = two_landings();
     let target = vec![format!("{}@{}", t.prose, t.v)];
@@ -466,6 +472,8 @@ fn picture(tail: &str) -> Vec<u8> {
 
 #[test]
 fn sdl4_removal_reports_keep_dark_and_removed_references() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let _clock = pin_clock(1_000_000);
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(&dir.path().join("src"), "rdy-standard").unwrap();

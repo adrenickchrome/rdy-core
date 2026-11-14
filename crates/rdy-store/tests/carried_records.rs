@@ -1505,7 +1505,7 @@ impl Carriers {
             read_identity: None,
             ..l
         };
-        s.put(kinds::LANDING, &orphan).unwrap()
+        s.put_landing_for_tests(&orphan).unwrap()
     }
 }
 
@@ -1757,6 +1757,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "foreign_copy",
             "object_encoding",
             "plan_tension",
+            "snapshot_delta",
             "view_replay"
         ]
     );
@@ -1766,6 +1767,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
         let want = match f.name.as_str() {
             "foreign_copy" => format::FOREIGN_COPY_REQUIRED_RDY,
             "figure_dark" => format::FIGURE_DARK_REQUIRED_RDY,
+            "snapshot_delta" => format::SNAPSHOT_DELTA_REQUIRED_RDY,
             _ => FEATURE_REQUIRED_RDY,
         };
         assert_eq!(f.required_rdy, want, "{}", f.name);
@@ -1775,7 +1777,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
     let s = Store::create(&d.path().join("new")).unwrap();
     assert_eq!(
         names(&log_manifest(&s)),
-        ["content_hash_v2", "object_encoding"]
+        ["content_hash_v2", "object_encoding", "snapshot_delta"]
     );
     assert_eq!(baseline_features(), log_manifest(&s));
     drop(s);
@@ -1806,7 +1808,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
         s.write(vec![frame]).unwrap();
         let manifest = log_manifest(&s);
         let mut got = names(&manifest);
-        got.retain(|n| !["content_hash_v2", "object_encoding"].contains(n));
+        got.retain(|n| !["content_hash_v2", "object_encoding", "snapshot_delta"].contains(n));
         assert_eq!(got, [*feature], "{k}: only its feature");
         assert!(
             last_batch_refs(&s).contains(&REF_STORE_FEATURES.to_string()),
@@ -1943,14 +1945,20 @@ fn ok4_features_activate_in_their_first_use_batch() {
         }
         i
     };
-    // a legacy load's final batch merges the features its records use into the baseline
+    // a legacy load's final batch merges the features its records use into the baseline, and
+    // the registered snapshot-delta step converts it in the same tail batch
     let mut i = ingest("legacy-under");
     assert!(i.upgrade(&format::DumpStore::Legacy(18)).unwrap());
     i.finish().unwrap();
     let loaded = Store::open(&d.path().join("legacy-under")).unwrap();
     assert_eq!(
         names(&log_manifest(&loaded)),
-        ["content_hash_v2", "object_encoding", "plan_tension"]
+        [
+            "content_hash_v2",
+            "object_encoding",
+            "plan_tension",
+            "snapshot_delta"
+        ]
     );
     assert_eq!(
         format::read_format_file(&d.path().join("legacy-under")).unwrap(),

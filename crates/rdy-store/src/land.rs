@@ -950,6 +950,47 @@ impl Store {
         Ok(outcome)
     }
 
+    /// Test hook: writes the landing record `rec` as it is (a test's forged landing), and, in a
+    /// store that lists `snapshot_delta`, its delta in the same batch, so the forged history
+    /// stays structurally valid and a test's own defect is the one a check finds. The delta's
+    /// base is the delta of `rec.prev` (held); its map is `rec.state`'s, read from a held
+    /// SNAPSHOT or from a held landing of the same state (`NotFound(state)` when neither is
+    /// held). Returns the landing's hash. No CLI, MCP, config or environment path reaches it.
+    #[doc(hidden)]
+    pub fn put_landing_for_tests(&mut self, rec: &LandingRecord) -> Result<Hash, StoreError> {
+        let frame = crate::codec::item(kinds::LANDING, rec)?;
+        let lid = Hash::of(&frame.1);
+        let mut items = vec![frame];
+        if self.features().has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+            let map = match self.get_typed::<rdy_model::StateSnapshot>(kinds::SNAPSHOT, &rec.state)
+            {
+                Ok(s) => s.blocks,
+                Err(StoreError::NotFound(_)) => {
+                    let mut found = None;
+                    for (h, other) in self.project_landings()? {
+                        if other.state == rec.state {
+                            found = Some(self.snapshot_at(&h)?.blocks);
+                            break;
+                        }
+                    }
+                    found.ok_or(StoreError::NotFound(rec.state))?
+                }
+                Err(e) => return Err(e),
+            };
+            let (base, before) = match rec.prev {
+                Some(p) => (
+                    self.snapshot_delta_of(&p)?.map(|(d, _)| d),
+                    self.snapshot_at(&p)?.blocks,
+                ),
+                None => (None, Default::default()),
+            };
+            let delta = rdy_model::diff_snapshots(lid, base, &before, &map);
+            items.push(crate::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        }
+        self.write(items)?;
+        Ok(lid)
+    }
+
     /// The set version a landing that chooses `alt` builds on: `alt.prev` must be the latest
     /// version of `alt/<set>` and open. Writes nothing.
     fn alt_landing_check(&self, alt: &AltLanding) -> Result<AltSet, StoreError> {

@@ -233,6 +233,8 @@ fn facts(fx: &Fx) -> Vec<(String, String)> {
 
 #[test]
 fn sdl2_all_state_scopes_read_delta_only_history() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let mut fx = fixture();
     let before = facts(&fx);
     assert_eq!(add_deltas(&mut fx.r), 3);
@@ -359,6 +361,8 @@ fn tag_hash(r: &Rdy, name: &str) -> Hash {
 
 #[test]
 fn sdl2_stream_and_store_materialization_are_equal() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let mut fx = fixture();
     add_deltas(&mut fx.r);
     fx.r.store().fold_held_snapshots_for_tests(true);
@@ -449,6 +453,8 @@ fn remove(r: &mut Rdy, target: &BlockId) {
 
 #[test]
 fn sdl2_removed_versions_read_as_stubs_after_cache_hits() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let mut fx = fixture();
     // warm the map cache: canon and a historical landing, each read twice
     cold(&mut fx.r);

@@ -610,12 +610,18 @@ fn rpl3_feature_first_use_is_atomic() {
         format::required_rdy(FEATURE_FOREIGN_COPY),
         FOREIGN_COPY_REQUIRED_RDY
     );
-    assert_eq!(registered.len(), 9);
-    // figure_dark (D-MKSFF) has its own minimum too
-    for f in registered
-        .iter()
-        .filter(|f| f.name != FEATURE_FOREIGN_COPY && f.name != format::FEATURE_FIGURE_DARK)
-    {
+    assert_eq!(registered.len(), 10);
+    // figure_dark (D-MKSFF) and snapshot_delta (D-RP6SM) have their own minima too
+    assert_eq!(
+        format::required_rdy(format::FEATURE_SNAPSHOT_DELTA),
+        format::SNAPSHOT_DELTA_REQUIRED_RDY
+    );
+    assert_eq!(format::SNAPSHOT_DELTA_REQUIRED_RDY, "0.52.0");
+    for f in registered.iter().filter(|f| {
+        f.name != FEATURE_FOREIGN_COPY
+            && f.name != format::FEATURE_FIGURE_DARK
+            && f.name != format::FEATURE_SNAPSHOT_DELTA
+    }) {
         assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
     }
@@ -646,7 +652,12 @@ fn rpl3_feature_first_use_is_atomic() {
     let manifest = log_manifest(&s);
     assert_eq!(
         names(&manifest),
-        ["content_hash_v2", "foreign_copy", "object_encoding"]
+        [
+            "content_hash_v2",
+            "foreign_copy",
+            "object_encoding",
+            "snapshot_delta"
+        ]
     );
     let batch = last_batch(&s);
     assert_eq!(batch[0].0, entry.0, "the entry leads its batch");

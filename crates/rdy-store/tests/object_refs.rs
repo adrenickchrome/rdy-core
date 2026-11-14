@@ -653,6 +653,24 @@ fn samples() -> Vec<Sample> {
             &snapshot,
             vec![some(BLOCK, 30), some(BLOCK, 31)],
         ),
+        // SD1: its landing, its base delta and each set version; `full` and `drop` are no links
+        s(
+            "snapshot delta",
+            SNAPSHOT_DELTA,
+            &rdy_model::SnapshotDelta {
+                landing: h(200),
+                base: Some(h(201)),
+                full: h(202),
+                set: vec![(id("c-00001"), h(203)), (id("d-00003"), h(204))],
+                drop: vec![id("e-00005")],
+            },
+            vec![
+                some(LANDING, 200),
+                some(SNAPSHOT_DELTA, 201),
+                some(BLOCK, 203),
+                some(BLOCK, 204),
+            ],
+        ),
         Sample {
             arm: "blob chunk",
             kind: BLOB_CHUNK,
@@ -1295,11 +1313,12 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         .iter()
         .map(|s| rdy_store::codec::logical_kind(s.kind))
         .collect();
-    // ok4: the four carried kinds, 25 to 28
+    // ok4: the four carried kinds, 25 to 28; SD1: the snapshot delta, 30
     let assigned: BTreeSet<u8> = (1..=7)
         .chain([9, 10, 11, 13])
         .chain(15..=22)
         .chain(24..=28)
+        .chain([30])
         .collect();
     assert_eq!(covered, assigned);
     assert_eq!(

@@ -744,12 +744,29 @@ pub fn authorized_batch_fixture(
         closed: head.closed,
         last_write_ms: head.last_write_ms,
     };
-    let mut items = vec![
-        (kinds::PROPOSAL, proposal_bytes),
-        (kinds::SNAPSHOT, state_bytes),
-        (landing_kind, landing_bytes),
-        (kinds::VIEW_OP, rebase),
-    ];
+    // a snapshot-delta store's landing carries its delta after it, and no SNAPSHOT, as
+    // `Store::commit_land` writes it (SD1 Task 6); a legacy store's keeps its SNAPSHOT
+    let mut items = if store
+        .features()
+        .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA)
+    {
+        let base = canon.map(|c| store.snapshot_delta_of(&c).unwrap().unwrap().0);
+        let before = store.canon_state().unwrap();
+        let delta = rdy_model::diff_snapshots(lid, base, &before.blocks, &state.blocks);
+        vec![
+            (kinds::PROPOSAL, proposal_bytes),
+            (landing_kind, landing_bytes),
+            rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta),
+            (kinds::VIEW_OP, rebase),
+        ]
+    } else {
+        vec![
+            (kinds::PROPOSAL, proposal_bytes),
+            (kinds::SNAPSHOT, state_bytes),
+            (landing_kind, landing_bytes),
+            (kinds::VIEW_OP, rebase),
+        ]
+    };
     let end = store.log_end();
     let at = Location {
         segment: end.segment,

@@ -466,27 +466,25 @@ fn landing_with_checks(s: &mut Store, checks: Vec<Hash>) -> Hash {
             },
         )
         .unwrap();
-    s.put(
-        kinds::LANDING,
-        &LandingRecord {
-            proposal,
-            prev: None,
-            state,
-            approved_by: prov(),
-            changes: vec![],
-            chosen: None,
-            checks,
-            assurance: Assurance::Local,
-            relayed_by: None,
-            relay_evidence: None,
-            approved_version: None,
-            rebased_from: vec![],
-            evidence: None,
-            assessment: None,
-            policy: None,
-            read_identity: None,
-        },
-    )
+    // structurally valid: its snapshot delta in the same batch (SD1 Task 6)
+    s.put_landing_for_tests(&LandingRecord {
+        proposal,
+        prev: None,
+        state,
+        approved_by: prov(),
+        changes: vec![],
+        chosen: None,
+        checks,
+        assurance: Assurance::Local,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+        evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
+    })
     .unwrap()
 }
 

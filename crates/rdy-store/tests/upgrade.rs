@@ -1075,27 +1075,24 @@ fn holder(base: &Path, with_block: bool) -> PathBuf {
         )
         .unwrap();
     let landing = s
-        .put(
-            kinds::LANDING,
-            &LandingRecord {
-                proposal,
-                prev: None,
-                state,
-                approved_by: holder_prov(3),
-                changes: vec![c],
-                chosen: None,
-                checks: vec![],
-                assurance: Assurance::Local,
-                relayed_by: None,
-                relay_evidence: None,
-                approved_version: None,
-                rebased_from: vec![],
-                evidence: None,
-                assessment: None,
-                policy: None,
-                read_identity: None,
-            },
-        )
+        .put_landing_for_tests(&LandingRecord {
+            proposal,
+            prev: None,
+            state,
+            approved_by: holder_prov(3),
+            changes: vec![c],
+            chosen: None,
+            checks: vec![],
+            assurance: Assurance::Local,
+            relayed_by: None,
+            relay_evidence: None,
+            approved_version: None,
+            rebased_from: vec![],
+            evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
+        })
         .unwrap();
     let t = s
         .put(
@@ -1765,17 +1762,36 @@ fn ok12_a_live_reader_is_refused_before_the_backup() {
 }
 
 /// ok9: with no registered upgrade step, an open plans nothing, so it walks no sealed log for a
-/// plan: the cost of a writable or RequireCurrent open does not grow with the log. An open with
-/// steps (the injected registry here) still plans from the sealed log.
+/// plan: the cost of a writable or RequireCurrent open does not grow with the log. With this
+/// rdy's steps, a current store's open takes the same fast path. An open with steps that may
+/// apply (the injected registry here) still plans from the sealed log.
 #[test]
 fn ok9_an_open_with_no_registered_step_walks_no_log() {
     use rdy_store::OpenPolicy;
-    assert!(
-        !upgrade::has_registered_steps(),
-        "production registers no step"
-    );
     let base = tempfile::tempdir().unwrap();
     let dir = project(base.path());
+    // with no registered step, no open walks the log
+    upgrade::with_registry_for_tests(&[], || {
+        assert!(!upgrade::has_registered_steps());
+        for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+            let walks = upgrade::sealed_walks_for_tests();
+            Store::open_with_policy(&dir, policy)
+                .unwrap()
+                .close()
+                .unwrap();
+            assert_eq!(
+                upgrade::sealed_walks_for_tests(),
+                walks,
+                "{policy:?}: the open walked the log for a plan"
+            );
+        }
+    });
+    // production registers the snapshot-delta step; a store whose manifest already lists what
+    // every step makes (a new store's) takes the fast path and walks no log either (SD1 Task 6)
+    assert!(
+        upgrade::has_registered_steps(),
+        "production registers the snapshot-delta step"
+    );
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         let walks = upgrade::sealed_walks_for_tests();
         Store::open_with_policy(&dir, policy)
@@ -1785,7 +1801,7 @@ fn ok9_an_open_with_no_registered_step_walks_no_log() {
         assert_eq!(
             upgrade::sealed_walks_for_tests(),
             walks,
-            "{policy:?}: the open walked the log for a plan"
+            "{policy:?}: a current store's open walked the log for a plan"
         );
     }
     let walks = upgrade::sealed_walks_for_tests();

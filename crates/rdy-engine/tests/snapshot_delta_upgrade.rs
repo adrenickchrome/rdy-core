@@ -288,6 +288,8 @@ const UPGRADE_REQUIRED: (&str, &str, &str) = (
 
 #[test]
 fn sdl5_optional_step_keeps_adapter_and_follower_reads() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let (root, r, landings) = project(base.path(), 2);
     let dump = base.path().join("p.rdydump");
@@ -337,6 +339,8 @@ fn sdl5_optional_step_keeps_adapter_and_follower_reads() {
 
 #[test]
 fn sdl5_empty_store_upgrade_activates_without_deltas() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     for interrupted in [false, true] {
         let base = tempfile::tempdir().unwrap();
         let root = base.path().join("p");
@@ -419,6 +423,8 @@ fn sdl5_empty_store_upgrade_activates_without_deltas() {
 
 #[test]
 fn sdl5_old_dump_load_appends_one_combined_batch() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let d = tempfile::tempdir().unwrap();
     for name in [
         "v1-s10",
@@ -491,6 +497,8 @@ fn sdl5_old_dump_load_appends_one_combined_batch() {
 
 #[test]
 fn sdl5_empty_dump_load_activates_in_one_batch_without_deltas() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("p");
     let r = Rdy::init(&root, "rdy-standard").unwrap();
@@ -519,6 +527,8 @@ fn sdl5_empty_dump_load_activates_in_one_batch_without_deltas() {
 
 #[test]
 fn sdl5_chain_stop_and_follower_seed_keep_the_source_prefix() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let (root, r, _) = project(base.path(), 2);
     let f0 = base.path().join("f0.rdydump");
@@ -582,6 +592,8 @@ fn sdl5_chain_stop_and_follower_seed_keep_the_source_prefix() {
 
 #[test]
 fn sdl5_take_feature_matrix_is_atomic() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     // a legacy source and a source with deltas, each tagged
     let (_, legacy, _) = project(&base.path().join("l"), 2);
@@ -703,6 +715,8 @@ fn sdl5_take_feature_matrix_is_atomic() {
 
 #[test]
 fn sdl5_empty_legacy_holder_refuses_feature_upload() {
+    // a legacy history, written as the last rdy before snapshot deltas wrote it
+    let _legacy = rdy_store::format::legacy_writer_for_tests();
     let base = tempfile::tempdir().unwrap();
     let (_, mut fed, _) = project(&base.path().join("f"), 1);
     add_deltas(&mut fed);
