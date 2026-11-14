@@ -1859,7 +1859,7 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
         sh.m.doc_of(&b.id)
             .map(|d| sh.site.label(d))
             .unwrap_or_default();
-    let section = rdy_engine::reader::shape::section_of(&sh.m, &b.id)
+    let section = rdy_engine::reader::shape::section_of(sh.m, &b.id)
         .map(|s| sh.site.label(s))
         .unwrap_or_default();
     (doc, section)
