@@ -210,6 +210,9 @@ fn moved(mut b: Block, parent: &str, order: &str) -> Block {
     b
 }
 
+/// A reference row's (source, target, source label, source doc title, target label).
+type LabelledRow = (String, String, String, Option<String>, Option<String>);
+
 /// Both sides resolved with `profile`, viewed with the comparison's removals, compared and
 /// reviewed; with the candidate's resolution and its reference lookup.
 struct Reviewed {
@@ -841,7 +844,7 @@ fn drv5_reference_labels_use_candidate_without_widening_selection() {
 
     let review = reference_review(report, &rv.lookup);
     assert_eq!(review.rows.len(), report.rows.len());
-    let rows: Vec<(String, String, String, Option<String>, Option<String>)> = report
+    let rows: Vec<LabelledRow> = report
         .rows
         .iter()
         .zip(&review.rows)
