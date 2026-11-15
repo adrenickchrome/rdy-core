@@ -2125,9 +2125,16 @@ impl Index {
         }
     }
 
-    /// Every landed row as (change, landing), in change order, from one read.
-    pub(crate) fn landed_rows(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+    /// Canon's head and every landed row as (change, landing), in change order, from one read:
+    /// the rows that head gives, while a writer moves canon.
+    pub(crate) fn canon_and_landed(&self) -> Result<(Option<Hash>, Vec<(Hash, Hash)>), StoreError> {
         let r = self.db.begin_read().map_err(db)?;
+        let head = r
+            .open_table(REFS)
+            .map_err(db)?
+            .get(CANON_REF)
+            .map_err(db)?
+            .and_then(|v| canon_value(v.value()));
         let t = r.open_table(LANDED).map_err(db)?;
         let mut out = Vec::new();
         for item in t.iter().map_err(db)? {
@@ -2137,7 +2144,7 @@ impl Index {
                 hash_from(v.value(), "landed entry")?,
             ));
         }
-        Ok(out)
+        Ok((head, out))
     }
 
     /// Test hook: overwrites the landed entry of `change` with raw bytes, so a test can damage it.

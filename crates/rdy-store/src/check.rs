@@ -185,10 +185,28 @@ impl StoreReader {
     /// has {other:?} as the landing of change {c}; run rdy reindex`; a row canon does not give is
     /// `the index has landing {l} as the landing of change {c}, which canon does not carry; run
     /// rdy reindex`. A held or replaced chain is checked by its own chain rules, never here.
+    /// Canon's head and the rows are read at one point, so a live writer's landing is no false
+    /// failure; the chain is `landings` when that head is its newest, else read from that head.
     fn check_landed(&self, landings: &[(Hash, LandingRecord)]) -> Result<(), StoreError> {
+        let (head, rows) = self.index().canon_and_landed()?;
+        let read;
+        let chain = if head == landings.first().map(|(h, _)| *h) {
+            landings
+        } else {
+            let mut out = vec![];
+            let mut cur = head;
+            while let Some(h) = cur {
+                let rec = self.landing(&h)?;
+                cur = rec.prev;
+                out.push((h, rec));
+            }
+            read = out;
+            &read[..]
+        };
+        let rows: HashMap<Hash, Hash> = rows.into_iter().collect();
         let mut want: HashMap<Hash, Hash> = HashMap::new();
         let mut order: Vec<(Hash, Hash)> = Vec::new();
-        for (l, rec) in landings.iter().rev() {
+        for (l, rec) in chain.iter().rev() {
             for c in &rec.changes {
                 let mut next = Some(*c);
                 // a replay chain is no longer than the changes it names; a longer one loops
@@ -211,7 +229,7 @@ impl StoreReader {
         }
         // newest landing first, as the chain is read
         for (c, l) in order.iter().rev() {
-            match self.landing_of(c)? {
+            match rows.get(c).copied() {
                 Some(o) if o == *l => {}
                 other => {
                     return Err(bad(format!(
@@ -220,8 +238,8 @@ impl StoreReader {
                 }
             }
         }
-        for (c, l) in self.index().landed_rows()? {
-            if !want.contains_key(&c) {
+        for (c, l) in &rows {
+            if !want.contains_key(c) {
                 return Err(bad(format!(
                     "the index has landing {l} as the landing of change {c}, which canon does not carry; run rdy reindex"
                 )));
