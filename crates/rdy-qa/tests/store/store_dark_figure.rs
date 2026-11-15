@@ -208,8 +208,8 @@ fn rfr2_feature_activates_in_the_first_durable_batch() {
     assert_eq!(f.class, FeatureClass::Incompatible);
     assert_eq!(f.required_rdy, FIGURE_DARK_REQUIRED_RDY);
     assert_eq!(FIGURE_DARK_REQUIRED_RDY, "0.51.0");
-    // nine before snapshot_delta (SD1 Task 6)
-    assert_eq!(reg.len(), 10);
+    // nine before snapshot_delta (SD1 Task 6), then hub_canon (Sync client A Task 1b)
+    assert_eq!(reg.len(), 11);
 
     // a store with no dark figure never turns it on: light figures, edits, landings, tags
     let (d, mut r, s, light, _dark) = base();
