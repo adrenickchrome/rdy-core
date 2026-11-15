@@ -270,8 +270,8 @@ fn ha7_check_holder_walks_every_tag_chain() {
 
 #[test]
 fn ha7_check_holder_judges_landed_changes_per_chain() {
-    // one change landed by two landings, each in its own chain: the global index holds only
-    // one of them, and the holder never asks it
+    // one change landed by two landings, each in its own chain: a holder without canon has no
+    // landed change (D-QCE8M), and the holder never asks the global index
     let (_d, mut s) = holder();
     let base = block("b-00001", "widget", "base");
     let v_base = put_block(&mut s, &base);
@@ -305,8 +305,11 @@ fn ha7_check_holder_judges_landed_changes_per_chain() {
     assert_ne!(la, lb);
     tag(&mut s, "v1.0.0", la);
     tag(&mut s, "v2.0.0", lb);
-    let global = s.landing_of(&c2).unwrap();
-    assert!(global == Some(la) || global == Some(lb), "{global:?}");
+    assert_eq!(
+        s.landing_of(&c2).unwrap(),
+        None,
+        "no canon: nothing is landed"
+    );
     let c = s.check_holder().unwrap();
     assert_eq!(c.landed_changes, 2, "distinct landed changes");
 

@@ -132,17 +132,10 @@ impl StoreReader {
                 if !self.has_kind(kinds::CHANGE, c)? {
                     return Err(bad(format!("landing {l}: change {c} is missing")));
                 }
-                match self.landing_of(c)? {
-                    Some(o) if o == *l => {}
-                    other => {
-                        return Err(bad(format!(
-                            "landing {l}: the index has {other:?} as the landing of change {c}; run rdy reindex"
-                        )));
-                    }
-                }
             }
             landed_changes += rec.changes.len();
         }
+        self.check_landed(&landings)?;
         let intents = self
             .check_chains::<Intent>(kinds::INTENT, INTENT_REF, "intent", |i| (i.stable, i.prev))?;
         let alt_sets =
@@ -183,6 +176,58 @@ impl StoreReader {
             answers,
             foreign,
         })
+    }
+
+    /// The index's landed rows are the ones canon's records give (D-QCE8M, D-NME32): each
+    /// change a landing of canon's chain carries, and each change its `replayed_from` chain
+    /// reaches, reads the oldest such landing, and no other change reads landed. `landings` is
+    /// canon's chain, newest first. A missing row or another landing is `landing {l}: the index
+    /// has {other:?} as the landing of change {c}; run rdy reindex`; a row canon does not give is
+    /// `the index has landing {l} as the landing of change {c}, which canon does not carry; run
+    /// rdy reindex`. A held or replaced chain is checked by its own chain rules, never here.
+    fn check_landed(&self, landings: &[(Hash, LandingRecord)]) -> Result<(), StoreError> {
+        let mut want: HashMap<Hash, Hash> = HashMap::new();
+        let mut order: Vec<(Hash, Hash)> = Vec::new();
+        for (l, rec) in landings.iter().rev() {
+            for c in &rec.changes {
+                let mut next = Some(*c);
+                // a replay chain is no longer than the changes it names; a longer one loops
+                let mut seen: HashSet<Hash> = HashSet::new();
+                while let Some(x) = next {
+                    if !seen.insert(x) {
+                        break;
+                    }
+                    if !want.contains_key(&x) {
+                        want.insert(x, *l);
+                        order.push((x, *l));
+                    }
+                    next = if self.has_kind(kinds::CHANGE, &x)? {
+                        self.change(&x)?.links.replayed_from
+                    } else {
+                        None
+                    };
+                }
+            }
+        }
+        // newest landing first, as the chain is read
+        for (c, l) in order.iter().rev() {
+            match self.landing_of(c)? {
+                Some(o) if o == *l => {}
+                other => {
+                    return Err(bad(format!(
+                        "landing {l}: the index has {other:?} as the landing of change {c}; run rdy reindex"
+                    )));
+                }
+            }
+        }
+        for (c, l) in self.index().landed_rows()? {
+            if !want.contains_key(&c) {
+                return Err(bad(format!(
+                    "the index has landing {l} as the landing of change {c}, which canon does not carry; run rdy reindex"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Every record that may hold a carried shape keeps the carried record rules

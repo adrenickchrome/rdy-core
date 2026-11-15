@@ -17,4 +17,5 @@ mod views_own;
 mod views_query;
 mod views_relayed;
 mod views_replay;
+mod views_sync_landed;
 mod views_undo;

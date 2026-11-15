@@ -744,6 +744,15 @@ pub(crate) fn briefed_entry(links: &rdy_model::ChangeLinks, at: Location) -> Opt
         .then_some(IndexEntry::BriefedChange { at })
 }
 
+/// The entry of CHANGE `change` whose links name the change it replays (`replayed_from`, a pull
+/// or a view replay): a landing that carries it lands that source too (D-QCE8M). None for a
+/// change that replays none.
+pub(crate) fn replay_entry(links: &rdy_model::ChangeLinks, change: Hash) -> Option<IndexEntry> {
+    links
+        .replayed_from
+        .map(|source| IndexEntry::Replay { change, source })
+}
+
 /// The entry of the ASSESSMENT `hash` at `at`, split as `o`: the version it assesses. Its body
 /// is read with the bounded decoder (an assessment's lists may come from another store); one
 /// that does not decode is `record <hash> (kind 25): <reason>`.
@@ -841,6 +850,7 @@ fn frame_entries(
         kinds::CHANGE => {
             let change: Change = crate::codec::decode_split(&o)?;
             out.extend(briefed_entry(&change.links, loc));
+            out.extend(replay_entry(&change.links, hash));
             for op in &change.ops {
                 match op {
                     Op::Create { block } | Op::Update { block, .. } => {
@@ -873,10 +883,12 @@ fn frame_entries(
                 landing: hash,
                 prev: rec.prev,
             });
-            out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
-                change,
+            // the landed rows follow canon: its ref's move reads what this landing carries
+            out.push(IndexEntry::LandingCarries {
                 landing: hash,
-            }));
+                prev: rec.prev,
+                changes: rec.changes,
+            });
         }
         kinds::SIGNATURE => {
             // the bounded decoder only: a record that does not decode is damage
@@ -2009,7 +2021,8 @@ impl Store {
         // the index was trusted above, so its acknowledged end stayed the log's floor, and it is
         // now rebuilt from the log. The old file is zeroed as a removal's reindex zeroes it, so
         // no text a pending removal erases (a cached drawing) survives in a kept copy
-        if store.index().counts_behind()? {
+        // and so are landed rows an older rdy kept by its own rule after this rdy last wrote
+        if store.index().counts_behind()? || store.index().landed_behind()? {
             store.reindex_after_removal()?;
             store.report.index_rebuilt = true;
         }

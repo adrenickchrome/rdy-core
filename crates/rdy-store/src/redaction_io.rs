@@ -323,6 +323,8 @@ impl Authorization {
             };
             // the residue keeps the change's links, so a removed briefed change keeps its place
             out.extend(crate::store::briefed_entry(&c.links, loc));
+            // and the change it replays, so a removed replay keeps its source landed
+            out.extend(crate::store::replay_entry(&c.links, hash));
             for op in &c.ops {
                 match op {
                     ResidualOp::Create { version, .. } | ResidualOp::Update { version, .. } => out
