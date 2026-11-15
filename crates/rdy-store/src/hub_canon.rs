@@ -861,6 +861,9 @@ impl StoreReader {
     }
 }
 
+/// A move's ref writes, or the tip or head its failed compare found.
+type Planned = Result<Vec<(String, Vec<u8>)>, Option<Hash>>;
+
 /// The ref writes of `mv` from plan `batch`, after its compare and chain rule, over `reader`.
 /// Returns the refs and the value the move moves to, or the compare's observed tip or head.
 fn plan_move(
@@ -869,7 +872,7 @@ fn plan_move(
     mv: &CanonMove,
     expected: Option<Hash>,
     at_ms: i64,
-) -> Result<Result<Vec<(String, Vec<u8>)>, Option<Hash>>, StoreError> {
+) -> Result<Planned, StoreError> {
     let overlay = Overlay::new(reader, &batch.records);
     let head = batch.head;
     let want_kind = match mv {

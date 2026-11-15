@@ -266,6 +266,10 @@ pub fn names_store_mode(payload: &[u8]) -> bool {
     decode_ref(payload).is_some_and(|u| u.name == REF_STORE_MODE)
 }
 
+/// A holder's `hub_canon` ref of the batch being judged: its name, and the objects it names or
+/// the refusal of its name or value.
+type HubRefJudged = (String, Result<Vec<(u8, Hash)>, String>);
+
 /// The rules for refs the log holds, in log order: the replay of an open or a reindex, and an
 /// ingest. A mode ref outside the first batch is refused, and so is a mode value other than
 /// `holder` in it. In a holder, every ref must be in a holder family, and an
@@ -291,7 +295,7 @@ pub(crate) struct RefRules {
     batch_hub: bool,
     /// A holder's `hub_canon` refs of this batch, each with the objects it names or the
     /// refusal of its name or value (judged at the marker, after the feature).
-    batch_hub_refs: Vec<(String, Result<Vec<(u8, Hash)>, String>)>,
+    batch_hub_refs: Vec<HubRefJudged>,
 }
 
 impl RefRules {

@@ -220,7 +220,10 @@ fn refused(r: Result<Moved, StoreError>) -> String {
 }
 
 /// Every ref of `s` and its log end: what a move that writes nothing leaves.
-fn state(s: &Store) -> (Location, Vec<(String, Vec<u8>)>, Vec<String>) {
+/// A store's log end, refs and feature names.
+type State = (Location, Vec<(String, Vec<u8>)>, Vec<String>);
+
+fn state(s: &Store) -> State {
     let features = s
         .features()
         .features
