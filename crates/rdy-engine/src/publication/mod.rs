@@ -14,6 +14,7 @@
 //! or included doc reads its own side for its summary ([`doc_reviews`]). One JSON form
 //! ([`review_json`]) writes the review for chat, the CLI and the adapter.
 
+mod baseline;
 mod diff;
 mod hidden;
 mod references;
@@ -29,9 +30,19 @@ mod review_side;
 mod select;
 mod source;
 
+pub use baseline::{
+    BASELINE_CANONICAL_MAX, BASELINE_DEPTH_MAX, BASELINE_FORMAT, BASELINE_INPUT_MAX,
+    BASELINE_INTEGER_MAX, Baseline, BaselineAttachment, BaselineBinding, BaselineCaps,
+    BaselineDecision, BaselineDoc, BaselineEntry, BaselineFolder, BaselineReviewSide,
+    BaselineSource, PathPart, build as build_baseline, canonical_json as baseline_canonical_json,
+    check_lineage as check_baseline_lineage, compare as compare_with_baseline,
+    make as make_baseline, make_at as make_baseline_at,
+};
+#[cfg(feature = "test-support")]
+pub use baseline::{BaselineCapsGuard, override_baseline_caps_for_tests};
 pub use diff::{
-    ChangedAttachment, ChangedDoc, ChangedFolder, ChangedOutsideDoc, DisclosureDiff,
-    disclosure_diff,
+    BaselineComparison, ChangedAttachment, ChangedDoc, ChangedFolder, ChangedOutsideDoc,
+    DisclosureDiff, disclosure_diff,
 };
 pub use hidden::{HiddenList, HiddenPlanned, HiddenRow};
 pub use rdy_schema::publication::Audience;

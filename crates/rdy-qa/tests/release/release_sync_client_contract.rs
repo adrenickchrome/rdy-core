@@ -5,7 +5,8 @@
 //! and the native holder `store/hub-canon-1`). scc2 (D-KE83X, D-4XHPH, D-3RSCW) then adds sync
 //! stream format 4, the minimum rule and the project's sync state: the registered feature
 //! `sync_state` and its rule, the sync state refs and bounds, the history purposes and the
-//! digests of the `sync4-*` stream fixtures, and the fix text `SYNC_LOCKED_FIX`. Every other
+//! digests of the `sync4-*` stream fixtures, and the fix text `SYNC_LOCKED_FIX`. scc7 (D-CDQF7) also adds the error values of the
+//! portable publication baseline: the code `E_PUBLICATION_BASELINE` and its texts. Every other
 //! member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -60,6 +61,47 @@ const SCC1_CHANGES: &[(&str, &str)] = &[
     (
         "changed /store/sources",
         "the store row reads the native holder fixture",
+    ),
+];
+
+/// The members Task 7 adds to [`CURRENT`], each with the reason it moves: the error values of
+/// the portable publication baseline (D-CDQF7) and nothing else.
+const SCC7_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /errors_warnings/codes/E_PUBLICATION_BASELINE",
+        "a baseline that does not verify, bind or share a lineage",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_BINDING_FIX",
+        "the fix of a binding mismatch",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_BINDING_MESSAGE",
+        "the text of a binding mismatch",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_LINEAGE_FIX",
+        "the fix of a baseline outside the lineage",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_LINEAGE_MESSAGE",
+        "the text of a baseline outside the lineage",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_TAG_FIX",
+        "the fix of a baseline make with no tag",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_TAG_MESSAGE",
+        "the text of a baseline make with no tag",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_VERIFY_FIX",
+        "the fix of every baseline reader failure",
+    ),
+    (
+        "added /errors_warnings/templates/BASELINE_VERIFY_MESSAGE",
+        "the text of every baseline reader failure",
     ),
 ];
 
@@ -124,12 +166,13 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1 and scc2 together, sorted and without repeats: both move
-/// `/store/registered_names` and `/store/sources`.
+/// The changed paths of scc1, scc2 and scc7 together, sorted and without repeats: scc1 and
+/// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
         .iter()
         .chain(SCC2_CHANGES)
+        .chain(SCC7_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -266,8 +309,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     }
 }
 
-/// scc1 (F13): the successor adds only the holder's storage and scc2's changes. Every changed
-/// path is listed with its reason; the registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
+/// scc1 (F13): the successor adds only the holder's storage, scc2's changes and the baseline's
+/// error values ([`SCC7_CHANGES`]). Every changed path is listed with its reason; the registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
 /// the digest of each file of the native holder, and the dump row of each file of its dump pair,
 /// each as its length and blake3.
 #[test]
@@ -387,4 +430,54 @@ fn scc2_contract_adds_only_sync4_and_minimums() {
         );
         assert_eq!(digests[f], digest(&fixtures.join(f)), "{f}");
     }
+}
+
+/// scc7: the successor adds only the baseline's error values: the code and the texts of its
+/// four refusals, each the engine's own constant.
+#[test]
+fn scc7_contract_adds_only_baseline_values() {
+    use rdy_engine::{
+        BASELINE_BINDING_FIX, BASELINE_BINDING_MESSAGE, BASELINE_LINEAGE_FIX,
+        BASELINE_LINEAGE_MESSAGE, BASELINE_TAG_FIX, BASELINE_TAG_MESSAGE, BASELINE_VERIFY_FIX,
+        BASELINE_VERIFY_MESSAGE, E_PUBLICATION_BASELINE,
+    };
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(
+        &keyed(&old["errors_warnings"]),
+        &keyed(&new["errors_warnings"]),
+        "/errors_warnings",
+        &mut found,
+    );
+    found.sort();
+    // the error row also gains scc2's SYNC_LOCKED_FIX
+    let want: Vec<String> = all_changes()
+        .into_iter()
+        .filter(|p| p.contains(" /errors_warnings/"))
+        .collect();
+    for (p, _) in SCC7_CHANGES {
+        assert!(want.iter().any(|w| w == p), "{p}");
+    }
+    assert_eq!(
+        found, want,
+        "the error row gains the baseline's values and scc2's fix text alone"
+    );
+    let e = &new["errors_warnings"];
+    assert_eq!(e["codes"]["E_PUBLICATION_BASELINE"], E_PUBLICATION_BASELINE);
+    for (name, text) in [
+        ("BASELINE_VERIFY_MESSAGE", BASELINE_VERIFY_MESSAGE),
+        ("BASELINE_VERIFY_FIX", BASELINE_VERIFY_FIX),
+        ("BASELINE_BINDING_MESSAGE", BASELINE_BINDING_MESSAGE),
+        ("BASELINE_BINDING_FIX", BASELINE_BINDING_FIX),
+        ("BASELINE_LINEAGE_MESSAGE", BASELINE_LINEAGE_MESSAGE),
+        ("BASELINE_LINEAGE_FIX", BASELINE_LINEAGE_FIX),
+        ("BASELINE_TAG_MESSAGE", BASELINE_TAG_MESSAGE),
+        ("BASELINE_TAG_FIX", BASELINE_TAG_FIX),
+    ] {
+        assert_eq!(e["templates"][name], text, "{name}");
+    }
+    assert_eq!(
+        BASELINE_VERIFY_MESSAGE,
+        "The publication baseline does not verify."
+    );
 }

@@ -34,7 +34,7 @@ pub use maintenance::{
     ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
     UpgradeReport, UpgradeStep,
 };
-pub use publication::{ProfileFacts, profile_facts};
+pub use publication::{Baseline, BaselineBinding, PreviousChoice, ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };

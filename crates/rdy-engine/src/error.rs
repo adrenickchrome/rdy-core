@@ -228,6 +228,30 @@ pub const W_REDACTION_SECRET_MESSAGE: &str =
 /// A public publication profile whose selection references blocks outside it (D-0VCQ5): its
 /// output is blocked.
 pub const E_PUBLICATION_REFERENCE: &str = "E_PUBLICATION_REFERENCE";
+/// A publication baseline that does not verify, does not match the previous publication's
+/// record, or comes from outside the candidate's lineage (D-CDQF7).
+pub const E_PUBLICATION_BASELINE: &str = "E_PUBLICATION_BASELINE";
+/// The message of `E_PUBLICATION_BASELINE` for every reader failure (D-6WD17).
+pub const BASELINE_VERIFY_MESSAGE: &str = "The publication baseline does not verify.";
+/// The fix of `E_PUBLICATION_BASELINE` for every reader failure.
+pub const BASELINE_VERIFY_FIX: &str =
+    "Make the baseline again with rdy publication baseline in its source project.";
+/// The message of `E_PUBLICATION_BASELINE` when the binding names another publication.
+pub const BASELINE_BINDING_MESSAGE: &str =
+    "The publication baseline does not match the previous publication <tag> of <repo_id>.";
+/// The fix of `E_PUBLICATION_BASELINE` when the binding names another publication.
+pub const BASELINE_BINDING_FIX: &str =
+    "Make the baseline again from that tag, or pass the record of the publication it came from.";
+/// The message of `E_PUBLICATION_BASELINE` for a baseline outside the lineage.
+pub const BASELINE_LINEAGE_MESSAGE: &str =
+    "The publication baseline comes from a project outside this project's lineage.";
+/// The fix of `E_PUBLICATION_BASELINE` for a baseline outside the lineage.
+pub const BASELINE_LINEAGE_FIX: &str =
+    "Use a baseline from this project or from a project that shares a fork origin with it.";
+/// The message of `E_BAD_INPUT` when a baseline make names no tag.
+pub const BASELINE_TAG_MESSAGE: &str = "A publication baseline requires a tag.";
+/// The fix of `E_BAD_INPUT` when a baseline make names no tag.
+pub const BASELINE_TAG_FIX: &str = "Use scope tag:<name>.";
 /// An org publication profile whose selection references blocks outside it (D-0VCQ5): a warning
 /// on its output.
 pub const W_PUBLICATION_REFERENCE: &str = "W_PUBLICATION_REFERENCE";
@@ -1161,7 +1185,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 116] = [
+const CORE_ERROR_CODES: [&str; 117] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1238,6 +1262,7 @@ const CORE_ERROR_CODES: [&str; 116] = [
     E_REDACTED,
     E_REDACTION_BUDGET,
     E_PUBLICATION_REFERENCE,
+    E_PUBLICATION_BASELINE,
     E_SIGNING_KEY_MISSING,
     E_SIGNING_KEY_TYPE,
     E_NO_AGENT,

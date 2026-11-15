@@ -1,0 +1,903 @@
+{
+  "description": "The expected values of baseline-v1.json, worked out apart from rdy: baseline_hash is BLAKE3 over \"rdy-publication-baseline-1\", a zero byte and the RFC 8785 bytes of the baseline without baseline_hash. Each parts row is a compared part: its tagged authored value, the RFC 8785 text of it, and BLAKE3 over that text.",
+  "baseline_hash": "eb8b06b0cea934670fa66ba5eaae21df4f43ff455bebabcfe9a9aaa5a3a2b50a",
+  "canonical_bytes": 13277,
+  "equal_reader_text": {
+    "blocks": [
+      "p-PRS02",
+      "p-PRS03"
+    ]
+  },
+  "parts": [
+    {
+      "block": "D-DEC01",
+      "part": "title",
+      "tagged": [
+        "str",
+        "A decision title that runs well past forty visible characters"
+      ],
+      "canonical": "[\"str\",\"A decision title that runs well past forty visible characters\"]",
+      "hash": "132a2f12daa318df9dc8575ee37e78cf2cde52ec1e2d1a62ff682e7aa199f325"
+    },
+    {
+      "block": "D-DEC01",
+      "part": "statement",
+      "tagged": [
+        "str",
+        "Ship it."
+      ],
+      "canonical": "[\"str\",\"Ship it.\"]",
+      "hash": "daf4a328d7df4fd4ef77def59028d46b03a2384d58ed49d94c389928480a1d3e"
+    },
+    {
+      "block": "D-DEC01",
+      "part": "status",
+      "tagged": [
+        "str",
+        "proposed"
+      ],
+      "canonical": "[\"str\",\"proposed\"]",
+      "hash": "8617ea4fbe098d47152bbcf1a11677fe900304338070120814e3c5012a8d512b"
+    },
+    {
+      "block": "D-XT001",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Outside"
+      ],
+      "canonical": "[\"str\",\"Outside\"]",
+      "hash": "685f5966ba706c6e1a8c4461612352f44bbe3b00afae13438394194a17f28f4e"
+    },
+    {
+      "block": "D-XT001",
+      "part": "statement",
+      "tagged": [
+        "str",
+        "Decided outside docs."
+      ],
+      "canonical": "[\"str\",\"Decided outside docs.\"]",
+      "hash": "d849bca3b1a7be38879c039840c41bc67f92d9a06f39a746a909113155900b1d"
+    },
+    {
+      "block": "D-XT001",
+      "part": "status",
+      "tagged": [
+        "str",
+        "live"
+      ],
+      "canonical": "[\"str\",\"live\"]",
+      "hash": "98b9337c1cf2cbd1b183d20c484a7cdd027206a29466b9c6559555a2eaee9e81"
+    },
+    {
+      "block": "d-APHA1",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Alpha ✓ 日本語"
+      ],
+      "canonical": "[\"str\",\"Alpha ✓ 日本語\"]",
+      "hash": "4ee974cb344cd026a203e89c4d84ddba1a752eeb54c3c48722c1f6f9a41333a9"
+    },
+    {
+      "block": "d-APHA1",
+      "part": "field:name",
+      "tagged": [
+        "str",
+        "alpha"
+      ],
+      "canonical": "[\"str\",\"alpha\"]",
+      "hash": "fd23a4827b340d6df93d2d10f76e10efab8fa40b0d4f11fd608c829183f9bb4e"
+    },
+    {
+      "block": "d-BETA1",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Beta"
+      ],
+      "canonical": "[\"str\",\"Beta\"]",
+      "hash": "c94e7dbbce8a48b01195393c404e1cd99a75707561029a6f398390601a44fe19"
+    },
+    {
+      "block": "d-BETA1",
+      "part": "field:name",
+      "tagged": [
+        "str",
+        "beta"
+      ],
+      "canonical": "[\"str\",\"beta\"]",
+      "hash": "7962362d9559df78f2beff4524ff702cc39873d5911109f187994c07c1faf968"
+    },
+    {
+      "block": "d-GSS01",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Glossary"
+      ],
+      "canonical": "[\"str\",\"Glossary\"]",
+      "hash": "d828f0dd7ee9cc0708bf932c7b3920a1bc807e950b5e84cf8d4a49dc5f497785"
+    },
+    {
+      "block": "d-GSS01",
+      "part": "field:name",
+      "tagged": [
+        "str",
+        "glossary"
+      ],
+      "canonical": "[\"str\",\"glossary\"]",
+      "hash": "c8425a859aa170049d79568dd2fd9db27268864711a9c9d56a7c3f27bc067788"
+    },
+    {
+      "block": "d-HDEN1",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "f-PBSS1",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Pubs"
+      ],
+      "canonical": "[\"str\",\"Pubs\"]",
+      "hash": "ef52e35fa7578187be08dd3959dabda6f18a4b48ca6779f7f9be9aa0bad1b518"
+    },
+    {
+      "block": "f-PBSS1",
+      "part": "field:name",
+      "tagged": [
+        "str",
+        "pubs"
+      ],
+      "canonical": "[\"str\",\"pubs\"]",
+      "hash": "14f02f06b222e698c1dff68366bcf8a8c984c2a7ac23b520229d3963e628e875"
+    },
+    {
+      "block": "f-SECRT",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "alt": [
+            "str",
+            "A figure"
+          ],
+          "body": [
+            "str",
+            ""
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"alt\":[\"str\",\"A figure\"],\"body\":[\"str\",\"\"]}]",
+      "hash": "3467bb3da7c564e32704e1103162f539a2a7bc4338ae9fcdcb3d16a9e957aca3"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "type",
+      "tagged": [
+        "str",
+        "figure"
+      ],
+      "canonical": "[\"str\",\"figure\"]",
+      "hash": "9aa1e511d2266ab3c69bcfb80b41be54167683b0ddcaac8cc6eb31436f414e5d"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "field:blob",
+      "tagged": [
+        "str",
+        "4daa1801c554b6c5dd0a9d21af82d87768a04c79cdf91e8cfd36d07fed016b6c"
+      ],
+      "canonical": "[\"str\",\"4daa1801c554b6c5dd0a9d21af82d87768a04c79cdf91e8cfd36d07fed016b6c\"]",
+      "hash": "a21b657e48a9d555f0d936151162e65ff454acce7db0f1973e59c170c8c21d7b"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "field:dark_blob",
+      "tagged": [
+        "str",
+        "2cb773379b807768e8cbd3ca9c102872d09c06278e797502608c7da51322241d"
+      ],
+      "canonical": "[\"str\",\"2cb773379b807768e8cbd3ca9c102872d09c06278e797502608c7da51322241d\"]",
+      "hash": "f50917cdb8c73a6790b80ba9c879098b6f0814dede7976319cbb01db725b7a2a"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "field:dark_media_type",
+      "tagged": [
+        "str",
+        "image/png"
+      ],
+      "canonical": "[\"str\",\"image/png\"]",
+      "hash": "25000fed067b762548467c692f9ed836f35ac85d0ba8d74223098b54a38839d2"
+    },
+    {
+      "block": "g-FGR01",
+      "part": "field:media_type",
+      "tagged": [
+        "str",
+        "image/png"
+      ],
+      "canonical": "[\"str\",\"image/png\"]",
+      "hash": "25000fed067b762548467c692f9ed836f35ac85d0ba8d74223098b54a38839d2"
+    },
+    {
+      "block": "p-BETA1",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-BETA1",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "Beta words that run on past the cut, so the tail stays out. See {{d-ADM1N}} and {{t-ZZZZ1}}."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"Beta words that run on past the cut, so the tail stays out. See {{d-ADM1N}} and {{t-ZZZZ1}}.\"]}]",
+      "hash": "b354e461a6ece46511c40b61a2444a5a88285dcc19b932f47994a14454644e9b"
+    },
+    {
+      "block": "p-BETA1",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-BETA1",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "p-BETA1",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-GSS01",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-GSS01",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "Glossary words."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"Glossary words.\"]}]",
+      "hash": "37acf881c2f7c5ee794e9a562ab42eb55630973b11392220508f1b3278a1dc1d"
+    },
+    {
+      "block": "p-GSS01",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-GSS01",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "p-GSS01",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-HDE01",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-HDE01",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "Under a removed doc."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"Under a removed doc.\"]}]",
+      "hash": "0408a63c6dacec030b2a57a4e1915435068324592a0306cbf071fecf24cc02f6"
+    },
+    {
+      "block": "p-HDE01",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-HDE01",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "p-HDE01",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            ""
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"\"]}]",
+      "hash": "7eed559d0a2f8865541fca582f493eac4966512c4bfa7e31742030ff96076f98"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "links",
+      "tagged": [
+        "map",
+        {
+          "references": [
+            "list",
+            [
+              [
+                "map",
+                {
+                  "target": [
+                    "str",
+                    "t-TERM1"
+                  ]
+                }
+              ]
+            ]
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"references\":[\"list\",[[\"map\",{\"target\":[\"str\",\"t-TERM1\"]}]]]}]",
+      "hash": "48d6f6392297f029e08fb6058cfb5e8a7c6251a16d51ee120af2672f6670863d"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-NNN01",
+      "part": "field:empty",
+      "tagged": [
+        "str",
+        ""
+      ],
+      "canonical": "[\"str\",\"\"]",
+      "hash": "d1f60dbe97ea887a7bd6f9c810c07b13b4a4a91aa6453dad0fb40d17171ddcd5"
+    },
+    {
+      "block": "p-PRS01",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-PRS01",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "Plain prose: café ✓ 😀."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"Plain prose: café ✓ 😀.\"]}]",
+      "hash": "1ebaf574bff9e725ffbeb850854f5d0b1ad5ed6943373cb7a69e933e7ca1a1ca"
+    },
+    {
+      "block": "p-PRS01",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-PRS01",
+      "part": "links",
+      "tagged": [
+        "map",
+        {
+          "decided_by": [
+            "list",
+            [
+              [
+                "map",
+                {
+                  "target": [
+                    "str",
+                    "D-XT001"
+                  ]
+                }
+              ]
+            ]
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"decided_by\":[\"list\",[[\"map\",{\"target\":[\"str\",\"D-XT001\"]}]]]}]",
+      "hash": "534cc37d680b0c94fe407a1f4140f5f9f5e8f144e37dc42a99e55709dc1c0723"
+    },
+    {
+      "block": "p-PRS01",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "See {{t-TERM1}}."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"See {{t-TERM1}}.\"]}]",
+      "hash": "0df2262a844ace8ab465fc43cfa70f5bda21d5447da81d483d142b0825569e05"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-PRS02",
+      "part": "field:custom",
+      "tagged": [
+        "map",
+        {
+          "café ✓": [
+            "list",
+            [
+              [
+                "int",
+                "-9223372036854775808"
+              ],
+              [
+                "int",
+                "9223372036854775807"
+              ],
+              [
+                "int",
+                "0"
+              ]
+            ]
+          ],
+          "empty": [
+            "list",
+            []
+          ],
+          "flag": [
+            "bool",
+            false
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"café ✓\":[\"list\",[[\"int\",\"-9223372036854775808\"],[\"int\",\"9223372036854775807\"],[\"int\",\"0\"]]],\"empty\":[\"list\",[]],\"flag\":[\"bool\",false]}]",
+      "hash": "ad32f38649903c377b4c828ef4ac0a75efbbbf1a433004cc2968c356afacd6e4"
+    },
+    {
+      "block": "p-PRS03",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "p-PRS03",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            "See {{t-TERM2}}."
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"See {{t-TERM2}}.\"]}]",
+      "hash": "26202bcff253da65338282b67b47c4c4d69a34621c56774c775961312e6c02a9"
+    },
+    {
+      "block": "p-PRS03",
+      "part": "type",
+      "tagged": [
+        "str",
+        "prose"
+      ],
+      "canonical": "[\"str\",\"prose\"]",
+      "hash": "1a5e1544f74285bedb38e1fc9e4a8c7e002c1e22e718c8c662b61f5697e28812"
+    },
+    {
+      "block": "p-PRS03",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "p-PRS03",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "s-SECT1",
+      "part": "title",
+      "tagged": [
+        "str",
+        "Intro"
+      ],
+      "canonical": "[\"str\",\"Intro\"]",
+      "hash": "325fcf5e3be6f29ba2d8f2a940ca78e9e9cb6ec501239ea371434f798e8547fb"
+    },
+    {
+      "block": "s-SECT1",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            ""
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"\"]}]",
+      "hash": "7eed559d0a2f8865541fca582f493eac4966512c4bfa7e31742030ff96076f98"
+    },
+    {
+      "block": "s-SECT1",
+      "part": "type",
+      "tagged": [
+        "str",
+        "section"
+      ],
+      "canonical": "[\"str\",\"section\"]",
+      "hash": "dc7c94cf10fb88f29835ab0086393df3c715e999e379be5857dda51d431e1ebf"
+    },
+    {
+      "block": "s-SECT1",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "s-SECT1",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            ""
+          ],
+          "name": [
+            "str",
+            "Widget"
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"name\":[\"str\",\"Widget\"]}]",
+      "hash": "ed2e07345780335504896706fa07baaa4bab37827dee7f63c692218d12f62c86"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "type",
+      "tagged": [
+        "str",
+        "term"
+      ],
+      "canonical": "[\"str\",\"term\"]",
+      "hash": "de8d0557c2179e597af5f7da782365410df01662c05c249d99381bb1117e135e"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "t-TERM1",
+      "part": "field:definition",
+      "tagged": [
+        "str",
+        "One."
+      ],
+      "canonical": "[\"str\",\"One.\"]",
+      "hash": "46d3720840cdbde50bfdbe4c7ad8a791adf8562476ecf54b229073458e150ee0"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "title",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "text",
+      "tagged": [
+        "map",
+        {
+          "body": [
+            "str",
+            ""
+          ],
+          "name": [
+            "str",
+            "Widget"
+          ]
+        }
+      ],
+      "canonical": "[\"map\",{\"body\":[\"str\",\"\"],\"name\":[\"str\",\"Widget\"]}]",
+      "hash": "ed2e07345780335504896706fa07baaa4bab37827dee7f63c692218d12f62c86"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "type",
+      "tagged": [
+        "str",
+        "term"
+      ],
+      "canonical": "[\"str\",\"term\"]",
+      "hash": "de8d0557c2179e597af5f7da782365410df01662c05c249d99381bb1117e135e"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "links",
+      "tagged": [
+        "map",
+        {}
+      ],
+      "canonical": "[\"map\",{}]",
+      "hash": "74f33dd6bf8081b107d3f345d826a004146f0239331ad5c76bd8859ba58b2057"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "status",
+      "tagged": [
+        "null"
+      ],
+      "canonical": "[\"null\"]",
+      "hash": "ce4eb22ec82e8f5fb1608b903b700fcd7ea3758597b34777f994de4c9cfc1dfc"
+    },
+    {
+      "block": "t-TERM2",
+      "part": "field:definition",
+      "tagged": [
+        "str",
+        "Two."
+      ],
+      "canonical": "[\"str\",\"Two.\"]",
+      "hash": "abf215428930423b987bb1a6c65a8cf341a924b1748c8ce8a7b90b3c653b7131"
+    }
+  ]
+}

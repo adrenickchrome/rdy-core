@@ -85,6 +85,20 @@ impl HiddenPlanned {
         Ok(out)
     }
 
+    /// The hidden ids of a portable baseline (D-B2AC3): ids alone, with no doc, title or
+    /// content. A candidate compares against them by id ([`HiddenPlanned::newly`]).
+    pub(crate) fn of_ids<'i>(ids: impl IntoIterator<Item = &'i BlockId>) -> HiddenPlanned {
+        HiddenPlanned {
+            ids: ids.into_iter().cloned().collect(),
+            ..HiddenPlanned::default()
+        }
+    }
+
+    /// Every hidden block id, docs included, in id order: what a baseline keeps of them.
+    pub fn ids(&self) -> impl Iterator<Item = &BlockId> {
+        self.ids.iter()
+    }
+
     /// Every doc with a hidden block or hidden itself.
     pub fn full(&self) -> HiddenList {
         self.list(self.full_counts())
