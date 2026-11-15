@@ -442,3 +442,123 @@ fn drv6_review_inputs_and_existing_scope_rules_stay_closed() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("--baseline"));
 }
+
+/// D-5WDC2, D-EGFYD, D-9PG33, D-62KA3, D-YKZNK: the engine, the command line and the chat tool
+/// give the new review members alike, with the values the fixture's rules give: the folder of
+/// each doc row from its side, one reading order, outline rows with ids and counts, section ids
+/// on change rows, the removed-title flags and the count of dropped decisions.
+#[test]
+fn rr2_new_review_members_match_on_every_surface() {
+    let dir = review_project_before_removals();
+    let removed = review_project();
+    let home = tempfile::tempdir().unwrap();
+    let cases = [(dir.path(), None, V1), (dir.path(), Some(V2), V1)];
+    let mut reports = vec![];
+    for (p, scope, against) in cases {
+        let e = engine(p, scope, Some(against));
+        let cli = run(cli_command(p, home.path(), true, scope, Some(against)));
+        reports.push((e, serde_json::from_str::<Value>(&cli).unwrap()));
+    }
+    let red = engine(removed.path(), None, Some(V1));
+    let red_cli = run(cli_command(
+        removed.path(),
+        home.path(),
+        true,
+        None,
+        Some(V1),
+    ));
+    assert_eq!(serde_json::from_str::<Value>(&red_cli).unwrap(), red);
+    let mut c = McpClient::start_isolated(dir.path(), home.path());
+    reader(&mut c);
+    for ((_, scope, against), (e, cli)) in cases.into_iter().zip(&reports) {
+        assert_eq!(cli, e, "{scope:?}");
+        assert_eq!(&mcp(&mut c, scope, Some(against)), e, "{scope:?}");
+    }
+    drop(c);
+    let mut c = McpClient::start_isolated(removed.path(), home.path());
+    reader(&mut c);
+    assert_eq!(mcp(&mut c, None, Some(V1)), red);
+    drop(c);
+
+    let against = &reports[1].0;
+    let d = &against["disclosure"];
+    let intro = &d["changed_docs"][0];
+    let setup = &d["added_docs"][0];
+    let old = &d["removed_docs"][0];
+    assert_eq!(intro["title"], "Intro", "{d}");
+    // folder: the candidate's for a changed row, the baseline's for a removed one
+    for (row, folder) in [
+        (intro, Value::Null),
+        (setup, json!("User guides")),
+        (old, json!("Guides")),
+    ] {
+        assert_eq!(row["folder"], folder, "{row}");
+        assert_eq!(row["folder_redacted"], false, "{row}");
+    }
+    // one reading order: Old stands after Intro, the doc before it that the candidate holds
+    assert_eq!(
+        (&intro["position"], &old["position"], &setup["position"]),
+        (&json!(0), &json!(1), &json!(2))
+    );
+    // the outline of Start: p1 and two claims, each a change; the planned note is hidden
+    let outline = intro["outline"].as_array().unwrap();
+    assert_eq!(outline.len(), 1, "{intro}");
+    let start = &outline[0];
+    assert_eq!(
+        (&start["label"], &start["blocks"], &start["changes"]),
+        (&json!("Start"), &json!(3), &json!(3))
+    );
+    assert_eq!(intro["omitted_outline"], 0);
+    let in_start: Vec<&Value> = intro["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["section"] == "Start")
+        .collect();
+    assert_eq!(in_start.len(), 3, "{intro}");
+    for c in in_start {
+        assert_eq!(c["section_id"], start["id"], "{c}");
+        assert!(c["before_section"].is_null() && c["before_section_id"].is_null());
+    }
+    let install = &setup["outline"][0];
+    assert_eq!(
+        (&install["label"], &install["blocks"], &install["changes"]),
+        (&json!("Install"), &json!(3), &json!(3))
+    );
+    assert!(install["id"].is_string(), "{install}");
+    let dropped = &against["references"]["dropped_decisions"];
+    assert_eq!(
+        (&dropped["count"], &dropped["omitted_rows"]),
+        (&json!(1), &json!(0))
+    );
+    assert_eq!(dropped["rows"].as_array().unwrap().len(), 1);
+    for r in against["references"]["rows"].as_array().unwrap() {
+        assert_eq!(r["source_doc_redacted"], false, "{r}");
+    }
+
+    // canon removes Setup: its row's prose still cites outside, from a doc whose title is gone
+    let rd = &red["disclosure"];
+    let rows = red["references"]["rows"].as_array().unwrap();
+    let flags: Vec<(&Value, &Value)> = rows
+        .iter()
+        .map(|r| (&r["source_doc_title"], &r["source_doc_redacted"]))
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            (&json!("Intro"), &json!(false)),
+            (&Value::Null, &json!(true))
+        ]
+    );
+    let new = &rd["new_references"][0];
+    assert_eq!(
+        (&new["source_doc_title"], &new["source_doc_redacted"]),
+        (&Value::Null, &json!(true))
+    );
+    let setup = &rd["added_docs"][0];
+    assert!(setup["title"].is_null(), "{setup}");
+    assert_eq!(
+        (&setup["folder"], &setup["folder_redacted"]),
+        (&json!("User guides"), &json!(false))
+    );
+}

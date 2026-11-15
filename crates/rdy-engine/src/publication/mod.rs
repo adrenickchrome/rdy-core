@@ -39,7 +39,8 @@ pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow}
 pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
 pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, short_diff};
 pub use review_docs::{
-    DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_reviews, doc_summary, included,
+    DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_positions, doc_reviews,
+    doc_summary, included,
 };
 pub use review_json::{PublicationReview, ReviewJson, review_json};
 pub use review_labels::{

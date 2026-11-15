@@ -1,4 +1,5 @@
-//! The owned rows of the publication review (D-RDH1C, D-9BWMV, D-0C4TB, D-MCH70, D-BND1J): what a
+//! The owned rows of the publication review (D-RDH1C, D-9BWMV, D-0C4TB, D-MCH70, D-BND1J,
+//! D-5WDC2, D-EGFYD, D-9PG33, D-62KA3, D-YKZNK): what a
 //! reviewer reads about a candidate. The row builders fill them from two
 //! [`super::review_side::PublicationReviewSide`] views; one projection writes them for chat, the
 //! CLI and the adapter. They add to the raw comparison ([`super::DisclosureDiff`]) and the
@@ -66,8 +67,11 @@ pub struct ReviewCounts {
 
 /// One change in a changed doc. `what` lists the changed parts of an update, in part order, with
 /// `place` for a counted move; it is empty for every other kind. `section` is the label of the
-/// nearest section (the baseline's, for a removed block). `excerpt` and `diff` are `None` for
-/// removed content (`redacted`) and where a side has no reader text.
+/// nearest section (the baseline's, for a removed block), and `section_id` that section's id.
+/// `before_section` and `before_section_id` name the nearest section that held the block on the
+/// baseline's side, for a `moved` row and an `updated` row with `place` only (D-EGFYD, D-9PG33);
+/// each id is `None` where its label is. `excerpt` and `diff` are `None` for removed content
+/// (`redacted`) and where a side has no reader text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ChangeRow {
     pub id: BlockId,
@@ -75,6 +79,9 @@ pub struct ChangeRow {
     pub change: ReviewChange,
     pub label: String,
     pub section: Option<String>,
+    pub section_id: Option<BlockId>,
+    pub before_section: Option<String>,
+    pub before_section_id: Option<BlockId>,
     pub what: Vec<String>,
     pub excerpt: Option<String>,
     pub diff: Option<Vec<DiffPiece>>,
@@ -95,11 +102,26 @@ pub struct DecisionRow {
     pub excerpt: Option<String>,
 }
 
+/// One section of a doc's outline (D-EGFYD, D-9PG33): its block id, its label, the shown blocks
+/// whose nearest section it is, and the change rows whose block sits in it. A nested section
+/// counts as one block of its parent and has its own row. A redacted section's label reads
+/// "Content removed."; its id stays.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OutlineRow {
+    pub id: BlockId,
+    pub label: String,
+    pub blocks: u64,
+    pub changes: u64,
+}
+
 /// What a changed doc adds to its comparison row. `title` and `page` are the candidate's;
 /// `before_title` is the baseline's title when it differs, else `None`; `before_page` is the
 /// baseline's page (D-RDH1C: each side's render names its page). A page is `None` when that
-/// side's site gives the doc none. `record_only` is true when the digest changed and every count
-/// is zero.
+/// side's site gives the doc none. `folder` is the candidate's top folder title (D-5WDC2), and
+/// `folder_redacted` is true only when a removal removed it (D-62KA3). `position` is the row's
+/// place in the review's one reading order of doc rows (D-EGFYD). `outline` is the candidate's,
+/// with each section's change rows counted. `record_only` is true when the digest changed and
+/// every count is zero.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ChangedDocReview {
     pub id: BlockId,
@@ -107,6 +129,11 @@ pub struct ChangedDocReview {
     pub before_title: Option<String>,
     pub page: Option<String>,
     pub before_page: Option<String>,
+    pub folder: Option<String>,
+    pub folder_redacted: bool,
+    pub position: u64,
+    pub outline: Vec<OutlineRow>,
+    pub omitted_outline: u64,
     pub counts: ReviewCounts,
     pub record_only: bool,
     pub changes: Vec<ChangeRow>,
@@ -132,16 +159,21 @@ pub struct FigureEntry {
     pub variant: Option<AttachmentVariant>,
 }
 
-/// What an added or included doc shows. `folder` names its top folder, `None` for a root doc.
+/// What an added or included doc shows. `folder` names its top folder, `None` for a root doc or
+/// when a removal removed its title; `folder_redacted` is true only in the second case
+/// (D-62KA3). `position` is the row's place in its reading order of doc rows (D-EGFYD). Each
+/// outline row counts every block of its section as a change, because each block is added.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DocSummary {
     pub id: BlockId,
     pub title: Option<String>,
     pub page: Option<String>,
     pub folder: Option<String>,
+    pub folder_redacted: bool,
+    pub position: u64,
     pub size: DocSize,
     pub lede: Option<String>,
-    pub outline: Vec<String>,
+    pub outline: Vec<OutlineRow>,
     pub omitted_outline: u64,
     pub decision_titles: Vec<String>,
     pub omitted_decision_titles: u64,
@@ -149,12 +181,17 @@ pub struct DocSummary {
     pub omitted_figures: u64,
 }
 
-/// What a removed doc adds to its comparison row, from the baseline.
+/// What a removed doc adds to its comparison row, from the baseline: its title, page, top
+/// folder (D-5WDC2) and size. `position` is its place in the review's one reading order of doc
+/// rows (D-EGFYD).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RemovedDocReview {
     pub id: BlockId,
     pub title: Option<String>,
     pub before_page: Option<String>,
+    pub folder: Option<String>,
+    pub folder_redacted: bool,
+    pub position: u64,
     pub size: DocSize,
 }
 
@@ -215,11 +252,13 @@ pub struct AttachmentLabels {
 }
 
 /// The labels a reference row adds, read from the candidate; `target_label` is `None` for a
-/// missing target.
+/// missing target. `source_doc_redacted` is true only when a removal removed the title of the
+/// source's doc, so a `None` title with false means the source sits outside docs (D-62KA3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ReferenceLabels {
     pub source_label: String,
     pub source_doc_title: Option<String>,
+    pub source_doc_redacted: bool,
     pub target_label: Option<String>,
 }
 
@@ -231,8 +270,10 @@ pub struct DroppedDecision {
 }
 
 /// The dropped decisions, in id order. They count as neither excluded nor missing references.
+/// `count` counts every one, also the rows a cut leaves out (D-YKZNK).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DroppedDecisions {
+    pub count: u64,
     pub rows: Vec<DroppedDecision>,
     pub omitted_rows: u64,
 }

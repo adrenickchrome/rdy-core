@@ -788,6 +788,12 @@ impl ReferenceLookup {
         (!d.is_redacted()).then(|| labels::label(self, d, 0))
     }
 
+    /// Whether a removal removed the title of the doc that holds `id` (D-62KA3): false when it
+    /// sits in no doc.
+    pub fn doc_redacted(&self, id: &BlockId) -> bool {
+        self.m.doc_of(id).is_some_and(Block::is_redacted)
+    }
+
     /// What a dropped decision row calls decision `id` ([`decision_title`]); `None` for a block
     /// the source lacks.
     pub fn decision_title(&self, id: &BlockId) -> Option<String> {

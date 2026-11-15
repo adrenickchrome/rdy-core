@@ -17,6 +17,12 @@
 //! ([`outside_reviews`]). Its rows count by their parts with sibling place left out; a version
 //! change with no changed part keeps its row, counts nothing and is `record_only` (D-BND1J).
 //!
+//! Each change row names its section by label and id, and a moved block's row, or an updated
+//! row with `place`, the section that held it on the baseline's side (D-EGFYD, D-9PG33). Each
+//! changed doc gives its candidate's top folder, its place in the review's reading order of doc
+//! rows, and the candidate's outline with the change rows of each section counted by its id,
+//! over every row before any cut.
+//!
 //! Rows follow the review index's "Changes on this page" order: the doc's own row, the lede,
 //! then each block in page order, with each removed block before the block it stood before
 //! ([`removed_line_places`]). Excerpts and short diffs read the reader text, never the raw body,
@@ -24,6 +30,7 @@
 //! pieces of one diff, with the "…" and a code span's backticks inside the limit.
 
 use super::diff::{ChangedFolder, DisclosureDiff};
+use super::review_docs::{OUTLINE_MAX, capped, doc_positions, outline_rows, top_folder};
 use super::review_labels::{DECISIONS_MAX, decision_row, doc_decisions};
 use super::review_model::{
     ChangeRow, ChangedDocReview, DiffOp, DiffPiece, OutsideReview, ReviewChange, ReviewCounts,
@@ -73,12 +80,17 @@ pub fn changed_doc_reviews(
         after,
         places: RefCell::new(HashMap::new()),
     };
+    let positions = doc_positions(diff, before, after);
     let mut docs: Vec<(Option<usize>, ChangedDocReview)> = diff
         .changed_docs
         .iter()
         .map(|d| {
             let place = after.tree_entry(&d.id).and_then(|t| t.position);
-            (place, sides.doc(&d.id))
+            let review = ChangedDocReview {
+                position: positions.get(&d.id).copied().unwrap_or_default(),
+                ..sides.doc(&d.id)
+            };
+            (place, review)
         })
         .collect();
     docs.sort_by(|(p, a), (q, b)| {
@@ -170,7 +182,7 @@ impl Sides<'_> {
         at.get(&a.id).is_some_and(|(x, y)| x != y)
     }
 
-    /// The review row of changed doc `doc`.
+    /// The review row of changed doc `doc`. Its position is 0 until its review places it.
     fn doc(&self, doc: &BlockId) -> ChangedDocReview {
         let (bt, at) = (self.before.tree_entry(doc), self.after.tree_entry(doc));
         let title = at.and_then(|t| t.title.clone());
@@ -192,12 +204,27 @@ impl Sides<'_> {
         }
         let omitted_decisions = decisions.len().saturating_sub(DECISIONS_MAX) as u64;
         decisions.truncate(DECISIONS_MAX);
+        // each section counts the rows whose block sits in it, by id, before any row is cut
+        let mut outline = outline_rows(self.after, doc);
+        for r in &mut outline {
+            r.changes = changes
+                .iter()
+                .filter(|c| c.section_id.as_ref() == Some(&r.id))
+                .count() as u64;
+        }
+        let (outline, omitted_outline) = capped(outline, OUTLINE_MAX);
+        let (folder, folder_redacted) = top_folder(self.after, doc);
         ChangedDocReview {
             id: doc.clone(),
             title,
             before_title,
             page: at.and_then(|t| t.page.clone()),
             before_page: bt.and_then(|t| t.page.clone()),
+            folder,
+            folder_redacted,
+            position: 0,
+            outline,
+            omitted_outline,
             counts,
             record_only: counts == ReviewCounts::default(),
             changes,
@@ -278,7 +305,13 @@ impl Sides<'_> {
         );
         let place = self.moved(b, a);
         if parts.is_empty() {
-            return place.then(|| row(self.after, a, ReviewChange::Moved, vec![], None));
+            return place.then(|| {
+                left_section(
+                    row(self.after, a, ReviewChange::Moved, vec![], None),
+                    self.before,
+                    b,
+                )
+            });
         }
         let diff = match (
             parts.contains(&PartName::Text),
@@ -288,13 +321,17 @@ impl Sides<'_> {
             (true, Some(old), Some(new)) => short_diff(old, new, &b.block_type, &a.block_type),
             _ => None,
         };
-        Some(row(
+        let updated = row(
             self.after,
             a,
             ReviewChange::Updated,
             what_of(&parts, place),
             diff,
-        ))
+        );
+        Some(match place {
+            true => left_section(updated, self.before, b),
+            false => updated,
+        })
     }
 
     /// The counts of a doc's rows. Sections and figures count as blocks too; figures count by
@@ -504,8 +541,25 @@ fn images(side: &dyn PublicationReviewSide, block: &BlockId) -> u64 {
     image_map(side, block).len() as u64
 }
 
+/// The nearest section of block `s` on `side`, as that side shows it: `None` before the first
+/// section.
+fn section_of<'s>(side: &'s dyn PublicationReviewSide, s: &ShownBlock) -> Option<&'s ShownBlock> {
+    s.section.as_ref().and_then(|x| side.shown(x))
+}
+
+/// `r` with the section that held its block `b` on the baseline `before` (D-EGFYD, D-9PG33): its
+/// label and id, `None` before the first section. A removed section reads "Content removed." and
+/// keeps its id.
+fn left_section(mut r: ChangeRow, before: &dyn PublicationReviewSide, b: &ShownBlock) -> ChangeRow {
+    let old = section_of(before, b);
+    r.before_section = old.map(|x| x.label.clone());
+    r.before_section_id = old.map(|x| x.id.clone());
+    r
+}
+
 /// One change row of block `s`, read on `side`: the candidate's, or the baseline's for a removed
-/// block. A removed version reads "Content removed." and has no excerpt and no diff.
+/// block. A removed version reads "Content removed." and has no excerpt and no diff. The row
+/// names the section that held the block before only when it moved ([`left_section`]).
 fn row(
     side: &dyn PublicationReviewSide,
     s: &ShownBlock,
@@ -513,16 +567,16 @@ fn row(
     what: Vec<String>,
     diff: Option<Vec<DiffPiece>>,
 ) -> ChangeRow {
+    let section = section_of(side, s);
     ChangeRow {
         id: s.id.clone(),
         block_type: s.block_type.clone(),
         change,
         label: s.label.clone(),
-        section: s
-            .section
-            .as_ref()
-            .and_then(|x| side.shown(x))
-            .map(|x| x.label.clone()),
+        section: section.map(|x| x.label.clone()),
+        section_id: section.map(|x| x.id.clone()),
+        before_section: None,
+        before_section_id: None,
         what,
         excerpt: match s.redacted {
             true => None,

@@ -65,7 +65,7 @@ fn omitted_any(v: &Value) -> bool {
         .map_or(0, |o| o.values().map(num).sum());
     let inner = row_omissions(
         &d["changed_docs"],
-        &["omitted_changes", "omitted_decisions"],
+        &["omitted_changes", "omitted_decisions", "omitted_outline"],
     ) + row_omissions(&d["added_docs"], &SUMMARY_OMISSIONS)
         + row_omissions(&v["included"]["rows"], &SUMMARY_OMISSIONS);
     top + diff + inner > 0
@@ -471,5 +471,18 @@ mod tests {
             assert!(check_text(&v, "site").ends_with(notice), "{path:?}");
         }
         assert!(!check_text(&first, "site").contains("omitted"));
+    }
+
+    /// D-EGFYD: a changed doc's outline cut reaches the one omission line too, which does not
+    /// change.
+    #[test]
+    fn rr2_text_reports_changed_outline_omissions() {
+        let notice = "\nSome rows are omitted. Counts include every row.";
+        let mut v = report(true, 0);
+        v["disclosure"]["omitted"] = json!({});
+        v["disclosure"]["changed_docs"][0]["omitted_outline"] = json!(0);
+        assert!(!check_text(&v, "site").contains("omitted"));
+        v["disclosure"]["changed_docs"][0]["omitted_outline"] = json!(1);
+        assert!(check_text(&v, "site").ends_with(notice));
     }
 }
