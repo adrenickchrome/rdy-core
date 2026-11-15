@@ -463,7 +463,12 @@ fn scc7_contract_adds_only_baseline_values() {
         "the error row gains the baseline's values and scc2's fix text alone"
     );
     let e = &new["errors_warnings"];
-    assert_eq!(e["codes"]["E_PUBLICATION_BASELINE"], E_PUBLICATION_BASELINE);
+    // the row holds each constant's source literal, quotes included
+    let literal = |x: &str| Value::String(format!("\"{x}\""));
+    assert_eq!(
+        e["codes"]["E_PUBLICATION_BASELINE"],
+        literal(E_PUBLICATION_BASELINE)
+    );
     for (name, text) in [
         ("BASELINE_VERIFY_MESSAGE", BASELINE_VERIFY_MESSAGE),
         ("BASELINE_VERIFY_FIX", BASELINE_VERIFY_FIX),
@@ -474,7 +479,7 @@ fn scc7_contract_adds_only_baseline_values() {
         ("BASELINE_TAG_MESSAGE", BASELINE_TAG_MESSAGE),
         ("BASELINE_TAG_FIX", BASELINE_TAG_FIX),
     ] {
-        assert_eq!(e["templates"][name], text, "{name}");
+        assert_eq!(e["templates"][name], literal(text), "{name}");
     }
     assert_eq!(
         BASELINE_VERIFY_MESSAGE,
