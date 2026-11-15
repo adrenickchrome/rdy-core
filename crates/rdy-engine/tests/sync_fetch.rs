@@ -567,3 +567,379 @@ fn scc2_write_sync4_fixtures_once() {
         Some("work"),
     );
 }
+
+// ---- fix round 1: fetched histories stay valid ----
+
+/// The head of view `name` in `r`.
+fn view_head(r: &Rdy, name: &str) -> Hash {
+    r.store().reader().view_head(name).unwrap().unwrap().head
+}
+
+/// The source's history of view `view` up to op `head`, as one batch file, with its fetch target.
+fn view_batch(p: &Pair, view: &str, head: Hash, name: &str) -> (PathBuf, FetchTarget) {
+    let mut out = Vec::new();
+    stream_export::write_history(
+        &p.src.read(),
+        StreamPurpose::ViewHistory,
+        head,
+        None,
+        &BTreeSet::new(),
+        &mut out,
+    )
+    .unwrap();
+    let path = p.dir.path().join(name);
+    std::fs::write(&path, out).unwrap();
+    let t = FetchTarget {
+        purpose: StreamPurpose::ViewHistory,
+        view: Some(view.into()),
+        ..target(head, URL)
+    };
+    (path, t)
+}
+
+/// A project fork's origin batch in `r`: it clears every `meta/sync/` ref (D-3RSCW).
+fn fork_origin(r: &mut Rdy) {
+    let origin = rdy_store::meta::Origin {
+        fork: true,
+        repo_id: repo(r),
+        tag: None,
+        landing: r.store().reader().canon_head().unwrap(),
+    };
+    r.store_mut()
+        .put_origin(&origin, Some(RepoId::new()))
+        .unwrap();
+    assert!(r.store().reader().sync_remotes().unwrap().is_empty());
+}
+
+/// A tag written straight to the store (no `rdy tag` rule), as a damaged or crafted ref is.
+fn raw_tag(r: &mut Rdy, name: &str, landing: Hash) {
+    r.store_mut()
+        .put_tag(&Tag {
+            name: name.into(),
+            landing,
+            message: None,
+            tagged_by: Provenance {
+                actor: "human:founder".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 1_000_000,
+            },
+        })
+        .unwrap();
+    r.seal_open().unwrap();
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// The text of `rdy fsck`'s refusal.
+fn fsck_refusal(r: &Rdy) -> String {
+    let e = r.fsck().expect_err("fsck refuses");
+    assert_eq!(e.code, "E_IO", "{e:?}");
+    e.message
+}
+
+#[test]
+fn scc2_fetched_tags_pass_fsck_and_keep_their_checks() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = pair();
+    let [l1, l2, l3] = p.ls;
+    // a tagged fetch: the tag names a landing of the fetched history, canon stays at l1
+    let file = canon_batch(&p, l3, Some(l1), "c");
+    fetch(&mut p.dst, &[&file], &target(l3, URL)).unwrap();
+    assert_eq!(p.dst.store().reader().canon_head().unwrap(), Some(l1));
+    assert_eq!(p.dst.fsck().unwrap().versions, 1);
+    // a fetch of an earlier tip replaces the cursor: the tag stays a fetched history's
+    let early = canon_batch(&p, l2, Some(l1), "c2");
+    fetch(&mut p.dst, &[&early], &target(l2, URL)).unwrap();
+    assert_eq!(
+        p.dst
+            .store()
+            .reader()
+            .sync_canon("origin")
+            .unwrap()
+            .unwrap()
+            .fetched,
+        Some(l2)
+    );
+    assert_eq!(p.dst.fsck().unwrap().versions, 1);
+    // a project fork's origin batch clears every sync ref: the tag stays a fetched history's
+    fork_origin(&mut p.dst);
+    assert_eq!(p.dst.fsck().unwrap().versions, 1);
+    assert_eq!(p.dst.store().reader().canon_head().unwrap(), Some(l1));
+
+    // a tag on a landing that only a view fetch brought: no canon fetch named its history
+    let mut q = pair();
+    let [_, _, q3] = q.ls;
+    let head = view_head(&q.src, "work");
+    let (vfile, vt) = view_batch(&q, "work", head, "v");
+    fetch(&mut q.dst, &[&vfile], &vt).unwrap();
+    assert!(
+        has(&q.dst, kinds::LANDING, q3),
+        "the view history holds the landing"
+    );
+    q.dst.fsck().unwrap();
+    raw_tag(&mut q.dst, "v5.0.0", q3);
+    let m = fsck_refusal(&q.dst);
+    assert!(
+        m.contains(&format!(
+            "tag/v5.0.0: landing {} is not in canon's chain",
+            q3.short()
+        )),
+        "{m}"
+    );
+
+    // the fetched tags keep their order on the fetched history: a higher version on an
+    // earlier landing is refused
+    let mut s = pair();
+    let [s1, s2, s3] = s.ls;
+    raw_tag(&mut s.src, "v3.0.0", s2);
+    let file = canon_batch(&s, s3, Some(s1), "c");
+    let got = fetch(&mut s.dst, &[&file], &target(s3, URL)).unwrap();
+    assert_eq!(sorted(got.tags_taken), ["v2.0.0", "v3.0.0"]);
+    let m = fsck_refusal(&s.dst);
+    assert!(
+        m.contains("tag/v3.0.0 names an earlier landing than tag/v2.0.0"),
+        "{m}"
+    );
+}
+
+#[test]
+fn scc2_fetched_fork_closure_ops_pass_fsck() {
+    let _clock = pin_clock(1_000_000);
+    // the source extends work and forks it as branch; the receiver fetches branch, whose
+    // closure holds work's new ops through the fork's source op
+    let mut p = pair();
+    let w = write(
+        &mut p.src,
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$e", "fields": {"name": "b", "title": "B", "doc_type": "page"}}]),
+    );
+    let d = w.created["$e"].clone();
+    let before_fork = view_head(&p.src, "work");
+    p.src
+        .view_fork(&session(Role::Writer), "work", "branch")
+        .unwrap();
+    write(
+        &mut p.src,
+        "branch",
+        json!([{"op": "update", "id": d, "fields": {"title": "B2"}}]),
+    );
+    let branch = view_head(&p.src, "branch");
+    let (file, t) = view_batch(&p, "branch", branch, "vb");
+    fetch(&mut p.dst, &[&file], &t).unwrap();
+    assert!(has(&p.dst, kinds::VIEW_OP, before_fork));
+    assert!(
+        p.dst
+            .store()
+            .reader()
+            .sync_view("origin", "work")
+            .unwrap()
+            .is_none()
+    );
+    p.dst.store().check_objects().unwrap();
+    p.dst.fsck().unwrap();
+}
+
+#[test]
+fn scc2_fetched_view_ops_pass_fsck_after_a_project_fork() {
+    let _clock = pin_clock(1_000_000);
+    // a view fetch, then a project fork's origin batch, which clears every sync ref
+    let mut p = pair();
+    let head = view_head(&p.src, "work");
+    let (file, t) = view_batch(&p, "work", head, "w");
+    fetch(&mut p.dst, &[&file], &t).unwrap();
+    p.dst.store().check_objects().unwrap();
+    fork_origin(&mut p.dst);
+    p.dst.store().check_objects().unwrap();
+    p.dst.fsck().unwrap();
+}
+
+#[test]
+fn scc2_fetched_view_ops_pass_fsck_after_the_cursor_moves_back() {
+    let _clock = pin_clock(1_000_000);
+    // a fetch of a newer head, then of an earlier one: the cursor moves back, the newer ops
+    // stay held
+    let mut p = pair();
+    let earlier = view_head(&p.src, "work");
+    write(
+        &mut p.src,
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$f", "fields": {"name": "c", "title": "C", "doc_type": "page"}}]),
+    );
+    let newer = view_head(&p.src, "work");
+    assert_ne!(earlier, newer);
+    let (file, t) = view_batch(&p, "work", newer, "n");
+    fetch(&mut p.dst, &[&file], &t).unwrap();
+    let (file, t) = view_batch(&p, "work", earlier, "e");
+    fetch(&mut p.dst, &[&file], &t).unwrap();
+    assert_eq!(
+        p.dst
+            .store()
+            .reader()
+            .sync_view("origin", "work")
+            .unwrap()
+            .unwrap()
+            .fetched,
+        Some(earlier)
+    );
+    p.dst.store().check_objects().unwrap();
+    p.dst.fsck().unwrap();
+}
+
+// ---- the relay-tag signature across a fetch ----
+
+fn signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[0x61; 32])
+}
+
+fn key_data() -> ssh_key::public::KeyData {
+    ssh_key::public::KeyData::Ed25519(ssh_key::public::Ed25519PublicKey(
+        signing_key().verifying_key().to_bytes(),
+    ))
+}
+
+fn sshsig(ns: &str, msg: &[u8]) -> Vec<u8> {
+    use ed25519_dalek::Signer as _;
+    use ssh_encoding::Encode as _;
+    let data = ssh_key::SshSig::signed_data(ns, ssh_key::HashAlg::Sha512, msg).unwrap();
+    let sig = ssh_key::Signature::new(
+        ssh_key::Algorithm::Ed25519,
+        signing_key().sign(&data).to_bytes().to_vec(),
+    )
+    .unwrap();
+    let mut out = vec![];
+    ssh_key::SshSig::new(key_data(), ns, ssh_key::HashAlg::Sha512, sig)
+        .unwrap()
+        .encode(&mut out)
+        .unwrap();
+    out
+}
+
+/// Tags canon's head `name` in `r` through a relay (an agent for the founder) and signs its
+/// relay statement in `r`'s repo. Returns the tag and its relay answer.
+fn relay_tag(r: &mut Rdy, name: &str) -> (Hash, Hash) {
+    use rdy_model::signature::{Signature, StatementSource, statement};
+    use ssh_encoding::Encode as _;
+    let agent = Session::agent("agent:a".into(), Some("run-1".into()), Role::Writer).unwrap();
+    let relay = rdy_engine::answer::relay::RelayInput {
+        evidence: Some("Yes, tag it.".into()),
+        ..Default::default()
+    };
+    let info = r
+        .tag_as(&agent, "human:founder", &relay, true, name, None, None)
+        .unwrap();
+    assert!(info.relayed_by.is_some());
+    let t = tag_hash(r, name);
+    let record = r.store().read_tag(&t).unwrap();
+    let (answer_hash, answer) = r
+        .store()
+        .answer_of(&format!("tag:{name}"))
+        .unwrap()
+        .unwrap();
+    let mut blob = vec![];
+    key_data().encode(&mut blob).unwrap();
+    let stmt = statement(
+        StatementSource::RelayTag {
+            hash: t,
+            tag: &record,
+            answer_hash,
+            answer: &answer,
+        },
+        Some(repo(r)),
+        &rdy_engine::signing_crypto::blob_fingerprint(&blob),
+    )
+    .unwrap();
+    let ns = rdy_model::signature::parse_statement(&stmt)
+        .unwrap()
+        .namespace()
+        .to_string();
+    let g = Signature {
+        subject: t,
+        namespace: ns.clone(),
+        sig: sshsig(&ns, &stmt),
+        statement: stmt,
+        signed_by: Provenance {
+            actor: "agent:s".into(),
+            run: Some("s/1".into()),
+            role: Role::Writer,
+            at_ms: 1_000,
+        },
+    };
+    r.store_mut().put_signature(&g).unwrap();
+    r.seal_open().unwrap();
+    (t, answer_hash)
+}
+
+/// The signature checks of subject `t` in `r`, as JSON.
+fn sig_checks(r: &Rdy, t: Hash) -> Value {
+    serde_json::to_value(
+        rdy_engine::signature_check::signature_checks(&r.read(), &t, None).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn scc2_fetched_relay_tag_keeps_its_answer_and_signature() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = pair();
+    let [l1, _, l3] = p.ls;
+    let (t, answer) = relay_tag(&mut p.src, "v3.0.0");
+    let source = sig_checks(&p.src, t);
+    assert_eq!(
+        (&source[0]["signed"], &source[0]["statement"]),
+        (&json!("valid"), &json!("match")),
+        "{source}"
+    );
+    // the fetch takes the free name with its relay answer, in its one batch
+    let writes = p.dst.store().write_count();
+    let file = canon_batch(&p, l3, Some(l1), "c");
+    let got = fetch(&mut p.dst, &[&file], &target(l3, URL)).unwrap();
+    assert_eq!(sorted(got.tags_taken), ["v2.0.0", "v3.0.0"]);
+    assert_eq!(p.dst.store().write_count(), writes + 1, "one batch");
+    let reader = p.dst.store().reader();
+    assert_eq!(reader.get_ref("tag/v3.0.0").unwrap(), Some(t.0.to_vec()));
+    assert_eq!(
+        reader.get_ref("answer/tag:v3.0.0").unwrap(),
+        Some(answer.0.to_vec())
+    );
+    drop(reader);
+    assert_eq!(sig_checks(&p.dst, t), source);
+    p.dst.fsck().unwrap();
+    // a retry writes nothing
+    let again = fetch(&mut p.dst, &[&file], &target(l3, URL)).unwrap();
+    assert!(again.unchanged);
+
+    // a collision: the receiver's own relayed v3.0.0 keeps its tag and its answer
+    let mut q = pair();
+    let [q1, _, q3] = q.ls;
+    let (theirs, _) = relay_tag(&mut q.src, "v3.0.0");
+    let (local, local_answer) = relay_tag(&mut q.dst, "v3.0.0");
+    let local_checks = sig_checks(&q.dst, local);
+    let file = canon_batch(&q, q3, Some(q1), "c");
+    let got = fetch(&mut q.dst, &[&file], &target(q3, URL)).unwrap();
+    assert_eq!(got.tags_kept, ["v3.0.0"]);
+    let reader = q.dst.store().reader();
+    assert_eq!(
+        reader.get_ref("tag/v3.0.0").unwrap(),
+        Some(local.0.to_vec())
+    );
+    assert_eq!(
+        reader.get_ref("answer/tag:v3.0.0").unwrap(),
+        Some(local_answer.0.to_vec())
+    );
+    assert!(reader.has_kind(kinds::TAG, &theirs).unwrap());
+    drop(reader);
+    assert_eq!(sig_checks(&q.dst, local), local_checks);
+    // the kept tag object, which no tag ref names, still reads its own relay answer
+    let kept = sig_checks(&q.dst, theirs);
+    assert_eq!(kept, sig_checks(&q.src, theirs));
+    assert_eq!(
+        (&kept[0]["signed"], &kept[0]["statement"]),
+        (&json!("valid"), &json!("match")),
+        "{kept}"
+    );
+    q.dst.fsck().unwrap();
+}

@@ -25,7 +25,10 @@
 //! [`read_check_context`] and [`signature_checks`] read the subject, the current repo id and the
 //! fork sources of the log's fork lineage from one immutable read state through the typed
 //! readers. A holder finds a tag's relay answer by the tag object
-//! (`answer/tag-object:<hash>`), a project by the tag name (`answer/tag:<name>`).
+//! (`answer/tag-object:<hash>`), a project by the tag name (`answer/tag:<name>`). A project tag
+//! object that no tag ref names (a fetched tag whose name the project keeps for its own tag,
+//! D-3RSCW) has no answer ref of its own: its relay answer is the stored answer that is that tag
+//! object's relay answer (`rdy_store::holder::is_relay_answer_of`).
 
 use crate::allowed_signers::AllowedSigners;
 use crate::read_state::ReadState;
@@ -36,7 +39,7 @@ use rdy_model::signature::{
     Signature, StatementKind, StatementSource, parse_statement, statement_for_version,
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
-use rdy_store::holder::{StoreMode, answer_tag_object_ref};
+use rdy_store::holder::{StoreMode, answer_tag_object_ref, is_relay_answer_of};
 use rdy_store::kinds::RefUpdate;
 use rdy_store::meta::{REF_ORIGIN, decode_origin};
 use rdy_store::signature::MAX_PER_SUBJECT;
@@ -539,7 +542,7 @@ pub(crate) fn subject_context(
         let answer = if holder {
             relay_answer_by_object(state, subject)?
         } else {
-            reader.answer_of(&format!("tag:{}", record.name))?
+            project_relay_answer(state, subject, &record.name)?
         };
         // the refs are live: an answer written after the state is not its answer
         let answer = match answer {
@@ -560,6 +563,36 @@ pub(crate) fn subject_context(
         source_repos: if holder { vec![] } else { source_repos },
         holder,
     })
+}
+
+/// A project's relay answer of the TAG object `tag` named `name`. When `tag/<name>` names this
+/// tag object, it is the answer `answer/tag:<name>` names, as `tag_as` and a fetch write them.
+/// Otherwise no ref names this tag object's answer (a fetched tag whose name the project keeps,
+/// D-3RSCW): it is the first stored answer, by hash, that is this tag object's relay answer, or
+/// none.
+fn project_relay_answer(
+    state: &ReadState,
+    tag: &Hash,
+    name: &str,
+) -> Result<Option<(Hash, Answer)>, RdyError> {
+    let reader = state.reader();
+    let named = reader
+        .get_ref(&format!("{}{name}", rdy_store::holder::TAG_REF))?
+        .is_some_and(|v| v == tag.0);
+    if named {
+        return Ok(reader.answer_of(&format!("tag:{name}"))?);
+    }
+    let mut found: Option<(Hash, Answer)> = None;
+    reader.for_each_object_of(kinds::ANSWER, |h| {
+        if found.is_none() {
+            let a: Answer = reader.get_typed(kinds::ANSWER, &h)?;
+            if is_relay_answer_of(&a, tag, name) {
+                found = Some((h, a));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 /// A holder's relay answer of the TAG object `tag`: the answer `answer/tag-object:<tag>` names.

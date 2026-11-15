@@ -4,7 +4,8 @@
 //! [`fetch`] takes the batch files of one format-4 history into the project through the same
 //! union, closure and proof checks as a holder's take (`rdy_store::take_batch`). It writes one
 //! sealed batch: the records the project lacks, `tag/<name>` for each fetched tag whose name is
-//! free, and the remote's sync state with the root as its fetched tip or head. It moves no
+//! free (with `answer/tag:<name>` for its relay answer, when that ref is free too), and the
+//! remote's sync state with the root as its fetched tip or head. It moves no
 //! canon or view ref, so the project reads the same canon and views after it. A fetched tag
 //! whose name the project uses for another landing is not taken: the local tag stays, and the
 //! name is listed. The first sync state write activates the `sync_state` feature in its batch.

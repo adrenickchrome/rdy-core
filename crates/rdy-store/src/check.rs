@@ -103,11 +103,13 @@ impl StoreReader {
         let mut view_ops = 0;
         let mut conflicts_recorded = 0;
         let mut sets: Vec<(String, ViewHead, Arc<Vec<Hash>>)> = vec![];
+        // the fetched view histories, read once and only when a view needs them
+        let mut fetched: Option<BTreeMap<String, BTreeSet<Hash>>> = None;
         for (key, bytes) in self.refs_with_prefix("view/")? {
             let name = &key["view/".len()..];
             let head: ViewHead = postcard::from_bytes(&bytes)
                 .map_err(|_| bad(format!("view {name:?}: its ref is not a view head")))?;
-            let c = self.check_view(name, &head)?;
+            let c = self.check_view(name, &head, &mut fetched)?;
             view_ops += c.ops;
             conflicts_recorded += c.conflicts;
             sets.push((name.to_string(), head, c.included));
@@ -878,8 +880,16 @@ impl StoreReader {
         Ok(())
     }
 
-    /// Checks one view: its chain, head, index entries, recorded conflicts and undo chains.
-    fn check_view(&self, name: &str, head: &ViewHead) -> Result<ViewCheck, StoreError> {
+    /// Checks one view: its chain, head, index entries, recorded conflicts and undo chains. An
+    /// indexed op off the chain is allowed when a writer put it on the chain since the walk, or
+    /// when it is an op of a fetched view history (`StoreReader::sync_fetched_view_ops`, read
+    /// into `fetched` at the first view that needs it).
+    fn check_view(
+        &self,
+        name: &str,
+        head: &ViewHead,
+        fetched: &mut Option<BTreeMap<String, BTreeSet<Hash>>>,
+    ) -> Result<ViewCheck, StoreError> {
         let mut chain: BTreeSet<Hash> = BTreeSet::new();
         let mut checked: Vec<(Hash, ViewOpKind)> = vec![];
         let mut cur = Some(head.head);
@@ -934,16 +944,24 @@ impl StoreReader {
             }
         }
         let indexed: BTreeSet<Hash> = self.view_op_ids(name)?.into_iter().collect();
-        // ops a writer put on the chain since the walk, and ops a fetch took for the view and
-        // no pull applied yet (D-3RSCW: a fetch moves no view ref)
-        let (newer, fetched) = if indexed.is_subset(&chain) {
-            (BTreeSet::new(), BTreeSet::new())
+        // ops a writer put on the chain since the walk, and ops of a fetched view history that
+        // no pull applied (D-3RSCW: a fetch moves no view ref)
+        let newer = if indexed.is_subset(&chain) {
+            BTreeSet::new()
         } else {
-            (self.ops_after(name, &chain)?, self.sync_fetched_ops(name)?)
+            self.ops_after(name, &chain)?
         };
-        if let Some(h) = indexed
+        let off: Vec<&Hash> = indexed
             .difference(&chain)
-            .find(|h| !newer.contains(*h) && !fetched.contains(*h))
+            .filter(|h| !newer.contains(*h))
+            .collect();
+        if !off.is_empty() && fetched.is_none() {
+            *fetched = Some(self.sync_fetched_view_ops()?);
+        }
+        let of_view = fetched.as_ref().and_then(|f| f.get(name));
+        if let Some(h) = off
+            .into_iter()
+            .find(|h| !of_view.is_some_and(|f| f.contains(*h)))
         {
             return Err(bad(format!(
                 "view {name:?}: op {h} is indexed but not on its chain"

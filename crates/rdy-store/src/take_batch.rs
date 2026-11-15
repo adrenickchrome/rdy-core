@@ -1059,14 +1059,22 @@ fn upload_refs<E>(
 /// The tag refs of a fetch: for each TAG of the union, `tag/<name>` when the project has no tag
 /// of that name (taken), nothing when its tag of that name names the same landing, and nothing
 /// when it names another landing (kept: the project's own tag stays, and the name is listed).
+///
+/// A tag that the project names by `tag/<name>` after the fetch (taken, or held already) keeps
+/// its relay answer (`relayed`, tag to answer): `answer/tag:<name>` names that answer, as
+/// `tag_as` writes it, when the project has no such ref. A project ref that names another
+/// answer stays, and so does every ref of a kept name. Project signature checks find a tag's
+/// relay answer by that ref (`rdy_engine::signature_check`).
 fn fetch_tag_refs(
     reader: &StoreReader,
     source: &mut UploadSource,
     objects: &[ObjectKey],
+    relayed: &BTreeMap<Hash, Hash>,
     refs: &mut Vec<(String, Vec<u8>)>,
     taken: &mut Vec<String>,
     kept: &mut Vec<String>,
 ) -> Result<(), StreamError> {
+    let store = |e: StoreError| store_error(e, None);
     for k in objects.iter().filter(|k| k.kind == kinds::TAG) {
         let Some(t) = stream_source::typed::<Tag>(source, *k)? else {
             continue;
@@ -1075,18 +1083,29 @@ fn fetch_tag_refs(
         if refs.iter().any(|(n, _)| *n == name) {
             continue;
         }
-        let held = match reader.get_ref(&name).map_err(|e| store_error(e, None))? {
-            Some(v) => {
-                Some(crate::index::hash_from(&v, "tag ref").map_err(|e| store_error(e, None))?)
-            }
+        let held = match reader.get_ref(&name).map_err(store)? {
+            Some(v) => Some(crate::index::hash_from(&v, "tag ref").map_err(store)?),
             None => None,
+        };
+        // the relay answer of a tag the project names after the fetch, when its ref is free
+        let answer_ref = |refs: &mut Vec<(String, Vec<u8>)>| -> Result<(), StreamError> {
+            if let Some(a) = relayed.get(&k.hash) {
+                let item = crate::answer::answer_ref(&format!("tag:{}", t.name));
+                if reader.get_ref(&item).map_err(store)?.is_none()
+                    && !refs.iter().any(|(n, _)| *n == item)
+                {
+                    refs.push((item, a.0.to_vec()));
+                }
+            }
+            Ok(())
         };
         match held {
             None => {
                 refs.push((name, k.hash.0.to_vec()));
+                answer_ref(refs)?;
                 taken.push(t.name);
             }
-            Some(h) if h == k.hash => {}
+            Some(h) if h == k.hash => answer_ref(refs)?,
             Some(h) => {
                 let same = reader
                     .read_tag(&h)
@@ -1213,8 +1232,9 @@ pub(crate) fn prepare<'a, E>(
 /// fetch's own: the header's purpose and root are the target's, the caller's check, each TAG
 /// of the union written as `tag/<name>` when that name is free (one that names the same
 /// landing stays; one that names another landing is kept and listed), and the remote's sync
-/// state with the root as its fetched tip or head, in the same batch. No canon or view ref
-/// moves, and no relay answer ref is written. A removal in the stream is refused
+/// state with the root as its fetched tip or head, in the same batch. A tag the project names
+/// after the fetch keeps its relay answer by `answer/tag:<name>` when that ref is free. No canon
+/// or view ref moves. A removal in the stream is refused
 /// ([`FETCH_REMOVAL`]).
 pub(crate) fn prepare_fetch<'a, E>(
     rx: &Receiver,
@@ -1673,10 +1693,13 @@ fn prepare_intake<E>(
                 features: header.features.clone(),
             };
             check(&mut source, &facts).map_err(TakeError::Validation)?;
+            // the relay answer of each fetched tag object, by the rule a holder take keeps
+            let relayed = stream_source::relay_answers(&mut source, &objects)?;
             fetch_tag_refs(
                 reader,
                 &mut source,
                 &objects,
+                &relayed,
                 &mut refs,
                 &mut tags_taken,
                 &mut tags_kept,

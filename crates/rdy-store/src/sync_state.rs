@@ -411,6 +411,15 @@ pub enum SyncStep {
     ClearUpload { push: String },
 }
 
+/// What the sync refs of a store named at any time ([`StoreReader::sync_named_heads`]): the
+/// landings of canon states (fetched, applied and held tips) and the view ops of view states
+/// (root, fetched and applied heads).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyncNamed {
+    pub landings: BTreeSet<Hash>,
+    pub view_ops: BTreeSet<Hash>,
+}
+
 /// The push a current `upload` or `pending` value names; None for an absent or cleared ref.
 fn push_of(v: Option<&[u8]>) -> Option<String> {
     let v = v.filter(|v| !v.is_empty())?;
@@ -474,37 +483,64 @@ impl StoreReader {
         })
     }
 
-    /// The ops of view `name` that a fetch took and the view's chain may not hold: each op on
-    /// the chain of a fetched head of a `meta/sync/<remote>/view/<name>` state, for every remote.
-    /// A walk stops at an op the store does not hold or of another view, and reads at most
-    /// [`crate::sync_stream::MAX_HISTORY_DEPTH`] ops for each remote, else E_LIMIT.
-    pub fn sync_fetched_ops(&self, name: &str) -> Result<BTreeSet<Hash>, StoreError> {
-        let mut out = BTreeSet::new();
-        for (ref_name, value) in self.refs_with_prefix(SYNC_REF)? {
-            let Some(SyncRefName::View { name: view, .. }) = SyncRefName::parse(&ref_name) else {
-                continue;
+    /// Every landing and view op that a canon or view sync ref of this store named at any time:
+    /// each hash of each such value that the log's ref updates hold, not only the current
+    /// values. A fetch moves no canon or view ref (D-3RSCW), so what it took is known by the
+    /// sync state it wrote. A later fetch of an earlier tip or head, and a fork's origin batch
+    /// that clears the refs, change the current value only: the log keeps each earlier value, so
+    /// the records each one named stay a fetched history's. A ref update that does not decode,
+    /// or a value that does not read, names nothing here (fsck reports it elsewhere).
+    pub fn sync_named_heads(&self) -> Result<SyncNamed, StoreError> {
+        let mut out = SyncNamed::default();
+        self.for_each_object_of(kinds::REF_UPDATE, |hash| {
+            let Ok(u) = self.get_typed::<kinds::RefUpdate>(kinds::REF_UPDATE, &hash) else {
+                return Ok(());
             };
-            if view != name {
+            if !is_sync_ref(&u.name) {
+                return Ok(());
+            }
+            let Ok(Some(v @ (SyncValue::Canon(_) | SyncValue::View(_)))) =
+                check_ref(&u.name, &u.value)
+            else {
+                return Ok(());
+            };
+            for (kind, h) in v.targets() {
+                if kind == kinds::LANDING {
+                    out.landings.insert(h);
+                } else {
+                    out.view_ops.insert(h);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// The view ops of each fetched view history, by view name: every op that a walk reaches
+    /// from a view op the sync refs ever named ([`StoreReader::sync_named_heads`]). The walk
+    /// follows `prev` and a `Fork`'s source op `from_head` into the source view, as a view
+    /// history's closure does (`crate::closure`), so a fetched fork brings the ops of the view it
+    /// forked. A view's chain need not hold these ops: no fetch moves a view ref. The walk stops
+    /// at an op the store does not hold and visits each op once.
+    pub fn sync_fetched_view_ops(&self) -> Result<BTreeMap<String, BTreeSet<Hash>>, StoreError> {
+        let heads = self.sync_named_heads()?;
+        let mut out: BTreeMap<String, BTreeSet<Hash>> = BTreeMap::new();
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        let mut queue: Vec<Hash> = heads.view_ops.into_iter().collect();
+        while let Some(h) = queue.pop() {
+            if !seen.insert(h) {
                 continue;
             }
-            let Ok(Some(SyncValue::View(v))) = check_ref(&ref_name, &value) else {
-                continue;
+            let op = match self.view_op(&h) {
+                Ok(op) => op,
+                Err(StoreError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
             };
-            let mut at = v.fetched;
-            let mut steps = 0u64;
-            while let Some(h) = at {
-                if !out.insert(h) {
-                    break;
-                }
-                steps += 1;
-                if steps > crate::sync_stream::MAX_HISTORY_DEPTH {
-                    return Err(unsent_limit());
-                }
-                at = match self.view_op(&h) {
-                    Ok(op) if op.view == name => op.prev,
-                    _ => None,
-                };
+            queue.extend(op.prev);
+            if let crate::view::ViewOpKind::Fork { from_head, .. } = &op.op {
+                queue.push(*from_head);
             }
+            out.entry(op.view).or_default().insert(h);
         }
         Ok(out)
     }

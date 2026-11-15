@@ -5446,8 +5446,8 @@ impl Store {
 
     /// The fetch of a canon or view history into a project (D-3RSCW): the take's checks over
     /// the project (`crate::take_batch::prepare_fetch`), then one sealed batch of its own, held
-    /// batches on or off, with the new records, the free tag refs and the remote's sync state,
-    /// which activates `sync_state` when it is the first. It moves no canon or view ref. A
+    /// batches on or off, with the new records, the free tag refs with their free relay answer
+    /// refs, and the remote's sync state, which activates `sync_state` when it is the first. It moves no canon or view ref. A
     /// holder is `TakeError::ModeMismatch`; an open held batch is refused; a retry of a fetch
     /// already taken writes nothing.
     pub fn take_fetched<E>(

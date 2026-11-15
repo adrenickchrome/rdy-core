@@ -319,9 +319,21 @@ fn tag_check_result(problems: Vec<String>, good: usize) -> Result<usize, RdyErro
 
 impl Rdy {
     /// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
+    ///
+    /// A tag names a landing of canon's chain, or of a fetched canon history: a fetch takes a
+    /// history's tags and moves no canon ref (D-3RSCW), so its tags may name landings that canon
+    /// does not hold yet. A fetched history is the chain of a landing that a canon sync ref named
+    /// at any time (`StoreReader::sync_named_heads`), so a later fetch or a fork's origin batch
+    /// that changes the ref keeps it. No two tags denote one version. Higher versions name
+    /// later landings: on canon's chain among the tags of canon, and on each fetched history
+    /// among the tags that canon does not hold. A local tag on canon and a fetched tag off it
+    /// keep no order between them: the pull that applies the history judges them.
     pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
         let mut problems = vec![];
-        let mut good: Vec<(semver::Version, String, usize)> = vec![];
+        let mut all: Vec<(semver::Version, String)> = vec![];
+        let mut on_canon: Vec<(semver::Version, String, usize)> = vec![];
+        let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
+        let mut fetched: Option<Vec<HashMap<Hash, usize>>> = None;
         for (refname, value) in self.store.refs_with_prefix("tag/")? {
             let (v, tag) = match check_tag_ref(&self.store, &refname, &value) {
                 Ok(t) => t,
@@ -330,25 +342,83 @@ impl Rdy {
                     continue;
                 }
             };
-            let Some(pos) = chain.iter().position(|c| *c == tag.landing) else {
+            if let Some(pos) = chain.iter().position(|c| *c == tag.landing) {
+                all.push((v.clone(), refname.clone()));
+                on_canon.push((v, refname, pos));
+                continue;
+            }
+            let histories = match &fetched {
+                Some(f) => f,
+                None => fetched.insert(self.fetched_histories(chain)?),
+            };
+            if !histories.iter().any(|h| h.contains_key(&tag.landing)) {
                 problems.push(format!(
                     "{refname}: landing {} is not in canon's chain",
                     tag.landing.short()
                 ));
                 continue;
-            };
-            good.push((v, refname, pos));
-        }
-        good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
-        for pair in good.windows(2) {
-            let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
-            if let Some(p) = same_version((lo, lo_ref), (hi, hi_ref)) {
-                problems.push(p);
-            } else if hi_pos > lo_pos {
-                problems.push(format!("{hi_ref} names an earlier landing than {lo_ref}"));
             }
+            all.push((v.clone(), refname.clone()));
+            off_canon.push((v, refname, tag.landing));
         }
-        tag_check_result(problems, good.len())
+        all.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+        for pair in all.windows(2) {
+            let ((lo, lo_ref), (hi, hi_ref)) = (&pair[0], &pair[1]);
+            problems.extend(same_version((lo, lo_ref), (hi, hi_ref)));
+        }
+        let mut order = |mut good: Vec<(semver::Version, String, usize)>| {
+            good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+            for pair in good.windows(2) {
+                let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
+                let p = format!("{hi_ref} names an earlier landing than {lo_ref}");
+                if lo.cmp_precedence(hi) != Ordering::Equal
+                    && hi_pos > lo_pos
+                    && !problems.contains(&p)
+                {
+                    problems.push(p);
+                }
+            }
+        };
+        order(on_canon);
+        for history in fetched.iter().flatten() {
+            let good: Vec<(semver::Version, String, usize)> = off_canon
+                .iter()
+                .filter_map(|(v, r, l)| history.get(l).map(|pos| (v.clone(), r.clone(), *pos)))
+                .collect();
+            order(good);
+        }
+        tag_check_result(problems, all.len())
+    }
+
+    /// The fetched canon histories that canon does not hold: for each landing that a canon sync
+    /// ref named at any time and canon's chain (`chain`) does not hold, the position of each
+    /// landing of its chain, head first. A chain's walk ends at a landing the store does not
+    /// hold, or at one it met already.
+    fn fetched_histories(&self, chain: &[Hash]) -> Result<Vec<HashMap<Hash, usize>>, RdyError> {
+        let reader = self.store.reader();
+        let named = reader.sync_named_heads()?;
+        let canon: HashSet<&Hash> = chain.iter().collect();
+        let mut out: Vec<HashMap<Hash, usize>> = vec![];
+        for tip in named.landings {
+            if canon.contains(&tip) || out.iter().any(|h| h.contains_key(&tip)) {
+                continue;
+            }
+            let mut positions: HashMap<Hash, usize> = HashMap::new();
+            let mut cur = Some(tip);
+            while let Some(h) = cur {
+                let n = positions.len();
+                if positions.insert(h, n).is_some() {
+                    break;
+                }
+                cur = match reader.landing(&h) {
+                    Ok(l) => l.prev,
+                    Err(rdy_store::StoreError::NotFound(_)) => None,
+                    Err(e) => return Err(e.into()),
+                };
+            }
+            out.push(positions);
+        }
+        Ok(out)
     }
 
     /// A holder's `check_tags`: the same rules for each ref and for versions that denote the
