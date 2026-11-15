@@ -650,8 +650,8 @@ fn sig4_a_missing_signature_table_never_means_unsigned() {
     let mut want = vec![gl, gt];
     want.sort();
     assert_eq!(seen, want);
-    // the index file set aside is kept, never deleted
-    assert!(set_aside_exists(&path));
+    // an index without the table is not damage: it is replaced, and no copy is set aside
+    assert!(!set_aside_exists(&path));
 }
 
 fn set_aside_exists(path: &Path) -> bool {

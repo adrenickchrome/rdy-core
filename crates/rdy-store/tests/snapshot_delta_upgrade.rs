@@ -493,6 +493,60 @@ fn sdl5_upgrade_writes_objects_features_and_receipt_once() {
     assert_eq!(upgrade_batches(dir), 1);
 }
 
+/// The index files beside the store's own index at `dir` (`index.redb.<anything>`): a damaged
+/// index set aside, or a replaced one kept for zeroing.
+fn index_copies(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("index.redb."))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn sdl5_upgrade_of_an_older_index_leaves_no_quarantine_file() {
+    let base = tempfile::tempdir().unwrap();
+    let fx = {
+        let _legacy = format::legacy_writer_for_tests();
+        project(base.path(), false)
+    };
+    let dir = &fx.dir;
+    // the index as the last rdy before snapshot deltas left it: no snapshot delta table
+    {
+        let raw = redb::Database::create(dir.join("index.redb")).unwrap();
+        let w = raw.begin_write().unwrap();
+        let def: redb::TableDefinition<&[u8], &[u8]> =
+            redb::TableDefinition::new("snapshot_deltas");
+        assert!(w.delete_table(def).unwrap(), "the table was there");
+        w.commit().unwrap();
+    }
+    // the first open upgrades the store; the older index is rebuilt from the log, not set
+    // aside as damage, so no quarantine file is left
+    let s = Store::open_with_registry_for_tests(dir, OpenPolicy::AutoUpgrade, &steps()).unwrap();
+    assert!(s.features().has(FEATURE_SNAPSHOT_DELTA));
+    for l in &fx.canon {
+        assert!(s.snapshot_delta_of(l).unwrap().is_some(), "{l}");
+    }
+    s.close().unwrap();
+    assert_eq!(index_copies(dir), Vec::<String>::new());
+    // the backup keeps the older index as it was
+    let backup = backups(dir);
+    assert_eq!(backup.len(), 1);
+    assert!(
+        dir.parent()
+            .unwrap()
+            .join(&backup[0])
+            .join("store/index.redb")
+            .is_file()
+    );
+    let s = Store::open(dir).unwrap();
+    assert!(!s.open_report().index_rebuilt);
+    s.close().unwrap();
+    assert_eq!(index_copies(dir), Vec::<String>::new());
+}
+
 #[test]
 fn sdl5_upgrade_covers_off_canon_and_holder_forks() {
     // a legacy history, written as the last rdy before snapshot deltas wrote it

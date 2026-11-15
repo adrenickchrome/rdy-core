@@ -495,6 +495,13 @@ pub struct CheckedIndex {
     pub repaired_at_open: bool,
 }
 
+/// What [`Index::open_checked_or_outdated`] found.
+pub(crate) enum Checked {
+    Index(CheckedIndex),
+    /// A clean index an earlier rdy wrote that lacks a table this rdy reads; the text says which.
+    Outdated(&'static str),
+}
+
 /// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` and
 /// `diagrams` are left out: `meta` records how far the index has read, and `diagrams` holds
 /// drawings, which a rebuild starts empty.
@@ -1152,6 +1159,59 @@ impl<'t> RedactionTables<'t> {
     }
 }
 
+/// Why an index an earlier rdy wrote cannot serve this rdy: it holds objects but lacks a table
+/// this rdy reads, so the table's rows would read as absent data. None when the index has every
+/// such table or holds no objects. Such an index is not damaged: the open replaces it with one
+/// rebuilt from the log (D-WWAK7: the derived layer is rebuilt).
+fn missing_table(names: &[String]) -> Option<&'static str> {
+    let has = |name: &str| names.iter().any(|n| n == name);
+    // an index that holds objects but no signature table cannot say a subject is unsigned:
+    // it is refused, and the open replaces it with one rebuilt from the log
+    if has(OBJECTS.name()) && !has(SIGNATURES.name()) {
+        return Some("the index has no signatures table; it is rebuilt from the log");
+    }
+    // likewise for the plan tables: no seal or deferral is ever read as absent
+    if has(OBJECTS.name())
+        && [
+            &PLAN_SEALS,
+            &PLAN_DECISIONS,
+            &PLAN_DEFERRALS,
+            &PLAN_PROPOSALS,
+        ]
+        .iter()
+        .any(|t| !has(t.name()))
+    {
+        return Some("the index has no plan tables; it is rebuilt from the log");
+    }
+    // likewise for the assessment table: no assessment, and no first briefed change, is ever
+    // read as absent
+    if has(OBJECTS.name()) && !has(ASSESSMENT_PROPOSALS.name()) {
+        return Some("the index has no assessment table; it is rebuilt from the log");
+    }
+    // likewise for the dispute tables: no dispute, and no resolution, is ever read as absent
+    if has(OBJECTS.name())
+        && [&DISPUTE_LANDINGS, &DISPUTE_RESOLUTIONS]
+            .iter()
+            .any(|t| !has(t.name()))
+    {
+        return Some("the index has no dispute tables; it is rebuilt from the log");
+    }
+    // likewise for the capacity counts and the landing depths (TASK-2340): a count is never
+    // read as zero for objects the index already holds
+    if has(OBJECTS.name())
+        && [&HOLDER_COUNTS, &LANDING_DEPTHS, &LANDING_WAITS]
+            .iter()
+            .any(|t| !has(t.name()))
+    {
+        return Some("the index has no capacity counts; it is rebuilt from the log");
+    }
+    // likewise for the snapshot delta table: no landing's delta is ever read as absent
+    if has(OBJECTS.name()) && !has(SNAPSHOT_DELTAS.name()) {
+        return Some("the index has no snapshot delta table; it is rebuilt from the log");
+    }
+    None
+}
+
 impl Index {
     pub fn open(path: &Path) -> Result<Index, StoreError> {
         Index::with_tables(Database::create(path).map_err(|e| open_error(path, e))?)
@@ -1162,6 +1222,16 @@ impl Index {
     /// repair is damage (set aside and rebuilt) or a rollback after a kill (trusted, then caught
     /// up). An error from redb is still an error.
     pub fn open_checked(path: &Path) -> Result<CheckedIndex, StoreError> {
+        match Index::open_checked_or_outdated(path)? {
+            Checked::Index(c) => Ok(c),
+            Checked::Outdated(why) => Err(StoreError::Db(why.into())),
+        }
+    }
+
+    /// [`Index::open_checked`], but an index an earlier rdy wrote, which lacks a table this rdy
+    /// reads ([`missing_table`]), is `Checked::Outdated` instead of an error, with the file
+    /// closed: it is not damaged, and the open replaces it.
+    pub(crate) fn open_checked_or_outdated(path: &Path) -> Result<Checked, StoreError> {
         let repaired = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&repaired);
         let mut database = redb::Builder::new()
@@ -1169,11 +1239,23 @@ impl Index {
             .create(path)
             .map_err(|e| open_error(path, e))?;
         let clean = database.check_integrity().map_err(db)?;
-        Ok(CheckedIndex {
+        if clean {
+            let r = database.begin_read().map_err(db)?;
+            let names: Vec<String> = r
+                .list_tables()
+                .map_err(db)?
+                .map(|t| t.name().to_string())
+                .collect();
+            drop(r);
+            if let Some(why) = missing_table(&names) {
+                return Ok(Checked::Outdated(why));
+            }
+        }
+        Ok(Checked::Index(CheckedIndex {
             index: Index::with_tables(database)?,
             clean,
             repaired_at_open: repaired.load(Ordering::Relaxed),
-        })
+        }))
     }
 
     fn with_tables(database: Database) -> Result<Index, StoreError> {
@@ -1183,63 +1265,10 @@ impl Index {
             .map_err(db)?
             .map(|t| t.name().to_string())
             .collect();
+        if let Some(why) = missing_table(&names) {
+            return Err(StoreError::Db(why.into()));
+        }
         let has = |name: &str| names.iter().any(|n| n == name);
-        // an index that holds objects but no signature table cannot say a subject is unsigned:
-        // it is refused, and the open sets it aside and rebuilds it from the log
-        if has(OBJECTS.name()) && !has(SIGNATURES.name()) {
-            return Err(StoreError::Db(
-                "the index has no signatures table; it is rebuilt from the log".into(),
-            ));
-        }
-        // likewise for the plan tables: no seal or deferral is ever read as absent
-        if has(OBJECTS.name())
-            && [
-                &PLAN_SEALS,
-                &PLAN_DECISIONS,
-                &PLAN_DEFERRALS,
-                &PLAN_PROPOSALS,
-            ]
-            .iter()
-            .any(|t| !has(t.name()))
-        {
-            return Err(StoreError::Db(
-                "the index has no plan tables; it is rebuilt from the log".into(),
-            ));
-        }
-        // likewise for the assessment table: no assessment, and no first briefed change, is ever
-        // read as absent
-        if has(OBJECTS.name()) && !has(ASSESSMENT_PROPOSALS.name()) {
-            return Err(StoreError::Db(
-                "the index has no assessment table; it is rebuilt from the log".into(),
-            ));
-        }
-        // likewise for the dispute tables: no dispute, and no resolution, is ever read as absent
-        if has(OBJECTS.name())
-            && [&DISPUTE_LANDINGS, &DISPUTE_RESOLUTIONS]
-                .iter()
-                .any(|t| !has(t.name()))
-        {
-            return Err(StoreError::Db(
-                "the index has no dispute tables; it is rebuilt from the log".into(),
-            ));
-        }
-        // likewise for the capacity counts and the landing depths (TASK-2340): a count is never
-        // read as zero for objects the index already holds
-        if has(OBJECTS.name())
-            && [&HOLDER_COUNTS, &LANDING_DEPTHS, &LANDING_WAITS]
-                .iter()
-                .any(|t| !has(t.name()))
-        {
-            return Err(StoreError::Db(
-                "the index has no capacity counts; it is rebuilt from the log".into(),
-            ));
-        }
-        // likewise for the snapshot delta table: no landing's delta is ever read as absent
-        if has(OBJECTS.name()) && !has(SNAPSHOT_DELTAS.name()) {
-            return Err(StoreError::Db(
-                "the index has no snapshot delta table; it is rebuilt from the log".into(),
-            ));
-        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());

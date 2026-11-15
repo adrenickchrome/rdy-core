@@ -3,7 +3,7 @@ use crate::fileid::FileId;
 use crate::format::{self, StoreFeatures};
 use crate::fsutil;
 use crate::holder::{Creation, FirstBatch, RefRules, RefWrite, StoreMode, Walk};
-use crate::index::{Index, IndexEntry};
+use crate::index::{Checked, Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::plan::{Held, NoneHeld, Resolver};
@@ -342,6 +342,9 @@ struct OpenedIndex {
 /// - Damage is an error, a panic (redb can panic on a corrupt page), or a file redb reports as not
 ///   clean when the last close was clean. It is renamed to `index.redb.damaged-<n>` and replaced
 ///   by an empty one, which the caller rebuilds from the log; the boundary is then unknown.
+/// - A clean file an earlier rdy wrote, which lacks a table this rdy reads, is no damage: it is
+///   zeroed and removed ([`replace_outdated_index`]) and replaced by an empty one, which the
+///   caller rebuilds from the log. No quarantine file is left.
 /// - Anything else is a rollback: a clean file, or any file after a kill, where redb discarding
 ///   its non-durable commits is expected. Its last durable commit never covers an unacknowledged
 ///   frame, so it is trusted and the caller catches it up from its `indexed_upto`.
@@ -359,12 +362,20 @@ struct OpenedIndex {
 fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     let path = dir.join("index.redb");
     let opened = std::panic::catch_unwind(|| {
-        Index::open_checked(&path).and_then(|c| {
-            let acked = c.index.acknowledged()?;
-            Ok((c, acked))
+        Index::open_checked_or_outdated(&path).and_then(|c| match c {
+            Checked::Index(c) => {
+                let acked = c.index.acknowledged()?;
+                Ok(Some((c, acked)))
+            }
+            Checked::Outdated(_) => Ok(None),
         })
     })
     .unwrap_or_else(|_| Err(StoreError::Db("index panicked while opening".into())));
+    let opened = match opened {
+        Ok(Some(c)) => Ok(c),
+        Ok(None) => return replace_outdated_index(dir, &path),
+        Err(e) => Err(e),
+    };
     match opened {
         Ok((c, acked)) if c.clean || unclean => Ok(OpenedIndex {
             repaired: !c.clean || c.repaired_at_open,
@@ -407,6 +418,26 @@ fn read_only_floor(
     Ok(match opened {
         Ok((clean, acked)) if clean || unclean => acked,
         _ => None,
+    })
+}
+
+/// Replaces an index an earlier rdy wrote, which lacks a table this rdy reads, with an empty
+/// one that the caller rebuilds from the log. The index is derived (D-WWAK7), so it is not set
+/// aside as damage and leaves no quarantine file: it takes the name of a replaced index kept for
+/// zeroing and is zeroed and removed as [`erase_leftovers`] does, since it may hold text a
+/// removal erased (D-6H0ZX). A kill in between leaves that name, which the next open zeroes.
+fn replace_outdated_index(dir: &Path, path: &Path) -> Result<OpenedIndex, StoreError> {
+    // the open's `erase_leftovers` ran under this lock, so the first kept name is free
+    std::fs::rename(
+        path,
+        path.with_file_name(format!("index.redb{}", crate::index::ERASE_SUFFIX)),
+    )?;
+    erase_leftovers(dir)?;
+    Ok(OpenedIndex {
+        index: Index::open(path)?,
+        acked: None,
+        rebuilt: true,
+        repaired: false,
     })
 }
 
