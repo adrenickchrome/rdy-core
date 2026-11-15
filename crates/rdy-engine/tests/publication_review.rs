@@ -421,7 +421,7 @@ fn hpb8_reference_summary_matches_report_projection() {
             }
             assert_eq!(
                 v["references"]["dropped_decisions"],
-                json!({"rows": [], "omitted_rows": 0})
+                json!({"count": 0, "rows": [], "omitted_rows": 0})
             );
         }
         let keys: Vec<&str> = summary
