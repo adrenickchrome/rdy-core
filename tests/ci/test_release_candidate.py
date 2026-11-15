@@ -366,12 +366,15 @@ class rsig4_Candidate(Fixture):
         self.assertEqual(str(caught.exception), "duplicate field 'pass'")
 
         jobs = workflow_jobs(WORKFLOW)
-        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'build-windows', 'check'])
+        self.assertEqual(sorted(jobs), ['assemble', 'build-linux', 'build-mac', 'build-windows', 'check', 'sign'])
         self.assertIn('\npermissions: {}\n', WORKFLOW)
         self.assertNotIn('continue-on-error', WORKFLOW)
-        self.assertNotIn('id-token', WORKFLOW)
         self.assertNotIn('secrets.', WORKFLOW)
-        self.assertNotIn('always()', WORKFLOW)
+        # Only the sign job holds an OIDC token, and it alone removes that token in an always() step.
+        for job, block in jobs.items():
+            if job != 'sign':
+                self.assertNotIn('id-token', str(block), job)
+                self.assertNotIn('always()', str(block), job)
         self.assertNotIn('actions: write', WORKFLOW)
         self.assertRegex(WORKFLOW, r'push:\n    tags: \["candidate/v\*"\]\n')
         for line in WORKFLOW.splitlines():

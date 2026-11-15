@@ -5,6 +5,7 @@ use crate::inline::Form;
 use crate::page::SiteFacts;
 use crate::review::{DocChange, Mark, Review};
 use crate::site::{Site, rel};
+use rdy_engine::reader::labels;
 use rdy_engine::{Materialized, VersionInfo};
 use rdy_model::{Block, BlockId, RefMode, tree};
 use serde::Serialize;
@@ -245,46 +246,14 @@ pub(crate) fn summary_html_of(chars: &[Ch], max: usize) -> String {
 }
 
 /// `text` with its whitespace collapsed, cut at a word boundary to at most `max` characters, with
-/// `…` when something was cut. A collapsed space keeps the code span of the first whitespace it
-/// stands for; a cut inside a code span ends the span there.
+/// `…` when something was cut ([`labels::cut`]).
 fn cut(text: &[Ch], max: usize) -> Vec<Ch> {
-    let mut words: Vec<Ch> = Vec::with_capacity(text.len());
-    let mut space: Option<u32> = None;
-    for &(c, span) in text {
-        if c.is_whitespace() {
-            space.get_or_insert(span);
-            continue;
-        }
-        if let Some(s) = space.take().filter(|_| !words.is_empty()) {
-            words.push((' ', s));
-        }
-        words.push((c, span));
-    }
-    if words.len() <= max {
-        return words;
-    }
-    // the cut falls on a word boundary when the next character is a space
-    let mut kept = &words[..max];
-    if words[max].0 != ' '
-        && let Some(i) = kept.iter().rposition(|c| c.0 == ' ')
-    {
-        kept = &kept[..i];
-    }
-    let end = kept
-        .iter()
-        .rposition(|c| ![' ', ',', ';', ':', '.', '-'].contains(&c.0))
-        .map_or(0, |i| i + 1);
-    let mut out = kept[..end].to_vec();
-    out.push(('…', 0));
-    out
+    labels::cut(text, max)
 }
 
-/// Plain `text` cut as [`cut`] says, as a string: whitespace collapsed, at most `max` characters
-/// (a word boundary when one falls in them), and one `…` when something was cut. A character has
-/// no code span here.
+/// Plain `text` cut as [`cut`] says, as a string ([`labels::cut_plain`]).
 pub(crate) fn cut_plain(text: &str, max: usize) -> String {
-    let chars: Vec<Ch> = text.chars().map(|c| (c, 0)).collect();
-    cut(&chars, max).into_iter().map(|(c, _)| c).collect()
+    labels::cut_plain(text, max)
 }
 
 /// `8 February 2021` for a time in milliseconds since the epoch (UTC).

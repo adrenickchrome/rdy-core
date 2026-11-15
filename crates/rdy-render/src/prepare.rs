@@ -6,13 +6,13 @@
 //! reads nothing else.
 use crate::site::Site;
 use crate::{changes, disagree, review, version};
+use rdy_engine::reader::review::figure_blobs;
 use rdy_engine::{
     BlobState, DiagramCache, E_REDACTED, Materialized, RdyError, ReadState, Scope, VersionInfo,
     VersionPosition,
 };
 use rdy_graph::Graph;
-use rdy_model::redaction::BlockResidue;
-use rdy_model::{Block, BlockId, Hash, Op};
+use rdy_model::{BlockId, Hash};
 use rdy_schema::Pack;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -485,20 +485,9 @@ impl FigureBlobs {
     /// projection). Its alt text, caption and file names are never read again, and the other
     /// image never stands in (D-TBDA1 rule 6).
     pub(crate) fn project(&self, m: Arc<Materialized>) -> Arc<Materialized> {
-        let ops: Vec<Op> = m
-            .iter()
-            .filter_map(|b| {
-                let request = figure_blobs(b).iter().find_map(|h| self.removed.get(h))?;
-                Some(Op::Update {
-                    base: b.version_hash(),
-                    block: BlockResidue::of(b).stub(*request),
-                })
-            })
-            .collect();
-        if ops.is_empty() {
-            m
-        } else {
-            Arc::new(m.with(&ops))
+        match rdy_engine::reader::review::mask_removed(&m, &BTreeMap::new(), &self.removed) {
+            Some(masked) => Arc::new(masked),
+            None => m,
         }
     }
 }
@@ -518,18 +507,6 @@ impl BlobReads for ReadState {
     fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError> {
         self.reader().get_blob(h).map_err(RdyError::from)
     }
-}
-
-/// The blobs a figure shows, light first: its `blob` and its `dark_blob` (D-3DAX4); none for any
-/// other block, and for a removed figure (it has no fields).
-fn figure_blobs(b: &Block) -> Vec<Hash> {
-    if b.block_type != "figure" || b.is_redacted() {
-        return vec![];
-    }
-    rdy_schema::ASSET_BLOB_FIELDS
-        .iter()
-        .filter_map(|f| b.field_str(f)?.parse().ok())
-        .collect()
 }
 
 /// The request an `E_REDACTED` refusal names (`Content removed by redaction {hash}.`); none for

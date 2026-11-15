@@ -2,6 +2,7 @@
 //! One `mod` line per test file in this directory; a file without its line never runs.
 //! Keep the list sorted.
 mod publication_dark_figure;
+mod publication_disclosure_review;
 mod publication_foreign;
 mod publication_hidden;
 mod publication_m3;

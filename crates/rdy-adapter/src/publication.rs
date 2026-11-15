@@ -7,12 +7,18 @@
 //! profile version and the selection identity (D-Z8Q4N, D-075QD), which a later removal keeps.
 
 use crate::store::Snapshot;
-use rdy_engine::publication::{IMPLICIT_ORG, Resolved, disclosure_diff, resolve};
+use rdy_engine::publication::review_model::AttachmentLabels;
+use rdy_engine::publication::{
+    ADAPTER_REVIEW_BYTES, IMPLICIT_ORG, PublicationReview, ReadPublicationSource, Resolved,
+    ReviewProjection, disclosure_diff, fit_within, resolve, review_json,
+};
 use rdy_engine::{E_BAD_INPUT, E_INTERNAL, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use rdy_schema::publication::PROFILE_TYPE;
+use serde_json::{Value, json};
 
 pub use rdy_engine::RdyError;
+pub use rdy_engine::publication::review_model::Included;
 pub use rdy_engine::publication::{
     AttachmentEntry, AttachmentVariant, Audience, CheckStatus, DisclosureDiff, HiddenList,
     HiddenRow, ProfileFacts, ReferenceReport, SelectionEntry, profile_facts,
@@ -58,19 +64,37 @@ pub struct PreviousPublication {
     pub selection_identity: Hash,
 }
 
+/// One attachment of a first publication with its labels (D-9BWMV): the old row, unchanged, and
+/// the figure's label and its home doc's title. The labels enter no hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelledAttachment {
+    /// The resolution's row, with every member and its `variant`.
+    pub entry: AttachmentEntry,
+    /// The figure's label.
+    pub label: String,
+    /// The home doc's title; `None` when the doc is redacted.
+    pub home_doc_title: Option<String>,
+}
+
 /// The check of one candidate publication: its profile, its reference check, and what it
 /// discloses beyond the previous publication. `comparison` is None when there is no previous
 /// publication; that is not an empty diff. Then `first_attachments` lists every attachment of
 /// the candidate (the complete docs are `profile.docs`) and `first_hidden_planned` lists the docs
 /// with planned blocks the profile hides; with a previous publication both are None and the
-/// comparison holds `newly_hidden_planned` instead.
+/// comparison holds `newly_hidden_planned` instead. `review` is the review's one JSON form
+/// (D-RDH1C): exactly `references`, `disclosure` and `included`, with every outer row kept and
+/// the inner lists cut as the report cuts them, at most [`ADAPTER_REVIEW_BYTES`] bytes.
+/// `included` is the typed list of the docs a first publication shows; it is None with a
+/// previous publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationCheck {
     pub profile: ProfileSummary,
     pub references: ReferenceReport,
     pub comparison: Option<DisclosureDiff>,
-    pub first_attachments: Option<Vec<AttachmentEntry>>,
+    pub first_attachments: Option<Vec<LabelledAttachment>>,
     pub first_hidden_planned: Option<HiddenList>,
+    pub review: Value,
+    pub included: Option<Included>,
 }
 
 /// Publications' refusal when the baseline holds no such profile (`diff.rs`); the baseline cannot
@@ -176,10 +200,21 @@ impl Snapshot {
         profile: &str,
         previous: Option<&PreviousPublication>,
     ) -> Result<PublicationCheck, RdyError> {
+        self.disclosure_within(tag, profile, previous, ADAPTER_REVIEW_BYTES)
+    }
+
+    /// [`Snapshot::disclosure`] with the review held to `max_bytes`.
+    fn disclosure_within(
+        &self,
+        tag: &str,
+        profile: &str,
+        previous: Option<&PreviousPublication>,
+        max_bytes: usize,
+    ) -> Result<PublicationCheck, RdyError> {
         let scope = self.tag_scope(tag)?;
         let read = self.read_state();
         let candidate = resolve(read, &scope, profile)?;
-        let comparison = match previous {
+        let prior = match previous {
             None => None,
             Some(prev) => {
                 let prior_scope = self.tag_scope(&prev.tag)?;
@@ -198,10 +233,53 @@ impl Snapshot {
                 {
                     return Err(identity_mismatch(&prev.tag));
                 }
-                Some(disclosure_diff(&prior, &candidate)?)
+                let diff = disclosure_diff(&prior, &candidate)?;
+                Some((prior, diff))
             }
         };
-        let first_attachments = comparison.is_none().then(|| candidate.attachments.clone());
+        // the review reads the captured tag's whole state for its labels, never the live tag
+        let source_state = read.materialized(&scope)?;
+        let (title, description) = (read.project_name(), read.project_description());
+        let source =
+            ReadPublicationSource::with_settings(read, read.pack(), &title, description.as_deref());
+        let review = PublicationReview::build(
+            &source,
+            &source_state,
+            &candidate,
+            prior.as_ref().map(|(p, d)| (p, d)),
+        )?;
+        let shown = review_json(
+            ReviewProjection::Adapter,
+            &candidate.references,
+            prior.as_ref().map(|(_, d)| d),
+            &review,
+        );
+        let review_value = fit_within(
+            json!({
+                "references": shown.references,
+                "disclosure": shown.disclosure,
+                "included": shown.included,
+            }),
+            max_bytes,
+            0,
+        )?;
+        // a removal since the snapshot was captured refuses the whole read
+        read.ensure_current_epoch()?;
+        let comparison = prior.map(|(_, d)| d);
+        let first_attachments = comparison.is_none().then(|| {
+            candidate
+                .attachments
+                .iter()
+                .zip(&review.first_attachments)
+                .map(
+                    |(entry, l): (&AttachmentEntry, &AttachmentLabels)| LabelledAttachment {
+                        entry: entry.clone(),
+                        label: l.label.clone(),
+                        home_doc_title: l.home_doc_title.clone(),
+                    },
+                )
+                .collect()
+        });
         let first_hidden_planned = comparison
             .is_none()
             .then(|| candidate.hidden_planned.full());
@@ -211,6 +289,8 @@ impl Snapshot {
             comparison,
             first_attachments,
             first_hidden_planned,
+            review: review_value,
+            included: review.included,
         })
     }
 }
@@ -353,6 +433,28 @@ mod tests {
         }
         // a new snapshot reads again
         handle.snapshot().unwrap().profiles("v1.0.0").unwrap();
+        handle.close().unwrap();
+    }
+
+    #[test]
+    fn drv7_the_adapter_refuses_a_review_over_its_limit_whole() {
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        let (dir, _) = tagged();
+        let handle = StoreHandle::open(dir.path()).unwrap();
+        let snap = handle.snapshot().unwrap();
+        let ok = snap.disclosure("v1.0.0", IMPLICIT_ORG, None).unwrap();
+        let size = serde_json::to_vec(&ok.review).unwrap().len();
+        let at = |max: usize| snap.disclosure_within("v1.0.0", IMPLICIT_ORG, None, max);
+        assert_eq!(at(size).unwrap().review, ok.review);
+        let e = at(size - 1).unwrap_err();
+        assert_eq!(e.code, "E_LIMIT");
+        assert_eq!(
+            e.message,
+            format!(
+                "Publication report exceeds the limit of {} bytes.",
+                size - 1
+            )
+        );
         handle.close().unwrap();
     }
 }

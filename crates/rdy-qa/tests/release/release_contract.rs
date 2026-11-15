@@ -98,10 +98,11 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
-/// `mcp-http-v1.json`, `m4a-v1.json` and `m4bc-v1.json`, all frozen) with the additions since. A
-/// capture writes this file, never a baseline. It starts as a byte copy of its predecessor
-/// `readme-from-rdy-v1.json`, which `release_readme_contract.rs` keeps frozen; a later contract
-/// change is a successor fixture.
+/// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json` and
+/// `disclosure-review-v1.json`, all frozen) with the additions since. A capture writes this file,
+/// never a baseline. It starts as a byte copy of its predecessor `disclosure-review-v1.json`, whose
+/// bytes `sdl7_contract_changes_only_delta_surfaces` and `release_disclosure_contract.rs` pin; a
+/// later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
     qa_root().join("fixtures/contracts/sd1-v1.json")
 }
@@ -2212,6 +2213,36 @@ fn cli_publication_probes(seen: &mut Seen, env: &[(String, String)]) {
     }
 }
 
+/// drv6 (D-RDH1C, D-MCH70): the publication check over the command line on a project whose
+/// review fills every list (`rdy_qa::disclosure_review`): a first check and a comparison under
+/// one label, so the label's shape holds `included` and `disclosure` both populated. The old
+/// probes keep their inputs.
+fn cli_review_probes(seen: &mut Seen, env: &[(String, String)]) {
+    let dir = rdy_qa::disclosure_review::review_project();
+    let profile = rdy_qa::disclosure_review::PROFILE;
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "publication check review rows",
+        &["publication", "check", "--profile", profile],
+    );
+    cli_probe(
+        seen,
+        dir.path(),
+        env,
+        "publication check review rows",
+        &[
+            "publication",
+            "check",
+            "--profile",
+            profile,
+            "--against",
+            rdy_qa::disclosure_review::V1,
+        ],
+    );
+}
+
 /// rpl34: a citing project that holds every state `rdy links` reports: the live link `core` with
 /// two deliveries (its adopted cited claim, its pins, a changed cited claim), the revoked link
 /// `old`, and, after both links leave canon, the delivered repo that no live link names. It is
@@ -2862,6 +2893,7 @@ fn cli_runtime() -> Value {
     cli_probe(&mut seen, setup_dir.path(), &setup_env, "setup", &["setup"]);
     cli_rule_probes(&mut seen);
     cli_publication_probes(&mut seen, &env);
+    cli_review_probes(&mut seen, &env);
     cli_links_probes(&mut seen, &env);
     cli_hook_probes(&mut seen);
     cli_markdown_probes(&mut seen, &env);
@@ -4393,6 +4425,32 @@ fn mcp_publication_probes(seen: &mut Seen) {
     }
 }
 
+/// drv6: the review probes over the chat tool, as the CLI probes run them.
+fn mcp_review_probes(seen: &mut Seen) {
+    let dir = rdy_qa::disclosure_review::review_project();
+    let profile = rdy_qa::disclosure_review::PROFILE;
+    let mut c = isolated_mcp(dir.path());
+    let opened = c.call(
+        "rdy_session",
+        json!({"actor": "agent:drv", "run": "drv", "role": "reader"}),
+    );
+    assert!(opened.is_ok(), "the reader session opens");
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_publication_check",
+        "rdy_publication_check review rows",
+        json!({"profile": profile}),
+    );
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_publication_check",
+        "rdy_publication_check review rows",
+        json!({"profile": profile, "against": rdy_qa::disclosure_review::V1}),
+    );
+}
+
 /// rfr3: `rdy_export` runs in the daemon, so its probes go through the proxy of a served project
 /// (which stops its daemon at drop): the single file's result and a refusal under one label, and
 /// a tree export's result.
@@ -4593,6 +4651,7 @@ fn mcp_row() -> Value {
     let mut seen = Seen::default();
     mcp_probes(&rich, &mut seen);
     mcp_publication_probes(&mut seen);
+    mcp_review_probes(&mut seen);
     mcp_links_probes(&mut seen);
     mcp_hook_probes(&mut seen);
     mcp_export_probes(&mut seen);
@@ -6871,6 +6930,9 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// nothing. m4a3: setup with hook options runs in the same clean home, so its own warnings stay
 /// empty; the warnings of its hooks are in `hooks`. m4bc5: the Markdown import's reply holds the
 /// same empty write-report arrays as the format-3 import's, and its refusal states no issue rows.
+/// drv6: the old publication probes' docs hold no section and no decision, and their profiles
+/// cite no decision outside the selection, so the review's outline, decision titles, decision
+/// rows and dropped decisions are empty there; the review rows probe fills each of them.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -6925,13 +6987,18 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
     "cli/publication check against/stdout/disclosure/added_docs",
+    "cli/publication check against/stdout/disclosure/changed_docs[]/decisions",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
     "cli/publication check against/stdout/disclosure/redactions",
+    "cli/publication check against/stdout/references/dropped_decisions/rows",
     "cli/publication check against/stdout/references/links_outside/rows",
     "cli/publication check against/stdout/references/rows",
     "cli/publication check against/stdout/warnings",
+    "cli/publication check first/stdout/included/rows[]/decision_titles",
+    "cli/publication check first/stdout/included/rows[]/outline",
+    "cli/publication check first/stdout/references/dropped_decisions/rows",
     "cli/publication check first/stdout/references/links_outside/rows",
     "cli/publication check first/stdout/references/rows",
     "cli/publication check first/stdout/warnings",
@@ -7060,13 +7127,18 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_docs[]/decisions",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
     "mcp/rdy_publication_check against/ok/disclosure/redactions",
+    "mcp/rdy_publication_check against/ok/references/dropped_decisions/rows",
     "mcp/rdy_publication_check against/ok/references/links_outside/rows",
     "mcp/rdy_publication_check against/ok/references/rows",
     "mcp/rdy_publication_check against/ok/warnings",
+    "mcp/rdy_publication_check first/ok/included/rows[]/decision_titles",
+    "mcp/rdy_publication_check first/ok/included/rows[]/outline",
+    "mcp/rdy_publication_check first/ok/references/dropped_decisions/rows",
     "mcp/rdy_publication_check first/ok/references/links_outside/rows",
     "mcp/rdy_publication_check first/ok/references/rows",
     "mcp/rdy_publication_check first/ok/warnings",
@@ -9557,7 +9629,7 @@ fn m4bc5_contract_diff_is_only_basis_and_import_additions() {
 }
 
 /// sdl7 (SD1 Task 7; D-RP6SM, D-918YB, D-7K4Z0, D-8T7PA): the members of `sd1-v1.json` that
-/// differ from its predecessor `readme-from-rdy-v1.json`, as `added|changed <path>` in the
+/// differ from its predecessor `disclosure-review-v1.json`, as `added|changed <path>` in the
 /// fixtures' keyed paths (see [`m4a5_keyed`]), each with the reason it moves. Closed: the
 /// registered feature and kind 30 (store), the feature-gated frame kind and the new dump members
 /// (dump), the sync kind and the new stream members (sync). The upgrade, compact, redaction,
@@ -9626,9 +9698,11 @@ const SDL7_CHANGES: &[(&str, &str)] = &[
     ("changed /sync/sync_kinds", "SYNC_KINDS gains kind 30"),
 ];
 
-/// The SHA-256 of the predecessor `readme-from-rdy-v1.json`, which this successor copies first.
+/// The SHA-256 of the predecessor `disclosure-review-v1.json`, which this successor copies first.
+/// The disclosure review plan merged first, so it re-anchors SD1 (`readme-from-rdy-v1.json` >
+/// `disclosure-review-v1.json` > `sd1-v1.json`).
 const SDL7_PREDECESSOR_SHA: &str =
-    "883debf0ad6ba99e983662a92ddb8c7f044306cea027ca835994b39b5187dc16";
+    "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139";
 
 /// sdl7: `sd1-v1.json` is the byte-copied predecessor with the snapshot-delta surfaces added and
 /// nothing else changed. Every changed member is in [`SDL7_CHANGES`] with its reason; the
@@ -9638,7 +9712,7 @@ const SDL7_PREDECESSOR_SHA: &str =
 /// prerequisite; and the compact report names kind 30.
 #[test]
 fn sdl7_contract_changes_only_delta_surfaces() {
-    let (old_bytes, old) = m4a5_fixture("readme-from-rdy-v1.json");
+    let (old_bytes, old) = m4a5_fixture("disclosure-review-v1.json");
     let (_, new) = m4a5_fixture("sd1-v1.json");
     let sha = |bytes: &[u8]| -> String {
         Sha256::digest(bytes)
@@ -9649,7 +9723,7 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     assert_eq!(
         sha(&old_bytes),
         SDL7_PREDECESSOR_SHA,
-        "readme-from-rdy-v1.json is frozen"
+        "disclosure-review-v1.json is frozen"
     );
     let mut found = vec![];
     m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);

@@ -1298,7 +1298,12 @@ fn spv10_cli_check_reviews_without_widening_output() {
         t.starts_with("Publication profile preview: blocked.\n"),
         "{t}"
     );
-    assert_eq!(t.lines().count(), 4, "{t}");
+    // the four report lines, then the first check's included line (D-MCH70)
+    assert_eq!(t.lines().count(), 5, "{t}");
+    assert_eq!(
+        t.lines().nth(4),
+        Some("Included: 2 docs, 1 folder, 0 sections, 2 blocks, 0 decisions, 0 figures.")
+    );
     let (ok, v) = s.json(&[
         "--json",
         "publication",

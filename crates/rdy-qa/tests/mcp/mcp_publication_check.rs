@@ -6,7 +6,11 @@ use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
-const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
+const DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication. The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs.";
+
+/// The tool's words before the review (pub9), and the words D-MCH70 adds to them (drv6).
+const PUB9_DESCRIPTION: &str = "Check a publication profile's selected docs and references. Scope may be canon, a tag, a landing, a view or a proposal. Pass implicit:org for every doc. Against accepts canon, a tag or a landing with the same profile id and audience. Release is the candidate's product version: it checks shown content and decisions that ship in a later version, and against never supplies it. Inspect the aggregate status and relay warnings to the person. A blocked result is a successful read and authorizes nothing. This check does not authorize publication or find the last publication.";
+const REVIEW_WORDS: &str = "The review names docs and decisions by title, counts the changes a reader sees and gives short excerpts. A first check lists the included docs.";
 
 /// A public profile `open` that refers outside its selection, an org profile `site` over the same
 /// doc, and a tag `v1.0.0`.
@@ -221,6 +225,11 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
     all_keys(&v, &mut keys);
     for k in &keys {
         for word in ["receipt", "approv", "authoriz", "publish", "record", "card"] {
+            // the review's `record_only` (D-BND1J) and its total `docs_record_only` (D-RDH1C) are
+            // the only keys a word may stand in
+            if word == "record" && (k == "record_only" || k == "docs_record_only") {
+                continue;
+            }
             assert!(!k.contains(word), "{k} in {v}");
         }
     }
@@ -351,4 +360,35 @@ fn relc4_the_tool_reports_hidden_planned_blocks_to_every_role() {
         );
         assert_eq!(r.code(), Some("E_BAD_INPUT"), "{role}: {r:?}");
     }
+}
+
+/// drv6 (D-MCH70): the tool's description adds the review's words to the old ones, exactly, and
+/// its input schema stays `profile`, `scope`, `against` and `release`.
+#[test]
+fn drv6_tool_description_names_the_readable_review() {
+    assert_eq!(DESCRIPTION, format!("{PUB9_DESCRIPTION} {REVIEW_WORDS}"));
+    let d = tempfile::tempdir().unwrap();
+    drop(Rdy::init(d.path(), "rdy-standard").unwrap());
+    let mut c = McpClient::start(d.path());
+    let tools = c.tools();
+    let t = tools
+        .iter()
+        .find(|t| t["name"] == "rdy_publication_check")
+        .expect("the tool is listed");
+    assert_eq!(t["description"], DESCRIPTION);
+    assert!(
+        t["description"]
+            .as_str()
+            .is_some_and(|s| s.ends_with(REVIEW_WORDS)),
+        "{t}"
+    );
+    let mut props: Vec<&str> = t["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    props.sort();
+    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 }

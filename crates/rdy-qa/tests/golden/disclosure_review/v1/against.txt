@@ -1,0 +1,11 @@
+Publication profile review: warning.
+22 blocks in 2 docs and 1 folders.
+References outside selection: 2.
+Links outside selection: 1.
+Hidden as planned: 2 blocks in 2 docs.
+Profile revision changed: no.
+Disclosure changes: 1 added docs, 1 removed docs, 1 changed docs, 1 changed folders, 2 changed blocks outside docs, 4 attachment changes, 1 new references.
+Newly hidden as planned: 1 blocks in 1 docs.
+Edited Intro (blocks: 2 added, 1 removed, 2 updated, 0 moved)
+New Setup (4 blocks)
+Removed Old (1 block)

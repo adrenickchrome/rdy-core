@@ -4,6 +4,7 @@
 pub mod chain_fixture;
 pub mod check_fixture;
 pub mod daemon;
+pub mod disclosure_review;
 pub mod edit_loop;
 pub mod every_kind;
 pub mod fixtures;

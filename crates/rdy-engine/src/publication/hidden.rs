@@ -87,6 +87,30 @@ impl HiddenPlanned {
 
     /// Every doc with a hidden block or hidden itself.
     pub fn full(&self) -> HiddenList {
+        self.list(self.full_counts())
+    }
+
+    /// Every row of [`HiddenPlanned::full`], with no row cut: the complete facts an outer list
+    /// that keeps every row reads.
+    pub fn full_rows(&self) -> Vec<HiddenRow> {
+        self.rows(self.full_counts(), usize::MAX)
+    }
+
+    /// What this resolution hides that `before` did not, by id: a version change to a block
+    /// hidden on both sides is no change. A doc hidden here and not there is listed even with no
+    /// new hidden block under it, and its `doc_hidden` is true. A block counts under its doc in
+    /// this resolution.
+    pub fn newly(&self, before: &HiddenPlanned) -> HiddenList {
+        self.list(self.newly_counts(before))
+    }
+
+    /// Every row of [`HiddenPlanned::newly`], with no row cut.
+    pub fn newly_rows(&self, before: &HiddenPlanned) -> Vec<HiddenRow> {
+        self.rows(self.newly_counts(before), usize::MAX)
+    }
+
+    /// Each doc of [`HiddenPlanned::full`] with its hidden block count and whether it is hidden.
+    fn full_counts(&self) -> BTreeMap<&BlockId, (u64, bool)> {
         let mut counts: BTreeMap<&BlockId, (u64, bool)> = BTreeMap::new();
         for doc in self.owner.values() {
             counts.entry(doc).or_default().0 += 1;
@@ -96,14 +120,12 @@ impl HiddenPlanned {
                 counts.entry(id).or_default().1 = true;
             }
         }
-        self.list(counts)
+        counts
     }
 
-    /// What this resolution hides that `before` did not, by id: a version change to a block
-    /// hidden on both sides is no change. A doc hidden here and not there is listed even with no
-    /// new hidden block under it, and its `doc_hidden` is true. A block counts under its doc in
-    /// this resolution.
-    pub fn newly(&self, before: &HiddenPlanned) -> HiddenList {
+    /// Each doc of [`HiddenPlanned::newly`] with its new hidden block count and whether it is
+    /// newly hidden.
+    fn newly_counts(&self, before: &HiddenPlanned) -> BTreeMap<&BlockId, (u64, bool)> {
         let mut counts: BTreeMap<&BlockId, (u64, bool)> = BTreeMap::new();
         for (id, doc) in &self.owner {
             if !before.ids.contains(id) {
@@ -115,15 +137,26 @@ impl HiddenPlanned {
                 counts.entry(id).or_default().1 = true;
             }
         }
-        self.list(counts)
+        counts
     }
 
     fn list(&self, counts: BTreeMap<&BlockId, (u64, bool)>) -> HiddenList {
         let total = counts.len();
         let blocks = counts.values().map(|(n, _)| *n).sum();
-        let rows = counts
+        let rows = self.rows(counts, REPORT_ROWS);
+        HiddenList {
+            docs: total as u64,
+            blocks,
+            omitted_rows: (total - rows.len()) as u64,
+            rows,
+        }
+    }
+
+    /// The rows of the first `max` docs of `counts`, by doc id.
+    fn rows(&self, counts: BTreeMap<&BlockId, (u64, bool)>, max: usize) -> Vec<HiddenRow> {
+        counts
             .into_iter()
-            .take(REPORT_ROWS)
+            .take(max)
             .filter_map(|(id, (hidden_blocks, doc_hidden))| {
                 let d = self.docs.get(id)?;
                 Some(HiddenRow {
@@ -134,13 +167,7 @@ impl HiddenPlanned {
                     doc_hidden,
                 })
             })
-            .collect::<Vec<_>>();
-        HiddenList {
-            docs: total as u64,
-            blocks,
-            omitted_rows: (total - rows.len()) as u64,
-            rows,
-        }
+            .collect()
     }
 }
 

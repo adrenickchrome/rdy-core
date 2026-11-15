@@ -1,0 +1,567 @@
+{
+  "against": {
+    "kind": "landing",
+    "landing": "67c5e9f52193175f1f01d98daf517c9eef9c424b8a0e78257cbce98b28c1ca18"
+  },
+  "disclosure": {
+    "added_attachments": [
+      {
+        "available": true,
+        "blob": "40b22831bd4b63eaba43b075db9008256ec641f2edf6a732fab3a0a19c30f317",
+        "block": "fg-CQ8YW",
+        "home_doc": "d-PBTCC",
+        "home_doc_title": "Setup",
+        "label": "Figure N"
+      },
+      {
+        "available": true,
+        "blob": "c8231e5c4a651d6ed417313856c9a9d14ae8f557d61abd0731e5bcf876733f8f",
+        "block": "fg-CQ8YW",
+        "home_doc": "d-PBTCC",
+        "home_doc_title": "Setup",
+        "label": "Figure N",
+        "variant": "dark"
+      }
+    ],
+    "added_docs": [
+      {
+        "decision_titles": [
+          "Pin versions"
+        ],
+        "digest": "5124e7e6fc0266f75f621a815bedc63555cc9d69c75f8dab2b7f9fc79678d75b",
+        "figures": [
+          {
+            "label": "Figure N"
+          },
+          {
+            "label": "Figure N",
+            "variant": "dark"
+          }
+        ],
+        "folder": "User guides",
+        "id": "d-PBTCC",
+        "lede": "Install with `cargo`.",
+        "omitted_decision_titles": 0,
+        "omitted_figures": 0,
+        "omitted_outline": 0,
+        "outline": [
+          "Install"
+        ],
+        "page": "guides/setup.html",
+        "path": "guides/setup",
+        "redacted": false,
+        "size": {
+          "blocks": 4,
+          "decisions": 1,
+          "figures": 2,
+          "sections": 1
+        },
+        "title": "Setup"
+      }
+    ],
+    "after_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
+    "after_selection_hash": "9ddaa68aac661e51849ec207ca9f9155a4d53581e06881afde35701cc6837aa3",
+    "after_selection_identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
+    "audience": "org",
+    "before_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
+    "before_selection_hash": "6d8d897a07b3a7d81c0022d87ce2c37436a0a00e42e0d5b801e7e170072f8ec4",
+    "before_selection_identity": "ce742884c785caf0efb9f8df593b4b295a980f4cd18df8602c1be2db649e0803",
+    "changed_attachments": [
+      {
+        "after_available": true,
+        "after_blob": "039f425867a351b83e454e4c77d5cd866771d370f3d71b863842b1efb95a6b39",
+        "after_home_doc": "d-EDWWE",
+        "after_home_doc_title": "Intro",
+        "before_available": true,
+        "before_blob": "54d59969154eabe23fb95dccb6536461c8097886c2fa9aca81c2b6c3de269243",
+        "before_home_doc": "d-EDWWE",
+        "before_home_doc_title": "Intro",
+        "block": "fg-6FQ2R",
+        "label": "Figure C"
+      }
+    ],
+    "changed_docs": [
+      {
+        "after_digest": "6340ca13fa4b326e94c7679016254cc5d67c8486377aff04fbb091de319b25fc",
+        "after_path": "intro",
+        "before_digest": "dc08758c0f5d06167e33221781339cc54af7d43eac966480c3c1f19b216981a8",
+        "before_page": "intro.html",
+        "before_path": "intro",
+        "before_title": null,
+        "changes": [
+          {
+            "block_type": "prose",
+            "change": "updated",
+            "diff": [
+              {
+                "op": "same",
+                "text": "Run `rdy`"
+              },
+              {
+                "op": "add",
+                "text": "` init`"
+              },
+              {
+                "op": "same",
+                "text": " first"
+              }
+            ],
+            "excerpt": "Run `rdy init` first, then read the guide.",
+            "id": "p-7YA08",
+            "label": "Run `rdy init` first, then read the guide.",
+            "redacted": false,
+            "section": "Start",
+            "what": [
+              "text"
+            ]
+          },
+          {
+            "block_type": "claim",
+            "change": "added",
+            "diff": null,
+            "excerpt": "The root claim.",
+            "id": "c-SQ780",
+            "label": "The root claim.",
+            "redacted": false,
+            "section": "Start",
+            "what": []
+          },
+          {
+            "block_type": "claim",
+            "change": "added",
+            "diff": null,
+            "excerpt": "A claim to remove.",
+            "id": "c-G7F9P",
+            "label": "A claim to remove.",
+            "redacted": false,
+            "section": "Start",
+            "what": []
+          },
+          {
+            "block_type": "figure",
+            "change": "removed",
+            "diff": null,
+            "excerpt": "Figure R",
+            "id": "fg-ZCCNV",
+            "label": "Figure R",
+            "redacted": false,
+            "section": null,
+            "what": []
+          },
+          {
+            "block_type": "figure",
+            "change": "updated",
+            "diff": null,
+            "excerpt": "Figure C",
+            "id": "fg-6FQ2R",
+            "label": "Figure C",
+            "redacted": false,
+            "section": null,
+            "what": [
+              "field:blob"
+            ]
+          }
+        ],
+        "counts": {
+          "added": 2,
+          "decisions_added": 2,
+          "decisions_removed": 0,
+          "decisions_updated": 1,
+          "figures_added": 0,
+          "figures_changed": 1,
+          "figures_removed": 1,
+          "moved": 0,
+          "removed": 1,
+          "sections_added": 0,
+          "sections_removed": 0,
+          "updated": 2
+        },
+        "decisions": [
+          {
+            "change": "updated",
+            "excerpt": "Keep rows in order.",
+            "id": "D-V726J",
+            "status_from": "live",
+            "status_to": "superseded",
+            "title": "Keep rows",
+            "what": [
+              "status"
+            ]
+          },
+          {
+            "change": "added",
+            "excerpt": "Keep rows in id order.",
+            "id": "D-BMHX1",
+            "status_from": null,
+            "status_to": "live",
+            "title": "Keep rows by id",
+            "what": []
+          },
+          {
+            "change": "added",
+            "excerpt": "Name each page.",
+            "id": "D-X2XSR",
+            "status_from": null,
+            "status_to": "live",
+            "title": "Name pages",
+            "what": []
+          }
+        ],
+        "id": "d-EDWWE",
+        "omitted_changes": 0,
+        "omitted_decisions": 0,
+        "page": "intro.html",
+        "record_only": false,
+        "redacted": false,
+        "title": "Intro"
+      }
+    ],
+    "changed_folders": [
+      {
+        "after_path": "guides",
+        "after_version": "e2b83c9f8f9bcd6d1700e1a558f98ff3fd55308f4fa38ea4284e52a69ce635aa",
+        "before_path": "guides",
+        "before_title": "Guides",
+        "before_version": "0891b17c551598330f72f8d6b3a728d1a8a35c0cd601636bbd33473ddb88ed95",
+        "id": "fd-MJE28",
+        "redacted": false,
+        "title": "User guides"
+      }
+    ],
+    "changed_outside_docs": [
+      {
+        "after_version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd",
+        "before_version": null,
+        "block_type": "decision",
+        "change": "added",
+        "excerpt": "A ruling at the root.",
+        "id": "D-ENGKQ",
+        "label": "Root ruling",
+        "record_only": false,
+        "redacted": false,
+        "status_from": null,
+        "status_to": "live",
+        "title": "Root ruling",
+        "what": []
+      },
+      {
+        "after_version": "9f4fed1ab150758c26fb919ebaa3a44475a9fbf22f1ba328c00ef6c247f31396",
+        "before_version": "8e6e2156a16fc274132f8c7949999bc581c767da8e3a8820247c206004953518",
+        "block_type": "question",
+        "change": "updated",
+        "id": "Q-R59GS",
+        "label": "Which guide comes first?",
+        "record_only": false,
+        "redacted": false,
+        "what": [
+          "text"
+        ]
+      }
+    ],
+    "new_reference_count": 1,
+    "new_references": [
+      {
+        "classification": "excluded",
+        "location": "body",
+        "occurrences": 1,
+        "source": "p-FC2N0",
+        "source_doc_title": "Setup",
+        "source_label": "Also see Notes.",
+        "target": "d-4K5SS",
+        "target_label": "Notes"
+      }
+    ],
+    "newly_hidden_planned": {
+      "blocks": 1,
+      "docs": 1,
+      "omitted_rows": 0,
+      "rows": [
+        {
+          "doc": "d-PBTCC",
+          "doc_hidden": false,
+          "hidden_blocks": 1,
+          "redacted": false,
+          "title": "Setup"
+        }
+      ]
+    },
+    "omitted": {
+      "added_attachments": 0,
+      "added_docs": 0,
+      "changed_attachments": 0,
+      "changed_docs": 0,
+      "changed_folders": 0,
+      "changed_outside_docs": 0,
+      "new_references": 0,
+      "redactions": 0,
+      "removed_attachments": 0,
+      "removed_docs": 0
+    },
+    "profile_changed": false,
+    "profile_id": "pf-GC0XG",
+    "redactions": [],
+    "removed_attachments": [
+      {
+        "available": true,
+        "blob": "2fbe4022560397f3ebd8359f330e326ac293f3f6c03db63f7356f94ce89f81bc",
+        "block": "fg-ZCCNV",
+        "home_doc": "d-EDWWE",
+        "home_doc_title": "Intro",
+        "label": "Figure R"
+      }
+    ],
+    "removed_docs": [
+      {
+        "before_page": "guides/old.html",
+        "digest": "38c3221512ffeb8e400a30869d40656061a20e082199cfb60ce5f70f51d8ce71",
+        "id": "d-5BT1C",
+        "path": "guides/old",
+        "redacted": false,
+        "size": {
+          "blocks": 1,
+          "decisions": 0,
+          "figures": 0,
+          "sections": 0
+        },
+        "title": "Old"
+      }
+    ],
+    "totals": {
+      "blocks_added": 7,
+      "blocks_moved": 0,
+      "blocks_removed": 3,
+      "blocks_updated": 4,
+      "decisions_added": 4,
+      "decisions_removed": 0,
+      "decisions_updated": 1,
+      "docs_added": 1,
+      "docs_changed": 1,
+      "docs_record_only": 0,
+      "docs_removed": 1,
+      "figures_added": 2,
+      "figures_changed": 1,
+      "figures_removed": 1,
+      "new_references": 1,
+      "sections_added": 1,
+      "sections_removed": 0
+    }
+  },
+  "hidden_planned": {
+    "blocks": 2,
+    "docs": 2,
+    "omitted_rows": 0,
+    "rows": [
+      {
+        "doc": "d-EDWWE",
+        "doc_hidden": false,
+        "hidden_blocks": 1,
+        "redacted": false,
+        "title": "Intro"
+      },
+      {
+        "doc": "d-PBTCC",
+        "doc_hidden": false,
+        "hidden_blocks": 1,
+        "redacted": false,
+        "title": "Setup"
+      }
+    ]
+  },
+  "included": null,
+  "profile": {
+    "audience": "org",
+    "id": "pf-GC0XG",
+    "key": "review",
+    "title": "Review",
+    "trail": true,
+    "version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22"
+  },
+  "references": {
+    "dropped_decisions": {
+      "omitted_rows": 0,
+      "rows": [
+        {
+          "id": "D-NM6P2",
+          "title": "Outside ruling"
+        }
+      ]
+    },
+    "excluded": 2,
+    "links_outside": {
+      "count": 1,
+      "omitted_rows": 0,
+      "rows": [
+        {
+          "classification": "excluded",
+          "location": "/links/decided_by/0",
+          "occurrences": 1,
+          "source": "c-T5C82",
+          "source_doc_title": "Intro",
+          "source_label": "The outside claim.",
+          "target": "D-NM6P2",
+          "target_label": "Outside ruling"
+        }
+      ]
+    },
+    "missing": 0,
+    "omitted_rows": 0,
+    "rows": [
+      {
+        "classification": "excluded",
+        "location": "body",
+        "occurrences": 1,
+        "source": "p-4357S",
+        "source_doc_title": "Intro",
+        "source_label": "See Notes.",
+        "target": "d-4K5SS",
+        "target_label": "Notes"
+      },
+      {
+        "classification": "excluded",
+        "location": "body",
+        "occurrences": 1,
+        "source": "p-FC2N0",
+        "source_doc_title": "Setup",
+        "source_label": "Also see Notes.",
+        "target": "d-4K5SS",
+        "target_label": "Notes"
+      }
+    ],
+    "status": "warning",
+    "total": 2
+  },
+  "release": null,
+  "scope": {
+    "kind": "landing",
+    "landing": "d422768a97ba8341aaad3fccf158c34692b5be2535dc3070a9aca374ea4b8eb6"
+  },
+  "selection": {
+    "attachments": 4,
+    "blocks": 22,
+    "docs": 2,
+    "entries": [
+      {
+        "id": "D-BMHX1",
+        "redaction": null,
+        "version": "970cddfeb51f3e13cdc08f283e63ea577fc0d51fec6f705fdc7b3fb36b840ec7"
+      },
+      {
+        "id": "D-ENGKQ",
+        "redaction": null,
+        "version": "8a128e712a803baadb4750c29c83ac480c3cdb5624af94e0c4d5bedac21173fd"
+      },
+      {
+        "id": "D-V726J",
+        "redaction": null,
+        "version": "021bd77a5f9b8aa8191102aa95b11142a1d5857ac8f7856f2c13ef4bbea47ce9"
+      },
+      {
+        "id": "D-X2XSR",
+        "redaction": null,
+        "version": "406bf0cae785485b5f30d40bf77a31915d2e16919ce7f8ef6fc0440421b8b2af"
+      },
+      {
+        "id": "D-YABJ2",
+        "redaction": null,
+        "version": "01d79c5681a2127001fbd28a6a9f01b378af80a0d31f8a8dd101fdd0d8f953b8"
+      },
+      {
+        "id": "Q-R59GS",
+        "redaction": null,
+        "version": "9f4fed1ab150758c26fb919ebaa3a44475a9fbf22f1ba328c00ef6c247f31396"
+      },
+      {
+        "id": "c-G7F9P",
+        "redaction": null,
+        "version": "0ba7d0a57ecf7a7406abcfe7351d5988a8a05939fb1341982875dcdd7f427b1a"
+      },
+      {
+        "id": "c-SQ780",
+        "redaction": null,
+        "version": "e3a75ff85fcdd8a62c50c81aee80d9e3e57531ed60e46a33e2a56998a6904385"
+      },
+      {
+        "id": "c-T5C82",
+        "redaction": null,
+        "version": "93682cb55cb6d23341828f06dc8cb83f34226a1852981d1120bb37693173a55f"
+      },
+      {
+        "id": "d-EDWWE",
+        "redaction": null,
+        "version": "e612d399805ff43ca2887c2bc48e49a8cce0a98cf9febc1d62e8eb8d65e7eb32"
+      },
+      {
+        "id": "d-PBTCC",
+        "redaction": null,
+        "version": "84e049096eacdee06d4ff5475910ea56f6e8347bc30520157486572c72b46cf7"
+      },
+      {
+        "id": "fd-MJE28",
+        "redaction": null,
+        "version": "e2b83c9f8f9bcd6d1700e1a558f98ff3fd55308f4fa38ea4284e52a69ce635aa"
+      },
+      {
+        "id": "fg-6FQ2R",
+        "redaction": null,
+        "version": "8eb673a9f3325fafaf85a0e84775484a8be652d778103f959b71ebd80476efe5"
+      },
+      {
+        "id": "fg-CQ8YW",
+        "redaction": null,
+        "version": "5648dcf57e96e34fa87af1268529305f4052f6ee41f694a5f1ae4f237fb7c867"
+      },
+      {
+        "id": "fg-ZQC2V",
+        "redaction": null,
+        "version": "4b6f44c304321ea052563378368f73730c1d5f69b343fe8122ebda09d13eaf69"
+      },
+      {
+        "id": "p-4357S",
+        "redaction": null,
+        "version": "f58ea49890adc3215c10f0dd3e4aafae590955396f4a3fed31fa39000f0ddbcc"
+      },
+      {
+        "id": "p-7YA08",
+        "redaction": null,
+        "version": "16e2532590ce502d9f5a22396cf795ffabaa81fab95d4dd86a7e844eed8e55f9"
+      },
+      {
+        "id": "p-FC2N0",
+        "redaction": null,
+        "version": "9330219bdd2f35e9cfb6eefd4d2622f0d6c6455f4471d46d9d271e69b1c7d977"
+      },
+      {
+        "id": "p-FXP25",
+        "redaction": null,
+        "version": "467a738ffa1838b555e8d11f75b7f9067cdde2945506d3a2f01763c972b0c765"
+      },
+      {
+        "id": "p-QB8ZC",
+        "redaction": null,
+        "version": "8de62cbaafa5a56c0eb207794cfa393d81052cd1109cddc636688fd534286ffc"
+      },
+      {
+        "id": "s-5S4PN",
+        "redaction": null,
+        "version": "d98738b706d765df4869dd6f93cc97c8de672c32252677026c5b16431c53345b"
+      },
+      {
+        "id": "s-RWFT6",
+        "redaction": null,
+        "version": "839d9f91e9bf6ab63a292383ac39d80d05cd13aa6c9b1d8659a045e7763f0eea"
+      }
+    ],
+    "folders": 1,
+    "hash": "9ddaa68aac661e51849ec207ca9f9155a4d53581e06881afde35701cc6837aa3",
+    "identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
+    "omitted_entries": 0
+  },
+  "status": "warning",
+  "warnings": [
+    {
+      "code": "W_PUBLICATION_REFERENCE",
+      "fix": "Review these references before you share the output.",
+      "message": "Org profile has 2 references outside its selection."
+    }
+  ]
+}

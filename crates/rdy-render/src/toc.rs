@@ -2,14 +2,15 @@
 //! review render the changes of the page (D-NYCMF).
 use crate::page::Item;
 use crate::review::Mark;
+use rdy_engine::reader::labels;
 use serde::Serialize;
 
 /// A doc with fewer sections than this has no section list.
 const MIN_SECTIONS: usize = 3;
 /// Sections nested deeper than this are in the page but not in the index.
 const MAX_DEPTH: usize = 4;
-/// The most characters of a change's label (O1).
-pub(crate) const LABEL_MAX: usize = 40;
+#[cfg(test)]
+use rdy_engine::reader::labels::LABEL_MAX;
 
 /// The word a section entry or a change of the page index carries (D-NYCMF).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -59,9 +60,9 @@ pub struct TocEntry {
     pub change: Option<Word>,
 }
 
-/// `text` cut as `home::cut_plain(text, LABEL_MAX)` cuts it.
+/// `text` cut to [`labels::LABEL_MAX`] ([`labels::plain_label`]).
 pub(crate) fn change_label(text: &str) -> String {
-    crate::home::cut_plain(text, LABEL_MAX)
+    labels::plain_label(text)
 }
 
 /// A change's label from plain `text` (a heading, a name, the notice), as [`Change::label`]
@@ -71,11 +72,13 @@ pub(crate) fn change_label_html(text: &str) -> String {
 }
 
 /// A change's label from characters with their code spans
-/// ([`crate::site::Site::label_coded`]), as [`Change::label`] holds it: cut to [`LABEL_MAX`] as
-/// the home card's summary is cut, escaped, each code span a `<code>` element
-/// (`home::summary_html`, ruling task-2).
+/// ([`crate::site::Site::label_coded`]), as [`Change::label`] holds it: cut to
+/// [`labels::LABEL_MAX`] as the home card's summary is cut ([`labels::coded_label`]), escaped,
+/// each code span a `<code>` element (`home::summary_html`, ruling task-2).
 pub(crate) fn change_label_coded(chars: &[crate::changes::Ch]) -> String {
-    crate::home::summary_html_of(chars, LABEL_MAX)
+    let mut out = String::new();
+    crate::changes::runs_html(&mut out, &labels::coded_label(chars));
+    out
 }
 
 /// One item of a doc page in page order, as the section words read it.
