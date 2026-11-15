@@ -36,6 +36,7 @@ pub mod seams;
 pub mod signing;
 pub mod site;
 pub mod skip;
+pub mod snapshot_delta_fixture;
 pub mod swarm;
 pub mod tensions;
 pub mod wc;

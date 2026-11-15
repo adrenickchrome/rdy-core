@@ -1,0 +1,394 @@
+{
+  "formats": {
+    "dump_format": 4,
+    "encodings": {
+      "1": 0,
+      "10": 0,
+      "11": 0,
+      "13": 0,
+      "15": 0,
+      "16": 0,
+      "17": 0,
+      "18": 0,
+      "19": 0,
+      "2": 1,
+      "20": 0,
+      "21": 1,
+      "22": 0,
+      "23": 0,
+      "24": 0,
+      "25": 1,
+      "26": 1,
+      "27": 1,
+      "28": 1,
+      "3": 0,
+      "4": 1,
+      "5": 0,
+      "6": 0,
+      "7": 0,
+      "8": 0,
+      "9": 0
+    },
+    "features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "content_hash_v2",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "snapshot_delta",
+          "required_rdy": "0.52.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "stream_format": 2
+  },
+  "published": false,
+  "rdy": "0.51.0",
+  "required_rdy": "0.52.0",
+  "stream": {
+    "header": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "content_hash_v2",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "snapshot_delta",
+            "required_rdy": "0.52.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "prerequisites": [],
+      "purpose": "tag_history",
+      "repo_id": "113a24847e23b6e8ec93a60a23233766",
+      "stream_format": 2,
+      "tag": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e"
+    },
+    "records": [
+      {
+        "form": "present",
+        "hash": "669df1191db5edeb471818ae2782b1ca3071bc4d1d07e7adbed670158a6c91cb",
+        "kind": 1,
+        "len": 63
+      },
+      {
+        "form": "present",
+        "hash": "1208e671cde93a6c450d3c731e356fcae8fb62629b141ea3d6790012eb528a0a",
+        "kind": 1,
+        "len": 68
+      },
+      {
+        "form": "present",
+        "hash": "c412a274c917fc4ef51661f4b776d49e4fbbe20e4bd4fdbc3b1ba55944b79769",
+        "kind": 1,
+        "len": 63
+      },
+      {
+        "form": "present",
+        "hash": "81065ccebb0842ee421ce5f941a4a39166dcac8416f6ca510b71953e58048e5b",
+        "kind": 1,
+        "len": 85
+      },
+      {
+        "form": "present",
+        "hash": "a7d357e889dd42ab4b278b1cba8ccdcaccaf7e252560fee174e3b370a0f26840",
+        "kind": 1,
+        "len": 45
+      },
+      {
+        "form": "present",
+        "hash": "5477d5801a9e58dddd64b7c91401f538123c3cfc9705661b47eaec96c00eba3a",
+        "kind": 2,
+        "len": 232
+      },
+      {
+        "form": "present",
+        "hash": "2364b5f27d70beabba9d3fcd12069b56db9b75ab9b0f0d5f9633b72bec0f49ba",
+        "kind": 2,
+        "len": 233
+      },
+      {
+        "form": "present",
+        "hash": "f8fb906f33fdbc2f786afdb35f8b31b461800d16639f45c0c91f686200e0d121",
+        "kind": 2,
+        "len": 109
+      },
+      {
+        "form": "present",
+        "hash": "2b8d096501b7953c65f784789bb06524c97416162936734239653f878428d919",
+        "kind": 3,
+        "len": 78
+      },
+      {
+        "form": "present",
+        "hash": "b6c63d34c27cbedd1dd2723e4cded7ea90ca7bd4ad8eb125984b40f433ee8c6c",
+        "kind": 25,
+        "len": 1128
+      },
+      {
+        "form": "present",
+        "hash": "b4bae5c5ee47133d618c8580fda90190356ecb7675c7ee1c804866dceaacef72",
+        "kind": 4,
+        "len": 195
+      },
+      {
+        "form": "present",
+        "hash": "57d96dc9f7f3ee9a78ed6eb7e08f83a3e1cd6ff7426d7cddf1866ffb5eb33f8c",
+        "kind": 3,
+        "len": 110
+      },
+      {
+        "form": "present",
+        "hash": "568cd493b4ca19b4fdfebf0655e9485482f52428e811c93f8ddf21e16afbef10",
+        "kind": 25,
+        "len": 1290
+      },
+      {
+        "form": "present",
+        "hash": "76f0ff4dd58b07df7035d04eff1f7b5cab1634df09ad05bc3ab7b57c3f2ce496",
+        "kind": 4,
+        "len": 227
+      },
+      {
+        "form": "present",
+        "hash": "fb7e8b835228772431ea6bf35f37c11cf4b53dba3d84b2b06f735e337c9e400e",
+        "kind": 3,
+        "len": 110
+      },
+      {
+        "form": "present",
+        "hash": "1f1dc12188ab62764a130b50310317e644e0829db65bbcbb0631b712b01b67c6",
+        "kind": 25,
+        "len": 955
+      },
+      {
+        "form": "present",
+        "hash": "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce",
+        "kind": 4,
+        "len": 227
+      },
+      {
+        "form": "present",
+        "hash": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e",
+        "kind": 9,
+        "len": 61
+      },
+      {
+        "form": "present",
+        "hash": "d7ff1b15eba55f7bc22e7a638778be6c4d4fce08a5272fa79a6432879ea842a2",
+        "kind": 24,
+        "len": 62
+      },
+      {
+        "form": "present",
+        "hash": "c3cd02437a0580367fe8292db73aaa448253f5f731871f9189837d85be4e897a",
+        "kind": 24,
+        "len": 252
+      },
+      {
+        "form": "present",
+        "hash": "0ba1f96ad77bc7c693e39d9991f288769ccc8b806f89aade08bfd3125ce94911",
+        "kind": 30,
+        "len": 189
+      },
+      {
+        "form": "present",
+        "hash": "142d992aafb60f7af715fd0ba974a8fe008a7e482a39b4460bf1c18450488742",
+        "kind": 30,
+        "len": 181
+      },
+      {
+        "form": "present",
+        "hash": "95e715dd7b4148f06bd0156f13d3fe9804a9dc38c7578e5c9e14bbddce4e5b4c",
+        "kind": 30,
+        "len": 109
+      }
+    ],
+    "totals": {
+      "bytes": 7354,
+      "digest": "05617df5564f3ba0022c1f07b18ed867948b07210bb089f5b93bea1458a76c2c",
+      "records": 23
+    }
+  },
+  "tag": "v2.0.0",
+  "taken": {
+    "canon": null,
+    "frames_written": 25,
+    "landing": "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce",
+    "records_taken": 23,
+    "store": {
+      "batches": 2,
+      "frames": 28,
+      "fsck": {
+        "alt_sets": 0,
+        "frames": 28,
+        "intents": 0,
+        "landed_changes": 3,
+        "landings": 3,
+        "reviews": 0,
+        "transitions": 0,
+        "versions": 1,
+        "views": 0
+      },
+      "landings": [],
+      "log_end": [
+        0,
+        7987
+      ],
+      "manifest": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "content_hash_v2",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "snapshot_delta",
+            "required_rdy": "0.52.0"
+          }
+        ],
+        "manifest_version": 1
+      },
+      "object_keys": [
+        "130:2364b5f27d70beabba9d3fcd12069b56db9b75ab9b0f0d5f9633b72bec0f49ba",
+        "130:5477d5801a9e58dddd64b7c91401f538123c3cfc9705661b47eaec96c00eba3a",
+        "130:f8fb906f33fdbc2f786afdb35f8b31b461800d16639f45c0c91f686200e0d121",
+        "132:76f0ff4dd58b07df7035d04eff1f7b5cab1634df09ad05bc3ab7b57c3f2ce496",
+        "132:a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce",
+        "132:b4bae5c5ee47133d618c8580fda90190356ecb7675c7ee1c804866dceaacef72",
+        "153:1f1dc12188ab62764a130b50310317e644e0829db65bbcbb0631b712b01b67c6",
+        "153:568cd493b4ca19b4fdfebf0655e9485482f52428e811c93f8ddf21e16afbef10",
+        "153:b6c63d34c27cbedd1dd2723e4cded7ea90ca7bd4ad8eb125984b40f433ee8c6c",
+        "158:0ba1f96ad77bc7c693e39d9991f288769ccc8b806f89aade08bfd3125ce94911",
+        "158:142d992aafb60f7af715fd0ba974a8fe008a7e482a39b4460bf1c18450488742",
+        "158:95e715dd7b4148f06bd0156f13d3fe9804a9dc38c7578e5c9e14bbddce4e5b4c",
+        "1:1208e671cde93a6c450d3c731e356fcae8fb62629b141ea3d6790012eb528a0a",
+        "1:669df1191db5edeb471818ae2782b1ca3071bc4d1d07e7adbed670158a6c91cb",
+        "1:81065ccebb0842ee421ce5f941a4a39166dcac8416f6ca510b71953e58048e5b",
+        "1:a7d357e889dd42ab4b278b1cba8ccdcaccaf7e252560fee174e3b370a0f26840",
+        "1:c412a274c917fc4ef51661f4b776d49e4fbbe20e4bd4fdbc3b1ba55944b79769",
+        "24:c3cd02437a0580367fe8292db73aaa448253f5f731871f9189837d85be4e897a",
+        "24:d7ff1b15eba55f7bc22e7a638778be6c4d4fce08a5272fa79a6432879ea842a2",
+        "3:2b8d096501b7953c65f784789bb06524c97416162936734239653f878428d919",
+        "3:57d96dc9f7f3ee9a78ed6eb7e08f83a3e1cd6ff7426d7cddf1866ffb5eb33f8c",
+        "3:fb7e8b835228772431ea6bf35f37c11cf4b53dba3d84b2b06f735e337c9e400e",
+        "8:0f1439a0010b459e1aaa87101cac8a363bbaa963dbbcd11ab009f8dc45208599",
+        "8:2103a7231be682e22916d5b3a931f57cb8258daa0429403f07a259d23203ddc3",
+        "8:5461b4ac6c12edc02a010c28cc716de6ea94957738b09f6fa02f61ca53999cbc",
+        "8:9f70b1657c4aec46ad5124620ed4f2b6892d10c980b2cf31d465849aa504e247",
+        "8:d485fddb4f6796c415366a1ea7e0424597ca9eaa38e58755b035def24f4ae5fb",
+        "9:bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e"
+      ],
+      "objects": {
+        "1": 5,
+        "130": 3,
+        "132": 3,
+        "153": 3,
+        "158": 3,
+        "24": 2,
+        "3": 3,
+        "8": 5,
+        "9": 1
+      },
+      "raw_encodings": {
+        "1": {
+          "0": 5
+        },
+        "2": {
+          "1": 3
+        },
+        "24": {
+          "0": 2
+        },
+        "25": {
+          "1": 3
+        },
+        "3": {
+          "0": 3
+        },
+        "30": {
+          "1": 3
+        },
+        "4": {
+          "1": 3
+        },
+        "8": {
+          "0": 5
+        },
+        "9": {
+          "0": 1
+        }
+      },
+      "redacted": {},
+      "refs": {
+        "meta/repo_id": "113a24847e23b6e8ec93a60a23233766",
+        "meta/store_features": "7b226d616e69666573745f76657273696f6e223a312c226665617475726573223a5b7b226e616d65223a226173736573736d656e74222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a22636f6e74656e745f686173685f7632222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a226f626a6563745f656e636f64696e67222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a22736e617073686f745f64656c7461222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e35322e30227d5d7d",
+        "meta/store_mode": "686f6c646572",
+        "tag/v2.0.0": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e"
+      },
+      "signatures": {},
+      "tags": {
+        "v2.0.0": {
+          "landing": "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce",
+          "tag": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e"
+        }
+      }
+    },
+    "tag": "v2.0.0",
+    "tag_hash": "bddc5f2dbdc5b72914d5c499e0be184c8bb6351c4fb11d9b24229bb01682ee4e",
+    "unchanged": false
+  },
+  "world": {
+    "deltas": {
+      "76f0ff4dd58b07df7035d04eff1f7b5cab1634df09ad05bc3ab7b57c3f2ce496": "142d992aafb60f7af715fd0ba974a8fe008a7e482a39b4460bf1c18450488742",
+      "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce": "95e715dd7b4148f06bd0156f13d3fe9804a9dc38c7578e5c9e14bbddce4e5b4c",
+      "b4bae5c5ee47133d618c8580fda90190356ecb7675c7ee1c804866dceaacef72": "0ba1f96ad77bc7c693e39d9991f288769ccc8b806f89aade08bfd3125ce94911"
+    },
+    "doc": "d-0GCWT",
+    "gone": "p-3G6RH",
+    "kept": "p-JQWYE",
+    "landings": [
+      "b4bae5c5ee47133d618c8580fda90190356ecb7675c7ee1c804866dceaacef72",
+      "76f0ff4dd58b07df7035d04eff1f7b5cab1634df09ad05bc3ab7b57c3f2ce496",
+      "a3acc6c2340d21a6ffb5ba59581999f2eed42b7d49d25a68e78c67d793d186ce"
+    ],
+    "tags": [
+      "v1.0.0",
+      "v2.0.0"
+    ]
+  }
+}

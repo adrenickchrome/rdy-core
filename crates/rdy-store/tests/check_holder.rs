@@ -120,7 +120,8 @@ fn land_state(
     };
     let mut rec = rec;
     edit(&mut rec);
-    s.put(kinds::LANDING, &rec).unwrap()
+    // a structurally valid landing: its snapshot delta in the same batch (SD1 Task 6)
+    s.put_landing_for_tests(&rec).unwrap()
 }
 
 /// Writes the tag `name` on `landing` and its `tag/<name>` ref. Returns the tag's hash.
@@ -701,13 +702,12 @@ fn ha7_check_holder_refuses_a_snapshot_version_of_another_block() {
     };
     let l2 = land_state(&mut s, Some(l1), &state, &[], "second", |_| {});
     tag(&mut s, "v2.0.0", l2);
-    let snap = s.landing(&l2).unwrap().state;
+    // SD1 Task 6: a delta holder's state is its landing's snapshot delta, which the check
+    // names
+    let snap = s.reader().snapshot_delta_of(&l2).unwrap().unwrap().0;
     assert_eq!(
         decode_text(s.check_holder()),
-        format!(
-            "snapshot {snap}: block {other} names version {v}, which is a version of {}",
-            b.id
-        )
+        format!("snapshot delta {snap}: block {other} names version {v} of another block")
     );
     // the same, where the walk reads the version before the snapshot that misnames it
     let (_d, mut s) = holder();
@@ -718,13 +718,10 @@ fn ha7_check_holder_refuses_a_snapshot_version_of_another_block() {
     let l1 = land_state(&mut s, None, &bad, &[], "first", |_| {});
     let l2 = land(&mut s, Some(l1), &[&b], &[], "second");
     tag(&mut s, "v1.0.0", l2);
-    let snap = s.landing(&l1).unwrap().state;
+    let snap = s.reader().snapshot_delta_of(&l1).unwrap().unwrap().0;
     assert_eq!(
         decode_text(s.check_holder()),
-        format!(
-            "snapshot {snap}: block {other} names version {v}, which is a version of {}",
-            b.id
-        )
+        format!("snapshot delta {snap}: block {other} names version {v} of another block")
     );
 }
 

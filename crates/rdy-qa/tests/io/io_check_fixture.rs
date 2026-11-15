@@ -329,7 +329,25 @@ fn ck_sync_batch_take_matches_expect() {
     assert!(store_holds(&h, kinds::REVIEW, &rec.review));
     assert!(!store_holds(&h, kinds::ANSWER, &rec.answer));
     h.close().unwrap();
-    assert_eq!(taken, expect["taken"]);
+    // the new holder lists snapshot_delta from its first batch, so the take adds a delta of each
+    // landing (SD1 Task 6): less those, and the manifest moves that name the feature, the take
+    // is the frozen one
+    let (taken, deltas) = crate::io_feature_fixture::taken_without_deltas(&taken);
+    assert!(deltas > 0);
+    let manifest = |v: &Value| {
+        let mut v = v.clone();
+        v["holder"]["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove(rdy_store::format::REF_STORE_FEATURES);
+        let prefix = format!("{}:", kinds::REF_UPDATE);
+        v["holder"]["identity"]["keys"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|k| !k.as_str().unwrap().starts_with(&prefix));
+        v
+    };
+    assert_eq!(manifest(&taken), manifest(&expect["taken"]));
 }
 
 /// The load of the dump member `name` matches its expect file: the file, the whole load (fsck,
@@ -337,22 +355,36 @@ fn ck_sync_batch_take_matches_expect() {
 fn check_dump(name: &str, expect_name: &str, holder: bool, holds: &[&str]) {
     let file = fixture(name);
     let expect = read_json(&fixture(expect_name));
-    assert_eq!(expect["formats"], chain_fixture::current_formats());
+    // the formats of the e1 set: the written formats less the features frozen in their own
+    // first-use members (SD1: `snapshot_delta`)
+    assert_eq!(
+        expect["formats"],
+        crate::io_feature_fixture::complete_set_formats(&chain_fixture::current_formats())
+    );
     assert_eq!(s18::file_facts(name, &file), expect["file"]);
     assert_eq!(expect["file"]["rdy"], json!(CK_RDY));
     assert_eq!(expect["holds"], json!(holds));
     let scratch = tempfile::tempdir().unwrap();
     let to = scratch.path().join("whole");
     let files = vec![file.clone()];
-    assert_eq!(s18::whole_facts(&files, &to, holder), expect["whole"]);
+    let got = s18::whole_facts(&files, &to, holder);
+    // the member predates snapshot_delta: the load appends its one upgrade batch (SD1 Task 6)
+    let want = crate::io_feature_fixture::whole_as_read_now(
+        &expect["whole"],
+        &to,
+        s18::chain_end(&files),
+        holder,
+        name,
+    );
+    assert_eq!(got, want);
     let r = s18::open(&to, holder);
     // fsck passes (a damaged store is an error); its report is in the whole facts
     r.fsck().unwrap();
     let features = r.store().reader().store_features().unwrap();
-    assert_eq!(
-        serde_json::to_value(&features).unwrap(),
-        expect["store_features"]
-    );
+    let source: rdy_store::format::StoreFeatures =
+        serde_json::from_value(expect["store_features"].clone()).unwrap();
+    let conv = rdy_qa::chain_fixture::conversion_features();
+    assert_eq!(features, source.merged(&conv));
     assert!(
         features.features.iter().any(|f| f.name == "check_request"),
         "{features:?}"

@@ -1120,3 +1120,31 @@ fn holder_chain_e1() -> (Chain, HolderUploads) {
     let stop = format!("tag:{}", E1_TAGS[1]);
     (chain, HolderUploads { uploads: ups, stop })
 }
+
+/// The snapshot deltas at the head of a legacy load's or upgrade's tail batch (D-918YB, SD1
+/// Task 6): one `SNAPSHOT_DELTA` for each project landing the store holds, before the ref
+/// updates. Removes them from `tail` (frames as the log stores them: raw kind and payload),
+/// checks that none follows and that their count is the store's project landings, and returns
+/// that count.
+pub fn take_delta_head(tail: &mut Vec<(u8, Vec<u8>)>, store: &rdy_store::Store) -> u64 {
+    let is_delta = |k: u8| rdy_store::codec::logical_kind(k) == kinds::SNAPSHOT_DELTA;
+    let n = tail.iter().take_while(|(k, _)| is_delta(*k)).count();
+    assert!(
+        !tail[n..].iter().any(|(k, _)| is_delta(*k)),
+        "the deltas lead the tail batch"
+    );
+    let landings = store.reader().project_landings().unwrap().len();
+    assert_eq!(n, landings, "one snapshot delta per landing");
+    tail.drain(..n);
+    n as u64
+}
+
+/// The features the snapshot-delta conversion merges into a source manifest (D-918YB, SD1 Task
+/// 6): `snapshot_delta`, and `object_encoding`, since a delta is an encoding-1 record.
+pub fn conversion_features() -> Vec<rdy_store::format::StoreFeature> {
+    use rdy_store::format::{FEATURE_OBJECT_ENCODING, FEATURE_SNAPSHOT_DELTA, registered_features};
+    registered_features()
+        .into_iter()
+        .filter(|f| f.name == FEATURE_OBJECT_ENCODING || f.name == FEATURE_SNAPSHOT_DELTA)
+        .collect()
+}

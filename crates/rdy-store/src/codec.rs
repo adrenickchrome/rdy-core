@@ -23,6 +23,9 @@
 //! - ASSESSMENT, DISPUTE, DISPUTE_RESOLUTION and CHECK_REQUEST start at encoding 1: they have no
 //!   encoding 0.
 //!
+//! SNAPSHOT_DELTA (kind 30) has no encoding 0 either: its first and only encoding is 1, raw kind
+//! `30 | 0x80`, decoded as `rdy_model::SnapshotDelta`.
+//!
 //! Every other kind's latest encoding is 0. An encoding-0 CHANGE, LANDING or REDACTION_RESIDUE
 //! body decodes through its frozen type (`rdy_model::encoding::Legacy*V0`), never directly into
 //! the larger current struct, and converts with the new options absent.
@@ -167,6 +170,10 @@ pub const REGISTERED: &[(u8, u16)] = &[
     (kinds::DISPUTE_RESOLUTION, 1),
     (kinds::CHECK_REQUEST, 1),
     (kinds::FOREIGN, 1),
+    (
+        kinds::SNAPSHOT_DELTA,
+        rdy_model::encoding::SNAPSHOT_DELTA_ENCODING,
+    ),
 ];
 
 /// The optional encodings repo links register (D-FK58A, store feature `foreign_copy`): (logical
@@ -203,9 +210,19 @@ pub fn first(kind: u8) -> u16 {
         | kinds::DISPUTE
         | kinds::DISPUTE_RESOLUTION
         | kinds::CHECK_REQUEST
-        | kinds::FOREIGN => 1,
+        | kinds::FOREIGN
+        | kinds::SNAPSHOT_DELTA => 1,
         _ => 0,
     }
+}
+
+/// The latest encoding production registers for logical kind `kind` ([`REGISTERED`]), else 0.
+fn registered_latest(kind: u8) -> u16 {
+    REGISTERED
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, v)| *v)
+        .fold(0, u16::max)
 }
 
 thread_local! {
@@ -218,12 +235,7 @@ thread_local! {
 /// ([`OPTIONAL`]). It is the kind's [`REGISTERED`] version, else 0 (or a higher test-registered
 /// one on this thread).
 pub fn latest(kind: u8) -> u16 {
-    let registered = REGISTERED
-        .iter()
-        .filter(|(k, _)| *k == kind)
-        .map(|(_, v)| *v)
-        .max()
-        .unwrap_or(0);
+    let registered = registered_latest(kind);
     TEST_ENCODINGS.with(|t| {
         t.borrow()
             .iter()
@@ -236,13 +248,7 @@ pub fn latest(kind: u8) -> u16 {
 /// Whether `version` of logical kind `kind` is one only a test hook registers on this thread
 /// ([`test_encoding`]): it decodes as encoding 0 does.
 fn is_test_version(kind: u8, version: u16) -> bool {
-    let registered = REGISTERED
-        .iter()
-        .filter(|(k, _)| *k == kind)
-        .map(|(_, v)| *v)
-        .max()
-        .unwrap_or(0);
-    version > registered && version <= latest(kind)
+    version > registered_latest(kind) && version <= latest(kind)
 }
 
 /// Splits a stored frame: an unmarked raw kind is encoding 0 and its whole payload; a marked one
@@ -621,6 +627,7 @@ fn dispatches(kind: u8, t: TypeId) -> bool {
         DISPUTE_RESOLUTION => &[TypeId::of::<rdy_model::dispute::DisputeResolution>()],
         CHECK_REQUEST => &[TypeId::of::<rdy_model::check_request::CheckRequest>()],
         FOREIGN => &[TypeId::of::<rdy_model::foreign::ForeignEntry>()],
+        SNAPSHOT_DELTA => &[TypeId::of::<rdy_model::SnapshotDelta>()],
         _ => &[],
     };
     // the registered wire types read every encoding of their kind
@@ -667,6 +674,7 @@ fn kind_name(kind: u8) -> String {
         DISPUTE_RESOLUTION => "DISPUTE_RESOLUTION",
         CHECK_REQUEST => "CHECK_REQUEST",
         FOREIGN => "FOREIGN",
+        SNAPSHOT_DELTA => "SNAPSHOT_DELTA",
         _ => return kind.to_string(),
     };
     name.to_string()
@@ -1019,6 +1027,23 @@ pub fn decode_bounded_split<T: DeserializeOwned + 'static>(
     body_of(o, Reader::Bounded).map_err(BodyError::into_record)
 }
 
+/// The bounded decode of a frame from outside bytes ([`decode_bounded`]) whose body must also be
+/// the canonical encoding of the value it decodes to ([`is_canonical`]), every byte compared:
+/// postcard also decodes varints that are not minimal and map keys that are repeated or out of
+/// order, which give the same value under another hash. Such bytes are `Decode`. A SNAPSHOT and
+/// a SNAPSHOT_DELTA are checked with it where they enter a store.
+pub fn decode_canonical<T: DeserializeOwned + Serialize + 'static>(
+    kind: u8,
+    payload: &[u8],
+) -> Result<T, RecordError> {
+    let o = split(kind, payload)?;
+    let value: T = decode_bounded_split(&o)?;
+    if !is_canonical(&o, &value) {
+        return Err(RecordError::Decode);
+    }
+    Ok(value)
+}
+
 /// While held, this thread's logical kind `kind` has encodings 1 to `version`, each decoding as
 /// encoding 0 does, and its latest encoding is `version`.
 #[doc(hidden)]
@@ -1043,4 +1068,35 @@ pub fn test_encoding(kind: u8, version: u16) -> TestEncoding {
         t.push((kind, version));
     });
     TestEncoding(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdl1_codec_names_and_dispatches_the_staged_delta() {
+        assert_eq!(kind_name(kinds::SNAPSHOT_DELTA), "SNAPSHOT_DELTA");
+        assert_eq!(kind_name(31), "31");
+        let want = TypeId::of::<rdy_model::SnapshotDelta>();
+        assert!(dispatches(kinds::SNAPSHOT_DELTA, want));
+        assert!(!dispatches(kinds::SNAPSHOT, want));
+        assert!(!dispatches(
+            kinds::SNAPSHOT_DELTA,
+            TypeId::of::<rdy_model::StateSnapshot>()
+        ));
+        // kind 30 is registered at encoding 1 (the delta writer ships), and has no encoding 0
+        assert_eq!(registered_latest(kinds::SNAPSHOT_DELTA), 1);
+        assert_eq!(newest(kinds::SNAPSHOT_DELTA), 1);
+        assert_eq!(latest(kinds::SNAPSHOT_DELTA), 1);
+        // a registered encoding, not a test hook's
+        assert!(!is_test_version(kinds::SNAPSHOT_DELTA, 1));
+        assert_eq!(raw_kind(kinds::SNAPSHOT_DELTA, 1), 158);
+        assert!(frame(kinds::SNAPSHOT_DELTA, 1, vec![]).is_ok());
+        assert_eq!(
+            frame(kinds::SNAPSHOT_DELTA, 0, vec![]),
+            Err(RecordError::UnknownVersion)
+        );
+        assert!(REGISTERED.contains(&(kinds::SNAPSHOT_DELTA, 1)));
+    }
 }

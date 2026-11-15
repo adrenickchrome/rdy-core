@@ -1015,7 +1015,8 @@ fn rdx2_metadata_and_history_records_are_not_targets() {
     let want: BTreeSet<u8> = [
         kinds::PROPOSAL,
         kinds::LANDING,
-        kinds::SNAPSHOT,
+        // a landing's state record: its delta since SD1 Task 6 (no SNAPSHOT is written)
+        kinds::SNAPSHOT_DELTA,
         BLOB_MANIFEST,
         kinds::REF_UPDATE,
         kinds::TAG,

@@ -518,6 +518,8 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         ImpactKind::Dispute,
         ImpactKind::DisputeResolution,
         ImpactKind::CheckRequest,
+        // appended after every older kind (snapshot deltas): no older index moves
+        ImpactKind::SnapshotDelta,
     ];
     for (i, k) in kinds.iter().enumerate() {
         roundtrip(k, &[i as u8]);
@@ -534,6 +536,55 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
     roundtrip(&AssessmentSupport::NotImplemented, &[0]);
     roundtrip(&AssessmentSupport::Carried, &[1]);
     roundtrip(&CopyStatus::Unknown, &[0]);
+}
+
+/// sdl4 (snapshot deltas): the delta row kind is appended after `CheckRequest`, so each older
+/// impact kind keeps its postcard index and its JSON name, and a row of the new kind has the
+/// row's fixed field order.
+#[test]
+fn sdl4_impact_kind_appends_without_changing_old_bytes() {
+    let old: [(ImpactKind, &str); 15] = [
+        (ImpactKind::BlockVersion, "block_version"),
+        (ImpactKind::Change, "change"),
+        (ImpactKind::Landing, "landing"),
+        (ImpactKind::Tag, "tag"),
+        (ImpactKind::View, "view"),
+        (ImpactKind::Proposal, "proposal"),
+        (ImpactKind::StateSnapshot, "state_snapshot"),
+        (ImpactKind::AuditText, "audit_text"),
+        (ImpactKind::Review, "review"),
+        (ImpactKind::Tension, "tension"),
+        (ImpactKind::Answer, "answer"),
+        (ImpactKind::Assessment, "assessment"),
+        (ImpactKind::Dispute, "dispute"),
+        (ImpactKind::DisputeResolution, "dispute_resolution"),
+        (ImpactKind::CheckRequest, "check_request"),
+    ];
+    for (i, (k, name)) in old.iter().enumerate() {
+        roundtrip(k, &[i as u8]);
+        assert_eq!(serde_json::to_value(k).unwrap(), serde_json::json!(name));
+    }
+    // the state snapshot keeps index 6: the delta kind is not placed beside it
+    assert_eq!(enc(&ImpactKind::StateSnapshot), [6]);
+    roundtrip(&ImpactKind::SnapshotDelta, &[15]);
+    assert_eq!(
+        serde_json::to_value(ImpactKind::SnapshotDelta).unwrap(),
+        serde_json::json!("snapshot_delta")
+    );
+    assert_eq!(
+        serde_json::from_value::<ImpactKind>(serde_json::json!("snapshot_delta")).unwrap(),
+        ImpactKind::SnapshotDelta
+    );
+    // the next index is no kind
+    assert!(postcard::from_bytes::<ImpactKind>(&[16]).is_err());
+    // a row: kind, record, relation, erasable
+    let row = ImpactRow {
+        kind: ImpactKind::SnapshotDelta,
+        record: "ab".into(),
+        relation: ImpactRelation::References,
+        erasable: false,
+    };
+    roundtrip(&row, &[15, 2, b'a', b'b', 2, 0]);
 }
 
 /// A change creating the target block and an unrelated block, so a projection resolves both.

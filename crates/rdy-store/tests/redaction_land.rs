@@ -372,7 +372,16 @@ fn rdx7_a_landing_and_its_apply_are_one_batch() {
         let fx =
             authorized_batch_fixture(&fw.path, &[fw.secret("work"), fw.blob_spec("work")], &opts);
         let fkinds: Vec<u8> = fx.landing_batch.iter().map(|(k, _)| *k).collect();
-        assert_eq!(shape(&kinds), shape(&fkinds), "{case}");
+        // SD1 Task 6: no SNAPSHOT precedes the store's landing any more, so its batch starts at
+        // the landing; the fixture's batch also carries its own proposal first
+        let mut fshape = shape(&fkinds);
+        assert_eq!(
+            fshape.first(),
+            Some(&"other"),
+            "{case}: the fixture's proposal"
+        );
+        fshape.remove(0);
+        assert_eq!(shape(&kinds), fshape, "{case}");
         // the fixture's applies are the same records: same requests and reports, its landing
         let fixture_requests: Vec<(Hash, Hash)> = fx
             .applies

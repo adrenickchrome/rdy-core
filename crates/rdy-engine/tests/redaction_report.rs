@@ -943,8 +943,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 29; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=29).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 30; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=30).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -976,12 +976,14 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::DISPUTE_RESOLUTION,
             kinds::CHECK_REQUEST,
             kinds::FOREIGN,
+            kinds::SNAPSHOT_DELTA,
         ],
         ASSIGNED_KINDS
     );
     for k in ASSIGNED_KINDS {
         let want = match k {
             kinds::SNAPSHOT
+            | kinds::SNAPSHOT_DELTA
             | kinds::BLOB_CHUNK
             | kinds::BLOB_MANIFEST
             | kinds::BATCH_COMMIT
@@ -1003,7 +1005,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     for k in 25..=28 {
         assert_eq!(text_policy(k), Some(TextPolicy::Strings), "kind {k}");
     }
-    for k in [0, 12, 127, 255] {
+    // a snapshot delta holds ids and version hashes only
+    assert_eq!(kinds::SNAPSHOT_DELTA, 30);
+    assert_eq!(text_policy(30), Some(TextPolicy::NoText));
+    for k in [0, 12, 31, 127, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1568,7 +1573,14 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
             .unwrap();
     let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
     p.r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    let state = p.r.read().reader().landing(&landing).unwrap().state;
+    // SD1 Task 6: a landing's state is its snapshot delta, which the report names
+    let state =
+        p.r.read()
+            .reader()
+            .snapshot_delta_of(&landing)
+            .unwrap()
+            .unwrap()
+            .0;
     let d = dry(&p.r, &[format!("{}@{vp}", p.prose)]);
     let refs = ImpactRelation::References;
     assert_eq!(
@@ -1585,18 +1597,18 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
             row(ImpactKind::Tag, "v1.0.0", refs, false),
             row(ImpactKind::View, "work", refs, false),
             row(ImpactKind::Proposal, &pi.id, refs, false),
-            row(ImpactKind::StateSnapshot, state, refs, false),
             row(
                 ImpactKind::Assessment,
                 assessment_of(&p.r, &pi.id),
                 refs,
                 false
             ),
+            row(ImpactKind::SnapshotDelta, state, refs, false),
         ]
     );
     assert!(d.quotes.is_empty());
     assert_eq!(d.versions, vec![(p.prose.clone(), vp)]);
-    // a state snapshot is a reference, not a copy: only the block and change frames drop
+    // a snapshot delta is a reference, not a copy: only the block and change frames drop
     let all = frames_from(&p.r, ORIGIN);
     let payloads: Vec<&(u8, Hash, Option<Vec<u8>>)> = all
         .iter()
@@ -1641,8 +1653,8 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
     let st = p.r.read();
     let rec3 = st.reader().landing(&l3).unwrap();
     assert_eq!(rec3.prev, Some(l2));
-    let snap3: rdy_model::StateSnapshot =
-        st.reader().get_typed(kinds::SNAPSHOT, &rec3.state).unwrap();
+    // SD1 Task 6: l3's map is its delta fold
+    let snap3 = st.reader().snapshot_at(&l3).unwrap();
     assert!(
         !snap3.blocks.values().any(|v| *v == vp),
         "l3's snapshot no longer names v1"
@@ -1700,7 +1712,13 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
             .unwrap();
     let landing_y = h(&p.r.land(&approver(), &py.id).unwrap());
     p.r.tag(&approver(), "v0.9.0", None, None).unwrap();
-    let state_y = p.r.read().reader().landing(&landing_y).unwrap().state;
+    let state_y =
+        p.r.read()
+            .reader()
+            .snapshot_delta_of(&landing_y)
+            .unwrap()
+            .unwrap()
+            .0;
     let w = write(
         &mut p.r,
         &writer(),
@@ -1719,7 +1737,13 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
             .unwrap();
     let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
     p.r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    let state = p.r.read().reader().landing(&landing).unwrap().state;
+    let state =
+        p.r.read()
+            .reader()
+            .snapshot_delta_of(&landing)
+            .unwrap()
+            .unwrap()
+            .0;
     let d = dry(&p.r, &[format!("blob:{x}")]);
     assert_eq!(d.blobs, vec![x]);
     assert_eq!(d.shared_blobs, vec![y], "y shares x's first chunk");
@@ -1739,8 +1763,9 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
         row(ImpactKind::View, "work", refs, false),
         row(ImpactKind::Proposal, &pi.id, refs, false),
         row(ImpactKind::Proposal, &py.id, refs, false),
-        row(ImpactKind::StateSnapshot, state, refs, false),
-        row(ImpactKind::StateSnapshot, state_y, refs, false),
+        // SD1 Task 6: each landing's snapshot delta, not a SNAPSHOT
+        row(ImpactKind::SnapshotDelta, state, refs, false),
+        row(ImpactKind::SnapshotDelta, state_y, refs, false),
         row(
             ImpactKind::Assessment,
             assessment_of(&p.r, &pi.id),

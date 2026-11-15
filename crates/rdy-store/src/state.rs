@@ -281,8 +281,16 @@ impl StoreReader {
             .transpose()
     }
 
+    /// The state landing `landing` recorded: the one map read of the store (`crate::snapshot`),
+    /// its held SNAPSHOT or the fold of its deltas, through the store's map cache.
     pub fn snapshot_at(&self, landing: &Hash) -> Result<StateSnapshot, StoreError> {
-        self.get(&self.landing(landing)?.state)
+        let record = self.landing(landing)?;
+        crate::snapshot::read_landing_snapshot(
+            &mut crate::snapshot::StoreSnapshots { reader: self },
+            Some(self.map_cache()),
+            landing,
+            &record,
+        )
     }
 
     /// A parent loop in `state` reachable from `starts`: two blocks on it, each the other's
@@ -1383,7 +1391,8 @@ impl Store {
         // carried bindings do not find passes them, and a landing that named the record would
         // then give a closure that does not resolve
         let edges =
-            crate::object_refs::refs_of(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
+            crate::object_refs::refs_of(&crate::snapshot::held_features(self)?, item.0, &item.1)
+                .map_err(|e| refuse(&e.to_string()))?;
         // each batch frame hashed once, whatever the number of edges
         let pending: std::collections::BTreeSet<(u8, Hash)> = batch
             .iter()

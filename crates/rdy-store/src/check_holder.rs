@@ -26,12 +26,13 @@
 use crate::StoreReader;
 use crate::check::StoreCheck;
 use crate::error::StoreError;
+use crate::format::StoreFeatures;
 use crate::holder::{
     ANSWER_TAG_OBJECT_REF, StoreMode, TAG_REF, answer_tag_object, is_relay_answer_of, not_allowed,
 };
 use crate::index::hash_from;
 use crate::kinds;
-use crate::object_refs::{ObjectKey, PORTABLE_KINDS, portable_refs_of};
+use crate::object_refs::{ObjectKey, portable_kinds, portable_refs_of};
 use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -127,11 +128,19 @@ struct Closure<'a> {
     pending: BTreeMap<(BlockId, Hash), Hash>,
     /// The length of each blob chunk read, so each is read once across every manifest.
     chunk_lens: HashMap<Hash, u64>,
+    /// The holder's features: the links each object names follow them.
+    features: StoreFeatures,
+    /// Whether they list `snapshot_delta`: each landing read adds its delta to the walk, and
+    /// no landing names its SNAPSHOT.
+    deltas: bool,
 }
 
 impl<'a> Closure<'a> {
-    fn new(reader: &'a StoreReader, limits: Limits) -> Closure<'a> {
-        Closure {
+    fn new(reader: &'a StoreReader, limits: Limits) -> Result<Closure<'a>, StoreError> {
+        let features = crate::snapshot::held_features(reader)?;
+        Ok(Closure {
+            deltas: features.has(crate::format::FEATURE_SNAPSHOT_DELTA),
+            features,
             reader,
             limits,
             seen: HashSet::new(),
@@ -141,7 +150,7 @@ impl<'a> Closure<'a> {
             ids: HashMap::new(),
             pending: BTreeMap::new(),
             chunk_lens: HashMap::new(),
-        }
+        })
     }
 
     /// Adds `key` to what the walk reads, once.
@@ -176,8 +185,8 @@ impl<'a> Closure<'a> {
                 Err(StoreError::Redacted { .. }) => continue,
                 Err(e) => return Err(e),
             };
-            let refs =
-                portable_refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
+            let refs = portable_refs_of(&self.features, raw, &payload)
+                .map_err(|e| bad(format!("object {key}: {e}")))?;
             let mut children = Vec::with_capacity(refs.len());
             for r in refs {
                 self.edges += 1;
@@ -209,6 +218,16 @@ impl<'a> Closure<'a> {
                     let rec: LandingRecord = crate::codec::decode_record(raw, &payload)?;
                     self.reader.check_landing_fields(&key.hash, &rec)?;
                     self.landings.insert(key.hash, Arc::new(rec));
+                    // its delta, which it does not name: read as an object of the walk, never
+                    // as a link of the landing (a missing one is the chain check's rule 1)
+                    if self.deltas
+                        && let Some((d, _)) = self.reader.snapshot_delta_of(&key.hash)?
+                    {
+                        children.push(ObjectKey {
+                            kind: kinds::SNAPSHOT_DELTA,
+                            hash: d,
+                        });
+                    }
                 }
                 kinds::BLOCK => {
                     let b: Block = crate::codec::decode_record(raw, &payload)?;
@@ -263,7 +282,7 @@ impl<'a> Closure<'a> {
     /// one portable object.
     fn resolve(&self, from: &ObjectKey, h: &Hash) -> Result<u8, StoreError> {
         let mut found = None;
-        for k in PORTABLE_KINDS {
+        for &k in portable_kinds() {
             if self.reader.has_kind(k, h)? {
                 if found.is_some() {
                     return Err(bad(format!(
@@ -492,7 +511,7 @@ impl StoreReader {
         self.check_no_foreign()?;
         let relayed_tags = self.check_answer_tags()?;
         let tags = self.holder_tags()?;
-        let mut closure = Closure::new(self, limits);
+        let mut closure = Closure::new(self, limits)?;
         for hash in tags.iter().map(|t| t.hash).chain(relayed_tags) {
             closure.add(ObjectKey {
                 kind: kinds::TAG,
@@ -500,6 +519,35 @@ impl StoreReader {
             })?;
         }
         closure.run()?;
+        // the snapshot of every landing read (`crate::snapshot::check_snapshot_chains`): under
+        // `snapshot_delta` the six rules of each one's delta, a block's id read from the walk's
+        // own reads first; without it, each held SNAPSHOT stored canonically
+        {
+            let read: Vec<(Hash, Arc<LandingRecord>)> = closure
+                .landings
+                .iter()
+                .map(|(h, r)| (*h, Arc::clone(r)))
+                .collect();
+            let refs: Vec<(Hash, &LandingRecord)> = read.iter().map(|(h, r)| (*h, &**r)).collect();
+            let ids = &closure.ids;
+            let mut source = crate::snapshot::StoreSnapshots { reader: self };
+            crate::snapshot::check_snapshot_chains(
+                &mut source,
+                closure.deltas,
+                &refs,
+                &mut |s: &mut crate::snapshot::StoreSnapshots<'_>, v: &Hash| {
+                    if let Some(id) = ids.get(v) {
+                        return Ok(Some(id.clone()));
+                    }
+                    match s.reader.get_block(v) {
+                        Ok(b) => Ok(Some(b.id)),
+                        Err(StoreError::Redacted { .. }) => Ok(None),
+                        Err(e) => Err(e),
+                    }
+                },
+                &mut |_, _, _, _| Ok(()),
+            )?;
+        }
         // each chain on its own: never the global change -> landing index. The walk read and
         // checked every landing the chains hold.
         let mut landings = std::mem::take(&mut closure.landings);

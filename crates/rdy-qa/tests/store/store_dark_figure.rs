@@ -115,7 +115,9 @@ fn batches(r: &Rdy) -> Vec<Batch> {
                 }
                 return Ok(());
             }
-            for o in refs_of(kind, payload).unwrap_or_default() {
+            for o in refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload)
+                .unwrap_or_default()
+            {
                 if o.kind == Some(kinds::BLOB_MANIFEST) {
                     cur.blobs.push(o.hash);
                 }
@@ -206,7 +208,8 @@ fn rfr2_feature_activates_in_the_first_durable_batch() {
     assert_eq!(f.class, FeatureClass::Incompatible);
     assert_eq!(f.required_rdy, FIGURE_DARK_REQUIRED_RDY);
     assert_eq!(FIGURE_DARK_REQUIRED_RDY, "0.51.0");
-    assert_eq!(reg.len(), 9);
+    // nine before snapshot_delta (SD1 Task 6)
+    assert_eq!(reg.len(), 10);
 
     // a store with no dark figure never turns it on: light figures, edits, landings, tags
     let (d, mut r, s, light, _dark) = base();
@@ -301,12 +304,13 @@ fn rfr2_both_variants_remain_reachable() {
             },
             r.store().log_end(),
             |_, kind, _, payload, _| {
-                let blobs: Vec<Hash> = refs_of(kind, payload)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|o| o.kind == Some(kinds::BLOB_MANIFEST))
-                    .map(|o| o.hash)
-                    .collect();
+                let blobs: Vec<Hash> =
+                    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|o| o.kind == Some(kinds::BLOB_MANIFEST))
+                        .map(|o| o.hash)
+                        .collect();
                 if blobs.contains(&dark) {
                     match rdy_store::codec::logical_kind(kind) {
                         kinds::BLOCK => block_refs.push(blobs),
@@ -333,7 +337,8 @@ fn rfr2_both_variants_remain_reachable() {
     r.store()
         .for_each_frame_from(end, r.store().log_end(), |_, kind, _, payload, _| {
             if rdy_store::codec::logical_kind(kind) == kinds::CHANGE {
-                last = refs_of(kind, payload).unwrap();
+                last =
+                    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload).unwrap();
             }
             Ok(())
         })
@@ -582,9 +587,11 @@ fn rfr2_dark_fixture_keeps_hashes_landings_and_tags() {
     let (_base, root) = foreign_fixture::project_copy(&dir);
     let store = opened_facts(&root);
     assert!(root.join(".rdy/store/index.redb").exists(), "rebuilt");
-    for member in want["store"].as_object().unwrap().keys() {
-        assert_eq!(store[member], want["store"][member], "{member}");
-    }
+    // the writer open ran the snapshot-delta step (SD1 Task 6): the recorded source, then its
+    // one upgrade batch; figure_dark and its minimum stay as recorded
+    let r = Rdy::open(&root).unwrap();
+    foreign_fixture::assert_upgraded_facts(&r, &want["store"], "figure-dark-1");
+    r.close().unwrap();
     let world = &want["world"];
     let light: Hash = world["light"].as_str().unwrap().parse().unwrap();
     let dark: Hash = world["dark"].as_str().unwrap().parse().unwrap();
@@ -609,7 +616,7 @@ fn rfr2_dark_fixture_keeps_hashes_landings_and_tags() {
     assert_eq!(r.store().get_blob(&dark).unwrap(), DARK);
     assert_eq!(
         foreign_fixture::store_facts(&r)["objects"],
-        want["store"]["objects"]
+        store["objects"]
     );
     r.close().unwrap();
     rdy_qa::invariants::check_all(&Rdy::open(&root).unwrap())

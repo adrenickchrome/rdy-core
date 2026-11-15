@@ -194,7 +194,11 @@ fn ha14_early_batch_returns_keys_without_root() {
     let (mut reader, _) = StreamReader::open(f.bytes.as_slice()).unwrap();
     let mut leaves: Vec<StreamRecord> = Vec::new();
     while let Some(rec) = reader.next().unwrap() {
-        if rec.refs().unwrap().is_empty() {
+        if rec
+            .refs(&rdy_store::format::baseline_features())
+            .unwrap()
+            .is_empty()
+        {
             leaves.push(rec);
         }
     }
@@ -220,8 +224,16 @@ fn ha14_early_batch_returns_keys_without_root() {
     assert!(!report.keys.contains(&root));
     assert_eq!(report.header.prerequisites, vec![root]);
 
-    // the full batch holds the root, last, and the early keys in its order
-    assert_eq!(f.report.keys.last(), Some(&root));
+    // the full batch holds the root, last but the snapshot deltas attached after it (SD1
+    // Task 6), and the early keys in its order
+    assert_eq!(
+        f.report
+            .keys
+            .iter()
+            .rev()
+            .find(|k| k.kind != rdy_store::kinds::SNAPSHOT_DELTA),
+        Some(&root)
+    );
     let in_full: Vec<ObjectKey> = f
         .report
         .keys

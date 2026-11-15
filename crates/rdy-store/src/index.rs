@@ -1,4 +1,5 @@
 use crate::error::{StoreError, db};
+use crate::kinds;
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
 use redb::{
@@ -79,6 +80,11 @@ const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatur
 /// A landing's hash (32 bytes) -> its seal's hash (32 bytes) and the seal's location (`loc_key`):
 /// the first sealed PLAN that names the landing (kind PLAN, p-CST21).
 const PLAN_SEALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_seals");
+/// A landing's hash (32 bytes) -> its snapshot delta's hash (32 bytes) and the delta's location
+/// (`loc_key`): the first SNAPSHOT_DELTA frame that names the landing (kind SNAPSHOT_DELTA,
+/// D-RP6SM), derived from that frame alone. A later copy of the same delta keeps the row; a
+/// distinct delta of the same landing is refused.
+const SNAPSHOT_DELTAS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapshot_deltas");
 /// A decision id's string bytes, a 0x00 byte, then its landing's location (`loc_key`) -> the
 /// seal's hash and the seal's location: every seal that names the decision, in landing order.
 const PLAN_DECISIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_decisions");
@@ -108,13 +114,23 @@ const DISPUTE_RESOLUTIONS: TableDefinition<&[u8], &[u8]> =
 /// (a later frame of the same key adds nothing, in the same commit or a later one). Both are
 /// u64 little-endian. They are upper bounds of what the holder check reads
 /// (`crate::check_holder`): it reads at most every held object, and follows each one's links
-/// once. The edge count follows the holder check's own counting; a change to that counting (a
-/// future snapshot_delta feature) is recounted by a reindex.
+/// once. The edge count follows the holder check's own counting with no feature (a landing links
+/// its `state`). Three more keys, each written once it is not zero, keep what a holder under
+/// `snapshot_delta` takes back off ([`Index::holder_counts_under`]): `snapshot_objects` (the
+/// SNAPSHOT keys among `objects`), `snapshot_edges` (their links among `edges`) and
+/// `state_edges` (the landings among `objects` whose links were charged, each of which links
+/// its `state` once). Under the feature the holder check reaches no SNAPSHOT through a landing.
 const HOLDER_COUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("holder_counts");
 /// The [`HOLDER_COUNTS`] key of the object count.
 const OBJECTS_COUNT_KEY: &[u8] = b"objects";
 /// The [`HOLDER_COUNTS`] key of the edge count.
 const EDGES_COUNT_KEY: &[u8] = b"edges";
+/// The [`HOLDER_COUNTS`] key of the SNAPSHOT objects among the object count.
+const SNAPSHOT_OBJECTS_KEY: &[u8] = b"snapshot_objects";
+/// The [`HOLDER_COUNTS`] key of the SNAPSHOT links among the edge count.
+const SNAPSHOT_EDGES_KEY: &[u8] = b"snapshot_edges";
+/// The [`HOLDER_COUNTS`] key of the landing `state` links among the edge count.
+const STATE_EDGES_KEY: &[u8] = b"state_edges";
 /// A landing's hash (32 bytes) -> its chain depth, u64 little-endian (TASK-2340): one for a
 /// landing with no `prev`, else its `prev`'s depth plus one, the chain length the holder check
 /// reads. Only a landing whose whole chain the index holds has a row; one whose `prev` has no
@@ -250,6 +266,13 @@ pub enum IndexEntry {
     PlanSeal {
         landing: Hash,
         seal: Hash,
+        at: Location,
+    },
+    /// SNAPSHOT_DELTA `delta`, at `at`, records the snapshot of landing `landing`: the first
+    /// frame of a landing's delta is kept, and a distinct delta of the same landing is refused.
+    SnapshotDelta {
+        landing: Hash,
+        delta: Hash,
         at: Location,
     },
     /// Sealed PLAN `seal`, at `at`, names `decision`; its landing is at `landing_at`.
@@ -506,6 +529,7 @@ pub struct IndexDump {
     pub holder_counts: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_depths: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_waits: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub snapshot_deltas: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The `meta` value of the first briefed change's location, if any.
     pub first_briefed_change: Option<Vec<u8>>,
 }
@@ -1210,6 +1234,12 @@ impl Index {
                 "the index has no capacity counts; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the snapshot delta table: no landing's delta is ever read as absent
+        if has(OBJECTS.name()) && !has(SNAPSHOT_DELTAS.name()) {
+            return Err(StoreError::Db(
+                "the index has no snapshot delta table; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1242,6 +1272,7 @@ impl Index {
             w.open_table(HOLDER_COUNTS).map_err(db)?;
             w.open_table(LANDING_DEPTHS).map_err(db)?;
             w.open_table(LANDING_WAITS).map_err(db)?;
+            w.open_table(SNAPSHOT_DELTAS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1336,6 +1367,8 @@ impl Index {
             // and the dispute tables only for a batch with a dispute or a resolution
             let mut disputes: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             let mut resolutions: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            // and the snapshot delta table only for a batch with a delta
+            let mut deltas: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
             // the capacity counts (TASK-2340): the keys whose frame just indexed was their first,
@@ -1344,6 +1377,8 @@ impl Index {
             // the frames split across commits
             let mut first: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
             let (mut add_objects, mut add_edges) = (0u64, 0u64);
+            // what a holder under `snapshot_delta` takes back off (see [`HOLDER_COUNTS`])
+            let (mut add_snapshots, mut add_snapshot_edges, mut add_states) = (0u64, 0u64, 0u64);
             let mut depths: Option<LandingDepthTables<'_>> = None;
             for e in entries {
                 match e {
@@ -1353,6 +1388,7 @@ impl Index {
                         let new = typed.insert(&key[..], &at[..]).map_err(db)?.is_none();
                         if new && crate::object_refs::is_portable(*kind) {
                             add_objects += 1;
+                            add_snapshots += u64::from(*kind == kinds::SNAPSHOT);
                             first.insert(key);
                         } else {
                             first.remove(&key);
@@ -1365,6 +1401,11 @@ impl Index {
                     IndexEntry::Links { kind, hash, links } => {
                         if first.remove(&typed_key(*kind, hash)) {
                             add_edges += links;
+                            match *kind {
+                                kinds::SNAPSHOT => add_snapshot_edges += links,
+                                kinds::LANDING => add_states += 1,
+                                _ => {}
+                            }
                         }
                     }
                     IndexEntry::LandingDepth { landing, prev } => {
@@ -1468,6 +1509,29 @@ impl Index {
                         };
                         t.insert(&signature_key(subject, signature)[..], &[][..])
                             .map_err(db)?;
+                    }
+                    IndexEntry::SnapshotDelta { landing, delta, at } => {
+                        let t = match &mut deltas {
+                            Some(t) => t,
+                            None => deltas.insert(w.open_table(SNAPSHOT_DELTAS).map_err(db)?),
+                        };
+                        let kept = match t.get(&landing.0[..]).map_err(db)? {
+                            Some(v) => Some(hash_at_from(v.value(), "snapshot delta entry")?.0),
+                            None => None,
+                        };
+                        match kept {
+                            // a repeated physical copy of the same delta is no second delta
+                            Some(k) if k == *delta => {}
+                            Some(_) => {
+                                return Err(StoreError::Decode(format!(
+                                    "landing {landing}: expected exactly one snapshot delta"
+                                )));
+                            }
+                            None => {
+                                t.insert(&landing.0[..], &hash_at_value(delta, at)[..])
+                                    .map_err(db)?;
+                            }
+                        }
                     }
                     IndexEntry::PlanSeal { landing, seal, at } => {
                         if plans.is_none() {
@@ -1586,7 +1650,14 @@ impl Index {
                 for (key, add) in [
                     (OBJECTS_COUNT_KEY, add_objects),
                     (EDGES_COUNT_KEY, add_edges),
+                    (SNAPSHOT_OBJECTS_KEY, add_snapshots),
+                    (SNAPSHOT_EDGES_KEY, add_snapshot_edges),
+                    (STATE_EDGES_KEY, add_states),
                 ] {
+                    // the feature's counts are written once they are not zero
+                    if add == 0 && key != OBJECTS_COUNT_KEY && key != EDGES_COUNT_KEY {
+                        continue;
+                    }
                     let was = counts
                         .get(key)
                         .map_err(db)?
@@ -1846,6 +1917,7 @@ impl Index {
             holder_counts: dump_table(&r, HOLDER_COUNTS)?,
             landing_depths: dump_table(&r, LANDING_DEPTHS)?,
             landing_waits: dump_table(&r, LANDING_WAITS)?,
+            snapshot_deltas: dump_table(&r, SNAPSHOT_DELTAS)?,
             first_briefed_change: r
                 .open_table(META)
                 .map_err(db)?
@@ -1870,6 +1942,33 @@ impl Index {
         Ok((get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?))
     }
 
+    /// The capacity counts ([`Index::holder_counts`]) as the holder check of a store with
+    /// `features` counts them: under `snapshot_delta` a landing's `state` is no link, and no
+    /// SNAPSHOT is reached through one, so each counts zero objects and links.
+    pub fn holder_counts_under(
+        &self,
+        features: &crate::format::StoreFeatures,
+    ) -> Result<(u64, u64), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(HOLDER_COUNTS).map_err(db)?;
+        let get = |key: &[u8]| -> Result<u64, StoreError> {
+            t.get(key)
+                .map_err(db)?
+                .map(|v| u64_from(v.value()))
+                .transpose()
+                .map(|v| v.unwrap_or(0))
+        };
+        let (objects, edges) = (get(OBJECTS_COUNT_KEY)?, get(EDGES_COUNT_KEY)?);
+        if !features.has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+            return Ok((objects, edges));
+        }
+        let off = get(SNAPSHOT_EDGES_KEY)?.saturating_add(get(STATE_EDGES_KEY)?);
+        Ok((
+            objects.saturating_sub(get(SNAPSHOT_OBJECTS_KEY)?),
+            edges.saturating_sub(off),
+        ))
+    }
+
     /// The chain depth of `landing` ([`LANDING_DEPTHS`]), if the index holds it and its whole
     /// chain.
     pub fn landing_depth(&self, landing: &Hash) -> Result<Option<u64>, StoreError> {
@@ -1879,6 +1978,16 @@ impl Index {
             .map_err(db)?
             .map(|v| u64_from(v.value()))
             .transpose()
+    }
+
+    /// The snapshot delta of `landing` and its location, if one is indexed ([`SNAPSHOT_DELTAS`]).
+    pub fn snapshot_delta(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(SNAPSHOT_DELTAS).map_err(db)?;
+        match t.get(&landing.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_at_from(v.value(), "snapshot delta entry")?)),
+            None => Ok(None),
+        }
     }
 
     /// The seal of `landing` and its location, if one is indexed.

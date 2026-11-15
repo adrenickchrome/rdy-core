@@ -59,13 +59,14 @@ fn land_tag(r: &mut Rdy, id: Option<&str>, body: &str, name: &str) -> String {
 }
 
 fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
-    const COPIED: [u8; 9] = [
+    const COPIED: [u8; 10] = [
         kinds::BLOCK,
         kinds::ASSESSMENT,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
         kinds::SNAPSHOT,
+        kinds::SNAPSHOT_DELTA,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,
@@ -390,4 +391,58 @@ fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::form
             .filter(|x| x.name == rdy_store::format::FEATURE_ASSESSMENT),
     );
     rdy_store::format::StoreFeatures::of(f)
+}
+
+/// sdl5: the snapshot-delta step is optional for readers. The adapter's open (which requires a
+/// current store) opens a legacy holder as it is, with the step registered; the host's
+/// maintenance runs it: one batch with each held landing's delta, both forks included.
+#[test]
+fn sdl5_adapter_open_reads_a_legacy_holder_and_maintenance_runs_the_step() {
+    let steps = vec![rdy_store::upgrade::snapshot_delta_step()];
+    let root = tempfile::tempdir().unwrap();
+    // a holder the last rdy before snapshot deltas wrote (SD1 Task 6: a new one lists the
+    // feature from its first batch)
+    let dir = {
+        let _legacy = rdy_store::format::legacy_writer_for_tests();
+        divergent_holder(root.path(), RepoId([5; 16]))
+    };
+    let segments = |dir: &Path| tree(&dir.join(".rdy/store/segments"));
+    let before = segments(&dir);
+    rdy_store::upgrade::with_registry_for_tests(&steps, || {
+        let plan = maintenance::inspect_store(&dir).unwrap();
+        assert_eq!(plan.steps, ["snapshot_delta"]);
+        assert!(!plan.requires_upgrade, "readers do not require it");
+        let h = StoreHandle::open_holder(&dir).unwrap();
+        let tags = h.snapshot().unwrap().tags().unwrap();
+        assert_eq!(tags.len(), 3);
+        h.fsck().unwrap();
+        h.close().unwrap();
+        let h = StoreHandle::open_with_registry_for_tests(
+            &dir,
+            rdy_store::holder::StoreMode::Holder,
+            &steps,
+        )
+        .unwrap();
+        h.close().unwrap();
+    });
+    assert_eq!(segments(&dir), before, "the open appended nothing");
+    let report = maintenance::upgrade_with_registry_for_tests(&dir, false, &steps).unwrap();
+    assert!(report.changed && report.checked);
+    assert_eq!(report.steps, ["snapshot_delta"]);
+    let h = Rdy::open_holder(&dir).unwrap();
+    assert!(
+        h.store()
+            .features()
+            .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA)
+    );
+    let r = h.store().reader();
+    let landings = r.project_landings().unwrap();
+    assert_eq!(landings.len(), 3, "the base and each fork");
+    for (l, rec) in &landings {
+        assert!(h.store().snapshot_delta_of(l).unwrap().is_some(), "{l}");
+        assert_eq!(r.snapshot_at(l).unwrap().id(), rec.state, "{l}");
+    }
+    drop(r);
+    h.store().check_holder().unwrap();
+    h.close().unwrap();
 }

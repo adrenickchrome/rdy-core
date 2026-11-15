@@ -136,14 +136,16 @@ fn dl3_the_every_kind_project_holds_every_kind_and_ref_family() {
     let dir = rdy_qa::every_kind::project();
     let r = Rdy::open(dir.path()).unwrap();
     let f = rdy_qa::every_kind::facts(&r);
-    for k in rdy_qa::every_kind::V11_KINDS {
-        // the facts count frames by raw kind: a kind's frames of either encoding
-        let count = |raw: u8| f["objects"][raw.to_string()].as_u64().unwrap_or(0);
-        assert!(
-            count(k) + count(k | rdy_store::codec::VERSIONED) >= 1,
-            "no frame of kind {k}: {f}"
-        );
+    // the facts count frames by raw kind: a kind's frames of either encoding
+    let count = |k: u8| {
+        let raw = |raw: u8| f["objects"][raw.to_string()].as_u64().unwrap_or(0);
+        raw(k) + raw(k | rdy_store::codec::VERSIONED)
+    };
+    for k in rdy_qa::every_kind::WRITER_KINDS {
+        assert!(count(k) >= 1, "no frame of kind {k}: {f}");
     }
+    // the current writer lands a snapshot delta, never a snapshot (SD1 Task 6)
+    assert_eq!(count(rdy_store::kinds::SNAPSHOT), 0, "no SNAPSHOT: {f}");
     for family in rdy_qa::every_kind::FAMILIES {
         assert!(
             f["refs"]

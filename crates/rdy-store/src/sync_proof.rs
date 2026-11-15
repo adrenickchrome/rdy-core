@@ -45,12 +45,31 @@ pub trait ObjectSource {
     /// The record of `key`: its original bytes (bounded as a stream record is), or its dropped
     /// identity; None when the source does not hold it.
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError>;
+
+    /// The hash of the SNAPSHOT_DELTA that records landing `landing`, when the source holds one
+    /// (`crate::snapshot`). A stream builds this from the typed delta records it holds; a store
+    /// asks its index. A source with no such association answers None.
+    fn snapshot_delta_of(&mut self, _landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        Ok(None)
+    }
 }
 
 /// Records by key, as a batch reader returned them.
 impl ObjectSource for BTreeMap<ObjectKey, StreamRecord> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         Ok(self.get(&key).cloned())
+    }
+
+    /// Built from the present delta records among them, on each call.
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        let keys: Vec<ObjectKey> = self
+            .keys()
+            .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
+            .copied()
+            .collect();
+        let by =
+            crate::snapshot::associate_deltas(&keys, |k| crate::stream_source::typed(self, k))?;
+        Ok(by.get(landing).copied())
     }
 }
 

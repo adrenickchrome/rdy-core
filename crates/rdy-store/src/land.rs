@@ -504,9 +504,23 @@ impl Store {
             .merge_checked_with(&prev_state, &changes, adoption.as_ref())?
             .0
             .state;
-        let snapshot = crate::codec::item_new(kinds::SNAPSHOT, &state);
-        let sid = Hash::of(&snapshot.1);
-        items.push(snapshot);
+        // the landing's `state` is the hash of the map's canonical SNAPSHOT bytes (encoding 0);
+        // the SNAPSHOT itself is not written: the landing's delta (step 6c) records the map
+        let sid = rdy_model::snapshot_map_id(&state.blocks);
+        let legacy = crate::format::legacy_writer();
+        if legacy {
+            items.push(crate::codec::item_new(kinds::SNAPSHOT, &state));
+        }
+        // the previous landing's delta, the new delta's `base`: a store with landings and no
+        // delta for its head needs the snapshot-delta upgrade before a landing
+        let base = match prev_head {
+            Some(h) if !legacy => Some(
+                self.snapshot_delta_of(&h)?
+                    .ok_or(StoreError::UpgradeRequired)?
+                    .0,
+            ),
+            _ => None,
+        };
         // 6. the landing. A removal landing names the requests of the carriers it lands in
         // `checks`, sorted and without repeats: its hash, and so a signed tag, commits to the
         // exact removal set (D-CC90E), and no other request of the same carrier can reuse the
@@ -576,6 +590,14 @@ impl Store {
         let lid = Hash::of(&lframe.1);
         let landing_record = landing;
         items.push(lframe);
+        // 6c. the landing's delta (D-RP6SM): made from the final landing hash, every field of
+        // the record settled, and the previous landing's delta; written in the landing's batch,
+        // after it. The merge ran once: the delta is the difference of its two maps
+        if !legacy {
+            let delta = rdy_model::diff_snapshots(lid, base, &prev_state.blocks, &state.blocks);
+            debug_assert_eq!(delta.full, sid);
+            items.push(crate::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        }
         // 6b. the set's next version, chosen by this landing
         let mut alt_ref = None;
         let alt_version = match (&req.alt, alt_prev) {
@@ -926,6 +948,47 @@ impl Store {
             }
         }
         Ok(outcome)
+    }
+
+    /// Test hook: writes the landing record `rec` as it is (a test's forged landing), and, in a
+    /// store that lists `snapshot_delta`, its delta in the same batch, so the forged history
+    /// stays structurally valid and a test's own defect is the one a check finds. The delta's
+    /// base is the delta of `rec.prev` (held); its map is `rec.state`'s, read from a held
+    /// SNAPSHOT or from a held landing of the same state (`NotFound(state)` when neither is
+    /// held). Returns the landing's hash. No CLI, MCP, config or environment path reaches it.
+    #[doc(hidden)]
+    pub fn put_landing_for_tests(&mut self, rec: &LandingRecord) -> Result<Hash, StoreError> {
+        let frame = crate::codec::item(kinds::LANDING, rec)?;
+        let lid = Hash::of(&frame.1);
+        let mut items = vec![frame];
+        if self.features().has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+            let map = match self.get_typed::<rdy_model::StateSnapshot>(kinds::SNAPSHOT, &rec.state)
+            {
+                Ok(s) => s.blocks,
+                Err(StoreError::NotFound(_)) => {
+                    let mut found = None;
+                    for (h, other) in self.project_landings()? {
+                        if other.state == rec.state {
+                            found = Some(self.snapshot_at(&h)?.blocks);
+                            break;
+                        }
+                    }
+                    found.ok_or(StoreError::NotFound(rec.state))?
+                }
+                Err(e) => return Err(e),
+            };
+            let (base, before) = match rec.prev {
+                Some(p) => (
+                    self.snapshot_delta_of(&p)?.map(|(d, _)| d),
+                    self.snapshot_at(&p)?.blocks,
+                ),
+                None => (None, Default::default()),
+            };
+            let delta = rdy_model::diff_snapshots(lid, base, &before, &map);
+            items.push(crate::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        }
+        self.write(items)?;
+        Ok(lid)
     }
 
     /// The set version a landing that chooses `alt` builds on: `alt.prev` must be the latest

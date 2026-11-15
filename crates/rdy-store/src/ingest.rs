@@ -10,12 +10,12 @@
 //! the source passes it here too.
 //!
 //! A dump of a scalar store format (dump formats 1 to 3) gets one more batch after its own:
-//! `upgrade` appends it, and it sets `meta/store_features` to the baseline features
-//! (`crate::format::baseline_features`; FW-UP1, in its smallest form), merged with every feature
-//! the ingested records use (`crate::format::required_features`, their first use). The historical
-//! `meta/store_format` refs the dump holds stay as they are, and no frame is re-encoded
-//! (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch gives it one
-//! (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
+//! `upgrade` appends it, and it sets `meta/store_features` to the legacy baseline features
+//! (`crate::format::legacy_baseline_features`; FW-UP1, in its smallest form), merged with every
+//! feature the ingested records use (`crate::format::required_features`, their first use). The
+//! historical `meta/store_format` refs the dump holds stay as they are, and no frame is
+//! re-encoded (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch
+//! gives it one (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
 //! manifest, which the load keeps, unknown compatible features included. That manifest must name
 //! every feature the ingested records use; a dump that under-reports one is refused.
 //!
@@ -127,6 +127,9 @@ pub struct Ingest<L = SegmentLog> {
     /// The features the ingested records use (`format::required_features`, and
     /// `object_encoding` for a dropped frame of a versioned encoding), each once.
     used: Vec<StoreFeature>,
+    /// The landings and snapshots the ingest wrote, for the tail's deltas: kept only when this
+    /// rdy registers the snapshot-delta step (`crate::upgrade::converts_deltas`).
+    history: Option<crate::snapshot_upgrade::LoadHistory>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -214,6 +217,7 @@ impl Ingest {
             features_ref: None,
             features: None,
             used: Vec::new(),
+            history: crate::upgrade::converts_deltas().then(Default::default),
         })
     }
 
@@ -231,7 +235,7 @@ impl Ingest {
             Some(f) => f,
             None => match &self.features_ref {
                 Some(v) => format::decode_features(v)?,
-                None => format::baseline_features(),
+                None => format::legacy_baseline_features(),
             },
         };
         format::write_format_file(&self.dir, &features)?;
@@ -274,6 +278,7 @@ impl<'l> Ingest<&'l mut SegmentLog> {
             features_ref: None,
             features: None,
             used: Vec::new(),
+            history: None,
         }
     }
 
@@ -375,6 +380,21 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                     .ok_or_else(|| dump_error(chain_text::OVERFLOW.into()))?;
             }
         }
+        // every present SNAPSHOT is the canonical encoding of its map, with or without the
+        // snapshot_delta feature (D-7K4Z0): a load refuses one before it writes the batch
+        for (i, f) in b.frames.iter().enumerate() {
+            if let Frame::Present {
+                kind,
+                hash,
+                payload,
+            } = f
+                && crate::codec::logical_kind(*kind) == kinds::SNAPSHOT
+                && !matches!(actions.get(i), Some(FrameAction::Zero { .. }))
+                && !crate::snapshot::canonical_snapshot(*kind, payload)
+            {
+                return Err(dump_error(crate::snapshot::noncanonical_snapshot(hash)));
+            }
+        }
         self.check_refs(b)?;
         self.check_holder_frames(b)?;
         let end = self.log().end();
@@ -410,7 +430,10 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
             };
             match zeroed.as_ref().unwrap_or(f) {
                 Frame::Present { kind, payload, .. } => {
-                    let (_, hash) = self.log_mut().append_unrolled(*kind, payload)?;
+                    let (loc, hash) = self.log_mut().append_unrolled(*kind, payload)?;
+                    if let Some(h) = &mut self.history {
+                        h.frame(*kind, hash, loc, payload);
+                    }
                     hashes.push(hash);
                     self.uses(format::required_features(*kind, payload));
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
@@ -698,6 +721,16 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
     ///   `meta/store_format` refs among them;
     /// - a later scalar format: refused with `StoreError::Dump`, and nothing is appended.
     ///
+    /// When this rdy registers the snapshot-delta step and the store's manifest (the feature
+    /// store's own, or the scalar store's new one) does not list `snapshot_delta`, the same tail
+    /// runs the step's action (`crate::snapshot_upgrade`): one batch after the dump's batches,
+    /// and after the carried batch, holds the delta of every landing whose SNAPSHOT the log
+    /// holds, in chain order, then the features ref of the manifest with the feature merged in
+    /// (every other feature kept), then the scalar store's repo id ref when it gets one, then its
+    /// marker. A feature store keeps its own manifest until that batch. An empty log's tail
+    /// holds no delta and still turns the feature on. The dump is the backup: no backup and no
+    /// receipt are written. A manifest that lists the feature already appends nothing.
+    ///
     /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
     /// `append_carried`, if it runs).
     pub fn upgrade(&mut self, from: &DumpStore) -> Result<bool, StoreError> {
@@ -716,7 +749,16 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
         let from = match from {
             DumpStore::Features(m) => {
                 self.keep_manifest(m)?;
-                return Ok(false);
+                let Some(features) = self.conversion(m)? else {
+                    return Ok(false);
+                };
+                let deltas = self.tail_deltas()?;
+                self.append_tail(
+                    deltas,
+                    vec![(format::REF_STORE_FEATURES, features.to_json())],
+                )?;
+                self.features = Some(features);
+                return Ok(true);
             }
             DumpStore::Legacy(n) => *n,
         };
@@ -726,9 +768,14 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                 format::LAST_SCALAR_STORE_FORMAT
             )));
         }
-        // the baseline, and every feature the ingested records use (their first use)
-        let features = format::baseline_features().merged(&self.used);
-        let start = self.log().end();
+        // the legacy baseline, and every feature the ingested records use (their first use)
+        let mut features = format::legacy_baseline_features().merged(&self.used);
+        // and the snapshot deltas in the same one tail batch, when this rdy converts them
+        let mut deltas = vec![];
+        if let Some(converted) = self.conversion(&features)? {
+            deltas = self.tail_deltas()?;
+            features = converted;
+        }
         let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
         if !self.has_repo_id {
             refs.push((
@@ -736,28 +783,58 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
                 encode_repo_id(&repo.unwrap_or_else(RepoId::new)),
             ));
         }
-        // the i-th ref of the batch is salted with the log end plus i, as the store salts
-        let frames: Vec<(u8, Vec<u8>)> = refs
-            .into_iter()
-            .enumerate()
-            .map(|(i, (name, value))| {
-                let at = Location {
-                    segment: start.segment,
-                    offset: start.offset + i as u64,
-                };
-                let update = RefUpdate {
-                    name: name.into(),
-                    value,
-                    at,
-                };
-                (kinds::REF_UPDATE, encode(&update))
-            })
-            .collect();
+        self.append_tail(deltas, refs)?;
+        self.features = Some(features);
+        Ok(true)
+    }
+
+    /// The manifest the snapshot-delta step makes from `from`, when this ingest converts and the
+    /// step applies (`crate::upgrade::delta_conversion`); the merged manifest keeps the bounds
+    /// this rdy writes.
+    fn conversion(&self, from: &StoreFeatures) -> Result<Option<StoreFeatures>, StoreError> {
+        if self.history.is_none() {
+            return Ok(None);
+        }
+        let Some(to) = crate::upgrade::delta_conversion(from)? else {
+            return Ok(None);
+        };
+        format::check_writable(&to)?;
+        Ok(Some(to))
+    }
+
+    /// The deltas of the ingested history ([`crate::snapshot_upgrade::LoadHistory::deltas`]).
+    fn tail_deltas(&self) -> Result<Vec<(u8, Vec<u8>)>, StoreError> {
+        match &self.history {
+            Some(h) => h.deltas(self.log()),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Appends the load's one tail batch: `objects`, then `refs`, the i-th ref salted with the
+    /// log end plus i as the store salts, then its marker.
+    fn append_tail(
+        &mut self,
+        objects: Vec<(u8, Vec<u8>)>,
+        refs: Vec<(&str, Vec<u8>)>,
+    ) -> Result<(), StoreError> {
+        let start = self.log().end();
+        let mut frames = objects;
+        frames.extend(refs.into_iter().enumerate().map(|(i, (name, value))| {
+            let at = Location {
+                segment: start.segment,
+                offset: start.offset + i as u64,
+            };
+            let update = RefUpdate {
+                name: name.into(),
+                value,
+                at,
+            };
+            (kinds::REF_UPDATE, encode(&update))
+        }));
         let placed = self.log_mut().append_frames(&frames, false)?;
         self.log_mut()
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
-        self.features = Some(features);
-        Ok(true)
+        Ok(())
     }
 
     /// The source-only end of a follower's seed (D-AA4FD): the log keeps the manifest `m`, and

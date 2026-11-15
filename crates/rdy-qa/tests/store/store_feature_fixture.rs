@@ -37,11 +37,6 @@ const INVENTORY_BLAKE3: &str = "5958aa4e476d53d7c95cb960896e2be5e29547340237ccb2
 /// The number of segment files of the fixture, set when it was written.
 const SEGMENT_COUNT: usize = 61;
 
-/// The members of the expect file's `store` object that record the code at write time and not a
-/// fact an open reads from the store. The fixture is immutable, so the reader must not compare
-/// them with the current code: a new latest encoding would fail a store that still opens.
-const CODE_RECORDED: [&str; 1] = ["encodings"];
-
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/feature-1")
 }
@@ -166,7 +161,8 @@ fn origin() -> Location {
 /// frame and batch counts, the object keys, the refs, the tags, the landings, the raw encodings
 /// and the signatures. It also writes `encodings`, the latest-encoding map of the code that wrote
 /// the fixture. That member is a record of the writer, not a fact of the store: the reader never
-/// compares it (`CODE_RECORDED`), and the io written-format guard holds it.
+/// compares it (`rdy_qa::foreign_fixture::assert_upgraded_facts` reads only the store's facts),
+/// and the io written-format guard holds it.
 fn store_facts(r: &Rdy) -> Value {
     let end = r.store().log_end();
     let (mut frames, mut batches) = (0u64, 0u64);
@@ -303,14 +299,10 @@ fn open_checked_copy() {
     let report = r.fsck().unwrap_or_else(|e| panic!("fsck failed: {e:?}"));
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(report.foreign_signatures, 0);
-    let got = store_facts(&r);
-    assert_eq!(got["fsck"], want["store"]["fsck"], "fsck report");
-    for member in want["store"].as_object().unwrap().keys() {
-        if CODE_RECORDED.contains(&member.as_str()) {
-            continue;
-        }
-        assert_eq!(got[member], want["store"][member], "{member}");
-    }
+    // the writer open ran the snapshot-delta step (SD1 Task 6): the recorded source prefix
+    // reads as recorded, then the added feature and the deltas of its one upgrade batch
+    // (`encodings` records the code that wrote the fixture: it is never compared)
+    rdy_qa::foreign_fixture::assert_upgraded_facts(&r, &want["store"], "feature-1");
     // the carriers read back: canon materializes and the invariants hold
     let canon = r.read().materialized(&Scope::Canon).unwrap();
     assert!(canon.iter().count() > 0);
@@ -351,6 +343,81 @@ fn open_read_only_copy() {
     r.close().unwrap();
     assert_eq!(tree(&root), before, "no source-store path or byte changed");
     assert!(std::fs::symlink_metadata(&lock).unwrap().is_file());
+}
+
+/// sdl5 (receipt F6): the optional snapshot-delta step never runs on a read-only open. With the
+/// step registered, as the release that ships it registers it, the writer's open of the copy
+/// runs the step (its store is legacy), then the copy uses a read-only feature; the next open,
+/// which knows no such feature, opens for reading and changes no byte, and the maintenance
+/// refuses the store (`E_STORE_READ_ONLY`) before it writes anything.
+fn read_only_copy_runs_no_optional_step() {
+    let steps = vec![rdy_store::upgrade::snapshot_delta_step()];
+    let (_base, root) = project_copy(&fixture_dir());
+    rdy_store::upgrade::with_registry_for_tests(&steps, || {
+        {
+            let _known = read_only_feature_for_tests();
+            let mut r = Rdy::open(&root).unwrap();
+            assert!(
+                r.store()
+                    .features()
+                    .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA),
+                "the writer's open ran the step"
+            );
+            r.store_mut()
+                .put_blob(b"uses the read-only feature")
+                .unwrap();
+            r.seal_open().unwrap();
+            r.close().unwrap();
+        }
+        std::fs::remove_file(root.join(".rdy/store/index.redb")).unwrap();
+        let before = tree(&root);
+        let r = Rdy::open(&root).unwrap();
+        assert_eq!(r.store().access(), StoreAccess::ReadOnly);
+        assert!(r.is_read_only());
+        let report = r.fsck().unwrap_or_else(|e| panic!("fsck failed: {e:?}"));
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        r.close().unwrap();
+        assert_eq!(tree(&root), before, "the read-only open changed nothing");
+        let e = rdy_engine::maintenance::run_with_registry_for_tests(&root, false, &steps)
+            .err()
+            .map(|e| e.code);
+        assert_eq!(e, None, "the step has run: there is no work");
+        assert_eq!(tree(&root), before, "the maintenance wrote nothing");
+    });
+    // a legacy copy that uses the read-only feature before any step ran (its writer open runs
+    // under an empty registry, so it activates nothing): the maintenance refuses it before it
+    // writes, and its read-only open runs nothing either
+    let (_base, root) = project_copy(&fixture_dir());
+    rdy_store::upgrade::with_registry_for_tests(&[], || {
+        let _known = read_only_feature_for_tests();
+        let mut r = Rdy::open(&root).unwrap();
+        r.store_mut()
+            .put_blob(b"uses the read-only feature")
+            .unwrap();
+        r.seal_open().unwrap();
+        r.close().unwrap();
+    });
+    std::fs::remove_file(root.join(".rdy/store/index.redb")).unwrap();
+    let before = tree(&root);
+    rdy_store::upgrade::with_registry_for_tests(&steps, || {
+        let e =
+            rdy_engine::maintenance::run_with_registry_for_tests(&root, false, &steps).unwrap_err();
+        assert_eq!(e.code, rdy_engine::E_STORE_READ_ONLY, "{e:?}");
+        let r = Rdy::open(&root).unwrap();
+        assert!(r.is_read_only());
+        assert!(
+            !r.store()
+                .features()
+                .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA)
+        );
+        r.close().unwrap();
+    });
+    assert_eq!(tree(&root), before, "nothing was written");
+}
+
+#[test]
+fn sdl5_read_only_copy_runs_no_optional_step() {
+    read_only_copy_runs_no_optional_step();
 }
 
 #[test]

@@ -81,13 +81,14 @@ fn fork(r: &Rdy, root: &Path, name: &str) -> Rdy {
 }
 
 /// The kinds a copy carries into a holder: what a tag's history reaches.
-const COPIED: [u8; 9] = [
+const COPIED: [u8; 10] = [
     kinds::BLOCK,
     kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
     kinds::SNAPSHOT,
+    kinds::SNAPSHOT_DELTA,
     kinds::BLOB_CHUNK,
     kinds::BLOB_MANIFEST,
     kinds::TAG,

@@ -918,7 +918,8 @@ type SpanEdit = fn(&mut rdy_model::redaction::DropSpan) -> Items;
 /// first: the source's request with `edit` applied to its block span (`edit` may return extra
 /// records, such as a residue), a landing that names it, its apply and a tag `v3` of that
 /// landing, with the block as a dropped record of that apply. Returns the batch file, the tag's
-/// landing, and the request, landing and apply records (with the extras first).
+/// landing, and the request, landing, its snapshot delta and apply records (with the extras
+/// first).
 fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items) {
     use rdy_model::redaction::RedactionApply;
     use rdy_store::sync_stream::StreamRecord;
@@ -954,9 +955,23 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         tagged_by: prov("human:alice", Role::Approver),
     });
     let tid = Hash::of(&tag_bytes);
+    // the landing's snapshot delta (SD1 Task 6): the source landing's state, on its prev's
+    let delta = {
+        let src = Store::open(&b.src).unwrap();
+        let base = landing
+            .prev
+            .map(|p| src.snapshot_delta_of(&p).unwrap().unwrap().0);
+        let before = match landing.prev {
+            Some(p) => src.snapshot_at(&p).unwrap().blocks,
+            None => Default::default(),
+        };
+        let after = src.snapshot_at(&b.fixture.landing.unwrap()).unwrap().blocks;
+        rdy_model::diff_snapshots(lid, base, &before, &after)
+    };
     records.extend([
         (kinds::REDACTION, request_bytes),
         (landing_kind, landing_bytes),
+        rdy_store::codec::item_new(kinds::SNAPSHOT_DELTA, &delta),
         (kinds::REDACTION_APPLY, apply_bytes),
     ]);
     // the batch, ending with the tag; its prerequisites are every key a record names that the
@@ -975,7 +990,10 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         .chain([secret])
         .collect();
     for (kind, payload) in &present {
-        for r in rdy_store::object_refs::refs_of(*kind, payload).unwrap() {
+        for r in
+            rdy_store::object_refs::refs_of(&rdy_store::format::baseline_features(), *kind, payload)
+                .unwrap()
+        {
             match r.kind {
                 Some(k) if !in_batch.contains(&key(k, r.hash)) => {
                     prerequisites.insert(key(k, r.hash));

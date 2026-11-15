@@ -25,5 +25,6 @@ mod store_pver;
 mod store_reader;
 mod store_redaction_crash;
 mod store_resolve;
+mod store_snapshot_delta_fixture;
 mod store_viewops;
 mod store_windows;

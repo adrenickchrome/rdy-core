@@ -277,6 +277,8 @@ pub enum ImpactKind {
     Dispute,
     DisputeResolution,
     CheckRequest,
+    /// A landing's snapshot delta whose set names an affected version (appended: index 15).
+    SnapshotDelta,
 }
 
 /// How a record relates to the removed content.

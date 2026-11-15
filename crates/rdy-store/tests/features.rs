@@ -181,7 +181,7 @@ fn ok1_test_feature_first_use_and_ref_are_one_batch() {
             .iter()
             .map(|f| f.name.as_str())
             .collect::<Vec<_>>(),
-        ["content_hash_v2", "object_encoding"]
+        ["content_hash_v2", "object_encoding", "snapshot_delta"]
     );
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
@@ -851,7 +851,18 @@ fn project_with(features: &StoreFeatures) -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn ok1_first_use_refuses_a_manifest_over_its_bounds() {
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::BLOB_CHUNK);
-    let full = manifest(unknown_compatible(256));
+    // each manifest lists what the snapshot-delta step merges (object_encoding and
+    // snapshot_delta), so the writer open has no step to run (SD1 Task 6)
+    let with_delta = |n: usize| {
+        let mut f = unknown_compatible(n);
+        f.extend(registered_features().into_iter().filter(|f| {
+            f.name == rdy_store::format::FEATURE_SNAPSHOT_DELTA
+                || f.name == rdy_store::format::FEATURE_OBJECT_ENCODING
+        }));
+        manifest(f)
+    };
+    let full = with_delta(254);
+    assert_eq!(full.features.len(), 256);
     let (_base, dir) = project_with(&full);
     let mut s = Store::open(&dir).unwrap();
     assert_eq!(s.features(), &full);
@@ -874,7 +885,7 @@ fn ok1_first_use_refuses_a_manifest_over_its_bounds() {
     assert_eq!(tree(&dir.join("segments")), before);
     Store::open(&dir).unwrap();
     // 255 and the first use: exactly the bound
-    let (_base, dir) = project_with(&manifest(unknown_compatible(255)));
+    let (_base, dir) = project_with(&with_delta(253));
     let mut s = Store::open(&dir).unwrap();
     s.put_blob(b"first use").unwrap();
     assert_eq!(log_manifest(&s).features.len(), 256);

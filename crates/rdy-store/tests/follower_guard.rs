@@ -890,6 +890,8 @@ fn mh3_bad_or_missing_mark_never_opens_as_a_writer() {
             class: FeatureClass::Compatible,
             required_rdy: "100.2.0".into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }];
     let lock = StoreLock::take(&f.dir).unwrap();
     let plan = upgrade::inspect_with_registry_for_tests(&f.dir, &registry).unwrap();

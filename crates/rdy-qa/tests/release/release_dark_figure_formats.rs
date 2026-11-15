@@ -179,11 +179,17 @@ fn rfr2_every_released_dump_still_loads() {
         .clone();
     assert_eq!(fd["class"], "incompatible");
     assert_eq!(fd["required_rdy"], json!(FIGURE_DARK_REQUIRED_RDY));
-    let whole = foreign_fixture::dump_load_facts(&file, &scratch.path().join("dark"));
-    assert_eq!(whole, expect["whole"], "the whole load");
+    // the load reads as recorded in its source prefix, then holds its one snapshot-delta
+    // upgrade tail (SD1 Task 6)
+    foreign_fixture::assert_upgraded_dump_load(
+        &file,
+        &scratch.path().join("dark"),
+        &expect["whole"],
+        DUMP,
+    );
     let native = read_json(&fixtures().join(NATIVE).join("expect.json"));
     assert_eq!(
-        whole["store"], native["store"],
+        expect["whole"]["store"], native["store"],
         "the dump holds the native store"
     );
 }

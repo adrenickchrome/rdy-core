@@ -599,6 +599,11 @@ fn records_of(bytes: &[u8]) -> BTreeMap<ObjectKey, StreamRecord> {
     out
 }
 
+/// The snapshot delta of `landing` the store holds.
+fn delta_of(reader: &StoreReader, landing: Hash) -> Hash {
+    reader.snapshot_delta_of(&landing).unwrap().unwrap().0
+}
+
 fn position(records: &[ObjectKey], k: ObjectKey) -> usize {
     records
         .iter()
@@ -614,17 +619,16 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     let c = closure(&reader, src.tag, &BTreeSet::new()).unwrap();
 
     // the inventory, key by key
-    let landing: LandingRecord = reader.landing(&src.landing).unwrap();
     let chunks = reader
         .get_typed::<BlobManifest>(kinds::BLOB_MANIFEST, &src.manifest)
         .unwrap()
         .chunks;
-    let later = src.fixture.landing_record.clone().unwrap();
     let mut want: BTreeSet<ObjectKey> = BTreeSet::from([
         key(kinds::TAG, src.tag),
         key(kinds::LANDING, src.landing),
         key(kinds::PROPOSAL, src.proposal),
-        key(kinds::SNAPSHOT, landing.state),
+        // SD1 Task 6: a current store's landing carries its snapshot delta, no SNAPSHOT
+        key(kinds::SNAPSHOT_DELTA, delta_of(&reader, src.landing)),
         key(kinds::CHANGE, src.change),
         key(kinds::BLOCK, src.secret.version_hash()),
         key(kinds::BLOCK, src.figure.version_hash()),
@@ -643,7 +647,10 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
         key(kinds::CHANGE, src.fixture.requests[0].carrier),
         key(kinds::LANDING, src.later_landing()),
         key(kinds::PROPOSAL, src.fixture.proposal.unwrap()),
-        key(kinds::SNAPSHOT, later.state),
+        key(
+            kinds::SNAPSHOT_DELTA,
+            delta_of(&reader, src.later_landing()),
+        ),
         // the landing's seal and the chain it ends
         key(kinds::PLAN, src.plans[0]),
         key(kinds::PLAN, src.plans[1]),
@@ -663,8 +670,11 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     let got_kinds: BTreeSet<u8> = got.iter().map(|k| k.kind).collect();
     assert_eq!(
         got_kinds,
-        SYNC_KINDS.into_iter().collect(),
-        "every sync kind"
+        SYNC_KINDS
+            .into_iter()
+            .filter(|k| *k != kinds::SNAPSHOT)
+            .collect(),
+        "every sync kind but the legacy SNAPSHOT"
     );
     assert!(c.prerequisites.is_empty(), "a whole history needs nothing");
     // not walked: another view's work, the fixture's own view ops
@@ -683,7 +693,7 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     let records = records_of(&bytes);
     for (i, k) in order.iter().enumerate() {
         if let r @ StreamRecord::Present { payload, .. } = &records[k] {
-            for e in refs_of(r.raw_kind(), payload).unwrap() {
+            for e in refs_of(&reader.store_features().unwrap(), r.raw_kind(), payload).unwrap() {
                 if let Some(kind) = e.kind {
                     assert!(
                         position(order, key(kind, e.hash)) < i,
@@ -729,7 +739,10 @@ fn ha5_known_keys_become_prerequisites() {
     assert_eq!(report.keys, c.records);
     assert_eq!(report.header.prerequisites, c.prerequisites);
     // a key is its kind and its hash: the landing's hash under another kind is not the landing
-    let other_kind = BTreeSet::from([key(kinds::SNAPSHOT, src.landing)]);
+    let other_kind = BTreeSet::from([
+        key(kinds::SNAPSHOT, src.landing),
+        key(kinds::SNAPSHOT_DELTA, src.landing),
+    ]);
     assert_eq!(closure(&reader, src.tag, &other_kind).unwrap(), full);
     // a key the walk never meets changes nothing
     let unmet = BTreeSet::from([key(kinds::BLOCK, src.side_block)]);
@@ -1265,7 +1278,12 @@ fn ha5_attachments_reach_a_fixed_point_without_identity_cycles() {
         else {
             panic!("a residue travels whole")
         };
-        let refs = refs_of(rec.raw_kind(), payload).unwrap();
+        let refs = refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            rec.raw_kind(),
+            payload,
+        )
+        .unwrap();
         assert!(
             !refs
                 .iter()

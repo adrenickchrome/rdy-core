@@ -386,7 +386,7 @@ fn frame<T: Serialize + 'static>(kind: u8, v: &T) -> (u8, Vec<u8>) {
 /// `refs_of` the frame of `v` as a stored object of logical kind `kind`.
 fn frame_refs<T: Serialize + 'static>(kind: u8, v: &T) -> Result<Vec<ObjectRef>, RecordError> {
     let (raw, payload) = frame(kind, v);
-    refs_of(raw, &payload)
+    refs_of(&rdy_store::format::StoreFeatures::of(vec![]), raw, &payload)
 }
 
 /// One sample record: its arm's name, kind, bytes and expected edges (in any order).
@@ -652,6 +652,24 @@ fn samples() -> Vec<Sample> {
             SNAPSHOT,
             &snapshot,
             vec![some(BLOCK, 30), some(BLOCK, 31)],
+        ),
+        // SD1: its landing, its base delta and each set version; `full` and `drop` are no links
+        s(
+            "snapshot delta",
+            SNAPSHOT_DELTA,
+            &rdy_model::SnapshotDelta {
+                landing: h(200),
+                base: Some(h(201)),
+                full: h(202),
+                set: vec![(id("c-00001"), h(203)), (id("d-00003"), h(204))],
+                drop: vec![id("e-00005")],
+            },
+            vec![
+                some(LANDING, 200),
+                some(SNAPSHOT_DELTA, 201),
+                some(BLOCK, 203),
+                some(BLOCK, 204),
+            ],
         ),
         Sample {
             arm: "blob chunk",
@@ -1281,7 +1299,11 @@ fn ha1_refs_cover_every_assigned_object_kind() {
     let all = samples();
     for sample in &all {
         assert_eq!(
-            refs_of(sample.kind, &sample.bytes),
+            refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                sample.kind,
+                &sample.bytes
+            ),
             Ok(sorted(sample.edges.clone())),
             "{}",
             sample.arm
@@ -1291,11 +1313,12 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         .iter()
         .map(|s| rdy_store::codec::logical_kind(s.kind))
         .collect();
-    // ok4: the four carried kinds, 25 to 28
+    // ok4: the four carried kinds, 25 to 28; SD1: the snapshot delta, 30
     let assigned: BTreeSet<u8> = (1..=7)
         .chain([9, 10, 11, 13])
         .chain(15..=22)
         .chain(24..=28)
+        .chain([30])
         .collect();
     assert_eq!(covered, assigned);
     assert_eq!(
@@ -1309,7 +1332,14 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         "figure",
         BTreeMap::from([("blob".to_string(), FieldValue::Str("abc".into()))]),
     );
-    assert_eq!(refs_of(BLOCK, &enc(&bad)), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOCK,
+            &enc(&bad)
+        ),
+        Err(RecordError::Decode)
+    );
     let upper = block(
         "block",
         "figure",
@@ -1318,13 +1348,27 @@ fn ha1_refs_cover_every_assigned_object_kind() {
             FieldValue::Str(h(0xab).to_string().to_uppercase()),
         )]),
     );
-    assert_eq!(refs_of(BLOCK, &enc(&upper)), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOCK,
+            &enc(&upper)
+        ),
+        Err(RecordError::Decode)
+    );
     let not_text = block(
         "block",
         "figure",
         BTreeMap::from([("blob".to_string(), FieldValue::Int(1))]),
     );
-    assert_eq!(refs_of(BLOCK, &enc(&not_text)), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOCK,
+            &enc(&not_text)
+        ),
+        Err(RecordError::Decode)
+    );
     // The same malformed figure embedded in a change.
     let embeds = change(
         "change",
@@ -1336,9 +1380,23 @@ fn ha1_refs_cover_every_assigned_object_kind() {
     // A span names its object by a portable kind only.
     let mut r = redaction();
     r.manifest.spans[0].kind = 12;
-    assert_eq!(refs_of(REDACTION, &enc(&r)), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            REDACTION,
+            &enc(&r)
+        ),
+        Err(RecordError::Decode)
+    );
     r.manifest.spans[0].kind = REF_UPDATE;
-    assert_eq!(refs_of(REDACTION, &enc(&r)), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            REDACTION,
+            &enc(&r)
+        ),
+        Err(RecordError::Decode)
+    );
 }
 
 #[test]
@@ -1355,7 +1413,12 @@ fn ha1_identity_hashes_are_not_dependencies() {
     .map(h)
     .collect();
     for sample in samples() {
-        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
+        let edges = refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            sample.kind,
+            &sample.bytes,
+        )
+        .unwrap();
         for r in &edges {
             assert!(
                 !identities.contains(&r.hash),
@@ -1368,7 +1431,14 @@ fn ha1_identity_hashes_are_not_dependencies() {
     // A pin-only block, the relayed tag answer, a block residue and a review have no edges.
     let mut pinned = block("block", "claim", BTreeMap::new());
     pinned.pins.insert(id("e-00005"), h(1));
-    assert_eq!(refs_of(BLOCK, &enc(&pinned)), Ok(vec![]));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            BLOCK,
+            &enc(&pinned)
+        ),
+        Ok(vec![])
+    );
     // An answer's item and card hash add none; only its targets do.
     let answer = Answer {
         item: format!("tag:{}", h(3)),
@@ -1384,7 +1454,14 @@ fn ha1_identity_hashes_are_not_dependencies() {
         evidence_kind: None,
         note: None,
     };
-    assert_eq!(refs_of(ANSWER, &enc(&answer)), Ok(vec![any(4)]));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            ANSWER,
+            &enc(&answer)
+        ),
+        Ok(vec![any(4)])
+    );
     // A change residue's own id is not a dependency of it.
     let edges = frame_refs(
         REDACTION_RESIDUE,
@@ -1456,7 +1533,11 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     for role in &roles {
         let a = answer(AnswerAct::Confirm, *role, None);
         assert_eq!(
-            refs_of(ANSWER, &enc(&a)),
+            refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                ANSWER,
+                &enc(&a)
+            ),
             Ok(answer_edges.clone()),
             "{role:?}"
         );
@@ -1464,7 +1545,11 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     for kind in evidence.iter().copied().map(Some).chain([None]) {
         let a = answer(AnswerAct::Confirm, Role::Approver, kind);
         assert_eq!(
-            refs_of(ANSWER, &enc(&a)),
+            refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                ANSWER,
+                &enc(&a)
+            ),
             Ok(answer_edges.clone()),
             "{kind:?}"
         );
@@ -1564,7 +1649,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);
     let impacts = every!(ImpactKind: BlockVersion, Change, Landing, Tag, View, Proposal,
         StateSnapshot, AuditText, Review, Tension, Answer, Assessment, Dispute, DisputeResolution,
-        CheckRequest);
+        CheckRequest, SnapshotDelta);
     let relations = every!(ImpactRelation: Removed, Embeds, References, Quotes);
     let copies = every!(CopyKind: Render, Export, Dump, Clone, Published, WorkingCopy);
     let statuses = every!(CopyStatus: Unknown);
@@ -1578,7 +1663,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             statuses.len(),
             support.len()
         ),
-        (4, 15, 4, 6, 1, 2)
+        (4, 16, 4, 6, 1, 2)
     );
     let request = |reason_class: ReasonClass, inside: Vec<ImpactRow>, outside: Vec<CopyRow>| {
         let mut r = redaction();
@@ -1597,7 +1682,11 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     for reason in &reasons {
         let r = request(*reason, vec![], vec![]);
         assert_eq!(
-            refs_of(REDACTION, &enc(&r)),
+            refs_of(
+                &rdy_store::format::StoreFeatures::of(vec![]),
+                REDACTION,
+                &enc(&r)
+            ),
             Ok(request_edges.clone()),
             "{reason:?}"
         );
@@ -1624,7 +1713,14 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         })
         .collect();
     let r = request(ReasonClass::Secret, inside, outside);
-    assert_eq!(refs_of(REDACTION, &enc(&r)), Ok(request_edges));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            REDACTION,
+            &enc(&r)
+        ),
+        Ok(request_edges)
+    );
 }
 
 #[test]
@@ -1695,7 +1791,12 @@ fn ha1_refs_are_sorted_and_unique() {
         ]
     );
     for sample in samples() {
-        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
+        let edges = refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            sample.kind,
+            &sample.bytes,
+        )
+        .unwrap();
         assert!(
             edges.windows(2).all(|w| w[0] < w[1]),
             "{}: not strictly ascending",
@@ -1779,7 +1880,7 @@ fn ha1_unknown_and_local_effect_kinds_are_refused() {
     for kind in [0u8, 8, 12, 14, 23, 127, 255] {
         for payload in [&tag, &ref_update, &commit, &vec![]] {
             assert_eq!(
-                refs_of(kind, payload),
+                refs_of(&rdy_store::format::StoreFeatures::of(vec![]), kind, payload),
                 Err(RecordError::Kind),
                 "kind {kind}"
             );
@@ -1832,13 +1933,22 @@ fn ha1_every_stored_text_field_is_bounded() {
             seen.insert(name.clone());
             let exact = widen(&sample.bytes, at, len, 1_048_576);
             assert!(
-                refs_of(sample.kind, &exact).is_ok(),
+                refs_of(
+                    &rdy_store::format::StoreFeatures::of(vec![]),
+                    sample.kind,
+                    &exact
+                )
+                .is_ok(),
                 "{}: {name} at the bound",
                 sample.arm
             );
             let over = widen(&sample.bytes, at, len, 1_048_577);
             assert_eq!(
-                refs_of(sample.kind, &over),
+                refs_of(
+                    &rdy_store::format::StoreFeatures::of(vec![]),
+                    sample.kind,
+                    &over
+                ),
                 Err(RecordError::Limit {
                     name: TEXT_BYTES,
                     maximum: 1_048_576
@@ -1976,7 +2086,11 @@ fn cp3_plan_refs_are_typed_and_identity_hashes_are_not_edges() {
     };
     let sealed = plan(Some(110), Some(111), Some(113), Some(seal));
     assert_eq!(
-        refs_of(PLAN, &enc(&sealed)),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            PLAN,
+            &enc(&sealed)
+        ),
         Ok(vec![
             some(PROPOSAL, 113),
             some(LANDING, 114),
@@ -1994,25 +2108,53 @@ fn cp3_plan_refs_are_typed_and_identity_hashes_are_not_edges() {
         .chain([Hash::of(b"c".repeat(40).as_slice())])
         .collect();
     for sample in plan_samples() {
-        for r in refs_of(sample.kind, &sample.bytes).unwrap() {
+        for r in refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            sample.kind,
+            &sample.bytes,
+        )
+        .unwrap()
+        {
             assert!(!identities.contains(&r.hash), "{}: {r:?}", sample.arm);
             assert!(r.kind.is_some(), "{}: every plan edge is typed", sample.arm);
         }
     }
     // a first version names nothing; the same link twice is one edge
     assert_eq!(
-        refs_of(PLAN, &enc(&plan(None, None, None, None))),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            PLAN,
+            &enc(&plan(None, None, None, None))
+        ),
         Ok(vec![])
     );
     assert_eq!(
-        refs_of(PLAN, &enc(&plan(Some(110), Some(110), None, None))),
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            PLAN,
+            &enc(&plan(Some(110), Some(110), None, None))
+        ),
         Ok(vec![some(PLAN, 110)])
     );
     // a version that is not its own canonical encoding, or holds a byte past it, is refused
     let mut trailing = enc(&sealed);
     trailing.push(0);
-    assert_eq!(refs_of(PLAN, &trailing), Err(RecordError::Decode));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            PLAN,
+            &trailing
+        ),
+        Err(RecordError::Decode)
+    );
     // PLAN is a portable kind; kind 127, the highest logical kind, is not
     assert!(PORTABLE_KINDS.contains(&PLAN));
-    assert_eq!(refs_of(127, &enc(&sealed)), Err(RecordError::Kind));
+    assert_eq!(
+        refs_of(
+            &rdy_store::format::StoreFeatures::of(vec![]),
+            127,
+            &enc(&sealed)
+        ),
+        Err(RecordError::Kind)
+    );
 }

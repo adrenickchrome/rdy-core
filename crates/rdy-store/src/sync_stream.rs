@@ -168,7 +168,7 @@ const PRELUDE: u64 = MAGIC.len() as u64 + 4;
 /// The store kinds an object frame may have: the portable kinds less TRANSITION, a batch's own
 /// local record (no FILE, REF_UPDATE, BATCH_COMMIT or TRANSITION is portable). Ascending. A
 /// kind-None link resolves among these.
-pub const SYNC_KINDS: [u8; 23] = [
+pub const SYNC_KINDS: [u8; 24] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -192,11 +192,17 @@ pub const SYNC_KINDS: [u8; 23] = [
     kinds::DISPUTE,
     kinds::DISPUTE_RESOLUTION,
     kinds::CHECK_REQUEST,
+    kinds::SNAPSHOT_DELTA,
 ];
 
-/// Whether an object frame of `kind` may stand in a sync batch.
+/// [`SYNC_KINDS`].
+pub fn sync_kinds() -> &'static [u8] {
+    &SYNC_KINDS
+}
+
+/// Whether an object frame of `kind` may stand in a sync batch ([`sync_kinds`]).
 pub fn is_sync_kind(kind: u8) -> bool {
-    SYNC_KINDS.contains(&kind)
+    sync_kinds().contains(&kind)
 }
 
 /// What a stream carries: a tag's history, written `tag_history` and as the byte 0, or a link
@@ -440,13 +446,16 @@ impl StreamRecord {
         }
     }
 
-    /// The objects the record needs before it, as `portable_refs_of` gives them (no
+    /// The objects the record needs before it, in a history of `features` (an incoming
+    /// stream's declared features, a held store's own), as `portable_refs_of` gives them (no
     /// foreign-only edge: foreign content is never a tag's history, D-FK58A): a present record's
     /// references, a dropped record's residue (its apply is a later proof, see
     /// [`StreamRecord::proof`]). Sorted, no repeats.
-    pub fn refs(&self) -> Result<Vec<ObjectRef>, RecordError> {
+    pub fn refs(&self, features: &StoreFeatures) -> Result<Vec<ObjectRef>, RecordError> {
         match self {
-            StreamRecord::Present { payload, .. } => portable_refs_of(self.raw_kind(), payload),
+            StreamRecord::Present { payload, .. } => {
+                portable_refs_of(features, self.raw_kind(), payload)
+            }
             StreamRecord::Dropped { residue, .. } => Ok(residue
                 .iter()
                 .map(|r| ObjectRef {
@@ -1310,6 +1319,37 @@ fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError
     let StreamRecord::Present { key, payload, .. } = r else {
         return Ok(());
     };
+    // a SNAPSHOT's bytes are the canonical encoding of its map, with or without the feature:
+    // postcard also decodes aliases (non-minimal varints, keys out of order or repeated) that a
+    // landing's `state` could never fold to (SD1, D-7K4Z0)
+    if key.kind == crate::kinds::SNAPSHOT {
+        return match crate::codec::decode_canonical::<rdy_model::StateSnapshot>(
+            r.raw_kind(),
+            payload,
+        ) {
+            Ok(_) => Ok(()),
+            Err(RecordError::Decode)
+                if crate::codec::decode_bounded::<rdy_model::StateSnapshot>(
+                    r.raw_kind(),
+                    payload,
+                )
+                .is_ok() =>
+            {
+                Err(StreamError::broken_rule(
+                    n,
+                    offset,
+                    &crate::snapshot::noncanonical_snapshot(&key.hash),
+                )
+                .with_object(Some(*key)))
+            }
+            Err(e) => Err(StreamError::from_record(n, offset, &e).with_object(Some(*key))),
+        };
+    }
+    if key.kind == crate::kinds::SNAPSHOT_DELTA {
+        return crate::codec::decode_canonical::<rdy_model::SnapshotDelta>(r.raw_kind(), payload)
+            .map(|_| ())
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)));
+    }
     let payload = crate::codec::split(r.raw_kind(), payload)
         .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?
         .body;
@@ -1401,8 +1441,9 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
                 .with_object(Some(key))
                 .into());
         }
+        // the links follow the features the stream declares (`portable_refs_of`)
         let refs = r
-            .refs()
+            .refs(&header.features)
             .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(key)))?;
         record_rules(n, offset, &r)?;
         on_record(n, offset, &r)?;
@@ -1447,7 +1488,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
             let target = match e.kind {
                 Some(kind) => ObjectKey { kind, hash: e.hash },
                 None => {
-                    let mut found = SYNC_KINDS
+                    let mut found = sync_kinds()
                         .iter()
                         .map(|&kind| ObjectKey { kind, hash: e.hash })
                         .filter(|k| index.contains_key(k) || is_prerequisite(k));

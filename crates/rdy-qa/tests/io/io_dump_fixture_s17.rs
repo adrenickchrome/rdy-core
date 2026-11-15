@@ -23,6 +23,7 @@
 //! the plan facts: every PLAN record and every row of the four plan tables. A later store format
 //! adds kinds and refs, never re-encodes (D-F0904): a load then appends one upgrade batch after the
 //! source log or the carried batch, and the checks allow exactly that batch.
+use crate::io_dump_fixture_s15::Upgrade;
 use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::Rdy;
 use rdy_engine::dump_stop::DumpStop;
@@ -726,26 +727,31 @@ fn holds(project: &Path, needle: &[u8]) -> bool {
 
 /// `want`, the facts of a store as the expect file pins them, as this rdy must read them: with
 /// this rdy's store format, and with the frames of `upgrade` upgrade batch data frames counted.
-fn as_read_now(want: &Value, upgrade: u64) -> Value {
+fn as_read_now(want: &Value, upgrade: Upgrade) -> Value {
     let mut want = want.clone();
     want["facts"]["refs"][REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
-    if upgrade > 0 {
+    if upgrade.frames() > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
-        *n = json!(n.as_u64().unwrap() + upgrade);
+        *n = json!(n.as_u64().unwrap() + upgrade.refs);
+        // the conversion's snapshot deltas (SD1 Task 6)
+        if upgrade.deltas > 0 {
+            let raw = kinds::SNAPSHOT_DELTA | rdy_store::codec::VERSIONED;
+            want["facts"]["objects"][raw.to_string()] = json!(upgrade.deltas);
+        }
         let fsck = want["facts"]["fsck"].as_object_mut().unwrap();
         let n = &mut fsck["frames"];
-        *n = json!(n.as_u64().unwrap() + upgrade);
+        *n = json!(n.as_u64().unwrap() + upgrade.frames());
         // a redaction count: in the report only while a redaction is active, and kept absent
         // when it is not
         if let Some(n) = fsck.get_mut("checked_payloads") {
-            *n = json!(n.as_u64().unwrap() + upgrade);
+            *n = json!(n.as_u64().unwrap() + upgrade.frames());
         }
     }
     want
 }
 
 /// Checks the loaded store facts `got` against the expect file's `want`, member by member.
-fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
+fn check_store(got: &Value, want: &Value, upgrade: Upgrade, what: &str) {
     let want = as_read_now(want, upgrade);
     for member in [
         "identity",
@@ -770,7 +776,7 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
 
 /// The data frames of the upgrade batch after `end`, for fixtures of store format `format`: none
 /// while this rdy writes that format.
-fn upgrade_after(dir: &Path, end: Location, holder: bool, format: u32) -> u64 {
+fn upgrade_after(dir: &Path, end: Location, holder: bool, format: u32) -> Upgrade {
     let r = open(dir, holder);
     let n = crate::io_dump_fixture_s15::upgrade_tail(&r, end, format);
     r.close().unwrap();
@@ -778,7 +784,7 @@ fn upgrade_after(dir: &Path, end: Location, holder: bool, format: u32) -> u64 {
 }
 
 /// Checks the facts of a whole load (`got`) against the expect file's `want`.
-fn check_whole(got: &Value, want: &Value, upgrade: u64, what: &str) {
+fn check_whole(got: &Value, want: &Value, upgrade: Upgrade, what: &str) {
     for member in ["end", "summary", "segments"] {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
@@ -788,7 +794,7 @@ fn check_whole(got: &Value, want: &Value, upgrade: u64, what: &str) {
 /// Checks the facts of a stopped load (`got`, read up to the pinned end of its carried batch)
 /// against the expect file's `want`. The bytes from the stop to that end are the pinned carried
 /// batch; `upgrade_after` checks the at most one upgrade batch after it.
-fn check_stop(got: &Value, want: &Value, upgrade: u64, what: &str) {
+fn check_stop(got: &Value, want: &Value, upgrade: Upgrade, what: &str) {
     for member in ["selector", "position", "end", "summary", "fsck_warnings"] {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
@@ -802,7 +808,13 @@ fn check_stop(got: &Value, want: &Value, upgrade: u64, what: &str) {
 /// A load of `files` into `to` stopped at the expect file's stop `want`, checked as this rdy or,
 /// when `later`, as a later one (`as_a_later_rdy`): its facts up to the pinned end of its carried
 /// batch, and the data frames of the upgrade batch after that end.
-fn stopped(files: &[PathBuf], want: &Value, to: &Path, holder: bool, later: bool) -> (Value, u64) {
+fn stopped(
+    files: &[PathBuf],
+    want: &Value,
+    to: &Path,
+    holder: bool,
+    later: bool,
+) -> (Value, Upgrade) {
     let selector = want["selector"].as_str().unwrap();
     let s = chain_load(files, to, Some(selector));
     assert!(!later, "a later rdy's checks are its own");

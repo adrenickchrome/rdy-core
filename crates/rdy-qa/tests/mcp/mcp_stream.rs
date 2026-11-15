@@ -81,7 +81,9 @@ fn source() -> Source {
                 {
                     // the frame's raw kind and stored bytes: a change is encoding 1
                     let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
-                    refs_of(raw, &payload).unwrap().is_empty()
+                    refs_of(r.store().features(), raw, &payload)
+                        .unwrap()
+                        .is_empty()
                 }
             })
             .collect();
@@ -490,8 +492,10 @@ fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
 /// `records` as one batch rooted at [`ROOT`] that lists `prerequisites` (sorted here).
 fn plb2_batch(mut prerequisites: Vec<ObjectKey>, records: &[StreamRecord]) -> Vec<u8> {
     prerequisites.sort();
+    // the pre-delta manifest: the cases carry a SNAPSHOT, and the offsets below stay fixed
+    // (SD1 Task 6 adds snapshot_delta to a new store's baseline)
     let header = StreamHeader::tag_history(
-        rdy_store::format::baseline_features(),
+        rdy_store::format::legacy_baseline_features(),
         RepoId([7; 16]),
         ROOT,
         prerequisites,
@@ -514,8 +518,8 @@ struct Case {
     issue: String,
 }
 
-/// The frame offset of the first record after a header with `k` prerequisites and the baseline
-/// manifest (183 bytes, ok4).
+/// The frame offset of the first record after a header with `k` prerequisites and the pre-delta
+/// baseline manifest (183 bytes, ok4).
 fn first_at(k: u64) -> u64 {
     12 + 37 + 57 + 183 + 33 * k
 }

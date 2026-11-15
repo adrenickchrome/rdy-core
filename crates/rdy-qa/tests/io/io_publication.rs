@@ -97,7 +97,9 @@ fn observed(project: &Path, profile: &str) -> Value {
     for v in st.versions().unwrap() {
         let landing: Hash = v.landing.parse().unwrap();
         let rec: LandingRecord = st.reader().get_typed(kinds::LANDING, &landing).unwrap();
-        let snap: StateSnapshot = st.reader().get_typed(kinds::SNAPSHOT, &rec.state).unwrap();
+        // the landing's state, folded from its snapshot deltas (SD1 Task 6)
+        let snap: StateSnapshot = st.reader().snapshot_at(&landing).unwrap();
+        assert_eq!(snap.id(), rec.state);
         let version = snap.blocks[&id];
         let raw = st.reader().get_block(&version).unwrap();
         versions.push(json!({

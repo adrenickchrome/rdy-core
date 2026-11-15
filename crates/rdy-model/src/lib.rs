@@ -30,7 +30,8 @@ pub use answer::{Answer, AnswerAct};
 pub use block::{Block, Link, RefMode, RefSpan, Tracking, hash_of, ref_spans};
 pub use canon::{
     ActorRun, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Proposal, RelayEvidence,
-    StateSnapshot, Tag,
+    SnapshotDelta, SnapshotDeltaError, StateSnapshot, Tag, diff_snapshots, fold_snapshot_delta,
+    snapshot_map_id, validate_snapshot_delta_form,
 };
 pub use change::{
     AltChoice, Change, ChangeLinks, ChangeReadIdentity, EditorialClass, Justification, Op,

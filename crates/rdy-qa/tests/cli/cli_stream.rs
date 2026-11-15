@@ -75,7 +75,9 @@ fn batches() -> Batches {
             {
                 // the frame's raw kind and stored bytes: a change is encoding 1
                 let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
-                refs_of(raw, &payload).unwrap().is_empty()
+                refs_of(r.store().features(), raw, &payload)
+                    .unwrap()
+                    .is_empty()
             }
         })
         .collect();

@@ -56,6 +56,8 @@ fn registry() -> Vec<UpgradeStep> {
         id: "add_assessment".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![assessment()]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 

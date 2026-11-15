@@ -37,6 +37,7 @@ mod io_plan_metadata;
 mod io_publication;
 mod io_reader;
 mod io_redaction_load;
+mod io_snapshot_delta;
 mod io_sync_fixture;
 mod io_tree;
 mod io_windows_roundtrip;

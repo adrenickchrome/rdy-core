@@ -358,9 +358,11 @@ mod hub {
             let mine: BTreeSet<ObjectKey> = part.iter().map(StreamRecord::key).collect();
             let mut needed: BTreeSet<ObjectKey> = BTreeSet::new();
             for rec in part {
-                let refs = rec.refs().map_err(|e| {
-                    RdyError::new("E_BAD_RECORD", e.to_string(), "export the history again")
-                })?;
+                let refs = rec
+                    .refs(&rdy_store::format::baseline_features())
+                    .map_err(|e| {
+                        RdyError::new("E_BAD_RECORD", e.to_string(), "export the history again")
+                    })?;
                 for r in refs {
                     let key = match r.kind {
                         Some(kind) => ObjectKey { kind, hash: r.hash },

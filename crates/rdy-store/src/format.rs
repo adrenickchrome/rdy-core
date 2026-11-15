@@ -69,6 +69,9 @@ pub const FOREIGN_COPY_REQUIRED_RDY: &str = "0.48.0";
 /// The first rdy that knows [`FEATURE_FIGURE_DARK`] (D-MKSFF): the release that first ships a
 /// figure's dark image. It never moves.
 pub const FIGURE_DARK_REQUIRED_RDY: &str = "0.51.0";
+/// The first rdy that knows [`FEATURE_SNAPSHOT_DELTA`] (D-RP6SM, D-918YB): the release that
+/// ships snapshot deltas. It never moves.
+pub const SNAPSHOT_DELTA_REQUIRED_RDY: &str = "0.52.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -91,10 +94,15 @@ pub const FEATURE_FOREIGN_COPY: &str = "foreign_copy";
 /// A figure's dark image (D-MKSFF, D-3DAX4): a `figure` block that sets `dark_blob`, alone or in
 /// a change's create or update. It stays on once a record uses it, whatever is removed later.
 pub const FEATURE_FIGURE_DARK: &str = "figure_dark";
+/// Snapshot deltas (D-RP6SM, D-918YB, D-7K4Z0): a SNAPSHOT_DELTA record, the snapshot of one
+/// landing as the difference from the previous landing's map. A new store and a new holder list
+/// it from their first batch ([`baseline_features`]); in a legacy store, its first use or the
+/// registered upgrade step (`crate::upgrade::snapshot_delta_step`) activates it.
+pub const FEATURE_SNAPSHOT_DELTA: &str = "snapshot_delta";
 
-/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF), sorted by name. Each is
-/// `incompatible` and needs its own minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 9] = [
+/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM), sorted by
+/// name. Each is `incompatible` and needs its own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 10] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -103,16 +111,19 @@ pub const REGISTERED_FEATURES: [&str; 9] = [
     FEATURE_FOREIGN_COPY,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
+    FEATURE_SNAPSHOT_DELTA,
     FEATURE_VIEW_REPLAY,
 ];
 
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
-/// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`, [`FEATURE_REQUIRED_RDY`] for
-/// the seven of O11.
+/// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
+/// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`FEATURE_REQUIRED_RDY`] for the seven
+/// of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
         FEATURE_FIGURE_DARK => FIGURE_DARK_REQUIRED_RDY,
+        FEATURE_SNAPSHOT_DELTA => SNAPSHOT_DELTA_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -878,9 +889,25 @@ fn known_class(name: &str) -> Option<FeatureClass> {
     })
 }
 
-/// The features a new store, and a legacy dump's load, start with: content-2 identity and
-/// versioned encodings, which every store this rdy writes uses.
+/// The features a new store and a new holder start with, in their first batch (D-8T7PA):
+/// content-2 identity, versioned encodings and snapshot deltas, which every store this rdy
+/// creates uses. A legacy load starts with [`legacy_baseline_features`] instead.
 pub fn baseline_features() -> StoreFeatures {
+    StoreFeatures {
+        manifest_version: 1,
+        features: vec![
+            registered(FEATURE_CONTENT_HASH_V2),
+            registered(FEATURE_OBJECT_ENCODING),
+            registered(FEATURE_SNAPSHOT_DELTA),
+        ],
+    }
+}
+
+/// The features a store that predates snapshot deltas is taken to have when nothing records
+/// its own: a legacy dump's load, and a store whose log or `FORMAT` names no manifest. They
+/// are content-2 identity and versioned encodings; `snapshot_delta` waits for the one upgrade
+/// tail or batch (`crate::upgrade::snapshot_delta_step`).
+pub fn legacy_baseline_features() -> StoreFeatures {
     StoreFeatures {
         manifest_version: 1,
         features: vec![
@@ -888,6 +915,51 @@ pub fn baseline_features() -> StoreFeatures {
             registered(FEATURE_OBJECT_ENCODING),
         ],
     }
+}
+
+/// The features [`crate::Store::create`] and [`crate::Store::create_holder`] start with:
+/// [`baseline_features`], or [`legacy_baseline_features`] on a thread that writes as the last
+/// rdy before snapshot deltas did ([`legacy_writer_for_tests`]).
+pub(crate) fn creation_baseline() -> StoreFeatures {
+    if legacy_writer() {
+        legacy_baseline_features()
+    } else {
+        baseline_features()
+    }
+}
+
+thread_local! {
+    /// How many [`LegacyWriter`] guards this thread holds.
+    static LEGACY_WRITER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread holds a [`legacy_writer_for_tests`] guard.
+pub(crate) fn legacy_writer() -> bool {
+    LEGACY_WRITER.with(|n| n.get() > 0)
+}
+
+/// While held, this thread writes as the last rdy before snapshot deltas did
+/// ([`legacy_writer_for_tests`]). Guards nest. It stays on the thread that took it.
+#[doc(hidden)]
+#[must_use]
+pub struct LegacyWriter(std::marker::PhantomData<*const ()>);
+
+impl Drop for LegacyWriter {
+    fn drop(&mut self) {
+        LEGACY_WRITER.with(|n| n.set(n.get().saturating_sub(1)));
+    }
+}
+
+/// Test hook: until the guard drops, this thread writes histories as the last rdy before
+/// snapshot deltas did, so a test can make a legacy source: a new store or holder starts with
+/// [`legacy_baseline_features`], a landing writes its full SNAPSHOT and no delta, and this rdy
+/// plans no upgrade step (a test's own registry, `crate::upgrade::with_registry_for_tests`,
+/// still wins). Every reader, check, load and take is this rdy's own. Another thread sees none
+/// of it. No environment, CLI or MCP path reaches it.
+#[doc(hidden)]
+pub fn legacy_writer_for_tests() -> LegacyWriter {
+    LEGACY_WRITER.with(|n| n.set(n.get() + 1));
+    LegacyWriter(std::marker::PhantomData)
 }
 
 /// The features this rdy registers ([`REGISTERED_FEATURES`]), and the injected test feature
@@ -917,7 +989,8 @@ pub fn registered_features() -> Vec<StoreFeature> {
 ///   assessment part or a `foreign_version` target), or a `repo_link` block, alone or in a
 ///   change;
 /// - `figure_dark`: a `figure` block that sets `dark_blob`, alone or in a change's create or
-///   update ([`is_dark_figure`]).
+///   update ([`is_dark_figure`]);
+/// - `snapshot_delta`: a SNAPSHOT_DELTA.
 ///
 /// A frame that does not split or decode uses nothing here: its own checks refuse it.
 pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
@@ -1009,6 +1082,7 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
             }
         }
         kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
+        kinds::SNAPSHOT_DELTA => add(FEATURE_SNAPSHOT_DELTA),
         kinds::REVIEW => {
             use rdy_model::Verdict;
             use rdy_model::review::{ReviewSubjectV1, ReviewV1};

@@ -13,8 +13,10 @@
 //!    is refused), every file and directory is fsynced, and `backup.json` is written last,
 //!    beside the copy. Every step names an entry of an open directory and follows no link, and
 //!    a backup or store path that was moved or replaced fails the upgrade;
-//! 4. it opens the store with no upgrade policy and appends one marked batch: the new
-//!    `meta/store_features` and the `meta/upgrade` receipt;
+//! 4. it opens the store with no upgrade policy, runs each planned step's action
+//!    ([`StepAction`]; an object-producing step prepares its objects here, and a refusal appends
+//!    nothing) and appends one marked batch: the step objects, the new `meta/store_features`
+//!    and the `meta/upgrade` receipt;
 //! 5. it rebuilds the index and runs the project's or the holder's store check.
 //!
 //! `FORMAT` still mirrors the old manifest then: the engine runs its full fsck, then
@@ -56,13 +58,64 @@ const COPY_BUFFER: usize = 1 << 20;
 /// The store's lock file, which no backup copies.
 const LOCK_FILE: &str = "lock";
 
+/// What a step writes into the upgrade batch beside the features and receipt refs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepAction {
+    /// Nothing: the step moves the manifest alone.
+    Manifest,
+    /// One SNAPSHOT_DELTA for each held landing that has none (`crate::snapshot_upgrade`). A
+    /// load and a take into a holder that holds the feature run the same action.
+    SnapshotDelta,
+}
+
 /// One registered upgrade step: it applies to a manifest that holds every feature of `from`
-/// and not yet every feature of `to`, and replaces `from`'s features with `to`'s.
+/// and not yet every feature of `to`, and replaces `from`'s features with `to`'s. `action` is
+/// what it writes beside the refs. `required` says whether a reader needs it: a store that a
+/// required step would change refuses a `RequireCurrent` open, an adapter's open and a
+/// follower; a store that only optional steps would change opens for them as it is, and only a
+/// writer's open or the store maintenance runs those steps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpgradeStep {
     pub id: String,
     pub from: StoreFeatures,
     pub to: StoreFeatures,
+    pub action: StepAction,
+    pub required: bool,
+}
+
+impl UpgradeStep {
+    /// A step that moves the manifest alone and that readers require.
+    pub fn manifest(id: &str, from: StoreFeatures, to: StoreFeatures) -> UpgradeStep {
+        UpgradeStep {
+            id: id.into(),
+            from,
+            to,
+            action: StepAction::Manifest,
+            required: true,
+        }
+    }
+}
+
+/// The id of the snapshot-delta step (D-918YB).
+pub const SNAPSHOT_DELTA_STEP: &str = "snapshot_delta";
+
+/// The snapshot-delta step (D-918YB, D-8T7PA): from any manifest without `snapshot_delta`, it
+/// merges the feature in and keeps every other feature; its batch holds one delta of every held
+/// landing (none for a store with no landing). A delta is an encoding-1 record, so the step
+/// merges `object_encoding` in too, for a source manifest that does not name it (a feature store
+/// that never wrote a versioned record). Readers do not require it. This rdy registers it
+/// ([`registered_steps`]).
+pub fn snapshot_delta_step() -> UpgradeStep {
+    UpgradeStep {
+        id: SNAPSHOT_DELTA_STEP.into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![
+            format::registered(format::FEATURE_OBJECT_ENCODING),
+            format::registered(format::FEATURE_SNAPSHOT_DELTA),
+        ]),
+        action: StepAction::SnapshotDelta,
+        required: false,
+    }
 }
 
 /// What [`inspect`] found: the authoritative manifest (`from`), the manifest the planned steps
@@ -99,12 +152,89 @@ pub struct UpgradeReport {
     pub pending: bool,
 }
 
-/// This rdy's upgrade steps. The first release registers none.
-const REGISTRY: &[UpgradeStep] = &[];
+/// This rdy's upgrade steps, in execution order: the snapshot-delta step
+/// ([`snapshot_delta_step`]).
+fn registered_steps() -> Vec<UpgradeStep> {
+    vec![snapshot_delta_step()]
+}
+
+thread_local! {
+    /// This thread's steps in place of this rdy's ([`with_registry_for_tests`]).
+    static OVERRIDE: RefCell<Option<Vec<UpgradeStep>>> = const { RefCell::new(None) };
+}
+
+/// Test hook: runs `f` with `registry` in place of this rdy's steps on this thread, for every
+/// planner, open, load and seed that reads them. No CLI, MCP, config or environment path
+/// reaches it.
+#[doc(hidden)]
+pub fn with_registry_for_tests<T>(registry: &[UpgradeStep], f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Vec<UpgradeStep>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OVERRIDE.with(|o| *o.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(OVERRIDE.with(|o| o.borrow_mut().replace(registry.to_vec())));
+    f()
+}
+
+/// This rdy's steps on this thread: [`registered_steps`], or a test's
+/// ([`with_registry_for_tests`]); none while the thread writes as the last rdy before snapshot
+/// deltas did (`crate::format::legacy_writer_for_tests`).
+fn registry() -> Vec<UpgradeStep> {
+    OVERRIDE.with(|o| o.borrow().clone()).unwrap_or_else(|| {
+        if format::legacy_writer() {
+            vec![]
+        } else {
+            registered_steps()
+        }
+    })
+}
 
 /// Whether this rdy registers any upgrade step. With none, an open plans nothing.
 pub fn has_registered_steps() -> bool {
-    !REGISTRY.is_empty()
+    !registry().is_empty()
+}
+
+/// Whether an open of the store at `dir` with this rdy's steps can skip the planner, so the
+/// sealed log is not walked: no completion can be pending ([`may_be_pending`]), and no step
+/// applies to the manifest `FORMAT` mirrors; for a reader (`writer` false), no required step. A
+/// mirror that does not read, or a registry that does not plan, is judged by the planner. With no
+/// registered step, only a pending completion is planned.
+pub(crate) fn current_without_walk(dir: &Path, writer: bool) -> bool {
+    let steps = registry();
+    if may_be_pending(dir) {
+        return false;
+    }
+    if steps.is_empty() {
+        return true;
+    }
+    let Ok(Some(mirror)) = format::read_format_file(dir) else {
+        return false;
+    };
+    match plan_steps(&mirror, &steps) {
+        Ok(p) => p.ids.is_empty() || (!writer && !p.required),
+        Err(_) => false,
+    }
+}
+
+/// The manifest a load or a take that runs the object-producing steps makes from `from`, when
+/// one of this rdy's steps with [`StepAction::SnapshotDelta`] applies to it: the load's one tail
+/// batch then holds that action's objects with the manifest. None when no such step applies.
+pub(crate) fn delta_conversion(from: &StoreFeatures) -> Result<Option<StoreFeatures>, StoreError> {
+    let steps: Vec<UpgradeStep> = registry()
+        .into_iter()
+        .filter(|s| s.action == StepAction::SnapshotDelta)
+        .collect();
+    let p = plan_steps(from, &steps)?;
+    Ok((!p.ids.is_empty()).then_some(p.to))
+}
+
+/// Whether this rdy registers a step with [`StepAction::SnapshotDelta`] on this thread.
+pub(crate) fn converts_deltas() -> bool {
+    registry()
+        .iter()
+        .any(|s| s.action == StepAction::SnapshotDelta)
 }
 
 /// Whether the store at `dir` may hold a sealed upgrade whose completion is pending, read
@@ -145,17 +275,19 @@ pub fn sealed_walks_for_tests() -> u64 {
 /// only: no store is opened, no lock is taken or created, nothing is written.
 pub fn inspect(dir: &Path) -> Result<UpgradePlan, StoreError> {
     crate::follower::refuse_follower(dir)?;
-    inspect_with(dir, REGISTRY).map(|(plan, _)| plan)
+    inspect_with(dir, &registry()).map(|(plan, _)| plan)
 }
 
 /// [`inspect`] of a follower's own open, which has read its mark.
 pub(crate) fn inspect_follower(dir: &Path) -> Result<UpgradePlan, StoreError> {
-    inspect_with(dir, REGISTRY).map(|(plan, _)| plan)
+    inspect_with(dir, &registry()).map(|(plan, _)| plan)
 }
 
-/// Whether a store of the manifest `from` needs one of this rdy's upgrade steps.
+/// Whether a reader of a store of the manifest `from` needs one of this rdy's upgrade steps: a
+/// required one applies. An optional step (the snapshot deltas) leaves the store readable as it
+/// is.
 pub fn manifest_needs_upgrade(from: &StoreFeatures) -> Result<bool, StoreError> {
-    Ok(!plan_steps(from, REGISTRY)?.0.is_empty())
+    Ok(plan_steps(from, &registry())?.required)
 }
 
 /// Test hook: [`manifest_needs_upgrade`] with the steps `registry`.
@@ -164,7 +296,7 @@ pub fn manifest_needs_upgrade_with_registry_for_tests(
     from: &StoreFeatures,
     registry: &[UpgradeStep],
 ) -> Result<bool, StoreError> {
-    Ok(!plan_steps(from, registry)?.0.is_empty())
+    Ok(plan_steps(from, registry)?.required)
 }
 
 /// Test hook: [`inspect`] with the steps `registry`, through the same planner. No CLI, MCP,
@@ -188,7 +320,7 @@ pub fn apply_locked(
     plan: &UpgradePlan,
 ) -> Result<UpgradeReport, StoreError> {
     crate::follower::refuse_follower(dir)?;
-    apply_with(dir, lock, plan, REGISTRY)
+    apply_with(dir, lock, plan, &registry())
 }
 
 /// Test hook: [`apply_locked`] with the steps `registry`, through the same runner.
@@ -473,7 +605,11 @@ fn inspect_with(
         // the sealed upgrade is completed first: no second batch is planned on top of it
         return Ok((no_steps(from, true, receipt), log.terminal));
     }
-    let (steps, to) = plan_steps(&from, registry)?;
+    let Planned {
+        ids: steps,
+        to,
+        required,
+    } = plan_steps(&from, registry)?;
     if steps.is_empty() {
         return Ok((no_steps(from, false, receipt), log.terminal));
     }
@@ -484,7 +620,7 @@ fn inspect_with(
         to,
         steps,
         backup_bytes,
-        requires_upgrade: true,
+        requires_upgrade: required,
         pending_check: false,
         receipt,
     };
@@ -516,14 +652,19 @@ fn bad_registry(why: String) -> StoreError {
     StoreError::Refused(format!("the upgrade step registry is invalid: {why}"))
 }
 
+/// What [`plan_steps`] planned: the step ids in execution order, the manifest they make, and
+/// whether any of them is required by readers.
+struct Planned {
+    ids: Vec<String>,
+    to: StoreFeatures,
+    required: bool,
+}
+
 /// The steps of `registry` that apply from `from`, in dependency order, then by step id, and the
 /// manifest they make. A step applies to a manifest that holds every feature of its `from` and
 /// not yet every feature of its `to`; it replaces its `from`'s features with its `to`'s. Each
 /// step runs at most once.
-fn plan_steps(
-    from: &StoreFeatures,
-    registry: &[UpgradeStep],
-) -> Result<(Vec<String>, StoreFeatures), StoreError> {
+fn plan_steps(from: &StoreFeatures, registry: &[UpgradeStep]) -> Result<Planned, StoreError> {
     if registry.len() > MAX_STEPS {
         return Err(bad_registry(format!("more than {MAX_STEPS} steps")));
     }
@@ -540,6 +681,7 @@ fn plan_steps(
     let mut current = from.clone();
     let mut done = vec![false; registry.len()];
     let mut steps = vec![];
+    let mut required = false;
     loop {
         let next = registry
             .iter()
@@ -570,8 +712,13 @@ fn plan_steps(
             .validate_written()
             .map_err(|e| bad_registry(format!("step {} makes an invalid manifest: {e}", s.id)))?;
         steps.push(s.id.clone());
+        required |= s.required;
     }
-    Ok((steps, current))
+    Ok(Planned {
+        ids: steps,
+        to: current,
+        required,
+    })
 }
 
 fn apply_with(
@@ -646,16 +793,34 @@ fn apply_with(
     if store.features() != &now.from {
         return Err(moved(Some(backup)));
     }
+    // each step's action, prepared under the lock before anything is appended: a refusal (a
+    // legacy snapshot that is not canonical names its landing) leaves the log, the refs and
+    // FORMAT as they are, and the store opens for its readers as before
+    let source_end = store.log_end();
+    let mut objects: Vec<(u8, Vec<u8>)> = Vec::new();
+    for id in &now.steps {
+        let step = registry
+            .iter()
+            .find(|s| &s.id == id)
+            .ok_or_else(|| moved(Some(backup.clone())))?;
+        if step.action == StepAction::SnapshotDelta {
+            objects.extend(crate::snapshot_upgrade::prepare(&store.reader())?);
+        }
+    }
+    // the planned source end again: nothing may have moved it under the lock
+    if store.log_end() != source_end {
+        return Err(moved(Some(backup)));
+    }
     let receipt = UpgradeReceipt {
         from: now.from.hash(),
         to: now.to.hash(),
         steps: now.steps.clone(),
-        source_end: store.log_end(),
+        source_end,
         backup: name,
     };
     // the store's own rollback undoes a failure before the marker's sync; from the sync on, the
     // batch stays (the store rebuilds its index from the log) and so does the backup
-    let batch = store.commit_upgrade_refs(&now.to, &receipt.to_json())?;
+    let batch = store.commit_upgrade(&now.to, &receipt.to_json(), objects)?;
     hit(Phase::Sealed(&mut store))?;
     store.reindex()?;
     hit(Phase::Reindexed(&mut store))?;
@@ -1271,11 +1436,7 @@ mod tests {
             required_rdy: "99.0.0".into(),
         };
         let m = |names: &[&str]| StoreFeatures::of(names.iter().map(|n| f(n)).collect());
-        let step = |id: &str, from: &[&str], to: &[&str]| UpgradeStep {
-            id: id.into(),
-            from: m(from),
-            to: m(to),
-        };
+        let step = |id: &str, from: &[&str], to: &[&str]| UpgradeStep::manifest(id, m(from), m(to));
         let registry = [
             step("alpha", &["zz_b"], &["zz_b", "zz_c"]),
             step("zeta", &[], &["zz_b"]),
@@ -1283,13 +1444,15 @@ mod tests {
             // never applies: it needs a feature no step makes
             step("gamma", &["zz_x"], &["zz_y"]),
         ];
-        let (steps, to) = plan_steps(&m(&[]), &registry).unwrap();
-        assert_eq!(steps, ["beta", "zeta", "alpha"]);
-        assert_eq!(to, m(&["zz_a", "zz_b", "zz_c"]));
+        let p = plan_steps(&m(&[]), &registry).unwrap();
+        assert_eq!(p.ids, ["beta", "zeta", "alpha"]);
+        assert_eq!(p.to, m(&["zz_a", "zz_b", "zz_c"]));
+        assert!(p.required);
         // nothing applies to the manifest they make
-        let (again, same) = plan_steps(&to, &registry).unwrap();
-        assert!(again.is_empty());
-        assert_eq!(same, to);
+        let again = plan_steps(&p.to, &registry).unwrap();
+        assert!(again.ids.is_empty());
+        assert!(!again.required);
+        assert_eq!(again.to, p.to);
         // the registry's bounds
         let many: Vec<UpgradeStep> = (0..=MAX_STEPS)
             .map(|i| step(&format!("s{i}"), &[], &[]))

@@ -94,6 +94,12 @@ pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
         | "cold_open_lagging"
         | "daemon_cold_start"
         | "open_chosen_alts_100" => 2000.0,
+        // SD1 Task 7 (D-RP6SM, D-918YB; D-ANNKF): the fixed p95 ceilings of the snapshot-delta
+        // workloads. Planning budgets, never baseline-relative; a miss is a finding.
+        "snapshot_delta_read_cold" => 250.0,
+        "snapshot_delta_read_warm" => 5.0,
+        "snapshot_delta_land" => 100.0,
+        "snapshot_delta_upgrade_large" => 300_000.0,
         _ => return None,
     })
 }
@@ -110,6 +116,10 @@ pub enum TargetClass {
     Ceiling,
     /// A stated spec target that is reported, not enforced; compared at 2x.
     Target,
+    /// A fixed planning ceiling on p95 ([`spec_ceiling_ms`]) that no baseline row backs: the
+    /// SD1 snapshot-delta rows (D-ANNKF). A row over its ceiling is `OverCeiling`; within it, it
+    /// passes with no baseline and never regresses against one.
+    FixedCeiling,
     /// A proposed target (ledger F4), not a spec target: reported, never failed.
     Proposed,
     /// No spec target: reported, never failed (D-PACK3).
@@ -198,6 +208,10 @@ pub fn target_class(op: &str) -> Option<TargetClass> {
         "site_event_after_land" | "site_event_after_view_write" | "site_get_page" => {
             TargetClass::Proposed
         }
+        "snapshot_delta_read_cold"
+        | "snapshot_delta_read_warm"
+        | "snapshot_delta_land"
+        | "snapshot_delta_upgrade_large" => TargetClass::FixedCeiling,
         "diff_since"
         | "site_versions_page"
         | "site_versions_page_warm"
@@ -699,6 +713,18 @@ fn spec_target(op: &str) -> Option<String> {
         "m3a_upgrade_backup_1000" | "m3a_upgrade_backup_10000" => {
             "recorded, no spec target: a store upgrade of N blocks with one metadata step: backup, batch, reindex, full fsck and the FORMAT mirror (D-WWAK7)"
         }
+        "snapshot_delta_read_cold" => {
+            "fixed ceiling < 250 ms p95 (D-ANNKF): 10,000 blocks, 1,000 deltas, ten set entries per non-root delta; empty map cache; the fold and the returned map"
+        }
+        "snapshot_delta_read_warm" => {
+            "fixed ceiling < 5 ms p95 (D-ANNKF): the same history, populated cache; the returned map"
+        }
+        "snapshot_delta_land" => {
+            "fixed ceiling < 100 ms p95 (D-ANNKF): a 10,000-block current map, ten sets and two drops; the prepared landing, its append and the durable acknowledgement"
+        }
+        "snapshot_delta_upgrade_large" => {
+            "fixed ceiling < 300,000 ms p95 (D-ANNKF): 10,000 legacy landings of 10,000 entries, one changed entry per later landing; backup, append, reindex, full check and mirrors"
+        }
         _ => return None,
     };
     Some(if large {
@@ -732,7 +758,8 @@ pub fn fsync_bound(op: &str) -> bool {
 /// `Recorded`, with the baseline and its delta shown when the class baseline holds the op. In
 /// `Compare` mode a targeted op (or an op with no class) in the baseline is `Regressed` at a median
 /// of [`REGRESSION_RATIO`] times its baseline or more, else `Pass`; one not in it is
-/// `Unbaselined`, which fails.
+/// `Unbaselined`, which fails. A [`TargetClass::FixedCeiling`] op within its ceiling is `Pass`
+/// with or without a baseline row, and never `Regressed`.
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) -> Vec<Verdict> {
     measured
         .iter()
@@ -743,6 +770,9 @@ pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) ->
                 Status::OverCeiling
             } else if mode == Mode::Record || informational {
                 Status::Recorded
+            } else if target_class(&m.op) == Some(TargetClass::FixedCeiling) {
+                // within its fixed ceiling: a pass whether or not a baseline row exists
+                Status::Pass
             } else {
                 match base {
                     None => Status::Unbaselined,
@@ -5500,6 +5530,8 @@ fn m3a_registry() -> Vec<rdy_store::upgrade::UpgradeStep> {
             class: FeatureClass::Incompatible,
             required_rdy: TEST_FEATURE_RDY.into(),
         }]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 
@@ -6422,6 +6454,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
     tier_m3a(&mut out, dir.path(), "", TYPICAL_RUNS.landing, &M3A_TYPICAL);
     tier_m3(&mut out, dir.path(), M3_RUNS);
+    tier_snapshot_delta(&mut out, dir.path());
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
@@ -6429,6 +6462,217 @@ pub fn run_workload() -> Vec<Measure> {
     }
     rdy_model::unseed_ids_for_tests();
     out
+}
+
+/// The SD1 rows (D-RP6SM, D-918YB; D-ANNKF), each with a fixed p95 ceiling
+/// ([`spec_ceiling_ms`]) and no baseline row: [`tier_snapshot_delta`] measures the first three
+/// in the typical workload, [`sd1_upgrade_large`] the last in the large tier (`RDY_QA_DEEP=1`).
+pub const SD1_OPS: [&str; 4] = [
+    "snapshot_delta_read_cold",
+    "snapshot_delta_read_warm",
+    "snapshot_delta_land",
+    "snapshot_delta_upgrade_large",
+];
+
+/// The view the SD1 land fixture writes in.
+const SD1_VIEW: &str = "sdl";
+
+/// `snapshot_delta_read_cold` and `snapshot_delta_read_warm`: the head landing's map of a history
+/// of [`crate::snapshot_delta_fixture::PERF_READ`] (10,000 blocks, 1,000 deltas, ten set entries
+/// per non-root delta), read through the store's own map read. The history is made in memory and
+/// written as one batch, outside every timer. Cold: the map cache is emptied before each run, so
+/// the fold of all 1,000 deltas and the returned map are timed. Warm: the cache holds the map, and
+/// the returned map is timed. Each run's map is checked outside the timer against the recipe's
+/// own final map.
+fn sd1_reads(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    runs: usize,
+    recipe: crate::snapshot_delta_fixture::Recipe,
+) {
+    use crate::snapshot_delta_fixture as fx;
+    let dir = parent.join("sdl-read");
+    let hist = recipe.build();
+    assert_eq!(hist.deltas.len(), recipe.landings);
+    let store = fx::source_store(&dir, &hist);
+    let reader = store.reader();
+    let head = *hist.landings.last().expect("a landing");
+    let state = *hist.states.last().expect("a state");
+    out.push(measure_timed("snapshot_delta_read_cold", runs, |_| {
+        reader.clear_map_cache_for_tests();
+        let s = Instant::now();
+        let map = reader.snapshot_at(&head).expect("the head map");
+        let took = s.elapsed();
+        assert_eq!(map.blocks.len(), recipe.blocks);
+        assert_eq!(map.id(), state, "the folded map is the landing's full map");
+        took
+    }));
+    // populate the cache, then measure what a read of a cached map costs
+    let warm = reader.snapshot_at(&head).expect("populate the cache");
+    assert!(warm.blocks == hist.final_map, "the recipe's own final map");
+    out.push(measure_timed("snapshot_delta_read_warm", runs, |_| {
+        let s = Instant::now();
+        let map = reader.snapshot_at(&head).expect("the head map");
+        let took = s.elapsed();
+        assert_eq!(map.blocks.len(), recipe.blocks);
+        took
+    }));
+    drop(reader);
+    drop(store);
+    std::fs::remove_dir_all(&dir).expect("remove the read fixture");
+}
+
+/// `snapshot_delta_land`: the landing of a proposal that sets ten blocks and drops two, onto a
+/// current map of at least [`crate::snapshot_delta_fixture::PERF_LAND_BLOCKS`] blocks (the typical
+/// tier's tree shape: 10 folders of 10 docs of 98 claims, 10,010 blocks). The write and the proposal are made once, outside every timer; each run
+/// copies the project, opens it and times `Rdy::land` alone: the prepared landing, its append and
+/// the durable acknowledgement. The landing's delta is checked outside the timer: ten sets and two
+/// drops, based on the previous landing's delta.
+fn sd1_land(out: &mut Vec<Measure>, parent: &std::path::Path, runs: usize) {
+    use crate::snapshot_delta_fixture as fx;
+    // 10 folders x 10 docs x 98 claims (+ section, doc, folder) = 10,010 blocks, landed
+    let fixture = parent.join("sdl-land");
+    std::fs::create_dir_all(&fixture).expect("mkdir");
+    let docs = testkit::generate_tree(&fixture, 10, 10, 98);
+    let (proposal, changes) = {
+        let mut r = Rdy::open(&fixture).expect("open the land fixture");
+        land(&mut r, "work").expect("land the base");
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        assert!(
+            canon.len() >= fx::PERF_LAND_BLOCKS,
+            "{} blocks",
+            canon.len()
+        );
+        // the first claim of each of the first twelve docs: ten are edited, two are deleted
+        let claims: Vec<BlockId> = docs[..fx::PERF_LAND_SETS + fx::PERF_LAND_DROPS]
+            .iter()
+            .map(|path| {
+                let doc = r.read().resolve_path(&Scope::Canon, path).expect("doc");
+                let section = canon.children(Some(&doc))[0].id.clone();
+                canon.children(Some(&section))[0].id.clone()
+            })
+            .collect();
+        drop(canon);
+        let mut ops: Vec<serde_json::Value> = claims[..fx::PERF_LAND_SETS]
+            .iter()
+            .map(|c| json!({"op": "update", "id": c.to_string(), "body": "Edited by the land fixture."}))
+            .collect();
+        ops.extend(
+            claims[fx::PERF_LAND_SETS..]
+                .iter()
+                .map(|c| json!({"op": "delete", "id": c.to_string()})),
+        );
+        write(&mut r, SD1_VIEW, serde_json::Value::Array(ops)).expect("the land write");
+        // the open items of the change plan are answered before the propose binds the plan
+        crate::intake::answer_open_items(&mut r, &writer(), SD1_VIEW);
+        let p = r
+            .propose(
+                &writer(),
+                SD1_VIEW,
+                SD1_VIEW,
+                Some(crate::intake::TEST_SUMMARY),
+            )
+            .expect("propose the view");
+        crate::intake::confirm_before_landing(&mut r, &approver(), &p);
+        r.close().expect("close the fixture");
+        (p.id.clone(), p.changes)
+    };
+    assert!(changes >= 1, "the proposal carries its change");
+    out.push(measure_timed("snapshot_delta_land", runs, |i| {
+        let work = parent.join(format!("sdl-land-run{i}"));
+        copy_project(&fixture, &work);
+        let mut r = Rdy::open(&work).expect("open the copy");
+        r.reconcile_transitions().expect("reconcile");
+        let s = Instant::now();
+        r.land(&approver(), &proposal).expect("land the view");
+        let took = s.elapsed();
+        // the new head's delta: ten sets and two drops (the claims' parent section and doc keep
+        // their versions), on the previous landing's delta
+        let reader = r.store().reader();
+        let head = reader.canon_head().expect("canon").expect("a head");
+        let (d, _) = reader
+            .snapshot_delta_of(&head)
+            .expect("the delta index")
+            .expect("the landing's delta");
+        let delta: rdy_model::SnapshotDelta = r
+            .store()
+            .get_typed(rdy_store::kinds::SNAPSHOT_DELTA, &d)
+            .expect("the delta");
+        assert_eq!(delta.set.len(), fx::PERF_LAND_SETS, "ten sets");
+        assert_eq!(delta.drop.len(), fx::PERF_LAND_DROPS, "two drops");
+        assert!(
+            delta.base.is_some(),
+            "based on the previous landing's delta"
+        );
+        drop(reader);
+        drop(r);
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&fixture).expect("remove the fixture");
+}
+
+/// `snapshot_delta_upgrade_large`: the writer's open of a legacy project of
+/// [`crate::snapshot_delta_fixture::PERF_UPGRADE`] (10,000 landings, each with a SNAPSHOT of
+/// 10,000 entries; one changed entry per later landing). The source is streamed once into a
+/// pristine project outside every timer (gigabytes of SNAPSHOTs, `write_legacy_streamed`); each
+/// run copies it, outside the timer, and times `maintenance::run`: the backup copy, the append of
+/// 10,000 deltas, the reindex, the full check and the mirrors. After each run, outside the
+/// timer, every landing's `state` and delta and the final map are verified.
+fn sd1_upgrade_large(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    runs: usize,
+    recipe: crate::snapshot_delta_fixture::Recipe,
+) {
+    use crate::snapshot_delta_fixture as fx;
+    let source = parent.join("sdl-upgrade-source");
+    let facts = fx::legacy_project(&source, recipe, 50);
+    assert_eq!(facts.landings.len(), recipe.landings);
+    out.push(measure_timed("snapshot_delta_upgrade_large", runs, |i| {
+        let work = parent.join(format!("sdl-upgrade-run{i}"));
+        copy_project(&source, &work);
+        let s = Instant::now();
+        let report = rdy_engine::maintenance::run(&work, false).expect("the upgrade");
+        let took = s.elapsed();
+        assert!(
+            report.changed && report.reindexed && report.checked,
+            "{report:?}"
+        );
+        assert_eq!(report.steps, ["snapshot_delta".to_string()]);
+        assert!(report.backup.is_some() && report.batch.is_some());
+        // every hash, after the measured upgrade
+        let r = Rdy::open(&work).expect("open the upgraded copy");
+        let reader = r.store().reader();
+        for (n, l) in facts.landings.iter().enumerate() {
+            let rec = reader.landing(l).expect("the landing");
+            assert_eq!(rec.state, facts.states[n], "landing {n}: its full hash");
+            assert!(
+                reader.snapshot_delta_of(l).expect("index").is_some(),
+                "landing {n}"
+            );
+        }
+        let last = facts.landings.last().expect("a landing");
+        let tip = reader.snapshot_at(last).expect("the last map");
+        assert!(tip.blocks == facts.final_map, "the final map");
+        drop(reader);
+        drop(r);
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&source).expect("remove the source");
+}
+
+/// The three SD1 rows of the typical workload ([`SD1_OPS`] but the upgrade): each on a project or
+/// store of its own under `parent`, so they move nothing the other tiers measure.
+fn tier_snapshot_delta(out: &mut Vec<Measure>, parent: &std::path::Path) {
+    sd1_reads(
+        out,
+        parent,
+        TYPICAL_RUNS.read,
+        crate::snapshot_delta_fixture::PERF_READ,
+    );
+    sd1_land(out, parent, TYPICAL_RUNS.landing);
 }
 
 /// The five M3 rows (M3 gate, D-PACK3), in the order [`tier_m3`] measures them. All are reported
@@ -7605,6 +7849,13 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     drop(r);
     // on projects of their own: the 10,000-block cases of the M3a operations
     tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);
+    // the SD1 upgrade row, on a project of its own (the other SD1 rows are typical-only)
+    sd1_upgrade_large(
+        &mut out,
+        parent,
+        LARGE_RUNS.landing,
+        crate::snapshot_delta_fixture::PERF_UPGRADE,
+    );
     out
 }
 
@@ -11286,6 +11537,7 @@ mod tests {
         ops.extend(PLAN_OPS);
         ops.extend(SITE_PROFILE_OPS);
         ops.extend(M3_OPS);
+        ops.extend(SD1_OPS);
         ops.extend([
             "load_chain",
             "load_chain_stop",
@@ -11342,6 +11594,11 @@ mod tests {
                         "{op}: {t}"
                     );
                     assert_eq!(spec_ceiling_ms(op), None, "{op}");
+                }
+                TargetClass::FixedCeiling => {
+                    let t = text.unwrap_or_else(|| panic!("{op} states no ceiling"));
+                    assert!(t.starts_with("fixed ceiling < "), "{op}: {t}");
+                    assert!(spec_ceiling_ms(op).is_some(), "{op}");
                 }
                 TargetClass::Proposed => {
                     assert!(
@@ -11445,5 +11702,202 @@ mod tests {
         );
         assert!(facts.logical_bytes > facts.removed_bytes, "{facts:?}");
         assert!(facts.allocated_bytes > 0, "{facts:?}");
+    }
+
+    /// sdl7 (SD1 Task 7; D-ANNKF): the four snapshot-delta rows are registered with their fixed
+    /// workloads and fixed p95 ceilings, and none is baselined. The closed ceiling set of the
+    /// predecessor rows (`mg3_explicit_ceilings_still_fail_on_p95`) is unchanged: these rows are a
+    /// class of their own, enforced on p95 and never compared with a baseline. The fixed
+    /// workloads are arithmetic here; this test builds no store.
+    #[test]
+    fn sdl7_perf_recipes_and_fixed_ceilings_are_registered() {
+        use crate::snapshot_delta_fixture as fx;
+        let fixed = [
+            ("snapshot_delta_read_cold", 250.0),
+            ("snapshot_delta_read_warm", 5.0),
+            ("snapshot_delta_land", 100.0),
+            ("snapshot_delta_upgrade_large", 300_000.0),
+        ];
+        assert_eq!(SD1_OPS, fixed.map(|(op, _)| op));
+        for (op, c) in fixed {
+            assert_eq!(spec_ceiling_ms(op), Some(c), "{op}");
+            assert_eq!(target_class(op), Some(TargetClass::FixedCeiling), "{op}");
+            assert!(!TargetClass::FixedCeiling.informational());
+            let t = spec_target(op).unwrap_or_else(|| panic!("{op} has no text"));
+            assert!(t.starts_with("fixed ceiling < "), "{op}: {t}");
+            // a row over its ceiling fails on p95 in every mode, with or without a baseline
+            let over = Measure {
+                op: op.into(),
+                median_ms: c / 10.0,
+                p95_ms: c * 1.01,
+                runs: 5,
+            };
+            for v in [
+                compare(None, std::slice::from_ref(&over), Mode::Compare),
+                compare(None, std::slice::from_ref(&over), Mode::Record),
+                not_compared(std::slice::from_ref(&over)),
+            ] {
+                assert_eq!(
+                    (v[0].status, v[0].pass),
+                    (Status::OverCeiling, false),
+                    "{op}"
+                );
+            }
+            // within it: a pass with no baseline row (never Unbaselined), and no regression
+            // against a row that a later rebaseline would add
+            let within = Measure {
+                op: op.into(),
+                median_ms: c / 2.0,
+                p95_ms: c * 0.99,
+                runs: 5,
+            };
+            let v = compare(None, std::slice::from_ref(&within), Mode::Compare);
+            assert_eq!((v[0].status, v[0].pass), (Status::Pass, true), "{op}");
+            let base = mg3_base(&[(op, c / 100.0)]);
+            let v = compare(Some(&base), std::slice::from_ref(&within), Mode::Compare);
+            assert_eq!(
+                (v[0].status, v[0].pass),
+                (Status::Pass, true),
+                "{op}: no ratio rule"
+            );
+            let v = compare(None, std::slice::from_ref(&within), Mode::Record);
+            assert_eq!(v[0].status, Status::Recorded, "{op}");
+        }
+        // none is baselined: the baseline file is untouched by this task
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for class in baseline["classes"].as_object().expect("classes").values() {
+            for op in SD1_OPS {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+            }
+        }
+        // the closed predecessor ceiling set holds exactly what it held
+        for op in SD1_OPS {
+            assert_ne!(target_class(op), Some(TargetClass::Ceiling), "{op}");
+            assert_eq!(
+                target_class(&format!("{op}{LARGE_SUFFIX}")),
+                Some(TargetClass::FixedCeiling)
+            );
+            assert_eq!(spec_ceiling_ms(&format!("{op}{LARGE_SUFFIX}")), None);
+        }
+
+        // the fixed workloads, as arithmetic only (nothing here builds them)
+        assert_eq!(
+            (
+                fx::PERF_READ.blocks,
+                fx::PERF_READ.landings,
+                fx::PERF_READ.sets
+            ),
+            (10_000, 1_000, 10)
+        );
+        // 1,000 deltas: the root's whole map and ten set entries in each of the 999 others
+        assert_eq!(fx::delta_entries(&fx::PERF_READ), 10_000 + 999 * 10);
+        assert_eq!(
+            (
+                fx::PERF_UPGRADE.blocks,
+                fx::PERF_UPGRADE.landings,
+                fx::PERF_UPGRADE.sets
+            ),
+            (10_000, 10_000, 1)
+        );
+        assert_eq!(fx::logical_entries(&fx::PERF_UPGRADE), 100_000_000);
+        assert_eq!(
+            (
+                fx::PERF_LAND_BLOCKS,
+                fx::PERF_LAND_SETS,
+                fx::PERF_LAND_DROPS
+            ),
+            (10_000, 10, 2)
+        );
+        // the objects each recipe makes, without building one
+        assert_eq!(
+            fx::object_count(&fx::PERF_READ),
+            10_000 + 999 * 10 + 1_000 * 4
+        );
+        // the registration: the typical workload measures the first three rows and the large
+        // tier the upgrade; the large store is never built by the ordinary tests
+        let src = include_str!("perf.rs");
+        let body = |f: &str| {
+            let from = src.find(f).expect(f);
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        assert!(
+            body("pub fn run_workload(").contains("tier_snapshot_delta(&mut out, dir.path());")
+        );
+        let large: String = body("fn run_large_tier(")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            large.contains(
+                "sd1_upgrade_large(&mutout,parent,LARGE_RUNS.landing,crate::snapshot_delta_fixture::PERF_UPGRADE,);"
+            ),
+            "the large tier measures the upgrade row on the fixed recipe"
+        );
+        assert!(body("fn tier_snapshot_delta(").contains("sd1_reads("));
+        assert!(body("fn tier_snapshot_delta(").contains("sd1_land("));
+        assert!(!body("fn tier_snapshot_delta(").contains("sd1_upgrade_large("));
+        // each row is a measured name in the workload source
+        for op in SD1_OPS {
+            assert!(
+                src.matches(&format!("measure_timed(\"{op}\"")).count() == 1,
+                "{op} is measured exactly once"
+            );
+        }
+    }
+
+    /// Bench-only: the three typical SD1 workloads on their fixed recipes, once. Run on the bench
+    /// machine class, in release: `cargo test -p rdy-qa --release --lib sdl7_perf_workloads -- --ignored`.
+    #[test]
+    #[ignore = "bench only: builds the fixed SD1 read and land fixtures (10,000 blocks)"]
+    fn sdl7_perf_workloads_run_on_their_fixed_recipes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out = vec![];
+        tier_snapshot_delta(&mut out, dir.path());
+        assert_eq!(
+            out.iter().map(|m| m.op.as_str()).collect::<Vec<_>>(),
+            SD1_OPS[..3]
+        );
+        for m in &out {
+            eprintln!(
+                "{}: median {:.3} ms, p95 {:.3} ms",
+                m.op, m.median_ms, m.p95_ms
+            );
+        }
+    }
+
+    /// The read and upgrade workloads' logic on small recipes, two runs each: each run's maps and
+    /// hashes are checked as the fixed workloads check them. Counts only, never a time; the fixed
+    /// recipes are the bench's.
+    #[test]
+    fn sdl7_small_perf_recipes_do_the_named_work() {
+        use crate::snapshot_delta_fixture::Recipe;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out = vec![];
+        sd1_reads(
+            &mut out,
+            dir.path(),
+            2,
+            Recipe {
+                blocks: 40,
+                landings: 13,
+                sets: 3,
+            },
+        );
+        sd1_upgrade_large(
+            &mut out,
+            dir.path(),
+            2,
+            Recipe {
+                blocks: 30,
+                landings: 9,
+                sets: 1,
+            },
+        );
+        assert_eq!(
+            out.iter().map(|m| m.op.as_str()).collect::<Vec<_>>(),
+            [SD1_OPS[0], SD1_OPS[1], SD1_OPS[3]]
+        );
+        assert!(out.iter().all(|m| m.runs == 2), "{out:?}");
     }
 }

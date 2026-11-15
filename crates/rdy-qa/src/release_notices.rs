@@ -2735,7 +2735,9 @@ mod tests {
             "sentinel 19 and dump format 4 do not move"
         );
         assert!(move_lines("0.50.1", ("0.50.0", 4, 19), current_store(), &features).is_empty());
-        assert!(move_lines("0.52.0", ("0.51.0", 4, 19), current_store(), &features).is_empty());
+        // a later release names its own features only (0.52.0 adds snapshot_delta, SD1 Task 6)
+        let at_052 = move_lines("0.52.0", ("0.51.0", 4, 19), current_store(), &features);
+        assert!(at_052.iter().all(|l| !l.contains("figure_dark")));
         // the first release that carries foreign_copy keeps its own lines only
         let at_048 = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
         assert!(at_048.iter().all(|l| !l.contains("figure_dark")));

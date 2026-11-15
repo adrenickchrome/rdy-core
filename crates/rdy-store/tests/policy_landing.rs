@@ -421,7 +421,8 @@ fn ap2_holder_fsck_refuses_a_policy_landing_with_no_policy() {
             }),
             read_identity: None,
         };
-        let l = s.put(kinds::LANDING, &rec).unwrap();
+        // structurally valid: its snapshot delta in the same batch (SD1 Task 6)
+        let l = s.put_landing_for_tests(&rec).unwrap();
         let tag = s
             .put(
                 kinds::TAG,

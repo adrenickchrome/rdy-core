@@ -398,8 +398,9 @@ pub(crate) enum RefWrite {
     Public,
     /// The take's crate-private write: a holder's `answer/tag-object:<hash>` beside its TAG.
     Take,
-    /// The upgrade transaction's commit (`Store::commit_upgrade_refs`): exactly the features
-    /// ref and the receipt ref, after the receipt's own checks.
+    /// The upgrade transaction's commit (`Store::commit_upgrade`): its registered step
+    /// objects, then exactly the features ref and the receipt ref, after the receipt's own
+    /// checks.
     Upgrade,
     /// The creation batch, and the test hook that forges refs: no ref rule.
     Unchecked,
@@ -448,11 +449,23 @@ pub(crate) fn check_ref_writes(
             .filter_map(|(_, p)| decode_ref(p))
     };
     if how == RefWrite::Upgrade {
-        // the upgrade's own batch: the features ref and the receipt ref, nothing else
-        let names: Vec<String> = decoded().map(|u| u.name).collect();
-        if names != [REF_STORE_FEATURES, REF_UPGRADE] || items.len() != names.len() {
+        // the upgrade's own batch: the registered step's objects (the only one that writes
+        // objects is the snapshot-delta step, `crate::snapshot_upgrade::check_batch`), then the
+        // features ref and the receipt ref, nothing else
+        let objects = items
+            .iter()
+            .take_while(|(k, _)| crate::codec::logical_kind(*k) == kinds::SNAPSHOT_DELTA)
+            .count();
+        let rest = &items[objects..];
+        let names: Vec<String> = rest
+            .iter()
+            .filter(|(k, _)| *k == kinds::REF_UPDATE)
+            .filter_map(|(_, p)| decode_ref(p))
+            .map(|u| u.name)
+            .collect();
+        if names != [REF_STORE_FEATURES, REF_UPGRADE] || rest.len() != names.len() {
             return Err(StoreError::Refused(
-                "the upgrade batch holds exactly the features and receipt refs".into(),
+                crate::snapshot_upgrade::UPGRADE_BATCH.into(),
             ));
         }
         return Ok(());

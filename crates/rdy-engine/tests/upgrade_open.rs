@@ -57,6 +57,8 @@ fn registry() -> Vec<UpgradeStep> {
         id: "add_test".into(),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![test_feature()]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 
@@ -445,6 +447,7 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
         kinds::PROPOSAL,
         kinds::LANDING,
         kinds::SNAPSHOT,
+        kinds::SNAPSHOT_DELTA,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,
@@ -508,4 +511,74 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
     h.close().unwrap();
     assert_eq!(format_text(&holder), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&holder), 1);
+}
+
+/// The bytes of the store's segment files, by name.
+fn segment_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    for e in std::fs::read_dir(store_dir(root).join("segments")).unwrap() {
+        let p = e.unwrap().path();
+        out.insert(p.clone(), std::fs::read(&p).unwrap());
+    }
+    out
+}
+
+#[test]
+fn sdl6_new_project_open_plans_no_upgrade_step() {
+    // this rdy's own registry: the snapshot-delta step is registered
+    assert!(upgrade::has_registered_steps());
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("p");
+    std::fs::create_dir(&root).unwrap();
+    let r = Rdy::init(&root, "rdy-standard").unwrap();
+    assert!(
+        r.store()
+            .features()
+            .has(rdy_store::format::FEATURE_SNAPSHOT_DELTA),
+        "a new project lists the feature from its first batch"
+    );
+    r.close().unwrap();
+    let dir = store_dir(&root);
+    // before its first landing: the planner plans no step, and no open walks the log or
+    // writes anything
+    let plan = upgrade::inspect(&dir).unwrap();
+    assert!(plan.steps.is_empty(), "{plan:?}");
+    assert!(!plan.requires_upgrade && !plan.pending_check);
+    let planned = rdy_engine::maintenance::plan(&root).unwrap();
+    assert!(planned.steps.is_empty(), "{planned:?}");
+    let bytes = segment_bytes(&root);
+    let format = format_text(&root);
+    let walks = upgrade::sealed_walks_for_tests();
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let r = Rdy::open_with_policy(&root, policy).unwrap();
+        assert!(!r.store().upgrade_pending(), "{policy:?}");
+        r.close().unwrap();
+    }
+    let r = Rdy::open(&root).unwrap();
+    r.close().unwrap();
+    assert_eq!(
+        upgrade::sealed_walks_for_tests(),
+        walks,
+        "no open walked the log"
+    );
+    assert_eq!(segment_bytes(&root), bytes, "no open appended a batch");
+    assert_eq!(format_text(&root), format);
+    assert_eq!(upgrade_batches(&root), 0);
+    assert!(backups(&root).is_empty());
+    // its first landing writes a delta and still plans no step
+    let mut r = Rdy::open(&root).unwrap();
+    write_doc(&mut r, "work", "Doc");
+    let p = r
+        .propose(&session(Role::Writer), "work", "Doc", Some("a summary"))
+        .unwrap();
+    let landing: Hash = r
+        .land(&session(Role::Approver), &p.id)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(r.store().snapshot_delta_of(&landing).unwrap().is_some());
+    r.close().unwrap();
+    assert!(upgrade::inspect(&dir).unwrap().steps.is_empty());
+    assert_eq!(upgrade_batches(&root), 0);
+    assert!(backups(&root).is_empty());
 }

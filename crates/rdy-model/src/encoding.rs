@@ -55,6 +55,9 @@ pub const CHANGE_FOREIGN_ENCODING: u16 = 2;
 /// The first and only encoding of a FOREIGN entry (`crate::foreign::ForeignEntry`, kind 29): the
 /// kind has no encoding 0.
 pub const FOREIGN_ENCODING: u16 = 1;
+/// The first and only encoding of a SNAPSHOT_DELTA (`crate::SnapshotDelta`, kind 30): the kind
+/// has no encoding 0. Its id is the hash of the stored payload, this prefix included.
+pub const SNAPSHOT_DELTA_ENCODING: u16 = 1;
 /// The encoding of a TRANSITION that holds a foreign shape: a move of cause `Delivered`, a
 /// foreign tension side or a foreign suspect target (the store's `TransitionsV1`). Encoding 0
 /// has no form for any of them.

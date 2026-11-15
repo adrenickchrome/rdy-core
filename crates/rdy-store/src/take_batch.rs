@@ -130,6 +130,8 @@ pub struct UploadFacts {
     pub root: Tag,
     pub objects: Vec<ObjectKey>,
     pub relay_answers: BTreeMap<Hash, Hash>,
+    /// The features the upload's headers declare: its records' links follow them.
+    pub features: StoreFeatures,
 }
 
 /// Which immutable tag ref survives the take: the upload's root (`tag/<root.name>`), or a tag
@@ -317,13 +319,19 @@ pub(crate) enum Write {
         len: u32,
         verify: Verify,
     },
+    /// A snapshot delta the take made for a new legacy landing of an upload into a holder that
+    /// holds `snapshot_delta` (`crate::snapshot_upgrade`): its raw kind and length; its bytes
+    /// are the plan's (`Plan::generated`).
+    Generated { key: ObjectKey, raw: u8, len: u32 },
 }
 
 impl Write {
     /// The object the frame writes.
     pub(crate) fn key(&self) -> ObjectKey {
         match self {
-            Write::Present { key, .. } | Write::Dropped { key, .. } => *key,
+            Write::Present { key, .. }
+            | Write::Dropped { key, .. }
+            | Write::Generated { key, .. } => *key,
         }
     }
 
@@ -331,7 +339,7 @@ impl Write {
     pub(crate) fn len(&self) -> u32 {
         match self {
             Write::Present { at, .. } => at.len,
-            Write::Dropped { len, .. } => *len,
+            Write::Dropped { len, .. } | Write::Generated { len, .. } => *len,
         }
     }
 }
@@ -351,6 +359,8 @@ pub(crate) struct Plan {
     pub(crate) tag: Tag,
     /// The holder's merged features when this batch activates any (its last ref sets them).
     pub(crate) features: Option<StoreFeatures>,
+    /// The bytes of each [`Write::Generated`] delta, by its key.
+    pub(crate) generated: BTreeMap<ObjectKey, Vec<u8>>,
 }
 
 /// The holder as the take reads it: its reader, its log's segment files and authorization, the
@@ -433,6 +443,11 @@ struct UploadSource<'a> {
     union: &'a BTreeMap<ObjectKey, Entry>,
     store: StoreSource<'a>,
     masked: BTreeMap<ObjectKey, (Hash, RemovalObject, u16)>,
+    /// Each landing's delta among the union's records, built once from their typed deltas
+    /// (`crate::snapshot`); a landing the union has no delta of asks the holder.
+    deltas: Option<BTreeMap<Hash, Hash>>,
+    /// The holder's features: a held record's links follow them.
+    features: &'a StoreFeatures,
 }
 
 impl ObjectSource for UploadSource<'_> {
@@ -470,6 +485,24 @@ impl ObjectSource for UploadSource<'_> {
             }
         }
         self.store.record(key)
+    }
+
+    fn snapshot_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        if self.deltas.is_none() {
+            let keys: Vec<ObjectKey> = self
+                .union
+                .keys()
+                .filter(|k| k.kind == kinds::SNAPSHOT_DELTA)
+                .copied()
+                .collect();
+            let by =
+                crate::snapshot::associate_deltas(&keys, |k| crate::stream_source::typed(self, k))?;
+            self.deltas = Some(by);
+        }
+        match self.deltas.as_ref().and_then(|by| by.get(landing)) {
+            Some(h) => Ok(Some(*h)),
+            None => self.store.snapshot_delta_of(landing),
+        }
     }
 }
 
@@ -515,18 +548,13 @@ impl Records for UploadSource<'_> {
             return Ok(Some(links));
         }
         match self.store.record(k)? {
-            Some(record) => {
-                let mut links = record
-                    .refs()
-                    .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
-                links.extend(record.proof().map(|p| ObjectRef {
-                    kind: Some(p.kind),
-                    hash: p.hash,
-                }));
-                Ok(Some(links))
-            }
+            Some(record) => stream_source::record_links(k, &record, self.features).map(Some),
             None => Ok(None),
         }
+    }
+
+    fn held_delta_of(&mut self, landing: &Hash) -> Result<Option<Hash>, StreamError> {
+        self.store.snapshot_delta_of(landing)
     }
 }
 
@@ -639,7 +667,8 @@ fn index_files(
             match r {
                 StreamRecord::Present { ref payload, .. } => {
                     let raw = r.raw_kind();
-                    let refs = portable_refs_of(raw, payload)
+                    // an incoming record's links follow the features its stream declares
+                    let refs = portable_refs_of(&header.features, raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     // the reader checked the frame splits
                     let needs = crate::codec::split(raw, payload)
@@ -791,24 +820,32 @@ pub fn set_holder_capacity_for_tests(bounds: Option<HolderCapacity>) {
 /// counts, `StoreReader::holder_counts`, upper bounds of what the check reads, plus what this
 /// batch writes), or a new landing deeper than [`HolderCapacity::landing_depth`] in its chain
 /// (its `prev`'s depth, `StoreReader::landing_depth` for a held one, plus one). The edge count
-/// follows the holder check's counting (`portable_refs_of` of each present record; a future
-/// snapshot_delta feature changes it, and a reindex recounts). It costs index reads and the
+/// follows the holder check's counting under `after`, the manifest the holder holds after the
+/// batch (`portable_refs_of` of each present record; under `snapshot_delta` a SNAPSHOT counts
+/// no object and no link, and a landing's links omit its `state`: `Index::holder_counts_under`
+/// for what is held). It costs index reads and the
 /// batch's own records, never a walk of the holder, and it runs whether the closure walk ended
 /// early or not. The refusal is E_LIMIT with the holder check's own text.
 fn check_capacity(
     reader: &StoreReader,
     source: &mut UploadSource<'_>,
     writes: &BTreeMap<ObjectKey, (Write, Vec<ObjectKey>)>,
+    generated: &BTreeMap<ObjectKey, Vec<u8>>,
+    after: &StoreFeatures,
 ) -> Result<(), StreamError> {
     use crate::check_holder::{
         CAPACITY_FIX, depth_limit, edges_limit, exceeds_text, objects_limit,
     };
     let bounds = HolderCapacity::current();
     let refuse = |limit: String| StreamError::capacity(exceeds_text(&limit), CAPACITY_FIX);
-    let (held_objects, held_edges) = reader.holder_counts().map_err(|e| store_error(e, None))?;
+    let deltas = after.has(crate::format::FEATURE_SNAPSHOT_DELTA);
+    let (held_objects, held_edges) = reader
+        .index()
+        .holder_counts_under(after)
+        .map_err(|e| store_error(e, None))?;
     let (mut objects, mut edges) = (held_objects, held_edges);
     for (key, (w, _)) in writes {
-        if !crate::object_refs::is_portable(key.kind) {
+        if !crate::object_refs::is_portable(key.kind) || (deltas && key.kind == kinds::SNAPSHOT) {
             continue;
         }
         objects += 1;
@@ -816,7 +853,21 @@ fn check_capacity(
             && key.kind != kinds::BLOB_CHUNK
             && let Some(e) = source.union.get(key)
         {
-            edges += e.refs.len() as u64;
+            // a landing the stream linked to its `state` links it no more under the feature
+            edges += e
+                .refs
+                .iter()
+                .filter(|r| !(deltas && r.kind == Some(kinds::SNAPSHOT)))
+                .count() as u64;
+        }
+        // a delta the take made counts its own links under the manifest after the batch, as
+        // the index counts them
+        if let Write::Generated { raw, .. } = w
+            && let Some(payload) = generated.get(key)
+        {
+            edges += portable_refs_of(after, *raw, payload)
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(*key)))?
+                .len() as u64;
         }
     }
     if objects > bounds.objects {
@@ -890,6 +941,16 @@ pub(crate) fn prepare<E>(
     // or not open, refuses the take before anything is read further
     crate::format::check_writable(&header.features)
         .map_err(|e| StreamError::store_format(Some(0), 0, &e))?;
+    // the snapshot deltas (D-918YB, D-8T7PA): a holder without the feature takes no upload that
+    // holds it, empty or not, while this rdy has the step that upgrades the holder: the host
+    // upgrades it first. Refused before anything is read further
+    let sd = crate::format::FEATURE_SNAPSHOT_DELTA;
+    let upload_deltas =
+        header.features.has(sd) || union.values().any(|e| e.needs.iter().any(|f| f.name == sd));
+    let holder_deltas = rx.features.has(sd);
+    if upload_deltas && !holder_deltas && crate::upgrade::converts_deltas() {
+        return Err(TakeError::Store(StoreError::UpgradeRequired));
+    }
     let objects: Vec<ObjectKey> = union.keys().copied().collect();
     let reader = rx.reader;
     let mut source = UploadSource {
@@ -900,6 +961,8 @@ pub(crate) fn prepare<E>(
             end: END_OF_LOG,
         },
         masked: BTreeMap::new(),
+        deltas: None,
+        features: rx.features,
     };
     // 2. every prerequisite, from the union or the holder. A placeholder's proof that names a
     // carried record of the holder is no removal proof (D-0VG72): the placeholder is refused
@@ -950,6 +1013,8 @@ pub(crate) fn prepare<E>(
     }
     // 5. the closure
     stream_source::check_closure(&mut source, root_key, &root, &objects)?;
+    // 5. and each landing's delta across every file, which an early closure end never skips
+    stream_source::check_snapshot_deltas(&mut source, &header.features, &objects)?;
     // 5. and the typed context of the new plans and plan answers, over the union and the holder
     // (with the new landings, which a landing's plans look up by the version they land), and of
     // the new records that may hold a carried shape (`crate::carried_records`)
@@ -1181,8 +1246,59 @@ pub(crate) fn prepare<E>(
         }
         scan?;
     }
-    // the holder's capacity: after this batch the holder check can still read the whole holder
-    check_capacity(reader, &mut source, &writes)?;
+    // a legacy upload into a holder that holds `snapshot_delta`: the take converts it in this
+    // same batch, one canonical delta for each new landing, in chain order, based on the
+    // holder's own delta where the chain meets the holder (`crate::snapshot_upgrade`). The
+    // upload's SNAPSHOT records are written as they came. A delta the holder holds already is
+    // not written again
+    let mut generated: BTreeMap<ObjectKey, Vec<u8>> = BTreeMap::new();
+    if holder_deltas && !upload_deltas {
+        let landings: Vec<Hash> = writes
+            .iter()
+            .filter(|(k, (w, _))| k.kind == kinds::LANDING && matches!(w, Write::Present { .. }))
+            .map(|(k, _)| k.hash)
+            .collect();
+        for (d, (raw, payload)) in
+            crate::snapshot_upgrade::take_deltas(reader, &mut source, &landings)?
+        {
+            let key = ObjectKey {
+                kind: kinds::SNAPSHOT_DELTA,
+                hash: Hash::of(&payload),
+            };
+            if rx.holds(&key)? || writes.contains_key(&key) {
+                continue;
+            }
+            let len = u32::try_from(payload.len())
+                .map_err(|_| StreamError::limit(None, 0, LIMIT_TOTAL_BYTES))?;
+            new_payload_bytes += u64::from(len);
+            writes.insert(
+                key,
+                (
+                    Write::Generated { key, raw, len },
+                    crate::snapshot_upgrade::delta_children(&d),
+                ),
+            );
+            generated.insert(key, payload);
+        }
+        // the batch keeps the bounds of one batch with the deltas it makes
+        let records = writes.len() as u64;
+        if records > MAX_RECORDS {
+            return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS).into());
+        }
+    }
+    // the holder keeps the stream's features (unknown compatible ones included) and activates
+    // those its new records first use, with the features ref in this same batch (D-WWAK7)
+    let mut needs: Vec<StoreFeature> = header.features.features.clone();
+    for (w, _) in writes.values() {
+        if let Write::Present { key, .. } = w {
+            needs.extend(union[key].needs.iter().cloned());
+        }
+    }
+    let merged = rx.features.merged(&needs);
+    drop(needs);
+    // the holder's capacity: after this batch the holder check (under the manifest the holder
+    // holds after it) can still read the whole holder
+    check_capacity(reader, &mut source, &writes, &generated, &merged)?;
     // 8. the caller's check, with removed objects as their drops
     for (k, by) in &approved {
         if let Some((apply, t)) = by.first() {
@@ -1220,6 +1336,7 @@ pub(crate) fn prepare<E>(
         root: root.clone(),
         objects,
         relay_answers: relayed,
+        features: header.features.clone(),
     };
     let choice = check(&mut source, &facts).map_err(TakeError::Validation)?;
     // each answer is read again after the check (a reread checks its frame and hash): input
@@ -1259,15 +1376,6 @@ pub(crate) fn prepare<E>(
         }
     };
     refs.extend(answer_refs);
-    // the holder keeps the stream's features (unknown compatible ones included) and activates
-    // those its new records first use, with the features ref in this same batch (D-WWAK7)
-    let mut needs: Vec<StoreFeature> = header.features.features.clone();
-    for (w, _) in writes.values() {
-        if let Write::Present { key, .. } = w {
-            needs.extend(union[key].needs.iter().cloned());
-        }
-    }
-    let merged = rx.features.merged(&needs);
     // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
     merged
         .validate_written()
@@ -1339,5 +1447,6 @@ pub(crate) fn prepare<E>(
         tag_hash,
         tag,
         features,
+        generated,
     })
 }

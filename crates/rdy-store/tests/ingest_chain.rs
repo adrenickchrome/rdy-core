@@ -139,7 +139,8 @@ fn hc7_older_ingest_gets_one_upgrade_after_all_batches() {
         report.frames,
         batches.iter().map(|b| b.frames.len() as u64).sum::<u64>()
     );
-    // the tail after the source log: exactly one batch, which names the baseline features
+    // the tail after the source log: exactly one batch, which converts each source landing to
+    // a snapshot delta and names the baseline features (SD1 Task 6: the registered step)
     let s = Store::open(&store).unwrap();
     let mut tail = vec![];
     s.reader()
@@ -149,8 +150,18 @@ fn hc7_older_ingest_gets_one_upgrade_after_all_batches() {
         })
         .unwrap();
     assert_eq!(tail.len(), 1, "{tail:?}");
-    let refs: Vec<RefUpdate> = tail[0]
+    let landings = batches
+        .iter()
+        .flat_map(|b| &b.frames)
+        .filter(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::LANDING)
+        .count();
+    assert!(landings > 0);
+    let (deltas, rest): (Vec<_>, Vec<_>) = tail[0]
         .frames
+        .iter()
+        .partition(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::SNAPSHOT_DELTA);
+    assert_eq!(deltas.len(), landings, "one delta per source landing");
+    let refs: Vec<RefUpdate> = rest
         .iter()
         .map(|f| {
             assert_eq!(f.kind(), kinds::REF_UPDATE);

@@ -46,7 +46,7 @@ use rdy_store::stream_error::{LIMIT_OBJECT_RECORDS, LIMIT_PREREQUISITES, LIMIT_T
 use rdy_store::stream_source::CheckedStream;
 use rdy_store::sync_stream::{
     HEADER_FIXED, KEY_LEN, LIMIT_BATCH_FILES, MAGIC, MAX_BATCH_FILES, MAX_PREREQUISITES,
-    MAX_RECORDS, MAX_STREAM_BYTES, SYNC_KINDS, StreamHeader, StreamWriter, TRAILER_LEN,
+    MAX_RECORDS, MAX_STREAM_BYTES, StreamHeader, StreamWriter, TRAILER_LEN,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
@@ -214,7 +214,8 @@ impl PreparedHistory {
                 .read(*key)
                 .map_err(from_stream)?
                 .ok_or_else(inconsistent)?;
-            let refs = record.refs().map_err(|e| {
+            // the captured store's links: the features its stream's header names
+            let refs = record.refs(&report.header.features).map_err(|e| {
                 to_rdy(StreamError::from_record(i as u64 + 1, 0, &e).with_object(Some(*key)))
             })?;
             let mut mine = Vec::with_capacity(refs.len() + 1);
@@ -222,7 +223,7 @@ impl PreparedHistory {
                 let target = match r.kind {
                     Some(kind) => ObjectKey { kind, hash: r.hash },
                     None => {
-                        let mut found = SYNC_KINDS
+                        let mut found = rdy_store::sync_stream::sync_kinds()
                             .iter()
                             .map(|&kind| ObjectKey { kind, hash: r.hash })
                             .filter(|k| stream.holds(k));

@@ -3,8 +3,11 @@
 //! [`compute_report`] reads the log, never only current blocks: every stored block version
 //! (closed views and withdrawn proposals included), every change that embeds a selected version,
 //! every chunk of a selected blob and every blob that shares one. It names every landing, tag,
-//! view, proposal, state snapshot, review, tension, answer and signature that references affected
-//! content, and every record that quotes a complete source string of a selected version. Quoted
+//! view, proposal, state snapshot, snapshot delta, review, tension, answer and signature that
+//! references affected content, and every record that quotes a complete source string of a
+//! selected version. A landing is read by its full map (its held SNAPSHOT or the fold of its
+//! snapshot deltas, `rdy_store::snapshot`), so a landing whose map names an affected version is
+//! affected though its own delta does not repeat the version. Quoted
 //! text is returned in the transient quote rows only; the manifest a request binds holds record
 //! identities, never the text.
 use super::scan::{BlockText, Frame, Hits, Matcher, require_text_policies, visit_strings, walk};
@@ -29,7 +32,7 @@ use rdy_model::review::{ReviewSubjectV1, ReviewV1};
 use rdy_model::semantic::SemanticTensionV1;
 use rdy_model::{
     AltSet, Answer, Block, BlockId, Change, FieldValue, Hash, Intent, LandingRecord, Op, Proposal,
-    Redaction, RedactionCarried, RepoId, StateSnapshot, Tag,
+    Redaction, RedactionCarried, RepoId, SnapshotDelta, StateSnapshot, Tag,
 };
 use rdy_store::bounded::TryDecodeError;
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
@@ -383,7 +386,7 @@ fn assessment_hits(
 
 /// The impact kind whose ordinal is `n`.
 fn impact_kind(n: u8) -> ImpactKind {
-    const ALL: [ImpactKind; 15] = [
+    const ALL: [ImpactKind; 16] = [
         ImpactKind::BlockVersion,
         ImpactKind::Change,
         ImpactKind::Landing,
@@ -399,6 +402,7 @@ fn impact_kind(n: u8) -> ImpactKind {
         ImpactKind::Dispute,
         ImpactKind::DisputeResolution,
         ImpactKind::CheckRequest,
+        ImpactKind::SnapshotDelta,
     ];
     ALL[usize::from(n)]
 }
@@ -1188,6 +1192,7 @@ pub(crate) fn compute_excluding(
     let mut proposals: Vec<(Hash, Vec<Hash>, bool)> = vec![];
     let mut landings: BTreeMap<Hash, LandingRecord> = BTreeMap::new();
     let mut snapshots: HashSet<Hash> = HashSet::new();
+    let mut deltas: BTreeSet<Hash> = BTreeSet::new();
     let mut tags: Vec<(Hash, String, Hash)> = vec![];
     let mut view_refs: Vec<(String, Vec<Hash>, bool)> = vec![];
     let mut reviews: Vec<(Hash, ReviewV1)> = vec![];
@@ -1298,6 +1303,17 @@ pub(crate) fn compute_excluding(
                 let s: StateSnapshot = reader.get_typed(kinds::SNAPSHOT, &h)?;
                 if s.blocks.values().any(|v| affected_versions.contains(v)) {
                     snapshots.insert(h);
+                }
+            }
+            // a landing's snapshot delta whose set names an affected version. Unlike a later
+            // SNAPSHOT, a delta written after the request still counts: an ordinary later
+            // landing's delta names an affected version only when the landing lands a change
+            // of it (which counts anyway), and an upgrade that adds the deltas of earlier
+            // landings changes the report, so a request recorded before it is stale
+            kinds::SNAPSHOT_DELTA => {
+                let d: SnapshotDelta = reader.get_typed(kinds::SNAPSHOT_DELTA, &h)?;
+                if d.set.iter().any(|(_, v)| affected_versions.contains(v)) {
+                    deltas.insert(h);
                 }
             }
             kinds::TAG => {
@@ -1500,6 +1516,9 @@ pub(crate) fn compute_excluding(
     for s in &snapshots {
         row(ImpactKind::StateSnapshot, s.to_string(), refs, false);
     }
+    for d in &deltas {
+        row(ImpactKind::SnapshotDelta, d.to_string(), refs, false);
+    }
     // a proposal or view op after the request counts only through a change of the removed
     // content (deep-drain ruling, as TASK-1237 for landings): a later propose or fork that only
     // carries earlier changes through `dep_hit` adds no copy or reach
@@ -1543,10 +1562,29 @@ pub(crate) fn compute_excluding(
         .map(|(h, _)| *h)
         .collect();
     let history = landing_history(&landings, &landing_direct)?;
+    // the states whose full map names an affected version, read through the store's one map
+    // read for each landing before the request (a later landing's state is left out, TASK-1237).
+    // A landing with such a state is affected, and so is every tag on it. A verified
+    // foreign-removal proof's landing is no project landing (`project_landings`, as fsck and
+    // upgrade classify it) and carries no delta by design, so its map is not read here; it
+    // still counts above for references and quotes, and below through its state
+    let proof_landings = reader.foreign_proof_landings()?;
+    let mut hit_states: HashSet<Hash> = HashSet::new();
+    let mut read_states: HashSet<Hash> = HashSet::new();
+    for (h, l) in &landings {
+        if later_landings.contains(h) || proof_landings.contains(h) || !read_states.insert(l.state)
+        {
+            continue;
+        }
+        let map = reader.snapshot_at(h)?;
+        if map.blocks.values().any(|v| affected_versions.contains(v)) {
+            hit_states.insert(l.state);
+        }
+    }
     let mut affected_landings: HashSet<Hash> = HashSet::new();
     for (h, l) in &landings {
         if landing_direct.contains(h)
-            || (!later_landings.contains(h) && snapshots.contains(&l.state))
+            || (!later_landings.contains(h) && hit_states.contains(&l.state))
         {
             affected_landings.insert(*h);
             row(ImpactKind::Landing, h.to_string(), refs, false);
@@ -1556,7 +1594,7 @@ pub(crate) fn compute_excluding(
     for (h, name, landing) in &tags {
         let snap = landings
             .get(landing)
-            .is_some_and(|l| snapshots.contains(&l.state));
+            .is_some_and(|l| hit_states.contains(&l.state));
         if snap || history.contains(landing) {
             affected_tags.insert(*h);
             row(ImpactKind::Tag, name.clone(), refs, false);

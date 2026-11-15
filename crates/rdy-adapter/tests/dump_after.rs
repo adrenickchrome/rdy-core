@@ -52,12 +52,13 @@ fn land_tag(r: &mut Rdy, n: usize, name: &str) {
 
 /// The objects of `src`'s log from `from` on that a holder keeps.
 fn objects(src: &Rdy, from: Location) -> Vec<(u8, Vec<u8>)> {
-    const COPIED: [u8; 8] = [
+    const COPIED: [u8; 9] = [
         kinds::BLOCK,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
         kinds::SNAPSHOT,
+        kinds::SNAPSHOT_DELTA,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,

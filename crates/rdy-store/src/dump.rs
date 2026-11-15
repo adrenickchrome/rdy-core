@@ -1532,18 +1532,27 @@ pub fn current_frame_kinds() -> &'static [u8] {
 /// The kinds a store feature adds to a dump-4 batch's frames, each with its feature: a frame of
 /// one stands only in a dump whose manifest names the feature. Repo links (D-FK58A): FOREIGN,
 /// with `foreign_copy`, which also lets a frame take its kind's optional encoding
-/// (`crate::codec::OPTIONAL`).
-pub const FEATURE_FRAME_KINDS: [(&str, u8); 1] =
-    [(crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN)];
+/// (`crate::codec::OPTIONAL`). Snapshot deltas (D-RP6SM): SNAPSHOT_DELTA, with
+/// `snapshot_delta`.
+pub const FEATURE_FRAME_KINDS: [(&str, u8); 2] = [
+    (crate::format::FEATURE_FOREIGN_COPY, kinds::FOREIGN),
+    (crate::format::FEATURE_SNAPSHOT_DELTA, kinds::SNAPSHOT_DELTA),
+];
+
+/// [`FEATURE_FRAME_KINDS`].
+pub fn feature_frame_kinds() -> &'static [(&'static str, u8)] {
+    &FEATURE_FRAME_KINDS
+}
 
 /// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
 /// store's kinds, where a marked raw kind needs a kind that registers versioned encodings. In a
 /// dump of the latest store whose manifest names `foreign_copy` (`foreign`), the kinds and the
-/// optional encodings that feature adds may stand too.
+/// optional encodings that feature adds may stand too; likewise SNAPSHOT_DELTA in one whose
+/// manifest names `snapshot_delta` (`delta`) ([`FEATURE_FRAME_KINDS`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FrameKinds {
     Legacy(&'static [u8]),
-    Current { foreign: bool },
+    Current { foreign: bool, delta: bool },
 }
 
 impl FrameKinds {
@@ -1563,6 +1572,7 @@ impl FrameKinds {
     pub(crate) fn current(m: &crate::format::StoreFeatures) -> FrameKinds {
         FrameKinds::Current {
             foreign: m.has(crate::format::FEATURE_FOREIGN_COPY),
+            delta: m.has(crate::format::FEATURE_SNAPSHOT_DELTA),
         }
     }
 
@@ -1570,10 +1580,16 @@ impl FrameKinds {
     pub(crate) fn allows(self, raw: u8) -> bool {
         match self {
             FrameKinds::Legacy(k) => k.contains(&raw),
-            FrameKinds::Current { foreign } => {
+            FrameKinds::Current { foreign, delta } => {
                 let kind = crate::codec::logical_kind(raw);
-                let featured = FEATURE_FRAME_KINDS.iter().any(|(_, k)| *k == kind);
-                let known = current_frame_kinds().contains(&kind) || (foreign && featured);
+                let named = |f: &str| {
+                    (foreign && f == crate::format::FEATURE_FOREIGN_COPY)
+                        || (delta && f == crate::format::FEATURE_SNAPSHOT_DELTA)
+                };
+                let featured = feature_frame_kinds()
+                    .iter()
+                    .any(|(f, k)| *k == kind && named(f));
+                let known = current_frame_kinds().contains(&kind) || featured;
                 let versioned = crate::codec::latest(kind) > 0
                     || (foreign && crate::codec::optional(kind).is_some());
                 known && (raw == kind || versioned)

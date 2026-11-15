@@ -1,10 +1,13 @@
 //! drv (disclosure review rows; D-TXFHR, D-RDH1C, D-69AY3): the public contract after the
 //! disclosure review plan.
 //!
-//! `contracts/disclosure-review-v1.json` is the current fixture: the frozen
-//! `readme-from-rdy-v1.json` plus the additions of this plan. Every live comparison and capture
-//! uses it: the release capture (`release_contract`), the CLI tree (`rdy-cli`'s `contract`) and
-//! the rule listing check (`cli_rules`). The baselines before it are frozen and never recaptured.
+//! `contracts/disclosure-review-v1.json` is this plan's fixture: the frozen
+//! `readme-from-rdy-v1.json` plus the additions of this plan. This plan merged first, so it is
+//! frozen too, and SD1's `sd1-v1.json` is its successor and the current fixture
+//! (`readme-from-rdy-v1.json` > `disclosure-review-v1.json` > `sd1-v1.json`). Every live
+//! comparison and capture uses the current fixture: the release capture (`release_contract`), the
+//! CLI tree (`rdy-cli`'s `contract`) and the rule listing check (`cli_rules`). The baselines
+//! before it are frozen and never recaptured.
 //!
 //! Task 1c starts the fixture as a byte copy of its predecessor and moves the three selectors to
 //! it together. It changes no surface, so its list of changed members is empty. A later task adds
@@ -35,10 +38,18 @@ fn sha(name: &str) -> String {
         .collect()
 }
 
-/// The current fixture.
+/// This plan's fixture, the successor of [`PREDECESSOR`]. It is frozen since SD1 re-anchored on it.
 const SUCCESSOR: &str = "disclosure-review-v1.json";
 
-/// The predecessor of the current fixture, which every selector named before this plan.
+/// The sha256 of [`SUCCESSOR`]. It is frozen: a later contract change is a successor fixture,
+/// never an edit of this file.
+const SUCCESSOR_SHA: &str = "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139";
+
+/// The current fixture, SD1's successor of [`SUCCESSOR`]; `sdl7_contract_changes_only_delta_surfaces`
+/// in `release_contract.rs` closes its changes.
+const CURRENT: &str = "sd1-v1.json";
+
+/// The predecessor of this plan's fixture, which every selector named before this plan.
 const PREDECESSOR: &str = "readme-from-rdy-v1.json";
 
 /// The sha256 of [`PREDECESSOR`]. It is frozen: a later contract change is a successor fixture,
@@ -68,9 +79,10 @@ const FROZEN: &[(&str, &str)] = &[
         "f8a229b41fff5337d52d8b614670a5b0edcbee534598b35c001064fa040d06c6",
     ),
     (PREDECESSOR, PREDECESSOR_SHA),
+    (SUCCESSOR, SUCCESSOR_SHA),
 ];
 
-/// Task 1c: no member of the current fixture moves. The seam, the row model and the part
+/// Task 1c: no member of this plan's fixture moves. The seam, the row model and the part
 /// fixture add no output field yet.
 const DRV1_CHANGES: &[&str] = &[];
 
@@ -197,7 +209,7 @@ fn leaves(was: &Value, now: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Every changed member of the current fixture against its predecessor is in one task's list,
+/// Every changed member of this plan's fixture against its predecessor is in one task's list,
 /// and none else moved: a member that is not listed is equal.
 fn assert_closed(old: &Value, new: &Value) {
     let mut found = vec![];
@@ -240,19 +252,21 @@ fn drv1_successor_preserves_predecessor_surfaces() {
         assert!(new.get(surface).is_some(), "{surface}");
     }
 
-    // all three selectors name the successor, and none names the predecessor as its path
+    // all three selectors name the current fixture, and none names a frozen one as its path
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for file in SELECTORS {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert!(
-            text.contains(&format!("fixtures/contracts/{SUCCESSOR}\"")),
-            "{file} selects {SUCCESSOR}"
+            text.contains(&format!("fixtures/contracts/{CURRENT}\"")),
+            "{file} selects {CURRENT}"
         );
-        assert!(
-            !text.contains(&format!("contracts/{PREDECESSOR}\"")),
-            "{file} no longer selects {PREDECESSOR}"
-        );
+        for old in [PREDECESSOR, SUCCESSOR] {
+            assert!(
+                !text.contains(&format!("contracts/{old}\"")),
+                "{file} no longer selects {old}"
+            );
+        }
     }
 }
 
@@ -351,8 +365,8 @@ fn drv6_contract_changes_only_review_results() {
     }
 }
 
-/// drv6: every frozen fixture keeps its bytes, the predecessor included, and the successor is
-/// the only fixture a selector names.
+/// drv6: every frozen fixture keeps its bytes, the predecessor and this plan's successor
+/// included, and the current fixture is the only one beside them.
 #[test]
 fn drv6_predecessor_fixtures_keep_their_bytes() {
     for (name, digest) in FROZEN {
@@ -365,11 +379,11 @@ fn drv6_predecessor_fixtures_keep_their_bytes() {
         .collect();
     names.sort();
     let mut want: Vec<String> = FROZEN.iter().map(|(n, _)| (*n).to_string()).collect();
-    want.push(SUCCESSOR.to_string());
+    want.push(CURRENT.to_string());
     want.sort();
     assert_eq!(
         names, want,
-        "no fixture is added or removed beside the successor"
+        "no fixture is added or removed beside the current one"
     );
 }
 
@@ -382,7 +396,7 @@ fn owned_leaves() -> Vec<String> {
     want
 }
 
-/// drv7 (D-TXFHR, D-RDH1C): the union of every change of the current fixture against the last
+/// drv7 (D-TXFHR, D-RDH1C): the union of every change of this plan's fixture against the last
 /// frozen predecessor is exactly the leaves the plan owns. Nothing is removed, and each change
 /// is in the two probe prefixes of the publication check or in its two new review probes: no
 /// other tool, command, error, store or dump member moves.
@@ -421,7 +435,8 @@ const HASH_VECTORS_SHA: &str = "8ba2e3981ccfa3309b39ab2e2c0eab414bc180091c239b11
 const PART_VECTORS_SHA: &str = "751fdfa5d8fe12af1ea2e64b54f7c003ddde9d50d6b9b9cdee8bd048b279dcdb";
 
 /// drv7 (D-B2AC3): the hash vectors that the engine's guard compares with, the part vectors and
-/// every frozen predecessor keep their bytes, `readme-from-rdy-v1.json` included.
+/// every frozen predecessor keep their bytes, `readme-from-rdy-v1.json` and
+/// `disclosure-review-v1.json` included.
 #[test]
 fn drv7_hash_vectors_and_predecessors_stay_frozen() {
     for (name, digest) in FROZEN {

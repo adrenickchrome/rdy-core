@@ -192,6 +192,22 @@ impl Src {
             .records
             .into_iter()
             .collect();
+        // a landing's snapshot delta travels with its landing (SD1: the closure of a known
+        // landing leaves its delta to the receiver), so each delta joins its landing's part
+        let mut parts = parts.to_vec();
+        for l in all.iter().filter(|k| k.kind == kinds::LANDING) {
+            let Some((d, _)) = r.snapshot_delta_of(&l.hash).unwrap() else {
+                continue;
+            };
+            let d = key(kinds::SNAPSHOT_DELTA, d);
+            if let Some(at) = parts.iter().position(|p| p.contains(l)) {
+                for p in parts.iter_mut() {
+                    p.remove(&d);
+                }
+                parts[at].insert(d);
+            }
+        }
+        parts.retain(|p| !p.is_empty());
         parts
             .iter()
             .enumerate()
@@ -1321,7 +1337,7 @@ fn hc3_a_placeholder_naming_an_invalid_carried_record_is_refused() {
 
 /// A project whose one landing is tagged `v1` by a TAG written through `Store::put` (so in the
 /// TAG kind's latest encoding), and one batch file of the tag's whole closure whose header
-/// carries `features`. Returns the base directory, the project path, its repo, the landing, the
+/// carries `features` and the baseline. Returns the base directory, the project path, its repo, the landing, the
 /// tag and the batch file.
 fn put_tag_upload(
     features: rdy_store::format::StoreFeatures,
@@ -1368,6 +1384,9 @@ fn put_tag_upload(
     let r = s.reader();
     let c = closure(&r, tag, &BTreeSet::new()).unwrap();
     let file = dir.path().join("v1.rdysync");
+    // the header names the baseline too: the landing travels with its snapshot delta, which a
+    // stream declares (SD1 Task 6)
+    let features = rdy_store::format::baseline_features().merged(&features.features);
     let header = StreamHeader::tag_history(features, repo, tag, c.prerequisites);
     let mut source = StoreSource {
         reader: &r,
@@ -1590,15 +1609,15 @@ fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
     // the TAG of every upload first uses the test feature
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
     // (holder's unknown features, header's unknown features, refused): each manifest also
-    // names the two baseline features (ok4), and the take first uses the test feature, so the
-    // merged manifest holds 3 more than the two counts
+    // names the three baseline features (ok4; SD1 Task 6 adds snapshot_delta), and the take
+    // first uses the test feature, so the merged manifest holds 4 more than the two counts
     let cases: Vec<(usize, usize, bool)> = vec![
-        (0, 254, true),   // a full header and the first use
-        (200, 54, true),  // the holder and the header
-        (253, 1, true),   // the holder, the header and the first use
-        (128, 126, true), // half and half, and the first use
-        (252, 1, false),  // exactly the bound
-        (0, 253, false),  // exactly the bound
+        (0, 253, true),   // a full header and the first use
+        (200, 53, true),  // the holder and the header
+        (252, 1, true),   // the holder, the header and the first use
+        (128, 125, true), // half and half, and the first use
+        (251, 1, false),  // exactly the bound
+        (0, 252, false),  // exactly the bound
     ];
     for (held, carried, refused) in cases {
         let case = format!("holder {held}, header {carried}");

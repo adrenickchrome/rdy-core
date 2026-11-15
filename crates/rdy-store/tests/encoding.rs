@@ -473,13 +473,13 @@ fn who(actor: &str, role: Role) -> Provenance {
 /// each kind whose store identity is its stored frame's hash, every object a writer authors is
 /// a versioned frame of version 1, the hash each writer returns and each ref names is that
 /// frame's, and the store reads, reindexes and reopens as before. BLOCK and CHANGE keep their
-/// model identities (`Block::version_hash`, `Change::id`) until their encodings move.
+/// model identities (`Block::version_hash`, `Change::id`) until their encodings move. The landing
+/// writer writes a SNAPSHOT_DELTA (encoding 1 registered) and no SNAPSHOT.
 #[test]
 fn ok1_every_writer_writes_its_kinds_latest_encoding() {
     let versioned = [
         kinds::PROPOSAL,
         kinds::LANDING,
-        kinds::SNAPSHOT,
         kinds::BLOB_CHUNK,
         kinds::BLOB_MANIFEST,
         kinds::TAG,
@@ -635,6 +635,10 @@ fn ok1_every_writer_writes_its_kinds_latest_encoding() {
     for k in versioned {
         assert!(written.contains(&k), "a writer wrote kind {k}");
     }
+    // the landing writer writes a snapshot delta of its registered latest encoding, no
+    // snapshot (SD1 Task 6)
+    assert!(written.contains(&kinds::SNAPSHOT_DELTA));
+    assert!(!written.contains(&kinds::SNAPSHOT));
     // each writer returns its frame's hash, and its refs name it
     for h in [
         side.head, proposal, landing, tag, answer, signature, blob, intent, alt, review,

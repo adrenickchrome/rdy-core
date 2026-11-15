@@ -110,6 +110,14 @@ struct ReaderShared {
     kind_walks: AtomicU64,
     /// Log frames read by `visit_carried` (a test hook).
     carried_frames_read: AtomicU64,
+    /// Full maps built by `snapshot_at`, by `full` hash (`crate::snapshot`): ids and version
+    /// hashes only, never a block body. Each entry is tagged with the index and removal epoch it
+    /// was read under; `set_index` (reindex) and `advance_epoch` clear it, and a reopen starts
+    /// with an empty one.
+    maps: crate::snapshot::MapCache,
+    /// A test hook: while set, a landing that has a snapshot delta reads its map by the fold,
+    /// as if its SNAPSHOT were not held (`StoreReader::fold_held_snapshots_for_tests`).
+    fold_held: AtomicBool,
     /// The redaction epoch of this store family: zero at open; it advances once per newly synced
     /// apply batch, before any payload is erased. A reader whose captured epoch is older reads a
     /// state that predates content removal.
@@ -761,15 +769,21 @@ pub(crate) fn resolution_entry(
 /// The object links of the present frame of raw kind `raw` and stored payload `payload`, as the
 /// holder check counts them (`portable_refs_of` over the stored frame), for the holder's edge
 /// count (TASK-2340); None for a kind that is not portable or has no links. A frame whose links
-/// do not decode counts none: the holder check refuses it as damage, never as a bound.
+/// do not decode counts none: the holder check refuses it as damage, never as a bound. The count
+/// follows no feature (a landing counts its `state`); a holder under `snapshot_delta` takes the
+/// SNAPSHOT edges back off (`Index::holder_counts_under`).
 pub(crate) fn links_entry(raw: u8, hash: Hash, payload: &[u8]) -> Option<IndexEntry> {
     let kind = crate::codec::logical_kind(raw);
     if !crate::object_refs::is_portable(kind) || kind == kinds::BLOB_CHUNK {
         return None;
     }
-    let links = crate::object_refs::portable_refs_of(raw, payload)
-        .ok()?
-        .len() as u64;
+    let links = crate::object_refs::portable_refs_of(
+        &crate::format::StoreFeatures::of(vec![]),
+        raw,
+        payload,
+    )
+    .ok()?
+    .len() as u64;
     (links > 0).then_some(IndexEntry::Links { kind, hash, links })
 }
 
@@ -876,9 +890,28 @@ fn frame_entries(
         kinds::DISPUTE_RESOLUTION => out.push(resolution_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
         kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
+        kinds::SNAPSHOT_DELTA => out.push(snapshot_delta_entry(hash, loc, &o)?),
         _ => {}
     }
     Ok(out)
+}
+
+/// The entry of the SNAPSHOT_DELTA `hash` at `at`, split as `o`: the landing it records, from the
+/// frame alone. Its body is read with the bounded decoder (a delta may come from another store);
+/// one that does not decode is `record <hash> (kind 30): <reason>`.
+pub(crate) fn snapshot_delta_entry(
+    hash: Hash,
+    at: Location,
+    o: &crate::codec::ObjectBytes<'_>,
+) -> Result<IndexEntry, StoreError> {
+    let d: rdy_model::SnapshotDelta = crate::codec::decode_bounded_split(o).map_err(|e| {
+        crate::carried_records::refusal(&hash, kinds::SNAPSHOT_DELTA, &e.to_string())
+    })?;
+    Ok(IndexEntry::SnapshotDelta {
+        landing: d.landing,
+        delta: hash,
+        at,
+    })
 }
 
 /// What a replay's plan entries read of earlier objects: the index being built and the log, with
@@ -1281,7 +1314,7 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         };
-        format::write_format_file(dir, &format::baseline_features())?;
+        format::write_format_file(dir, &format::creation_baseline())?;
         synced.push(dir.to_path_buf());
         Store::open_current_format(dir, synced, None, None)
     }
@@ -1306,6 +1339,19 @@ impl Store {
         format::write_format_file(dir, &store.features)?;
         store.synced.push(dir.to_path_buf());
         Ok(store)
+    }
+
+    /// Test hook: [`Store::create`] of a store that predates snapshot deltas, as an older rdy
+    /// made it: its `FORMAT` and its first batch name [`format::legacy_baseline_features`], and
+    /// it opens with no upgrade, so the writer's open does not activate the feature first. No
+    /// CLI, MCP, config or environment path reaches it.
+    #[doc(hidden)]
+    pub fn create_legacy_for_tests(dir: &Path) -> Result<Store, StoreError> {
+        crate::follower::refuse_follower(dir)?;
+        let mut synced = fsutil::create_dir_durable(dir)?;
+        format::write_format_file(dir, &format::legacy_baseline_features())?;
+        synced.push(dir.to_path_buf());
+        Store::open_current_format(dir, synced, None, None)
     }
 
     /// Opens an existing store with [`OpenPolicy::AutoUpgrade`]. Opening never creates or
@@ -1387,12 +1433,12 @@ impl Store {
         // give the planner's answers, so the sealed log is not walked on every open. A store
         // that may be pending is planned, so RequireCurrent refuses it before anything is
         // written.
-        let (steps, pending) = match registry {
-            None if !crate::upgrade::has_registered_steps()
-                && !crate::upgrade::may_be_pending(dir) =>
-            {
-                (false, false)
-            }
+        // So is a store whose FORMAT mirror no step applies to (for a reader, no required
+        // step), with no completion pending: an always-registered step forces no walk on a
+        // store that is already current. A test's registry is always planned.
+        let writer = policy == OpenPolicy::AutoUpgrade;
+        let (steps, required, pending) = match registry {
+            None if crate::upgrade::current_without_walk(dir, writer) => (false, false, false),
             _ => match plan_upgrade(dir, registry) {
                 // a pending completion this rdy cannot run (a read-only feature it does not
                 // know): refused with the unfinished-upgrade text, before anything is written
@@ -1405,7 +1451,11 @@ impl Store {
                 {
                     return Err(unfinished_upgrade(&plan.from));
                 }
-                Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
+                Ok(plan) => (
+                    !plan.steps.is_empty(),
+                    plan.requires_upgrade,
+                    plan.pending_check,
+                ),
                 Err(planned @ StoreError::Format { .. }) => {
                     drop(Store::open_current_format_with(
                         dir,
@@ -1420,8 +1470,10 @@ impl Store {
             },
         };
         match policy {
+            // a step readers do not require (the snapshot deltas) leaves the store readable as
+            // it is: only a required step or a sealed upgrade's pending completion refuses
             OpenPolicy::RequireCurrent => {
-                if steps || pending {
+                if required || pending {
                     return Err(StoreError::UpgradeRequired);
                 }
                 Store::open_current_format_with(dir, vec![], held.cloned(), None, false)
@@ -1483,9 +1535,11 @@ impl Store {
         }
         let mark = crate::follower::require_mark(dir)?;
         Store::check_writable_store(dir)?;
-        if crate::upgrade::has_registered_steps() || crate::upgrade::may_be_pending(dir) {
+        // a follower reads its source's prefix as it is: an optional step never runs here, and
+        // only a required one, or a pending completion, refuses the open
+        if !crate::upgrade::current_without_walk(dir, false) {
             let plan = crate::upgrade::inspect_follower(dir)?;
-            if !plan.steps.is_empty() || plan.pending_check {
+            if plan.requires_upgrade || plan.pending_check {
                 return Err(StoreError::UpgradeRequired);
             }
         }
@@ -1852,6 +1906,8 @@ impl Store {
                 refs_read: AtomicU64::new(0),
                 kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
+                maps: crate::snapshot::MapCache::new(),
+                fold_held: AtomicBool::new(false),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -1884,7 +1940,7 @@ impl Store {
             open: None,
             stale_index: false,
             creation,
-            features: format::baseline_features(),
+            features: format::legacy_baseline_features(),
             held_features: None,
             accept_pending: upgrade_pending,
             completion_pending: false,
@@ -2031,6 +2087,8 @@ impl Store {
                 refs_read: AtomicU64::new(0),
                 kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
+                maps: crate::snapshot::MapCache::new(),
+                fold_held: AtomicBool::new(false),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
@@ -2074,7 +2132,7 @@ impl Store {
             open: None,
             stale_index: false,
             creation,
-            features: format::baseline_features(),
+            features: format::legacy_baseline_features(),
             held_features: None,
             accept_pending: false,
             completion_pending: false,
@@ -2281,12 +2339,13 @@ impl Store {
                 }
             }
             None => {
-                // the features FORMAT mirrors (a new store's baseline), or the baseline for a
-                // holder, whose FORMAT comes after this batch
+                // the features FORMAT mirrors (a new store's baseline), or the new-store
+                // baseline for a holder, whose FORMAT comes after this batch; a store with no
+                // FORMAT predates snapshot deltas
                 let features = match holder {
-                    Some(_) => format::baseline_features(),
+                    Some(_) => format::creation_baseline(),
                     None => format::read_format_file(&self.dir)?
-                        .unwrap_or_else(format::baseline_features),
+                        .unwrap_or_else(format::legacy_baseline_features),
                 };
                 // one batch of the features and the repo id (D-DAGNB): set_refs refuses meta/
                 // refs
@@ -2337,21 +2396,48 @@ impl Store {
             .has(name)
     }
 
-    /// The upgrade transaction's commit (D-WWAK7): exactly the features ref (`features`) and the
-    /// receipt ref (`receipt`, an [`format::UpgradeReceipt`]'s JSON) in one unheld batch. Refused
-    /// with a held batch open, a receipt that does not validate, a receipt whose `source_end` is
-    /// not the current sealed end, whose `from` is not the current manifest's hash, or whose `to`
-    /// is not `features`' hash. Returns the batch's `BATCH_COMMIT` hash. No public ref write
-    /// passes these checks.
+    /// Test hook: [`Store::commit_upgrade`], with its checks, of the step objects `objects`
+    /// (as a registered step would hand them over) and the two refs.
+    #[doc(hidden)]
+    pub fn commit_upgrade_for_tests(
+        &mut self,
+        features: &StoreFeatures,
+        receipt: &[u8],
+        objects: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Hash, StoreError> {
+        self.commit_upgrade(features, receipt, objects)
+    }
+
+    /// [`Store::commit_upgrade`] of a batch with no step objects.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn commit_upgrade_refs(
+        &mut self,
+        features: &StoreFeatures,
+        receipt: &[u8],
+    ) -> Result<Hash, StoreError> {
+        self.commit_upgrade(features, receipt, vec![])
+    }
+
+    /// The upgrade transaction's commit (D-WWAK7): the registered steps' objects (`objects`),
+    /// then exactly the features ref (`features`) and the receipt ref (`receipt`, an
+    /// [`format::UpgradeReceipt`]'s JSON), in one unheld batch. Refused with a held batch open,
+    /// a receipt that does not validate, a receipt whose `source_end` is not the current sealed
+    /// end, whose `from` is not the current manifest's hash, or whose `to` is not `features`'
+    /// hash; and objects the receipt's steps do not produce
+    /// (`crate::snapshot_upgrade::check_batch`: the snapshot-delta step's deltas, each held
+    /// landing's one, and nothing else). `features` must name every feature the objects use:
+    /// the batch activates no feature of its own. Returns the batch's `BATCH_COMMIT` hash. No
+    /// public ref write passes these checks.
     ///
     /// The marker's sync is the commit point. A failure before it rolls the batch back, as a
     /// failed write does. A failure after it (the index update) keeps the batch: the store's
     /// features become the batch's, the index is rebuilt from the log, and the error is
     /// returned, so the receipt waits for the upgrade's completion.
-    pub(crate) fn commit_upgrade_refs(
+    pub(crate) fn commit_upgrade(
         &mut self,
         features: &StoreFeatures,
         receipt: &[u8],
+        objects: Vec<(u8, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
         if self.open.is_some() {
             return Err(batch_open("before the upgrade batch"));
@@ -2373,10 +2459,24 @@ impl Store {
             ));
         }
         features.validate().map_err(|e| e.store_error())?;
-        let items = self.ref_items(vec![
+        crate::snapshot_upgrade::check_batch(self, &r.steps, &objects)?;
+        // the batch activates no feature of its own: every feature a step object uses is one
+        // the batch's features name
+        let unnamed = objects.iter().any(|(raw, payload)| {
+            format::required_features(*raw, payload)
+                .iter()
+                .any(|f| !features.has(&f.name))
+        });
+        if unnamed {
+            return Err(StoreError::Refused(
+                crate::snapshot_upgrade::UPGRADE_BATCH.into(),
+            ));
+        }
+        let mut items = objects;
+        items.extend(self.ref_items(vec![
             (format::REF_STORE_FEATURES.into(), features.to_json()),
             (format::REF_UPGRADE.into(), receipt.to_vec()),
-        ]);
+        ]));
         // where the batch starts: the end, or the next segment's start when it rolls
         let start = self.log.batch_start(&items);
         let held = self.held;
@@ -2730,6 +2830,8 @@ impl Store {
     /// Makes `index` the store's index, in a new reader that shares everything else with the old.
     fn set_index(&mut self, (shared, tracking): (Arc<ReaderShared>, Arc<Tracking>), index: Index) {
         let epoch = shared.epoch.load(Ordering::Acquire);
+        // maps read through the old index are not this index's
+        shared.maps.clear();
         self.reader = Some(StoreReader {
             index: Arc::new(index),
             shared,
@@ -3059,7 +3161,13 @@ impl Store {
         }
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
-        let (items, activated, published) = self.first_use(items)?;
+        // the upgrade's batch carries its own features ref, which names every feature its step
+        // objects use (`commit_upgrade`): it activates nothing and never publishes FORMAT early
+        let (items, activated, published) = if how == RefWrite::Upgrade {
+            (items, None, false)
+        } else {
+            self.first_use(items)?
+        };
         let start = self.log.end();
         let mut result = if self.held {
             self.append_held(items)
@@ -3814,6 +3922,61 @@ impl StoreReader {
             })
     }
 
+    /// The snapshot delta of `landing` and its location, if the index holds one: the first
+    /// SNAPSHOT_DELTA frame that names it.
+    pub fn snapshot_delta_of(
+        &self,
+        landing: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        self.index().snapshot_delta(landing)
+    }
+
+    /// This reader's map cache and the tag of what it reads through: its index and its removal
+    /// epoch. Readers of one store share the cache; an entry of another index or epoch is never
+    /// served.
+    pub(crate) fn map_cache(&self) -> (&crate::snapshot::MapCache, crate::snapshot::CacheTag) {
+        (
+            &self.shared.maps,
+            crate::snapshot::CacheTag {
+                source: Arc::as_ptr(&self.index) as usize as u64,
+                epoch: self.epoch,
+            },
+        )
+    }
+
+    /// The entries and bytes the store's map cache holds (a test hook).
+    #[doc(hidden)]
+    pub fn map_cache_stats_for_tests(&self) -> (usize, usize) {
+        self.shared.maps.stats()
+    }
+
+    /// Sets the store's map cache budget in bytes, evicting the oldest entries past it (a test
+    /// hook; production keeps [`crate::snapshot::MAP_CACHE_BYTES`]).
+    #[doc(hidden)]
+    pub fn set_map_cache_budget_for_tests(&self, bytes: usize) {
+        self.shared.maps.set_budget(bytes);
+    }
+
+    /// Empties the store's map cache, as a reopen does (a test hook).
+    #[doc(hidden)]
+    pub fn clear_map_cache_for_tests(&self) {
+        self.shared.maps.clear();
+    }
+
+    /// A test hook for histories written before the delta writer: while `on`, a landing that
+    /// has a snapshot delta reads its map by the fold, as if its SNAPSHOT were not held. A
+    /// landing with no delta still reads its SNAPSHOT. It empties the map cache.
+    #[doc(hidden)]
+    pub fn fold_held_snapshots_for_tests(&self, on: bool) {
+        self.shared.fold_held.store(on, Ordering::Relaxed);
+        self.shared.maps.clear();
+    }
+
+    /// Whether [`StoreReader::fold_held_snapshots_for_tests`] is on.
+    pub(crate) fn folds_held_snapshots(&self) -> bool {
+        self.shared.fold_held.load(Ordering::Relaxed)
+    }
+
     /// The first object written with hash `h`, whatever its kind, and that kind. A payload a
     /// redaction removed is `Redacted`, never a valid object.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
@@ -3966,10 +4129,12 @@ impl StoreReader {
     }
 
     /// The capacity counts the index derives (TASK-2340): the distinct portable objects stored
-    /// and the sum of their object links, as the holder check counts links. Upper bounds of what
-    /// the holder check reads; a reindex rebuilds them from the log.
+    /// and the sum of their object links, as the holder check of this store's features counts
+    /// them (`Index::holder_counts_under`). Upper bounds of what the holder check reads; a
+    /// reindex rebuilds them from the log.
     pub fn holder_counts(&self) -> Result<(u64, u64), StoreError> {
-        self.index().holder_counts()
+        let features = crate::snapshot::held_features(self)?;
+        self.index().holder_counts_under(&features)
     }
 
     /// The chain depth of landing `landing` the index derives (TASK-2340): one with no `prev`,
@@ -4685,6 +4850,7 @@ impl Store {
     /// refuses new responses with `RedactedState`.
     fn advance_epoch(&mut self, epoch: u64) {
         self.shared.epoch.store(epoch, Ordering::Release);
+        self.shared.maps.clear();
         if let Some(r) = self.reader.as_mut() {
             r.epoch = epoch;
         }
@@ -5354,6 +5520,17 @@ impl Store {
                     // the removed frame's raw kind, as its source stored it
                     self.log.append_dropped(*raw, &key.hash, *len)?;
                     frames.push((*raw, key.hash));
+                }
+                Write::Generated { key, raw, .. } => {
+                    // a delta the take made for a new legacy landing (`crate::snapshot_upgrade`)
+                    let payload = plan.generated.get(key).ok_or_else(|| {
+                        StoreError::Decode(format!("the take has no bytes for {key}"))
+                    })?;
+                    let (loc, hash) = self.log.append_unrolled(*raw, payload)?;
+                    if !plan.redaction {
+                        entries.extend(entries_for_frame(*raw, hash, loc, payload, &mut r)?);
+                    }
+                    frames.push((*raw, hash));
                 }
             }
         }

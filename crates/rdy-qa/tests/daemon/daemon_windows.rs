@@ -270,6 +270,8 @@ fn registry() -> Vec<UpgradeStep> {
         id: format!("add_{}", feature.name),
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![feature]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
     }]
 }
 

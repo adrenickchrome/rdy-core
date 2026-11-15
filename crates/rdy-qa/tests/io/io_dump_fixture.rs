@@ -189,6 +189,8 @@ fn dl8_the_v1_fixture_loads_with_every_hash() {
     if fixture_format > LAST_SCALAR_STORE_FORMAT {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
     } else {
+        // the deltas of the conversion lead the batch (SD1 Task 6)
+        rdy_qa::chain_fixture::take_delta_head(&mut tail, r.store());
         assert_eq!(tail.len(), 3, "two ref frames and their marker: {tail:?}");
         assert_eq!(tail[0].0, kinds::REF_UPDATE);
         let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();

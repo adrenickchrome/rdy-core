@@ -209,14 +209,20 @@ fn rpl33_every_released_dump_loads() {
         .expect("the dump's manifest holds foreign_copy");
     assert_eq!(fc["class"], "incompatible");
     assert_eq!(fc["required_rdy"], expect["required_rdy"]);
-    let whole = foreign_fixture::dump_load_facts(&file, &scratch.path().join("foreign"));
-    assert_eq!(whole, expect["whole"], "the whole load");
+    // the load reads as recorded in its source prefix, then holds its one snapshot-delta
+    // upgrade tail (SD1 Task 6)
+    foreign_fixture::assert_upgraded_dump_load(
+        &file,
+        &scratch.path().join("foreign"),
+        &expect["whole"],
+        DUMP,
+    );
     let native = read_json(&fixtures().join("store/foreign-copy-1/expect.json"));
     assert_eq!(
-        whole["store"], native["store"],
+        expect["whole"]["store"], native["store"],
         "the dump holds the native store"
     );
-    assert_eq!(whole["foreign"], native["foreign"]);
+    assert_eq!(expect["whole"]["foreign"], native["foreign"]);
 }
 
 /// rpl33: the frozen link delivery (sync stream format 3) reads to the frames, delivery,
@@ -269,10 +275,12 @@ fn bytes_under(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
-/// rpl33: the published Release 1 store opens in place. A dry-run upgrade plans nothing and
-/// writes nothing. A writable open and reindex pass fsck, add no feature (no `foreign_copy`
-/// before first use), append nothing, and read every object key, landing, tag, ref and
-/// signature that the fixture records: no identity is rekeyed. The store files keep their bytes.
+/// rpl33: the published Release 1 store opens in place. A dry-run upgrade plans exactly the
+/// snapshot-delta step and writes nothing. A writable open runs that step (SD1 Task 6,
+/// D-918YB): it appends one upgrade batch, adds `snapshot_delta` and no other feature (no
+/// `foreign_copy` before first use), and reads every object key, landing, tag, ref and
+/// signature that the fixture records in its source prefix: no identity is rekeyed. The log
+/// keeps its bytes and only grows.
 #[test]
 fn rpl33_release_one_store_opens_without_rekey() {
     let (_base, root, from) = release_one_copy();
@@ -287,41 +295,40 @@ fn rpl33_release_one_store_opens_without_rekey() {
     let store = root.join(".rdy/store");
     let files = bytes_under(&store);
 
-    // the dry run plans nothing and writes nothing
+    // the dry run plans the snapshot-delta step and writes nothing
     let plan = rdy_engine::maintenance::run(&root, true).unwrap();
     assert!(plan.dry_run && !plan.changed, "{plan:?}");
-    assert!(plan.steps.is_empty(), "{plan:?}");
-    assert_eq!(plan.from, plan.to);
-    assert_eq!(serde_json::to_value(&plan.to).unwrap(), *manifest);
+    assert_eq!(
+        plan.steps,
+        [rdy_store::format::FEATURE_SNAPSHOT_DELTA],
+        "{plan:?}"
+    );
+    assert_eq!(serde_json::to_value(&plan.from).unwrap(), *manifest);
+    let source: rdy_store::format::StoreFeatures =
+        serde_json::from_value(manifest.clone()).unwrap();
+    let to = source.merged(&rdy_qa::chain_fixture::conversion_features());
+    assert_eq!(plan.to, to, "snapshot_delta is the one added feature");
     assert_eq!(bytes_under(&store), files, "a dry run writes nothing");
 
-    // the writable open: no feature added, nothing appended, every identity as recorded
+    // the writable open: one upgrade batch; every recorded identity in the source prefix
     let mut r = Rdy::open(&root).unwrap();
     assert_eq!(r.store().access(), StoreAccess::ReadWrite);
     r.reindex().unwrap();
     let report = r.fsck().unwrap_or_else(|e| panic!("fsck failed: {e:?}"));
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-    let features = r.store().features().clone();
-    assert_eq!(serde_json::to_value(&features).unwrap(), *manifest);
-    let got = foreign_fixture::store_facts(&r);
-    for member in [
-        "log_end",
-        "frames",
-        "batches",
-        "object_keys",
-        "redacted",
-        "refs",
-        "tags",
-        "landings",
-        "signatures",
-        "raw_encodings",
-    ] {
-        assert_eq!(got[member], want["store"][member], "{member}");
-    }
+    assert_eq!(r.store().features(), &to);
+    rdy_qa::foreign_fixture::assert_upgraded_facts(&r, &want["store"], "feature-1");
     r.close().unwrap();
     let after = bytes_under(&store);
     for (f, b) in &files {
-        assert_eq!(after.get(f), Some(b), "{f}: the open rewrote it");
+        let now = after
+            .get(f)
+            .unwrap_or_else(|| panic!("{f}: the open removed it"));
+        if f.starts_with("segments/") {
+            assert!(now.starts_with(b), "{f}: the open rewrote the log");
+        } else if f != "FEATURES" && f != "FORMAT" {
+            assert_eq!(now, b, "{f}: the open rewrote it");
+        }
     }
     let mut extra: Vec<&String> = after.keys().filter(|f| !files.contains_key(*f)).collect();
     extra.retain(|f| !f.starts_with("index.redb"));

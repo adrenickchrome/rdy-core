@@ -8,9 +8,7 @@
 //! content (D-600CW, D-3M81W).
 use rdy_engine::{Rdy, ReadState, Scope};
 use rdy_model::redaction::{RedactTarget, RedactedBlockIdentity};
-use rdy_model::{
-    Block, BlockId, FieldValue, Hash, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
-};
+use rdy_model::{Block, BlockId, FieldValue, Hash, decision, tree, valid_order_key};
 use rdy_schema::{Severity, validate_prefix, validate_read_block};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, StoreReader, ViewOpKind, kinds};
@@ -370,9 +368,9 @@ pub fn frozen_report(r: &Rdy) -> FrozenReport {
     // are compared with (the first block itself, unless a removal erased it)
     let mut fixed: BTreeMap<BlockId, (Hash, Block, Option<Block>)> = BTreeMap::new();
     let mut unavailable: BTreeSet<Unavailable> = BTreeSet::new();
-    for (_, rec) in chain {
-        let rec: LandingRecord = rec;
-        let Ok(snap) = store.get::<StateSnapshot>(&rec.state) else {
+    for (landing, _) in chain {
+        // the store's one map read: a held SNAPSHOT or the fold of the landing's deltas
+        let Ok(snap) = store.snapshot_at(&landing) else {
             continue;
         };
         for (id, (h, first, base)) in fixed.iter_mut() {
