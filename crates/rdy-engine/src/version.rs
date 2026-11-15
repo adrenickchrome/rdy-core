@@ -301,6 +301,9 @@ fn same_version(lo: (&semver::Version, &str), hi: (&semver::Version, &str)) -> O
         .then(|| format!("{} and {} denote the same version", lo.1, hi.1))
 }
 
+/// A tag on a chain: its version, its ref and its position (0 at the chain's head).
+type TagAt = (semver::Version, String, usize);
+
 /// fsck's result for the tag problems `problems` among `good` good tags.
 fn tag_check_result(problems: Vec<String>, good: usize) -> Result<usize, RdyError> {
     if problems.is_empty() {
@@ -334,7 +337,7 @@ impl Rdy {
     pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
         let mut problems = vec![];
         let mut all: Vec<(semver::Version, String)> = vec![];
-        let mut on_canon: Vec<(semver::Version, String, usize)> = vec![];
+        let mut on_canon: Vec<TagAt> = vec![];
         let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
         let mut fetched: Option<BTreeSet<Hash>> = None;
         for (refname, value) in self.store.refs_with_prefix("tag/")? {
@@ -369,7 +372,7 @@ impl Rdy {
             let ((lo, lo_ref), (hi, hi_ref)) = (&pair[0], &pair[1]);
             problems.extend(same_version((lo, lo_ref), (hi, hi_ref)));
         }
-        let mut order = |mut good: Vec<(semver::Version, String, usize)>| {
+        let mut order = |mut good: Vec<TagAt>| {
             good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
             for pair in good.windows(2) {
                 let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
@@ -412,7 +415,7 @@ impl Rdy {
         &self,
         chain: &[Hash],
         off_canon: &[(semver::Version, String, Hash)],
-    ) -> Result<Vec<Vec<(semver::Version, String, usize)>>, RdyError> {
+    ) -> Result<Vec<Vec<TagAt>>, RdyError> {
         if off_canon.len() < 2 {
             return Ok(vec![]);
         }
