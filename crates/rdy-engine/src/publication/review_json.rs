@@ -466,13 +466,13 @@ fn disclosure_json(
     let redactions = match &d.baseline {
         None => {
             let (kept, left) = p.list(&d.redactions);
-            put("redactions", hashes(&kept), left)
+            put("redactions", hashes(kept), left)
         }
         Some(b) => {
             let (candidate, c_left) = p.list(&b.candidate_redactions);
             let (baseline, b_left) = p.list(&b.baseline_redactions);
             put("redactions", vec![], c_left + b_left);
-            json!({"candidate": hashes(&candidate), "baseline": hashes(&baseline)})
+            json!({"candidate": hashes(candidate), "baseline": hashes(baseline)})
         }
     };
     let mut out = json!({

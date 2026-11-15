@@ -116,6 +116,12 @@ fn remove(r: &mut Rdy, target: &str) {
     r.invalidate();
 }
 
+/// One change to a baseline value.
+type Tamper = Box<dyn Fn(&mut Value)>;
+
+/// One change to the fixture state.
+type Change = Box<dyn Fn(Vec<Block>) -> Vec<Block>>;
+
 /// The ids of the project's blocks by their write names.
 type Ids = BTreeMap<String, String>;
 
@@ -1088,7 +1094,7 @@ fn scc7_new_members_are_required_and_hash_covered() {
         .iter()
         .position(|e| e["type"] == "decision")
         .unwrap();
-    let mut edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+    let mut edits: Vec<(&str, Tamper)> = vec![
         (
             "doc title",
             Box::new(|v| v["docs"][0]["title"] = json!("Other")),
@@ -1809,10 +1815,7 @@ fn scc7_source_absence_does_not_expire_baseline() {
 }
 
 /// A change of the fixture state: block `id` changed by `f`.
-fn edit(
-    id: &'static str,
-    f: impl Fn(&mut Block) + 'static,
-) -> Box<dyn Fn(Vec<Block>) -> Vec<Block>> {
+fn edit(id: &'static str, f: impl Fn(&mut Block) + 'static) -> Change {
     Box::new(move |mut v: Vec<Block>| {
         for b in v.iter_mut().filter(|b| b.id.as_str() == id) {
             f(b);
@@ -1826,7 +1829,7 @@ fn scc7_each_part_and_move_counts_match_same_store_in_memory() {
     let (_d, r) = store();
     let st = r.read();
     let before = fixture_blocks();
-    let cases: Vec<(&str, Box<dyn Fn(Vec<Block>) -> Vec<Block>>, bool)> = vec![
+    let cases: Vec<(&str, Change, bool)> = vec![
         (
             "title",
             edit("s-SECT1", |b| {
