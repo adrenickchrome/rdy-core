@@ -62,6 +62,9 @@ pub fn fix_malloc_threshold() -> bool {
     false
 }
 
+/// The free memory in the allocator's heaps: nothing to release here (the Linux glibc step).
+pub fn release_free_memory() {}
+
 /// The bytes the allocator holds in blocks with their own mapping: not read here.
 pub fn malloc_mapped_bytes() -> Option<usize> {
     None

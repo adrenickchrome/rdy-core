@@ -368,6 +368,8 @@ pub struct LiveSite {
     /// Shared with each [`Subscription`], which removes its stream when dropped.
     inner: Arc<Mutex<Inner>>,
     builds: AtomicU64,
+    /// The times a build gave the allocator's free memory back ([`crate::sys::release_free_memory`]).
+    memory_releases: AtomicU64,
     /// The docs each view or proposal version changes, for the versions page: keyed by the scope
     /// and what its count reads (see [`count_key`]). At most [`MAX_COUNTS`] entries.
     counts: Mutex<BTreeMap<(ScopeRef, Hash), usize>>,
@@ -539,6 +541,7 @@ impl LiveSite {
                 ..Inner::default()
             })),
             builds: AtomicU64::new(0),
+            memory_releases: AtomicU64::new(0),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
             before_publish: Mutex::new(None),
@@ -801,7 +804,17 @@ impl LiveSite {
             s.memo = memo;
         }
         inner.evict();
+        // the build's freed memory goes back to the system, never while the site lock is held:
+        // the trim holds the allocator's arenas for a fraction of a second
+        drop(inner);
+        self.release_free_memory();
         Ok((new, true))
+    }
+
+    /// Gives the allocator's free memory back after a build, and counts it.
+    fn release_free_memory(&self) {
+        crate::sys::release_free_memory();
+        self.memory_releases.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Builds `target` (normalized and valid) from `st`, with `memo` for a profile's history.
@@ -1139,6 +1152,12 @@ impl LiveSite {
         self.builds.load(Ordering::SeqCst)
     }
 
+    /// Test hook: the times a build gave the allocator's free memory back.
+    #[doc(hidden)]
+    pub fn memory_releases(&self) -> u64 {
+        self.memory_releases.load(Ordering::SeqCst)
+    }
+
     /// Stops the worker and drops every stream's sender, so each open page's stream ends.
     pub fn close(&self) {
         {
@@ -1269,6 +1288,32 @@ mod tests {
             drop(home);
             sh.shutdown().unwrap();
         }
+    }
+
+    /// A build gives the allocator's free memory back once, after it publishes; a refresh that
+    /// finds its build in the cache builds nothing and releases nothing.
+    #[test]
+    fn site_build_releases_free_memory_and_a_cache_hit_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let site = &sh.site;
+        assert_eq!(site.memory_releases(), 0);
+        let (_, built) = site.refresh_counted(&sh, &C).unwrap();
+        assert!(built);
+        assert_eq!((site.builds(), site.memory_releases()), (1, 1));
+        let (_, built) = site.refresh_counted(&sh, &C).unwrap();
+        assert!(!built, "the second refresh is a cache hit");
+        assert_eq!((site.builds(), site.memory_releases()), (1, 1));
+        sh.writer
+            .run(Box::new(|r: &mut Rdy| {
+                write_and_land(r, "work", one_doc("alpha"));
+                Ok(Value::Null)
+            }))
+            .unwrap();
+        let (_, built) = site.refresh_counted(&sh, &C).unwrap();
+        assert!(built, "a landing builds canon again");
+        assert_eq!((site.builds(), site.memory_releases()), (2, 2));
+        sh.shutdown().unwrap();
     }
 
     /// Fix round 1, finding 2: a refresh that runs while the writer reloads the pack, after the

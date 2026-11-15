@@ -1106,6 +1106,20 @@ pub fn fix_malloc_threshold() -> bool {
     }
 }
 
+/// Gives the free memory inside glibc's heap arenas back to the system (`malloc_trim(0)`), on
+/// Linux with glibc. A site build makes and frees millions of small blocks; glibc keeps the
+/// freed memory in each thread's arena, so the daemon grew after each build and the unused pages
+/// went to swap. The trim only releases free pages; it holds the arenas while it runs (a fraction
+/// of a second for a large build). Nothing on other Unix systems.
+#[allow(unsafe_code)]
+pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: malloc_trim only returns free pages to the system; glibc marks it MT-Safe
+        unsafe { libc::malloc_trim(0) };
+    }
+}
+
 /// The bytes glibc's malloc holds in blocks with their own mapping (`mallinfo2().hblkhd`), on
 /// Linux with glibc; `None` elsewhere. Tests read it to prove [`fix_malloc_threshold`].
 #[allow(unsafe_code)]
