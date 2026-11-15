@@ -5,7 +5,8 @@
 //! and the native holder `store/hub-canon-1`). scc2 (D-KE83X, D-4XHPH, D-3RSCW) then adds sync
 //! stream format 4, the minimum rule and the project's sync state: the registered feature
 //! `sync_state` and its rule, the sync state refs and bounds, the history purposes and the
-//! digests of the `sync4-*` stream fixtures. Every other member is the predecessor's.
+//! digests of the `sync4-*` stream fixtures, and the fix text `SYNC_LOCKED_FIX`. Every other
+//! member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -65,6 +66,10 @@ const SCC1_CHANGES: &[(&str, &str)] = &[
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /errors_warnings/templates/SYNC_LOCKED_FIX",
+        "the fix text of E_LOCKED while a push or pull with the remote runs (D-3RSCW)",
+    ),
     (
         "added /store/feature_rules/sync_state",
         "the activation rule of the feature, in words",
@@ -245,7 +250,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     leaves(&keyed(&old), &keyed(&new), "", &mut found);
     let removed: Vec<&String> = found.iter().filter(|c| c.starts_with("removed ")).collect();
     assert!(removed.is_empty(), "{removed:?}");
-    // the rows of the predecessor are all there, and only the store, dump and sync rows move
+    // the rows of the predecessor are all there, and only the store, dump, sync and error rows
+    // move
     let (Value::Object(was), Value::Object(now)) = (&old, &new) else {
         panic!("the fixtures are objects");
     };
@@ -254,7 +260,7 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
         now.keys().collect::<Vec<_>>()
     );
     for (row, v) in was {
-        if row != "store" && row != "dump_load" && row != "sync" {
+        if !["store", "dump_load", "sync", "errors_warnings"].contains(&row.as_str()) {
             assert_eq!(&now[row], v, "row {row} moved");
         }
     }
@@ -358,6 +364,10 @@ fn scc2_contract_adds_only_sync4_and_minimums() {
     assert_eq!(
         history["minimum_classes"],
         serde_json::json!(["read_only_compatible", "incompatible"])
+    );
+    assert_eq!(
+        new["errors_warnings"]["templates"]["SYNC_LOCKED_FIX"],
+        format!("\"{}\"", rdy_store::sync_state::SYNC_LOCKED_FIX)
     );
     let state = &new["store"]["sync_state"];
     assert_eq!(state["max_value_bytes"], 8192);
