@@ -1049,6 +1049,13 @@ fn move_lines(
                 .iter()
                 .find(|(n, _)| n == name)
                 .map_or("first uses it", |(_, u)| u);
+            if name == rdy_store::format::FEATURE_SNAPSHOT_DELTA {
+                // no first-use step: any open upgrades a store of the release before
+                out.push(format!(
+                    "- **Breaking for older rdy: rdy {version} adds the store feature `{name}` (class {class}, minimum rdy {need}); store format {ps} and dump format {cd} stay.** The first time rdy {version} opens a store made by rdy {prev}, even to read it, it upgrades the store to use `{name}`, after a backup beside the store. Every store rdy {version} creates uses `{name}` from the start. From then on rdy {prev} refuses that store, and a dump of it, with `E_STORE_FORMAT` and names rdy {need}. The way back is a dump made with rdy {prev} before the first rdy {version} open. rdy {version} loads every earlier dump."
+                ));
+                continue;
+            }
             out.push(format!(
                 "- **Breaking for older rdy: rdy {version} adds the store feature `{name}` (class {class}, minimum rdy {need}); store format {ps} and dump format {cd} stay.** A store starts to use `{name}` only when its project {first_use}, and only a store or dump that uses it needs rdy {need}: rdy {prev} refuses one with `E_STORE_FORMAT` and names rdy {need}. rdy {version} opens a store made by rdy {prev} as it is, and loads every earlier dump."
             ));
@@ -2741,6 +2748,17 @@ mod tests {
         // the first release that carries foreign_copy keeps its own lines only
         let at_048 = move_lines("0.48.0", ("0.47.0", 4, 19), current_store(), &features);
         assert!(at_048.iter().all(|l| !l.contains("figure_dark")));
+    }
+
+    /// The 0.52.0 line for `snapshot_delta` says that any open of a 0.51.0 store upgrades it,
+    /// not that a project first uses the feature; the other features keep the generic line.
+    #[test]
+    fn sd1_snapshot_delta_move_line_names_the_writer_upgrade() {
+        let features = rdy_store::format::registered_features();
+        let got = move_lines("0.52.0", ("0.51.0", 4, 19), current_store(), &features);
+        let want = "- **Breaking for older rdy: rdy 0.52.0 adds the store feature `snapshot_delta` (class incompatible, minimum rdy 0.52.0); store format 19 and dump format 4 stay.** The first time rdy 0.52.0 opens a store made by rdy 0.51.0, even to read it, it upgrades the store to use `snapshot_delta`, after a backup beside the store. Every store rdy 0.52.0 creates uses `snapshot_delta` from the start. From then on rdy 0.51.0 refuses that store, and a dump of it, with `E_STORE_FORMAT` and names rdy 0.52.0. The way back is a dump made with rdy 0.51.0 before the first rdy 0.52.0 open. rdy 0.52.0 loads every earlier dump.";
+        assert!(got.iter().any(|l| l == want), "{got:#?}");
+        assert!(got.iter().all(|l| !l.contains("only when its project")));
     }
 
     /// rpl33: the changes part must hold every move line in its Changes group; notes that lack
