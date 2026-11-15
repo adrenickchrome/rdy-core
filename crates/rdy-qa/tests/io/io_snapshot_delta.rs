@@ -1258,3 +1258,58 @@ fn sdl7_large_store_upgrade_bench_fixture() {
     let last = facts.landings.last().unwrap();
     assert!(reader.snapshot_at(last).unwrap().blocks == facts.final_map);
 }
+
+/// sdl4 (final review F1, D-918YB): a verified foreign-removal proof's landing carries no
+/// snapshot delta by design, so a removal report reads full maps for the project's own landings
+/// only (`StoreReader::project_landings`, as fsck and upgrade classify them). On the frozen
+/// foreign-copy dump, a dry-run removal of a local document reports instead of failing with
+/// `expected exactly one snapshot delta`, and the proof landing still counts for references
+/// and quotes as any landing does.
+#[test]
+fn sdl4_foreign_proof_landings_leave_local_removals_working() {
+    let file = fixtures()
+        .join("dump")
+        .join("v4-f1-e1-foreign-copy.rdydump");
+    let t = tempfile::tempdir().unwrap();
+    let to = t.path().join("p");
+    load(&file, &to).unwrap();
+    let s = Store::open_with_policy(&store_dir(&to), OpenPolicy::RequireCurrent).unwrap();
+    let reader = s.reader();
+    let project: BTreeSet<Hash> = reader
+        .project_landings()
+        .unwrap()
+        .into_iter()
+        .map(|(h, _)| h)
+        .collect();
+    let mut held = BTreeSet::new();
+    reader
+        .for_each_object_of(kinds::LANDING, |h| {
+            held.insert(h);
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        held.len() > project.len(),
+        "the fixture holds a foreign-removal proof landing outside the project's landings"
+    );
+    drop(reader);
+    drop(s);
+    let r = Rdy::open(&to).unwrap();
+    let report = r
+        .read()
+        .redaction_report(&rdy_engine::redaction::RedactInput {
+            targets: vec!["d-9XVJA".into()],
+            reason_class: "secret".into(),
+            reason: "review probe".into(),
+            dry_run: true,
+        })
+        .unwrap_or_else(|e| panic!("dry-run removal of a local document: {e}"));
+    assert!(
+        report
+            .versions
+            .iter()
+            .any(|(id, _)| id.as_str() == "d-9XVJA"),
+        "the report selects the local document: {:?}",
+        report.versions
+    );
+}

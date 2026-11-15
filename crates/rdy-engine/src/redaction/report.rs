@@ -1564,11 +1564,16 @@ pub(crate) fn compute_excluding(
     let history = landing_history(&landings, &landing_direct)?;
     // the states whose full map names an affected version, read through the store's one map
     // read for each landing before the request (a later landing's state is left out, TASK-1237).
-    // A landing with such a state is affected, and so is every tag on it
+    // A landing with such a state is affected, and so is every tag on it. A verified
+    // foreign-removal proof's landing is no project landing (`project_landings`, as fsck and
+    // upgrade classify it) and carries no delta by design, so its map is not read here; it
+    // still counts above for references and quotes, and below through its state
+    let proof_landings = reader.foreign_proof_landings()?;
     let mut hit_states: HashSet<Hash> = HashSet::new();
     let mut read_states: HashSet<Hash> = HashSet::new();
     for (h, l) in &landings {
-        if later_landings.contains(h) || !read_states.insert(l.state) {
+        if later_landings.contains(h) || proof_landings.contains(h) || !read_states.insert(l.state)
+        {
             continue;
         }
         let map = reader.snapshot_at(h)?;

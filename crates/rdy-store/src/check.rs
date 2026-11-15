@@ -1261,6 +1261,18 @@ impl StoreReader {
         Ok(out)
     }
 
+    /// The LANDING records of verified foreign-removal proofs: the held landings that
+    /// [`Self::project_landings`] leaves out. They carry no snapshot delta by design, so a
+    /// reader of the project's landing maps skips them; empty without `foreign_copy`.
+    pub fn foreign_proof_landings(&self) -> Result<BTreeSet<Hash>, StoreError> {
+        Ok(self
+            .foreign_proof_keys()?
+            .into_iter()
+            .filter(|k| k.kind == kinds::LANDING)
+            .map(|k| k.hash)
+            .collect())
+    }
+
     /// The keys of the verified foreign-removal proofs' records (as
     /// [`Self::foreign_authorities`] finds them); empty without `foreign_copy`.
     fn foreign_proof_keys(&self) -> Result<BTreeSet<crate::object_refs::ObjectKey>, StoreError> {
