@@ -789,6 +789,63 @@ fn scc2_fetched_view_ops_pass_fsck_after_the_cursor_moves_back() {
     p.dst.fsck().unwrap();
 }
 
+/// A landing `r` above `l2` in the source that names `l3` as its provenance (`rebased_from`),
+/// as a replay's landing does; canon stays at `l3`. Returns its hash.
+fn rebased_landing(p: &mut Pair) -> Hash {
+    let [_, l2, l3] = p.ls;
+    let rec = p.src.store().landing(&l3).unwrap();
+    let r = p
+        .src
+        .store_mut()
+        .put_landing_for_tests(&LandingRecord {
+            prev: Some(l2),
+            rebased_from: vec![l3],
+            read_identity: None,
+            ..rec
+        })
+        .unwrap();
+    p.src.seal_open().unwrap();
+    r
+}
+
+#[test]
+fn scc2_fetched_tagged_rebased_from_landing_passes_fsck() {
+    let _clock = pin_clock(1_000_000);
+    // the fetched tip's chain is r, l2, l1: the tagged l3 joins its closure only as r's
+    // provenance, with its tag v2.0.0
+    let mut p = pair();
+    let [l1, _, l3] = p.ls;
+    let r = rebased_landing(&mut p);
+    assert_eq!(p.src.fsck().unwrap().versions, 1);
+    let file = canon_batch(&p, r, Some(l1), "c");
+    let got = fetch(&mut p.dst, &[&file], &target(r, URL)).unwrap();
+    assert_eq!(got.tags_taken, ["v2.0.0"]);
+    assert!(has(&p.dst, kinds::LANDING, l3));
+    assert_eq!(p.dst.store().reader().canon_head().unwrap(), Some(l1));
+    p.dst.store().check_objects().unwrap();
+    assert_eq!(p.dst.fsck().unwrap().versions, 1);
+    // a project fork's origin batch clears every sync ref: the tag stays a fetched closure's
+    fork_origin(&mut p.dst);
+    assert_eq!(p.dst.fsck().unwrap().versions, 1);
+    assert_eq!(p.dst.store().reader().canon_head().unwrap(), Some(l1));
+
+    // the order holds on the provenance chain l3, l2, l1: a higher version on l2 is refused,
+    // although the fetched tip's own chain holds only that one tag
+    let mut s = pair();
+    let [s1, s2, _] = s.ls;
+    let r = rebased_landing(&mut s);
+    raw_tag(&mut s.src, "v3.0.0", s2);
+    let file = canon_batch(&s, r, Some(s1), "c");
+    let got = fetch(&mut s.dst, &[&file], &target(r, URL)).unwrap();
+    assert_eq!(sorted(got.tags_taken), ["v2.0.0", "v3.0.0"]);
+    let m = fsck_refusal(&s.dst);
+    assert!(
+        m.contains("tag/v3.0.0 names an earlier landing than tag/v2.0.0"),
+        "{m}"
+    );
+    assert!(!m.contains("not in canon's chain"), "{m}");
+}
+
 // ---- the relay-tag signature across a fetch ----
 
 fn signing_key() -> ed25519_dalek::SigningKey {

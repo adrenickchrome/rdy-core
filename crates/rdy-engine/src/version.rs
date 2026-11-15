@@ -320,20 +320,23 @@ fn tag_check_result(problems: Vec<String>, good: usize) -> Result<usize, RdyErro
 impl Rdy {
     /// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
     ///
-    /// A tag names a landing of canon's chain, or of a fetched canon history: a fetch takes a
+    /// A tag names a landing of canon's chain, or of a fetched canon closure: a fetch takes a
     /// history's tags and moves no canon ref (D-3RSCW), so its tags may name landings that canon
-    /// does not hold yet. A fetched history is the chain of a landing that a canon sync ref named
-    /// at any time (`StoreReader::sync_named_heads`), so a later fetch or a fork's origin batch
-    /// that changes the ref keeps it. No two tags denote one version. Higher versions name
-    /// later landings: on canon's chain among the tags of canon, and on each fetched history
-    /// among the tags that canon does not hold. A local tag on canon and a fetched tag off it
-    /// keep no order between them: the pull that applies the history judges them.
+    /// does not hold yet. A fetched canon closure is the closure that the canon history export
+    /// walks from a landing that a canon sync ref named at any time
+    /// (`StoreReader::sync_named_heads`): its prev chain, its provenance branches
+    /// (`rebased_from`), and every other landing its links and attachments reach. A later fetch
+    /// or a fork's origin batch that changes the ref keeps it. No two tags denote one version.
+    /// Higher versions name later landings: on canon's chain among the tags of canon, and on
+    /// each prev chain among the tags that canon does not hold. A local tag on canon and a
+    /// fetched tag off it keep no order between them: the pull that applies the history judges
+    /// them.
     pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
         let mut problems = vec![];
         let mut all: Vec<(semver::Version, String)> = vec![];
         let mut on_canon: Vec<(semver::Version, String, usize)> = vec![];
         let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
-        let mut fetched: Option<Vec<HashMap<Hash, usize>>> = None;
+        let mut fetched: Option<BTreeSet<Hash>> = None;
         for (refname, value) in self.store.refs_with_prefix("tag/")? {
             let (v, tag) = match check_tag_ref(&self.store, &refname, &value) {
                 Ok(t) => t,
@@ -347,11 +350,11 @@ impl Rdy {
                 on_canon.push((v, refname, pos));
                 continue;
             }
-            let histories = match &fetched {
+            let landings = match &fetched {
                 Some(f) => f,
-                None => fetched.insert(self.fetched_histories(chain)?),
+                None => fetched.insert(self.fetched_landings()?),
             };
-            if !histories.iter().any(|h| h.contains_key(&tag.landing)) {
+            if !landings.contains(&tag.landing) {
                 problems.push(format!(
                     "{refname}: landing {} is not in canon's chain",
                     tag.landing.short()
@@ -380,43 +383,79 @@ impl Rdy {
             }
         };
         order(on_canon);
-        for history in fetched.iter().flatten() {
-            let good: Vec<(semver::Version, String, usize)> = off_canon
-                .iter()
-                .filter_map(|(v, r, l)| history.get(l).map(|pos| (v.clone(), r.clone(), *pos)))
-                .collect();
+        for good in self.off_canon_chains(chain, &off_canon)? {
             order(good);
         }
         tag_check_result(problems, all.len())
     }
 
-    /// The fetched canon histories that canon does not hold: for each landing that a canon sync
-    /// ref named at any time and canon's chain (`chain`) does not hold, the position of each
-    /// landing of its chain, head first. A chain's walk ends at a landing the store does not
-    /// hold, or at one it met already.
-    fn fetched_histories(&self, chain: &[Hash]) -> Result<Vec<HashMap<Hash, usize>>, RdyError> {
+    /// The landings of the fetched canon closures: the closure that the canon history export
+    /// walks from every landing that a canon sync ref named at any time
+    /// (`rdy_store::closure::history_landings_before`).
+    fn fetched_landings(&self) -> Result<BTreeSet<Hash>, RdyError> {
         let reader = self.store.reader();
         let named = reader.sync_named_heads()?;
+        rdy_store::closure::history_landings_before(
+            &reader,
+            &named.landings,
+            rdy_store::closure::END_OF_LOG,
+        )
+        .map_err(crate::stream_error::to_rdy)
+    }
+
+    /// The tags `off_canon` (version, ref, landing) that canon's chain (`chain`) does not hold,
+    /// grouped by prev chain: one group for each tagged landing that no other tagged landing
+    /// has on its prev chain, with each tag on that chain and its position (0 at the group's
+    /// landing). A chain's walk ends at a landing of canon, which no such tag names, at a
+    /// landing the store does not hold, or at one it met already.
+    fn off_canon_chains(
+        &self,
+        chain: &[Hash],
+        off_canon: &[(semver::Version, String, Hash)],
+    ) -> Result<Vec<Vec<(semver::Version, String, usize)>>, RdyError> {
+        if off_canon.len() < 2 {
+            return Ok(vec![]);
+        }
+        let reader = self.store.reader();
         let canon: HashSet<&Hash> = chain.iter().collect();
-        let mut out: Vec<HashMap<Hash, usize>> = vec![];
-        for tip in named.landings {
-            if canon.contains(&tip) || out.iter().any(|h| h.contains_key(&tip)) {
-                continue;
-            }
-            let mut positions: HashMap<Hash, usize> = HashMap::new();
-            let mut cur = Some(tip);
+        let tagged: BTreeSet<Hash> = off_canon.iter().map(|(_, _, l)| *l).collect();
+        // each tagged landing's prev chain: the position of each tagged landing on it
+        let mut on_chain: Vec<(Hash, HashMap<Hash, usize>)> = vec![];
+        for top in &tagged {
+            let mut met: HashSet<Hash> = HashSet::new();
+            let mut found: HashMap<Hash, usize> = HashMap::new();
+            let mut cur = Some(*top);
+            let mut pos = 0usize;
             while let Some(h) = cur {
-                let n = positions.len();
-                if positions.insert(h, n).is_some() {
+                if canon.contains(&h) || !met.insert(h) {
                     break;
                 }
+                if tagged.contains(&h) {
+                    found.insert(h, pos);
+                }
+                pos += 1;
                 cur = match reader.landing(&h) {
                     Ok(l) => l.prev,
                     Err(rdy_store::StoreError::NotFound(_)) => None,
                     Err(e) => return Err(e.into()),
                 };
             }
-            out.push(positions);
+            on_chain.push((*top, found));
+        }
+        let mut out = vec![];
+        for (top, found) in &on_chain {
+            let below = on_chain
+                .iter()
+                .any(|(other, f)| other != top && f.contains_key(top));
+            if below {
+                continue;
+            }
+            out.push(
+                off_canon
+                    .iter()
+                    .filter_map(|(v, r, l)| found.get(l).map(|pos| (v.clone(), r.clone(), *pos)))
+                    .collect(),
+            );
         }
         Ok(out)
     }

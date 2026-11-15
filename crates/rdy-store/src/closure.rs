@@ -397,6 +397,52 @@ fn batch_of(
     Ok((records, prerequisites.into_iter().collect(), needs))
 }
 
+/// The landings of the canon histories that start at `roots`, as the walk of
+/// [`history_closure_before`] reaches them as the log stood at `end`: through every forward link
+/// and every attachment, the tags of each landing and their own links included. fsck reads it to
+/// know which landings a fetch of those roots could hold (D-KE83X, D-3RSCW).
+///
+/// It is the export's walk with three changes: it charges no bounds; it keeps no links, only the
+/// keys met; and it leaves out, where an export refuses, a key the store does not hold, a record
+/// whose links do not decode, an ambiguous kind-None link, a foreign entry, carried content and
+/// a landing with no delta. fsck checks each of those itself. A root the store does not hold
+/// reaches nothing.
+pub fn history_landings_before(
+    reader: &StoreReader,
+    roots: &BTreeSet<Hash>,
+    end: Location,
+) -> Result<BTreeSet<Hash>, StreamError> {
+    let known = BTreeSet::new();
+    let roots: Vec<ObjectKey> = roots
+        .iter()
+        .map(|h| ObjectKey {
+            kind: kinds::LANDING,
+            hash: *h,
+        })
+        .collect();
+    if roots.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let unbounded = WalkBounds {
+        records: u64::MAX,
+        edges: u64::MAX,
+    };
+    let w = walk_from(
+        reader,
+        StreamPurpose::CanonHistory,
+        &roots,
+        &known,
+        end,
+        unbounded,
+        true,
+    )?;
+    Ok(w.nodes
+        .keys()
+        .filter(|k| k.kind == kinds::LANDING)
+        .map(|k| k.hash)
+        .collect())
+}
+
 /// The links that the walk of [`closure_within`] keeps when it ends, summed over the records it
 /// found: each record's needed keys and its proof. Only an emitted record keeps them, so this is
 /// the edges the emitted records carry. The walk has no bounds. For tests of the walk's memory.
@@ -439,6 +485,22 @@ fn walk<'a>(
     end: Location,
     bounds: WalkBounds,
 ) -> Result<Walk<'a>, StreamError> {
+    walk_from(reader, purpose, &[root], known, end, bounds, false)
+}
+
+/// [`walk`] from every key of `roots` (one at least; the first is the walk's root). A `lenient`
+/// walk is [`history_landings_before`]'s: it leaves out what an export refuses and keeps no
+/// links.
+fn walk_from<'a>(
+    reader: &'a StoreReader,
+    purpose: StreamPurpose,
+    roots: &[ObjectKey],
+    known: &'a BTreeSet<ObjectKey>,
+    end: Location,
+    bounds: WalkBounds,
+    lenient: bool,
+) -> Result<Walk<'a>, StreamError> {
+    let root = roots[0];
     let features = reader
         .store_features()
         .map_err(|e| store_error(e, Some(root)))?;
@@ -459,9 +521,16 @@ fn walk<'a>(
         met: 0,
         edges: 0,
         asked: HashSet::new(),
-        carried: uncovered_carried(reader, end)?,
+        carried: if lenient {
+            BTreeMap::new()
+        } else {
+            uncovered_carried(reader, end)?
+        },
+        lenient,
     };
-    w.reach(root)?;
+    for r in roots {
+        w.reach(*r)?;
+    }
     loop {
         // forward links and the indexed attachments, to their fixed point
         loop {
@@ -767,6 +836,9 @@ struct Walk<'a> {
     /// The objects that a carried span names and no apply covers, each with the first carried
     /// record that names it.
     carried: BTreeMap<ObjectKey, Hash>,
+    /// Whether the walk is fsck's read of landings ([`history_landings_before`]): it leaves out
+    /// what an export refuses and keeps no links.
+    lenient: bool,
 }
 
 /// One record of the closure.
@@ -818,6 +890,9 @@ impl Walk<'_> {
         }
         if let Some(carried) = self.carried.get(&k) {
             return Err(self.carried_refusal(*carried).with_object(Some(k)));
+        }
+        if self.lenient {
+            return self.expand_lenient(k);
         }
         // a foreign entry is never a tag's history (D-FK58A)
         if k.kind == kinds::FOREIGN {
@@ -873,6 +948,54 @@ impl Walk<'_> {
                 children,
                 proof,
                 len,
+                attached: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// A lenient walk's [`Walk::expand`]: record `k` reaches the keys it links, and keeps none.
+    /// A foreign entry, a key the store does not hold and a record whose links do not decode
+    /// reach nothing; a kind-None link that names no held portable object, or more than one, is
+    /// left out.
+    fn expand_lenient(&mut self, k: ObjectKey) -> Result<(), StreamError> {
+        if k.kind == kinds::FOREIGN {
+            return Ok(());
+        }
+        let Some(record) = self.source.record(k)? else {
+            return Ok(());
+        };
+        let Ok(refs) = record.refs(&self.features) else {
+            return Ok(());
+        };
+        for r in refs {
+            let target = match r.kind {
+                Some(kind) => Some(ObjectKey { kind, hash: r.hash }),
+                None => {
+                    let mut held = None;
+                    let mut n = 0;
+                    for &kind in crate::sync_stream::sync_kinds() {
+                        if self.source.holds(kind, &r.hash)? {
+                            n += 1;
+                            held = Some(ObjectKey { kind, hash: r.hash });
+                        }
+                    }
+                    held.filter(|_| n == 1)
+                }
+            };
+            if let Some(c) = target {
+                self.reach(c)?;
+            }
+        }
+        if let Some(p) = record.proof() {
+            self.reach(p)?;
+        }
+        self.nodes.insert(
+            k,
+            Node {
+                children: Vec::new(),
+                proof: None,
+                len: 0,
                 attached: false,
             },
         );
@@ -973,6 +1096,9 @@ impl Walk<'_> {
                 // delta is refused, as the receiver would refuse it
                 if k.kind == kinds::LANDING && self.deltas && !self.known.contains(&k) {
                     let Some(d) = self.source.snapshot_delta_of(&k.hash)? else {
+                        if self.lenient {
+                            return Ok(out);
+                        }
                         return Err(crate::snapshot::stream_refusal(
                             crate::snapshot::FoldRefusal::MissingDelta { landing: k.hash },
                         ));
