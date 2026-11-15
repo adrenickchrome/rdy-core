@@ -658,15 +658,21 @@ fn unapplied_warnings(
         .collect())
 }
 
-/// The landing that already carried any of `p`'s changes into canon: one index lookup per
-/// change (lidx1).
+/// The landing that already carried `p` into canon: Some when every change of `p` already
+/// reads landed, as the landing of its first change; one index lookup per change (lidx1). A
+/// change that reads landed through a replay that landed elsewhere (D-NME32) does not make the
+/// proposal landed while another of its changes has not.
 pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
+    let mut first = None;
     for c in &p.changes {
-        if let Some(l) = st.reader().landing_of(c)? {
-            return Ok(Some(l));
+        match st.reader().landing_of(c)? {
+            Some(l) => {
+                first.get_or_insert(l);
+            }
+            None => return Ok(None),
         }
     }
-    Ok(None)
+    Ok(first)
 }
 
 /// Whether proposal version `version` (`p`) is withdrawn (D-K0SS1): its view is closed now, or
@@ -2678,6 +2684,17 @@ impl Rdy {
                 out
             }
         };
+        // a change that already reads landed (its replay landed, D-NME32) stays in the view but
+        // is not carried again, while the selection holds a change that has not landed
+        let mut unlanded = Vec::with_capacity(ids.len());
+        for c in &ids {
+            if st.reader().landing_of(c)?.is_none() {
+                unlanded.push(*c);
+            }
+        }
+        if !unlanded.is_empty() && unlanded.len() < ids.len() {
+            ids = unlanded;
+        }
         let changes = changes_of(&st, &ids)?;
         linked_alts(&st, view, alternative.as_ref(), &ids, &changes)?;
         // closure: each dep is proposed with its dependent or landed in the view's base (the
