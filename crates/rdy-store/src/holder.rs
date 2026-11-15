@@ -18,6 +18,12 @@
 //! answer ref never stand in a holder. A holder keeps the PLAN objects a take brings (a seal and
 //! its chain, D-4JMPH) and their derived tables, with no `plan/` ref.
 //!
+//! The store feature `hub_canon` (D-DZDB7) opens four more families in a holder: `canon`,
+//! `view/<name>`, `held/<landing>` and `replaced/<hash>` (`crate::hub_canon`). Only a move
+//! (`Store::move_canon`) writes them, each names stored landings or view ops of the kinds its
+//! family takes, and each needs `hub_canon` listed by the end of its batch: the first one's
+//! batch lists it. The `held/` and `replaced/` value rules hold in a project too.
+//!
 //! One set of rules serves every path that adds refs: a write (`Store::write` and the seals),
 //! the replay of the log into the index (an open's catch-up and a reindex), an ingest, and the
 //! fsck (`StoreReader::check_meta`, which also checks the index's refs against the log's first
@@ -30,6 +36,7 @@
 //! walk's rules, so a batch that a failed catch-up left half indexed is judged whole again.
 use crate::error::StoreError;
 use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE};
+use crate::hub_canon::{is_hub_ref, missing_target, ref_targets};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
 use crate::segment::{Holes, Location, SegmentReader};
@@ -146,6 +153,8 @@ enum Family<'a> {
     Tag,
     /// `answer/tag-object:<hex>`, with the text after the prefix.
     AnswerTagObject(&'a str),
+    /// `canon`, `view/`, `held/` or `replaced/`: with `hub_canon` only (`crate::hub_canon`).
+    Hub,
     /// Anything else: never in a holder.
     Other,
 }
@@ -167,6 +176,8 @@ fn family(name: &str) -> Family<'_> {
         Family::Tag
     } else if let Some(t) = name.strip_prefix(ANSWER_TAG_OBJECT_REF) {
         Family::AnswerTagObject(t)
+    } else if is_hub_ref(name) {
+        Family::Hub
     } else {
         Family::Other
     }
@@ -259,7 +270,9 @@ pub fn names_store_mode(payload: &[u8]) -> bool {
 /// ingest. A mode ref outside the first batch is refused, and so is a mode value other than
 /// `holder` in it. In a holder, every ref must be in a holder family, and an
 /// `answer/tag-object:<hash>` needs its TAG object in its batch or an earlier one (checked at
-/// the batch's marker).
+/// the batch's marker). A holder's `hub_canon` ref needs the feature listed by the end of its
+/// batch and each object it names in its batch or an earlier one; its name and value are
+/// judged where it stands. A project's `held/` and `replaced/` values are judged too.
 pub(crate) struct RefRules {
     creation: Creation,
     /// A holder's TAG objects of the batches before this one.
@@ -268,6 +281,17 @@ pub(crate) struct RefRules {
     batch_tags: BTreeSet<Hash>,
     /// A holder's answer refs of this batch, each with the TAG it names.
     batch_answers: Vec<(String, Hash)>,
+    /// A holder's landings and view ops of the batches before this one, `(kind, hash)`.
+    objects: BTreeSet<(u8, Hash)>,
+    /// A holder's landings and view ops of this batch.
+    batch_objects: BTreeSet<(u8, Hash)>,
+    /// Whether the batches before this one list `hub_canon`.
+    hub: bool,
+    /// Whether this batch's features ref lists `hub_canon`.
+    batch_hub: bool,
+    /// A holder's `hub_canon` refs of this batch, each with the objects it names or the
+    /// refusal of its name or value (judged at the marker, after the feature).
+    batch_hub_refs: Vec<(String, Result<Vec<(u8, Hash)>, String>)>,
 }
 
 impl RefRules {
@@ -278,6 +302,11 @@ impl RefRules {
             tags: BTreeSet::new(),
             batch_tags: BTreeSet::new(),
             batch_answers: Vec::new(),
+            objects: BTreeSet::new(),
+            batch_objects: BTreeSet::new(),
+            hub: false,
+            batch_hub: false,
+            batch_hub_refs: Vec::new(),
         }
     }
 
@@ -299,7 +328,8 @@ impl RefRules {
     }
 
     /// Takes the log frame `kind` at `loc` whose payload is `payload` (None for an authorized
-    /// hole): a ref, a batch's marker, a TAG object, or a frame no rule reads.
+    /// hole): a ref, a batch's marker, an object a holder ref may name, or a frame no rule
+    /// reads.
     pub fn on_frame(
         &mut self,
         loc: Location,
@@ -309,11 +339,27 @@ impl RefRules {
         match (kind, payload) {
             (kinds::REF_UPDATE, Some(p)) => self.on_ref_frame(self.creation.in_first(loc), p),
             (kinds::BATCH_COMMIT, _) => self.on_marker(),
-            (k, Some(p)) if crate::codec::logical_kind(k) == kinds::TAG => {
-                self.on_tag(p);
+            (k, Some(p)) => {
+                self.on_object(k, p);
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Takes an object frame of raw kind `kind` of the batch being judged (its payload): a TAG
+    /// an answer ref may name, or a landing or view op a `hub_canon` ref may name, in this batch
+    /// or a later one. A project keeps none.
+    pub fn on_object(&mut self, kind: u8, payload: &[u8]) {
+        if self.creation.mode != StoreMode::Holder {
+            return;
+        }
+        match crate::codec::logical_kind(kind) {
+            kinds::TAG => self.on_tag(payload),
+            k @ (kinds::LANDING | kinds::VIEW_OP) => {
+                self.batch_objects.insert((k, Hash::of(payload)));
+            }
+            _ => {}
         }
     }
 
@@ -335,11 +381,29 @@ impl RefRules {
             return Ok(());
         }
         if self.creation.mode == StoreMode::Project {
+            // a project's held and replaced refs keep their value rules
+            ref_targets(StoreMode::Project, name, value)?;
             return Ok(());
         }
         match family(name) {
+            Family::Meta if name == REF_STORE_FEATURES => {
+                // a features ref that does not decode is left to the index's own decode
+                if let Ok(f) = crate::format::decode_features(value) {
+                    self.batch_hub |= f.has(crate::format::FEATURE_HUB_CANON);
+                }
+                Ok(())
+            }
             Family::Meta | Family::Mode => Ok(()),
             Family::Tag => Ok(()),
+            Family::Hub => {
+                // every refusal of `ref_targets` is `Decode`
+                let targets = ref_targets(StoreMode::Holder, name, value).map_err(|e| match e {
+                    StoreError::Decode(m) => m,
+                    e => e.to_string(),
+                });
+                self.batch_hub_refs.push((name.to_string(), targets));
+                Ok(())
+            }
             Family::AnswerTagObject(t) => match tag_object(t) {
                 Some(h) => {
                     self.batch_answers.push((name.to_string(), h));
@@ -364,6 +428,9 @@ impl RefRules {
     pub fn abandon_batch(&mut self) {
         self.batch_tags.clear();
         self.batch_answers.clear();
+        self.batch_objects.clear();
+        self.batch_hub = false;
+        self.batch_hub_refs.clear();
     }
 
     /// Ends a batch: `check_marker`, then `commit_batch`.
@@ -374,20 +441,38 @@ impl RefRules {
     }
 
     /// Checks the end of a batch: each answer ref of it needs its TAG object in it or before
-    /// it.
+    /// it, and each `hub_canon` ref of it needs the feature listed by its end and each object
+    /// it names in it or before it.
     pub fn check_marker(&self) -> Result<(), StoreError> {
         for (name, h) in &self.batch_answers {
             if !self.batch_tags.contains(h) && !self.tags.contains(h) {
                 return Err(not_allowed(name));
             }
         }
+        for (name, targets) in &self.batch_hub_refs {
+            if !self.hub && !self.batch_hub {
+                return Err(not_allowed(name));
+            }
+            let targets = match targets {
+                Ok(t) => t,
+                Err(m) => return Err(StoreError::Decode(m.clone())),
+            };
+            for t in targets {
+                if !self.batch_objects.contains(t) && !self.objects.contains(t) {
+                    return Err(missing_target(name, t.0, &t.1));
+                }
+            }
+        }
         Ok(())
     }
 
-    /// Keeps the batch's tags for the batches after it.
+    /// Keeps the batch's tags, objects and features for the batches after it.
     pub fn commit_batch(&mut self) {
         self.batch_answers.clear();
+        self.batch_hub_refs.clear();
         self.tags.append(&mut self.batch_tags);
+        self.objects.append(&mut self.batch_objects);
+        self.hub |= std::mem::take(&mut self.batch_hub);
     }
 }
 
@@ -404,6 +489,9 @@ pub(crate) enum RefWrite {
     Upgrade,
     /// The creation batch, and the test hook that forges refs: no ref rule.
     Unchecked,
+    /// A checked move (`Store::move_canon`): a holder's `hub_canon` refs beside the move's
+    /// objects.
+    Move,
 }
 
 /// Refuses a `meta/upgrade` write in `items` unless `how` is the upgrade transaction's own
@@ -432,12 +520,14 @@ pub(crate) fn refuse_upgrade_writes(
 /// mode ref is never written (`store mode cannot change`). In a holder, a ref outside the
 /// holder families is refused, and so is an answer ref outside the take; the take's
 /// `answer/tag-object:<hash>` needs its TAG object in `items` or already in the store
-/// (`has_tag`).
+/// (`has_kind`). A holder's `hub_canon` ref stands only in a move, and in a holder or a project
+/// a `held/` or `replaced/` ref (and a holder's `canon` or `view/`) keeps its family's name
+/// and value rules and names objects of its kinds in `items` or in the store.
 pub(crate) fn check_ref_writes(
     mode: StoreMode,
     items: &[(u8, Vec<u8>)],
     how: RefWrite,
-    has_tag: impl Fn(&Hash) -> Result<bool, StoreError>,
+    has_kind: impl Fn(u8, &Hash) -> Result<bool, StoreError>,
 ) -> Result<(), StoreError> {
     if how == RefWrite::Unchecked {
         return Ok(());
@@ -470,10 +560,27 @@ pub(crate) fn check_ref_writes(
         }
         return Ok(());
     }
+    // the objects of `items` a hub ref may name, by logical kind
+    let beside = |kind: u8, h: &Hash| {
+        items
+            .iter()
+            .any(|(k, p)| crate::codec::logical_kind(*k) == kind && Hash::of(p) == *h)
+    };
+    let targets_stored = |name: &str, targets: Vec<(u8, Hash)>| -> Result<(), StoreError> {
+        for (k, h) in targets {
+            if !beside(k, &h) && !has_kind(k, &h)? {
+                return Err(missing_target(name, k, &h));
+            }
+        }
+        Ok(())
+    };
     if mode == StoreMode::Project {
-        // a project's only rule: the mode ref is never written
-        if decoded().any(|u| u.name == REF_STORE_MODE) {
-            return Err(cannot_change());
+        // the mode ref is never written, and held and replaced refs keep their rules
+        for u in decoded() {
+            if u.name == REF_STORE_MODE {
+                return Err(cannot_change());
+            }
+            targets_stored(&u.name, ref_targets(mode, &u.name, &u.value)?)?;
         }
         return Ok(());
     }
@@ -488,12 +595,15 @@ pub(crate) fn check_ref_writes(
                 let Some(h) = tag_object(t) else {
                     return Err(cannot_write(&u.name));
                 };
-                let beside = items
-                    .iter()
-                    .any(|(k, p)| crate::codec::logical_kind(*k) == kinds::TAG && Hash::of(p) == h);
-                if how != RefWrite::Take || !(beside || has_tag(&h)?) {
+                if how != RefWrite::Take || !(beside(kinds::TAG, &h) || has_kind(kinds::TAG, &h)?) {
                     return Err(cannot_write(&u.name));
                 }
+            }
+            Family::Hub => {
+                if how != RefWrite::Move {
+                    return Err(cannot_write(&u.name));
+                }
+                targets_stored(&u.name, ref_targets(mode, &u.name, &u.value)?)?;
             }
             Family::Other => return Err(cannot_write(&u.name)),
         }
@@ -521,18 +631,34 @@ impl StoreReader {
         if !matches {
             return Err(late_mode());
         }
+        let stored = |name: &str, value: &[u8]| -> Result<(), StoreError> {
+            for (k, h) in ref_targets(creation.mode, name, value)? {
+                if !self.has_kind(k, &h)? {
+                    return Err(missing_target(name, k, &h));
+                }
+            }
+            Ok(())
+        };
         if creation.mode == StoreMode::Project {
+            for prefix in [crate::hub_canon::HELD_REF, crate::hub_canon::REPLACED_REF] {
+                for (name, value) in self.index().refs_with_prefix(prefix)? {
+                    stored(&name, &value)?;
+                }
+            }
             return Ok(());
         }
+        let hub = crate::snapshot::held_features(self)
+            .is_ok_and(|f| f.has(crate::format::FEATURE_HUB_CANON));
         let refs = self.index().refs_with_prefix("")?;
-        for (name, _) in &refs {
+        for (name, value) in &refs {
             match family(name) {
                 Family::Meta | Family::Mode | Family::Tag => {}
                 Family::AnswerTagObject(t) => match tag_object(t) {
                     Some(h) if self.has_kind(kinds::TAG, &h)? => {}
                     _ => return Err(not_allowed(name)),
                 },
-                Family::Other => return Err(not_allowed(name)),
+                Family::Hub if hub => stored(name, value)?,
+                Family::Hub | Family::Other => return Err(not_allowed(name)),
             }
         }
         Ok(())

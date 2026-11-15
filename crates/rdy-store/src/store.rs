@@ -2678,7 +2678,7 @@ impl Store {
         for (kind, payload) in &last {
             entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
-        let (last, activated, published) = self.first_use(last)?;
+        let (last, activated, published) = self.first_use(last, RefWrite::Public)?;
         let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
         match self.seal_batch(last) {
             Ok(()) => {
@@ -3141,6 +3141,22 @@ impl Store {
         self.write_refs(items, RefWrite::Take)
     }
 
+    /// A move's write (`Store::move_canon`): `write`, where a holder's `hub_canon` refs stand
+    /// beside the move's objects, and the first of them activates the feature in its batch. As
+    /// in the take's write, the pushed objects may hold PLAN records (a holder keeps them with
+    /// no `plan/` ref, which its ref families refuse). The move is one sealed batch of its own,
+    /// held batches on or off (as `write_sealed`): the caller refuses a move while one is open.
+    pub(crate) fn write_move(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        debug_assert!(self.open.is_none(), "move_canon refuses an open held batch");
+        let held = std::mem::replace(&mut self.held, false);
+        let result = self.write_refs(items, RefWrite::Move);
+        self.held = held;
+        result
+    }
+
     /// The ref rules of a write or seal of `items`, before anything is appended.
     fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
         self.check_mode_refs(items, how)?;
@@ -3149,9 +3165,7 @@ impl Store {
 
     /// The mode and holder ref rules of [`Store::check_refs`] alone.
     fn check_mode_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
-        crate::holder::check_ref_writes(self.creation.mode, items, how, |h| {
-            self.has_kind(kinds::TAG, h)
-        })
+        crate::holder::check_ref_writes(self.creation.mode, items, how, |k, h| self.has_kind(k, h))
     }
 
     /// `write` for the store's own checked writers: any kind, with the removed-hash refusal.
@@ -3210,7 +3224,7 @@ impl Store {
         let (items, activated, published) = if how == RefWrite::Upgrade {
             (items, None, false)
         } else {
-            self.first_use(items)?
+            self.first_use(items, how)?
         };
         let start = self.log.end();
         let mut result = if self.held {
@@ -3261,11 +3275,27 @@ impl Store {
     /// fails keeps `FORMAT` as published. A `FORMAT` that lists more than the sealed log (a crash
     /// before the batch sealed) opens by the log's features, and the open puts it back. Returns the items, the merged manifest, if any, and whether `FORMAT` was
     /// rewritten.
-    fn first_use(&self, mut items: Frames) -> Result<FirstUse, StoreError> {
+    ///
+    /// A move's batch (`RefWrite::Move`) that writes a holder's first `hub_canon` ref activates
+    /// `hub_canon` the same way (D-DZDB7); no other write does.
+    fn first_use(&self, mut items: Frames, how: RefWrite) -> Result<FirstUse, StoreError> {
         let current = self.held_features.as_ref().unwrap_or(&self.features);
         let mut needed: Vec<format::StoreFeature> = vec![];
         for (raw, payload) in &items {
             let kind = crate::codec::logical_kind(*raw);
+            // a holder's first `hub_canon` ref activates the feature in its batch (D-DZDB7)
+            if kind == kinds::REF_UPDATE
+                && how == RefWrite::Move
+                && self.creation.mode == StoreMode::Holder
+                && !current.has(format::FEATURE_HUB_CANON)
+                && crate::holder::decode_ref(payload)
+                    .is_some_and(|u| crate::hub_canon::is_hub_ref(&u.name))
+            {
+                let f = format::registered(format::FEATURE_HUB_CANON);
+                if !needed.contains(&f) {
+                    needed.push(f);
+                }
+            }
             if kind == kinds::REF_UPDATE || kind == kinds::BATCH_COMMIT {
                 continue;
             }
@@ -5401,12 +5431,9 @@ impl Store {
         }
         let refs = self.ref_items(plan.refs.clone());
         // an answer ref may name a TAG object the plan writes in this batch (the root)
-        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |h| {
-            let key = crate::object_refs::ObjectKey {
-                kind: kinds::TAG,
-                hash: *h,
-            };
-            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(kinds::TAG, h)?)
+        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |k, h| {
+            let key = crate::object_refs::ObjectKey { kind: k, hash: *h };
+            Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(k, h)?)
         })?;
         crate::holder::refuse_upgrade_writes(&refs, RefWrite::Take)?;
         let epoch = if plan.new_applies {

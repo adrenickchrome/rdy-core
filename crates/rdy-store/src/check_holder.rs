@@ -20,6 +20,12 @@
 //!
 //! A holder holds no FOREIGN entry (repo links, D-FK58A): a foreign log belongs to a project.
 //!
+//! Under `hub_canon` (D-DZDB7, `crate::hub_canon`) the check starts from the hub refs too:
+//! `canon` and each `held/` head start a chain that keeps the chain rules, each `view/` head
+//! is the hub's head of its view's chain (recomputed from the chain's root), and every landing
+//! and view op a `replaced/` mark names is read with its links. So a replaced tip and a held
+//! chain stay reachable through a dump, a load, a compaction and a reindex.
+//!
 //! Every walk is iterative and bounded: [`MAX_LANDING_DEPTH`] landings in one chain,
 //! [`MAX_OBJECTS`] objects and [`MAX_EDGES`] object links. Past a bound the check refuses with
 //! `holder check exceeds {limit}` ([`holder_check_limit`] reads the limit back).
@@ -36,6 +42,14 @@ use crate::object_refs::{ObjectKey, portable_kinds, portable_refs_of};
 use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+
+/// What the hub refs add to a holder check: the objects they name, and the chains that start
+/// at `canon` and at each `held/` ref, with the ref's name.
+#[derive(Default)]
+struct HubRoots {
+    objects: Vec<ObjectKey>,
+    chains: Vec<(String, Hash)>,
+}
 
 /// The most landings one tag's chain may hold.
 pub const MAX_LANDING_DEPTH: usize = 100_000;
@@ -511,12 +525,16 @@ impl StoreReader {
         self.check_no_foreign()?;
         let relayed_tags = self.check_answer_tags()?;
         let tags = self.holder_tags()?;
+        let hub = self.hub_roots()?;
         let mut closure = Closure::new(self, limits)?;
         for hash in tags.iter().map(|t| t.hash).chain(relayed_tags) {
             closure.add(ObjectKey {
                 kind: kinds::TAG,
                 hash,
             })?;
+        }
+        for key in &hub.objects {
+            closure.add(*key)?;
         }
         closure.run()?;
         // the snapshot of every landing read (`crate::snapshot::check_snapshot_chains`): under
@@ -566,6 +584,19 @@ impl StoreReader {
                 self.change_for_dag(&mut changes, c)
             })?;
         }
+        // canon's chain and each held chain, each on its own
+        for (refname, head) in &hub.chains {
+            let chain = self.chain_within(head, limits.landing_depth, &mut landings)?;
+            for (l, rec) in &chain {
+                if rec.relayed_by.is_some() {
+                    relayed.insert(*l);
+                }
+                landed.extend(rec.changes.iter().copied());
+            }
+            chain_rules(refname, &chain, &mut |_, c| {
+                self.change_for_dag(&mut changes, c)
+            })?;
+        }
         let roots: BTreeSet<Hash> = closure
             .seen
             .iter()
@@ -595,6 +626,50 @@ impl StoreReader {
             answers,
             foreign: 0,
         })
+    }
+
+    /// The roots the hub refs add (`crate::hub_canon`): every landing and view op they name, and
+    /// the head of `canon` and of each `held/` chain with its ref name. Each `view/` value must
+    /// be the hub's head of its chain at the op it names, from the chain's root. The names,
+    /// values, kinds and feature were judged by `check_meta`.
+    fn hub_roots(&self) -> Result<HubRoots, StoreError> {
+        use crate::hub_canon::{CANON_REF, HELD_REF, REPLACED_REF, VIEW_REF};
+        let mut out = HubRoots::default();
+        let add = |out: &mut HubRoots, name: &str, value: &[u8]| -> Result<(), StoreError> {
+            for (kind, hash) in crate::hub_canon::ref_targets(StoreMode::Holder, name, value)? {
+                out.objects.push(ObjectKey { kind, hash });
+            }
+            Ok(())
+        };
+        if let Some(v) = self.get_ref(CANON_REF)? {
+            add(&mut out, CANON_REF, &v)?;
+            out.chains
+                .push((CANON_REF.to_string(), hash_from(&v, CANON_REF)?));
+        }
+        for (name, value) in self.refs_with_prefix(HELD_REF)? {
+            add(&mut out, &name, &value)?;
+            let head: Hash = name[HELD_REF.len()..]
+                .parse()
+                .map_err(|_| bad(format!("{name}: the name is not a landing hash")))?;
+            out.chains.push((name, head));
+        }
+        for (name, value) in self.refs_with_prefix(REPLACED_REF)? {
+            add(&mut out, &name, &value)?;
+        }
+        for (name, value) in self.refs_with_prefix(VIEW_REF)? {
+            add(&mut out, &name, &value)?;
+            let view = &name[VIEW_REF.len()..];
+            let stored: crate::view::ViewHead = postcard::from_bytes(&value)
+                .map_err(|e| bad(format!("ref {name}: not a view head: {e}")))?;
+            let want = self.hub_view_head(view, &stored.head)?;
+            if want != stored {
+                return Err(bad(format!(
+                    "ref {name}: the head is not the hub's head of its chain at {}",
+                    stored.head
+                )));
+            }
+        }
+        Ok(out)
     }
 
     /// A holder holds no FOREIGN entry: `holder holds foreign entry {hash}` otherwise.

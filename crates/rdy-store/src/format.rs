@@ -72,6 +72,9 @@ pub const FIGURE_DARK_REQUIRED_RDY: &str = "0.51.0";
 /// The first rdy that knows [`FEATURE_SNAPSHOT_DELTA`] (D-RP6SM, D-918YB): the release that
 /// ships snapshot deltas. It never moves.
 pub const SNAPSHOT_DELTA_REQUIRED_RDY: &str = "0.52.0";
+/// The first rdy that knows [`FEATURE_HUB_CANON`] (D-DZDB7): the release that first ships the
+/// holder's canon, views, held chains and replaced marks. It never moves.
+pub const HUB_CANON_REQUIRED_RDY: &str = "0.53.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -99,16 +102,21 @@ pub const FEATURE_FIGURE_DARK: &str = "figure_dark";
 /// it from their first batch ([`baseline_features`]); in a legacy store, its first use or the
 /// registered upgrade step (`crate::upgrade::snapshot_delta_step`) activates it.
 pub const FEATURE_SNAPSHOT_DELTA: &str = "snapshot_delta";
+/// A holder's canon (D-DZDB7, D-R80JP): the first holder batch that writes `canon`, a `view/`,
+/// a `held/` or a `replaced/` ref activates it, in that batch (`crate::hub_canon`). No object
+/// turns it on, and no upgrade step writes it.
+pub const FEATURE_HUB_CANON: &str = "hub_canon";
 
-/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM), sorted by
-/// name. Each is `incompatible` and needs its own minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 10] = [
+/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7),
+/// sorted by name. Each is `incompatible` and needs its own minimum ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 11] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
     FEATURE_DISPUTE,
     FEATURE_FIGURE_DARK,
     FEATURE_FOREIGN_COPY,
+    FEATURE_HUB_CANON,
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
     FEATURE_SNAPSHOT_DELTA,
@@ -117,13 +125,14 @@ pub const REGISTERED_FEATURES: [&str; 10] = [
 
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
 /// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
-/// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`FEATURE_REQUIRED_RDY`] for the seven
-/// of O11.
+/// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
+/// `hub_canon`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
         FEATURE_FIGURE_DARK => FIGURE_DARK_REQUIRED_RDY,
         FEATURE_SNAPSHOT_DELTA => SNAPSHOT_DELTA_REQUIRED_RDY,
+        FEATURE_HUB_CANON => HUB_CANON_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }

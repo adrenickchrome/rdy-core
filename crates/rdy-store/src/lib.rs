@@ -21,6 +21,7 @@ pub mod foreign_removal;
 pub mod format;
 pub mod fsutil;
 pub mod holder;
+pub mod hub_canon;
 pub mod inbox;
 pub mod index;
 pub mod ingest;

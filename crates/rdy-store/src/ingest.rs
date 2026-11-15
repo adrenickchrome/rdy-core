@@ -544,15 +544,13 @@ impl<L: BorrowMut<SegmentLog>> Ingest<L> {
         };
         // a batch refused earlier left its refs: they never count
         rules.abandon_batch();
-        // the batch's TAG objects, which its answer refs may name
+        // the batch's TAG objects, which its answer refs may name, and its landings and view
+        // ops, which its hub refs may name
         for f in &b.frames {
-            if let Frame::Present {
-                kind: kinds::TAG,
-                payload,
-                ..
-            } = f
+            if let Frame::Present { kind, payload, .. } = f
+                && *kind != kinds::REF_UPDATE
             {
-                rules.on_tag(payload);
+                rules.on_object(*kind, payload);
             }
         }
         let judged = refs()
