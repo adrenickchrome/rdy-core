@@ -483,7 +483,12 @@ fn old_fields(review: &Value) -> Value {
     let strip = |rows: &mut Value| {
         for row in rows.as_array_mut().unwrap() {
             let row = row.as_object_mut().unwrap();
-            for label in ["source_label", "source_doc_title", "target_label"] {
+            for label in [
+                "source_label",
+                "source_doc_title",
+                "source_doc_redacted",
+                "target_label",
+            ] {
                 row.remove(label);
             }
         }

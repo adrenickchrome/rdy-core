@@ -426,6 +426,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
             "location",
             "occurrences",
             "source",
+            "source_doc_redacted",
             "source_doc_title",
             "source_label",
             "target",
@@ -434,7 +435,7 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
     );
     assert_eq!(
         keys(&v["references"]["dropped_decisions"]),
-        ["omitted_rows", "rows"]
+        ["count", "omitted_rows", "rows"]
     );
     // a comparison has no included list; a first publication has no comparison
     assert!(v["included"].is_null());
@@ -566,6 +567,7 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
                 "occurrences": 1,
                 "source_label": "The claim has no ref.",
                 "source_doc_title": "In",
+                "source_doc_redacted": false,
                 "target_label": "The ruling.",
             }],
             "omitted_rows": 0,
@@ -576,7 +578,12 @@ fn lo1_report_lists_links_outside_apart_from_reference_rows() {
     let mut old = refs["links_outside"].clone();
     for row in old["rows"].as_array_mut().unwrap() {
         let row = row.as_object_mut().unwrap();
-        for label in ["source_label", "source_doc_title", "target_label"] {
+        for label in [
+            "source_label",
+            "source_doc_title",
+            "source_doc_redacted",
+            "target_label",
+        ] {
             row.remove(label);
         }
     }
