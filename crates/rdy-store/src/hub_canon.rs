@@ -570,12 +570,6 @@ fn hub_head(
             },
         };
         match &effect {
-            ResolvedOp::Include(x) if !matches!(op.op, ViewOpKind::Undo { .. }) => {
-                include(&mut set, &mut members, x)
-            }
-            ResolvedOp::Exclude(x) if !matches!(op.op, ViewOpKind::Undo { .. }) => {
-                exclude(&mut set, &mut members, x)
-            }
             ResolvedOp::Include(x) => include(&mut set, &mut members, x),
             ResolvedOp::Exclude(x) => exclude(&mut set, &mut members, x),
             ResolvedOp::Close => closed = true,
@@ -891,7 +885,11 @@ fn plan_move(
         if batch.head_kind != want_kind {
             return Err(refused(format!("the pushed head {head} is not a view op")));
         }
-        let chain = walk_view(name, &head, &mut |h| overlay.view_op(h))?;
+        // a pushed chain that is not one view's chain is the push's fault
+        let chain = walk_view(name, &head, &mut |h| overlay.view_op(h)).map_err(|e| match e {
+            StoreError::Decode(m) => refused(m),
+            e => e,
+        })?;
         let pushed_root = chain.last().expect("a chain has a root").0;
         let hub_root = match &current {
             Some(h) => reader.view_root(name, &h.head)?,

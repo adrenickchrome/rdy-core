@@ -484,7 +484,9 @@ struct FirstUse {
 /// `snapshot_delta` (D-918YB, SD1 Task 6), the first feature a new store writes from its first
 /// batch that a complete set does not hold: the dump pair `v4-f1-e1-snapshot-delta`, the sync pair
 /// `v2-f1-e1-snapshot-delta` and the native store `store/snapshot-delta-1`, whose own tests are
-/// `sdl6_` in the store area.
+/// `sdl6_` in the store area. `hub_canon` (D-DZDB7, Sync client A Task 1b), a holder's first
+/// move activates it: the dump pair `v4-f1-e1-hub-canon` and the native holder
+/// `store/hub-canon-1`, whose own tests are `scc1_` in the store area.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -542,6 +544,22 @@ const FIRST_USE: &[FirstUse] = &[
         ],
         native: "fixtures/store/snapshot-delta-1/expect.json",
         baseline: true,
+    },
+    FirstUse {
+        name: "hub_canon",
+        dump: &[
+            (
+                "v4-f1-e1-hub-canon.rdydump",
+                "69c214a9813fb5e1b1f0ac13da4a440df158e28f67b0d4c6312fc93d34e6e9ec",
+            ),
+            (
+                "v4-f1-e1-hub-canon.expect.json",
+                "2d81d696b42558566a9d8619cb79caa57cdb36a2e7d33078e77cd13d92b9967c",
+            ),
+        ],
+        sync: &[],
+        native: "fixtures/store/hub-canon-1/expect.json",
+        baseline: false,
     },
 ];
 

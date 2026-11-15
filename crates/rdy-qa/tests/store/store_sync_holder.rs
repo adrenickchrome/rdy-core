@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 /// The blake3 of the inventory text of the native store files, set when they were written. A
 /// change here needs a founder decision, and after publication it is never allowed.
-const INVENTORY_BLAKE3: &str = "<unset>";
+const INVENTORY_BLAKE3: &str = "05b89fa0ea1171aad32e781cf7308ba47539a8df74cee4a38390688c76979bae";
 
 const NATIVE: &str = "hub-canon-1";
 const DUMP: &str = "v4-f1-e1-hub-canon.rdydump";

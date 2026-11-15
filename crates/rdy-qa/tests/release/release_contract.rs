@@ -1,7 +1,7 @@
 //! ok14: the Release 1 contract inventory (D-TXFHR: the contract surfaces; D-E30RA: Release 1
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture holds thirteen rows, one for
 //! each surface the decision lists. The released baseline, `fixtures/contracts/release-1.json`,
-//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sd1-v1.json`,
+//! is frozen at the Release 1 tag; the current fixture, `fixtures/contracts/sync-client-v1.json`,
 //! is that baseline with the additions since, and every live comparison and capture uses it. Every row is generated from the code that owns the surface (its registry, parser, schema
 //! or an existing fixture), and the tests compare the live generation with the fixture. The members
 //! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
@@ -98,13 +98,13 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The current contract fixture: the released baselines (`release-1.json`, `repo-links-v1.json`,
-/// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json` and
-/// `disclosure-review-v1.json`, all frozen) with the additions since. A capture writes this file,
-/// never a baseline. It starts as a byte copy of its predecessor `disclosure-review-v1.json`, whose
-/// bytes `sdl7_contract_changes_only_delta_surfaces` and `release_disclosure_contract.rs` pin; a
+/// `mcp-http-v1.json`, `m4a-v1.json`, `m4bc-v1.json`, `readme-from-rdy-v1.json`,
+/// `disclosure-review-v1.json` and `sd1-v1.json`, all frozen) with the additions since. A capture
+/// writes this file, never a baseline. It starts as a byte copy of its predecessor `sd1-v1.json`,
+/// whose bytes `release_sync_client_contract.rs` and `release_disclosure_contract.rs` pin; a
 /// later contract change is a successor fixture.
 fn fixture_path() -> PathBuf {
-    qa_root().join("fixtures/contracts/sd1-v1.json")
+    qa_root().join("fixtures/contracts/sync-client-v1.json")
 }
 
 fn capture_mode() -> bool {
@@ -951,7 +951,7 @@ fn store_row() -> Value {
     json!({
         "sources": [
             "rdy_store::format", "rdy_store::codec", "rdy_store::kinds", "rdy_model enums",
-            "fixtures/store/feature-1", "fixtures/dump/*.expect.json",
+            "fixtures/store/feature-1", "fixtures/store/hub-canon-1", "fixtures/dump/*.expect.json",
         ],
         "manifest": {
             "version": MANIFEST_VERSION,
@@ -987,6 +987,7 @@ fn store_row() -> Value {
             "dispute": "a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or ResolveDispute",
             "figure_dark": "a figure BLOCK whose dark_blob is set, alone or in a CHANGE's create or update",
             "foreign_copy": "a FOREIGN, any frame in its kind's optional encoding, or a repo_link block, alone or in a change",
+            "hub_canon": "a holder's first move: a batch that writes canon, a view/, a held/ or a replaced/ ref",
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
@@ -1012,6 +1013,8 @@ fn store_row() -> Value {
         "content_domain": String::from_utf8_lossy(rdy_model::block::CONTENT_DOMAIN).trim_end_matches('\0'),
         "object_ids": object_ids,
         "native_fixture": digests(&fixtures.join("store/feature-1"), |_| true),
+        // the first-use native holder of hub_canon (Sync client A Task 1b)
+        "holder_fixture": digests(&fixtures.join("store/hub-canon-1"), |_| true),
     })
 }
 
