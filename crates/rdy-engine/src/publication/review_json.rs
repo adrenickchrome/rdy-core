@@ -189,6 +189,7 @@ fn references_json(
             "omitted_rows": omitted_link_rows,
         },
         "dropped_decisions": {
+            "count": dropped.count,
             "rows": value(&dropped_rows),
             "omitted_rows": dropped.omitted_rows + omitted_dropped,
         },

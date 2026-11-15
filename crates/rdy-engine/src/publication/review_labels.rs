@@ -232,15 +232,17 @@ pub fn first_attachments(side: &dyn PublicationReviewSide) -> Vec<AttachmentLabe
 // ---- references ---------------------------------------------------------------------------
 
 /// The labels of each reference row in `rows`, in their order, read from the candidate source
-/// (D-44NMT): the source's label, its doc's title (`None` outside docs), and the target's
-/// label. A missing target, a cited block of another repo and a key that names no single block
-/// have no target label.
+/// (D-44NMT): the source's label, its doc's title (`None` outside docs or when a removal removed
+/// it), whether a removal removed that title (D-62KA3), and the target's label. A missing
+/// target, a cited block of another repo and a key that names no single block have no target
+/// label.
 pub fn reference_labels(rows: &[ReferenceRow], lookup: &ReferenceLookup) -> Vec<ReferenceLabels> {
     let keys: OnceCell<Keys> = OnceCell::new();
     rows.iter()
         .map(|r| ReferenceLabels {
             source_label: lookup.label(&r.source).unwrap_or_default(),
             source_doc_title: lookup.doc_title(&r.source),
+            source_doc_redacted: lookup.doc_redacted(&r.source),
             target_label: target_label(r, lookup, &keys),
         })
         .collect()
@@ -269,10 +271,11 @@ fn target_label(
 }
 
 /// The dropped decisions `ids`, in id order, each with its title (D-7M0YF, D-0C4TB): its title,
-/// else the change label over its statement, and "Content removed." for a removed one. No row
-/// is cut here.
+/// else the change label over its statement, and "Content removed." for a removed one. `count`
+/// counts every one (D-YKZNK). No row is cut here.
 pub fn dropped_decisions(ids: &BTreeSet<BlockId>, lookup: &ReferenceLookup) -> DroppedDecisions {
     DroppedDecisions {
+        count: ids.len() as u64,
         rows: ids
             .iter()
             .map(|id| DroppedDecision {

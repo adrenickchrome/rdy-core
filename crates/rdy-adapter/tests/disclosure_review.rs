@@ -521,3 +521,76 @@ fn drv7_adapter_limit_never_returns_a_partial_review() {
     assert!(publication::fit_within(check.review, size, 0).is_ok());
     handle.close().unwrap();
 }
+
+/// D-5WDC2, D-EGFYD, D-9PG33, D-62KA3, D-YKZNK: the adapter's review gives the new members as
+/// the report does: folder and its flag on every doc row, one reading order over the doc rows,
+/// outline rows with ids and counts, section ids on change rows, the removed-title flag on
+/// reference rows and the count of dropped decisions.
+#[test]
+fn rr2_adapter_review_gives_the_new_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = project(dir.path(), 3);
+    let prev = record(&r, "v1.0.0", "site");
+    let against = members(&report(&r, "site", "v2.0.0", Some("v1.0.0")));
+    let first = members(&report(&r, "site", "v2.0.0", None));
+    r.close().unwrap();
+
+    let handle = StoreHandle::open(dir.path()).unwrap();
+    let snap = handle.snapshot().unwrap();
+    let check = snap.disclosure("v2.0.0", "site", Some(&prev)).unwrap();
+    assert_eq!(check.review, against);
+    let d = &check.review["disclosure"];
+    // every doc sits in the folder pubs, which has no title of its own: the site's name for it
+    let pubs = d["changed_docs"][0]["folder"].clone();
+    assert!(pubs.is_string(), "{pubs}");
+    let mut places = vec![];
+    for list in ["changed_docs", "added_docs", "removed_docs"] {
+        for row in d[list].as_array().unwrap() {
+            assert_eq!(row["folder"], pubs, "{list}: {row}");
+            assert_eq!(row["folder_redacted"], false, "{list}: {row}");
+            places.push((row["position"].as_u64().unwrap(), row["title"].clone()));
+        }
+    }
+    places.sort_by_key(|(p, _)| *p);
+    let titles: Vec<&Value> = places.iter().map(|(_, t)| t).collect();
+    // Gone stands after Base, the doc before it that the candidate still holds
+    assert_eq!(
+        titles,
+        [
+            &json!("Base"),
+            &json!("Gone"),
+            &json!("Added 0"),
+            &json!("Added 1"),
+            &json!("Added 2")
+        ]
+    );
+    assert_eq!(
+        places.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4]
+    );
+    let base = &d["changed_docs"][0];
+    assert_eq!(
+        (&base["outline"], &base["omitted_outline"]),
+        (&json!([]), &json!(0))
+    );
+    for c in base["changes"].as_array().unwrap() {
+        for k in ["section_id", "before_section", "before_section_id"] {
+            assert!(c.get(k).is_some_and(Value::is_null), "{k}: {c}");
+        }
+    }
+    for row in check.review["references"]["rows"].as_array().unwrap() {
+        assert_eq!(row["source_doc_redacted"], false, "{row}");
+    }
+    assert_eq!(check.review["references"]["dropped_decisions"]["count"], 0);
+
+    // a first check's included rows take the added-doc form with the same members
+    let first_check = snap.disclosure("v2.0.0", "site", None).unwrap();
+    assert_eq!(first_check.review, first);
+    let rows = first_check.review["included"]["rows"].as_array().unwrap();
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row["position"], json!(i), "{row}");
+        assert_eq!(row["folder_redacted"], false, "{row}");
+        assert!(row["outline"].is_array(), "{row}");
+    }
+    handle.close().unwrap();
+}

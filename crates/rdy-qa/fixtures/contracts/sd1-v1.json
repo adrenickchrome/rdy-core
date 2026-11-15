@@ -1469,6 +1469,8 @@
                   "before_title": "null",
                   "changes": [
                     {
+                      "before_section": "null",
+                      "before_section_id": "null",
                       "block_type": "string",
                       "change": "string",
                       "diff": "null",
@@ -1477,6 +1479,7 @@
                       "label": "string",
                       "redacted": "bool",
                       "section": "null",
+                      "section_id": "null",
                       "what": [
                         "string"
                       ]
@@ -1497,10 +1500,15 @@
                     "updated": "number"
                   },
                   "decisions": [],
+                  "folder": "null",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "omitted_changes": "number",
                   "omitted_decisions": "number",
+                  "omitted_outline": "number",
+                  "outline": [],
                   "page": "string",
+                  "position": "number",
                   "record_only": "bool",
                   "redacted": "bool",
                   "title": "string"
@@ -1554,8 +1562,11 @@
                 {
                   "before_page": "string",
                   "digest": "string",
+                  "folder": "null",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "path": "string",
+                  "position": "number",
                   "redacted": "bool",
                   "size": {
                     "blocks": "number",
@@ -1611,6 +1622,7 @@
             },
             "references": {
               "dropped_decisions": {
+                "count": "number",
                 "omitted_rows": "number",
                 "rows": []
               },
@@ -1686,6 +1698,7 @@
                     }
                   ],
                   "folder": "null",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "lede": "string",
                   "omitted_decision_titles": "number",
@@ -1693,6 +1706,7 @@
                   "omitted_outline": "number",
                   "outline": [],
                   "page": "string",
+                  "position": "number",
                   "size": {
                     "blocks": "number",
                     "decisions": "number",
@@ -1721,6 +1735,7 @@
             },
             "references": {
               "dropped_decisions": {
+                "count": "number",
                 "omitted_rows": "number",
                 "rows": []
               },
@@ -1798,16 +1813,23 @@
                       }
                     ],
                     "folder": "string",
+                    "folder_redacted": "bool",
                     "id": "string",
                     "lede": "string",
                     "omitted_decision_titles": "number",
                     "omitted_figures": "number",
                     "omitted_outline": "number",
                     "outline": [
-                      "string"
+                      {
+                        "blocks": "number",
+                        "changes": "number",
+                        "id": "string",
+                        "label": "string"
+                      }
                     ],
                     "page": "string",
                     "path": "string",
+                    "position": "number",
                     "redacted": "bool",
                     "size": {
                       "blocks": "number",
@@ -1849,6 +1871,8 @@
                     "before_title": "null",
                     "changes": [
                       {
+                        "before_section": "null",
+                        "before_section_id": "null",
                         "block_type": "string",
                         "change": "string",
                         "diff": {
@@ -1864,6 +1888,7 @@
                         "label": "string",
                         "redacted": "bool",
                         "section": "null|string",
+                        "section_id": "null|string",
                         "what": [
                           "string"
                         ]
@@ -1896,10 +1921,22 @@
                         ]
                       }
                     ],
+                    "folder": "null",
+                    "folder_redacted": "bool",
                     "id": "string",
                     "omitted_changes": "number",
                     "omitted_decisions": "number",
+                    "omitted_outline": "number",
+                    "outline": [
+                      {
+                        "blocks": "number",
+                        "changes": "number",
+                        "id": "string",
+                        "label": "string"
+                      }
+                    ],
                     "page": "string",
+                    "position": "number",
                     "record_only": "bool",
                     "redacted": "bool",
                     "title": "string"
@@ -1943,6 +1980,7 @@
                     "location": "string",
                     "occurrences": "number",
                     "source": "string",
+                    "source_doc_redacted": "bool",
                     "source_doc_title": "null",
                     "source_label": "string",
                     "target": "string",
@@ -1994,8 +2032,11 @@
                   {
                     "before_page": "string",
                     "digest": "string",
+                    "folder": "string",
+                    "folder_redacted": "bool",
                     "id": "string",
                     "path": "string",
+                    "position": "number",
                     "redacted": "bool",
                     "size": {
                       "blocks": "number",
@@ -2058,15 +2099,22 @@
                       }
                     ],
                     "folder": "null|string",
+                    "folder_redacted": "bool",
                     "id": "string",
                     "lede": "string",
                     "omitted_decision_titles": "number",
                     "omitted_figures": "number",
                     "omitted_outline": "number",
                     "outline": [
-                      "string"
+                      {
+                        "blocks": "number",
+                        "changes": "number",
+                        "id": "string",
+                        "label": "string"
+                      }
                     ],
                     "page": "string",
+                    "position": "number",
                     "size": {
                       "blocks": "number",
                       "decisions": "number",
@@ -2096,6 +2144,7 @@
             },
             "references": {
               "dropped_decisions": {
+                "count": "number",
                 "omitted_rows": "number",
                 "rows": [
                   {
@@ -2114,6 +2163,7 @@
                     "location": "string",
                     "occurrences": "number",
                     "source": "string",
+                    "source_doc_redacted": "bool",
                     "source_doc_title": "string",
                     "source_label": "string",
                     "target": "string",
@@ -2129,6 +2179,7 @@
                   "location": "string",
                   "occurrences": "number",
                   "source": "string",
+                  "source_doc_redacted": "bool",
                   "source_doc_title": "null|string",
                   "source_label": "string",
                   "target": "string",
@@ -22453,6 +22504,8 @@
                 "before_title": "null",
                 "changes": [
                   {
+                    "before_section": "null",
+                    "before_section_id": "null",
                     "block_type": "string",
                     "change": "string",
                     "diff": "null",
@@ -22461,6 +22514,7 @@
                     "label": "string",
                     "redacted": "bool",
                     "section": "null",
+                    "section_id": "null",
                     "what": [
                       "string"
                     ]
@@ -22481,10 +22535,15 @@
                   "updated": "number"
                 },
                 "decisions": [],
+                "folder": "null",
+                "folder_redacted": "bool",
                 "id": "string",
                 "omitted_changes": "number",
                 "omitted_decisions": "number",
+                "omitted_outline": "number",
+                "outline": [],
                 "page": "string",
+                "position": "number",
                 "record_only": "bool",
                 "redacted": "bool",
                 "title": "string"
@@ -22538,8 +22597,11 @@
               {
                 "before_page": "string",
                 "digest": "string",
+                "folder": "null",
+                "folder_redacted": "bool",
                 "id": "string",
                 "path": "string",
+                "position": "number",
                 "redacted": "bool",
                 "size": {
                   "blocks": "number",
@@ -22595,6 +22657,7 @@
           },
           "references": {
             "dropped_decisions": {
+              "count": "number",
               "omitted_rows": "number",
               "rows": []
             },
@@ -22667,6 +22730,7 @@
                   }
                 ],
                 "folder": "null",
+                "folder_redacted": "bool",
                 "id": "string",
                 "lede": "string",
                 "omitted_decision_titles": "number",
@@ -22674,6 +22738,7 @@
                 "omitted_outline": "number",
                 "outline": [],
                 "page": "string",
+                "position": "number",
                 "size": {
                   "blocks": "number",
                   "decisions": "number",
@@ -22702,6 +22767,7 @@
           },
           "references": {
             "dropped_decisions": {
+              "count": "number",
               "omitted_rows": "number",
               "rows": []
             },
@@ -22776,16 +22842,23 @@
                     }
                   ],
                   "folder": "string",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "lede": "string",
                   "omitted_decision_titles": "number",
                   "omitted_figures": "number",
                   "omitted_outline": "number",
                   "outline": [
-                    "string"
+                    {
+                      "blocks": "number",
+                      "changes": "number",
+                      "id": "string",
+                      "label": "string"
+                    }
                   ],
                   "page": "string",
                   "path": "string",
+                  "position": "number",
                   "redacted": "bool",
                   "size": {
                     "blocks": "number",
@@ -22827,6 +22900,8 @@
                   "before_title": "null",
                   "changes": [
                     {
+                      "before_section": "null",
+                      "before_section_id": "null",
                       "block_type": "string",
                       "change": "string",
                       "diff": {
@@ -22842,6 +22917,7 @@
                       "label": "string",
                       "redacted": "bool",
                       "section": "null|string",
+                      "section_id": "null|string",
                       "what": [
                         "string"
                       ]
@@ -22874,10 +22950,22 @@
                       ]
                     }
                   ],
+                  "folder": "null",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "omitted_changes": "number",
                   "omitted_decisions": "number",
+                  "omitted_outline": "number",
+                  "outline": [
+                    {
+                      "blocks": "number",
+                      "changes": "number",
+                      "id": "string",
+                      "label": "string"
+                    }
+                  ],
                   "page": "string",
+                  "position": "number",
                   "record_only": "bool",
                   "redacted": "bool",
                   "title": "string"
@@ -22921,6 +23009,7 @@
                   "location": "string",
                   "occurrences": "number",
                   "source": "string",
+                  "source_doc_redacted": "bool",
                   "source_doc_title": "null",
                   "source_label": "string",
                   "target": "string",
@@ -22972,8 +23061,11 @@
                 {
                   "before_page": "string",
                   "digest": "string",
+                  "folder": "string",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "path": "string",
+                  "position": "number",
                   "redacted": "bool",
                   "size": {
                     "blocks": "number",
@@ -23036,15 +23128,22 @@
                     }
                   ],
                   "folder": "null|string",
+                  "folder_redacted": "bool",
                   "id": "string",
                   "lede": "string",
                   "omitted_decision_titles": "number",
                   "omitted_figures": "number",
                   "omitted_outline": "number",
                   "outline": [
-                    "string"
+                    {
+                      "blocks": "number",
+                      "changes": "number",
+                      "id": "string",
+                      "label": "string"
+                    }
                   ],
                   "page": "string",
+                  "position": "number",
                   "size": {
                     "blocks": "number",
                     "decisions": "number",
@@ -23074,6 +23173,7 @@
           },
           "references": {
             "dropped_decisions": {
+              "count": "number",
               "omitted_rows": "number",
               "rows": [
                 {
@@ -23092,6 +23192,7 @@
                   "location": "string",
                   "occurrences": "number",
                   "source": "string",
+                  "source_doc_redacted": "bool",
                   "source_doc_title": "string",
                   "source_label": "string",
                   "target": "string",
@@ -23107,6 +23208,7 @@
                 "location": "string",
                 "occurrences": "number",
                 "source": "string",
+                "source_doc_redacted": "bool",
                 "source_doc_title": "null|string",
                 "source_label": "string",
                 "target": "string",

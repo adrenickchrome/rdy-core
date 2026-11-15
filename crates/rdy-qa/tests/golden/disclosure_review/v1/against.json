@@ -39,16 +39,23 @@
           }
         ],
         "folder": "User guides",
+        "folder_redacted": false,
         "id": "d-PBTCC",
         "lede": "Install with `cargo`.",
         "omitted_decision_titles": 0,
         "omitted_figures": 0,
         "omitted_outline": 0,
         "outline": [
-          "Install"
+          {
+            "blocks": 3,
+            "changes": 3,
+            "id": "s-RWFT6",
+            "label": "Install"
+          }
         ],
         "page": "guides/setup.html",
         "path": "guides/setup",
+        "position": 2,
         "redacted": false,
         "size": {
           "blocks": 4,
@@ -90,6 +97,8 @@
         "before_title": null,
         "changes": [
           {
+            "before_section": null,
+            "before_section_id": null,
             "block_type": "prose",
             "change": "updated",
             "diff": [
@@ -111,11 +120,14 @@
             "label": "Run `rdy init` first, then read the guide.",
             "redacted": false,
             "section": "Start",
+            "section_id": "s-5S4PN",
             "what": [
               "text"
             ]
           },
           {
+            "before_section": null,
+            "before_section_id": null,
             "block_type": "claim",
             "change": "added",
             "diff": null,
@@ -124,9 +136,12 @@
             "label": "The root claim.",
             "redacted": false,
             "section": "Start",
+            "section_id": "s-5S4PN",
             "what": []
           },
           {
+            "before_section": null,
+            "before_section_id": null,
             "block_type": "claim",
             "change": "added",
             "diff": null,
@@ -135,9 +150,12 @@
             "label": "A claim to remove.",
             "redacted": false,
             "section": "Start",
+            "section_id": "s-5S4PN",
             "what": []
           },
           {
+            "before_section": null,
+            "before_section_id": null,
             "block_type": "figure",
             "change": "removed",
             "diff": null,
@@ -146,9 +164,12 @@
             "label": "Figure R",
             "redacted": false,
             "section": null,
+            "section_id": null,
             "what": []
           },
           {
+            "before_section": null,
+            "before_section_id": null,
             "block_type": "figure",
             "change": "updated",
             "diff": null,
@@ -157,6 +178,7 @@
             "label": "Figure C",
             "redacted": false,
             "section": null,
+            "section_id": null,
             "what": [
               "field:blob"
             ]
@@ -207,10 +229,22 @@
             "what": []
           }
         ],
+        "folder": null,
+        "folder_redacted": false,
         "id": "d-EDWWE",
         "omitted_changes": 0,
         "omitted_decisions": 0,
+        "omitted_outline": 0,
+        "outline": [
+          {
+            "blocks": 3,
+            "changes": 3,
+            "id": "s-5S4PN",
+            "label": "Start"
+          }
+        ],
         "page": "intro.html",
+        "position": 0,
         "record_only": false,
         "redacted": false,
         "title": "Intro"
@@ -265,6 +299,7 @@
         "location": "body",
         "occurrences": 1,
         "source": "p-FC2N0",
+        "source_doc_redacted": false,
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",
@@ -314,8 +349,11 @@
       {
         "before_page": "guides/old.html",
         "digest": "38c3221512ffeb8e400a30869d40656061a20e082199cfb60ce5f70f51d8ce71",
+        "folder": "Guides",
+        "folder_redacted": false,
         "id": "d-5BT1C",
         "path": "guides/old",
+        "position": 1,
         "redacted": false,
         "size": {
           "blocks": 1,
@@ -378,6 +416,7 @@
   },
   "references": {
     "dropped_decisions": {
+      "count": 1,
       "omitted_rows": 0,
       "rows": [
         {
@@ -396,6 +435,7 @@
           "location": "/links/decided_by/0",
           "occurrences": 1,
           "source": "c-T5C82",
+          "source_doc_redacted": false,
           "source_doc_title": "Intro",
           "source_label": "The outside claim.",
           "target": "D-NM6P2",
@@ -411,6 +451,7 @@
         "location": "body",
         "occurrences": 1,
         "source": "p-4357S",
+        "source_doc_redacted": false,
         "source_doc_title": "Intro",
         "source_label": "See Notes.",
         "target": "d-4K5SS",
@@ -421,6 +462,7 @@
         "location": "body",
         "occurrences": 1,
         "source": "p-FC2N0",
+        "source_doc_redacted": false,
         "source_doc_title": "Setup",
         "source_label": "Also see Notes.",
         "target": "d-4K5SS",

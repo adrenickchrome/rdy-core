@@ -421,7 +421,7 @@ fn hpb8_reference_summary_matches_report_projection() {
             }
             assert_eq!(
                 v["references"]["dropped_decisions"],
-                json!({"rows": [], "omitted_rows": 0})
+                json!({"count": 0, "rows": [], "omitted_rows": 0})
             );
         }
         let keys: Vec<&str> = summary
@@ -483,7 +483,12 @@ fn old_fields(review: &Value) -> Value {
     let strip = |rows: &mut Value| {
         for row in rows.as_array_mut().unwrap() {
             let row = row.as_object_mut().unwrap();
-            for label in ["source_label", "source_doc_title", "target_label"] {
+            for label in [
+                "source_label",
+                "source_doc_title",
+                "source_doc_redacted",
+                "target_label",
+            ] {
                 row.remove(label);
             }
         }

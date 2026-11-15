@@ -3,7 +3,9 @@
 //! figure labels, read from each side's reader view. Each test builds its states in memory over
 //! an empty snapshot.
 
-use rdy_engine::publication::review_model::{DocSize, DocSummary, FigureEntry, RemovedDocReview};
+use rdy_engine::publication::review_model::{
+    DocSize, DocSummary, FigureEntry, OutlineRow, RemovedDocReview,
+};
 use rdy_engine::publication::{
     self, AttachmentVariant, DECISION_TITLES_MAX, DisclosureDiff, FIGURES_MAX, OUTLINE_MAX,
     PublicationReviewSide, ReadPublicationSource, ReaderReviewSide, ReviewRemovals,
@@ -244,6 +246,11 @@ fn strs(v: &[String]) -> Vec<&str> {
     v.iter().map(String::as_str).collect()
 }
 
+/// The labels of an outline, in its order (D-EGFYD gives each row more members).
+fn labels(v: &[OutlineRow]) -> Vec<&str> {
+    v.iter().map(|r| r.label.as_str()).collect()
+}
+
 // ---- tests ----------------------------------------------------------------------------------
 
 /// D-RDH1C, D-0C4TB: an added doc names its title, page and top folder, and shows its full size,
@@ -302,7 +309,7 @@ fn drv3_added_docs_show_size_lede_outline_and_top_folder() {
         fresh.lede.as_deref(),
         Some("Opening words of the `fresh` doc.")
     );
-    assert_eq!(strs(&fresh.outline), vec!["First part", "Deeper part"]);
+    assert_eq!(labels(&fresh.outline), vec!["First part", "Deeper part"]);
     assert_eq!(strs(&fresh.decision_titles), vec!["Use small fixtures"]);
     assert_eq!(fresh.figures, vec![light("A chart")]);
     assert_eq!(
@@ -364,6 +371,9 @@ fn drv3_removed_docs_use_baseline_titles_pages_and_sizes() {
             id: bid("d-00001"),
             title: Some("Gone".into()),
             before_page: Some("guide/gone.html".into()),
+            folder: Some("Guide".into()),
+            folder_redacted: false,
+            position: 0,
             size: size(1, 3, 1, 2),
         }]
     );
@@ -397,7 +407,7 @@ fn drv3_first_publication_lists_every_doc_in_site_order() {
     assert_eq!(nine.lede.as_deref(), Some("Nine words."));
     let five = summary(&inc.rows, "d-00005");
     assert_eq!(five.folder, None);
-    assert_eq!(strs(&five.outline), vec!["Five part"]);
+    assert_eq!(labels(&five.outline), vec!["Five part"]);
     assert_eq!(five.size, size(1, 1, 0, 0));
 }
 
@@ -507,8 +517,8 @@ fn drv3_outline_decision_title_and_figure_caps_count_omissions() {
         "every image is a row or an omission"
     );
     // page order, and the statement for an untitled decision
-    assert_eq!(b.outline[0], "Part 0");
-    assert_eq!(b.outline[29], "Part 29");
+    assert_eq!(b.outline[0].label, "Part 0");
+    assert_eq!(b.outline[29].label, "Part 29");
     assert_eq!(b.decision_titles[0], "Choice number 0.");
     assert_eq!(b.decision_titles[49], "Choice number 49.");
     assert!(b.decision_titles.iter().all(|t| !t.contains("D-B")));
@@ -587,7 +597,7 @@ fn drv3_redacted_doc_folder_and_figure_text_stays_removed() {
     assert_eq!(red.title, None, "a removed doc title is null");
     assert_eq!(red.folder, None, "a removed folder title is null");
     assert_eq!(red.lede.as_deref(), Some("Plain words."));
-    assert_eq!(strs(&red.outline), vec![CONTENT_REMOVED]);
+    assert_eq!(labels(&red.outline), vec![CONTENT_REMOVED]);
     // the removed figure has no image left; the other keeps both rows, each with the notice
     assert_eq!(
         red.figures,
@@ -637,7 +647,7 @@ fn drv3_size_counts_all_depths_and_each_attachment_image() {
     // s-00001..4, p-00001, x-00001 and p-00003; not the doc, the decision or its rationale
     assert_eq!(deep.size, size(4, 7, 1, 2));
     assert_eq!(
-        strs(&deep.outline),
+        labels(&deep.outline),
         vec!["One", "Two", "Three", "Shell part"]
     );
     assert_eq!(strs(&deep.decision_titles), vec!["Deep decision."]);
