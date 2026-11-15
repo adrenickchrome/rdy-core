@@ -28,7 +28,7 @@
         "decision_titles": [
           "Pin versions"
         ],
-        "digest": "662fa74223f3ddfa74fea1045ce32b523303102fe7b1b0dcba6580f3d54b611b",
+        "digest": "a0c97dc9cec856b47b35d434e275b222ab345b80a1ae6384274bbcc0e50f7a08",
         "figures": [
           {
             "label": "Figure N"
@@ -60,7 +60,7 @@
       }
     ],
     "after_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
-    "after_selection_hash": "e84c936fdc8f637788219e5fe7448b27830f1be2bbfee2e520c76e1c8b2b6bf0",
+    "after_selection_hash": "f08e904d224987a99c702d98e942556052f6c9f2166943bb66abd305f891f151",
     "after_selection_identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
     "audience": "org",
     "before_profile_version": "8298911c78b71ada208565a584375e46926b608c437dae7194de5f9624b96e22",
@@ -82,7 +82,7 @@
     ],
     "changed_docs": [
       {
-        "after_digest": "9198c4f81fabc7c6028fdf1f509451bb8404c6e3917690fb330cda878c726695",
+        "after_digest": "0af2ae06f2c259affda13d747545934658bdfe048ad8dac6f70148aad9bd7e76",
         "after_path": "intro",
         "before_digest": "dc08758c0f5d06167e33221781339cc54af7d43eac966480c3c1f19b216981a8",
         "before_page": "intro.html",
@@ -300,9 +300,9 @@
     "profile_changed": false,
     "profile_id": "pf-GC0XG",
     "redactions": [
-      "02285d472242cdd040d42a71e2ebc6a75aaa7f0befd0a119dadbfc74b1ab57c4",
-      "1761aa8a6b8c3fb227f865dda3ca9053cb50203135ce2360e61fcfa07f76a7a8",
-      "f498572a156714ca03b2ae547f2811960dd5b27d4060b9ff1cb2a22e0f1a7a5c"
+      "205173d399ab92ee51f74d57af85b45bbcded0a0ffae94fecc5ec0e99f0ecebb",
+      "39345f00087398ac49ae7820784d9f722d1fe97dc4321ddfcdbc729852b87205",
+      "a357c3c5c914d93ea3defa4b8af623b93656e51ecfc2b48251e710b3aa9b997a"
     ],
     "removed_attachments": [
       {
@@ -437,7 +437,7 @@
   "release": null,
   "scope": {
     "kind": "canon",
-    "landing": "31db37123dac71a2a701f53fbd2aa34fdba6729799eb4ac00dbb8c270bc6e9d8"
+    "landing": "bbf2dfd9218be9cc19cfa3dda24a049b67900794719cee37c93ad2a87893d461"
   },
   "selection": {
     "attachments": 4,
@@ -461,7 +461,7 @@
       },
       {
         "id": "D-X2XSR",
-        "redaction": "1761aa8a6b8c3fb227f865dda3ca9053cb50203135ce2360e61fcfa07f76a7a8",
+        "redaction": "205173d399ab92ee51f74d57af85b45bbcded0a0ffae94fecc5ec0e99f0ecebb",
         "version": "406bf0cae785485b5f30d40bf77a31915d2e16919ce7f8ef6fc0440421b8b2af"
       },
       {
@@ -476,7 +476,7 @@
       },
       {
         "id": "c-G7F9P",
-        "redaction": "f498572a156714ca03b2ae547f2811960dd5b27d4060b9ff1cb2a22e0f1a7a5c",
+        "redaction": "39345f00087398ac49ae7820784d9f722d1fe97dc4321ddfcdbc729852b87205",
         "version": "0ba7d0a57ecf7a7406abcfe7351d5988a8a05939fb1341982875dcdd7f427b1a"
       },
       {
@@ -496,7 +496,7 @@
       },
       {
         "id": "d-PBTCC",
-        "redaction": "02285d472242cdd040d42a71e2ebc6a75aaa7f0befd0a119dadbfc74b1ab57c4",
+        "redaction": "a357c3c5c914d93ea3defa4b8af623b93656e51ecfc2b48251e710b3aa9b997a",
         "version": "84e049096eacdee06d4ff5475910ea56f6e8347bc30520157486572c72b46cf7"
       },
       {
@@ -556,7 +556,7 @@
       }
     ],
     "folders": 1,
-    "hash": "e84c936fdc8f637788219e5fe7448b27830f1be2bbfee2e520c76e1c8b2b6bf0",
+    "hash": "f08e904d224987a99c702d98e942556052f6c9f2166943bb66abd305f891f151",
     "identity": "4cc4131ece40874a3b0a8405f97fc8c59f7820f6fdab86f662a8e4992c882d2b",
     "omitted_entries": 0
   },
