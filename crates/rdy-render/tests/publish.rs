@@ -195,8 +195,18 @@ impl PublishWire for Wire {
 /// The source: doc `a` (which references doc `b`) and doc `b`; profile `site` (org) selects
 /// `a`, so its one reference is excluded and warns. Landed and tagged `v1.0.0`; canon then
 /// moves on.
-#[test]
-fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
+/// What one publish run leaves: the project, the fake wire and the coordinator's result.
+struct Scenario {
+    _home: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    r: Rdy,
+    site: BlockId,
+    landing: Hash,
+    wire: Wire,
+    result: rdy_engine::hub_publish::PublishResult,
+}
+
+fn scenario() -> Scenario {
     let home = tempfile::tempdir().unwrap();
     pio::make_private_dir(home.path()).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -259,7 +269,6 @@ fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
     f.write_all(&encode_credentials(&file).unwrap()).unwrap();
     drop(f);
 
-    let read = r.read();
     let landing = r
         .store()
         .tags()
@@ -269,7 +278,6 @@ fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
         .unwrap()
         .2
         .landing;
-    let scope = Scope::At(landing);
     let mut state = PublishState {
         canon: None,
         repo_id: None,
@@ -312,6 +320,30 @@ fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
         )
         .unwrap();
 
+    Scenario {
+        _home: home,
+        _dir: dir,
+        r,
+        site,
+        landing,
+        wire,
+        result,
+    }
+}
+
+#[test]
+fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
+    let Scenario {
+        r,
+        site,
+        landing,
+        wire,
+        result,
+        ..
+    } = scenario();
+    let read = r.read();
+    let scope = Scope::At(landing);
+    let renderer = PublicationRenderer;
     // the same build, made here from the tag's own inputs
     let inputs = capture_inputs(&read, &scope).unwrap();
     assert_eq!(renderer.capture(&read, &scope).unwrap(), inputs);
@@ -363,4 +395,54 @@ fn hpb14_the_publication_renderer_uploads_the_tagged_site() {
     let steps = wire.steps.lock().unwrap().clone();
     assert_eq!(steps.first(), Some(&"discovery"));
     assert_eq!(steps.last(), Some(&"publish"));
+}
+
+/// Sync client A Task 1c (D-8RGWW): a publication captures and renders with one rdy, as before.
+/// The captured inputs name this rdy, the coordinator uploads the artifact that this renderer
+/// builds, and a re-render from the same inputs labelled by another rdy gives the same bytes.
+#[test]
+fn scc1_publish_output_is_unchanged() {
+    let Scenario {
+        r,
+        site,
+        landing,
+        wire,
+        result,
+        ..
+    } = scenario();
+    let read = r.read();
+    let scope = Scope::At(landing);
+    let renderer = PublicationRenderer;
+    let inputs = renderer.capture(&read, &scope).unwrap();
+    assert_eq!(inputs.rdy, rdy_engine::render_inputs::RDY_VERSION);
+    assert_eq!(result.record.render_inputs, inputs, "the captured inputs");
+    let build = |inputs: &rdy_engine::render_inputs::RenderInputs| {
+        let source = ReadPublicationSource::with_settings(
+            &read,
+            &inputs.pack,
+            &inputs.title,
+            inputs.description.as_deref(),
+        );
+        let m = read.materialized(&scope).unwrap();
+        build_publication(&source, &m, "v1.0.0", false, &site.to_string(), inputs).unwrap()
+    };
+    let want = build(&inputs);
+    assert_eq!(result.record.manifest_hash, want.manifest_hash);
+    let published = wire.published.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].1, want.manifest, "the uploaded manifest");
+    let sent = wire.files.lock().unwrap().clone();
+    let distinct: BTreeMap<Hash, Vec<u8>> = want
+        .files
+        .values()
+        .map(|b| (Hash::of(b), b.clone()))
+        .collect();
+    assert_eq!(sent, distinct, "the uploaded artifact bytes");
+    for label in ["0.0.1", "99.0.0"] {
+        let mut other = inputs.clone();
+        other.rdy = label.into();
+        let again = build(&other);
+        assert_eq!(again.manifest_hash, want.manifest_hash, "{label}");
+        assert_eq!(again.files, want.files, "{label}");
+    }
 }

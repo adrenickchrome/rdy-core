@@ -2,8 +2,8 @@
 //! the source's settings: this rdy's version, the rdy-standard theme, the effective pack, and the
 //! project's title and description. Nothing else of the config enters them.
 use rdy_engine::render_inputs::{
-    DisagreementInput, RenderInputs, THEME, capture, disagreement_sentence, to_bounded_json,
-    validate_inputs,
+    DisagreementInput, RDY_VERSION, RenderInputs, THEME, capture, disagreement_sentence,
+    read_inputs, to_bounded_json, validate_inputs,
 };
 use rdy_engine::{Rdy, RdyError, did_you_mean};
 use rdy_model::BlockId;
@@ -62,7 +62,7 @@ fn mismatch(i: &RenderInputs) {
         &validate_inputs(i).unwrap_err(),
         "E_BAD_INPUT",
         "render inputs do not match this renderer",
-        "use this rdy version and the rdy-standard theme",
+        "use the rdy-standard theme and a non-empty title",
     );
 }
 
@@ -189,10 +189,13 @@ fn hpb1_render_inputs_capture_source_settings_and_refuse_unknown_fields() {
         .to_string();
     assert!(msg.starts_with("unknown field `config_path`"), "{msg}");
 
-    // a different renderer is refused; no fallback is substituted
-    let changes: [fn(&mut RenderInputs); 5] = [
-        |i: &mut RenderInputs| i.rdy = "0.0.1".into(),
-        |i: &mut RenderInputs| i.rdy = String::new(),
+    // another capturing version is read (D-8RGWW); another theme or an empty title is refused
+    for rdy in ["0.0.1", "99.0.0", ""] {
+        let mut other = i.clone();
+        other.rdy = rdy.into();
+        validate_inputs(&other).unwrap();
+    }
+    let changes: [fn(&mut RenderInputs); 3] = [
         |i: &mut RenderInputs| i.theme = "rdy-dark".into(),
         |i: &mut RenderInputs| i.theme = "RDY-STANDARD".into(),
         |i: &mut RenderInputs| i.title = String::new(),
@@ -439,4 +442,195 @@ fn hpb1_render_inputs_refuse_the_min_block_id() {
             "capture the render inputs from the source again",
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sync client A Task 1c (D-8RGWW): inputs from any captured version, read whole or refused
+// ---------------------------------------------------------------------------------------------
+
+/// The captured inputs of a small project, as JSON.
+fn captured_json() -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, r) = project(dir.path(), "p", "name: P\n");
+    serde_json::to_value(capture(&r.read()).unwrap()).unwrap()
+}
+
+fn read_value(v: &serde_json::Value) -> Result<RenderInputs, RdyError> {
+    read_inputs(&serde_json::to_vec(v).unwrap())
+}
+
+/// D-8RGWW's refusal of inputs that rdy `captured` wrote.
+#[track_caller]
+fn unfit(e: &RdyError, captured: &str) {
+    assert_err(
+        e,
+        "E_BAD_INPUT",
+        &format!("render inputs from rdy {captured} do not fit rdy {RDY_VERSION}"),
+        &format!(
+            "capture the render inputs with rdy {RDY_VERSION}, or render with rdy {captured} or later"
+        ),
+    );
+}
+
+#[test]
+fn scc1_render_inputs_older_and_newer_versions_give_this_renderers_bytes() {
+    let base = captured_json();
+    let current = read_value(&base).unwrap();
+    assert_eq!(current.rdy, RDY_VERSION);
+    for label in ["0.1.0", "0.0.1", "99.99.99", "1.0.0-rc.1"] {
+        let mut v = base.clone();
+        v["rdy"] = label.into();
+        let got = read_value(&v).unwrap();
+        assert_eq!(got.rdy, label, "the capturing client is kept as named");
+        // equal inputs but the label: the same everything else
+        let mut same = got.clone();
+        same.rdy = current.rdy.clone();
+        assert_eq!(same, current);
+        assert_eq!(
+            to_bounded_json(&same).unwrap(),
+            to_bounded_json(&current).unwrap()
+        );
+    }
+}
+
+#[test]
+fn scc1_render_inputs_unknown_member_names_both_versions() {
+    let base = captured_json();
+    for (path, label) in [
+        (vec!["token"], "0.9.0"),
+        (vec!["theme_variant"], "99.0.0"),
+        (vec!["pack", "future_field"], "99.1.0"),
+        (vec!["pack", "block_types", "decision", "future"], "99.1.0"),
+    ] {
+        let mut v = base.clone();
+        v["rdy"] = label.into();
+        let mut at = &mut v;
+        for k in &path[..path.len() - 1] {
+            at = &mut at[*k];
+        }
+        at.as_object_mut()
+            .unwrap_or_else(|| panic!("{path:?} is no object"))
+            .insert(path[path.len() - 1].into(), 1.into());
+        unfit(&read_value(&v).unwrap_err(), label);
+    }
+    // a member in a disagreement row
+    let mut v = base.clone();
+    v["rdy"] = "99.0.0".into();
+    v["disagreements"] = serde_json::json!([
+        {"sentence": disagreement_sentence("fork").unwrap(), "blocks": ["B-00001"], "lead": null, "kind": "fork"}
+    ]);
+    unfit(&read_value(&v).unwrap_err(), "99.0.0");
+}
+
+#[test]
+fn scc1_render_inputs_unknown_pack_member_names_both_versions() {
+    let base = captured_json();
+    for (key, label) in [("nmae", "0.7.0"), ("config_path", "99.0.0")] {
+        let mut v = base.clone();
+        v["rdy"] = label.into();
+        v["pack"][key] = "x".into();
+        unfit(&read_value(&v).unwrap_err(), label);
+    }
+    // a `tensions_across` key the pack parser would skip is refused here
+    for key in ["future_kind", "fork"] {
+        let mut v = base.clone();
+        v["rdy"] = "99.2.0".into();
+        v["pack"]["tensions_across"] = serde_json::json!({ key: "warn" });
+        unfit(&read_value(&v).unwrap_err(), "99.2.0");
+    }
+    // a known kind stays readable
+    let mut v = base.clone();
+    v["pack"]["tensions_across"] = serde_json::json!({"value_disagreement": "blocking"});
+    let got = read_value(&v).unwrap();
+    assert_eq!(got.pack.tensions_across.len(), 1);
+}
+
+#[test]
+fn scc1_render_inputs_missing_needed_member_names_both_versions() {
+    let base = captured_json();
+    for (path, label) in [
+        (vec!["title"], "0.8.0"),
+        (vec!["theme"], "99.0.0"),
+        (vec!["pack", "name"], "0.8.0"),
+        (vec!["pack", "version"], "99.3.0"),
+    ] {
+        let mut v = base.clone();
+        v["rdy"] = label.into();
+        let mut at = &mut v;
+        for k in &path[..path.len() - 1] {
+            at = &mut at[*k];
+        }
+        at.as_object_mut()
+            .unwrap()
+            .remove(path[path.len() - 1])
+            .unwrap();
+        unfit(&read_value(&v).unwrap_err(), label);
+    }
+}
+
+#[test]
+fn scc1_render_inputs_theme_and_empty_title_still_refuse() {
+    let base = captured_json();
+    for label in [RDY_VERSION, "0.0.1", "99.0.0"] {
+        let mut theme = base.clone();
+        theme["rdy"] = label.into();
+        theme["theme"] = "rdy-dark".into();
+        let mut title = base.clone();
+        title["rdy"] = label.into();
+        title["title"] = "".into();
+        for v in [theme, title] {
+            assert_err(
+                &read_value(&v).unwrap_err(),
+                "E_BAD_INPUT",
+                "render inputs do not match this renderer",
+                "use the rdy-standard theme and a non-empty title",
+            );
+        }
+    }
+}
+
+#[test]
+fn scc1_render_inputs_bounds_stay_exact() {
+    let base = captured_json();
+    let bytes = |v: &serde_json::Value| serde_json::to_vec(v).unwrap();
+    // too many bytes: refused before any parse
+    let mut big = bytes(&base);
+    big.resize(8_388_609, b' ');
+    assert_err(
+        &read_inputs(&big).unwrap_err(),
+        "E_LIMIT",
+        "render inputs exceed 8388608 bytes",
+        "reduce the render inputs to the stated limit",
+    );
+    // a title, a scalar, a value count and a depth over their bounds, from any captured version
+    let limit = |v: &serde_json::Value, what: &str| {
+        assert_err(
+            &read_value(v).unwrap_err(),
+            "E_LIMIT",
+            &format!("render inputs exceed {what}"),
+            "reduce the render inputs to the stated limit",
+        );
+    };
+    let mut v = base.clone();
+    v["rdy"] = "99.0.0".into();
+    v["title"] = "t".repeat(4097).into();
+    limit(&v, "4096 title bytes");
+    let mut v = base.clone();
+    v["rdy"] = "0.0.1".into();
+    v["pack"]["areas"] =
+        serde_json::json!({"big": {"description": "a".repeat(1_048_577), "paths": []}});
+    limit(&v, "1048576 scalar bytes");
+    let mut v = base.clone();
+    v["pack"]["link_types"] = (0..200_001)
+        .map(|k| format!("l{k}"))
+        .collect::<Vec<_>>()
+        .into();
+    limit(&v, "200000 values");
+    let mut v = base.clone();
+    v["description"] = "d".repeat(65_537).into();
+    limit(&v, "65536 description bytes");
+    // at the limits the inputs read
+    let mut ok = base.clone();
+    ok["title"] = "t".repeat(4096).into();
+    read_value(&ok).unwrap();
 }

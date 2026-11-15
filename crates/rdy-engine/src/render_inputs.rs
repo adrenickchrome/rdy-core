@@ -13,6 +13,12 @@
 //! blocks and the lead block, in captured order. `capture` leaves it empty; the renderer's
 //! scope-aware capture fills it. No stored review prose or caller-authored sentence enters it.
 //!
+//! A render takes inputs that any rdy version captured, when this rdy can read them whole
+//! (D-8RGWW). The `rdy` member names the capturing client; the bytes follow the rdy that renders.
+//! [`read_inputs`] reads the `rdy` member first, then the whole input through one bounded path.
+//! An input with a member this rdy does not know, or without a member it needs, is refused with
+//! [`unreadable`]: a render never drops a member, because that member could change the page.
+//!
 //! These are transient types: no store record holds them.
 use crate::error::{E_BAD_INPUT, E_LIMIT, RdyError};
 use crate::read_state::ReadState;
@@ -93,7 +99,8 @@ pub struct DisagreementInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderInputs {
-    /// The rdy version that renders: this one.
+    /// The rdy version that captured the inputs. The rdy that renders may be another version; the
+    /// bytes follow the rendering rdy.
     pub rdy: String,
     /// The effective pack, in full.
     pub pack: Pack,
@@ -118,13 +125,86 @@ pub fn capture(read: &ReadState) -> Result<RenderInputs, RdyError> {
     Ok(inputs)
 }
 
-/// `E_BAD_INPUT`: inputs for another rdy version or theme, or with no title.
+/// `E_BAD_INPUT`: inputs for another theme, or with no title.
 fn mismatch() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
         "render inputs do not match this renderer",
-        "use this rdy version and the rdy-standard theme",
+        "use the rdy-standard theme and a non-empty title",
     )
+}
+
+/// `E_BAD_INPUT`: inputs that rdy `captured` wrote and this rdy cannot read whole (D-8RGWW): a
+/// member this rdy does not know, in the inputs or the pack, or a member it needs that they lack.
+pub fn unreadable(captured: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("render inputs from rdy {captured} do not fit rdy {RDY_VERSION}"),
+        format!(
+            "capture the render inputs with rdy {RDY_VERSION}, or render with rdy {captured} or later"
+        ),
+    )
+}
+
+/// The message of [`malformed`]. A caller with its own fixed refusal for a malformed request
+/// matches it.
+pub const NOT_READABLE: &str = "render inputs are not readable";
+
+/// `E_BAD_INPUT`: render inputs that are no JSON object of the known shape, so no capturing
+/// version can be named.
+fn malformed() -> RdyError {
+    RdyError::new(E_BAD_INPUT, NOT_READABLE, "capture the render inputs again")
+}
+
+/// The inputs in `json`, read whole. The byte limit is checked before anything is parsed. The
+/// `rdy` member is read first; the whole input then goes through one typed read and
+/// [`validate_inputs`]. An input this rdy cannot read whole is [`unreadable`]; nothing is dropped.
+pub fn read_inputs(json: &[u8]) -> Result<RenderInputs, RdyError> {
+    if json.len() > MAX_INPUT_BYTES {
+        return Err(over("8388608 bytes"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|_| malformed())?;
+    read_inputs_value(&value, |v| RenderInputs::deserialize(v))
+}
+
+/// [`read_inputs`] for a value the caller parsed and bounded. `read` is the caller's typed read of
+/// the whole value (a caller may read structs from objects only); its unknown-member and
+/// missing-member failures are [`unreadable`], any other failure is not readable at all.
+pub fn read_inputs_value(
+    value: &serde_json::Value,
+    read: impl FnOnce(&serde_json::Value) -> Result<RenderInputs, serde_json::Error>,
+) -> Result<RenderInputs, RdyError> {
+    let captured = value
+        .get("rdy")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(malformed)?;
+    // `tensions_across` skips a key it does not know when a pack loads; here it is a member this
+    // rdy cannot read
+    if let Some(across) = value
+        .get("pack")
+        .and_then(|p| p.get("tensions_across"))
+        .and_then(serde_json::Value::as_object)
+        && across.keys().any(|k| {
+            !rdy_schema::CROSS_PROJECT_KINDS
+                .iter()
+                .any(|c| c.name() == k)
+        })
+    {
+        return Err(unreadable(captured));
+    }
+    let inputs = read(value).map_err(|e| {
+        let text = e.to_string();
+        if ["unknown field", "unknown variant", "missing field"]
+            .iter()
+            .any(|p| text.starts_with(p))
+        {
+            unreadable(captured)
+        } else {
+            malformed()
+        }
+    })?;
+    validate_inputs(&inputs)?;
+    Ok(inputs)
 }
 
 /// `E_LIMIT`: inputs over `limit` (`8388608 bytes`, `32 depth`, ...).
@@ -145,11 +225,11 @@ fn bad_disagreements() -> RdyError {
     )
 }
 
-/// Validates `inputs`: this renderer's version and theme, a title of 1 to 4096 bytes, a
+/// Validates `inputs`: the `rdy-standard` theme (any capturing version), a title of 1 to 4096 bytes, a
 /// description of at most 65,536 bytes, well-formed disagreement rows within their bounds, and
 /// the bounds of the compact JSON (bytes, depth, values, scalar bytes).
 pub fn validate_inputs(inputs: &RenderInputs) -> Result<(), RdyError> {
-    if inputs.rdy != RDY_VERSION || inputs.theme != THEME || inputs.title.is_empty() {
+    if inputs.theme != THEME || inputs.title.is_empty() {
         return Err(mismatch());
     }
     if inputs.title.len() > MAX_TITLE_BYTES {

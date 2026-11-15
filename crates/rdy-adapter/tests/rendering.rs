@@ -354,6 +354,29 @@ fn hpb13_one_page_never_uses_the_holder_directory_name() {
     b.close().unwrap();
 }
 
+/// Sync client A Task 1c (D-8RGWW): the one-page render takes inputs that another rdy captured.
+/// Only the `rdy` label differs; the page bytes are the current-labelled case's.
+#[test]
+fn scc1_adapter_one_page_takes_inputs_from_another_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(&dir.path().join("src"));
+    let inputs = src.inputs();
+    let holder = src.holder(&dir.path().join("holder"), dir.path());
+    let snap = holder.snapshot().unwrap();
+    for profile in [src.profile.as_str(), IMPLICIT_ORG] {
+        for path in ["index.html", "intro.html"] {
+            let want = snap.render_page("v1.0.0", profile, &inputs, path).unwrap();
+            for label in ["0.0.1", "99.0.0"] {
+                let mut other = inputs.clone();
+                other.rdy = label.into();
+                let got = snap.render_page("v1.0.0", profile, &other, path).unwrap();
+                assert_eq!(got, want, "{label} {profile} {path}");
+            }
+        }
+    }
+    holder.close().unwrap();
+}
+
 fn entry(path: &str, hash: [u8; 32], media: &str, size: u64, offset: Option<u64>) -> ManifestEntry {
     ManifestEntry {
         path: path.into(),
@@ -618,9 +641,10 @@ fn hpb13_bad_inputs_and_stale_snapshots_return_no_success() {
     let too_long = format!("p{}", "0".repeat(128));
     assert_eq!(fail("v1.0.0", &too_long, &inputs).code, "E_BAD_INPUT");
 
-    // inputs for another renderer, or with no title, are refused
+    // inputs for another theme, or with no title, are refused (another capturing rdy is read:
+    // D-8RGWW)
     let mut wrong = inputs.clone();
-    wrong.rdy = "0.0.1".into();
+    wrong.theme = "rdy-dark".into();
     assert_eq!(fail("v1.0.0", &src.profile, &wrong).code, "E_BAD_INPUT");
     let mut untitled = inputs.clone();
     untitled.title = String::new();
