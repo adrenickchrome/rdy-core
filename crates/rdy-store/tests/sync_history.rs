@@ -309,9 +309,12 @@ fn scc2_format4_roots_and_old_formats_are_exact() {
     check_sync4_fixtures();
 }
 
+/// One fixture file: its extension, its length and its blake3.
+type FixtureFile = (&'static str, usize, &'static str);
+
 /// The format-4 fixtures, frozen once (written by `scc2_write_sync4_fixtures_once` in the
 /// engine's `sync_fetch` tests, rdy 0.53.0): each file's length and blake3.
-const SYNC4_FIXTURES: [(&str, StreamPurpose, [(&str, usize, &str); 2]); 2] = [
+const SYNC4_FIXTURES: [(&str, StreamPurpose, [FixtureFile; 2]); 2] = [
     (
         "sync4-canon-history",
         StreamPurpose::CanonHistory,
