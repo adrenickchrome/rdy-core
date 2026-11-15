@@ -934,12 +934,17 @@ impl StoreReader {
             }
         }
         let indexed: BTreeSet<Hash> = self.view_op_ids(name)?.into_iter().collect();
-        let newer = if indexed.is_subset(&chain) {
-            BTreeSet::new()
+        // ops a writer put on the chain since the walk, and ops a fetch took for the view and
+        // no pull applied yet (D-3RSCW: a fetch moves no view ref)
+        let (newer, fetched) = if indexed.is_subset(&chain) {
+            (BTreeSet::new(), BTreeSet::new())
         } else {
-            self.ops_after(name, &chain)?
+            (self.ops_after(name, &chain)?, self.sync_fetched_ops(name)?)
         };
-        if let Some(h) = indexed.difference(&chain).find(|h| !newer.contains(*h)) {
+        if let Some(h) = indexed
+            .difference(&chain)
+            .find(|h| !newer.contains(*h) && !fetched.contains(*h))
+        {
             return Err(bad(format!(
                 "view {name:?}: op {h} is indexed but not on its chain"
             )));

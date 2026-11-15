@@ -2,7 +2,10 @@
 //! is the current fixture: it starts as a byte copy of the shipped `sd1-v1.json`, which is frozen
 //! from here on, and adds only the holder's storage surfaces: the registered feature `hub_canon`
 //! and its rule, and the digests of its first-use fixtures (the dump pair `v4-f1-e1-hub-canon`
-//! and the native holder `store/hub-canon-1`). Every other member is the predecessor's.
+//! and the native holder `store/hub-canon-1`). scc2 (D-KE83X, D-4XHPH, D-3RSCW) then adds sync
+//! stream format 4, the minimum rule and the project's sync state: the registered feature
+//! `sync_state` and its rule, the sync state refs and bounds, the history purposes and the
+//! digests of the `sync4-*` stream fixtures. Every other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -58,6 +61,74 @@ const SCC1_CHANGES: &[(&str, &str)] = &[
         "the store row reads the native holder fixture",
     ),
 ];
+
+/// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
+/// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
+const SCC2_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /store/feature_rules/sync_state",
+        "the activation rule of the feature, in words",
+    ),
+    (
+        "added /store/features/name=sync_state",
+        "the registry gains the incompatible feature sync_state at its minimum 0.53.0",
+    ),
+    (
+        "added /store/sync_state",
+        "the sync state refs of a remote, their value and name bounds and the write kinds",
+    ),
+    (
+        "added /sync/fixture_digests/sync4-canon-history.bin",
+        "the format-4 canon history fixture, frozen once",
+    ),
+    (
+        "added /sync/fixture_digests/sync4-canon-history.expect.json",
+        "the expect file of the canon history fixture, frozen once",
+    ),
+    (
+        "added /sync/fixture_digests/sync4-view-history.bin",
+        "the format-4 view history fixture, frozen once",
+    ),
+    (
+        "added /sync/fixture_digests/sync4-view-history.expect.json",
+        "the expect file of the view history fixture, frozen once",
+    ),
+    (
+        "added /sync/history",
+        "stream format 4: its read formats, each purpose's root kind and the minimum's classes",
+    ),
+    (
+        "changed /store/registered_names",
+        "the registry's names gain sync_state",
+    ),
+    (
+        "changed /store/sources",
+        "the store row reads rdy_store::sync_state",
+    ),
+    (
+        "changed /sync/purposes",
+        "the purposes gain canon_history (2) and view_history (3)",
+    ),
+];
+
+/// The stream fixture files the sync row's digests gain in scc2 (F13: each leaf).
+const SYNC4_FILES: [&str; 4] = [
+    "sync4-canon-history.bin",
+    "sync4-canon-history.expect.json",
+    "sync4-view-history.bin",
+    "sync4-view-history.expect.json",
+];
+
+/// The changed paths of scc1 and scc2 together, sorted and without repeats: both move
+/// `/store/registered_names` and `/store/sources`.
+fn all_changes() -> Vec<String> {
+    let set: BTreeSet<String> = SCC1_CHANGES
+        .iter()
+        .chain(SCC2_CHANGES)
+        .map(|(p, _)| (*p).to_string())
+        .collect();
+    set.into_iter().collect()
+}
 
 /// The files of the native holder whose digests the store row holds (F13: each leaf).
 const HOLDER_FILES: [&str; 5] = [
@@ -174,7 +245,7 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     leaves(&keyed(&old), &keyed(&new), "", &mut found);
     let removed: Vec<&String> = found.iter().filter(|c| c.starts_with("removed ")).collect();
     assert!(removed.is_empty(), "{removed:?}");
-    // the rows of the predecessor are all there, and only the store and dump rows move
+    // the rows of the predecessor are all there, and only the store, dump and sync rows move
     let (Value::Object(was), Value::Object(now)) = (&old, &new) else {
         panic!("the fixtures are objects");
     };
@@ -183,14 +254,14 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
         now.keys().collect::<Vec<_>>()
     );
     for (row, v) in was {
-        if row != "store" && row != "dump_load" {
+        if row != "store" && row != "dump_load" && row != "sync" {
             assert_eq!(&now[row], v, "row {row} moved");
         }
     }
 }
 
-/// scc1 (F13): the successor adds only the holder's storage. Every changed path is listed with
-/// its reason; the registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
+/// scc1 (F13): the successor adds only the holder's storage and scc2's changes. Every changed
+/// path is listed with its reason; the registered row of `hub_canon` is incompatible at 0.53.0; the store row holds
 /// the digest of each file of the native holder, and the dump row of each file of its dump pair,
 /// each as its length and blake3.
 #[test]
@@ -198,9 +269,8 @@ fn scc1_contract_adds_only_holder_storage() {
     let (old, new) = (read(PREDECESSOR), read(CURRENT));
     let mut found = vec![];
     leaves(&keyed(&old), &keyed(&new), "", &mut found);
-    let mut want: Vec<String> = SCC1_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    let want = all_changes();
     found.sort();
-    want.sort();
     assert_eq!(
         found, want,
         "every changed path of {CURRENT} is listed with its reason, and none else"
@@ -239,5 +309,72 @@ fn scc1_contract_adds_only_holder_storage() {
             "{f} is new"
         );
         assert_eq!(dumps[f], digest(&fixtures.join("dump").join(f)), "{f}");
+    }
+}
+
+/// scc2 (F13): the successor adds only sync stream format 4, the minimum rule and the sync state.
+/// Every scc2 path is a changed path of the fixture; the registered row of `sync_state` is
+/// incompatible at 0.53.0; the purposes gain bytes 2 and 3, each with its root kind; only the
+/// incompatible and read-only-compatible classes raise the minimum; and the sync row holds the
+/// digest of each `sync4-*` file, as its length and blake3.
+#[test]
+fn scc2_contract_adds_only_sync4_and_minimums() {
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    for (p, _) in SCC2_CHANGES {
+        assert!(found.iter().any(|f| f == p), "{p} is a change of {CURRENT}");
+    }
+    found.sort();
+    assert_eq!(found, all_changes(), "no change outside scc1 and scc2");
+    let row = new["store"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "sync_state")
+        .expect("the registered feature");
+    assert_eq!(row["class"], "incompatible");
+    assert_eq!(
+        row["required_rdy"],
+        rdy_store::format::SYNC_STATE_REQUIRED_RDY
+    );
+    assert_eq!(rdy_store::format::SYNC_STATE_REQUIRED_RDY, "0.53.0");
+    assert_eq!(
+        new["sync"]["purposes"],
+        serde_json::json!([
+            [0, "tag_history"],
+            [1, "link_delivery"],
+            [2, "canon_history"],
+            [3, "view_history"]
+        ])
+    );
+    let history = &new["sync"]["history"];
+    assert_eq!(history["format"], 4);
+    assert_eq!(history["read_formats"], serde_json::json!([2, 3, 4]));
+    assert_eq!(
+        history["roots"],
+        serde_json::json!([[0, 2, 9], [1, 3, 9], [2, 4, 4], [3, 4, 13]])
+    );
+    assert_eq!(
+        history["minimum_classes"],
+        serde_json::json!(["read_only_compatible", "incompatible"])
+    );
+    let state = &new["store"]["sync_state"];
+    assert_eq!(state["max_value_bytes"], 8192);
+    assert_eq!(state["max_url_bytes"], 4096);
+    assert_eq!(state["feature"], "sync_state");
+    // each new stream fixture file, with its bytes on disk
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/sync");
+    let digest = |p: &Path| {
+        let b = std::fs::read(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        format!("{} {}", b.len(), rdy_model::Hash::of(&b))
+    };
+    let digests = new["sync"]["fixture_digests"].as_object().unwrap();
+    for f in SYNC4_FILES {
+        assert!(
+            old["sync"]["fixture_digests"].get(f).is_none(),
+            "{f} is new"
+        );
+        assert_eq!(digests[f], digest(&fixtures.join(f)), "{f}");
     }
 }

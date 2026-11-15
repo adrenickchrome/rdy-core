@@ -75,6 +75,9 @@ pub const SNAPSHOT_DELTA_REQUIRED_RDY: &str = "0.52.0";
 /// The first rdy that knows [`FEATURE_HUB_CANON`] (D-DZDB7): the release that first ships the
 /// holder's canon, views, held chains and replaced marks. It never moves.
 pub const HUB_CANON_REQUIRED_RDY: &str = "0.53.0";
+/// The first rdy that knows [`FEATURE_SYNC_STATE`] (D-3RSCW): the release that first ships a
+/// project's sync state. It never moves.
+pub const SYNC_STATE_REQUIRED_RDY: &str = "0.53.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -106,10 +109,14 @@ pub const FEATURE_SNAPSHOT_DELTA: &str = "snapshot_delta";
 /// a `held/` or a `replaced/` ref activates it, in that batch (`crate::hub_canon`). No object
 /// turns it on, and no upgrade step writes it.
 pub const FEATURE_HUB_CANON: &str = "hub_canon";
+/// A project's sync state (D-3RSCW): the first batch that writes a `meta/sync/` ref activates
+/// it, in that batch (`crate::sync_state`). No object turns it on, and no upgrade step writes it.
+pub const FEATURE_SYNC_STATE: &str = "sync_state";
 
-/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7),
-/// sorted by name. Each is `incompatible` and needs its own minimum ([`required_rdy`]).
-pub const REGISTERED_FEATURES: [&str; 11] = [
+/// The features this rdy registers (O11, D-1HDVA; repo links; D-MKSFF; D-RP6SM; D-DZDB7;
+/// D-3RSCW), sorted by name. Each is `incompatible` and needs its own minimum
+/// ([`required_rdy`]).
+pub const REGISTERED_FEATURES: [&str; 12] = [
     FEATURE_ASSESSMENT,
     FEATURE_CHECK_REQUEST,
     FEATURE_CONTENT_HASH_V2,
@@ -120,19 +127,22 @@ pub const REGISTERED_FEATURES: [&str; 11] = [
     FEATURE_OBJECT_ENCODING,
     FEATURE_PLAN_TENSION,
     FEATURE_SNAPSHOT_DELTA,
+    FEATURE_SYNC_STATE,
     FEATURE_VIEW_REPLAY,
 ];
 
 /// The first rdy that knows registered feature `name`: [`FOREIGN_COPY_REQUIRED_RDY`] for
 /// `foreign_copy`, [`FIGURE_DARK_REQUIRED_RDY`] for `figure_dark`,
 /// [`SNAPSHOT_DELTA_REQUIRED_RDY`] for `snapshot_delta`, [`HUB_CANON_REQUIRED_RDY`] for
-/// `hub_canon`, [`FEATURE_REQUIRED_RDY`] for the seven of O11.
+/// `hub_canon`, [`SYNC_STATE_REQUIRED_RDY`] for `sync_state`, [`FEATURE_REQUIRED_RDY`] for the
+/// seven of O11.
 pub fn required_rdy(name: &str) -> &'static str {
     match name {
         FEATURE_FOREIGN_COPY => FOREIGN_COPY_REQUIRED_RDY,
         FEATURE_FIGURE_DARK => FIGURE_DARK_REQUIRED_RDY,
         FEATURE_SNAPSHOT_DELTA => SNAPSHOT_DELTA_REQUIRED_RDY,
         FEATURE_HUB_CANON => HUB_CANON_REQUIRED_RDY,
+        FEATURE_SYNC_STATE => SYNC_STATE_REQUIRED_RDY,
         _ => FEATURE_REQUIRED_RDY,
     }
 }
@@ -340,6 +350,26 @@ impl StoreFeatures {
             manifest_version: self.manifest_version,
             ..StoreFeatures::of(features)
         }
+    }
+
+    /// The manifest's minimum rdy (D-4XHPH): the highest `required_rdy` of its `incompatible`
+    /// and `read_only_compatible` features, compared as three numbers. A `compatible` feature
+    /// never raises it, and a manifest with no such feature has none. It reads each entry's own
+    /// version, so a feature this rdy does not know counts too, and it never asks whether this
+    /// rdy can open the manifest ([`check_features`] does). An entry whose version is not three
+    /// numbers is no valid manifest's: it is skipped.
+    pub fn min_rdy(&self) -> Option<RdyVersion> {
+        self.features
+            .iter()
+            .filter(|f| f.class != FeatureClass::Compatible)
+            .filter_map(|f| RdyVersion::parse(&f.required_rdy))
+            .max()
+    }
+
+    /// The minimum rdy that this manifest would have once `add` is merged into it
+    /// ([`StoreFeatures::merged`], [`StoreFeatures::min_rdy`]): a take's prospective minimum.
+    pub fn merged_min_rdy(&self, add: &StoreFeatures) -> Option<RdyVersion> {
+        self.merged(&add.features).min_rdy()
     }
 
     /// Whether every feature of `self` is in `other`, with the same class and version.
@@ -822,6 +852,34 @@ mod json {
     }
 }
 
+/// An rdy version of three numbers, as a manifest entry's `required_rdy` writes it. It orders
+/// as three numbers, so `0.10.0` is after `0.9.0`. Its JSON and display form is the dotted text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RdyVersion(pub u32, pub u32, pub u32);
+
+impl RdyVersion {
+    /// The version `v` names ([`valid_required_rdy`]); None for any other text.
+    pub fn parse(v: &str) -> Option<RdyVersion> {
+        if !valid_required_rdy(v) {
+            return None;
+        }
+        let mut parts = v.split('.').map(|p| p.parse::<u32>().ok());
+        Some(RdyVersion(parts.next()??, parts.next()??, parts.next()??))
+    }
+}
+
+impl std::fmt::Display for RdyVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+impl Serialize for RdyVersion {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
 /// What a manifest lets this rdy do with its store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreAccess {
@@ -887,7 +945,9 @@ pub enum ParseFailure {
 
 /// The registered class of feature `name`, if this rdy registers it. Allocates nothing.
 fn known_class(name: &str) -> Option<FeatureClass> {
-    if REGISTERED_FEATURES.contains(&name) {
+    if REGISTERED_FEATURES.contains(&name)
+        && !FORGOTTEN.with(|f| f.borrow().iter().any(|n| n == name))
+    {
         return Some(FeatureClass::Incompatible);
     }
     TEST_FEATURES.with(|t| {
@@ -1119,6 +1179,31 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
 thread_local! {
     /// The injected test feature of this thread, with the logical kind whose objects use it.
     static TEST_FEATURES: RefCell<Vec<(StoreFeature, u8)>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    static FORGOTTEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// While held, this thread reads manifests as an older rdy that does not know some registered
+/// features ([`older_reader_for_tests`]).
+#[doc(hidden)]
+#[must_use]
+pub struct OlderReader(());
+
+impl Drop for OlderReader {
+    fn drop(&mut self) {
+        FORGOTTEN.with(|f| f.borrow_mut().clear());
+    }
+}
+
+/// Test hook: on this thread, until the guard drops, the open and every manifest check treat
+/// the registered features `names` as unknown, as an older rdy does. No environment, CLI or MCP
+/// path reaches it.
+#[doc(hidden)]
+pub fn older_reader_for_tests(names: &[&str]) -> OlderReader {
+    FORGOTTEN.with(|f| *f.borrow_mut() = names.iter().map(|n| n.to_string()).collect());
+    OlderReader(())
 }
 
 /// While held, this thread registers [`TEST_FEATURE`] (required version [`TEST_FEATURE_RDY`]).

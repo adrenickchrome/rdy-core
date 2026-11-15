@@ -496,6 +496,9 @@ pub(crate) enum RefWrite {
     /// A checked move (`Store::move_canon`): a holder's `hub_canon` refs beside the move's
     /// objects.
     Move,
+    /// A project's sync state batch (`Store::write_sync`, a clone's or fork's origin batch):
+    /// `meta/sync/` refs with their rules (`crate::sync_state`).
+    Sync,
 }
 
 /// Refuses a `meta/upgrade` write in `items` unless `how` is the upgrade transaction's own
@@ -583,6 +586,20 @@ pub(crate) fn check_ref_writes(
         for u in decoded() {
             if u.name == REF_STORE_MODE {
                 return Err(cannot_change());
+            }
+            if crate::sync_state::is_sync_ref(&u.name) {
+                // only the store's sync state batch and a fetch write sync state (D-3RSCW)
+                if !matches!(how, RefWrite::Sync | RefWrite::Take) {
+                    return Err(StoreError::Decode(format!(
+                        "ref {:?} is project metadata: only the store writes meta/ refs",
+                        u.name
+                    )));
+                }
+                let value =
+                    crate::sync_state::check_ref(&u.name, &u.value).map_err(StoreError::Refused)?;
+                let targets = value.iter().flat_map(|v| v.targets()).collect();
+                targets_stored(&u.name, targets)?;
+                continue;
             }
             targets_stored(&u.name, ref_targets(mode, &u.name, &u.value)?)?;
         }

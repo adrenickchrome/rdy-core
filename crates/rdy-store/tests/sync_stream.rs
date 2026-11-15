@@ -820,9 +820,9 @@ fn ha5_changed_hash_and_trailer_are_refused() {
         refusal(check(&magic).unwrap_err()),
         bad(0, 0, "invalid header")
     );
-    // a stream format this rdy does not read (it reads 2 and 3)
+    // a stream format this rdy does not read (it reads 2, 3 and, since Sync client A Task 2, 4)
     let mut format = bytes.clone();
-    format[8] = 4;
+    format[8] = 5;
     assert_eq!(
         refusal(check(&format).unwrap_err()),
         bad(0, 8, "invalid header")

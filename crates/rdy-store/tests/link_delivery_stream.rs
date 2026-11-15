@@ -211,7 +211,9 @@ fn rpl6_delivery_has_one_header_manifest_and_trailer() {
     );
     assert_eq!(StreamPurpose::LinkDelivery.byte(), 1);
     assert_eq!(StreamPurpose::of(1), Some(StreamPurpose::LinkDelivery));
-    assert_eq!(StreamPurpose::of(2), None);
+    // bytes 2 and 3 are the format-4 histories since Sync client A Task 2 (D-KE83X)
+    assert_eq!(StreamPurpose::of(2), Some(StreamPurpose::CanonHistory));
+    assert_eq!(StreamPurpose::of(4), None);
     assert_eq!(rec::DELIVERY, 0xF4);
     let records = vec![present(&a), present(&b)];
     let bytes = write(&h, &d, &records);
@@ -746,9 +748,10 @@ fn rpl6_old_sync_fixtures_still_read() {
         ("E_STORE_FORMAT", "sync batch format 1 is not supported")
     );
     let root = Hash([9; 32]);
-    let four = craft(4, &header_payload(0, root, &[]), &[]);
+    // format 4 is read since Sync client A Task 2 (D-KE83X), so format 5 is the unknown one
+    let five = craft(5, &header_payload(0, root, &[]), &[]);
     assert_eq!(
-        refusal(check_batch(&four[..]).unwrap_err()),
+        refusal(check_batch(&five[..]).unwrap_err()),
         bad(0, 8, "invalid header")
     );
     // format 2 knows only tag_history, as the released reader does

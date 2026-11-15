@@ -93,6 +93,12 @@ pub struct TakeOutcome {
     pub canon: Option<Hash>,
     pub end: StorePosition,
     pub unchanged: bool,
+    /// The holder's minimum rdy before and after the take (D-4XHPH). Not in the JSON output:
+    /// the published shape stays as it was.
+    #[serde(skip)]
+    pub min_rdy_before: Option<rdy_store::format::RdyVersion>,
+    #[serde(skip)]
+    pub min_rdy_after: Option<rdy_store::format::RdyVersion>,
 }
 
 fn hex<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
@@ -242,6 +248,8 @@ fn outcome(t: BatchTaken) -> TakeOutcome {
             offset: t.end.offset,
         },
         unchanged: t.frames == 0,
+        min_rdy_before: t.min_rdy_before,
+        min_rdy_after: t.min_rdy_after,
     }
 }
 

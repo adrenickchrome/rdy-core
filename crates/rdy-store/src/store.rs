@@ -3131,6 +3131,16 @@ impl Store {
         self.write_checked(items, how)
     }
 
+    /// `write` with the ref rules `how` names, for the store's own writers in other modules
+    /// (`crate::sync_state`).
+    pub(crate) fn write_refs_as(
+        &mut self,
+        items: Vec<(u8, Vec<u8>)>,
+        how: RefWrite,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.write_refs(items, how)
+    }
+
     /// The take's write (Task 11 is its caller): `write`, where a holder's
     /// `answer/tag-object:<hash>` names a TAG object in `items` or in the store (O11).
     #[cfg_attr(not(test), allow(dead_code))]
@@ -3277,7 +3287,9 @@ impl Store {
     /// rewritten.
     ///
     /// A move's batch (`RefWrite::Move`) that writes a holder's first `hub_canon` ref activates
-    /// `hub_canon` the same way (D-DZDB7); no other write does.
+    /// `hub_canon` the same way (D-DZDB7). A project's sync state batch or fetch
+    /// (`RefWrite::Sync`, `RefWrite::Take`) that writes its first `meta/sync/` ref activates
+    /// `sync_state` (D-3RSCW). No other write activates a feature by a ref.
     fn first_use(&self, mut items: Frames, how: RefWrite) -> Result<FirstUse, StoreError> {
         let current = self.held_features.as_ref().unwrap_or(&self.features);
         let mut needed: Vec<format::StoreFeature> = vec![];
@@ -3292,6 +3304,19 @@ impl Store {
                     .is_some_and(|u| crate::hub_canon::is_hub_ref(&u.name))
             {
                 let f = format::registered(format::FEATURE_HUB_CANON);
+                if !needed.contains(&f) {
+                    needed.push(f);
+                }
+            }
+            // a project's first `meta/sync/` ref activates `sync_state` in its batch (D-3RSCW)
+            if kind == kinds::REF_UPDATE
+                && matches!(how, RefWrite::Sync | RefWrite::Take)
+                && self.creation.mode == StoreMode::Project
+                && !current.has(format::FEATURE_SYNC_STATE)
+                && crate::holder::decode_ref(payload)
+                    .is_some_and(|u| crate::sync_state::is_sync_ref(&u.name))
+            {
+                let f = format::registered(format::FEATURE_SYNC_STATE);
                 if !needed.contains(&f) {
                     needed.push(f);
                 }
@@ -5405,29 +5430,114 @@ impl Store {
             check,
         )?;
         drop(reader);
-        self.seal_take(files, plan)
+        let (end, frames) = self.seal_take(files, &plan)?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::BatchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            end,
+            tag_hash: plan.tag_hash,
+            tag: plan.tag.expect("an upload's root tag"),
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+        })
     }
 
-    /// Writes a prepared take (see [`Store::take_batches`]).
+    /// The fetch of a canon or view history into a project (D-3RSCW): the take's checks over
+    /// the project (`crate::take_batch::prepare_fetch`), then one sealed batch of its own, held
+    /// batches on or off, with the new records, the free tag refs and the remote's sync state,
+    /// which activates `sync_state` when it is the first. It moves no canon or view ref. A
+    /// holder is `TakeError::ModeMismatch`; an open held batch is refused; a retry of a fetch
+    /// already taken writes nothing.
+    pub fn take_fetched<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::FetchTarget,
+        check: impl FnOnce(
+            &mut dyn crate::sync_proof::ObjectSource,
+            &crate::take_batch::FetchFacts,
+        ) -> Result<(), E>,
+    ) -> Result<crate::take_batch::FetchTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if files.is_empty() {
+            return Err(TakeError::Stream(
+                crate::stream_error::StreamError::bad_record(
+                    0,
+                    0,
+                    crate::stream_error::Reason::NoBatchFiles,
+                ),
+            ));
+        }
+        if files.len() > crate::sync_stream::MAX_BATCH_FILES {
+            return Err(TakeError::Stream(crate::stream_error::StreamError::limit(
+                None,
+                0,
+                crate::sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        self.ensure_writable().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a fetch")));
+        }
+        if self.creation.mode != StoreMode::Project {
+            return Err(TakeError::ModeMismatch);
+        }
+        if !crate::sync_state::is_remote(&target.remote) {
+            return Err(TakeError::Store(StoreError::Refused(format!(
+                "{:?} is not a remote name",
+                target.remote
+            ))));
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("the project has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare_fetch(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+            check,
+        )?;
+        drop(reader);
+        // the fetch is one sealed batch of its own (as a move): no held batch is open here
+        let held = std::mem::replace(&mut self.held, false);
+        let sealed = self.seal_take(files, &plan);
+        self.held = held;
+        let (end, frames) = sealed?;
+        Ok(crate::take_batch::FetchTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            end,
+            tags_taken: plan.tags_taken,
+            tags_kept: plan.tags_kept,
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+        })
+    }
+
+    /// Writes a prepared take (see [`Store::take_batches`], [`Store::take_fetched`]): returns
+    /// the log's end after it and the data frames it wrote (none for a complete retry).
     fn seal_take<E>(
         &mut self,
         files: &[File],
-        plan: crate::take_batch::Plan,
-    ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
-        use crate::take_batch::{BatchTaken, TakeError};
-        let taken = |end, frames| BatchTaken {
-            new_objects: plan.writes.len() as u64,
-            frames,
-            redacted_objects: plan.redacted_objects,
-            end,
-            tag_hash: plan.tag_hash,
-            tag: plan.tag.clone(),
-        };
+        plan: &crate::take_batch::Plan,
+    ) -> Result<(Location, u64), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::TakeError;
         if plan.writes.is_empty() && plan.refs.is_empty() {
-            return Ok(BatchTaken {
-                redacted_objects: 0,
-                ..taken(self.log.end(), 0)
-            });
+            return Ok((self.log.end(), 0));
         }
         let refs = self.ref_items(plan.refs.clone());
         // an answer ref may name a TAG object the plan writes in this batch (the root)
@@ -5455,7 +5565,7 @@ impl Store {
             None => false,
         };
         let before = self.log.end();
-        let appended = self.append_take(files, &plan, &refs);
+        let appended = self.append_take(files, plan, &refs);
         let (frames, entries) = match appended {
             Ok(a) => a,
             Err(e) => {
@@ -5508,7 +5618,7 @@ impl Store {
             }
             self.writes += 1;
             self.acknowledge(frames);
-            return Ok(taken(self.log.end(), n));
+            return Ok((self.log.end(), n));
         };
         // authorized: the batch is durable, and no error below rolls it back
         self.log.set_authorization(Arc::new(auth));
@@ -5531,7 +5641,7 @@ impl Store {
         }
         self.writes += 1;
         self.acknowledge(frames);
-        Ok(taken(self.log.end(), n))
+        Ok((self.log.end(), n))
     }
 
     /// Appends a prepared take's frames and marker, with no sync: each new record read again

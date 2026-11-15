@@ -73,8 +73,9 @@ fn delivery_record_fact(r: &StreamRecord) -> Value {
 
 #[test]
 fn rpl33_new_reader_takes_every_released_sync_format() {
-    // the formats this rdy reads: Release 1's format 2 and the link delivery's format 3
-    assert_eq!(READ_FORMATS, [2, 3]);
+    // the formats this rdy reads: Release 1's format 2, the link delivery's format 3 and the
+    // canon and view histories' format 4 (Sync client A Task 2, D-KE83X)
+    assert_eq!(READ_FORMATS, [2, 3, 4]);
     assert_eq!(
         STREAM_FORMAT, 2,
         "a tag history stays in Release 1's format"

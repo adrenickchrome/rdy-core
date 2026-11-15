@@ -610,9 +610,9 @@ fn rpl3_feature_first_use_is_atomic() {
         format::required_rdy(FEATURE_FOREIGN_COPY),
         FOREIGN_COPY_REQUIRED_RDY
     );
-    assert_eq!(registered.len(), 11);
-    // figure_dark (D-MKSFF), snapshot_delta (D-RP6SM) and hub_canon (D-DZDB7) have their own
-    // minima too
+    assert_eq!(registered.len(), 12);
+    // figure_dark (D-MKSFF), snapshot_delta (D-RP6SM), hub_canon (D-DZDB7) and sync_state
+    // (D-3RSCW) have their own minima too
     assert_eq!(
         format::required_rdy(format::FEATURE_SNAPSHOT_DELTA),
         format::SNAPSHOT_DELTA_REQUIRED_RDY
@@ -623,6 +623,7 @@ fn rpl3_feature_first_use_is_atomic() {
             && f.name != format::FEATURE_FIGURE_DARK
             && f.name != format::FEATURE_SNAPSHOT_DELTA
             && f.name != format::FEATURE_HUB_CANON
+            && f.name != format::FEATURE_SYNC_STATE
     }) {
         assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);

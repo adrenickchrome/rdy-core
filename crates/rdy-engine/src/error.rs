@@ -557,6 +557,11 @@ impl From<StoreError> for RdyError {
                 ),
                 "drop --no-daemon, or stop the daemon with rdy serve --stop",
             ),
+            StoreError::SyncBusy(remote) => RdyError::new(
+                E_LOCKED,
+                rdy_store::sync_state::sync_locked_message(&remote),
+                rdy_store::sync_state::SYNC_LOCKED_FIX,
+            ),
             StoreError::HeldByReader(p) => RdyError::new(
                 E_HELD_BY_READER,
                 format!(

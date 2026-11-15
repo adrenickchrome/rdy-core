@@ -693,6 +693,8 @@ fn ha11_repeated_take_appends_nothing() {
     let end = h.log_end();
     let bytes = segment_bytes(&path);
     let again = take(&mut h, &open(&paths), &src.target()).unwrap();
+    // a take that adds nothing leaves the minimum where it was (Sync client A Task 2)
+    let min = h.features().min_rdy();
     assert_eq!(
         again,
         BatchTaken {
@@ -702,6 +704,8 @@ fn ha11_repeated_take_appends_nothing() {
             end,
             tag_hash: src.tag,
             tag: again.tag.clone(),
+            min_rdy_before: min,
+            min_rdy_after: min,
         }
     );
     assert_eq!(again.tag.name, "v1");

@@ -952,6 +952,7 @@ fn store_row() -> Value {
         "sources": [
             "rdy_store::format", "rdy_store::codec", "rdy_store::kinds", "rdy_model enums",
             "fixtures/store/feature-1", "fixtures/store/hub-canon-1", "fixtures/dump/*.expect.json",
+            "rdy_store::sync_state",
         ],
         "manifest": {
             "version": MANIFEST_VERSION,
@@ -991,6 +992,7 @@ fn store_row() -> Value {
             "object_encoding": "any frame of encoding 1 or more",
             "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
             "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
+            "sync_state": "a project's first meta/sync/ ref: a batch that writes one",
             "view_replay": "a CHANGE whose links.replayed_from is set",
         },
         "encoding_versions": {
@@ -1015,6 +1017,30 @@ fn store_row() -> Value {
         "native_fixture": digests(&fixtures.join("store/feature-1"), |_| true),
         // the first-use native holder of hub_canon (Sync client A Task 1b)
         "holder_fixture": digests(&fixtures.join("store/hub-canon-1"), |_| true),
+        // a project's sync state refs and their bounds (D-3RSCW, Sync client A Task 2)
+        "sync_state": sync_state_facts(),
+    })
+}
+
+/// The sync state refs of one remote `<remote>` and view `<name>` (D-3RSCW), their value and
+/// name bounds and the write kinds, each from `rdy_store::sync_state`.
+fn sync_state_facts() -> Value {
+    use rdy_store::sync_state as st;
+    json!({
+        "refs": [
+            st::canon_ref("<remote>"),
+            st::view_ref("<remote>", "<name>"),
+            st::upload_ref("<remote>"),
+            st::pending_ref("<remote>"),
+        ],
+        "prefix": st::SYNC_REF,
+        "max_value_bytes": st::MAX_VALUE_BYTES,
+        "max_url_bytes": st::MAX_URL_BYTES,
+        "max_push_bytes": st::MAX_PUSH_BYTES,
+        "max_remote_bytes": st::MAX_REMOTE_BYTES,
+        "max_view_chars": st::MAX_VIEW_CHARS,
+        "write_kinds": [[st::KIND_CANON, "canon"], [st::KIND_VIEW, "view"]],
+        "feature": rdy_store::format::FEATURE_SYNC_STATE,
     })
 }
 
@@ -1160,6 +1186,9 @@ fn sync_row() -> Value {
             "purpose: u8", "tag: [u8; 32]", "prerequisites: u32", "keys: kind u8 + hash [u8; 32]",
         ],
         "purposes": purposes(),
+        // the canon and view histories of stream format 4 and the upload minimum (D-KE83X,
+        // D-4XHPH; Sync client A Task 2)
+        "history": history_facts(),
         "logical_keys": "kind: u8 || hash: [u8; 32]",
         "prerequisite_order": "strictly ascending logical keys",
         "trailer_fields": ["records: u64", "bytes: u64", "digest: [u8; 32]"],
@@ -5554,6 +5583,40 @@ fn purposes() -> Value {
         .collect();
     assert!(!rows.is_empty(), "the reader accepts a purpose");
     json!(rows)
+}
+
+/// Stream format 4's facts: the format, the formats this rdy reads, each purpose's first format
+/// and root kind, and the feature classes that raise a manifest's minimum rdy (probed through
+/// `StoreFeatures::min_rdy`).
+fn history_facts() -> Value {
+    let roots: Vec<Value> = (0..=u8::MAX)
+        .filter_map(sync_stream::StreamPurpose::of)
+        .map(|p| json!([p.byte(), p.first_format(), p.root_kind()]))
+        .collect();
+    let counts = |class: FeatureClass| {
+        rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+            name: "probe".into(),
+            class,
+            required_rdy: rdy_store::format::SYNC_STATE_REQUIRED_RDY.into(),
+        }])
+        .min_rdy()
+        .is_some()
+    };
+    let minimum_classes: Vec<&str> = [
+        FeatureClass::Compatible,
+        FeatureClass::ReadOnlyCompatible,
+        FeatureClass::Incompatible,
+    ]
+    .into_iter()
+    .filter(|c| counts(*c))
+    .map(|c| c.as_str())
+    .collect();
+    json!({
+        "format": sync_stream::HISTORY_FORMAT,
+        "read_formats": sync_stream::READ_FORMATS,
+        "roots": roots,
+        "minimum_classes": minimum_classes,
+    })
 }
 
 // ---- derived identities ----

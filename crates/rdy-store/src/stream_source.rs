@@ -217,6 +217,8 @@ struct Attachments {
     verdicts: HashMap<Hash, Vec<ObjectKey>>,
     /// Snapshot deltas by the landing they record (D-7K4Z0).
     deltas: HashMap<Hash, Vec<ObjectKey>>,
+    /// Tags by the landing they name: a canon history's attachments (D-KE83X).
+    tags: HashMap<Hash, Vec<ObjectKey>>,
 }
 
 /// Collects the incoming records' attachments: every answer, signature, request and apply they
@@ -226,24 +228,26 @@ struct Attachments {
 fn attachments(
     source: &mut dyn ObjectSource,
     root_key: ObjectKey,
-    root: &Tag,
+    root: Option<&Tag>,
     input_keys: &[ObjectKey],
 ) -> Result<Attachments, StreamError> {
     let mut a = Attachments::default();
+    let canon = root_key.kind == kinds::LANDING;
     let keys = input_keys.iter().filter(|k| {
-        matches!(
-            k.kind,
-            kinds::ANSWER
-                | kinds::SIGNATURE
-                | kinds::REDACTION
-                | kinds::REDACTION_APPLY
-                | kinds::PLAN
-                | kinds::DISPUTE
-                | kinds::DISPUTE_RESOLUTION
-                | kinds::CHECK_REQUEST
-                | kinds::REVIEW
-                | kinds::SNAPSHOT_DELTA
-        )
+        (canon && k.kind == kinds::TAG)
+            || matches!(
+                k.kind,
+                kinds::ANSWER
+                    | kinds::SIGNATURE
+                    | kinds::REDACTION
+                    | kinds::REDACTION_APPLY
+                    | kinds::PLAN
+                    | kinds::DISPUTE
+                    | kinds::DISPUTE_RESOLUTION
+                    | kinds::CHECK_REQUEST
+                    | kinds::REVIEW
+                    | kinds::SNAPSHOT_DELTA
+            )
     });
     for k in keys.copied() {
         match k.kind {
@@ -254,7 +258,9 @@ fn attachments(
                 for t in &answer.targets {
                     a.answers.entry(*t).or_default().push(k);
                 }
-                if crate::holder::is_relay_answer_of(&answer, &root_key.hash, &root.name) {
+                if let Some(root) = root
+                    && crate::holder::is_relay_answer_of(&answer, &root_key.hash, &root.name)
+                {
                     a.relay.push(k);
                 }
             }
@@ -302,6 +308,11 @@ fn attachments(
             kinds::SNAPSHOT_DELTA => {
                 if let Some(d) = typed::<rdy_model::SnapshotDelta>(source, k)? {
                     a.deltas.entry(d.landing).or_default().push(k);
+                }
+            }
+            kinds::TAG => {
+                if let Some(t) = typed::<Tag>(source, k)? {
+                    a.tags.entry(t.landing).or_default().push(k);
                 }
             }
             kinds::REVIEW => {
@@ -405,10 +416,15 @@ pub(crate) fn check_snapshot_deltas(
 /// batch and one upload hold) count only what the walk visits, so held history the walk does
 /// not need is never charged to them; a walk that must go through the holder is charged
 /// everything it visits, as a whole walk is.
+///
+/// A canon or view history (D-KE83X) walks the same way from its root LANDING or VIEW_OP, with no
+/// relay answer (`root` is None). A canon history also attaches each incoming TAG that names a
+/// reached landing, and the signatures of reached tags. A key outside its closure is `object is
+/// outside the sync closure`.
 pub(crate) fn check_closure(
     rec: &mut dyn Records,
     root_key: ObjectKey,
-    root: &Tag,
+    root: Option<&Tag>,
     input_keys: &[ObjectKey],
 ) -> Result<(), StreamError> {
     walk_closure(rec, root_key, root, input_keys, MAX_RECORDS, MAX_EDGES)
@@ -418,7 +434,7 @@ pub(crate) fn check_closure(
 fn walk_closure(
     rec: &mut dyn Records,
     root_key: ObjectKey,
-    root: &Tag,
+    root: Option<&Tag>,
     input_keys: &[ObjectKey],
     max_records: u64,
     max_edges: u64,
@@ -461,8 +477,12 @@ fn walk_closure(
         if matches!(k.kind, kinds::LANDING | kinds::TAG) {
             links.extend(att.answers.get(&k.hash).into_iter().flatten());
         }
-        if k.kind == kinds::LANDING || k == root_key {
+        let canon = root_key.kind == kinds::LANDING;
+        if k.kind == kinds::LANDING || k == root_key || (canon && k.kind == kinds::TAG) {
             links.extend(att.signatures.get(&k.hash).into_iter().flatten());
+        }
+        if canon && k.kind == kinds::LANDING {
+            links.extend(att.tags.get(&k.hash).into_iter().flatten());
         }
         if k.kind == kinds::LANDING {
             links.extend(att.seals.get(&k.hash).into_iter().flatten());
@@ -494,8 +514,13 @@ fn walk_closure(
             }
         }
     }
+    let outside = if root_key.kind == kinds::TAG {
+        Reason::OutsideTagClosure
+    } else {
+        Reason::OutsideSyncClosure
+    };
     match input_keys.iter().find(|k| !walk.reached.contains(k)) {
-        Some(k) => Err(bad(Reason::OutsideTagClosure, *k)),
+        Some(k) => Err(bad(outside, *k)),
         None => Ok(()),
     }
 }
@@ -1048,7 +1073,7 @@ fn complete(
     // the root, and the closure
     let root_key = header.root();
     let root = root_tag(rec, root_key)?;
-    check_closure(rec, root_key, &root, &keys)?;
+    check_closure(rec, root_key, Some(&root), &keys)?;
     check_snapshot_deltas(rec, &header.features, &keys)?;
     // the typed context of the plans and plan answers
     check_typed_context(rec, None, &keys)?;
@@ -1737,7 +1762,7 @@ mod tcw_tests {
         records: u64,
         edges: u64,
     ) -> Result<(), StreamError> {
-        walk_closure(f, root, &tag(), input, records, edges)
+        walk_closure(f, root, Some(&tag()), input, records, edges)
     }
 
     #[test]

@@ -63,6 +63,25 @@
 //! store's mode. Other tags export as before; once an apply covers every such span, the tag
 //! exports with that apply as its placeholders' proof.
 //!
+//! # Canon and view histories (sync stream format 4, D-KE83X)
+//!
+//! [`history_closure_before`] walks the same way from another root. A canon history starts at a
+//! LANDING, and its walk also attaches each TAG that names a closure landing, with that tag's
+//! answers and signatures (one pass over the stored tags, as for the answers). A view history
+//! starts at a VIEW_OP: the op chain and what the ops name (changes, a `Create` or `Fork` base,
+//! a `Rebase` landing, a `Fork`'s source op) are its forward links. Replay sources
+//! (`links.replayed_from`, `rebased_from`) are links, so they travel too.
+//!
+//! An export leaves out a record only when the receiver holds it: a key of `known`, or a record
+//! in the link closure of the `base` the caller names (the last hub tip or view head). The base's
+//! link closure follows forward links only, so an attachment of a record below the base (a later
+//! signature, answer or removal proof) still travels unless a known key names it. Each emitted
+//! record keeps its original raw encoding.
+//!
+//! The header of a format-4 batch lists only the features that the emitted records need
+//! (`format::required_features`), so a push raises the receiver's minimum rdy only when the
+//! pushed records need it.
+//!
 //! # The order
 //!
 //! Depth-first postorder over the batch's records, with each record's needed keys in `ObjectKey`
@@ -82,8 +101,8 @@ use crate::stream_error::{
 use crate::sync_proof::ObjectSource;
 use crate::sync_stream::{
     HEADER_FIXED, KEY_LEN, MAGIC, MAX_EDGES, MAX_HISTORY_DEPTH, MAX_PREREQUISITES, MAX_RECORDS,
-    MAX_STREAM_BYTES, StreamHeader, StreamRecord, StreamTotals, StreamWriter, TRAILER_LEN,
-    depth_of,
+    MAX_STREAM_BYTES, StreamHeader, StreamPurpose, StreamRecord, StreamTotals, StreamWriter,
+    TRAILER_LEN, depth_of,
 };
 use rdy_model::{Answer, AnswerAct, Hash, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -102,6 +121,16 @@ pub const END_OF_LOG: Location = Location {
 pub struct Closure {
     pub records: Vec<ObjectKey>,
     pub prerequisites: Vec<ObjectKey>,
+}
+
+/// A canon or view history's closure as one batch (D-KE83X): its records in dependency order,
+/// its prerequisites (with the root when the batch does not hold it), and the features its
+/// records need, which a format-4 header lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryClosure {
+    pub records: Vec<ObjectKey>,
+    pub prerequisites: Vec<ObjectKey>,
+    pub features: crate::format::StoreFeatures,
 }
 
 /// The bounds the walk of a closure charges, as one upload holds them (p-VCW8D: "One batch, and
@@ -174,8 +203,150 @@ pub fn closure_within(
     end: Location,
     bounds: WalkBounds,
 ) -> Result<Closure, StreamError> {
-    let w = walk(reader, tag, known, end, bounds)?;
-    let root = w.root;
+    let root = ObjectKey {
+        kind: kinds::TAG,
+        hash: tag,
+    };
+    let (records, prerequisites, _) =
+        batch_of(reader, StreamPurpose::TagHistory, root, known, end, bounds)?;
+    Ok(Closure {
+        records,
+        prerequisites,
+    })
+}
+
+/// The closure of a canon history (`purpose` canon_history, `root` a LANDING) or a view history
+/// (view_history, `root` a VIEW_OP) that `reader` holds as the log stood at `end`, less the
+/// keys of `known` and of the link closure of `base` (a LANDING for a canon history, a VIEW_OP
+/// for a view history; each landing of it with its one snapshot delta, which a receiver of the
+/// landing holds), within one upload's bounds. Later attachments of those records still
+/// travel. A tag history or link delivery purpose is
+/// E_STREAM_PURPOSE; a root or base that the store does not hold before `end` is
+/// E_UNRESOLVED_REF.
+pub fn history_closure_before(
+    reader: &StoreReader,
+    purpose: StreamPurpose,
+    root: Hash,
+    known: &BTreeSet<ObjectKey>,
+    base: Option<Hash>,
+    end: Location,
+) -> Result<HistoryClosure, StreamError> {
+    if !matches!(
+        purpose,
+        StreamPurpose::CanonHistory | StreamPurpose::ViewHistory
+    ) {
+        return Err(StreamError::purpose_for(
+            None,
+            0,
+            purpose.byte(),
+            StreamPurpose::CanonHistory.name(),
+        ));
+    }
+    let root = ObjectKey {
+        kind: purpose.root_kind(),
+        hash: root,
+    };
+    let mut source = StoreSource { reader, end };
+    if !source.holds(root.kind, &root.hash)? {
+        return Err(StreamError::unresolved(0, 0, root));
+    }
+    let mut held: BTreeSet<ObjectKey> = known.clone();
+    if let Some(base) = base {
+        let base = ObjectKey {
+            kind: purpose.root_kind(),
+            hash: base,
+        };
+        link_closure(&mut source, base, &mut held)?;
+    }
+    let (records, prerequisites, features) =
+        batch_of(reader, purpose, root, &held, end, WalkBounds::UPLOAD)?;
+    Ok(HistoryClosure {
+        records,
+        prerequisites,
+        features,
+    })
+}
+
+/// Adds the link closure of `base` (forward links only, through every record the source holds)
+/// to `held`. A link to a key the source does not hold ends there. At most [`MAX_RECORDS`] keys
+/// join, else E_LIMIT `1000000 object records`; a kind-None link resolves as the walk's do.
+fn link_closure(
+    source: &mut StoreSource,
+    base: ObjectKey,
+    held: &mut BTreeSet<ObjectKey>,
+) -> Result<(), StreamError> {
+    if !source.holds(base.kind, &base.hash)? {
+        return Err(StreamError::unresolved(0, 0, base));
+    }
+    let features = source
+        .reader
+        .store_features()
+        .map_err(|e| store_error(e, Some(base)))?;
+    let mut seen: HashSet<ObjectKey> = HashSet::new();
+    let mut queue = vec![base];
+    seen.insert(base);
+    while let Some(k) = queue.pop() {
+        let Some(record) = source.record(k)? else {
+            continue;
+        };
+        held.insert(k);
+        // a landing the receiver holds comes with its one snapshot delta (D-918YB)
+        if k.kind == kinds::LANDING
+            && let Some(d) = source.snapshot_delta_of(&k.hash)?
+        {
+            held.insert(ObjectKey {
+                kind: kinds::SNAPSHOT_DELTA,
+                hash: d,
+            });
+        }
+        let refs = record
+            .refs(&features)
+            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+        for r in refs {
+            let target = match r.kind {
+                Some(kind) => ObjectKey { kind, hash: r.hash },
+                None => {
+                    let mut found = None;
+                    for &kind in crate::sync_stream::sync_kinds() {
+                        if source.holds(kind, &r.hash)? {
+                            found = Some(ObjectKey { kind, hash: r.hash });
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(k) => k,
+                        None => continue,
+                    }
+                }
+            };
+            if seen.contains(&target) {
+                continue;
+            }
+            if seen.len() as u64 >= MAX_RECORDS {
+                return Err(StreamError::limit(None, 0, LIMIT_OBJECT_RECORDS));
+            }
+            seen.try_reserve(1)
+                .map_err(|_| StreamError::allocation(None, 0))?;
+            seen.insert(target);
+            queue.push(target);
+        }
+    }
+    Ok(())
+}
+
+/// The batch of the closure from `root` (of `purpose`'s root kind) less `known`: its records in
+/// dependency order, its prerequisites, and the features its records need. The byte bound of
+/// one batch is checked with the header the purpose writes: the source store's manifest in a tag
+/// history, the records' needs in a canon or view history.
+fn batch_of(
+    reader: &StoreReader,
+    purpose: StreamPurpose,
+    root: ObjectKey,
+    known: &BTreeSet<ObjectKey>,
+    end: Location,
+    bounds: WalkBounds,
+) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>, crate::format::StoreFeatures), StreamError> {
+    let w = walk(reader, purpose, root, known, end, bounds)?;
     // the batch: every record found that the receiver does not hold
     let children: BTreeMap<ObjectKey, Vec<ObjectKey>> = w
         .nodes
@@ -205,22 +376,25 @@ pub fn closure_within(
     if prerequisites.len() > MAX_PREREQUISITES {
         return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
     }
-    // the header names the source store's features (sync format 2)
-    let manifest = reader
-        .store_features()
-        .map_err(|e| store_error(e, Some(root)))?
-        .to_json()
-        .len();
+    let needs = crate::format::StoreFeatures::of(w.needs.clone());
+    // the header names the source store's features (sync format 2), or the records' needs
+    // (format 4)
+    let manifest = if purpose == StreamPurpose::TagHistory {
+        reader
+            .store_features()
+            .map_err(|e| store_error(e, Some(root)))?
+            .to_json()
+            .len()
+    } else {
+        needs.to_json().len()
+    };
     let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
     let bytes =
         MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
     if bytes > MAX_STREAM_BYTES {
         return Err(StreamError::limit(None, 0, LIMIT_TOTAL_BYTES));
     }
-    Ok(Closure {
-        records,
-        prerequisites: prerequisites.into_iter().collect(),
-    })
+    Ok((records, prerequisites.into_iter().collect(), needs))
 }
 
 /// The links that the walk of [`closure_within`] keeps when it ends, summed over the records it
@@ -237,26 +411,34 @@ pub fn closure_kept_links_for_tests(
         records: u64::MAX,
         edges: u64::MAX,
     };
-    let w = walk(reader, tag, known, end, unbounded)?;
+    let root = ObjectKey {
+        kind: kinds::TAG,
+        hash: tag,
+    };
+    let w = walk(
+        reader,
+        StreamPurpose::TagHistory,
+        root,
+        known,
+        end,
+        unbounded,
+    )?;
     Ok(w.nodes
         .values()
         .map(|n| n.children.len() as u64 + u64::from(n.proof.is_some()))
         .sum())
 }
 
-/// The walk of the closure of the TAG `tag` to its fixed point: every record found, known
-/// records included, within `bounds`.
+/// The walk of the closure of `root` (a TAG, LANDING or VIEW_OP, by `purpose`) to its fixed
+/// point: every record found, known records included, within `bounds`.
 fn walk<'a>(
     reader: &'a StoreReader,
-    tag: Hash,
+    purpose: StreamPurpose,
+    root: ObjectKey,
     known: &'a BTreeSet<ObjectKey>,
     end: Location,
     bounds: WalkBounds,
 ) -> Result<Walk<'a>, StreamError> {
-    let root = ObjectKey {
-        kind: kinds::TAG,
-        hash: tag,
-    };
     let features = reader
         .store_features()
         .map_err(|e| store_error(e, Some(root)))?;
@@ -264,7 +446,10 @@ fn walk<'a>(
         source: StoreSource { reader, end },
         deltas: features.has(crate::format::FEATURE_SNAPSHOT_DELTA),
         features,
+        purpose,
         root,
+        needs: Vec::new(),
+        tags_asked: HashSet::new(),
         nodes: BTreeMap::new(),
         seen: HashSet::new(),
         queue: Vec::new(),
@@ -308,7 +493,8 @@ fn walk<'a>(
             .filter(|h| !w.asked.contains(h))
             .collect();
         let carried = w.attach_carried()?;
-        if ask.is_empty() && !carried {
+        let tagged = w.attach_tags()?;
+        if ask.is_empty() && !carried && !tagged {
             break;
         }
         w.attach_answers(&ask)?;
@@ -553,7 +739,13 @@ struct Walk<'a> {
     features: crate::format::StoreFeatures,
     /// Whether the features list `snapshot_delta`: each landing attaches its delta.
     deltas: bool,
+    /// What the walk exports: a tag, canon or view history.
+    purpose: StreamPurpose,
     root: ObjectKey,
+    /// The features the emitted records need, no repeats.
+    needs: Vec<crate::format::StoreFeature>,
+    /// The landings whose tags a canon history's tag pass looked for.
+    tags_asked: HashSet<Hash>,
     /// The records found so far, known records included; an emitted record with the keys it
     /// needs, a known record with none (its links are released once reached).
     nodes: BTreeMap<ObjectKey, Node>,
@@ -656,6 +848,13 @@ impl Walk<'_> {
                 return Err(StreamError::limit(None, 0, LIMIT_GRAPH_EDGES).with_object(Some(k)));
             }
             self.records += 1;
+            if let StreamRecord::Present { payload, .. } = &record {
+                for f in crate::format::required_features(record.raw_kind(), payload) {
+                    if !self.needs.iter().any(|g| g.name == f.name) {
+                        self.needs.push(f);
+                    }
+                }
+            }
         }
         for c in children.iter().chain(&proof) {
             self.reach(*c)?;
@@ -681,9 +880,18 @@ impl Walk<'_> {
     }
 
     /// The refusal of this walk's tag for reaching content that carried record `carried` names.
+    /// A canon or view history names its root object's hash in the tag's place.
     fn carried_refusal(&self, carried: Hash) -> StreamError {
         let reader = self.source.reader;
         let err = |e| store_error(e, Some(self.root));
+        if self.root.kind != kinds::TAG {
+            return match reader.mode() {
+                Ok(mode) => {
+                    StreamError::carried_content(&self.root.hash.to_string(), carried, mode)
+                }
+                Err(e) => err(e),
+            };
+        }
         let name = match reader.get_kind_raw(kinds::TAG, &self.root.hash) {
             Ok((raw, payload)) => match crate::codec::decode_bounded::<Tag>(raw, &payload) {
                 Ok(t) => t.name,
@@ -736,7 +944,12 @@ impl Walk<'_> {
         let end = self.source.end;
         match k.kind {
             kinds::LANDING | kinds::TAG => {
-                if k.kind == kinds::LANDING || k == self.root {
+                // a canon history's tags bring their signatures, as the root tag of a tag
+                // history does
+                if k.kind == kinds::LANDING
+                    || k == self.root
+                    || self.purpose == StreamPurpose::CanonHistory
+                {
                     for g in reader.signatures_before(&k.hash, end).map_err(err)? {
                         out.push(ObjectKey {
                             kind: kinds::SIGNATURE,
@@ -938,10 +1151,77 @@ impl Walk<'_> {
         Ok(joined)
     }
 
+    /// A canon history's pass over the stored tags before the end: each TAG that names a
+    /// closure landing not asked yet joins the walk, with its answers and signatures through
+    /// the other passes (D-KE83X). Returns whether one joined. Another purpose attaches none.
+    fn attach_tags(&mut self) -> Result<bool, StreamError> {
+        if self.purpose != StreamPurpose::CanonHistory {
+            return Ok(false);
+        }
+        let ask: HashSet<Hash> = self
+            .nodes
+            .keys()
+            .filter(|k| k.kind == kinds::LANDING)
+            .map(|k| k.hash)
+            .filter(|h| !self.tags_asked.contains(h))
+            .collect();
+        if ask.is_empty() {
+            return Ok(false);
+        }
+        let reader = self.source.reader;
+        let mut source = StoreSource {
+            reader,
+            end: self.source.end,
+        };
+        let mut found: Vec<ObjectKey> = Vec::new();
+        let mut failed: Option<StreamError> = None;
+        let seen = &self.seen;
+        let mut visit = |h: Hash| -> Result<(), StreamError> {
+            let key = ObjectKey {
+                kind: kinds::TAG,
+                hash: h,
+            };
+            if seen.contains(&key) {
+                return Ok(());
+            }
+            let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+                return Ok(());
+            };
+            let StreamRecord::Present { payload, .. } = &r else {
+                return Ok(());
+            };
+            let t: Tag = crate::codec::decode_bounded(r.raw_kind(), payload)
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
+            if ask.contains(&t.landing) {
+                found.push(key);
+            }
+            Ok(())
+        };
+        let walked = reader.for_each_object_of(kinds::TAG, |h| {
+            visit(h).map_err(|e| {
+                failed = Some(e);
+                StoreError::Refused("the closure's tag pass stopped".into())
+            })
+        });
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        walked.map_err(|e| store_error(e, None))?;
+        self.tags_asked.extend(ask);
+        let joined = !found.is_empty();
+        for k in found {
+            self.reach(k)?;
+        }
+        Ok(joined)
+    }
+
     /// The ANSWER that the ref `answer/tag:<root name>` names, when it has act Tag and that item
-    /// and lies before the end (O11).
+    /// and lies before the end (O11). Only a tag history's root has one.
     fn relay_answer(&mut self) -> Result<Option<ObjectKey>, StreamError> {
         let root = self.root;
+        if root.kind != kinds::TAG {
+            return Ok(None);
+        }
         let Some(r @ StreamRecord::Present { .. }) = self.source.record(root)? else {
             return Ok(None);
         };

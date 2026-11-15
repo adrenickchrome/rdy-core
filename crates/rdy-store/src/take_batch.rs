@@ -69,7 +69,7 @@
 use crate::closure::{END_OF_LOG, StoreSource, dependency_order, store_error};
 use crate::dump::{ENCODED_DROPPED_LEN, Frame, encoded_dropped_payload, parse_encoded_dropped};
 use crate::error::StoreError;
-use crate::format::{StoreFeature, StoreFeatures};
+use crate::format::{RdyVersion, StoreFeature, StoreFeatures};
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, portable_refs_of};
 use crate::redaction::residue_matches;
@@ -134,6 +134,45 @@ pub struct UploadFacts {
     pub features: StoreFeatures,
 }
 
+/// What a project fetch takes (D-3RSCW): a canon or view history from remote `remote` at `url`,
+/// rooted at `root` (a landing, or a view op of view `view`). The fetch moves no canon or view
+/// ref: it writes the records, the free tag refs, and the remote's sync state with `root` as
+/// its fetched tip or head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchTarget {
+    pub remote: String,
+    pub url: String,
+    pub purpose: crate::sync_stream::StreamPurpose,
+    pub root: Hash,
+    pub view: Option<String>,
+}
+
+/// What a fetch validated before it asks the caller: the stream's repo and purpose, its root,
+/// every key of the union, sorted, and the features its headers declare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchFacts {
+    pub repo_id: RepoId,
+    pub purpose: crate::sync_stream::StreamPurpose,
+    pub root: Hash,
+    pub objects: Vec<ObjectKey>,
+    pub features: StoreFeatures,
+}
+
+/// What a fetch sealed: the distinct keys it wrote that the project did not hold, its data
+/// frames (the marker not counted), the log's end after it, the tag names it wrote, the tag
+/// names it did not take because the project's tag of that name names another landing, and the
+/// store's minimum rdy before and after the batch (D-4XHPH).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchTaken {
+    pub new_objects: u64,
+    pub frames: u64,
+    pub end: Location,
+    pub tags_taken: Vec<String>,
+    pub tags_kept: Vec<String>,
+    pub min_rdy_before: Option<RdyVersion>,
+    pub min_rdy_after: Option<RdyVersion>,
+}
+
 /// Which immutable tag ref survives the take: the upload's root (`tag/<root.name>`), or a tag
 /// the holder holds already for the same landing, by its stored name and hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +192,9 @@ pub struct BatchTaken {
     pub end: Location,
     pub tag_hash: Hash,
     pub tag: Tag,
+    /// The holder's minimum rdy before and after the batch (D-4XHPH).
+    pub min_rdy_before: Option<RdyVersion>,
+    pub min_rdy_after: Option<RdyVersion>,
 }
 
 /// Why a take refused or failed. `Validation` is the caller's check's own error; the other
@@ -165,7 +207,7 @@ pub enum TakeError<E> {
     /// An intact receiver change embeds an approved removed block version, and no approval of
     /// the upload or of the holder covers it.
     UncoveredChange(Hash),
-    /// The store is a project, not a holder.
+    /// The store is a project, not a holder (an upload), or a holder, not a project (a fetch).
     ModeMismatch,
     /// The stream's repo is not the holder's.
     RepoMismatch {
@@ -235,6 +277,21 @@ pub fn check_input_bounds(file_count: usize, target: &UploadTarget) -> Result<()
     }
     Ok(())
 }
+
+/// The refusal of a fetched stream whose purpose or root is not the fetch target's.
+fn fetch_mismatch(root: ObjectKey) -> StreamError {
+    StreamError {
+        code: "E_BAD_RECORD",
+        message: "fetch target does not match the batch root".into(),
+        fix: "fetch the history the remote named".into(),
+        record: Some(0),
+        offset: 0,
+        object: Some(root),
+    }
+}
+
+/// The refusal of a fetched stream that holds a removal: the removal intake takes it.
+pub const FETCH_REMOVAL: &str = "a fetched history that holds a removal is not taken yet";
 
 /// The refusal of a root TAG that does not name the upload target.
 fn target_mismatch(root: ObjectKey) -> StreamError {
@@ -356,7 +413,13 @@ pub(crate) struct Plan {
     pub(crate) new_applies: bool,
     pub(crate) redacted_objects: u64,
     pub(crate) tag_hash: Hash,
-    pub(crate) tag: Tag,
+    /// The root TAG of an upload; None for a fetch.
+    pub(crate) tag: Option<Tag>,
+    /// The tag names a fetch writes and those it does not take.
+    pub(crate) tags_taken: Vec<String>,
+    pub(crate) tags_kept: Vec<String>,
+    /// The store's minimum rdy before and after the batch (D-4XHPH).
+    pub(crate) min_rdy: (Option<RdyVersion>, Option<RdyVersion>),
     /// The holder's merged features when this batch activates any (its last ref sets them).
     pub(crate) features: Option<StoreFeatures>,
     /// The bytes of each [`Write::Generated`] delta, by its key.
@@ -916,14 +979,259 @@ fn check_capacity(
     Ok(())
 }
 
+/// Step 8 of an upload: the relay answers, the caller's check and the surviving tag. `facts`
+/// comes without its relay answers, which this finds. Pushes the tag ref (when it is new) and
+/// then the answer refs onto `refs`; returns the surviving tag's hash and record.
+fn upload_refs<E>(
+    reader: &StoreReader,
+    source: &mut UploadSource,
+    mut facts: UploadFacts,
+    check: UploadCheck<'_, E>,
+    refs: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(Hash, Tag), TakeError<E>> {
+    let root_key = ObjectKey {
+        kind: kinds::TAG,
+        hash: facts.root_hash,
+    };
+    // the relay answer of every tag object of the union (O11, ruling task-13), each named by
+    // its tag object whichever tag stays the version: at most one per tag object, and never
+    // another one than the holder holds for it. The caller's check judges signatures against
+    // them, so they are found before it runs
+    let relayed = stream_source::relay_answers(source, &facts.objects)?;
+    let mut answer_refs: Vec<(String, Vec<u8>)> = Vec::new();
+    for (tag, answer) in &relayed {
+        let name = crate::holder::answer_tag_object_ref(tag);
+        match reader.get_ref(&name)? {
+            Some(v) if v == answer.0 => {}
+            // the tag object holds another relay answer already: one per tag object
+            Some(_) => {
+                let key = ObjectKey {
+                    kind: kinds::ANSWER,
+                    hash: *answer,
+                };
+                return Err(bad(Reason::OutsideTagClosure, key).into());
+            }
+            None => answer_refs.push((name, answer.0.to_vec())),
+        }
+    }
+    facts.relay_answers = relayed;
+    let choice = check(source, &facts).map_err(TakeError::Validation)?;
+    // each answer is read again after the check (a reread checks its frame and hash): input
+    // changed since then refuses here, before any append, as an answer the holder holds is not
+    // read again by the append
+    if stream_source::relay_answers(source, &facts.objects)? != facts.relay_answers {
+        return Err(StreamError::bad_record(0, 0, Reason::InputChangedDuringTake).into());
+    }
+    let root = facts.root;
+    let surviving = match choice {
+        TagChoice::Incoming => {
+            let name = format!("{}{}", crate::holder::TAG_REF, root.name);
+            match reader.get_ref(&name)? {
+                Some(v) if v == root_key.hash.0 => {}
+                Some(_) => return Err(bad(Reason::InvalidHeader, root_key).into()),
+                None => refs.push((name, root_key.hash.0.to_vec())),
+            }
+            (root_key.hash, root)
+        }
+        TagChoice::Existing { name, hash } => {
+            let held = reader.get_ref(&format!("{}{name}", crate::holder::TAG_REF))?;
+            let tag_key = ObjectKey {
+                kind: kinds::TAG,
+                hash,
+            };
+            let stored: Option<Tag> = match held {
+                Some(v) if v == hash.0 => match reader.get_kind_raw(kinds::TAG, &hash) {
+                    Ok((raw, p)) => crate::codec::decode_bounded(raw, &p).ok(),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+            match stored {
+                Some(t) if t.name == name && t.landing == root.landing => (hash, t),
+                _ => return Err(bad(Reason::InvalidHeader, tag_key).into()),
+            }
+        }
+    };
+    refs.extend(answer_refs);
+    Ok(surviving)
+}
+
+/// The tag refs of a fetch: for each TAG of the union, `tag/<name>` when the project has no tag
+/// of that name (taken), nothing when its tag of that name names the same landing, and nothing
+/// when it names another landing (kept: the project's own tag stays, and the name is listed).
+fn fetch_tag_refs(
+    reader: &StoreReader,
+    source: &mut UploadSource,
+    objects: &[ObjectKey],
+    refs: &mut Vec<(String, Vec<u8>)>,
+    taken: &mut Vec<String>,
+    kept: &mut Vec<String>,
+) -> Result<(), StreamError> {
+    for k in objects.iter().filter(|k| k.kind == kinds::TAG) {
+        let Some(t) = stream_source::typed::<Tag>(source, *k)? else {
+            continue;
+        };
+        let name = format!("{}{}", crate::holder::TAG_REF, t.name);
+        if refs.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        let held = match reader.get_ref(&name).map_err(|e| store_error(e, None))? {
+            Some(v) => {
+                Some(crate::index::hash_from(&v, "tag ref").map_err(|e| store_error(e, None))?)
+            }
+            None => None,
+        };
+        match held {
+            None => {
+                refs.push((name, k.hash.0.to_vec()));
+                taken.push(t.name);
+            }
+            Some(h) if h == k.hash => {}
+            Some(h) => {
+                let same = reader
+                    .read_tag(&h)
+                    .map(|own| own.landing == t.landing)
+                    .unwrap_or(false);
+                if !same {
+                    kept.push(t.name);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The sync state ref a fetch writes (D-3RSCW): the remote's canon state, or the view's, with
+/// `root` as its fetched tip or head and the target's URL. A state of the same hub repo keeps
+/// its applied tip and held request, whatever URL it named; a state of another repo starts
+/// again. A view state's root is the first op of the
+/// fetched head's chain. None when the state holds that value already (a retry).
+fn fetch_state_ref(
+    reader: &StoreReader,
+    source: &mut UploadSource,
+    target: &FetchTarget,
+    repo_id: RepoId,
+    root: ObjectKey,
+) -> Result<Option<(String, Vec<u8>)>, StreamError> {
+    use crate::sync_state::{SyncCanon, SyncValue, SyncView};
+    use crate::sync_stream::StreamPurpose;
+    let store = |e: StoreError| store_error(e, None);
+    // the hub repo decides; a changed URL keeps the state and records the new one
+    let same = |r: &RepoId| *r == repo_id;
+    let (name, value) = match target.purpose {
+        StreamPurpose::CanonHistory => {
+            let old = reader.sync_canon(&target.remote).map_err(store)?;
+            let old = old.filter(|o| same(&o.repo_id));
+            let v = SyncCanon {
+                repo_id,
+                url: target.url.clone(),
+                fetched: Some(root.hash),
+                applied: old.as_ref().and_then(|o| o.applied),
+                held: old.and_then(|o| o.held),
+            };
+            (
+                crate::sync_state::canon_ref(&target.remote),
+                SyncValue::Canon(v),
+            )
+        }
+        StreamPurpose::ViewHistory => {
+            let Some(view) = &target.view else {
+                return Err(fetch_mismatch(root));
+            };
+            let old = reader.sync_view(&target.remote, view).map_err(store)?;
+            let old = old.filter(|o| same(&o.repo_id));
+            // the chain's first op: the walk ends where `prev` is null
+            let mut first = root.hash;
+            let mut steps = 0u64;
+            loop {
+                let key = ObjectKey {
+                    kind: kinds::VIEW_OP,
+                    hash: first,
+                };
+                let Some(op) = stream_source::typed::<crate::view::ViewOp>(source, key)? else {
+                    return Err(stream_source::missing(key));
+                };
+                match op.prev {
+                    Some(p) => first = p,
+                    None => break,
+                }
+                steps += 1;
+                if steps > crate::sync_stream::MAX_HISTORY_DEPTH {
+                    return Err(StreamError::limit(
+                        None,
+                        0,
+                        crate::stream_error::LIMIT_HISTORY_DEPTH,
+                    ));
+                }
+            }
+            let v = SyncView {
+                repo_id,
+                url: target.url.clone(),
+                root: first,
+                fetched: Some(root.hash),
+                applied: old.and_then(|o| o.applied),
+            };
+            (
+                crate::sync_state::view_ref(&target.remote, view),
+                SyncValue::View(v),
+            )
+        }
+        _ => return Err(fetch_mismatch(root)),
+    };
+    let bytes = value.encode();
+    if reader.get_ref(&name).map_err(store)?.as_deref() == Some(&bytes[..]) {
+        return Ok(None);
+    }
+    Ok(Some((name, bytes)))
+}
+
+/// The caller's check of an upload.
+type UploadCheck<'a, E> =
+    Box<dyn FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E> + 'a>;
+/// The caller's check of a fetch.
+type FetchCheck<'a, E> = Box<dyn FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a>;
+
+/// What a take takes: a holder's upload for a publication tag, or a project's fetched canon or
+/// view history (D-3RSCW), each with the caller's check.
+pub(crate) enum Intake<'a, E> {
+    Upload(&'a UploadTarget, UploadCheck<'a, E>),
+    Fetch(&'a FetchTarget, FetchCheck<'a, E>),
+}
+
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
 /// caller's check, and the frames to write in canonical order.
-pub(crate) fn prepare<E>(
+pub(crate) fn prepare<'a, E>(
     rx: &Receiver,
     files: &[File],
-    target: &UploadTarget,
-    check: impl FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E>,
+    target: &'a UploadTarget,
+    check: impl FnOnce(&mut dyn ObjectSource, &UploadFacts) -> Result<TagChoice, E> + 'a,
 ) -> Result<Plan, TakeError<E>> {
+    prepare_intake(rx, files, Intake::Upload(target, Box::new(check)))
+}
+
+/// Prepares a project's fetch: the take's steps 1, 2 and 4 to 7 over the project, then the
+/// fetch's own: the header's purpose and root are the target's, the caller's check, each TAG
+/// of the union written as `tag/<name>` when that name is free (one that names the same
+/// landing stays; one that names another landing is kept and listed), and the remote's sync
+/// state with the root as its fetched tip or head, in the same batch. No canon or view ref
+/// moves, and no relay answer ref is written. A removal in the stream is refused
+/// ([`FETCH_REMOVAL`]).
+pub(crate) fn prepare_fetch<'a, E>(
+    rx: &Receiver,
+    files: &[File],
+    target: &'a FetchTarget,
+    check: impl FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a,
+) -> Result<Plan, TakeError<E>> {
+    prepare_intake(rx, files, Intake::Fetch(target, Box::new(check)))
+}
+
+/// [`prepare`] and [`prepare_fetch`].
+fn prepare_intake<E>(
+    rx: &Receiver,
+    files: &[File],
+    intake: Intake<'_, E>,
+) -> Result<Plan, TakeError<E>> {
+    let fetch = matches!(intake, Intake::Fetch(..));
     // 1. every file alone, and the union's index
     let mut union: BTreeMap<ObjectKey, Entry> = BTreeMap::new();
     let mut prerequisites: BTreeSet<ObjectKey> = BTreeSet::new();
@@ -937,6 +1245,20 @@ pub(crate) fn prepare<E>(
         }
         Err(IndexError::Stream(e)) => return Err(e.into()),
     };
+    // a holder takes tag histories only, and a project fetches canon and view histories
+    let expected = match &intake {
+        Intake::Upload(..) => header.purpose == crate::sync_stream::StreamPurpose::TagHistory,
+        Intake::Fetch(t, _) => header.purpose == t.purpose,
+    };
+    if !expected {
+        let want = match &intake {
+            Intake::Upload(..) => crate::sync_stream::StreamPurpose::TagHistory,
+            Intake::Fetch(t, _) => t.purpose,
+        };
+        return Err(
+            StreamError::purpose_for(Some(0), 0, header.purpose.byte(), want.name()).into(),
+        );
+    }
     // the stream's features: this holder writes what it takes, so a feature it may only read,
     // or not open, refuses the take before anything is read further
     crate::format::check_writable(&header.features)
@@ -976,10 +1298,24 @@ pub(crate) fn prepare<E>(
     }
     // 3. the root names the target
     let root_key = header.root();
-    let root: Tag = stream_source::root_tag(&mut source, root_key)?;
-    if root.name.as_bytes() != target.tag.as_bytes() || root.landing != target.landing {
-        return Err(target_mismatch(root_key).into());
-    }
+    let root: Option<Tag> = match &intake {
+        Intake::Upload(target, _) => {
+            let root: Tag = stream_source::root_tag(&mut source, root_key)?;
+            if root.name.as_bytes() != target.tag.as_bytes() || root.landing != target.landing {
+                return Err(target_mismatch(root_key).into());
+            }
+            Some(root)
+        }
+        Intake::Fetch(target, _) => {
+            if header.purpose != target.purpose
+                || !header.purpose.is_history()
+                || root_key.hash != target.root
+            {
+                return Err(fetch_mismatch(root_key).into());
+            }
+            None
+        }
+    };
     // 4. SIG's rule on every new signature
     for k in union.keys().filter(|k| k.kind == kinds::SIGNATURE) {
         if rx.holds(k)? {
@@ -1012,7 +1348,7 @@ pub(crate) fn prepare<E>(
         reader.check_new_signatures(&items)?;
     }
     // 5. the closure
-    stream_source::check_closure(&mut source, root_key, &root, &objects)?;
+    stream_source::check_closure(&mut source, root_key, root.as_ref(), &objects)?;
     // 5. and each landing's delta across every file, which an early closure end never skips
     stream_source::check_snapshot_deltas(&mut source, &header.features, &objects)?;
     // 5. and the typed context of the new plans and plan answers, over the union and the holder
@@ -1294,6 +1630,9 @@ pub(crate) fn prepare<E>(
             needs.extend(union[key].needs.iter().cloned());
         }
     }
+    if fetch {
+        needs.push(crate::format::registered(crate::format::FEATURE_SYNC_STATE));
+    }
     let merged = rx.features.merged(&needs);
     drop(needs);
     // the holder's capacity: after this batch the holder check (under the manifest the holder
@@ -1309,73 +1648,46 @@ pub(crate) fn prepare<E>(
             source.masked.insert(*k, (*apply, *t, encoding));
         }
     }
-    // the relay answer of every tag object of the union (O11, ruling task-13), each named by
-    // its tag object whichever tag stays the version: at most one per tag object, and never
-    // another one than the holder holds for it. The caller's check judges signatures against
-    // them, so they are found before it runs
-    let relayed = stream_source::relay_answers(&mut source, &objects)?;
-    let mut answer_refs: Vec<(String, Vec<u8>)> = Vec::new();
-    for (tag, answer) in &relayed {
-        let name = crate::holder::answer_tag_object_ref(tag);
-        match reader.get_ref(&name)? {
-            Some(v) if v == answer.0 => {}
-            // the tag object holds another relay answer already: one per tag object
-            Some(_) => {
-                let key = ObjectKey {
-                    kind: kinds::ANSWER,
-                    hash: *answer,
-                };
-                return Err(bad(Reason::OutsideTagClosure, key).into());
-            }
-            None => answer_refs.push((name, answer.0.to_vec())),
-        }
-    }
-    let facts = UploadFacts {
-        repo_id: header.repo_id,
-        root_hash: root_key.hash,
-        root: root.clone(),
-        objects,
-        relay_answers: relayed,
-        features: header.features.clone(),
-    };
-    let choice = check(&mut source, &facts).map_err(TakeError::Validation)?;
-    // each answer is read again after the check (a reread checks its frame and hash): input
-    // changed since then refuses here, before any append, as an answer the holder holds is not
-    // read again by the append
-    if stream_source::relay_answers(&mut source, &facts.objects)? != facts.relay_answers {
-        return Err(StreamError::bad_record(0, 0, Reason::InputChangedDuringTake).into());
-    }
     let mut refs: Vec<(String, Vec<u8>)> = Vec::new();
-    let (tag_hash, tag) = match choice {
-        TagChoice::Incoming => {
-            let name = format!("{}{}", crate::holder::TAG_REF, root.name);
-            match reader.get_ref(&name)? {
-                Some(v) if v == root_key.hash.0 => {}
-                Some(_) => return Err(bad(Reason::InvalidHeader, root_key).into()),
-                None => refs.push((name, root_key.hash.0.to_vec())),
-            }
-            (root_key.hash, root.clone())
+    let mut tags_taken: Vec<String> = Vec::new();
+    let mut tags_kept: Vec<String> = Vec::new();
+    let (tag_hash, tag) = match intake {
+        Intake::Upload(_, check) => {
+            let facts = UploadFacts {
+                repo_id: header.repo_id,
+                root_hash: root_key.hash,
+                root: root.expect("an upload's root tag"),
+                objects,
+                relay_answers: BTreeMap::new(),
+                features: header.features.clone(),
+            };
+            let (tag_hash, tag) = upload_refs(reader, &mut source, facts, check, &mut refs)?;
+            (tag_hash, Some(tag))
         }
-        TagChoice::Existing { name, hash } => {
-            let held = reader.get_ref(&format!("{}{name}", crate::holder::TAG_REF))?;
-            let tag_key = ObjectKey {
-                kind: kinds::TAG,
-                hash,
+        Intake::Fetch(target, check) => {
+            let facts = FetchFacts {
+                repo_id: header.repo_id,
+                purpose: header.purpose,
+                root: root_key.hash,
+                objects: objects.clone(),
+                features: header.features.clone(),
             };
-            let stored: Option<Tag> = match held {
-                Some(v) if v == hash.0 => match reader.get_kind_raw(kinds::TAG, &hash) {
-                    Ok((raw, p)) => crate::codec::decode_bounded(raw, &p).ok(),
-                    Err(_) => None,
-                },
-                _ => None,
-            };
-            match stored {
-                Some(t) if t.name == name && t.landing == root.landing => (hash, t),
-                _ => return Err(bad(Reason::InvalidHeader, tag_key).into()),
+            check(&mut source, &facts).map_err(TakeError::Validation)?;
+            fetch_tag_refs(
+                reader,
+                &mut source,
+                &objects,
+                &mut refs,
+                &mut tags_taken,
+                &mut tags_kept,
+            )?;
+            if let Some(r) = fetch_state_ref(reader, &mut source, target, header.repo_id, root_key)?
+            {
+                refs.push(r);
             }
+            (root_key.hash, None)
         }
     };
-    refs.extend(answer_refs);
     // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
     merged
         .validate_written()
@@ -1435,7 +1747,18 @@ pub(crate) fn prepare<E>(
                 kinds::REDACTION | kinds::REDACTION_RESIDUE | kinds::REDACTION_APPLY
             )
     });
+    // a fetched removal is the removal intake's (a later step): the fetch takes none
+    if fetch && (redaction || !incoming.is_empty() || !redacted.is_empty()) {
+        return Err(TakeError::Store(StoreError::Refused(FETCH_REMOVAL.into())));
+    }
+    let min_rdy = (
+        rx.features.min_rdy(),
+        features.as_ref().unwrap_or(rx.features).min_rdy(),
+    );
     Ok(Plan {
+        tags_taken,
+        tags_kept,
+        min_rdy,
         writes: order
             .iter()
             .map(|k| writes.remove(k).expect("an ordered write").0)

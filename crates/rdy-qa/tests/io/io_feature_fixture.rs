@@ -462,13 +462,16 @@ fn e1_encodings() -> Value {
 
 /// A registered first-use feature that a later task froze in a fixture of its own, not in a
 /// complete set: its dump members with their blake3 and its native store fixture. Its dump's
-/// manifest holds the feature, through first use, with its class and minimum rdy.
+/// manifest holds the feature, through first use, with its class and minimum rdy. A feature
+/// that only a ref activates and that no dump pair freezes (`sync_state`) is frozen by its sync
+/// members instead: their first expect file records the receiver's manifest after the take.
 struct FirstUse {
     name: &'static str,
     dump: &'static [(&'static str, &'static str)],
     /// Its sync members with their blake3: none for a feature frozen with a dump pair alone.
     sync: &'static [(&'static str, &'static str)],
-    native: &'static str,
+    /// Its native store fixture's expect file: none for a feature its sync members freeze.
+    native: Option<&'static str>,
     /// Whether a new store writes the feature from its first batch (`baseline_features`): its
     /// expect files then name the written formats, and the complete sets pin the written formats
     /// less it ([`complete_set_formats`]).
@@ -486,7 +489,10 @@ struct FirstUse {
 /// `v2-f1-e1-snapshot-delta` and the native store `store/snapshot-delta-1`, whose own tests are
 /// `sdl6_` in the store area. `hub_canon` (D-DZDB7, Sync client A Task 1b), a holder's first
 /// move activates it: the dump pair `v4-f1-e1-hub-canon` and the native holder
-/// `store/hub-canon-1`, whose own tests are `scc1_` in the store area.
+/// `store/hub-canon-1`, whose own tests are `scc1_` in the store area. `sync_state` (D-3RSCW,
+/// Sync client A Task 2), a project's first `meta/sync/` ref activates it: the format-4 sync
+/// pairs `sync4-canon-history` and `sync4-view-history`, whose fetch activates it in the
+/// receiver; their own tests are `scc2_` in the store area.
 const FIRST_USE: &[FirstUse] = &[
     FirstUse {
         name: "foreign_copy",
@@ -501,7 +507,7 @@ const FIRST_USE: &[FirstUse] = &[
             ),
         ],
         sync: &[],
-        native: "fixtures/store/foreign-copy-1/expect.json",
+        native: Some("fixtures/store/foreign-copy-1/expect.json"),
         baseline: false,
     },
     FirstUse {
@@ -517,7 +523,7 @@ const FIRST_USE: &[FirstUse] = &[
             ),
         ],
         sync: &[],
-        native: "fixtures/store/figure-dark-1/expect.json",
+        native: Some("fixtures/store/figure-dark-1/expect.json"),
         baseline: false,
     },
     FirstUse {
@@ -542,7 +548,7 @@ const FIRST_USE: &[FirstUse] = &[
                 "8aaa56853f67f2b25db4f2174097602c38cef0e7291c98ba9d68735dcab28e3c",
             ),
         ],
-        native: "fixtures/store/snapshot-delta-1/expect.json",
+        native: Some("fixtures/store/snapshot-delta-1/expect.json"),
         baseline: true,
     },
     FirstUse {
@@ -558,7 +564,31 @@ const FIRST_USE: &[FirstUse] = &[
             ),
         ],
         sync: &[],
-        native: "fixtures/store/hub-canon-1/expect.json",
+        native: Some("fixtures/store/hub-canon-1/expect.json"),
+        baseline: false,
+    },
+    FirstUse {
+        name: "sync_state",
+        dump: &[],
+        sync: &[
+            (
+                "sync4-canon-history.expect.json",
+                "19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
+            ),
+            (
+                "sync4-canon-history.bin",
+                "8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
+            ),
+            (
+                "sync4-view-history.expect.json",
+                "3c4a8147ee8439998f41895ed2905165f7f3461dac089e8069b7e7dfa326eff4",
+            ),
+            (
+                "sync4-view-history.bin",
+                "0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",
+            ),
+        ],
+        native: None,
         baseline: false,
     },
 ];
@@ -630,24 +660,36 @@ fn all_features() -> StoreFeatures {
                 assert_eq!(v["formats"], now, "{name}");
             }
         }
-        let dump = f
-            .dump
-            .iter()
-            .find(|(n, _)| n.ends_with(".rdydump"))
-            .unwrap()
-            .0;
-        let manifest = s18::file_facts(dump, &fixture(dump))["store_format"]["features"].clone();
+        let (dump, manifest) = match f.dump.iter().find(|(n, _)| n.ends_with(".rdydump")) {
+            Some((dump, _)) => (
+                *dump,
+                s18::file_facts(dump, &fixture(dump))["store_format"]["features"].clone(),
+            ),
+            None => {
+                let (name, _) = f
+                    .sync
+                    .iter()
+                    .find(|(n, _)| n.ends_with(".expect.json"))
+                    .expect("a sync-frozen feature has a sync expect file");
+                let v: Value =
+                    serde_json::from_str(&std::fs::read_to_string(sync_fixture(name)).unwrap())
+                        .unwrap();
+                (*name, v["receiver_features"].clone())
+            }
+        };
         let features = manifest["features"].as_array().unwrap();
         assert!(
             features.contains(&serde_json::to_value(reg).unwrap()),
             "{dump}: its manifest holds {} as registered",
             f.name
         );
-        let native: Value = serde_json::from_str(
-            &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(f.native)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(native["store"]["manifest"], manifest, "{}", f.native);
+        if let Some(path) = f.native {
+            let native: Value = serde_json::from_str(
+                &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(native["store"]["manifest"], manifest, "{path}");
+        }
         for g in features {
             let name = g["name"].as_str().unwrap().to_string();
             assert!(

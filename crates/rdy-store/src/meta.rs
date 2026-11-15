@@ -100,8 +100,9 @@ impl StoreReader {
             .transpose()
     }
 
-    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the six, in
-    /// name order; then `meta/store_features` holds a valid manifest and `meta/upgrade`, when
+    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the six and a
+    /// project's `meta/sync/` refs, in name order; then the sync refs keep their rules with
+    /// `sync_state` listed (`crate::sync_state::check_sync_refs`); then `meta/store_features` holds a valid manifest and `meta/upgrade`, when
     /// present, a valid receipt; (2) `meta/repo_id`, when present, holds 16 bytes; (3)
     /// `meta/repo_id` is present
     /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
@@ -111,7 +112,12 @@ impl StoreReader {
     /// refs are all in its families. The first failure is returned. Part of
     /// `check_objects`; a clone runs it alone before it writes its origin (ruling task-5).
     pub fn check_meta(&self) -> Result<(), StoreError> {
-        for (name, _) in self.refs_with_prefix(META_REF)? {
+        let mut sync = Vec::new();
+        for (name, value) in self.refs_with_prefix(META_REF)? {
+            if crate::sync_state::is_sync_ref(&name) {
+                sync.push((name, value));
+                continue;
+            }
             if !KNOWN.contains(&name.as_str()) {
                 return Err(bad(format!(
                     "{name:?} is not a meta ref this rdy knows (meta/store_features, meta/upgrade, meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
@@ -125,6 +131,14 @@ impl StoreReader {
         if let Some(v) = self.get_ref(REF_UPGRADE)? {
             crate::format::UpgradeReceipt::parse(&v)
                 .map_err(|e| bad(format!("meta/upgrade is not a valid receipt: {e}")))?;
+        }
+        if !sync.is_empty() {
+            let listed = self
+                .store_features()?
+                .has(crate::format::FEATURE_SYNC_STATE);
+            crate::sync_state::check_sync_refs(&sync, self.mode()?, listed, |k, h| {
+                self.has_kind(k, h)
+            })?;
         }
         let Some(r) = self.repo_id()? else {
             return Err(bad(NO_REPO_ID));
@@ -149,7 +163,8 @@ impl StoreReader {
 
 impl Store {
     /// The clone's batch (D-C8C70, O23): `meta/origin`, and for a fork a new `meta/repo_id`
-    /// first, in one `write` of `ref_items`: one marker, one sync. It writes with held batches
+    /// first, in one `write` of `ref_items`: one marker, one sync. The same batch clears a
+    /// clone's `upload` and `pending` sync refs, and every sync ref of a fork (D-3RSCW). It writes with held batches
     /// off and puts them back as they were after, so no TRANSITION frame joins the batch and no
     /// batch stays open. A batch already open is refused (`StoreError::Refused`); so is a clone
     /// (no new repo id) of a store with no repo id. Returns the repo id after it.
@@ -171,7 +186,28 @@ impl Store {
             refs.push((REF_REPO_ID.to_string(), encode_repo_id(id)));
         }
         refs.push((REF_ORIGIN.to_string(), encode_origin(origin)));
+        // sync state (D-3RSCW): a clone keeps canon and view states and clears `upload` and
+        // `pending`; a fork clears every sync ref. A cleared ref holds an empty value.
+        let mut clears = 0;
+        for (name, value) in self.refs_with_prefix(crate::sync_state::SYNC_REF)? {
+            let keep = !origin.fork
+                && matches!(
+                    crate::sync_state::SyncRefName::parse(&name),
+                    Some(
+                        crate::sync_state::SyncRefName::Canon { .. }
+                            | crate::sync_state::SyncRefName::View { .. }
+                    )
+                );
+            if !value.is_empty() && !keep {
+                refs.push((name, Vec::new()));
+                clears += 1;
+            }
+        }
         let items = self.ref_items_pub(refs);
+        if clears > 0 {
+            self.write_sync_items(items)?;
+            return Ok(after);
+        }
         let held = self.held();
         // no batch is open, so turning held batches off seals nothing
         self.set_held(false)?;

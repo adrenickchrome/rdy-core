@@ -82,6 +82,26 @@
 //!
 //! [`check_delivery`] checks one delivery whole, before any intake; [`check_batch`] refuses a
 //! delivery, and [`check_delivery`] a tag history, with E_STREAM_PURPOSE.
+//!
+//! # Stream format 4
+//!
+//! Format 4 (D-KE83X) keeps format 2's prelude, frames, header and trailer, and adds two
+//! history purposes. Format 2 and 3 never carry them: a purpose in a format that does not know
+//! it is E_STREAM_PURPOSE. A tag history stays at format 2 and a link delivery at format 3.
+//!
+//! - **`canon_history` (byte 2):** the header's 32-byte root field (`tag`) holds the upload's
+//!   head `LANDING`. The batch carries its link closure, the attachments of a tag history, and
+//!   each `TAG` that names a carried landing with that tag's answers and signatures.
+//! - **`view_history` (byte 3):** the root field holds the head `VIEW_OP` of one view. The batch
+//!   carries the op chain and every record the ops name, with their own closures and
+//!   attachments.
+//! - **Root:** the root object is a record of the batch or a prerequisite, as a tag history's
+//!   root TAG is (`root landing is not in the batch or its prerequisites`, `root view op is not
+//!   in the batch or its prerequisites`).
+//! - **Features:** the header's manifest lists only the features that the upload's records need,
+//!   the same list in every batch of one upload, never the source store's whole manifest. Its
+//!   minimum (`StoreFeatures::min_rdy`) is then the minimum that the pushed records need.
+//! - **Order and limits:** as format 2's.
 use crate::bounded::{CHUNK_BYTES, MAX_CHUNK_BYTES, MAX_RECORD_BYTES, RECORD_BYTES, RecordError};
 use crate::dump::{
     ENCODED_DROPPED_LEN, Frame, LINK_LEN, check_dropped, encoded_dropped_payload, link,
@@ -113,8 +133,11 @@ pub const STREAM_FORMAT: u32 = 2;
 /// The stream format a link delivery is written in: the first that knows the purpose
 /// `link_delivery` and its `DELIVERY` record.
 pub const LINK_DELIVERY_FORMAT: u32 = 3;
+/// The stream format a canon or view history is written in: the first that knows the purposes
+/// `canon_history` and `view_history` (D-KE83X).
+pub const HISTORY_FORMAT: u32 = 4;
 /// The stream formats this rdy reads: every format released from Release 1 on.
-pub const READ_FORMATS: [u32; 2] = [STREAM_FORMAT, LINK_DELIVERY_FORMAT];
+pub const READ_FORMATS: [u32; 3] = [STREAM_FORMAT, LINK_DELIVERY_FORMAT, HISTORY_FORMAT];
 
 /// The frame kinds of the stream's own records. Object frames keep their store kinds.
 pub mod rec {
@@ -205,13 +228,17 @@ pub fn is_sync_kind(kind: u8) -> bool {
     sync_kinds().contains(&kind)
 }
 
-/// What a stream carries: a tag's history, written `tag_history` and as the byte 0, or a link
-/// delivery, written `link_delivery` and as the byte 1 (stream format 3 on).
+/// What a stream carries: a tag's history, written `tag_history` and as the byte 0, a link
+/// delivery, written `link_delivery` and as the byte 1 (stream format 3 on), a canon history
+/// rooted at a landing, `canon_history` and the byte 2, or one view's history rooted at a view
+/// op, `view_history` and the byte 3 (stream format 4 on, D-KE83X).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPurpose {
     TagHistory,
     LinkDelivery,
+    CanonHistory,
+    ViewHistory,
 }
 
 impl StreamPurpose {
@@ -220,6 +247,8 @@ impl StreamPurpose {
         match self {
             StreamPurpose::TagHistory => 0,
             StreamPurpose::LinkDelivery => 1,
+            StreamPurpose::CanonHistory => 2,
+            StreamPurpose::ViewHistory => 3,
         }
     }
 
@@ -228,6 +257,8 @@ impl StreamPurpose {
         match b {
             0 => Some(StreamPurpose::TagHistory),
             1 => Some(StreamPurpose::LinkDelivery),
+            2 => Some(StreamPurpose::CanonHistory),
+            3 => Some(StreamPurpose::ViewHistory),
             _ => None,
         }
     }
@@ -237,6 +268,8 @@ impl StreamPurpose {
         match self {
             StreamPurpose::TagHistory => "tag_history",
             StreamPurpose::LinkDelivery => "link_delivery",
+            StreamPurpose::CanonHistory => "canon_history",
+            StreamPurpose::ViewHistory => "view_history",
         }
     }
 
@@ -245,6 +278,32 @@ impl StreamPurpose {
         match self {
             StreamPurpose::TagHistory => STREAM_FORMAT,
             StreamPurpose::LinkDelivery => LINK_DELIVERY_FORMAT,
+            StreamPurpose::CanonHistory | StreamPurpose::ViewHistory => HISTORY_FORMAT,
+        }
+    }
+
+    /// Whether the purpose carries a history of portable objects: a tag, canon or view history.
+    /// Only a link delivery does not.
+    pub fn is_history(self) -> bool {
+        self != StreamPurpose::LinkDelivery
+    }
+
+    /// The store kind of the purpose's root object: a `TAG`, a `LANDING` or a `VIEW_OP`. A link
+    /// delivery's root field names a `TAG` for provenance only.
+    pub fn root_kind(self) -> u8 {
+        match self {
+            StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => kinds::TAG,
+            StreamPurpose::CanonHistory => kinds::LANDING,
+            StreamPurpose::ViewHistory => kinds::VIEW_OP,
+        }
+    }
+
+    /// The refusal reason of a history batch whose root is neither a record nor a prerequisite.
+    fn root_not_listed(self) -> Reason {
+        match self {
+            StreamPurpose::CanonHistory => Reason::RootLandingNotListed,
+            StreamPurpose::ViewHistory => Reason::RootViewOpNotListed,
+            StreamPurpose::TagHistory | StreamPurpose::LinkDelivery => Reason::RootTagNotListed,
         }
     }
 }
@@ -311,10 +370,12 @@ fn decode_delivery(p: &[u8]) -> Result<DeliveryRecord, RecordError> {
     Ok(d)
 }
 
-/// A batch's header: the stream format, the source store's features, the source repo, the
-/// purpose, the upload's root TAG and this batch's prerequisites (strictly ascending logical
-/// keys). JSON writes the repo id and the hash as full lowercase hex and each key as
-/// `{"kind", "hash"}`.
+/// A batch's header: the stream format, the features (the source store's in format 2 and 3, the
+/// upload's record needs in format 4), the source repo, the purpose, the upload's root and this
+/// batch's prerequisites (strictly ascending logical keys). The root field keeps its name `tag`
+/// for every purpose: a TAG's hash in a tag history, a LANDING's in a canon history, a VIEW_OP's
+/// in a view history ([`StreamHeader::root`] gives its typed key). JSON writes the repo id and
+/// the hash as full lowercase hex and each key as `{"kind", "hash"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StreamHeader {
     pub stream_format: u32,
@@ -360,11 +421,48 @@ impl StreamHeader {
         }
     }
 
-    /// The upload's root: the TAG the header names. Only a tag history has one; a link
-    /// delivery's tag is provenance.
+    /// The header of a canon history (stream format 4, D-KE83X) for `repo_id`, rooted at the
+    /// head LANDING `landing`. `features` are the features that the upload's records need.
+    pub fn canon_history(
+        features: StoreFeatures,
+        repo_id: RepoId,
+        landing: Hash,
+        prerequisites: Vec<ObjectKey>,
+    ) -> Self {
+        StreamHeader {
+            stream_format: HISTORY_FORMAT,
+            features,
+            repo_id,
+            purpose: StreamPurpose::CanonHistory,
+            tag: landing,
+            prerequisites,
+        }
+    }
+
+    /// The header of a view history (stream format 4, D-KE83X) for `repo_id`, rooted at the
+    /// head VIEW_OP `op` of one view. `features` are the features that the upload's records
+    /// need.
+    pub fn view_history(
+        features: StoreFeatures,
+        repo_id: RepoId,
+        op: Hash,
+        prerequisites: Vec<ObjectKey>,
+    ) -> Self {
+        StreamHeader {
+            stream_format: HISTORY_FORMAT,
+            features,
+            repo_id,
+            purpose: StreamPurpose::ViewHistory,
+            tag: op,
+            prerequisites,
+        }
+    }
+
+    /// The upload's root: the object the root field names, of the purpose's root kind
+    /// ([`StreamPurpose::root_kind`]). A link delivery's tag is provenance.
     pub fn root(&self) -> ObjectKey {
         ObjectKey {
-            kind: kinds::TAG,
+            kind: self.purpose.root_kind(),
             hash: self.tag,
         }
     }
@@ -579,11 +677,11 @@ fn header_payload(h: &StreamHeader) -> Vec<u8> {
 }
 
 /// Whether an object record of logical kind `kind` may stand in a stream of `purpose`: a sync
-/// kind in a tag history, a `BLOCK` alone in a link delivery.
+/// kind in a tag, canon or view history, a `BLOCK` alone in a link delivery.
 fn purpose_kind(purpose: StreamPurpose, kind: u8) -> bool {
     match purpose {
-        StreamPurpose::TagHistory => is_sync_kind(kind),
         StreamPurpose::LinkDelivery => kind == kinds::BLOCK,
+        _ => is_sync_kind(kind),
     }
 }
 
@@ -594,7 +692,7 @@ fn bad_header() -> StreamError {
 
 /// The rules of a header's fields, shared by the writer and the reader: a stream format this rdy
 /// reads, a purpose that format knows (E_STREAM_PURPOSE otherwise: format 2 knows only
-/// `tag_history`), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
+/// `tag_history`, format 3 adds `link_delivery`, format 4 `canon_history` and `view_history`), a manifest this rdy reads (E_STORE_FORMAT otherwise), at most
 /// [`MAX_PREREQUISITES`] prerequisites, each of a sync kind, strictly ascending, and none for a
 /// link delivery.
 fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
@@ -776,13 +874,13 @@ pub struct StreamWriter<W: Write> {
 }
 
 impl<W: Write> StreamWriter<W> {
-    /// Writes the prelude and `header`, a tag history's, in its stream format. Refuses another
-    /// purpose (E_STREAM_PURPOSE: a link delivery starts with [`StreamWriter::new_delivery`]), a
+    /// Writes the prelude and `header`, a tag, canon or view history's, in its stream format.
+    /// Refuses a link delivery (E_STREAM_PURPOSE: it starts with [`StreamWriter::new_delivery`]), a
     /// header of a stream or store format this rdy does not read, more than
     /// [`MAX_PREREQUISITES`] prerequisites, or prerequisites of a kind that is not a sync kind
     /// or not strictly ascending.
     pub fn new(w: W, header: &StreamHeader) -> Result<Self, StreamError> {
-        if header.purpose != StreamPurpose::TagHistory {
+        if !header.purpose.is_history() {
             return Err(wrong_purpose(
                 header.purpose.byte(),
                 StreamPurpose::TagHistory,
@@ -968,6 +1066,13 @@ impl<W: Write> StreamWriter<W> {
     }
 }
 
+/// What an open requires of a stream's purpose: one purpose, or any history purpose.
+#[derive(Clone, Copy)]
+enum Expect {
+    Purpose(StreamPurpose),
+    History,
+}
+
 /// Reads one batch and checks its framing on the way (verify on receive): the prelude, the
 /// header, every frame's hash, kind and bounds, each `DROPPED` record's body, the trailer's
 /// length, counts and digest, and the end of the file after it. Typed records are not decoded
@@ -1002,7 +1107,13 @@ impl<R: Read> StreamReader<R> {
     /// [`StreamReader::open`] for a stream that must be of `purpose`: another purpose is
     /// E_STREAM_PURPOSE naming `purpose`, refused at the header before any later record is read.
     pub fn open_for(r: R, purpose: StreamPurpose) -> Result<(Self, StreamHeader), StreamError> {
-        Self::open_inner(r, Some(purpose))
+        Self::open_inner(r, Some(Expect::Purpose(purpose)))
+    }
+
+    /// [`StreamReader::open`] for a stream of a history purpose: a tag, canon or view history.
+    /// A link delivery is E_STREAM_PURPOSE naming `tag_history`, refused at the header.
+    pub fn open_history(r: R) -> Result<(Self, StreamHeader), StreamError> {
+        Self::open_inner(r, Some(Expect::History))
     }
 
     /// A link delivery's `DELIVERY` record, read and checked with the header; None for a tag
@@ -1011,10 +1122,7 @@ impl<R: Read> StreamReader<R> {
         self.delivery.as_ref()
     }
 
-    fn open_inner(
-        r: R,
-        expected: Option<StreamPurpose>,
-    ) -> Result<(Self, StreamHeader), StreamError> {
+    fn open_inner(r: R, expected: Option<Expect>) -> Result<(Self, StreamHeader), StreamError> {
         let mut me = StreamReader {
             r,
             purpose: StreamPurpose::TagHistory,
@@ -1057,11 +1165,18 @@ impl<R: Read> StreamReader<R> {
             return Err(StreamError::limit(Some(0), PRELUDE, LIMIT_HEADER_BYTES));
         }
         let p = me.payload(0, PRELUDE, len, &hash)?;
-        let header = parse_header(&p, format, expected.unwrap_or(StreamPurpose::TagHistory))?;
-        if let Some(expected) = expected
-            && header.purpose != expected
-        {
-            return Err(wrong_purpose(header.purpose.byte(), expected));
+        let named = match expected {
+            Some(Expect::Purpose(p)) => p,
+            Some(Expect::History) | None => StreamPurpose::TagHistory,
+        };
+        let header = parse_header(&p, format, named)?;
+        let fits = match expected {
+            None => true,
+            Some(Expect::Purpose(p)) => header.purpose == p,
+            Some(Expect::History) => header.purpose.is_history(),
+        };
+        if !fits {
+            return Err(wrong_purpose(header.purpose.byte(), named));
         }
         me.chain.add(0, PRELUDE, rec::HEADER, len, &hash)?;
         me.offset = PRELUDE + FRAME_HEADER + len;
@@ -1414,14 +1529,15 @@ pub fn check_batch<R: Read>(input: R) -> Result<BatchReport, StreamError> {
 /// offset, before the next record is read. Either one's error ends the check, and no report is
 /// returned. The record buffer is still the reader's one buffer: `on_record` borrows the record.
 ///
-/// A batch is a tag history: a link delivery is E_STREAM_PURPOSE at its header, before
-/// `on_header` runs ([`check_delivery`] checks it).
+/// A batch is a tag, canon or view history: a link delivery is E_STREAM_PURPOSE at its header,
+/// before `on_header` runs ([`check_delivery`] checks it). A canon or view history's root is its
+/// LANDING or VIEW_OP, with its own `root ... is not in the batch or its prerequisites` reason.
 pub fn check_batch_with<R: Read, E: From<StreamError>>(
     input: R,
     on_header: impl FnOnce(&StreamHeader) -> Result<(), E>,
     mut on_record: impl FnMut(u64, u64, &StreamRecord) -> Result<(), E>,
 ) -> Result<BatchReport, E> {
-    let (mut reader, header) = StreamReader::open_for(input, StreamPurpose::TagHistory)?;
+    let (mut reader, header) = StreamReader::open_history(input)?;
     on_header(&header)?;
     let mut keys: Vec<ObjectKey> = Vec::new();
     let mut record_features = RecordFeatures::default();
@@ -1536,7 +1652,7 @@ pub fn check_batch_with<R: Read, E: From<StreamError>>(
     let root = header.root();
     if !index.contains_key(&root) {
         if !is_prerequisite(&root) {
-            return Err(at_header(Reason::RootTagNotListed).into());
+            return Err(at_header(header.purpose.root_not_listed()).into());
         }
         needed.insert(root);
     }

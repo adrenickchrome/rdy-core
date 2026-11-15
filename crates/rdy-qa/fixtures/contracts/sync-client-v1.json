@@ -31414,6 +31414,7 @@
       "object_encoding": "any frame of encoding 1 or more",
       "plan_tension": "a PLAN with a sealed Tension item or Dismissed outcome, or an answer with act Dismiss",
       "snapshot_delta": "baseline: every store this rdy creates; an older store at its upgrade, load or take; a SNAPSHOT_DELTA",
+      "sync_state": "a project's first meta/sync/ ref: a batch that writes one",
       "view_replay": "a CHANGE whose links.replayed_from is set"
     },
     "features": [
@@ -31466,6 +31467,11 @@
         "class": "incompatible",
         "name": "snapshot_delta",
         "required_rdy": "0.52.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "sync_state",
+        "required_rdy": "0.53.0"
       },
       {
         "class": "incompatible",
@@ -31789,6 +31795,7 @@
       "object_encoding",
       "plan_tension",
       "snapshot_delta",
+      "sync_state",
       "view_replay"
     ],
     "sources": [
@@ -31798,8 +31805,34 @@
       "rdy_model enums",
       "fixtures/store/feature-1",
       "fixtures/store/hub-canon-1",
-      "fixtures/dump/*.expect.json"
-    ]
+      "fixtures/dump/*.expect.json",
+      "rdy_store::sync_state"
+    ],
+    "sync_state": {
+      "feature": "sync_state",
+      "max_push_bytes": 64,
+      "max_remote_bytes": 64,
+      "max_url_bytes": 4096,
+      "max_value_bytes": 8192,
+      "max_view_chars": 256,
+      "prefix": "meta/sync/",
+      "refs": [
+        "meta/sync/<remote>/canon",
+        "meta/sync/<remote>/view/<name>",
+        "meta/sync/<remote>/upload",
+        "meta/sync/<remote>/pending"
+      ],
+      "write_kinds": [
+        [
+          0,
+          "canon"
+        ],
+        [
+          1,
+          "view"
+        ]
+      ]
+    }
   },
   "sync": {
     "carrier_fixture": {
@@ -31877,6 +31910,10 @@
       "records": 221
     },
     "fixture_digests": {
+      "sync4-canon-history.bin": "5884 8d51365e1d9bd84bf9c00526e672d401298d0128cdf3590d1c09f50eb5f746e4",
+      "sync4-canon-history.expect.json": "4641 19bd7fd90178c3883d3d9cd018577877a7aaa6eadfb6d1da99355a9693574e5c",
+      "sync4-view-history.bin": "6699 0abb9333ec131aa4f87c78e0a549322d053c49048c0c7ab15dd309ec96f7dace",
+      "sync4-view-history.expect.json": "5338 3c4a8147ee8439998f41895ed2905165f7f3461dac089e8069b7e7dfa326eff4",
       "v1-s15.expect.json": "24439 1b288d272891be45291c7fb77a059cded97ae2c69354b6d2c1c10b6fa68b435d",
       "v1-s15.rdysync": "8436 b4e977c6b5fbf6d90b23ab4a9e8727ab10e2852699e8de94e8fb572eeb87a0cf",
       "v2-f1-e0.expect.json": "25539 41c739398eff4112f85e8b86bfd324110a4d8e9d97280dcdcaee62164156989c",
@@ -31899,6 +31936,40 @@
       "prerequisites: u32",
       "keys: kind u8 + hash [u8; 32]"
     ],
+    "history": {
+      "format": 4,
+      "minimum_classes": [
+        "read_only_compatible",
+        "incompatible"
+      ],
+      "read_formats": [
+        2,
+        3,
+        4
+      ],
+      "roots": [
+        [
+          0,
+          2,
+          9
+        ],
+        [
+          1,
+          3,
+          9
+        ],
+        [
+          2,
+          4,
+          4
+        ],
+        [
+          3,
+          4,
+          13
+        ]
+      ]
+    },
     "logical_keys": "kind: u8 || hash: [u8; 32]",
     "magic": "RDYSYNC\n",
     "order": [
@@ -31915,6 +31986,14 @@
       [
         1,
         "link_delivery"
+      ],
+      [
+        2,
+        "canon_history"
+      ],
+      [
+        3,
+        "view_history"
       ]
     ],
     "record_kinds": {
