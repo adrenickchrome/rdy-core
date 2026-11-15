@@ -31,20 +31,98 @@ pub(crate) enum PublicationCmd {
     },
 }
 
-/// The arrays of the report that a row cut can leave rows out of, link rows too: the count of
-/// rows left out, summed.
+/// The sum of the counters `names` over the rows of the array `rows`.
+fn row_omissions(rows: &Value, names: &[&str]) -> u64 {
+    rows.as_array().map_or(0, |a| {
+        a.iter()
+            .map(|r| names.iter().map(|n| num(&r[*n])).sum::<u64>())
+            .sum()
+    })
+}
+
+/// The omission counters of a doc summary's inner lists (D-RDH1C).
+const SUMMARY_OMISSIONS: [&str; 3] = [
+    "omitted_outline",
+    "omitted_decision_titles",
+    "omitted_figures",
+];
+
+/// The arrays of the report that a row cut can leave rows out of, link rows too, and the inner
+/// lists of the review's rows: the count of rows left out, summed.
 fn omitted_any(v: &Value) -> bool {
     let refs = &v["references"];
+    let d = &v["disclosure"];
     let top = num(&v["selection"]["omitted_entries"])
         + num(&refs["omitted_rows"])
         + num(&refs["links_outside"]["omitted_rows"])
+        + num(&refs["dropped_decisions"]["omitted_rows"])
         + num(&v["release"]["omitted_rows"])
         + num(&v["hidden_planned"]["omitted_rows"])
-        + num(&v["disclosure"]["newly_hidden_planned"]["omitted_rows"]);
-    let diff: u64 = v["disclosure"]["omitted"]
+        + num(&d["newly_hidden_planned"]["omitted_rows"])
+        + num(&v["included"]["omitted_rows"]);
+    let diff: u64 = d["omitted"]
         .as_object()
         .map_or(0, |o| o.values().map(num).sum());
-    top + diff > 0
+    let inner = row_omissions(
+        &d["changed_docs"],
+        &["omitted_changes", "omitted_decisions"],
+    ) + row_omissions(&d["added_docs"], &SUMMARY_OMISSIONS)
+        + row_omissions(&v["included"]["rows"], &SUMMARY_OMISSIONS);
+    top + diff + inner > 0
+}
+
+/// `n` with its noun: the singular for a count of 1 (D-MCH70).
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A doc row's title; a null title prints as the notice for removed content (D-MCH70).
+fn title(row: &Value) -> &str {
+    row["title"].as_str().unwrap_or("Content removed.")
+}
+
+/// The review's lines (D-MCH70): with a comparison, one line for each changed, added and removed
+/// doc, in the order of its list; without one, the included totals.
+fn review_lines(v: &Value) -> Vec<String> {
+    let d = &v["disclosure"];
+    let rows = |name: &str| d[name].as_array().cloned().unwrap_or_default();
+    let mut lines = vec![];
+    if d.is_object() {
+        for r in rows("changed_docs") {
+            let c = &r["counts"];
+            lines.push(if r["record_only"].as_bool().unwrap_or(false) {
+                format!("Edited {} (no change a reader sees)", title(&r))
+            } else {
+                format!(
+                    "Edited {} (blocks: {} added, {} removed, {} updated, {} moved)",
+                    title(&r),
+                    num(&c["added"]),
+                    num(&c["removed"]),
+                    num(&c["updated"]),
+                    num(&c["moved"])
+                )
+            });
+        }
+        for (word, name) in [("New", "added_docs"), ("Removed", "removed_docs")] {
+            for r in rows(name) {
+                let blocks = count(num(&r["size"]["blocks"]), "block", "blocks");
+                lines.push(format!("{word} {} ({blocks})", title(&r)));
+            }
+        }
+    }
+    let t = &v["included"]["totals"];
+    if t.is_object() {
+        lines.push(format!(
+            "Included: {}, {}, {}, {}, {}, {}.",
+            count(num(&t["docs"]), "doc", "docs"),
+            count(num(&t["folders"]), "folder", "folders"),
+            count(num(&t["sections"]), "section", "sections"),
+            count(num(&t["blocks"]), "block", "blocks"),
+            count(num(&t["decisions"]), "decision", "decisions"),
+            count(num(&t["figures"]), "figure", "figures"),
+        ));
+    }
+    lines
 }
 
 /// The listed rows of a disclosure array plus the rows the report left out: its full count.
@@ -64,8 +142,9 @@ fn hidden_line(label: &str, list: &Value) -> Option<String> {
     })
 }
 
-/// The text of a `publication_check` reply (the lines are in the order the docs list). The
-/// implicit profile (an `id` that is null) is named by its audience; a profile block by its key.
+/// The text of a `publication_check` reply (the lines are in the order the docs list), then the
+/// review's lines. The implicit profile (an `id` that is null) is named by its audience; a
+/// profile block by its key.
 fn check_text(v: &Value, asked: &str) -> String {
     let p = &v["profile"];
     let status = text(&v["status"]);
@@ -139,6 +218,7 @@ fn check_text(v: &Value, asked: &str) -> String {
             &d["newly_hidden_planned"],
         ));
     }
+    lines.extend(review_lines(v));
     if omitted_any(v) {
         lines.push("Some rows are omitted. Counts include every row.".to_string());
     }
@@ -166,6 +246,7 @@ mod tests {
     use super::*;
 
     fn report(against: bool, omitted: u64) -> Value {
+        let counts = |a: u64, r: u64, u: u64, m: u64| json!({"added": a, "removed": r, "updated": u, "moved": m});
         json!({
             "profile": {"key": "site"},
             "selection": {"blocks": 7, "docs": 2, "folders": 1, "omitted_entries": 0},
@@ -173,7 +254,11 @@ mod tests {
             "references": {"status": "warning", "total": 3, "omitted_rows": omitted},
             "disclosure": against.then(|| json!({
                 "profile_changed": true,
-                "added_docs": [{}], "removed_docs": [], "changed_docs": [{}, {}],
+                "added_docs": [{"title": "Setup", "size": {"blocks": 6}}], "removed_docs": [],
+                "changed_docs": [
+                    {"title": "Guide", "record_only": false, "counts": counts(2, 1, 3, 0)},
+                    {"title": "Notes", "record_only": true, "counts": counts(0, 0, 0, 0)}
+                ],
                 "changed_folders": [], "changed_outside_docs": [{}, {}],
                 "added_attachments": [{}], "removed_attachments": [],
                 "changed_attachments": [{}],
@@ -183,6 +268,16 @@ mod tests {
                     "added_attachments": 0, "removed_attachments": 0, "changed_attachments": 0, "new_references": 0}
             })),
         })
+    }
+
+    /// [`report`] of a first check, with the included totals the review adds.
+    fn first_report() -> Value {
+        let mut v = report(false, 0);
+        v["included"] = json!({
+            "docs": 2, "folders": 1, "rows": [], "omitted_rows": 0,
+            "totals": {"docs": 2, "folders": 1, "sections": 3, "blocks": 4, "decisions": 0, "figures": 2}
+        });
+        v
     }
 
     #[test]
@@ -221,12 +316,12 @@ mod tests {
     #[test]
     fn pub9_the_text_has_four_lines_and_a_comparison_with_full_counts() {
         assert_eq!(
-            check_text(&report(false, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0."
+            check_text(&first_report(), "site"),
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0.\nIncluded: 2 docs, 1 folder, 3 sections, 4 blocks, 0 decisions, 2 figures."
         );
         assert_eq!(
             check_text(&report(true, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 3 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nLinks outside selection: 0.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 3 changed blocks outside docs, 2 attachment changes, 5 new references.\nEdited Guide (blocks: 2 added, 1 removed, 3 updated, 0 moved)\nEdited Notes (no change a reader sees)\nNew Setup (6 blocks)\nSome rows are omitted. Counts include every row."
         );
         assert!(
             check_text(&report(false, 1), "site")
@@ -260,5 +355,121 @@ mod tests {
         w["disclosure"]["newly_hidden_planned"] =
             json!({"docs": 300, "blocks": 9, "rows": [], "omitted_rows": 100});
         assert!(check_text(&w, "site").ends_with("Counts include every row."));
+    }
+
+    /// drv6 (D-MCH70): the doc lines follow the summary in each list's order, then the included
+    /// totals of a first check. A count of 1 takes the singular noun; a null title prints as
+    /// "Content removed.".
+    #[test]
+    fn drv6_text_lists_doc_titles_and_first_totals() {
+        let mut v = report(true, 0);
+        v["disclosure"]["omitted"] = json!({});
+        v["disclosure"]["changed_docs"] = json!([
+            {"title": "Guide", "record_only": false,
+             "counts": {"added": 1, "removed": 0, "updated": 2, "moved": 1}},
+            {"title": null, "record_only": false,
+             "counts": {"added": 0, "removed": 1, "updated": 0, "moved": 0}},
+            {"title": "Quiet", "record_only": true,
+             "counts": {"added": 0, "removed": 0, "updated": 0, "moved": 0}}
+        ]);
+        v["disclosure"]["added_docs"] = json!([
+            {"title": "One", "size": {"blocks": 1}},
+            {"title": null, "size": {"blocks": 0}}
+        ]);
+        v["disclosure"]["removed_docs"] = json!([
+            {"title": "Old", "size": {"blocks": 12}},
+            {"title": "Small", "size": {"blocks": 1}}
+        ]);
+        let t = check_text(&v, "site");
+        let lines: Vec<&str> = t.lines().skip(6).collect();
+        assert_eq!(
+            lines,
+            [
+                "Edited Guide (blocks: 1 added, 0 removed, 2 updated, 1 moved)",
+                "Edited Content removed. (blocks: 0 added, 1 removed, 0 updated, 0 moved)",
+                "Edited Quiet (no change a reader sees)",
+                "New One (1 block)",
+                "New Content removed. (0 blocks)",
+                "Removed Old (12 blocks)",
+                "Removed Small (1 block)",
+            ],
+            "{t}"
+        );
+        // no list holds rows past a cap, so no omission line follows
+        assert!(!t.contains("omitted"), "{t}");
+
+        // a first check prints the included totals, with singular nouns for a count of 1
+        let mut v = first_report();
+        v["included"]["totals"] = json!({"docs": 1, "folders": 0, "sections": 1, "blocks": 1, "decisions": 1, "figures": 1});
+        assert!(
+            check_text(&v, "site").ends_with(
+                "\nIncluded: 1 doc, 0 folders, 1 section, 1 block, 1 decision, 1 figure."
+            ),
+            "{}",
+            check_text(&v, "site")
+        );
+        v["included"]["totals"] = json!({"docs": 3, "folders": 2, "sections": 0, "blocks": 9, "decisions": 4, "figures": 0});
+        assert!(check_text(&v, "site").ends_with(
+            "\nIncluded: 3 docs, 2 folders, 0 sections, 9 blocks, 4 decisions, 0 figures."
+        ));
+        // a comparison prints no included line, and a first check no doc line
+        assert!(!check_text(&report(true, 0), "site").contains("Included:"));
+        let first = check_text(&first_report(), "site");
+        assert!(
+            !first.contains("Edited") && !first.contains("New "),
+            "{first}"
+        );
+    }
+
+    /// drv6: every omission counter of the review reaches the one omission line, which does not
+    /// change.
+    #[test]
+    fn drv6_text_reports_nested_omissions() {
+        let notice = "\nSome rows are omitted. Counts include every row.";
+        let mut clean = report(true, 0);
+        clean["disclosure"]["omitted"] = json!({});
+        assert!(!check_text(&clean, "site").contains("omitted"));
+        let first = first_report();
+        assert!(!check_text(&first, "site").contains("omitted"));
+        let set = |v: &Value, path: &[&str], n: u64| {
+            let mut v = v.clone();
+            let mut at = &mut v;
+            for p in path {
+                at = match p.parse::<usize>() {
+                    Ok(i) => &mut at[i],
+                    Err(_) => &mut at[*p],
+                };
+            }
+            *at = json!(n);
+            v
+        };
+        let mut with_rows = clean.clone();
+        with_rows["disclosure"]["added_docs"][0]["omitted_outline"] = json!(0);
+        for path in [
+            &["disclosure", "changed_docs", "0", "omitted_changes"][..],
+            &["disclosure", "changed_docs", "1", "omitted_decisions"],
+            &["disclosure", "added_docs", "0", "omitted_outline"],
+            &["disclosure", "added_docs", "0", "omitted_decision_titles"],
+            &["disclosure", "added_docs", "0", "omitted_figures"],
+            &["references", "dropped_decisions", "omitted_rows"],
+        ] {
+            let v = set(&with_rows, path, 2);
+            assert!(check_text(&v, "site").ends_with(notice), "{path:?}");
+            assert!(!check_text(&set(&with_rows, path, 0), "site").contains("omitted"));
+        }
+        let mut first = first_report();
+        first["included"]["rows"] =
+            json!([{"omitted_outline": 0, "omitted_decision_titles": 0, "omitted_figures": 0}]);
+        for path in [
+            &["included", "omitted_rows"][..],
+            &["included", "rows", "0", "omitted_outline"],
+            &["included", "rows", "0", "omitted_decision_titles"],
+            &["included", "rows", "0", "omitted_figures"],
+            &["references", "dropped_decisions", "omitted_rows"],
+        ] {
+            let v = set(&first, path, 1);
+            assert!(check_text(&v, "site").ends_with(notice), "{path:?}");
+        }
+        assert!(!check_text(&first, "site").contains("omitted"));
     }
 }

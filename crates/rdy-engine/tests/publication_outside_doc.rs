@@ -696,9 +696,13 @@ fn report_lists_a_block_outside_docs() {
         .expect("the decision is retained")["version"]
         .clone();
     let d = &v["disclosure"];
+    // the review adds the decided label and the decision's own fields (D-RDH1C, D-0C4TB)
     assert_eq!(
         d["changed_outside_docs"],
-        json!([{"id": dec, "before_version": null, "after_version": version, "redacted": false}]),
+        json!([{"id": dec, "before_version": null, "after_version": version, "redacted": false,
+            "block_type": "decision", "label": "A ruling at the root.", "change": "added",
+            "what": [], "record_only": false, "title": "A ruling at the root.",
+            "status_from": null, "status_to": "live", "excerpt": "A ruling at the root."}]),
         "{d}"
     );
     assert_eq!(d["omitted"]["changed_outside_docs"], json!(0), "{d}");
@@ -764,9 +768,13 @@ fn ndh4_a_decision_in_a_selected_doc_brings_its_outside_doc_targets() {
         .unwrap_or_else(|| panic!("the finding is retained: {v}"))["version"]
         .clone();
     let d = &v["disclosure"];
+    // the review adds its type, label and record-only form: the store-only finding is no change
+    // a reader sees (D-BND1J)
     assert_eq!(
         d["changed_outside_docs"],
-        json!([{"id": f, "before_version": null, "after_version": version, "redacted": false}]),
+        json!([{"id": f, "before_version": null, "after_version": version, "redacted": false,
+            "block_type": "finding", "label": "The release changed retention.", "change": null,
+            "what": [], "record_only": true}]),
         "{d}"
     );
 }

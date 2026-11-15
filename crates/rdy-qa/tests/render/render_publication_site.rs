@@ -870,6 +870,18 @@ fn pub6_profile_metadata_references_count_in_the_check() {
             (&json!(1), &json!(0), &json!(1)),
             "{key}: {v}"
         );
+        // the review's labels may name the excluded target and the profile's doc, for the
+        // authorizer only (D-0C4TB); every other member of the check stays clean
+        let row = &refs["rows"][0];
+        assert_eq!(row["target_label"], "HIDDENCANARY doc", "{key}: {v}");
+        assert_eq!(row["source_doc_title"], "Admin page", "{key}: {v}");
+        let mut v = v.clone();
+        for k in ["source_label", "source_doc_title", "target_label"] {
+            v["references"]["rows"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(k);
+        }
         let text = v.to_string();
         assert!(text.contains(field), "{key}: {text}");
         assert!(

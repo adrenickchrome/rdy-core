@@ -1,0 +1,3707 @@
+{
+  "base_commit": "22a2e3f85a67261d0a151e0cec8df2817fddd3af",
+  "held_blobs": [
+    {
+      "bytes": "drr light one",
+      "hash": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481"
+    },
+    {
+      "bytes": "drr dark one",
+      "hash": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702"
+    },
+    {
+      "bytes": "drr light two",
+      "hash": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35"
+    }
+  ],
+  "absent_blob": {
+    "bytes": "drr blob the store lacks",
+    "hash": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3",
+    "stored": false
+  },
+  "removal_request": {
+    "bytes": "drr removal request",
+    "hash": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+  },
+  "states": [
+    {
+      "blocks": [],
+      "state": "S0-empty"
+    },
+    {
+      "blocks": [
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "name": {
+                "Str": "one"
+              }
+            },
+            "id": "d-0NE01",
+            "links": {},
+            "order": "a",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "955172249fb66c02188f4249c54e077a19237b0ad2b22c206a8604f369a0df2c"
+        }
+      ],
+      "state": "S1-one-doc"
+    },
+    {
+      "blocks": [
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "admin"
+              },
+              "title": {
+                "Str": "Doc admin"
+              }
+            },
+            "id": "d-ADM1N",
+            "links": {},
+            "order": "zz",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "4fb2973f390c8317c45d1c4d1018953a10453d71fe5098906a7908c5433e86c8"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "org"
+              },
+              "key": {
+                "Str": "site"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "fd-G1D01"
+                  },
+                  {
+                    "Str": "d-R00T1"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-S1TE1",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "08c02d49fea2d75d8065b7b9e1dce6eb2fb6b285e8791be750f165c0bbbc2358"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "public"
+              },
+              "key": {
+                "Str": "pubsite"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "fd-G1D01"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PB1C1",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "5791447192ada53619058b54f7bf52d79aa9dc89e31587d9baaa8de4502d8bf4"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "org"
+              },
+              "key": {
+                "Str": "onedoc"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-1NTR1"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-0NE01",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "5ce167bce58e3967b86afc6e6ce8bd967b1d2f890a946fd179e091e4791000d8"
+        },
+        {
+          "block": {
+            "block_type": "folder",
+            "body": "",
+            "fields": {
+              "name": {
+                "Str": "guide"
+              },
+              "title": {
+                "Str": "Folder guide"
+              }
+            },
+            "id": "fd-G1D01",
+            "links": {},
+            "order": "b",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "a07c7554197f397f687100b075a1e7b535b7536c5a3e371f39d37bf4043de9f4"
+        },
+        {
+          "block": {
+            "block_type": "folder",
+            "body": "",
+            "fields": {
+              "name": {
+                "Str": "deep"
+              },
+              "title": {
+                "Str": "Folder deep"
+              }
+            },
+            "id": "fd-SB001",
+            "links": {},
+            "order": "c",
+            "parent": "fd-G1D01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "1a84105d56f63f4b135493b88f2b4e4f5e9f6cd8264721b54e7c88d015147e92"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "intro"
+              },
+              "title": {
+                "Str": "Doc intro"
+              }
+            },
+            "id": "d-1NTR1",
+            "links": {},
+            "order": "a",
+            "parent": "fd-G1D01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "8c6a5421ceebfece45149b5fe1ffff27515c201e1878ceb3a15fb46117e5332c"
+        },
+        {
+          "block": {
+            "block_type": "term",
+            "body": "The `work` term.",
+            "fields": {
+              "everyday": {
+                "Str": "A job."
+              },
+              "name": {
+                "Str": "Work"
+              }
+            },
+            "id": "t-TERM1",
+            "links": {},
+            "order": "a",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "2916f484df4a01b41d3db36ecbeb3eaa2e18a8eb12d71fddd94fc91bd71d0477"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "title": {
+                "Str": "First section"
+              }
+            },
+            "id": "s-SEC01",
+            "links": {},
+            "order": "b",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "3545cef386dc414decf59bbe9510e1ba2bf66ebcf0c9056e53ff631a590aec66"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Some prose with Unicode é ✓.",
+            "fields": {},
+            "id": "p-PR0S1",
+            "links": {
+              "references": [
+                {
+                  "part": null,
+                  "target": "t-TERM1"
+                }
+              ]
+            },
+            "order": "a",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "1aa6bc06d24732fe88e0281abd5b4ce7bc454532e5339938e6e243ef560cbfe4"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Prose with a part link.",
+            "fields": {},
+            "id": "p-PR0S2",
+            "links": {
+              "references": [
+                {
+                  "part": "name",
+                  "target": "t-TERM1"
+                }
+              ]
+            },
+            "order": "b",
+            "parent": "s-SEC01",
+            "pins": {
+              "t-TERM1": [
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34,
+                34
+              ]
+            }
+          },
+          "redacted": false,
+          "version_hash": "f80a4f7ba86451cd84c2235e51556be6cdc85e790aa0d1874265e7170e8687c3"
+        },
+        {
+          "block": {
+            "block_type": "value",
+            "body": "",
+            "fields": {
+              "name": {
+                "Str": "Limit"
+              },
+              "unit": {
+                "Str": "bytes"
+              },
+              "value": {
+                "Int": 9007199254740993
+              }
+            },
+            "id": "v-VA101",
+            "links": {},
+            "order": "c",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "fa9af3fe7b5205a81856ea7a7f43f70b0b1fd767ef81483e286c1a12017189db"
+        },
+        {
+          "block": {
+            "block_type": "table",
+            "body": "",
+            "fields": {
+              "columns": {
+                "List": [
+                  {
+                    "Str": "a"
+                  },
+                  {
+                    "Str": "b"
+                  }
+                ]
+              },
+              "rows": {
+                "List": [
+                  {
+                    "List": [
+                      {
+                        "Str": "1"
+                      },
+                      {
+                        "Str": "2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "id": "tb-TAB01",
+            "links": {},
+            "order": "d",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "3890df2e109228656fa2a0af98bace9a1600b4138c3fe3deec7116ec014a707a"
+        },
+        {
+          "block": {
+            "block_type": "figure",
+            "body": "",
+            "fields": {
+              "alt": {
+                "Str": "Alt of fg-F1G01"
+              },
+              "blob": {
+                "Str": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481"
+              },
+              "dark_blob": {
+                "Str": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702"
+              },
+              "media_type": {
+                "Str": "image/png"
+              }
+            },
+            "id": "fg-F1G01",
+            "links": {},
+            "order": "c",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "9f4a87e9c2b603eeeec74294d305eeff245bd5515913f25811bef388f943fd19"
+        },
+        {
+          "block": {
+            "block_type": "figure",
+            "body": "",
+            "fields": {
+              "alt": {
+                "Str": "Alt of fg-F1G02"
+              },
+              "blob": {
+                "Str": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35"
+              },
+              "media_type": {
+                "Str": "image/png"
+              }
+            },
+            "id": "fg-F1G02",
+            "links": {},
+            "order": "d",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "c88630afbbb5c12c91bfcc954fbf5557e0895ecfcce25bd85d4331e0802326f2"
+        },
+        {
+          "block": {
+            "block_type": "figure",
+            "body": "",
+            "fields": {
+              "alt": {
+                "Str": "Alt of fg-F1G03"
+              },
+              "blob": {
+                "Str": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3"
+              },
+              "media_type": {
+                "Str": "image/png"
+              }
+            },
+            "id": "fg-F1G03",
+            "links": {},
+            "order": "e",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "fa224ac6bee22434a26dcd828852056cf753850675c5269f434d70e38c49e176"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "",
+            "fields": {
+              "built": {
+                "Str": "1.0.0"
+              },
+              "statement": {
+                "Str": "Ruling D-DEC01"
+              },
+              "status": {
+                "Str": "accepted"
+              }
+            },
+            "id": "D-DEC01",
+            "links": {},
+            "order": "f",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "c7f0fbbca4bf91109f933cfc3037c1d7dbd02c0a438c111ab6afdd2e5158f450"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "",
+            "fields": {
+              "statement": {
+                "Str": "Ruling D-DEC02"
+              },
+              "status": {
+                "Str": "accepted"
+              }
+            },
+            "id": "D-DEC02",
+            "links": {},
+            "order": "g",
+            "parent": "d-1NTR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "a449292f2f0fa36311abcf2a7b0b48cbb9463c69d33172ca71cb641e6829425f"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "reference"
+              },
+              "name": {
+                "Str": "nested"
+              },
+              "title": {
+                "Str": "Doc nested"
+              }
+            },
+            "id": "d-DEEP1",
+            "links": {},
+            "order": "a",
+            "parent": "fd-SB001",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "0358204b8c2cf82498cd57e7e9acc389ebbc9fc5474843271ee0220d393e744b"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "title": {
+                "Str": "Nested section"
+              }
+            },
+            "id": "s-SEC02",
+            "links": {},
+            "order": "a",
+            "parent": "d-DEEP1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "b38b60239372b05c40224b4c3846556a0bfb344cf81f3d959e29a7aba654e939"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "title": {
+                "Str": "Inner section"
+              }
+            },
+            "id": "s-SEC03",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC02",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "2421f1dcedd548cb342e41316d060b522eeeec0a3ed350d812e24bac29a7d4ca"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Deep prose.",
+            "fields": {},
+            "id": "p-PR0S3",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC03",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "f89c980917ff34f3a0ab555edfea7df14aa3db70794c00ec28a32da06366536e"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "rootdoc"
+              },
+              "title": {
+                "Str": "Doc rootdoc"
+              }
+            },
+            "id": "d-R00T1",
+            "links": {},
+            "order": "a",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "c771e86af68f0979d515643e6077a7d00f9d44c544b7c111a215673ccb275da1"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Root prose.",
+            "fields": {},
+            "id": "p-PR0S4",
+            "links": {},
+            "order": "a",
+            "parent": "d-R00T1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "94d2637a3c1f2ade1779a4ec6bfdae0a0d9f26f0518a0f568b2fac13eab16709"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "glossary"
+              },
+              "title": {
+                "Str": "Doc glossary"
+              }
+            },
+            "id": "d-G10S1",
+            "links": {},
+            "order": "d",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "28b39008067d40e377e6f5b238ebdd15c28b8ff70922bc83fce6ffbd36c95677"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "",
+            "fields": {
+              "built": {
+                "Str": "2.0.0"
+              },
+              "statement": {
+                "Str": "Ruling D-0TT01"
+              },
+              "status": {
+                "Str": "accepted"
+              }
+            },
+            "id": "D-0TT01",
+            "links": {},
+            "order": "y",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "bc2c31c554101e6b19ea3f5b26e5457ec7f4aba485d7c207d2f66a94f97678d9"
+        }
+      ],
+      "state": "S2-rich"
+    },
+    {
+      "blocks": [
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "admin"
+              },
+              "title": {
+                "Str": "Doc admin"
+              }
+            },
+            "id": "d-ADM1N",
+            "links": {},
+            "order": "a",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "096e6d05fbe3230dc99a776066915865f494aedc04af328e34b08e9cdabe3d48"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "public"
+              },
+              "key": {
+                "Str": "pubsite"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-PRP01"
+                  },
+                  {
+                    "Str": "d-EMPT1"
+                  },
+                  {
+                    "Str": "d-SHW01"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC01",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "b870f51dbef7ed509a70d19b2071154ac0cde510d3161354871cb02c4278a4f4"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "public"
+              },
+              "key": {
+                "Str": "nothing"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-EMPT1"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC02",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "d704763df0c5f562052eaa984a2407fdef7d72d976b4a83ef7cc3c91d5b1ddee"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "org"
+              },
+              "key": {
+                "Str": "orgsite"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-PRP01"
+                  },
+                  {
+                    "Str": "d-EMPT1"
+                  },
+                  {
+                    "Str": "d-SHW01"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC03",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "05e92d73edc9046853ce9ed0111c5d5a90c5bf600143c0ba3486a63e0448cf1f"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "public"
+              },
+              "key": {
+                "Str": "showall"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-PRP01"
+                  },
+                  {
+                    "Str": "d-EMPT1"
+                  },
+                  {
+                    "Str": "d-SHW01"
+                  }
+                ]
+              },
+              "since": {
+                "Str": "show"
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC04",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "ad0e80b00c0d7326111aede20581fbad048744432e704d16ebbdacc0278f1699"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "public"
+              },
+              "key": {
+                "Str": "quiet"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-PRP01"
+                  },
+                  {
+                    "Str": "d-EMPT1"
+                  },
+                  {
+                    "Str": "d-SHW01"
+                  }
+                ]
+              },
+              "since": {
+                "Str": "off"
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC05",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "be0ecde5e78b41fd91112a1e3ceccc6c1df66b18fc747f59bdf8014ab6d324c3"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "org"
+              },
+              "key": {
+                "Str": "orghide"
+              },
+              "planned": {
+                "Str": "hide"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "d-PRP01"
+                  },
+                  {
+                    "Str": "d-EMPT1"
+                  },
+                  {
+                    "Str": "d-SHW01"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-PBC06",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "616acb58ad78322b70b78616a1125f7693908b47a8603d85073de2e81e5117a0"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "Secret doc body.",
+            "fields": {
+              "doc_type": {
+                "Str": "reference"
+              },
+              "lifecycle": {
+                "Str": "draft"
+              },
+              "name": {
+                "Str": "plan"
+              },
+              "planned": {
+                "Bool": true
+              },
+              "title": {
+                "Str": "Doc plan"
+              }
+            },
+            "id": "d-PRP01",
+            "links": {
+              "decided_by": [
+                {
+                  "part": null,
+                  "target": "D-DT001"
+                }
+              ]
+            },
+            "order": "b",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "Secret section text.",
+            "fields": {
+              "lifecycle": {
+                "Str": "draft"
+              },
+              "title": {
+                "Str": "Sec one"
+              }
+            },
+            "id": "s-SEC01",
+            "links": {
+              "decided_by": [
+                {
+                  "part": null,
+                  "target": "D-DT001"
+                }
+              ]
+            },
+            "order": "a",
+            "parent": "d-PRP01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "block": {
+            "block_type": "note",
+            "body": "Shipped one.",
+            "fields": {
+              "since": {
+                "Str": "v1.2.0"
+              }
+            },
+            "id": "n-SHP01",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "title": {
+                "Str": "Sec two"
+              }
+            },
+            "id": "s-SEC02",
+            "links": {},
+            "order": "b",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "c245694396cebbec3d89c1b0ee1d3730c2ff69537a617a650d6c045ea2dcf828"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Gone two.",
+            "fields": {},
+            "id": "p-G0NE2",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC02",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "2e4b9feed7b9f4cfec5d5bc3d4d48a43c811d2b21cd30a1ce096f21b5108c12d"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "title": {
+                "Str": "Sec three"
+              }
+            },
+            "id": "s-SEC03",
+            "links": {},
+            "order": "c",
+            "parent": "s-SEC01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "",
+            "fields": {
+              "built": {
+                "Str": "planned"
+              },
+              "statement": {
+                "Str": "Ruling D-1N001"
+              },
+              "status": {
+                "Str": "accepted"
+              }
+            },
+            "id": "D-1N001",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC03",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Gone one.",
+            "fields": {},
+            "id": "p-G0NE1",
+            "links": {},
+            "order": "b",
+            "parent": "d-PRP01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "9eb84548129b2d9408a30599d2836d153e5fe960b7d80ce636ca807f2f528cb9"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "Content removed.",
+            "fields": {},
+            "id": "s-STB01",
+            "links": {},
+            "order": "m",
+            "parent": "d-PRP01",
+            "pins": {}
+          },
+          "redacted": true,
+          "stub": {
+            "constructor": "Block::redacted(id, type, parent, order, RedactedBlockIdentity { version, content_hash, frozen, request })",
+            "content_hash": {
+              "hash": "c1009e5c779e963081359d9a892ea60584e0dfa2a98abe30488125d892b92761",
+              "of_bytes": "content of s-STB01"
+            },
+            "frozen": false,
+            "order": "m",
+            "request": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+            "version": {
+              "hash": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4",
+              "of_bytes": "version of s-STB01"
+            }
+          },
+          "version_hash": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        },
+        {
+          "block": {
+            "block_type": "note",
+            "body": "Shipped three.",
+            "fields": {
+              "since": {
+                "Str": "1.0.0"
+              }
+            },
+            "id": "n-SHP03",
+            "links": {},
+            "order": "a",
+            "parent": "s-STB01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "all"
+              },
+              "planned": {
+                "Bool": true
+              },
+              "title": {
+                "Str": "Doc all"
+              }
+            },
+            "id": "d-EMPT1",
+            "links": {},
+            "order": "c",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "58bfb155216ff4e4fba4b6ee7e6a88e9a9f06d964856c02fc30442a6be61bdd5"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Gone three.",
+            "fields": {},
+            "id": "p-G0NE3",
+            "links": {},
+            "order": "a",
+            "parent": "d-EMPT1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "8fca2056c05a560b3011f4d2d7441a27a63d6c5836c23be2a88e32d4c2d850e2"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "shown"
+              },
+              "title": {
+                "Str": "Doc shown"
+              }
+            },
+            "id": "d-SHW01",
+            "links": {},
+            "order": "d",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "block": {
+            "block_type": "section",
+            "body": "",
+            "fields": {
+              "planned": {
+                "Bool": true
+              },
+              "title": {
+                "Str": "Sec four"
+              }
+            },
+            "id": "s-SEC04",
+            "links": {},
+            "order": "a",
+            "parent": "d-SHW01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "block": {
+            "block_type": "note",
+            "body": "Shipped two.",
+            "fields": {
+              "since": {
+                "Str": "2.0.0"
+              }
+            },
+            "id": "n-SHP02",
+            "links": {},
+            "order": "a",
+            "parent": "s-SEC04",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "block": {
+            "block_type": "memo",
+            "body": "Planned memo.",
+            "fields": {
+              "planned": {
+                "Bool": true
+              }
+            },
+            "id": "mm-MEM01",
+            "links": {},
+            "order": "b",
+            "parent": "d-SHW01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "3800f9961986d742c1c3342636e70c89bde70eb31ecaeed55e8e78b55b1cbb73"
+        },
+        {
+          "block": {
+            "block_type": "memo",
+            "body": "Shipped memo.",
+            "fields": {
+              "since": {
+                "Str": "3.0.0-rc.1"
+              }
+            },
+            "id": "mm-MEM02",
+            "links": {},
+            "order": "c",
+            "parent": "d-SHW01",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "other"
+              },
+              "title": {
+                "Str": "Doc other"
+              }
+            },
+            "id": "d-0THR1",
+            "links": {},
+            "order": "e",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "853f95b535d04852a9ef7ccb0a601cec62648764c98da54afc17a5e1358f0a90"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "",
+            "fields": {
+              "built": {
+                "Str": "1.0.0"
+              },
+              "statement": {
+                "Str": "Ruling D-DT001"
+              },
+              "status": {
+                "Str": "accepted"
+              }
+            },
+            "id": "D-DT001",
+            "links": {},
+            "order": "a",
+            "parent": "d-0THR1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "92433387c74f30e4c7794811be11a5b3e1a5beea2a56546c509b5d2f140ae7ca"
+        }
+      ],
+      "state": "S3-planned"
+    },
+    {
+      "blocks": [
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "admin"
+              },
+              "title": {
+                "Str": "Doc admin"
+              }
+            },
+            "id": "d-ADM1N",
+            "links": {},
+            "order": "zz",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "4fb2973f390c8317c45d1c4d1018953a10453d71fe5098906a7908c5433e86c8"
+        },
+        {
+          "block": {
+            "block_type": "publication_profile",
+            "body": "",
+            "fields": {
+              "audience": {
+                "Str": "org"
+              },
+              "key": {
+                "Str": "redsite"
+              },
+              "select": {
+                "List": [
+                  {
+                    "Str": "fd-RF1D1"
+                  },
+                  {
+                    "Str": "d-RD0C2"
+                  }
+                ]
+              },
+              "title": {
+                "Str": "Profile title"
+              }
+            },
+            "id": "pf-RED01",
+            "links": {},
+            "order": "z",
+            "parent": "d-ADM1N",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "dc02f54d85a8fc1fd2e7f3c9971eb4d6b3ef3750f0f3198eaa153da6de99d0ae"
+        },
+        {
+          "block": {
+            "block_type": "folder",
+            "body": "Content removed.",
+            "fields": {},
+            "id": "fd-RF1D1",
+            "links": {},
+            "order": "m",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": true,
+          "stub": {
+            "constructor": "Block::redacted(id, type, parent, order, RedactedBlockIdentity { version, content_hash, frozen, request })",
+            "content_hash": {
+              "hash": "e5c7570385d0723441f324d17d69878b399b3d0b7402f3406a1a91f3f4f0cbb9",
+              "of_bytes": "content of fd-RF1D1"
+            },
+            "frozen": false,
+            "order": "m",
+            "request": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+            "version": {
+              "hash": "616dcfdc5a30b5c9d3f5994b53899e31627dfb136eeb415a947689e93838eddf",
+              "of_bytes": "version of fd-RF1D1"
+            }
+          },
+          "version_hash": "616dcfdc5a30b5c9d3f5994b53899e31627dfb136eeb415a947689e93838eddf"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "",
+            "fields": {
+              "doc_type": {
+                "Str": "page"
+              },
+              "name": {
+                "Str": "underremoved"
+              },
+              "title": {
+                "Str": "Doc underremoved"
+              }
+            },
+            "id": "d-RD0C1",
+            "links": {},
+            "order": "a",
+            "parent": "fd-RF1D1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "90cd7fbe6cb954b0cd75b9d23c43a41da35f4ffe81072c30f0e3ccda36f23e18"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Kept prose.",
+            "fields": {},
+            "id": "p-KEEP1",
+            "links": {},
+            "order": "a",
+            "parent": "d-RD0C1",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "6ab432636e9f39a3a984630d62f58d76de3c3836da4b39f84790ccb486c89b64"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Content removed.",
+            "fields": {},
+            "id": "p-G0NE1",
+            "links": {},
+            "order": "m",
+            "parent": "d-RD0C1",
+            "pins": {}
+          },
+          "redacted": true,
+          "stub": {
+            "constructor": "Block::redacted(id, type, parent, order, RedactedBlockIdentity { version, content_hash, frozen, request })",
+            "content_hash": {
+              "hash": "62ad2a09d7f1711cd5de33b0bbb9bb0581844778eab1c28867aca0bc34fd0626",
+              "of_bytes": "content of p-G0NE1"
+            },
+            "frozen": false,
+            "order": "m",
+            "request": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+            "version": {
+              "hash": "fd191ef1834a52e2693f49f696193a7e5351b6ed2ee17a515f75e993ad892ab6",
+              "of_bytes": "version of p-G0NE1"
+            }
+          },
+          "version_hash": "fd191ef1834a52e2693f49f696193a7e5351b6ed2ee17a515f75e993ad892ab6"
+        },
+        {
+          "block": {
+            "block_type": "doc",
+            "body": "Content removed.",
+            "fields": {},
+            "id": "d-RD0C2",
+            "links": {},
+            "order": "m",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": true,
+          "stub": {
+            "constructor": "Block::redacted(id, type, parent, order, RedactedBlockIdentity { version, content_hash, frozen, request })",
+            "content_hash": {
+              "hash": "5b560d520ad2fe91b0bd888527b51817e485393f46beebaa5e33c260a50b4190",
+              "of_bytes": "content of d-RD0C2"
+            },
+            "frozen": false,
+            "order": "m",
+            "request": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+            "version": {
+              "hash": "c6e64a3d9c9aaed87257e1ad51955f064b7019e460f4d8eb37f766532d3fa2ee",
+              "of_bytes": "version of d-RD0C2"
+            }
+          },
+          "version_hash": "c6e64a3d9c9aaed87257e1ad51955f064b7019e460f4d8eb37f766532d3fa2ee"
+        },
+        {
+          "block": {
+            "block_type": "prose",
+            "body": "Kept under a removed doc.",
+            "fields": {},
+            "id": "p-KEEP2",
+            "links": {},
+            "order": "a",
+            "parent": "d-RD0C2",
+            "pins": {}
+          },
+          "redacted": false,
+          "version_hash": "f5adb814e9f45c42bb45510c6848124162b99957ba384267690582a213a7ae0a"
+        },
+        {
+          "block": {
+            "block_type": "decision",
+            "body": "Content removed.",
+            "fields": {},
+            "id": "D-R0TT1",
+            "links": {},
+            "order": "m",
+            "parent": null,
+            "pins": {}
+          },
+          "redacted": true,
+          "stub": {
+            "constructor": "Block::redacted(id, type, parent, order, RedactedBlockIdentity { version, content_hash, frozen, request })",
+            "content_hash": {
+              "hash": "10e4a546fd60fdf737db6a18bbc3e3375c5c9fa9f0d656b80dbeea8e1222a153",
+              "of_bytes": "content of D-R0TT1"
+            },
+            "frozen": false,
+            "order": "m",
+            "request": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+            "version": {
+              "hash": "c58d41e3dda6c47e69698a3d0298f3c26cb6934e89af61d6673989226c6ab76c",
+              "of_bytes": "version of D-R0TT1"
+            }
+          },
+          "version_hash": "c58d41e3dda6c47e69698a3d0298f3c26cb6934e89af61d6673989226c6ab76c"
+        }
+      ],
+      "state": "S4-removals"
+    }
+  ],
+  "cases": [
+    {
+      "as_built": {},
+      "attachments": [],
+      "case": "S0-implicit",
+      "docs": [],
+      "entries": [],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": null,
+        "key": null,
+        "planned": "Mark",
+        "since": "None",
+        "version": null
+      },
+      "profile_request": "implicit:org",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "cc99701fd4a8e62f055c5134d20688f195c728399d235f404911e6351d7a3a24",
+      "selection_identity": "9230b0aa2486bd0655af576f154b1ebd335afaf05d31b72d3f60e3ec81bb91da",
+      "shells": [],
+      "state": "S0-empty"
+    },
+    {
+      "as_built": {},
+      "attachments": [],
+      "case": "S1-implicit",
+      "docs": [
+        {
+          "digest": "2c3a5e2862ed311b9728e728cbb5aae6397138ee62b1884b56961143cd1eb673",
+          "id": "d-0NE01",
+          "path": "one",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "d-0NE01",
+          "redaction": null,
+          "version": "955172249fb66c02188f4249c54e077a19237b0ad2b22c206a8604f369a0df2c"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": null,
+        "key": null,
+        "planned": "Mark",
+        "since": "None",
+        "version": null
+      },
+      "profile_request": "implicit:org",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "efe5e4bdf8217df40d3128593e7fced2dc0e3a4ad0c749b28ae73489904253e1",
+      "selection_identity": "204fdf019c953a859d2d9bc4f2a577783bcd718a6cf4e0170b19b487a67671e6",
+      "shells": [],
+      "state": "S1-one-doc"
+    },
+    {
+      "as_built": {
+        "fg-F1G01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S3": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S4": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "t-TERM1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "tb-TAB01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "v-VA101": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [
+        {
+          "available": true,
+          "blob": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": true,
+          "blob": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": "dark"
+        },
+        {
+          "available": true,
+          "blob": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35",
+          "block": "fg-F1G02",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": false,
+          "blob": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3",
+          "block": "fg-F1G03",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        }
+      ],
+      "case": "S2-implicit",
+      "docs": [
+        {
+          "digest": "2f0ef4663131d90dedca9ed7260877f0b6ce981bbbaaf6ecf86b1b5067ab7e76",
+          "id": "d-1NTR1",
+          "path": "guide/intro",
+          "redacted": false
+        },
+        {
+          "digest": "e117224fd3601beff56935d82d84e5b9f375a3028d8c1176feea9aa04b432990",
+          "id": "d-ADM1N",
+          "path": "admin",
+          "redacted": false
+        },
+        {
+          "digest": "27dc6c04a7f59ebf319a7ea893bfef2f6039b139b7d7c6cb76eef19c1370a573",
+          "id": "d-DEEP1",
+          "path": "guide/deep/nested",
+          "redacted": false
+        },
+        {
+          "digest": "c699b568bc905411bd605193056746354dbcbf5dafb348739526c81465ad6421",
+          "id": "d-G10S1",
+          "path": "glossary",
+          "redacted": false
+        },
+        {
+          "digest": "a0486316940ad844b93a95f54a6477093c81e9c542fa81a52ca955f05b1a9180",
+          "id": "d-R00T1",
+          "path": "rootdoc",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-0TT01",
+          "redaction": null,
+          "version": "bc2c31c554101e6b19ea3f5b26e5457ec7f4aba485d7c207d2f66a94f97678d9"
+        },
+        {
+          "id": "D-DEC01",
+          "redaction": null,
+          "version": "c7f0fbbca4bf91109f933cfc3037c1d7dbd02c0a438c111ab6afdd2e5158f450"
+        },
+        {
+          "id": "D-DEC02",
+          "redaction": null,
+          "version": "a449292f2f0fa36311abcf2a7b0b48cbb9463c69d33172ca71cb641e6829425f"
+        },
+        {
+          "id": "d-1NTR1",
+          "redaction": null,
+          "version": "8c6a5421ceebfece45149b5fe1ffff27515c201e1878ceb3a15fb46117e5332c"
+        },
+        {
+          "id": "d-ADM1N",
+          "redaction": null,
+          "version": "4fb2973f390c8317c45d1c4d1018953a10453d71fe5098906a7908c5433e86c8"
+        },
+        {
+          "id": "d-DEEP1",
+          "redaction": null,
+          "version": "0358204b8c2cf82498cd57e7e9acc389ebbc9fc5474843271ee0220d393e744b"
+        },
+        {
+          "id": "d-G10S1",
+          "redaction": null,
+          "version": "28b39008067d40e377e6f5b238ebdd15c28b8ff70922bc83fce6ffbd36c95677"
+        },
+        {
+          "id": "d-R00T1",
+          "redaction": null,
+          "version": "c771e86af68f0979d515643e6077a7d00f9d44c544b7c111a215673ccb275da1"
+        },
+        {
+          "id": "fd-G1D01",
+          "redaction": null,
+          "version": "a07c7554197f397f687100b075a1e7b535b7536c5a3e371f39d37bf4043de9f4"
+        },
+        {
+          "id": "fd-SB001",
+          "redaction": null,
+          "version": "1a84105d56f63f4b135493b88f2b4e4f5e9f6cd8264721b54e7c88d015147e92"
+        },
+        {
+          "id": "fg-F1G01",
+          "redaction": null,
+          "version": "9f4a87e9c2b603eeeec74294d305eeff245bd5515913f25811bef388f943fd19"
+        },
+        {
+          "id": "fg-F1G02",
+          "redaction": null,
+          "version": "c88630afbbb5c12c91bfcc954fbf5557e0895ecfcce25bd85d4331e0802326f2"
+        },
+        {
+          "id": "fg-F1G03",
+          "redaction": null,
+          "version": "fa224ac6bee22434a26dcd828852056cf753850675c5269f434d70e38c49e176"
+        },
+        {
+          "id": "p-PR0S1",
+          "redaction": null,
+          "version": "1aa6bc06d24732fe88e0281abd5b4ce7bc454532e5339938e6e243ef560cbfe4"
+        },
+        {
+          "id": "p-PR0S2",
+          "redaction": null,
+          "version": "f80a4f7ba86451cd84c2235e51556be6cdc85e790aa0d1874265e7170e8687c3"
+        },
+        {
+          "id": "p-PR0S3",
+          "redaction": null,
+          "version": "f89c980917ff34f3a0ab555edfea7df14aa3db70794c00ec28a32da06366536e"
+        },
+        {
+          "id": "p-PR0S4",
+          "redaction": null,
+          "version": "94d2637a3c1f2ade1779a4ec6bfdae0a0d9f26f0518a0f568b2fac13eab16709"
+        },
+        {
+          "id": "pf-0NE01",
+          "redaction": null,
+          "version": "5ce167bce58e3967b86afc6e6ce8bd967b1d2f890a946fd179e091e4791000d8"
+        },
+        {
+          "id": "pf-PB1C1",
+          "redaction": null,
+          "version": "5791447192ada53619058b54f7bf52d79aa9dc89e31587d9baaa8de4502d8bf4"
+        },
+        {
+          "id": "pf-S1TE1",
+          "redaction": null,
+          "version": "08c02d49fea2d75d8065b7b9e1dce6eb2fb6b285e8791be750f165c0bbbc2358"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "3545cef386dc414decf59bbe9510e1ba2bf66ebcf0c9056e53ff631a590aec66"
+        },
+        {
+          "id": "s-SEC02",
+          "redaction": null,
+          "version": "b38b60239372b05c40224b4c3846556a0bfb344cf81f3d959e29a7aba654e939"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "2421f1dcedd548cb342e41316d060b522eeeec0a3ed350d812e24bac29a7d4ca"
+        },
+        {
+          "id": "t-TERM1",
+          "redaction": null,
+          "version": "2916f484df4a01b41d3db36ecbeb3eaa2e18a8eb12d71fddd94fc91bd71d0477"
+        },
+        {
+          "id": "tb-TAB01",
+          "redaction": null,
+          "version": "3890df2e109228656fa2a0af98bace9a1600b4138c3fe3deec7116ec014a707a"
+        },
+        {
+          "id": "v-VA101",
+          "redaction": null,
+          "version": "fa9af3fe7b5205a81856ea7a7f43f70b0b1fd767ef81483e286c1a12017189db"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": null,
+        "key": null,
+        "planned": "Mark",
+        "since": "None",
+        "version": null
+      },
+      "profile_request": "implicit:org",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "aeeebcc3bb0ae3169e9d5d963f74b79722ac44b8f1f1d08b4a943c5f46df0c8e",
+      "selection_identity": "eafd93f29ce6b74a0b20784060ff19f02d8239896482062beb947fa8c4568512",
+      "shells": [],
+      "state": "S2-rich"
+    },
+    {
+      "as_built": {
+        "fg-F1G01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S3": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S4": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "t-TERM1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "tb-TAB01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "v-VA101": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [
+        {
+          "available": true,
+          "blob": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": true,
+          "blob": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": "dark"
+        },
+        {
+          "available": true,
+          "blob": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35",
+          "block": "fg-F1G02",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": false,
+          "blob": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3",
+          "block": "fg-F1G03",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        }
+      ],
+      "case": "S2-site",
+      "docs": [
+        {
+          "digest": "2f0ef4663131d90dedca9ed7260877f0b6ce981bbbaaf6ecf86b1b5067ab7e76",
+          "id": "d-1NTR1",
+          "path": "guide/intro",
+          "redacted": false
+        },
+        {
+          "digest": "27dc6c04a7f59ebf319a7ea893bfef2f6039b139b7d7c6cb76eef19c1370a573",
+          "id": "d-DEEP1",
+          "path": "guide/deep/nested",
+          "redacted": false
+        },
+        {
+          "digest": "a0486316940ad844b93a95f54a6477093c81e9c542fa81a52ca955f05b1a9180",
+          "id": "d-R00T1",
+          "path": "rootdoc",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-DEC01",
+          "redaction": null,
+          "version": "c7f0fbbca4bf91109f933cfc3037c1d7dbd02c0a438c111ab6afdd2e5158f450"
+        },
+        {
+          "id": "D-DEC02",
+          "redaction": null,
+          "version": "a449292f2f0fa36311abcf2a7b0b48cbb9463c69d33172ca71cb641e6829425f"
+        },
+        {
+          "id": "d-1NTR1",
+          "redaction": null,
+          "version": "8c6a5421ceebfece45149b5fe1ffff27515c201e1878ceb3a15fb46117e5332c"
+        },
+        {
+          "id": "d-DEEP1",
+          "redaction": null,
+          "version": "0358204b8c2cf82498cd57e7e9acc389ebbc9fc5474843271ee0220d393e744b"
+        },
+        {
+          "id": "d-R00T1",
+          "redaction": null,
+          "version": "c771e86af68f0979d515643e6077a7d00f9d44c544b7c111a215673ccb275da1"
+        },
+        {
+          "id": "fd-G1D01",
+          "redaction": null,
+          "version": "a07c7554197f397f687100b075a1e7b535b7536c5a3e371f39d37bf4043de9f4"
+        },
+        {
+          "id": "fd-SB001",
+          "redaction": null,
+          "version": "1a84105d56f63f4b135493b88f2b4e4f5e9f6cd8264721b54e7c88d015147e92"
+        },
+        {
+          "id": "fg-F1G01",
+          "redaction": null,
+          "version": "9f4a87e9c2b603eeeec74294d305eeff245bd5515913f25811bef388f943fd19"
+        },
+        {
+          "id": "fg-F1G02",
+          "redaction": null,
+          "version": "c88630afbbb5c12c91bfcc954fbf5557e0895ecfcce25bd85d4331e0802326f2"
+        },
+        {
+          "id": "fg-F1G03",
+          "redaction": null,
+          "version": "fa224ac6bee22434a26dcd828852056cf753850675c5269f434d70e38c49e176"
+        },
+        {
+          "id": "p-PR0S1",
+          "redaction": null,
+          "version": "1aa6bc06d24732fe88e0281abd5b4ce7bc454532e5339938e6e243ef560cbfe4"
+        },
+        {
+          "id": "p-PR0S2",
+          "redaction": null,
+          "version": "f80a4f7ba86451cd84c2235e51556be6cdc85e790aa0d1874265e7170e8687c3"
+        },
+        {
+          "id": "p-PR0S3",
+          "redaction": null,
+          "version": "f89c980917ff34f3a0ab555edfea7df14aa3db70794c00ec28a32da06366536e"
+        },
+        {
+          "id": "p-PR0S4",
+          "redaction": null,
+          "version": "94d2637a3c1f2ade1779a4ec6bfdae0a0d9f26f0518a0f568b2fac13eab16709"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "3545cef386dc414decf59bbe9510e1ba2bf66ebcf0c9056e53ff631a590aec66"
+        },
+        {
+          "id": "s-SEC02",
+          "redaction": null,
+          "version": "b38b60239372b05c40224b4c3846556a0bfb344cf81f3d959e29a7aba654e939"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "2421f1dcedd548cb342e41316d060b522eeeec0a3ed350d812e24bac29a7d4ca"
+        },
+        {
+          "id": "t-TERM1",
+          "redaction": null,
+          "version": "2916f484df4a01b41d3db36ecbeb3eaa2e18a8eb12d71fddd94fc91bd71d0477"
+        },
+        {
+          "id": "tb-TAB01",
+          "redaction": null,
+          "version": "3890df2e109228656fa2a0af98bace9a1600b4138c3fe3deec7116ec014a707a"
+        },
+        {
+          "id": "v-VA101",
+          "redaction": null,
+          "version": "fa9af3fe7b5205a81856ea7a7f43f70b0b1fd767ef81483e286c1a12017189db"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": "pf-S1TE1",
+        "key": "site",
+        "planned": "Mark",
+        "since": "None",
+        "version": "08c02d49fea2d75d8065b7b9e1dce6eb2fb6b285e8791be750f165c0bbbc2358"
+      },
+      "profile_request": "site",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "dcf95a4fe6b260495ba576907d5a89ddd3a9c4ed0d45d4f410257a90d533af6d",
+      "selection_identity": "f79a0b50803fa0d7a0ba476b9db8559bdd4c3d158f27b146562e91f284a0ba71",
+      "shells": [],
+      "state": "S2-rich"
+    },
+    {
+      "as_built": {
+        "fg-F1G01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S3": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "t-TERM1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "tb-TAB01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "v-VA101": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [
+        {
+          "available": true,
+          "blob": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": true,
+          "blob": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": "dark"
+        },
+        {
+          "available": true,
+          "blob": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35",
+          "block": "fg-F1G02",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": false,
+          "blob": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3",
+          "block": "fg-F1G03",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        }
+      ],
+      "case": "S2-pubsite",
+      "docs": [
+        {
+          "digest": "2f0ef4663131d90dedca9ed7260877f0b6ce981bbbaaf6ecf86b1b5067ab7e76",
+          "id": "d-1NTR1",
+          "path": "guide/intro",
+          "redacted": false
+        },
+        {
+          "digest": "27dc6c04a7f59ebf319a7ea893bfef2f6039b139b7d7c6cb76eef19c1370a573",
+          "id": "d-DEEP1",
+          "path": "guide/deep/nested",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-DEC01",
+          "redaction": null,
+          "version": "c7f0fbbca4bf91109f933cfc3037c1d7dbd02c0a438c111ab6afdd2e5158f450"
+        },
+        {
+          "id": "D-DEC02",
+          "redaction": null,
+          "version": "a449292f2f0fa36311abcf2a7b0b48cbb9463c69d33172ca71cb641e6829425f"
+        },
+        {
+          "id": "d-1NTR1",
+          "redaction": null,
+          "version": "8c6a5421ceebfece45149b5fe1ffff27515c201e1878ceb3a15fb46117e5332c"
+        },
+        {
+          "id": "d-DEEP1",
+          "redaction": null,
+          "version": "0358204b8c2cf82498cd57e7e9acc389ebbc9fc5474843271ee0220d393e744b"
+        },
+        {
+          "id": "fd-G1D01",
+          "redaction": null,
+          "version": "a07c7554197f397f687100b075a1e7b535b7536c5a3e371f39d37bf4043de9f4"
+        },
+        {
+          "id": "fd-SB001",
+          "redaction": null,
+          "version": "1a84105d56f63f4b135493b88f2b4e4f5e9f6cd8264721b54e7c88d015147e92"
+        },
+        {
+          "id": "fg-F1G01",
+          "redaction": null,
+          "version": "9f4a87e9c2b603eeeec74294d305eeff245bd5515913f25811bef388f943fd19"
+        },
+        {
+          "id": "fg-F1G02",
+          "redaction": null,
+          "version": "c88630afbbb5c12c91bfcc954fbf5557e0895ecfcce25bd85d4331e0802326f2"
+        },
+        {
+          "id": "fg-F1G03",
+          "redaction": null,
+          "version": "fa224ac6bee22434a26dcd828852056cf753850675c5269f434d70e38c49e176"
+        },
+        {
+          "id": "p-PR0S1",
+          "redaction": null,
+          "version": "1aa6bc06d24732fe88e0281abd5b4ce7bc454532e5339938e6e243ef560cbfe4"
+        },
+        {
+          "id": "p-PR0S2",
+          "redaction": null,
+          "version": "f80a4f7ba86451cd84c2235e51556be6cdc85e790aa0d1874265e7170e8687c3"
+        },
+        {
+          "id": "p-PR0S3",
+          "redaction": null,
+          "version": "f89c980917ff34f3a0ab555edfea7df14aa3db70794c00ec28a32da06366536e"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "3545cef386dc414decf59bbe9510e1ba2bf66ebcf0c9056e53ff631a590aec66"
+        },
+        {
+          "id": "s-SEC02",
+          "redaction": null,
+          "version": "b38b60239372b05c40224b4c3846556a0bfb344cf81f3d959e29a7aba654e939"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "2421f1dcedd548cb342e41316d060b522eeeec0a3ed350d812e24bac29a7d4ca"
+        },
+        {
+          "id": "t-TERM1",
+          "redaction": null,
+          "version": "2916f484df4a01b41d3db36ecbeb3eaa2e18a8eb12d71fddd94fc91bd71d0477"
+        },
+        {
+          "id": "tb-TAB01",
+          "redaction": null,
+          "version": "3890df2e109228656fa2a0af98bace9a1600b4138c3fe3deec7116ec014a707a"
+        },
+        {
+          "id": "v-VA101",
+          "redaction": null,
+          "version": "fa9af3fe7b5205a81856ea7a7f43f70b0b1fd767ef81483e286c1a12017189db"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Public",
+        "id": "pf-PB1C1",
+        "key": "pubsite",
+        "planned": "Hide",
+        "since": "None",
+        "version": "5791447192ada53619058b54f7bf52d79aa9dc89e31587d9baaa8de4502d8bf4"
+      },
+      "profile_request": "pubsite",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "5a12a817b4dca170fb5d63acf7258fa22bd452113f659c1fa74d0a6f22dd0fc6",
+      "selection_identity": "fda64edb908e6a7e24dbba6d3d9641ca513663a46da28bac0963c63d73e9b818",
+      "shells": [],
+      "state": "S2-rich"
+    },
+    {
+      "as_built": {
+        "fg-F1G01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G02": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "fg-F1G03": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-PR0S2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "t-TERM1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "tb-TAB01": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "v-VA101": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [
+        {
+          "available": true,
+          "blob": "252ef3bd9daf0824270b4e4c507661e2544ba90d998dd040dde7e9c567e58481",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": true,
+          "blob": "985c9cffe714a14a7dbf6b18c77a3f28a9eafd485b83f08ff4187b2093dae702",
+          "block": "fg-F1G01",
+          "home_doc": "d-1NTR1",
+          "variant": "dark"
+        },
+        {
+          "available": true,
+          "blob": "177e13ee3166a36f6ee3fbed7c4a06a1c4b3e56d6f0a2f4b88d82e039d8ecf35",
+          "block": "fg-F1G02",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        },
+        {
+          "available": false,
+          "blob": "92427ceba65276d2e2382673d5c113da48f50c900140aed39f1c4538c404a5c3",
+          "block": "fg-F1G03",
+          "home_doc": "d-1NTR1",
+          "variant": null
+        }
+      ],
+      "case": "S2-onedoc",
+      "docs": [
+        {
+          "digest": "2f0ef4663131d90dedca9ed7260877f0b6ce981bbbaaf6ecf86b1b5067ab7e76",
+          "id": "d-1NTR1",
+          "path": "guide/intro",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-DEC01",
+          "redaction": null,
+          "version": "c7f0fbbca4bf91109f933cfc3037c1d7dbd02c0a438c111ab6afdd2e5158f450"
+        },
+        {
+          "id": "D-DEC02",
+          "redaction": null,
+          "version": "a449292f2f0fa36311abcf2a7b0b48cbb9463c69d33172ca71cb641e6829425f"
+        },
+        {
+          "id": "d-1NTR1",
+          "redaction": null,
+          "version": "8c6a5421ceebfece45149b5fe1ffff27515c201e1878ceb3a15fb46117e5332c"
+        },
+        {
+          "id": "fd-G1D01",
+          "redaction": null,
+          "version": "a07c7554197f397f687100b075a1e7b535b7536c5a3e371f39d37bf4043de9f4"
+        },
+        {
+          "id": "fg-F1G01",
+          "redaction": null,
+          "version": "9f4a87e9c2b603eeeec74294d305eeff245bd5515913f25811bef388f943fd19"
+        },
+        {
+          "id": "fg-F1G02",
+          "redaction": null,
+          "version": "c88630afbbb5c12c91bfcc954fbf5557e0895ecfcce25bd85d4331e0802326f2"
+        },
+        {
+          "id": "fg-F1G03",
+          "redaction": null,
+          "version": "fa224ac6bee22434a26dcd828852056cf753850675c5269f434d70e38c49e176"
+        },
+        {
+          "id": "p-PR0S1",
+          "redaction": null,
+          "version": "1aa6bc06d24732fe88e0281abd5b4ce7bc454532e5339938e6e243ef560cbfe4"
+        },
+        {
+          "id": "p-PR0S2",
+          "redaction": null,
+          "version": "f80a4f7ba86451cd84c2235e51556be6cdc85e790aa0d1874265e7170e8687c3"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "3545cef386dc414decf59bbe9510e1ba2bf66ebcf0c9056e53ff631a590aec66"
+        },
+        {
+          "id": "t-TERM1",
+          "redaction": null,
+          "version": "2916f484df4a01b41d3db36ecbeb3eaa2e18a8eb12d71fddd94fc91bd71d0477"
+        },
+        {
+          "id": "tb-TAB01",
+          "redaction": null,
+          "version": "3890df2e109228656fa2a0af98bace9a1600b4138c3fe3deec7116ec014a707a"
+        },
+        {
+          "id": "v-VA101",
+          "redaction": null,
+          "version": "fa9af3fe7b5205a81856ea7a7f43f70b0b1fd767ef81483e286c1a12017189db"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": "pf-0NE01",
+        "key": "onedoc",
+        "planned": "Mark",
+        "since": "None",
+        "version": "5ce167bce58e3967b86afc6e6ce8bd967b1d2f890a946fd179e091e4791000d8"
+      },
+      "profile_request": "onedoc",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "488d086d7280296565830390e5e5d6b538348d49973d2d366286d2381d9ab04e",
+      "selection_identity": "6a3031cdb2715a588e40780294b4d3e34f47aeeb6996a27a1c9402eece0e2b8a",
+      "shells": [],
+      "state": "S2-rich"
+    },
+    {
+      "as_built": {
+        "mm-MEM02": {
+          "pill": false,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": true,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": false,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": true,
+          "since": "1.0.0",
+          "status": "since"
+        }
+      },
+      "attachments": [],
+      "case": "S3-pubsite",
+      "docs": [
+        {
+          "digest": "aa7e65ca809efd77f0e927c344b2baf222dbc6f22df02d180323090763573adf",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "63a77e98343fa53a667bfdc619f0f832f973db0a78c51ad50b916c60dd464467",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Public",
+        "id": "pf-PBC01",
+        "key": "pubsite",
+        "planned": "Hide",
+        "since": "None",
+        "version": "b870f51dbef7ed509a70d19b2071154ac0cde510d3161354871cb02c4278a4f4"
+      },
+      "profile_request": "pubsite",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "f347bba9727bc2e932903e7973e6275f685ccd55c645df2146ab5f178acc082b",
+      "selection_identity": "a271fd5c97e91ef69f3bb7996512e2a23e5a1d29e5abb3fa01ed07781e95959f",
+      "shells": [
+        "d-PRP01",
+        "s-SEC01",
+        "s-SEC03",
+        "s-SEC04",
+        "s-STB01"
+      ],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {},
+      "attachments": [],
+      "case": "S3-nothing",
+      "docs": [],
+      "entries": [],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Public",
+        "id": "pf-PBC02",
+        "key": "nothing",
+        "planned": "Hide",
+        "since": "None",
+        "version": "d704763df0c5f562052eaa984a2407fdef7d72d976b4a83ef7cc3c91d5b1ddee"
+      },
+      "profile_request": "nothing",
+      "redactions": [],
+      "removed_outside_docs": [],
+      "selection_hash": "94d277c347447dc23b70ccae44b14b11ecc581e5ced8945cdc7f847e27169150",
+      "selection_identity": "9230b0aa2486bd0655af576f154b1ebd335afaf05d31b72d3f60e3ec81bb91da",
+      "shells": [],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "mm-MEM01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "mm-MEM02": {
+          "pill": false,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": true,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": false,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": true,
+          "since": "1.0.0",
+          "status": "since"
+        },
+        "p-G0NE1": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "p-G0NE2": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "p-G0NE3": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC02": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC03": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC04": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-STB01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        }
+      },
+      "attachments": [],
+      "case": "S3-orgsite",
+      "docs": [
+        {
+          "digest": "5bca960f54006a621b8d8bdffbeefa5d86649ee26c9ada2cd79b1ecb746d8741",
+          "id": "d-EMPT1",
+          "path": "all",
+          "redacted": false
+        },
+        {
+          "digest": "6ea1c91c41f3022e6d3c2e5e72acdd31019391a79974cea7941587ac409b0a5b",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "75f1aec4b5b80e181dbd9591e1a3399e0315b68eba627890aab536dedd589a5d",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "d-EMPT1",
+          "redaction": null,
+          "version": "58bfb155216ff4e4fba4b6ee7e6a88e9a9f06d964856c02fc30442a6be61bdd5"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM01",
+          "redaction": null,
+          "version": "3800f9961986d742c1c3342636e70c89bde70eb31ecaeed55e8e78b55b1cbb73"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "p-G0NE1",
+          "redaction": null,
+          "version": "9eb84548129b2d9408a30599d2836d153e5fe960b7d80ce636ca807f2f528cb9"
+        },
+        {
+          "id": "p-G0NE2",
+          "redaction": null,
+          "version": "2e4b9feed7b9f4cfec5d5bc3d4d48a43c811d2b21cd30a1ce096f21b5108c12d"
+        },
+        {
+          "id": "p-G0NE3",
+          "redaction": null,
+          "version": "8fca2056c05a560b3011f4d2d7441a27a63d6c5836c23be2a88e32d4c2d850e2"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC02",
+          "redaction": null,
+          "version": "c245694396cebbec3d89c1b0ee1d3730c2ff69537a617a650d6c045ea2dcf828"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Org",
+        "id": "pf-PBC03",
+        "key": "orgsite",
+        "planned": "Mark",
+        "since": "None",
+        "version": "05e92d73edc9046853ce9ed0111c5d5a90c5bf600143c0ba3486a63e0448cf1f"
+      },
+      "profile_request": "orgsite",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "feae48dadeb57a948997b2a46e3d87187f6e77842a8ce8924d6baa4aa51db4e4",
+      "selection_identity": "8688ba1a08142283e7db44bac86b227927be5eb6b53b9704c45d6f090b1c972a",
+      "shells": [],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "mm-MEM02": {
+          "pill": true,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": true,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": true,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": true,
+          "since": "1.0.0",
+          "status": "since"
+        }
+      },
+      "attachments": [],
+      "case": "S3-showall",
+      "docs": [
+        {
+          "digest": "aa7e65ca809efd77f0e927c344b2baf222dbc6f22df02d180323090763573adf",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "63a77e98343fa53a667bfdc619f0f832f973db0a78c51ad50b916c60dd464467",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Public",
+        "id": "pf-PBC04",
+        "key": "showall",
+        "planned": "Hide",
+        "since": "Some(Show)",
+        "version": "ad0e80b00c0d7326111aede20581fbad048744432e704d16ebbdacc0278f1699"
+      },
+      "profile_request": "showall",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "371e0f5ce5c69124e0f73e90c006e0db9aefd286c9ac75f0f154e0efcda4be7e",
+      "selection_identity": "a271fd5c97e91ef69f3bb7996512e2a23e5a1d29e5abb3fa01ed07781e95959f",
+      "shells": [
+        "d-PRP01",
+        "s-SEC01",
+        "s-SEC03",
+        "s-SEC04",
+        "s-STB01"
+      ],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "mm-MEM02": {
+          "pill": false,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": false,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": false,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": false,
+          "since": "1.0.0",
+          "status": "since"
+        }
+      },
+      "attachments": [],
+      "case": "S3-quiet",
+      "docs": [
+        {
+          "digest": "aa7e65ca809efd77f0e927c344b2baf222dbc6f22df02d180323090763573adf",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "63a77e98343fa53a667bfdc619f0f832f973db0a78c51ad50b916c60dd464467",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Public",
+        "id": "pf-PBC05",
+        "key": "quiet",
+        "planned": "Hide",
+        "since": "Some(Off)",
+        "version": "be0ecde5e78b41fd91112a1e3ceccc6c1df66b18fc747f59bdf8014ab6d324c3"
+      },
+      "profile_request": "quiet",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "a1e5310b9c9c32c1b6b808ec5dd3bd15676819b71bba0481c80cf8e27603fa4d",
+      "selection_identity": "a271fd5c97e91ef69f3bb7996512e2a23e5a1d29e5abb3fa01ed07781e95959f",
+      "shells": [
+        "d-PRP01",
+        "s-SEC01",
+        "s-SEC03",
+        "s-SEC04",
+        "s-STB01"
+      ],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "mm-MEM02": {
+          "pill": false,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": true,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": false,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": true,
+          "since": "1.0.0",
+          "status": "since"
+        }
+      },
+      "attachments": [],
+      "case": "S3-orghide",
+      "docs": [
+        {
+          "digest": "aa7e65ca809efd77f0e927c344b2baf222dbc6f22df02d180323090763573adf",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "63a77e98343fa53a667bfdc619f0f832f973db0a78c51ad50b916c60dd464467",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Org",
+        "id": "pf-PBC06",
+        "key": "orghide",
+        "planned": "Hide",
+        "since": "None",
+        "version": "616acb58ad78322b70b78616a1125f7693908b47a8603d85073de2e81e5117a0"
+      },
+      "profile_request": "orghide",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "7c8c4ba757c94d83f9a4fef50cd85e967053647686b7cefad165f43c776bdf88",
+      "selection_identity": "a271fd5c97e91ef69f3bb7996512e2a23e5a1d29e5abb3fa01ed07781e95959f",
+      "shells": [
+        "d-PRP01",
+        "s-SEC01",
+        "s-SEC03",
+        "s-SEC04",
+        "s-STB01"
+      ],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "mm-MEM01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "mm-MEM02": {
+          "pill": false,
+          "since": "3.0.0-rc.1",
+          "status": "since"
+        },
+        "n-SHP01": {
+          "pill": true,
+          "since": "1.2.0",
+          "status": "since"
+        },
+        "n-SHP02": {
+          "pill": false,
+          "since": "2.0.0",
+          "status": "since"
+        },
+        "n-SHP03": {
+          "pill": true,
+          "since": "1.0.0",
+          "status": "since"
+        },
+        "p-G0NE1": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "p-G0NE2": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "p-G0NE3": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC02": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC03": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-SEC04": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        },
+        "s-STB01": {
+          "pill": false,
+          "since": null,
+          "status": "planned"
+        }
+      },
+      "attachments": [],
+      "case": "S3-implicit",
+      "docs": [
+        {
+          "digest": "8dcbe33c54dd6882dedd681151585aa1c3b8d796ad742a38b4526f7c3ac5d180",
+          "id": "d-0THR1",
+          "path": "other",
+          "redacted": false
+        },
+        {
+          "digest": "98a63943935146465e909d245b02d73e4bab2a6711852313bbf09f7b1f72e828",
+          "id": "d-ADM1N",
+          "path": "admin",
+          "redacted": false
+        },
+        {
+          "digest": "5bca960f54006a621b8d8bdffbeefa5d86649ee26c9ada2cd79b1ecb746d8741",
+          "id": "d-EMPT1",
+          "path": "all",
+          "redacted": false
+        },
+        {
+          "digest": "6ea1c91c41f3022e6d3c2e5e72acdd31019391a79974cea7941587ac409b0a5b",
+          "id": "d-PRP01",
+          "path": "plan",
+          "redacted": false
+        },
+        {
+          "digest": "75f1aec4b5b80e181dbd9591e1a3399e0315b68eba627890aab536dedd589a5d",
+          "id": "d-SHW01",
+          "path": "shown",
+          "redacted": false
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-1N001",
+          "redaction": null,
+          "version": "e7cb91db60f84bd24fcbd70c0acbcfb05c3b485fc303d28d8544ac66328110d6"
+        },
+        {
+          "id": "D-DT001",
+          "redaction": null,
+          "version": "92433387c74f30e4c7794811be11a5b3e1a5beea2a56546c509b5d2f140ae7ca"
+        },
+        {
+          "id": "d-0THR1",
+          "redaction": null,
+          "version": "853f95b535d04852a9ef7ccb0a601cec62648764c98da54afc17a5e1358f0a90"
+        },
+        {
+          "id": "d-ADM1N",
+          "redaction": null,
+          "version": "096e6d05fbe3230dc99a776066915865f494aedc04af328e34b08e9cdabe3d48"
+        },
+        {
+          "id": "d-EMPT1",
+          "redaction": null,
+          "version": "58bfb155216ff4e4fba4b6ee7e6a88e9a9f06d964856c02fc30442a6be61bdd5"
+        },
+        {
+          "id": "d-PRP01",
+          "redaction": null,
+          "version": "872286f56862af93139dfc8ff5a670e21a0563e5e1f1b144e07068feeafd06da"
+        },
+        {
+          "id": "d-SHW01",
+          "redaction": null,
+          "version": "bd1e31901ae6ed5930085dae37c16440c11abf75fa01d0c9dd3b27383ccea8ff"
+        },
+        {
+          "id": "mm-MEM01",
+          "redaction": null,
+          "version": "3800f9961986d742c1c3342636e70c89bde70eb31ecaeed55e8e78b55b1cbb73"
+        },
+        {
+          "id": "mm-MEM02",
+          "redaction": null,
+          "version": "2a017a75c5fded63ba8f387d6ea456e97cd7b31b1e921f8216cedf7b2854990b"
+        },
+        {
+          "id": "n-SHP01",
+          "redaction": null,
+          "version": "1b850911e360853e5d32194d412c1fd1bf990268a94f925c5fdbaf48b39e9cc1"
+        },
+        {
+          "id": "n-SHP02",
+          "redaction": null,
+          "version": "2400d8ac5356bfef803e211e089d464446c371edc4f10f3b0e6fbcdb4213544f"
+        },
+        {
+          "id": "n-SHP03",
+          "redaction": null,
+          "version": "4f6ffca49bc6d3552fb8c6b74cf868fcf57b41d69c2214373eb2125946929957"
+        },
+        {
+          "id": "p-G0NE1",
+          "redaction": null,
+          "version": "9eb84548129b2d9408a30599d2836d153e5fe960b7d80ce636ca807f2f528cb9"
+        },
+        {
+          "id": "p-G0NE2",
+          "redaction": null,
+          "version": "2e4b9feed7b9f4cfec5d5bc3d4d48a43c811d2b21cd30a1ce096f21b5108c12d"
+        },
+        {
+          "id": "p-G0NE3",
+          "redaction": null,
+          "version": "8fca2056c05a560b3011f4d2d7441a27a63d6c5836c23be2a88e32d4c2d850e2"
+        },
+        {
+          "id": "pf-PBC01",
+          "redaction": null,
+          "version": "b870f51dbef7ed509a70d19b2071154ac0cde510d3161354871cb02c4278a4f4"
+        },
+        {
+          "id": "pf-PBC02",
+          "redaction": null,
+          "version": "d704763df0c5f562052eaa984a2407fdef7d72d976b4a83ef7cc3c91d5b1ddee"
+        },
+        {
+          "id": "pf-PBC03",
+          "redaction": null,
+          "version": "05e92d73edc9046853ce9ed0111c5d5a90c5bf600143c0ba3486a63e0448cf1f"
+        },
+        {
+          "id": "pf-PBC04",
+          "redaction": null,
+          "version": "ad0e80b00c0d7326111aede20581fbad048744432e704d16ebbdacc0278f1699"
+        },
+        {
+          "id": "pf-PBC05",
+          "redaction": null,
+          "version": "be0ecde5e78b41fd91112a1e3ceccc6c1df66b18fc747f59bdf8014ab6d324c3"
+        },
+        {
+          "id": "pf-PBC06",
+          "redaction": null,
+          "version": "616acb58ad78322b70b78616a1125f7693908b47a8603d85073de2e81e5117a0"
+        },
+        {
+          "id": "s-SEC01",
+          "redaction": null,
+          "version": "5ede5f5033bf514599f4f2bebd9027b5077fccb95fcffcff6914cd6a0f93055a"
+        },
+        {
+          "id": "s-SEC02",
+          "redaction": null,
+          "version": "c245694396cebbec3d89c1b0ee1d3730c2ff69537a617a650d6c045ea2dcf828"
+        },
+        {
+          "id": "s-SEC03",
+          "redaction": null,
+          "version": "e2718e83e89f4e648620ef55bf7a9a781a72d05e0f65f76c44b1a7d158cd9d93"
+        },
+        {
+          "id": "s-SEC04",
+          "redaction": null,
+          "version": "85e9a81c69756c0dc6d4e5cac37977e9b63467a931df2832d334053a8e9472c2"
+        },
+        {
+          "id": "s-STB01",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "cba49f02760016eab487b9ca0f40d7c28ea49f0e3e61b60dfe09f7e54e30d1a4"
+        }
+      ],
+      "pack": "rdy-standard + memo",
+      "profile": {
+        "audience": "Org",
+        "id": null,
+        "key": null,
+        "planned": "Mark",
+        "since": "None",
+        "version": null
+      },
+      "profile_request": "implicit:org",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "04cf71eb86b65a398d1ae420d9017bc2b7b9c758d5b65fab73ce425799e9698e",
+      "selection_identity": "8c384bf7484d8d6a20075b72e8625392d5f31e9c784fb103a93382dd0c301503",
+      "shells": [],
+      "state": "S3-planned"
+    },
+    {
+      "as_built": {
+        "p-G0NE1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-KEEP1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-KEEP2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [],
+      "case": "S4-redsite",
+      "docs": [
+        {
+          "digest": "083c38a321ae2725011e9f2c2dd1d7a9a1e91362cdba78313b4e48e53c67b29f",
+          "id": "d-RD0C1",
+          "path": "fd-RF1D1/underremoved",
+          "redacted": true
+        },
+        {
+          "digest": "539238796631b461d92e4ebfd0984e79c83466fcfb91760762be76e513251658",
+          "id": "d-RD0C2",
+          "path": "d-RD0C2",
+          "redacted": true
+        }
+      ],
+      "entries": [
+        {
+          "id": "d-RD0C1",
+          "redaction": null,
+          "version": "90cd7fbe6cb954b0cd75b9d23c43a41da35f4ffe81072c30f0e3ccda36f23e18"
+        },
+        {
+          "id": "d-RD0C2",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "c6e64a3d9c9aaed87257e1ad51955f064b7019e460f4d8eb37f766532d3fa2ee"
+        },
+        {
+          "id": "fd-RF1D1",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "616dcfdc5a30b5c9d3f5994b53899e31627dfb136eeb415a947689e93838eddf"
+        },
+        {
+          "id": "p-G0NE1",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "fd191ef1834a52e2693f49f696193a7e5351b6ed2ee17a515f75e993ad892ab6"
+        },
+        {
+          "id": "p-KEEP1",
+          "redaction": null,
+          "version": "6ab432636e9f39a3a984630d62f58d76de3c3836da4b39f84790ccb486c89b64"
+        },
+        {
+          "id": "p-KEEP2",
+          "redaction": null,
+          "version": "f5adb814e9f45c42bb45510c6848124162b99957ba384267690582a213a7ae0a"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": "pf-RED01",
+        "key": "redsite",
+        "planned": "Mark",
+        "since": "None",
+        "version": "dc02f54d85a8fc1fd2e7f3c9971eb4d6b3ef3750f0f3198eaa153da6de99d0ae"
+      },
+      "profile_request": "redsite",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [
+        "D-R0TT1"
+      ],
+      "selection_hash": "b7a89a748ed1edcbfddd9a02ec445a4ed63f57c84922ad99ecf0522ae9a9dcfe",
+      "selection_identity": "b3297f26a86ff475f77f69457ace637418d4d82bdf261fc97e5145007c56bd56",
+      "shells": [],
+      "state": "S4-removals"
+    },
+    {
+      "as_built": {
+        "p-G0NE1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-KEEP1": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        },
+        "p-KEEP2": {
+          "pill": false,
+          "since": null,
+          "status": "unversioned"
+        }
+      },
+      "attachments": [],
+      "case": "S4-implicit",
+      "docs": [
+        {
+          "digest": "ac0005a9778eb1e0bc7c124d2fb81c81e28b13502985f37b11bb54c18639d25f",
+          "id": "d-ADM1N",
+          "path": "admin",
+          "redacted": false
+        },
+        {
+          "digest": "083c38a321ae2725011e9f2c2dd1d7a9a1e91362cdba78313b4e48e53c67b29f",
+          "id": "d-RD0C1",
+          "path": "fd-RF1D1/underremoved",
+          "redacted": true
+        },
+        {
+          "digest": "539238796631b461d92e4ebfd0984e79c83466fcfb91760762be76e513251658",
+          "id": "d-RD0C2",
+          "path": "d-RD0C2",
+          "redacted": true
+        }
+      ],
+      "entries": [
+        {
+          "id": "D-R0TT1",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "c58d41e3dda6c47e69698a3d0298f3c26cb6934e89af61d6673989226c6ab76c"
+        },
+        {
+          "id": "d-ADM1N",
+          "redaction": null,
+          "version": "4fb2973f390c8317c45d1c4d1018953a10453d71fe5098906a7908c5433e86c8"
+        },
+        {
+          "id": "d-RD0C1",
+          "redaction": null,
+          "version": "90cd7fbe6cb954b0cd75b9d23c43a41da35f4ffe81072c30f0e3ccda36f23e18"
+        },
+        {
+          "id": "d-RD0C2",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "c6e64a3d9c9aaed87257e1ad51955f064b7019e460f4d8eb37f766532d3fa2ee"
+        },
+        {
+          "id": "fd-RF1D1",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "616dcfdc5a30b5c9d3f5994b53899e31627dfb136eeb415a947689e93838eddf"
+        },
+        {
+          "id": "p-G0NE1",
+          "redaction": "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49",
+          "version": "fd191ef1834a52e2693f49f696193a7e5351b6ed2ee17a515f75e993ad892ab6"
+        },
+        {
+          "id": "p-KEEP1",
+          "redaction": null,
+          "version": "6ab432636e9f39a3a984630d62f58d76de3c3836da4b39f84790ccb486c89b64"
+        },
+        {
+          "id": "p-KEEP2",
+          "redaction": null,
+          "version": "f5adb814e9f45c42bb45510c6848124162b99957ba384267690582a213a7ae0a"
+        },
+        {
+          "id": "pf-RED01",
+          "redaction": null,
+          "version": "dc02f54d85a8fc1fd2e7f3c9971eb4d6b3ef3750f0f3198eaa153da6de99d0ae"
+        }
+      ],
+      "pack": "rdy-standard",
+      "profile": {
+        "audience": "Org",
+        "id": null,
+        "key": null,
+        "planned": "Mark",
+        "since": "None",
+        "version": null
+      },
+      "profile_request": "implicit:org",
+      "redactions": [
+        "6d3865dce0451f1358fb0acaa79ebb26b72ecd20a7da46983524d2e5f9077d49"
+      ],
+      "removed_outside_docs": [],
+      "selection_hash": "075f58e14dd36f591415422fb6058dcfa278aaf56300d4217c7d303ba7e4dbcb",
+      "selection_identity": "dca2d0f5145ab1a75f7a11b1291e17a9cef6bf3fa143fc993f7c4a5756afab0d",
+      "shells": [],
+      "state": "S4-removals"
+    }
+  ]
+}

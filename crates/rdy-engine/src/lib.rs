@@ -106,6 +106,7 @@ mod publish;
 pub mod quarantine;
 mod query;
 mod read_state;
+pub mod reader;
 pub mod readiness;
 pub mod reaffirm;
 pub mod redaction;

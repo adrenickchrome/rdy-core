@@ -935,7 +935,7 @@ fn rtc6_cli_contract_lists_rule_and_every_flag() {
     let dir = w.project();
     // the current fixture's tree, which rdy-cli compares with its clap tree
     let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts/readme-from-rdy-v1.json");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/contracts/disclosure-review-v1.json");
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("the fixture")).unwrap();
     let tree = &fixture["cli"]["tree"];

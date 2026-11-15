@@ -146,8 +146,20 @@ fn rpl29_publication_reports_foreign_target_excluded() {
     assert_eq!(refs["status"], "blocked", "{v}");
     assert_eq!(refs["excluded"], 1, "{v}");
     assert_eq!(refs["missing"], 0, "{v}");
+    // the review labels the row: a foreign target has no label (D-0C4TB)
+    let row = &refs["rows"][0];
+    assert_eq!(row["source_doc_title"], "Guide", "{v}");
+    assert_eq!(row["target_label"], Value::Null, "{v}");
+    assert!(row["source_label"].is_string(), "{v}");
+    let facts = |rows: &Value| -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(rdy_qa::publication_scenario::row_facts)
+            .collect()
+    };
     assert_eq!(
-        refs["rows"],
+        facts(&refs["rows"]),
         json!([{"source": prose, "location": "body", "target": token,
                 "classification": "excluded", "occurrences": 1}]),
         "{v}"
@@ -155,7 +167,7 @@ fn rpl29_publication_reports_foreign_target_excluded() {
     // the link is a link outside the selection: listed apart and never counted
     assert_eq!(refs["links_outside"]["count"], 1, "{v}");
     assert_eq!(
-        refs["links_outside"]["rows"],
+        facts(&refs["links_outside"]["rows"]),
         json!([{"source": claim, "location": "/links/decided_by/0", "target": token,
                 "classification": "excluded", "occurrences": 1}]),
         "{v}"
