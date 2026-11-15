@@ -1271,6 +1271,9 @@ fn landed_rule_outdated(
 /// The name of canon's ref.
 const CANON_REF: &str = "canon";
 
+/// Canon's head and the landed rows as (change, landing) ([`Index::canon_and_landed`]).
+pub(crate) type CanonRows = (Option<Hash>, Vec<(Hash, Hash)>);
+
 /// The landing a `canon` ref value names: None for an empty value, and for a value that is no
 /// hash (fsck reports that ref; no landing reads landed on it).
 fn canon_value(v: &[u8]) -> Option<Hash> {
@@ -1304,14 +1307,11 @@ fn carries_from(v: &[u8]) -> Result<(Option<Hash>, Vec<Hash>), StoreError> {
         ),
         _ => return Err(bad()),
     };
-    if rest.len() % 32 != 0 {
+    let (changes, tail) = rest.as_chunks::<32>();
+    if !tail.is_empty() {
         return Err(bad());
     }
-    let changes = rest
-        .chunks_exact(32)
-        .map(|c| hash_from(c, "landing carries entry"))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((prev, changes))
+    Ok((prev, changes.iter().map(|c| Hash(*c)).collect()))
 }
 
 /// Moves the [`LANDED`] rows from canon's head `was` to `now` (D-QCE8M, D-NME32), in the commit
@@ -2127,7 +2127,7 @@ impl Index {
 
     /// Canon's head and every landed row as (change, landing), in change order, from one read:
     /// the rows that head gives, while a writer moves canon.
-    pub(crate) fn canon_and_landed(&self) -> Result<(Option<Hash>, Vec<(Hash, Hash)>), StoreError> {
+    pub(crate) fn canon_and_landed(&self) -> Result<CanonRows, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let head = r
             .open_table(REFS)

@@ -215,8 +215,8 @@ impl StoreReader {
                     if !seen.insert(x) {
                         break;
                     }
-                    if !want.contains_key(&x) {
-                        want.insert(x, *l);
+                    if let std::collections::hash_map::Entry::Vacant(e) = want.entry(x) {
+                        e.insert(*l);
                         order.push((x, *l));
                     }
                     next = if self.has_kind(kinds::CHANGE, &x)? {
