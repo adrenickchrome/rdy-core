@@ -9698,6 +9698,70 @@ const SDL7_CHANGES: &[(&str, &str)] = &[
     ("changed /sync/sync_kinds", "SYNC_KINDS gains kind 30"),
 ];
 
+/// The review-row members that `sd1-v1.json` adds after SD1, on both surfaces of the publication
+/// check (D-5WDC2, D-EGFYD, D-9PG33, D-62KA3, D-YKZNK): the disclosure review is not released, so
+/// its additions extend the current fixture and add no successor. A changed doc row gains folder,
+/// its flag, position and the outline; a change row its section ids; a removed doc row folder, its
+/// flag and position; an included or added row the flag and position, and its outline rows become
+/// objects; reference rows (unkeyed lists) gain `source_doc_redacted`; dropped decisions gain
+/// `count`.
+fn rr2_changes() -> Vec<String> {
+    const CHANGED_DOC: [&str; 5] = [
+        "folder",
+        "folder_redacted",
+        "omitted_outline",
+        "outline",
+        "position",
+    ];
+    const CHANGE_ROW: [&str; 3] = ["before_section", "before_section_id", "section_id"];
+    const REMOVED_DOC: [&str; 3] = ["folder", "folder_redacted", "position"];
+    const SUMMARY: [&str; 2] = ["folder_redacted", "position"];
+    let mut out = vec![];
+    for (surface, result) in [
+        ("/cli/runtime/probes/publication check", "stdout"),
+        ("/mcp/result_fields/rdy_publication_check", "ok"),
+    ] {
+        let against = format!("{surface} against/{result}");
+        let first = format!("{surface} first/{result}");
+        let rows = format!("{surface} review rows/{result}");
+        for (p, d) in [
+            (&against, format!("{against}/disclosure")),
+            (&rows, format!("{rows}/disclosure/|null")),
+        ] {
+            for m in CHANGED_DOC {
+                out.push(format!("added {d}/changed_docs/id=string/{m}"));
+            }
+            for m in CHANGE_ROW {
+                out.push(format!(
+                    "added {d}/changed_docs/id=string/changes/id=string/{m}"
+                ));
+            }
+            for m in REMOVED_DOC {
+                out.push(format!("added {d}/removed_docs/id=string/{m}"));
+            }
+            out.push(format!("added {p}/references/dropped_decisions/count"));
+        }
+        for m in SUMMARY {
+            out.push(format!("added {first}/included/rows/id=string/{m}"));
+            out.push(format!(
+                "added {rows}/disclosure/|null/added_docs/id=string/{m}"
+            ));
+            out.push(format!("added {rows}/included/|null/rows/id=string/{m}"));
+        }
+        out.push(format!("added {first}/references/dropped_decisions/count"));
+        out.push(format!(
+            "changed {rows}/disclosure/|null/added_docs/id=string/outline"
+        ));
+        out.push(format!(
+            "changed {rows}/included/|null/rows/id=string/outline"
+        ));
+        out.push(format!("changed {rows}/disclosure/|null/new_references"));
+        out.push(format!("changed {rows}/references/links_outside/rows"));
+        out.push(format!("changed {rows}/references/rows"));
+    }
+    out
+}
+
 /// The SHA-256 of the predecessor `disclosure-review-v1.json`, which this successor copies first.
 /// The disclosure review plan merged first, so it re-anchors SD1 (`readme-from-rdy-v1.json` >
 /// `disclosure-review-v1.json` > `sd1-v1.json`).
@@ -9728,6 +9792,7 @@ fn sdl7_contract_changes_only_delta_surfaces() {
     let mut found = vec![];
     m4a5_leaves(&m4a5_keyed(&old), &m4a5_keyed(&new), "", &mut found);
     let mut want: Vec<String> = SDL7_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    want.extend(rr2_changes());
     found.sort();
     want.sort();
     assert_eq!(
@@ -9739,15 +9804,14 @@ fn sdl7_contract_changes_only_delta_surfaces() {
         found.iter().all(|f| !f.starts_with("removed ")),
         "{found:#?}"
     );
-    // every other row is the predecessor's: no tool, command, error, config or pack moved
+    // every other row is the predecessor's: no tool, command, error, config or pack moved; the
+    // `cli` and `mcp` rows move only by the review-row members of [`rr2_changes`]
     for member in [
-        "/cli",
         "/config",
         "/derived_identities",
         "/errors_warnings",
         "/inventory_version",
         "/markdown_exports",
-        "/mcp",
         "/schema_packs",
         "/signatures",
         "/site_urls",
