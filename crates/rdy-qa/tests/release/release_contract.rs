@@ -6914,8 +6914,10 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// frames, upgrade steps, lineage, stale states, code files) or because the one call that fills
 /// them is not worth its set-up (a conflict, a moved block, a plan note). The list is explicit
 /// so that coverage is not claimed for them: a new empty array fails the test, and a path that
-/// fills up must leave the list. ck8: a case of a check that reads no linked checkout holds no
-/// code, and an agent check is in no stage (`rdy_schema` lists its stages as an empty array).
+/// fills up must leave the list. rr2: the comparison probe's changed doc holds no section, so its
+/// outline is empty; the review rows probe fills the outline rows. ck8: a case of a check that
+/// reads no linked checkout holds no code, and an agent check is in no stage (`rdy_schema` lists
+/// its stages as an empty array).
 /// ck9: the command line's run and request hold no code for the same reason, and the held
 /// version's card fills `cli/pending/stdout/not_ready`, which leaves the list. nb8: a neighbor
 /// entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list. TASK-1067: every
@@ -6988,6 +6990,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/warnings",
     "cli/publication check against/stdout/disclosure/added_docs",
     "cli/publication check against/stdout/disclosure/changed_docs[]/decisions",
+    "cli/publication check against/stdout/disclosure/changed_docs[]/outline",
     "cli/publication check against/stdout/disclosure/changed_folders",
     "cli/publication check against/stdout/disclosure/changed_outside_docs",
     "cli/publication check against/stdout/disclosure/new_references",
@@ -7128,6 +7131,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_publication_check against/ok/disclosure/added_docs",
     "mcp/rdy_publication_check against/ok/disclosure/changed_docs[]/decisions",
+    "mcp/rdy_publication_check against/ok/disclosure/changed_docs[]/outline",
     "mcp/rdy_publication_check against/ok/disclosure/changed_folders",
     "mcp/rdy_publication_check against/ok/disclosure/changed_outside_docs",
     "mcp/rdy_publication_check against/ok/disclosure/new_references",
