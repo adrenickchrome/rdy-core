@@ -867,3 +867,24 @@ fn cc15_overview_builds_no_coverage_report_and_agrees_with_it() {
         assert_eq!(ov["coverage"][k], report[k], "{k}: {ov:#} vs {report:#}");
     }
 }
+
+/// D-CRXNA: `rdy_overview` names each upgrade backup beside the store with its size, as `rdy
+/// status` does; with none, it has no member.
+#[test]
+fn crxna_overview_lists_upgrade_backups_with_their_size() {
+    let (d, mut st) = state();
+    start(&mut st);
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert!(ov.get("upgrade_backups").is_none(), "{ov}");
+    let name = format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64));
+    let backup = d.path().join(".rdy").join(&name);
+    std::fs::create_dir_all(backup.join("store")).unwrap();
+    std::fs::write(backup.join("backup.json"), b"{}").unwrap();
+    std::fs::write(backup.join("store/FORMAT"), [1u8; 40]).unwrap();
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert_eq!(
+        ov["upgrade_backups"],
+        json!([{"name": name, "bytes": 42}]),
+        "{ov}"
+    );
+}

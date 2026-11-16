@@ -330,12 +330,26 @@ fn status_text(v: &Value) -> String {
             "\n{unlinked} delivered repos have no repo link (rdy links)"
         ));
     }
+    // D-CRXNA: one line per upgrade backup, which the person may delete
+    for b in v["upgrade_backups"].as_array().into_iter().flatten() {
+        out.push_str(&format!("\n{}", backup_line(b)));
+    }
     out.push_str(&warning_lines_with_targets(
         &v["warnings"],
         &v["redaction_warnings"],
     ));
     out.push_str(&open_warnings(v));
     out
+}
+
+/// The status line of one upgrade backup (D-CRXNA): its name, its size and that the person may
+/// delete it.
+fn backup_line(b: &Value) -> String {
+    format!(
+        "upgrade backup {} ({} bytes): rdy's rollback for the last upgrade; you may delete it after checking the store",
+        text(&b["name"]),
+        num(&b["bytes"])
+    )
 }
 
 /// The `mcp http:` line of a status, and its activity line while the endpoint serves; each ends
@@ -826,6 +840,26 @@ mod tests {
         let t = status_text(&v);
         assert!(t.contains("\ncoverage not read: E_INTERNAL: boom"), "{t}");
         assert!(!t.contains("coverage: "), "{t}");
+    }
+
+    /// D-CRXNA: one line per upgrade backup, with its name and size, that says the person may
+    /// delete it; none without backups.
+    #[test]
+    fn crxna_status_text_prints_one_line_per_upgrade_backup() {
+        let mut v = json!({
+            "pack": "p", "landings": 0, "suspects": 0, "views": [],
+            "version_position": {"label": "v0"}, "warnings": [],
+        });
+        assert!(!status_text(&v).contains("upgrade backup"));
+        let name = format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64));
+        v["upgrade_backups"] = json!([{"name": name, "bytes": 2048}]);
+        let t = status_text(&v);
+        assert!(
+            t.contains(&format!(
+                "\nupgrade backup {name} (2048 bytes): rdy's rollback for the last upgrade; you may delete it after checking the store"
+            )),
+            "{t}"
+        );
     }
 
     /// Final-review fix round 1: `rdy log` prints the alternative a landing chose, as `rdy

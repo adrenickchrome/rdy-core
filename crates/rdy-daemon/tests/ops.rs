@@ -1936,3 +1936,27 @@ async fn wx21c_pipe_ops_keep_roles_errors_and_results() {
     task.await.unwrap().unwrap();
     dir.close().unwrap();
 }
+
+/// D-CRXNA: the status names each upgrade backup beside the store with its size; a project with
+/// none has no member.
+#[test]
+fn crxna_status_lists_upgrade_backups_with_their_size() {
+    let (d, e) = project();
+    let s = human();
+    let v = dispatch(&cx(&e, &s, d.path()), "status", json!({})).unwrap();
+    assert!(v.get("upgrade_backups").is_none(), "{v}");
+    let name = format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64));
+    let backup = d.path().join(".rdy").join(&name);
+    std::fs::create_dir_all(backup.join("store/segments")).unwrap();
+    std::fs::write(backup.join("backup.json"), b"{}").unwrap();
+    std::fs::write(backup.join("store/segments/seg-000000.log"), [7u8; 100]).unwrap();
+    // not a backup: a file with the prefix, and an unrelated directory
+    std::fs::write(d.path().join(".rdy/.store-upgrade-x"), b"x").unwrap();
+    std::fs::create_dir(d.path().join(".rdy/other")).unwrap();
+    let v = dispatch(&cx(&e, &s, d.path()), "status", json!({})).unwrap();
+    assert_eq!(
+        v["upgrade_backups"],
+        json!([{"name": name, "bytes": 102}]),
+        "{v}"
+    );
+}

@@ -5166,6 +5166,12 @@ impl Store {
             if at_open && affected.is_empty() {
                 crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync)?;
             }
+            // D-CRXNA: an upgrade backup holds the text too. Each goes before the first zero
+            // write, so a kill in between leaves payloads that the next open zeroes, and it then
+            // erases any backup again
+            if affected.is_empty() {
+                self.erase_upgrade_backups()?;
+            }
             let span = crate::redaction_io::drop_span(*loc, hole, &auth.spans[loc]);
             self.log.zero_payload(&span)?;
             affected.insert(loc.segment);
@@ -5177,6 +5183,26 @@ impl Store {
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
         self.reindex_after_removal()?;
         Ok((counts, true))
+    }
+
+    /// A removal's erase of the store's upgrade backups (D-CRXNA,
+    /// `crate::upgrade::erase_backups`): all but the backup of a sealed upgrade whose completion
+    /// is pending, which the last receipt names.
+    fn erase_upgrade_backups(&self) -> Result<(), StoreError> {
+        let pending = if self.completion_pending {
+            let receipt = self
+                .index()
+                .get_ref(format::REF_UPGRADE)?
+                .map(|v| format::UpgradeReceipt::parse(&v))
+                .transpose()
+                .map_err(|e| {
+                    StoreError::Decode(format!("meta/upgrade is not a valid receipt: {e}"))
+                })?;
+            receipt.map(|r| r.backup)
+        } else {
+            None
+        };
+        crate::upgrade::erase_backups(&self.dir, pending.as_deref())
     }
 
     /// Reads and hash-checks every frame as `verify` does, reading the authorized holes as frames

@@ -23,6 +23,12 @@
 //! [`publish_checked`] writes the new mirror. A later inspect of a store whose mirror lags the
 //! receipt reports `pending_check`, and its plan is empty, so no second batch is written.
 //! Nothing here restores a backup: a person does that, after stopping the daemon.
+//!
+//! The backup's lifetime (D-CRXNA): rdy keeps it after a verified upgrade, until the person
+//! deletes it ([`backups`] lists it for `rdy status`). [`publish_checked`] deletes the backups
+//! of earlier upgrades once it writes the new `FORMAT`, so a store keeps at most one. A content
+//! removal zeroes and deletes every backup ([`erase_backups`]). Neither ever deletes the backup
+//! of an upgrade whose completion is pending.
 use crate::error::{StoreError, UpgradeFailure};
 use crate::fileid::FileId;
 use crate::format::{self, StoreFeature, StoreFeatures, UpgradeReceipt};
@@ -94,6 +100,146 @@ impl UpgradeStep {
             required: true,
         }
     }
+}
+
+/// One upgrade backup beside a store (D-CRXNA): its directory name and the bytes of the regular
+/// files it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Backup {
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// The upgrade backups beside the store at `dir`, sorted by name: each directory of the
+/// store's parent whose name starts with [`BACKUP_PREFIX`], with the bytes of the regular files
+/// under it. No link is followed; what cannot be read counts nothing.
+pub fn backups(dir: &Path) -> Vec<Backup> {
+    let Some(parent) = dir.parent() else {
+        return vec![];
+    };
+    backup_names(parent)
+        .into_iter()
+        .map(|name| Backup {
+            bytes: tree_bytes(&parent.join(&name)),
+            name,
+        })
+        .collect()
+}
+
+/// The names of the backup directories in `parent`, sorted. A link or a file that carries the
+/// prefix is not a backup.
+fn backup_names(parent: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return vec![];
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name().into_string().ok()?;
+            let is_dir = std::fs::symlink_metadata(e.path()).ok()?.is_dir();
+            (is_dir && name.starts_with(BACKUP_PREFIX)).then_some(name)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The bytes of the regular files under `dir`, read without following a link.
+fn tree_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            if m.is_dir() {
+                dirs.push(e.path());
+            } else if m.is_file() {
+                total = total.saturating_add(m.len());
+            }
+        }
+    }
+    total
+}
+
+/// Deletes the upgrade backups beside the store at `dir` other than `keep`, the backup of the
+/// upgrade whose `FORMAT` was just written (D-CRXNA): the store keeps at most one. A backup that
+/// does not go is named in a notice; the upgrade stands.
+fn remove_earlier_backups(dir: &Path, keep: &str) {
+    let Some(parent) = dir.parent() else {
+        return;
+    };
+    for name in backup_names(parent) {
+        if name == keep {
+            continue;
+        }
+        let path = parent.join(&name);
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            crate::notice(&format!(
+                "rdy: the earlier upgrade backup {} was not deleted: {e}",
+                path.display()
+            ));
+        }
+    }
+    let _ = fsutil::sync_dir(parent);
+}
+
+/// A content removal's erase of the upgrade backups beside the store at `dir` (D-CRXNA, as
+/// D-6H0ZX does for the index): every regular file of every backup is overwritten with zeros
+/// and synced, then the backup is deleted, and the parent directory is synced. `pending` names
+/// the backup that marks a pending completion: it is kept. No link is followed; a file with
+/// more than one link is not rdy's own copy, so it is not zeroed (a notice says so) and only
+/// its name goes.
+pub(crate) fn erase_backups(dir: &Path, pending: Option<&str>) -> Result<(), StoreError> {
+    let Some(parent) = dir.parent() else {
+        return Ok(());
+    };
+    let names: Vec<String> = backup_names(parent)
+        .into_iter()
+        .filter(|n| Some(n.as_str()) != pending)
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    for name in &names {
+        let backup = parent.join(name);
+        let mut dirs = vec![backup.clone()];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d)? {
+                let path = e?.path();
+                let m = std::fs::symlink_metadata(&path)?;
+                if m.is_dir() {
+                    dirs.push(path);
+                } else if m.is_file() {
+                    zero_backup_file(&path)?;
+                }
+            }
+        }
+        std::fs::remove_dir_all(&backup)?;
+    }
+    fsutil::sync_dir(parent)?;
+    Ok(())
+}
+
+/// Zeroes and syncs one regular file of a backup ([`erase_backups`]).
+fn zero_backup_file(path: &Path) -> Result<(), StoreError> {
+    let f = pio::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), path)?;
+    if !f.metadata()?.is_file() {
+        return Ok(());
+    }
+    if crate::fileid::links_of(&f, path)? != 1 {
+        crate::notice(&format!(
+            "rdy: {} has more than one link, so it was not zeroed",
+            path.display()
+        ));
+        return Ok(());
+    }
+    fsutil::zero_open_file(&f, path)?;
+    Ok(())
 }
 
 /// The id of the snapshot-delta step (D-918YB).
@@ -337,8 +483,8 @@ pub fn apply_locked_with_registry_for_tests(
 
 /// Publishes `FORMAT` for the upgrade `store` holds, once the engine's full fsck passed: the
 /// log's manifest must be the last receipt's `to`, and `FORMAT` its `from` (or already the
-/// manifest, which makes this a no-op). It writes `FORMAT` durably and nothing else: no object
-/// or log frame changes.
+/// manifest, which makes this a no-op). It writes `FORMAT` durably, then deletes the backups of
+/// earlier upgrades (D-CRXNA); this upgrade's backup stays. No object or log frame changes.
 pub fn publish_checked(store: &mut Store) -> Result<(), StoreError> {
     store.refuse_follower_write()?;
     let log = store.store_features()?;
@@ -356,12 +502,16 @@ pub fn publish_checked(store: &mut Store) -> Result<(), StoreError> {
         })?),
         None => None,
     };
-    let explained = receipt
-        .is_some_and(|r| r.to == log.hash() && mirror.as_ref().is_some_and(|m| m.hash() == r.from));
-    if !explained {
+    let Some(receipt) = receipt
+        .filter(|r| r.to == log.hash() && mirror.as_ref().is_some_and(|m| m.hash() == r.from))
+    else {
         return Err(moved(None));
-    }
-    format::write_format_file(&dir, &log)
+    };
+    format::write_format_file(&dir, &log)?;
+    // D-CRXNA: the upgrade is verified and nothing is pending now; its backup stays until the
+    // person deletes it, and every earlier one goes
+    remove_earlier_backups(&dir, &receipt.backup);
+    Ok(())
 }
 
 /// Test hook: the upgrade's own open of the store at `dir` under `lock`, which accepts a
@@ -789,6 +939,11 @@ fn apply_with(
     hit(Phase::BackupComplete)?;
 
     let mut store = Store::open_unupgraded_locked(dir, lock)?;
+    // a removal this open finished erased the backup with the store's other copies (D-CRXNA):
+    // nothing is appended, and a retry backs up the erased store
+    if !std::fs::symlink_metadata(backup.join(BACKUP_MANIFEST)).is_ok_and(|m| m.is_file()) {
+        return Err(moved(None));
+    }
     hit(Phase::Opened(&mut store))?;
     if store.features() != &now.from {
         return Err(moved(Some(backup)));
@@ -1394,6 +1549,49 @@ fn reuse_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-CRXNA: a removal's erase zeroes and deletes every backup but the one that marks a
+    /// pending completion, which stays whole.
+    #[test]
+    fn crxna_a_removal_keeps_the_pending_backup() {
+        let base = tempfile::tempdir().unwrap();
+        let store = base.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let name = |c: char| {
+            format!(
+                "{BACKUP_PREFIX}{}-{}",
+                c.to_string().repeat(64),
+                c.to_string().repeat(64)
+            )
+        };
+        let (done, pending) = (name('a'), name('b'));
+        for n in [&done, &pending] {
+            std::fs::create_dir_all(base.path().join(n).join(BACKUP_STORE)).unwrap();
+            std::fs::write(base.path().join(n).join(BACKUP_STORE).join("seg"), b"text").unwrap();
+        }
+        let ((), zeroed) = fsutil::record_zeroed(|| erase_backups(&store, Some(&pending)).unwrap());
+        let seg = base.path().join(&done).join(BACKUP_STORE).join("seg");
+        assert_eq!(
+            zeroed,
+            [fsutil::ZeroedFile {
+                path: seg,
+                len: 4,
+                all_zero: true
+            }]
+        );
+        assert!(!base.path().join(&done).exists());
+        assert_eq!(
+            std::fs::read(base.path().join(&pending).join(BACKUP_STORE).join("seg")).unwrap(),
+            b"text"
+        );
+        assert_eq!(
+            backups(&store),
+            [Backup {
+                name: pending,
+                bytes: 4
+            }]
+        );
+    }
 
     #[test]
     fn ok5_backup_byte_sums_refuse_overflow() {

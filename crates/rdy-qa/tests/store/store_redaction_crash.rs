@@ -895,3 +895,97 @@ fn rdb7_a_copy_whose_log_replays_a_removal_keeps_no_drawing() {
         "no file holds the removed text after the close"
     );
 }
+
+/// A copy of the closed store at `path` as an upgrade backup beside it, named
+/// `.store-upgrade-<a>-<b>` from the hex digits `a` and `b`: its `store` directory and its
+/// `backup.json`, and every regular file it holds.
+fn upgrade_backup_of(path: &Path, a: char, b: char) -> (PathBuf, Vec<PathBuf>) {
+    let name = format!(
+        "{}{}-{}",
+        rdy_store::upgrade::BACKUP_PREFIX,
+        a.to_string().repeat(64),
+        b.to_string().repeat(64)
+    );
+    let backup = path.with_file_name(name);
+    copy_dir(path, &backup.join("store"));
+    std::fs::write(backup.join("backup.json"), b"{}").unwrap();
+    let mut files = vec![];
+    let mut dirs = vec![backup.clone()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    (backup, files)
+}
+
+/// Every file of `files` was overwritten with zeros, synced and read back as zeros before it
+/// went, and the backups are gone.
+fn assert_erased(zeroed: &[rdy_store::fsutil::ZeroedFile], backups: &[(PathBuf, Vec<PathBuf>)]) {
+    for (backup, files) in backups {
+        for f in files {
+            let z = zeroed
+                .iter()
+                .find(|z| &z.path == f)
+                .unwrap_or_else(|| panic!("{} was not zeroed: {zeroed:?}", f.display()));
+            assert!(
+                z.all_zero,
+                "{} read as zeros before its unlink",
+                f.display()
+            );
+        }
+        assert!(!backup.exists(), "{} is deleted", backup.display());
+    }
+}
+
+/// D-CRXNA: a removal that an open finishes overwrites every file of every upgrade backup of the
+/// store with zeros, syncs them, then deletes the backups; none is listed after.
+#[test]
+fn crxna_a_removal_at_open_zeroes_and_deletes_every_upgrade_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    content(&path);
+    let backups = [
+        upgrade_backup_of(&path, 'a', 'b'),
+        upgrade_backup_of(&path, 'c', 'd'),
+    ];
+    for (b, _) in &backups {
+        assert!(
+            !files_with_secret(b).is_empty(),
+            "the backup holds the text"
+        );
+    }
+    assert_eq!(rdy_store::upgrade::backups(&path).len(), 2);
+    authorized_batch_fixture(
+        &path,
+        &[spec(&path)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    let (s, zeroed) = rdy_store::fsutil::record_zeroed(|| Store::open(&path).unwrap());
+    s.close().unwrap();
+    assert_erased(&zeroed, &backups);
+    assert_eq!(rdy_store::upgrade::backups(&path), vec![]);
+    assert_eq!(files_with_secret(dir.path()), Vec::<PathBuf>::new());
+}
+
+/// D-CRXNA: a live removal erases the upgrade backups the same way.
+#[test]
+fn crxna_a_live_removal_zeroes_and_deletes_every_upgrade_backup() {
+    let l = live_landing();
+    let backups = [upgrade_backup_of(&l.prep, 'e', 'f')];
+    assert!(!files_with_secret(&backups[0].0).is_empty());
+    let mut s = Store::open(&l.prep).unwrap();
+    let items = decode_items(&std::fs::read(&l.items_file).unwrap());
+    let (sealed, zeroed) =
+        rdy_store::fsutil::record_zeroed(|| s.seal_redaction_batch_for_tests(items));
+    sealed.unwrap();
+    s.close().unwrap();
+    assert_erased(&zeroed, &backups);
+    assert_eq!(rdy_store::upgrade::backups(&l.prep), vec![]);
+}

@@ -1959,3 +1959,152 @@ fn wx7_upgrade_preserves_private_security_and_syncs_directories() {
         b"kept"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// D-CRXNA: the backup's lifetime
+
+/// The registry and one more step, `omega`, that adds a compatible feature to what the registry
+/// makes: a second upgrade of a store the registry already upgraded.
+fn later_registry() -> Vec<UpgradeStep> {
+    let mut steps = registry();
+    steps.push(UpgradeStep {
+        id: "omega".into(),
+        from: manifest(vec![]),
+        to: manifest(vec![feature("zz_later", FeatureClass::Compatible)]),
+        action: rdy_store::upgrade::StepAction::Manifest,
+        required: true,
+    });
+    steps
+}
+
+/// The manifest `later_registry` makes from the baseline.
+fn upgraded_later() -> StoreFeatures {
+    upgraded().merged(&[feature("zz_later", FeatureClass::Compatible)])
+}
+
+/// Plans and applies `later_registry`'s upgrade on the closed store at `dir`.
+fn upgrade_later(dir: &Path) -> Result<UpgradeReport, StoreError> {
+    let lock = StoreLock::take(dir).unwrap();
+    let plan = inspect_with(dir, &later_registry()).unwrap();
+    assert_eq!(plan.steps, ["omega"]);
+    apply_with(dir, &lock, &plan, &later_registry())
+}
+
+/// The bytes of every regular file under `dir`.
+fn bytes_under(dir: &Path) -> u64 {
+    tree(dir)
+        .values()
+        .filter_map(|c| c.as_ref().map(|c| c.len() as u64))
+        .sum()
+}
+
+/// The upgrade backups beside the store at `dir`, by name, as the listing reads them.
+fn listed(dir: &Path) -> Vec<(String, u64)> {
+    upgrade::backups(dir)
+        .into_iter()
+        .map(|b| (b.name, b.bytes))
+        .collect()
+}
+
+/// D-CRXNA: a verified upgrade keeps its backup; the listing names it with its size.
+#[test]
+fn crxna_a_verified_upgrade_keeps_its_backup_and_lists_it() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let report = upgrade(&dir).unwrap();
+    complete(&dir);
+    assert_eq!(format_text(&dir), upgraded().to_text());
+    let backup = report.backup.unwrap();
+    assert!(backup.join("backup.json").is_file(), "the backup is kept");
+    let name = backup.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(listed(&dir), [(name, bytes_under(&backup))]);
+}
+
+/// D-CRXNA: a second verified upgrade deletes the first backup once its FORMAT is written,
+/// never before; the store keeps at most one backup. While the second completion is pending,
+/// its backup marks it and both stay.
+#[test]
+fn crxna_a_later_upgrade_deletes_earlier_backups_after_its_format() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let first = upgrade(&dir).unwrap().backup.unwrap();
+    complete(&dir);
+    let second = upgrade_later(&dir).unwrap().backup.unwrap();
+    assert_ne!(first, second);
+    // sealed, checked by the store, and FORMAT not yet written: nothing is deleted
+    assert_eq!(format_text(&dir), upgraded().to_text());
+    assert!(first.is_dir() && second.is_dir());
+    assert_eq!(listed(&dir).len(), 2);
+    complete(&dir);
+    assert_eq!(format_text(&dir), upgraded_later().to_text());
+    assert!(!first.exists(), "the earlier backup is deleted");
+    assert!(
+        second.join("backup.json").is_file(),
+        "the new backup is kept"
+    );
+    let name = second.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(listed(&dir), [(name, bytes_under(&second))]);
+}
+
+/// D-CRXNA: a pending completion keeps its backup. The completion's open and its store check
+/// run, and the engine's fsck does not pass, so `FORMAT` is not written: no backup is deleted,
+/// and a store opened again is still pending with both.
+#[test]
+fn crxna_a_pending_completion_keeps_its_backup() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let first = upgrade(&dir).unwrap().backup.unwrap();
+    complete(&dir);
+    let second = upgrade_later(&dir).unwrap().backup.unwrap();
+    for _ in 0..2 {
+        let lock = StoreLock::take(&dir).unwrap();
+        let s = upgrade::open_pending_for_tests(&dir, &lock).unwrap();
+        assert!(s.upgrade_pending());
+        s.check_objects().unwrap();
+        // the engine's fsck failed here: no publish
+        s.close().unwrap();
+        drop(lock);
+        assert!(first.is_dir() && second.is_dir(), "both backups stay");
+    }
+    let lock = StoreLock::take(&dir).unwrap();
+    let mut s = upgrade::open_pending_for_tests(&dir, &lock).unwrap();
+    s.refresh_upgrade_pending().unwrap();
+    assert!(s.upgrade_pending(), "still pending");
+    upgrade::publish_checked(&mut s).unwrap();
+    s.close().unwrap();
+    assert!(!first.exists() && second.is_dir());
+}
+
+/// D-CRXNA: a later upgrade that fails deletes nothing: one that fails before its batch is
+/// sealed, and one whose batch is sealed but whose checks never pass.
+#[test]
+fn crxna_a_failed_later_upgrade_deletes_nothing() {
+    let _f = known();
+    for fault in [Fault::Copy, Fault::Append, Fault::Reindex] {
+        let base = tempfile::tempdir().unwrap();
+        let dir = project(base.path());
+        let first = upgrade(&dir).unwrap().backup.unwrap();
+        complete(&dir);
+        let before = tree(&first);
+        let name = backup_name(&upgraded(), terminal(&dir));
+        let e = with_hook_for_tests(inject(fault), || upgrade_later(&dir)).unwrap_err();
+        assert!(
+            matches!(e, StoreError::Io(_) | StoreError::Db(_)),
+            "{fault:?}: {e:?}"
+        );
+        assert_eq!(
+            tree(&first),
+            before,
+            "{fault:?}: the first backup is kept whole"
+        );
+        assert!(
+            base.path().join(".rdy").join(&name).is_dir(),
+            "{fault:?}: the failed upgrade's backup is kept"
+        );
+        assert_eq!(format_text(&dir), upgraded().to_text(), "{fault:?}");
+        assert_eq!(listed(&dir).len(), 2, "{fault:?}");
+    }
+}
