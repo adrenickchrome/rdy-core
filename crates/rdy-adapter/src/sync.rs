@@ -299,6 +299,14 @@ fn io(e: std::io::Error) -> RdyError {
     )
 }
 
+/// What a push brings besides its checked batch: the distinct keys of its objects, sorted, and
+/// its batch files (cloned handles). Empty for a stored head.
+#[derive(Default)]
+struct Pushed {
+    objects: Vec<ObjectKey>,
+    files: Vec<File>,
+}
+
 /// A push read: its header, its present records as (kind, bytes), and their keys.
 type PushRead = (StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>);
 
@@ -410,7 +418,8 @@ impl Snapshot {
             .map(File::try_clone)
             .collect::<Result<Vec<_>, _>>()
             .map_err(io)?;
-        self.checked(batch, header.purpose, landings, &ops, objects, need, files)
+        let pushed = Pushed { objects, files };
+        self.checked(batch, header.purpose, landings, &ops, pushed, need)
     }
 
     /// A checked quarantine with no new batch: the head `head` that this snapshot's holder
@@ -430,8 +439,7 @@ impl Snapshot {
             purpose,
             BTreeMap::new(),
             &BTreeMap::new(),
-            Vec::new(),
-            Vec::new(),
+            Pushed::default(),
             Vec::new(),
         )
     }
@@ -443,10 +451,10 @@ impl Snapshot {
         purpose: StreamPurpose,
         landings: BTreeMap<Hash, Option<Hash>>,
         ops: &BTreeMap<Hash, ViewOp>,
-        objects: Vec<ObjectKey>,
+        pushed: Pushed,
         mut need: Vec<rdy_store::format::StoreFeature>,
-        files: Vec<File>,
     ) -> Result<CheckedQuarantine, RdyError> {
+        let Pushed { objects, files } = pushed;
         let read = self.read_state();
         let head = batch.head();
         let head_purpose = if batch.head_kind() == kinds::VIEW_OP {
