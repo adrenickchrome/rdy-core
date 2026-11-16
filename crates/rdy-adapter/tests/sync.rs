@@ -1994,3 +1994,285 @@ fn scc6_held_attachment_landing_tag_lands_with_its_extend() {
     h.fsck().unwrap();
     h.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// final review fix round 3: a retained removal's tag across the held boundary
+
+/// A tagged removal that a take left off canon, then pushed: project P lands `l1` with a
+/// secret, and the hub seeds `l1`. L, a copy of P at `l1`, removes the secret in landing `lr`
+/// (with `removal`) or lands a plain landing `lr` (without), and tags `lr` `v1.0.0`. P lands
+/// `p2` (tagged `v1.0.0` when `hub_names_v1`) and the hub extends to it. L fetches the hub's
+/// canon and pulls with `take`: canon is `p2`, and `replaced/` keeps `lr`. L lands `n` on `p2`.
+/// Returns the holder and L's canon history at `n` less `p2`. With `removal`, that history
+/// brings the removal's proof, because its request names the secret's version, which the hub
+/// holds below the push: the proof brings its human landing `lr` and that landing's tag.
+struct RetainedRemoval {
+    dir: tempfile::TempDir,
+    hub: StoreHandle,
+    p2: Hash,
+    lr: Hash,
+    n: Hash,
+    push: PathBuf,
+}
+
+fn retained_removal(removal: bool, hub_names_v1: bool) -> RetainedRemoval {
+    use rdy_engine::sync_fetch::{self, HubState};
+    use rdy_engine::sync_replay::{self, PULLED, PullRequest};
+    use rdy_store::sync_state::{SyncCanon, SyncStep};
+    use rdy_store::take_batch::FetchTarget;
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let ld = dir.path().join("l");
+    let mut p = project(&pd);
+    let repo = repo_of(&p);
+    let w = doc(&mut p, "work", "Intro", "Public words.");
+    let secret = write_in(
+        &mut p,
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$x", "parent": w.created["$s"], "body": "The launch code is ZEBRA-7731."}]),
+    );
+    let l1 = land(&mut p, "work");
+    p.close().unwrap();
+    copy_dir(&pd, &ld);
+    let mut p = Rdy::open(&pd).unwrap();
+    doc(&mut p, "w1", "Extend", "The canon moves forward.");
+    let p2 = land(&mut p, "w1");
+    if hub_names_v1 {
+        tag(&mut p, "v1.0.0");
+    }
+    p.close().unwrap();
+    let at = |n: &str| dir.path().join(format!("{n}.rdysync"));
+    let canon = StreamPurpose::CanonHistory;
+    export(&pd, canon, l1, None, &at("e1"));
+    export(&pd, canon, p2, Some(l1), &at("e2"));
+    let hub = StoreHandle::create_holder(&dir.path().join("hub"), repo).unwrap();
+    let s0 = hub.snapshot().unwrap();
+    let c1 = check(&s0, &[&at("e1")]).unwrap();
+    assert_eq!(
+        hub.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(l1)
+    );
+    let s1 = hub.snapshot().unwrap();
+    let c2 = check(&s1, &[&at("e2")]).unwrap();
+    assert_eq!(
+        hub.move_canon(&c2, CanonMove::Extend, Some(l1)).unwrap(),
+        moved(p2)
+    );
+    drop((s0, c1, s1, c2));
+
+    // L: a tagged local landing on l1, a removal or a plain one
+    let mut l = Rdy::open(&ld).unwrap();
+    l.store_mut()
+        .write_sync(
+            "origin",
+            vec![SyncStep::Canon(SyncCanon {
+                repo_id: repo,
+                url: HUB_URL.into(),
+                fetched: Some(l1),
+                applied: Some(l1),
+                held: None,
+            })],
+        )
+        .unwrap();
+    let lr = if removal {
+        remove(&mut l, &secret.created["$x"]);
+        l.store().reader().canon_head().unwrap().unwrap()
+    } else {
+        doc(
+            &mut l,
+            "w2",
+            "Local",
+            "A local landing the hub has not seen.",
+        );
+        land(&mut l, "w2")
+    };
+    assert_ne!(lr, l1);
+    tag(&mut l, "v1.0.0");
+
+    // fetch the hub's canon from the holder, then pull with a take
+    let snap = hub.snapshot().unwrap();
+    snap.write_history(
+        canon,
+        p2,
+        Some(l1),
+        &BTreeSet::<ObjectKey>::new(),
+        File::create(at("fetch")).unwrap(),
+    )
+    .unwrap();
+    drop(snap);
+    let target = FetchTarget {
+        remote: "origin".into(),
+        url: HUB_URL.into(),
+        purpose: canon,
+        root: p2,
+        view: None,
+    };
+    sync_fetch::fetch(&mut l, &files(&[&at("fetch")]), &target).unwrap();
+    let puller = Session {
+        actor: "human:puller".into(),
+        run: None,
+        role: Role::Writer,
+        kind: SessionKind::Human,
+    };
+    let out = sync_replay::pull(
+        &mut l,
+        &puller,
+        &PullRequest {
+            remote: "origin".into(),
+            hub: HubState {
+                repo_id: Some(repo),
+                canon: Some(p2),
+            },
+            take: true,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(out.status, PULLED, "{out:?}");
+    assert_eq!(out.replaced, Some(lr.to_string()));
+    assert_eq!(l.store().reader().canon_head().unwrap(), Some(p2));
+    doc(&mut l, "w3", "Next", "Work on the hub's canon.");
+    let n = land(&mut l, "w3");
+    assert_eq!(l.store().reader().landing(&n).unwrap().prev, Some(p2));
+    l.close().unwrap();
+    let push = at("push");
+    export(&ld, canon, n, Some(p2), &push);
+    RetainedRemoval {
+        dir,
+        hub,
+        p2,
+        lr,
+        n,
+        push,
+    }
+}
+
+/// The refs of the holder at `dir` whose names start with `prefix`.
+fn holder_refs(dir: &Path, prefix: &str) -> Vec<(String, Vec<u8>)> {
+    let raw = Rdy::open_holder(dir).unwrap();
+    raw.store().reader().refs_with_prefix(prefix).unwrap()
+}
+
+/// Fix round 3 (final review, D-KE83X): after a tagged removal and a take, an incremental push
+/// carries the removal's proof, whose request names a version the hub holds below the push. The
+/// proof brings its human landing `lr` and that landing's tag `v1.0.0`; the extend names
+/// `v1.0.0` at `lr` in its batch, as a fetch of the same history into a project takes it.
+#[test]
+fn scc6_retained_removal_tag_lands_with_its_push() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = retained_removal(true, false);
+    let h = &w.hub;
+    assert!(tag_names(&h.snapshot().unwrap()).is_empty());
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[&w.push]).unwrap();
+    let carried = |kind: u8, hash: Hash| c.facts().objects.contains(&ObjectKey { kind, hash });
+    assert!(
+        carried(rdy_store::kinds::LANDING, w.lr),
+        "the removal's proof brings its human landing"
+    );
+    assert!(
+        c.facts()
+            .objects
+            .iter()
+            .any(|k| k.kind == rdy_store::kinds::TAG),
+        "the push carries the tag"
+    );
+    assert_eq!(
+        h.move_canon(&c, CanonMove::Extend, Some(w.p2)).unwrap(),
+        moved(w.n)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.lr)]
+    );
+    drop((s, c));
+    h.fsck().unwrap();
+    let RetainedRemoval { hub, dir, .. } = w;
+    hub.close().unwrap();
+    drop(dir);
+}
+
+/// Fix round 3: the same push when the hub names `v1.0.0` at `p2` already is `E_TAG_EXISTS`,
+/// and the move writes nothing: canon, the tags, the move refs, the pushed landings and the
+/// removal stay as they were.
+#[test]
+fn scc6_retained_removal_tag_with_a_held_name_is_refused() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = retained_removal(true, true);
+    let h = &w.hub;
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p2)]
+    );
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[&w.push]).unwrap();
+    let e = h.move_canon(&c, CanonMove::Extend, Some(w.p2)).unwrap_err();
+    assert_eq!(e.code, "E_TAG_EXISTS", "{e:#?}");
+    let after = h.snapshot().unwrap();
+    assert_eq!(after.canon(), Some(w.p2));
+    assert_eq!(tag_names(&after), [("v1.0.0".to_string(), w.p2)]);
+    assert!(after.view_heads().is_ok(), "no removal ran");
+    drop((after, c));
+    assert!(s.view_heads().is_ok(), "no removal ran");
+    drop(s);
+    assert!(holds_none(
+        h,
+        &[
+            ObjectKey {
+                kind: rdy_store::kinds::LANDING,
+                hash: w.lr,
+            },
+            ObjectKey {
+                kind: rdy_store::kinds::LANDING,
+                hash: w.n,
+            },
+        ]
+    ));
+    h.fsck().unwrap();
+    let RetainedRemoval { hub, dir, .. } = w;
+    hub.close().unwrap();
+    let at = dir.path().join("hub");
+    assert!(holder_refs(&at, "held/").is_empty());
+    assert!(holder_refs(&at, rdy_store::hub_canon::REPLACED_REF).is_empty());
+    let raw = Rdy::open_holder(&at).unwrap();
+    let mut applies = 0;
+    raw.store()
+        .reader()
+        .for_each_object_of(rdy_store::kinds::REDACTION_APPLY, |_| {
+            applies += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(applies, 0, "the holder took no removal");
+    drop(raw);
+    drop(dir);
+}
+
+/// Fix round 3: a plain incremental push after a take, with no removal, crosses no held
+/// boundary: the retained tagged landing `lr` stays L's, the push carries no tag, and the extend
+/// names nothing new while the hub names `v1.0.0` at `p2`.
+#[test]
+fn scc6_plain_push_after_a_take_names_no_retained_tag() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = retained_removal(false, true);
+    let h = &w.hub;
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[&w.push]).unwrap();
+    assert!(!c.facts().objects.contains(&ObjectKey {
+        kind: rdy_store::kinds::LANDING,
+        hash: w.lr,
+    }));
+    assert_eq!(
+        h.move_canon(&c, CanonMove::Extend, Some(w.p2)).unwrap(),
+        moved(w.n)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p2)]
+    );
+    drop((s, c));
+    h.fsck().unwrap();
+    let RetainedRemoval { hub, dir, .. } = w;
+    hub.close().unwrap();
+    drop(dir);
+}

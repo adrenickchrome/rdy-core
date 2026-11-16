@@ -417,14 +417,30 @@ pub fn history_landings_before(
     roots: &BTreeSet<Hash>,
     end: Location,
 ) -> Result<BTreeSet<Hash>, StreamError> {
-    let known = BTreeSet::new();
-    let roots: Vec<ObjectKey> = roots
+    let roots: BTreeSet<ObjectKey> = roots
         .iter()
         .map(|h| ObjectKey {
             kind: kinds::LANDING,
             hash: *h,
         })
         .collect();
+    Ok(history_keys_before(reader, &roots, end)?
+        .into_iter()
+        .filter(|k| k.kind == kinds::LANDING)
+        .map(|k| k.hash)
+        .collect())
+}
+
+/// Every key that the walk of [`history_landings_before`] meets from `roots` (keys of any kind
+/// the store holds), the roots included. A canon move reads it to join the canon history of its
+/// held prerequisites with the records it brings (`crate::hub_canon`).
+pub(crate) fn history_keys_before(
+    reader: &StoreReader,
+    roots: &BTreeSet<ObjectKey>,
+    end: Location,
+) -> Result<BTreeSet<ObjectKey>, StreamError> {
+    let known = BTreeSet::new();
+    let roots: Vec<ObjectKey> = roots.iter().copied().collect();
     if roots.is_empty() {
         return Ok(BTreeSet::new());
     }
@@ -441,11 +457,7 @@ pub fn history_landings_before(
         unbounded,
         true,
     )?;
-    Ok(w.nodes
-        .keys()
-        .filter(|k| k.kind == kinds::LANDING)
-        .map(|k| k.hash)
-        .collect())
+    Ok(w.nodes.keys().copied().collect())
 }
 
 /// The links that the walk of [`closure_within`] keeps when it ends, summed over the records it

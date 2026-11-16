@@ -1061,11 +1061,16 @@ const ATTACHMENT_KINDS: [u8; 10] = [
 ];
 
 /// Every landing of the canon history at `head`, as the export walks it (`crate::closure`),
-/// over the plan and the holder. The plan's part: the records of the plan that `head` reaches
-/// through their object links, with each record of an attachment kind that links one of them
-/// (a removal proof brings its human landing, a dispute resolution its correction landing), to
-/// a fixed point. The holder's part: the canon-history closure of each held landing that this
-/// walk meets (`crate::closure::history_landings_before`), with its own attachments.
+/// over the plan and the holder together, to one fixed point. The plan's part: the records of
+/// the plan that the walk reaches through their object links, with each record of an attachment
+/// kind that links a record the walk holds, the plan's or the holder's (a removal proof brings
+/// its human landing, a dispute resolution its correction landing). The holder's part: the
+/// canon-history closure of each held object that a plan record links
+/// (`crate::closure::history_keys_before`), with its own attachments. A plan attachment of a
+/// held record joins the walk as one of a plan record does: after a take, a pushed removal proof
+/// whose request names a version the holder holds below the push brings its human landing and
+/// that landing's tags. A holder record links no plan record, so the holder's part needs no
+/// plan record.
 fn history_landings(
     reader: &StoreReader,
     overlay: &Overlay<'_>,
@@ -1095,29 +1100,28 @@ fn history_landings(
         plan.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect();
     let mut walked: HashSet<ObjectKey> = HashSet::new();
     let mut walked_hashes: HashSet<Hash> = HashSet::new();
-    let mut held_roots: BTreeSet<Hash> = BTreeSet::new();
+    // the held objects the plan's records link, and the holder's closure of them
+    let mut held_roots: BTreeSet<ObjectKey> = BTreeSet::new();
+    let mut held_walked: BTreeSet<ObjectKey> = BTreeSet::new();
+    let mut held: HashSet<ObjectKey> = HashSet::new();
+    let mut held_hashes: HashSet<Hash> = HashSet::new();
     let mut todo: Vec<crate::object_refs::ObjectRef> = vec![crate::object_refs::ObjectRef {
         kind: Some(kinds::LANDING),
         hash: *head,
     }];
     loop {
         while let Some(r) = todo.pop() {
-            let found = match r.kind {
-                Some(k) => {
-                    let key = ObjectKey {
-                        kind: k,
-                        hash: r.hash,
-                    };
-                    in_plan.contains_key(&key).then_some(key)
-                }
-                None => portable_kinds()
-                    .iter()
-                    .map(|&k| ObjectKey {
-                        kind: k,
-                        hash: r.hash,
-                    })
-                    .find(|key| in_plan.contains_key(key)),
+            let kinds_of: Vec<u8> = match r.kind {
+                Some(k) => vec![k],
+                None => portable_kinds().to_vec(),
             };
+            let found = kinds_of
+                .iter()
+                .map(|&k| ObjectKey {
+                    kind: k,
+                    hash: r.hash,
+                })
+                .find(|key| in_plan.contains_key(key));
             match found {
                 Some(key) => {
                     if walked.insert(key) {
@@ -1126,21 +1130,43 @@ fn history_landings(
                     }
                 }
                 None => {
-                    if matches!(r.kind, None | Some(kinds::LANDING))
-                        && reader.has_kind(kinds::LANDING, &r.hash)?
-                    {
-                        held_roots.insert(r.hash);
+                    for k in kinds_of {
+                        if reader.has_kind(k, &r.hash)? {
+                            held_roots.insert(ObjectKey {
+                                kind: k,
+                                hash: r.hash,
+                            });
+                        }
                     }
                 }
             }
         }
-        // the plan's attachments of what the walk holds
+        // the holder's closure of the held objects met since the last pass
+        let fresh: BTreeSet<ObjectKey> = held_roots
+            .iter()
+            .filter(|k| !held.contains(k) && !held_walked.contains(k))
+            .copied()
+            .collect();
+        if !fresh.is_empty() {
+            held_walked.extend(fresh.iter().copied());
+            let keys =
+                crate::closure::history_keys_before(reader, &fresh, crate::closure::END_OF_LOG)
+                    .map_err(|e| refused(e.to_string()))?;
+            for k in keys {
+                held_hashes.insert(k.hash);
+                held.insert(k);
+            }
+        }
+        // the plan's attachments of what the walk holds, the plan's records or the holder's
         let names = |r: &crate::object_refs::ObjectRef| match r.kind {
-            Some(k) => walked.contains(&ObjectKey {
-                kind: k,
-                hash: r.hash,
-            }),
-            None => walked_hashes.contains(&r.hash),
+            Some(k) => {
+                let key = ObjectKey {
+                    kind: k,
+                    hash: r.hash,
+                };
+                walked.contains(&key) || held.contains(&key)
+            }
+            None => walked_hashes.contains(&r.hash) || held_hashes.contains(&r.hash),
         };
         let joined: Vec<ObjectKey> = plan
             .iter()
@@ -1161,18 +1187,16 @@ fn history_landings(
     }
     let mut out: HashSet<Hash> = walked
         .iter()
+        .chain(&held)
         .filter(|k| k.kind == kinds::LANDING)
         .map(|k| k.hash)
         .collect();
-    if !held_roots.is_empty() {
-        let held = crate::closure::history_landings_before(
-            reader,
-            &held_roots,
-            crate::closure::END_OF_LOG,
-        )
-        .map_err(|e| refused(e.to_string()))?;
-        out.extend(held);
-    }
+    out.extend(
+        held_roots
+            .iter()
+            .filter(|k| k.kind == kinds::LANDING)
+            .map(|k| k.hash),
+    );
     Ok(out)
 }
 
