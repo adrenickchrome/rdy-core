@@ -167,13 +167,13 @@ fn io(e: std::io::Error) -> RdyError {
     )
 }
 
+/// A push read: its header, its present records as (kind, bytes), and their keys.
+type PushRead = (StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>);
+
 /// The checked header and present records of the push `batches` for the holder of `repo`: each
 /// file passes core's batch check, the headers agree, and every record is a canon or view
 /// history's present object. Repeated records are one.
-fn read_push(
-    batches: &[File],
-    repo: RepoId,
-) -> Result<(StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>), RdyError> {
+fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
     if batches.is_empty() {
         return Err(to_rdy(StreamError::bad_record(0, 0, Reason::NoBatchFiles)));
     }
@@ -469,12 +469,12 @@ impl StoreHandle {
     }
 }
 
+/// A landing's `prev` (outer none: the landing is not found).
+type PrevOf<'a> = &'a dyn Fn(&Hash) -> Result<Option<Option<Hash>>, RdyError>;
+
 /// The landings of the chain from `tip` back by `prev`, newest first, as far as `prev_of` finds
 /// them, and at most [`MAX_HISTORY_DEPTH`].
-fn chain(
-    tip: Option<Hash>,
-    prev_of: &dyn Fn(&Hash) -> Result<Option<Option<Hash>>, RdyError>,
-) -> Result<Vec<Hash>, RdyError> {
+fn chain(tip: Option<Hash>, prev_of: PrevOf<'_>) -> Result<Vec<Hash>, RdyError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut at = tip;

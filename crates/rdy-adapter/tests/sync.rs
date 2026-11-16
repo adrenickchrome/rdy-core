@@ -481,15 +481,14 @@ fn scc6_quarantine_check_and_move_share_expected_state() {
     // nothing was written: the store's log end and refs are as they were
     let after = h.snapshot().unwrap();
     assert_eq!(after.canon(), Some(w.p2));
-    assert_eq!(
-        after
+    assert!(
+        !after
             .has_objects(&[ObjectKey {
                 kind: rdy_store::kinds::LANDING,
                 hash: w.q2
             }])
             .unwrap()[0]
-            .present,
-        false
+            .present
     );
     assert_eq!(before.canon(), after.canon());
     // the captured snapshot still reads its own tip
