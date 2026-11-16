@@ -37,11 +37,13 @@
 //! - **Set view head:** `view/<name>` is the expected head, or absent. The pushed chain of view
 //!   `<name>` holds that head, and its root is the hub view's root.
 //!
-//! A seed, an extend or a force also names the tags on the chain it makes canon that no
-//! `tag/` ref names yet ([`CarriedTag`]), in the same batch, by its caller's tag rule; a hold
-//! names none until a later move makes its chain canon. A plan whose pushed history carries a
-//! removal takes it through the store's checked take, under the writer, with the move's refs in
-//! the take's one batch ([`Store::move_canon_with`], D-FNRXT).
+//! A seed, an extend or a force also names the tags of the canon history it moves to that no
+//! `tag/` ref names yet ([`CarriedTag`]), in the same batch, by its caller's tag rule: the tags
+//! of every landing of that history's closure, as an export walks it (the chain, each replay
+//! source and each attachment landing). A hold names none until a later move makes its chain
+//! canon. A plan whose pushed history carries a removal takes it through the store's checked
+//! take, under the writer, with the move's refs in the take's one batch
+//! ([`Store::move_canon_with`], D-FNRXT).
 //!
 //! A compare that fails is no error: the move writes nothing and returns
 //! [`Moved::Behind`] with the tip or head it found. A chain rule that fails is
@@ -388,9 +390,13 @@ impl MoveBatch {
     }
 }
 
-/// A tag a canon move carries: a TAG object whose landing is on the chain the move makes
-/// canon, and that no `tag/` ref names (D-KE83X). The tag rule of the move's caller
-/// ([`Store::move_canon_with`]) chooses which of them the move names.
+/// A tag a canon move carries: a TAG object of the plan or the holder whose landing is in the
+/// canon history the move makes canon, and that no `tag/` ref names (D-KE83X). That history is
+/// its closure, as an export walks it (`crate::closure`): the chain, each replay source
+/// (`rebased_from`) with its chain, and each attachment landing (a removal proof's human
+/// landing, a dispute resolution's correction landing), so the hub names what a push carries.
+/// The tag rule of the move's caller ([`Store::move_canon_with`]) chooses which of them the
+/// move names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarriedTag {
     pub hash: Hash,
@@ -960,15 +966,16 @@ impl StoreReader {
 /// A move's ref writes and the tags it carries, or the tip or head its failed compare found.
 type Planned = Result<(Vec<(String, Vec<u8>)>, Vec<CarriedTag>), Option<Hash>>;
 
-/// The tags a canon move to the chain `chain` carries (see [`CarriedTag`]): each TAG object of
-/// the plan or the holder whose landing is on `chain` and that no `tag/` ref names, in name
-/// and hash order.
+/// The tags a canon move to head `head` carries (see [`CarriedTag`]): each TAG object of the
+/// plan or the holder that no `tag/` ref names and whose landing is in the canon history at
+/// `head`, in name and hash order. The history's landings are first read cheaply
+/// ([`replay_landings`]); only a tag they do not hold reads the whole history
+/// ([`history_landings`]), once.
 fn carried_tags(
     reader: &StoreReader,
     overlay: &Overlay<'_>,
-    chain: &[Hash],
+    head: &Hash,
 ) -> Result<Vec<CarriedTag>, StoreError> {
-    let on: HashSet<&Hash> = chain.iter().collect();
     let mut named: HashSet<Hash> = HashSet::new();
     for (_, v) in reader.refs_with_prefix(crate::holder::TAG_REF)? {
         if let Ok(b) = <[u8; 32]>::try_from(v.as_slice()) {
@@ -985,7 +992,7 @@ fn carried_tags(
         hashes.insert(h);
         Ok(())
     })?;
-    let mut out = vec![];
+    let mut candidates = vec![];
     for h in hashes {
         if named.contains(&h) {
             continue;
@@ -993,11 +1000,179 @@ fn carried_tags(
         let Some(tag) = overlay.typed::<Tag>(kinds::TAG, &h)? else {
             continue;
         };
-        if on.contains(&tag.landing) {
-            out.push(CarriedTag { hash: h, tag });
+        candidates.push(CarriedTag { hash: h, tag });
+    }
+    if candidates.is_empty() {
+        return Ok(vec![]);
+    }
+    let near = replay_landings(overlay, head)?;
+    let mut far: Option<HashSet<Hash>> = None;
+    let mut out = vec![];
+    for c in candidates {
+        let on = near.contains(&c.tag.landing) || {
+            let f = match &far {
+                Some(f) => f,
+                None => far.insert(history_landings(reader, overlay, head)?),
+            };
+            f.contains(&c.tag.landing)
+        };
+        if on {
+            out.push(c);
         }
     }
     out.sort_by(|a, b| (&a.tag.name, a.hash).cmp(&(&b.tag.name, b.hash)));
+    Ok(out)
+}
+
+/// The landings of the canon history at `head` that its landings' own links reach, read through
+/// the plan and the holder: the head's chain and each replay source (`rebased_from`), with
+/// their chains, to any depth (D-KE83X: a clean replay keeps its sources, and their tags travel
+/// with the history). A landing that neither holds ends its walk.
+fn replay_landings(overlay: &Overlay<'_>, head: &Hash) -> Result<HashSet<Hash>, StoreError> {
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let mut todo = vec![*head];
+    while let Some(l) = todo.pop() {
+        if seen.contains(&l) {
+            continue;
+        }
+        let Some(rec) = overlay.landing(&l)? else {
+            continue;
+        };
+        seen.insert(l);
+        todo.extend(rec.prev);
+        todo.extend(rec.rebased_from.iter().copied());
+    }
+    Ok(seen)
+}
+
+/// The kinds that join a canon history as a reverse attachment of a record it holds
+/// (`crate::closure`): no forward link reaches them.
+const ATTACHMENT_KINDS: [u8; 10] = [
+    kinds::SIGNATURE,
+    kinds::ANSWER,
+    kinds::PLAN,
+    kinds::SNAPSHOT_DELTA,
+    kinds::REDACTION,
+    kinds::REDACTION_APPLY,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+    kinds::REVIEW,
+];
+
+/// Every landing of the canon history at `head`, as the export walks it (`crate::closure`),
+/// over the plan and the holder. The plan's part: the records of the plan that `head` reaches
+/// through their object links, with each record of an attachment kind that links one of them
+/// (a removal proof brings its human landing, a dispute resolution its correction landing), to
+/// a fixed point. The holder's part: the canon-history closure of each held landing that this
+/// walk meets (`crate::closure::history_landings_before`), with its own attachments.
+fn history_landings(
+    reader: &StoreReader,
+    overlay: &Overlay<'_>,
+    head: &Hash,
+) -> Result<HashSet<Hash>, StoreError> {
+    let mut features = crate::snapshot::held_features(reader)?;
+    for (raw, payload) in overlay.records {
+        features = features.merged(&crate::format::required_features(*raw, payload));
+    }
+    // each plan record's key and the links it names (a record whose links do not decode
+    // names none: the move's own checks refuse it)
+    let plan: Vec<(ObjectKey, Vec<crate::object_refs::ObjectRef>)> = overlay
+        .records
+        .iter()
+        .map(|(raw, payload)| {
+            let key = ObjectKey {
+                kind: crate::codec::logical_kind(*raw),
+                hash: Hash::of(payload),
+            };
+            (
+                key,
+                portable_refs_of(&features, *raw, payload).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let in_plan: HashMap<ObjectKey, usize> =
+        plan.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect();
+    let mut walked: HashSet<ObjectKey> = HashSet::new();
+    let mut walked_hashes: HashSet<Hash> = HashSet::new();
+    let mut held_roots: BTreeSet<Hash> = BTreeSet::new();
+    let mut todo: Vec<crate::object_refs::ObjectRef> = vec![crate::object_refs::ObjectRef {
+        kind: Some(kinds::LANDING),
+        hash: *head,
+    }];
+    loop {
+        while let Some(r) = todo.pop() {
+            let found = match r.kind {
+                Some(k) => {
+                    let key = ObjectKey {
+                        kind: k,
+                        hash: r.hash,
+                    };
+                    in_plan.contains_key(&key).then_some(key)
+                }
+                None => portable_kinds()
+                    .iter()
+                    .map(|&k| ObjectKey {
+                        kind: k,
+                        hash: r.hash,
+                    })
+                    .find(|key| in_plan.contains_key(key)),
+            };
+            match found {
+                Some(key) => {
+                    if walked.insert(key) {
+                        walked_hashes.insert(key.hash);
+                        todo.extend(plan[in_plan[&key]].1.iter().copied());
+                    }
+                }
+                None => {
+                    if matches!(r.kind, None | Some(kinds::LANDING))
+                        && reader.has_kind(kinds::LANDING, &r.hash)?
+                    {
+                        held_roots.insert(r.hash);
+                    }
+                }
+            }
+        }
+        // the plan's attachments of what the walk holds
+        let names = |r: &crate::object_refs::ObjectRef| match r.kind {
+            Some(k) => walked.contains(&ObjectKey {
+                kind: k,
+                hash: r.hash,
+            }),
+            None => walked_hashes.contains(&r.hash),
+        };
+        let joined: Vec<ObjectKey> = plan
+            .iter()
+            .filter(|(k, refs)| {
+                ATTACHMENT_KINDS.contains(&k.kind) && !walked.contains(k) && refs.iter().any(names)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        if joined.is_empty() {
+            break;
+        }
+        for k in joined {
+            todo.push(crate::object_refs::ObjectRef {
+                kind: Some(k.kind),
+                hash: k.hash,
+            });
+        }
+    }
+    let mut out: HashSet<Hash> = walked
+        .iter()
+        .filter(|k| k.kind == kinds::LANDING)
+        .map(|k| k.hash)
+        .collect();
+    if !held_roots.is_empty() {
+        let held = crate::closure::history_landings_before(
+            reader,
+            &held_roots,
+            crate::closure::END_OF_LOG,
+        )
+        .map_err(|e| refused(e.to_string()))?;
+        out.extend(held);
+    }
     Ok(out)
 }
 
@@ -1171,20 +1346,20 @@ fn plan_move(
     }
     let (chain, complete) = walk_landings(&head, &mut |h| overlay.landing(h))?;
     let canon = (CANON_REF.to_string(), head.0.to_vec());
-    // a move that makes the chain canon carries the tags on it; a hold names none
-    let carried = |chain: &[Hash]| carried_tags(reader, &overlay, chain);
+    // a move that makes the chain canon carries the tags of its history; a hold names none
+    let carried = || carried_tags(reader, &overlay, &head);
     match (mv, current) {
         (CanonMove::Seed, _) => {
             if !complete {
                 return Err(refused(SEED_REASON));
             }
-            Ok(Ok((vec![canon], carried(&chain)?)))
+            Ok(Ok((vec![canon], carried()?)))
         }
         (CanonMove::Extend, Some(tip)) => {
             if !chain.contains(&tip) {
                 return Err(refused(extend_reason(&tip)));
             }
-            Ok(Ok((vec![canon], carried(&chain)?)))
+            Ok(Ok((vec![canon], carried()?)))
         }
         (CanonMove::Force, Some(tip)) => {
             if chain.contains(&tip) {
@@ -1200,7 +1375,7 @@ fn plan_move(
             };
             Ok(Ok((
                 vec![canon, (replaced_ref(&tip), mark.encode())],
-                carried(&chain)?,
+                carried()?,
             )))
         }
         (CanonMove::Hold, Some(tip)) => {
@@ -1237,7 +1412,7 @@ impl Store {
     /// that fails to write leaves the objects, the refs, the features and the index as they
     /// were.
     ///
-    /// A seed, an extend or a force carries the tags on the chain it makes canon
+    /// A seed, an extend or a force carries the tags of the history it makes canon
     /// ([`CarriedTag`]). `tag_rule` gets them and returns the ones the move names, or its own
     /// refusal (`TakeError::Validation`), before anything is written. The batch then names each
     /// by `tag/<name>`, with its relay answer by `answer/tag-object:<tag>`.

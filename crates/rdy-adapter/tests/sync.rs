@@ -1677,3 +1677,320 @@ fn scc6_held_chain_tags_land_with_its_extend() {
     h.fsck().unwrap();
     h.close().unwrap();
 }
+
+/// A tagged clean replay, pushed: project P lands `p1` and then `p2` (tagged `v1.0.0` when
+/// `hub_names_v1`); the hub seeds `p1` and extends to `p2` from P's histories. L, a copy of P at
+/// `p1`, lands `l` and tags it `v1.0.0`, fetches the hub's canon from the holder and pulls with
+/// a clean replay: canon `l2` follows `p2`, with `rebased_from = [l]`, and the tag stays on `l`
+/// (D-KE83X). Returns the holder and L's canon history at `l2` less `p2`.
+struct ReplayedTag {
+    dir: tempfile::TempDir,
+    hub: StoreHandle,
+    p2: Hash,
+    l: Hash,
+    l2: Hash,
+    push: PathBuf,
+}
+
+/// The URL of L's sync state with the hub.
+const HUB_URL: &str = "https://127.0.0.1:9/r/demo";
+
+fn replayed_tag(hub_names_v1: bool) -> ReplayedTag {
+    use rdy_engine::sync_fetch::{self, HubState};
+    use rdy_engine::sync_replay::{self, PULLED, PullRequest};
+    use rdy_store::sync_state::{SyncCanon, SyncStep};
+    use rdy_store::take_batch::FetchTarget;
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let ld = dir.path().join("l");
+    let mut p = project(&pd);
+    let repo = repo_of(&p);
+    doc(&mut p, "w0", "Canon", "The hub keeps one canon.");
+    let p1 = land(&mut p, "w0");
+    p.close().unwrap();
+    copy_dir(&pd, &ld);
+    let mut p = Rdy::open(&pd).unwrap();
+    doc(&mut p, "w1", "Extend", "The canon moves forward.");
+    let p2 = land(&mut p, "w1");
+    if hub_names_v1 {
+        tag(&mut p, "v1.0.0");
+    }
+    p.close().unwrap();
+    let at = |n: &str| dir.path().join(format!("{n}.rdysync"));
+    let canon = StreamPurpose::CanonHistory;
+    export(&pd, canon, p1, None, &at("e1"));
+    export(&pd, canon, p2, Some(p1), &at("e2"));
+    let hub = StoreHandle::create_holder(&dir.path().join("hub"), repo).unwrap();
+    let s0 = hub.snapshot().unwrap();
+    let c1 = check(&s0, &[&at("e1")]).unwrap();
+    assert_eq!(
+        hub.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(p1)
+    );
+    let s1 = hub.snapshot().unwrap();
+    let c2 = check(&s1, &[&at("e2")]).unwrap();
+    assert_eq!(
+        hub.move_canon(&c2, CanonMove::Extend, Some(p1)).unwrap(),
+        moved(p2)
+    );
+    drop((s0, c1, s1, c2));
+
+    // L: a tagged local landing on p1
+    let mut l = Rdy::open(&ld).unwrap();
+    l.store_mut()
+        .write_sync(
+            "origin",
+            vec![SyncStep::Canon(SyncCanon {
+                repo_id: repo,
+                url: HUB_URL.into(),
+                fetched: Some(p1),
+                applied: Some(p1),
+                held: None,
+            })],
+        )
+        .unwrap();
+    doc(
+        &mut l,
+        "w2",
+        "Local",
+        "A local landing the hub has not seen.",
+    );
+    let lh = land(&mut l, "w2");
+    tag(&mut l, "v1.0.0");
+
+    // fetch the hub's canon from the holder, then pull with a clean replay
+    let snap = hub.snapshot().unwrap();
+    snap.write_history(
+        canon,
+        p2,
+        Some(p1),
+        &BTreeSet::<ObjectKey>::new(),
+        File::create(at("fetch")).unwrap(),
+    )
+    .unwrap();
+    drop(snap);
+    let target = FetchTarget {
+        remote: "origin".into(),
+        url: HUB_URL.into(),
+        purpose: canon,
+        root: p2,
+        view: None,
+    };
+    sync_fetch::fetch(&mut l, &files(&[&at("fetch")]), &target).unwrap();
+    let puller = Session {
+        actor: "human:puller".into(),
+        run: None,
+        role: Role::Writer,
+        kind: SessionKind::Human,
+    };
+    let out = sync_replay::pull(
+        &mut l,
+        &puller,
+        &PullRequest {
+            remote: "origin".into(),
+            hub: HubState {
+                repo_id: Some(repo),
+                canon: Some(p2),
+            },
+            take: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(out.status, PULLED, "{out:?}");
+    let l2 = l.store().reader().canon_head().unwrap().unwrap();
+    let rec = l.store().reader().landing(&l2).unwrap();
+    assert_eq!(rec.prev, Some(p2));
+    assert_eq!(rec.rebased_from, [lh]);
+    let local: Vec<(String, Hash)> = l
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(n, _, t)| (n, t.landing))
+        .collect();
+    assert!(local.contains(&("v1.0.0".to_string(), lh)), "{local:?}");
+    l.close().unwrap();
+    let push = at("push");
+    export(&ld, canon, l2, Some(p2), &push);
+    ReplayedTag {
+        dir,
+        hub,
+        p2,
+        l: lh,
+        l2,
+        push,
+    }
+}
+
+/// Fix round 2 (final review finding 3, D-KE83X): a push after a tagged clean replay carries the
+/// tag on its replay source `l`, which canon's new chain reaches through `rebased_from` only.
+/// The extend names `v1.0.0` at `l` in its batch, and the holder stays whole.
+#[test]
+fn scc6_replayed_source_tag_lands_with_its_push() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = replayed_tag(false);
+    let h = &w.hub;
+    assert!(tag_names(&h.snapshot().unwrap()).is_empty());
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[&w.push]).unwrap();
+    assert!(
+        c.facts()
+            .objects
+            .iter()
+            .any(|k| k.kind == rdy_store::kinds::TAG),
+        "the push carries the tag"
+    );
+    assert_eq!(
+        h.move_canon(&c, CanonMove::Extend, Some(w.p2)).unwrap(),
+        moved(w.l2)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.l)]
+    );
+    drop((s, c));
+    h.fsck().unwrap();
+    let ReplayedTag { hub, dir, .. } = w;
+    hub.close().unwrap();
+    drop(dir);
+}
+
+/// Fix round 2: the same push when the hub names `v1.0.0` at `p2` already is `E_TAG_EXISTS`,
+/// and the move writes nothing: canon, the tags and the pushed landings stay as they were.
+#[test]
+fn scc6_replayed_source_tag_with_a_held_name_is_refused() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = replayed_tag(true);
+    let h = &w.hub;
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p2)]
+    );
+    let s = h.snapshot().unwrap();
+    let c = check(&s, &[&w.push]).unwrap();
+    let e = h.move_canon(&c, CanonMove::Extend, Some(w.p2)).unwrap_err();
+    assert_eq!(e.code, "E_TAG_EXISTS", "{e:#?}");
+    let after = h.snapshot().unwrap();
+    assert_eq!(after.canon(), Some(w.p2));
+    assert_eq!(tag_names(&after), [("v1.0.0".to_string(), w.p2)]);
+    drop((s, c, after));
+    assert!(holds_none(
+        h,
+        &[
+            ObjectKey {
+                kind: rdy_store::kinds::LANDING,
+                hash: w.l,
+            },
+            ObjectKey {
+                kind: rdy_store::kinds::LANDING,
+                hash: w.l2,
+            },
+        ]
+    ));
+    h.fsck().unwrap();
+    let ReplayedTag { hub, dir, .. } = w;
+    hub.close().unwrap();
+    drop(dir);
+}
+
+/// Fix round 2 (D-KE83X): a canon history carries the tags of every landing its closure holds,
+/// attachment landings included. P lands `l1` with a secret, removes it in `l2` and tags `l2`
+/// `v2.0.0`. P's history at `l1` brings the removal's proof and, with it, its human landing
+/// `l2` and that landing's tag; the seed names `v2.0.0` at `l2`, as a fetch of the same history
+/// into a project takes it.
+#[test]
+fn scc6_seed_takes_the_tag_of_an_attachment_landing() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let mut r = project(&pd);
+    let repo = repo_of(&r);
+    let w = doc(&mut r, "work", "Intro", "Public words.");
+    let secret = write_in(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$x", "parent": w.created["$s"], "body": "The launch code is ZEBRA-7731."}]),
+    );
+    let l1 = land(&mut r, "work");
+    remove(&mut r, &secret.created["$x"]);
+    let l2 = r.store().reader().canon_head().unwrap().unwrap();
+    assert_ne!(l1, l2);
+    tag(&mut r, "v2.0.0");
+    r.close().unwrap();
+    let e1 = dir.path().join("e1.rdysync");
+    export(&pd, StreamPurpose::CanonHistory, l1, None, &e1);
+    let h = StoreHandle::create_holder(&dir.path().join("hub"), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&e1]).unwrap();
+    let carried = |kind: u8, hash: Hash| c1.facts().objects.contains(&ObjectKey { kind, hash });
+    assert!(
+        carried(rdy_store::kinds::LANDING, l2),
+        "the removal's proof brings its human landing"
+    );
+    assert_eq!(h.move_canon(&c1, CanonMove::Seed, None).unwrap(), moved(l1));
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v2.0.0".to_string(), l2)]
+    );
+    drop((s0, c1));
+    h.fsck().unwrap();
+    h.close().unwrap();
+}
+
+/// Fix round 2: the same attachment landing from a held chain. The hub seeds P's first landing
+/// `p0`, then holds P's history at `l1` (it brings `l2` and its tag `v2.0.0`), which names no
+/// version. The extend from the stored head `l1`, with no new batch, reads the holder's own
+/// closure of `l1` and names `v2.0.0` at `l2`.
+#[test]
+fn scc6_held_attachment_landing_tag_lands_with_its_extend() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let mut r = project(&pd);
+    let repo = repo_of(&r);
+    let w = doc(&mut r, "work", "Intro", "Public words.");
+    let p0 = land(&mut r, "work");
+    let secret = write_in(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$x", "parent": w.created["$s"], "body": "The launch code is ZEBRA-7731."}]),
+    );
+    let l1 = land(&mut r, "work");
+    remove(&mut r, &secret.created["$x"]);
+    let l2 = r.store().reader().canon_head().unwrap().unwrap();
+    tag(&mut r, "v2.0.0");
+    r.close().unwrap();
+    let e0 = dir.path().join("e0.rdysync");
+    let e1 = dir.path().join("e1.rdysync");
+    export(&pd, StreamPurpose::CanonHistory, p0, None, &e0);
+    export(&pd, StreamPurpose::CanonHistory, l1, Some(p0), &e1);
+    let h = StoreHandle::create_holder(&dir.path().join("hub"), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c0 = check(&s0, &[&e0]).unwrap();
+    assert_eq!(h.move_canon(&c0, CanonMove::Seed, None).unwrap(), moved(p0));
+    let s1 = h.snapshot().unwrap();
+    let c1 = check(&s1, &[&e1]).unwrap();
+    assert!(c1.facts().objects.contains(&ObjectKey {
+        kind: rdy_store::kinds::LANDING,
+        hash: l2,
+    }));
+    assert_eq!(
+        h.move_canon(&c1, CanonMove::Hold, Some(p0)).unwrap(),
+        moved(l1)
+    );
+    assert!(tag_names(&h.snapshot().unwrap()).is_empty());
+    let s2 = h.snapshot().unwrap();
+    let stored = s2.check_stored_head(l1).unwrap();
+    assert_eq!(
+        h.move_canon(&stored, CanonMove::Extend, Some(p0)).unwrap(),
+        moved(l1)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v2.0.0".to_string(), l2)]
+    );
+    drop((s0, c0, s1, c1, s2, stored));
+    h.fsck().unwrap();
+    h.close().unwrap();
+}
