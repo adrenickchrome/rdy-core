@@ -401,10 +401,11 @@ fn ha7_holder_never_uses_global_landing_of() {
     assert_eq!(left.changes, right.changes, "of one change");
     let c = left.changes[0];
     let h = d.holder();
-    let global = h.store().landing_of(&c).unwrap();
-    assert!(
-        global == Some(d.l_left) || global == Some(d.l_right),
-        "the global index holds one of them: {global:?}"
+    // a holder without canon has no landed change (D-QCE8M): the global index holds neither
+    assert_eq!(
+        h.store().landing_of(&c).unwrap(),
+        None,
+        "no canon: nothing is landed"
     );
     let report = h.fsck().unwrap();
     assert_eq!(report.landings, 3);

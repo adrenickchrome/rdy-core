@@ -108,7 +108,7 @@ fn dump_inputs() -> Vec<Input> {
     let mut out = vec![];
     for n in &names {
         let stem = n.trim_end_matches(".rdydump");
-        let holder = stem.contains("holder");
+        let holder = stem.contains("holder") || stem.contains("hub-canon");
         if let Some(prefix) = stem.strip_suffix("-chain-full") {
             out.push(Input {
                 name: format!("{prefix}-chain"),
