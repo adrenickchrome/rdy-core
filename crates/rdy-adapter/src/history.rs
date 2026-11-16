@@ -62,9 +62,10 @@ impl Snapshot {
         history_facts::disputes(self.read_state(), landings)
     }
 
-    /// The captured canon history, newest landing first. Empty before the first landing, and
-    /// always empty in a holder, which has no canon.
-    pub fn canon_chain(&self) -> Result<Vec<LandingFacts>, RdyError> {
+    /// The captured canon history, newest landing first. Empty before the first landing; in a
+    /// holder, hub canon's history, empty before its seed. ([`Snapshot::canon_chain`] reads the
+    /// chain facts of a push.)
+    pub fn canon_history(&self) -> Result<Vec<LandingFacts>, RdyError> {
         match self.canon() {
             Some(head) => history_facts::chain(self.read_state(), head),
             None => {
@@ -273,7 +274,7 @@ mod tests {
         let l2 = land_more(&handle, "second", Some("v2.0.0"));
 
         // the older snapshot reaches L1 only: canon and its one tag end there
-        assert_eq!(hashes(&before.canon_chain().unwrap()), [l1]);
+        assert_eq!(hashes(&before.canon_history().unwrap()), [l1]);
         assert_eq!(before.landing_facts(l1).unwrap().hash, l1);
         for e in [
             before.landing_facts(l2).unwrap_err(),
@@ -287,7 +288,7 @@ mod tests {
 
         // a new snapshot reaches both, newest first, and finds a tag by its version
         let after = handle.snapshot().unwrap();
-        assert_eq!(hashes(&after.canon_chain().unwrap()), [l2, l1]);
+        assert_eq!(hashes(&after.canon_history().unwrap()), [l2, l1]);
         assert_eq!(after.landing_facts(l2).unwrap().hash, l2);
         assert_eq!(hashes(&after.tag_history("2.0.0").unwrap()), [l2, l1]);
         handle.close().unwrap();
@@ -304,7 +305,7 @@ mod tests {
         // each tag's chain starts at its own landing; canon's runs past both
         assert_eq!(hashes(&snap.tag_history("v1.0.0").unwrap()), [l1]);
         assert_eq!(hashes(&snap.tag_history("v2.0.0").unwrap()), [l2, l1]);
-        assert_eq!(hashes(&snap.canon_chain().unwrap()), [l3, l2, l1]);
+        assert_eq!(hashes(&snap.canon_history().unwrap()), [l3, l2, l1]);
         // the untagged landing is reachable through canon
         let facts = snap.landing_facts(l3).unwrap();
         assert_eq!(facts.record.prev, Some(l2));
@@ -322,7 +323,7 @@ mod tests {
         let handle = StoreHandle::open(dir.path()).unwrap();
         let snap = handle.snapshot().unwrap();
         assert!(snap.canon().is_none());
-        assert!(snap.canon_chain().unwrap().is_empty());
+        assert!(snap.canon_history().unwrap().is_empty());
         assert_eq!(
             snap.landing_facts(Hash([1; 32])).unwrap_err().code,
             E_NOT_FOUND
@@ -534,7 +535,7 @@ mod tests {
             (
                 E_NOT_FOUND.to_string(),
                 format!("no landing {missing} in the captured history"),
-                "read landings from canon_chain or tag_history".to_string()
+                "read landings from canon_history or tag_history".to_string()
             )
         );
         // a new capture reaches the later landing; the orphan still fails

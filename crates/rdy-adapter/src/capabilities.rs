@@ -8,9 +8,11 @@
 
 use rdy_engine::formats::{FormatFacts, formats};
 use rdy_store::format::{
-    FeatureClass, MANIFEST_VERSION, StoreAccess, StoreFeature, StoreFeatures, check_features,
-    registered_features,
+    FEATURE_HUB_CANON, FeatureClass, MANIFEST_VERSION, StoreAccess, StoreFeature, StoreFeatures,
+    check_features, registered_features,
 };
+use rdy_store::hub_canon::CanonMove;
+use rdy_store::sync_stream::{HISTORY_FORMAT, READ_FORMATS, StreamPurpose};
 use serde::Serialize;
 
 pub use rdy_engine::formats::DumpPair;
@@ -62,6 +64,21 @@ pub struct DumpReads {
     pub features: Vec<DumpFeaturePair>,
 }
 
+/// What this build takes from a sync push into a holder (D-KE83X, D-47HVF, D-DZDB7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncCapabilities {
+    /// The sync stream formats this build reads.
+    pub stream_formats: Vec<u32>,
+    /// The stream format of a canon or view history.
+    pub history_format: u32,
+    /// The purposes a push into a holder carries, in their byte order.
+    pub history_purposes: Vec<StreamPurpose>,
+    /// The moves a holder makes (`sync::CanonMove`), by name.
+    pub moves: Vec<&'static str>,
+    /// The store feature the first move lists, with its class and minimum rdy.
+    pub hub_canon: StoreFeature,
+}
+
 /// The formats this build writes and the formats it reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FormatCapabilities {
@@ -69,6 +86,45 @@ pub struct FormatCapabilities {
     pub written: FormatFacts,
     pub store_reads: StoreReads,
     pub dump_reads: DumpReads,
+}
+
+/// The name of each move, from the move itself: a new move cannot be left out unnoticed.
+fn move_name(m: &CanonMove) -> &'static str {
+    match m {
+        CanonMove::Seed => "seed",
+        CanonMove::Extend => "extend",
+        CanonMove::Force => "force",
+        CanonMove::Hold => "hold",
+        CanonMove::SetViewHead { .. } => "set_view_head",
+    }
+}
+
+/// What this build takes from a sync push into a holder, from core's stream registry, move set
+/// and feature registry. Like [`format_capabilities`], it opens no store.
+pub fn sync_capabilities() -> SyncCapabilities {
+    let moves = [
+        CanonMove::Seed,
+        CanonMove::Extend,
+        CanonMove::Force,
+        CanonMove::Hold,
+        CanonMove::SetViewHead {
+            name: String::new(),
+            root: rdy_model::Hash([0; 32]),
+        },
+    ];
+    SyncCapabilities {
+        stream_formats: READ_FORMATS.to_vec(),
+        history_format: HISTORY_FORMAT,
+        history_purposes: (0..=u8::MAX)
+            .filter_map(StreamPurpose::of)
+            .filter(|p| p.first_format() == HISTORY_FORMAT)
+            .collect(),
+        moves: moves.iter().map(move_name).collect(),
+        hub_canon: registered_features()
+            .into_iter()
+            .find(|f| f.name == FEATURE_HUB_CANON)
+            .expect("hub_canon is a registered feature"),
+    }
 }
 
 /// The access `check_features` gives a manifest of one unknown feature of `class`.

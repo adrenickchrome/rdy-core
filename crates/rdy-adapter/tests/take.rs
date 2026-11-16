@@ -517,7 +517,7 @@ fn ha16_snapshot_refs_and_removal_epoch_are_correct() {
         .find(|b| b.version == Some(secret_key.hash))
         .unwrap();
     assert!(w.redacted);
-    assert!(after.canon().is_none() && after.canon_chain().unwrap().is_empty());
+    assert!(after.canon().is_none() && after.canon_history().unwrap().is_empty());
     handle.close().unwrap();
     assert!(!segments_hold_canary(&dir.path().join("holder")));
 }

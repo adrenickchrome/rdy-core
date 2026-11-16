@@ -547,7 +547,7 @@ fn ha16_hub_contract_resumes_with_persistent_batch_files() {
     );
     let holder = StoreHandle::open_holder(&root).unwrap();
     let snap = holder.snapshot().unwrap();
-    assert!(snap.canon().is_none() && snap.canon_chain().unwrap().is_empty());
+    assert!(snap.canon().is_none() && snap.canon_history().unwrap().is_empty());
     let l1 = got.landing;
     drop(snap);
     holder.close().unwrap();

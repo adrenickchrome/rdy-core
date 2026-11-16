@@ -6,9 +6,12 @@ use rdy_engine::{
 };
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::OpenPolicy;
+use rdy_store::format::{RdyVersion, StoreFeatures};
 use rdy_store::holder::StoreMode;
+use rdy_store::hub_canon::{HELD_REF, VIEW_REF};
 use rdy_store::meta::Origin;
 use rdy_store::upgrade::UpgradeStep;
+use rdy_store::view::ViewHead;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -124,8 +127,9 @@ impl StoreHandle {
         self.local.inspect(|rdy| rdy.read().carried_warnings())
     }
 
-    /// A read snapshot: the published state, the identity, the canon head and every `tag/*` ref,
-    /// all taken together under the store's lock, so no write falls between them.
+    /// A read snapshot: the published state, the identity, the canon head, every `tag/*`,
+    /// `view/*` and `held/*` ref and the store's minimum rdy, all taken together under the
+    /// store's lock, so no write falls between them.
     pub fn snapshot(&self) -> Result<Snapshot, RdyError> {
         self.local.inspect(|rdy| snapshot_of(rdy.read()))
     }
@@ -177,8 +181,9 @@ impl StoreHandle {
     }
 }
 
-/// The snapshot of the captured `state`: its identity, canon head and every `tag/*` ref, all read
-/// through its own reader.
+/// The snapshot of the captured `state`: its identity, canon head, every `tag/*`, `view/*` and
+/// `held/*` ref and the store's minimum rdy, all read through its own reader. The caller holds
+/// the store's lock, so the refs and the state's log position are one point.
 pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
     let reader = state.reader();
     let Some(repo_id) = reader.repo_id()? else {
@@ -200,11 +205,30 @@ pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
         .map(|(name, hash, tag)| (name, (hash, tag)))
         .collect();
     let canon = state.canon_head();
+    let mut views = BTreeMap::new();
+    for (name, _) in reader.refs_with_prefix(VIEW_REF)? {
+        let Some(view) = name.strip_prefix(VIEW_REF) else {
+            continue;
+        };
+        if let Some(head) = reader.view_head(view)? {
+            views.insert(view.to_string(), head);
+        }
+    }
+    let mut held = Vec::new();
+    for (name, _) in reader.refs_with_prefix(HELD_REF)? {
+        if let Some(h) = name.strip_prefix(HELD_REF).and_then(|h| h.parse().ok()) {
+            held.push(h);
+        }
+    }
+    let features = reader.store_features()?;
     Ok(Snapshot {
         state,
         identity,
         canon,
         tags,
+        views,
+        held,
+        features,
     })
 }
 
@@ -216,6 +240,12 @@ pub struct Snapshot {
     canon: Option<Hash>,
     /// Tag name (as stored) to the tag's hash and the tag, in name order.
     tags: BTreeMap<String, (Hash, Tag)>,
+    /// View name to the head its `view/` ref held, in name order.
+    views: BTreeMap<String, ViewHead>,
+    /// The heads the `held/` refs named, in name order.
+    held: Vec<Hash>,
+    /// The store's features when the snapshot was taken: they give its minimum rdy (D-4XHPH).
+    features: StoreFeatures,
 }
 
 impl Snapshot {
@@ -223,9 +253,17 @@ impl Snapshot {
         &self.identity
     }
 
-    /// The canon head when the snapshot was taken; None before the first landing.
+    /// The canon head when the snapshot was taken; None before the first landing. In a holder,
+    /// hub canon's tip; None before its seed.
     pub fn canon(&self) -> Option<Hash> {
         self.canon
+    }
+
+    /// The store's minimum rdy when the snapshot was taken (D-4XHPH): the highest
+    /// `required_rdy` of its incompatible and read-only-compatible features, as three numbers.
+    /// None when no feature qualifies. A later write never changes it.
+    pub fn min_rdy(&self) -> Option<RdyVersion> {
+        self.features.min_rdy()
     }
 
     /// The captured tags as (tag hash, tag), oldest version first (Semantic Versioning
@@ -252,10 +290,30 @@ impl Snapshot {
         &self.state
     }
 
+    /// The published state the snapshot holds, shared.
+    pub(crate) fn shared_state(&self) -> &Arc<ReadState> {
+        &self.state
+    }
+
     /// The captured tags by stored name.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn captured_tags(&self) -> &BTreeMap<String, (Hash, Tag)> {
         &self.tags
+    }
+
+    /// The captured view heads by name.
+    pub(crate) fn captured_views(&self) -> &BTreeMap<String, ViewHead> {
+        &self.views
+    }
+
+    /// The store's features when the snapshot was taken.
+    pub(crate) fn captured_features(&self) -> &StoreFeatures {
+        &self.features
+    }
+
+    /// The captured `held/` heads.
+    pub(crate) fn captured_held(&self) -> &[Hash] {
+        &self.held
     }
 
     /// The captured tag that names `name`'s version, as `tag:<version>` reads it: `1.2.0` finds

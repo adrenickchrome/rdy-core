@@ -18,7 +18,7 @@
 
 use crate::ReadState;
 use crate::config::{CoverageGate, ProposeCadence};
-use crate::error::RdyError;
+use crate::error::{E_BAD_INPUT, RdyError};
 use crate::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use crate::readiness::{Candidate, assess};
 use rdy_model::assessment::AssessedPolicy;
@@ -53,6 +53,50 @@ impl CheckInputs {
             propose_changes: st.propose_changes(),
             require_up_to_date: st.require_up_to_date(),
         }
+    }
+
+    /// Checks the inputs a caller passes (`E_BAD_INPUT`), in the ranges the config keeps: a
+    /// coverage target from 0 to 100, a propose changes count from 1 to 1000, and a decisions
+    /// home that is not empty and has no spaces at its ends. The config drops such a value with
+    /// a warning; an explicit input is refused instead.
+    pub fn check(&self) -> Result<(), RdyError> {
+        if self.coverage_target > 100 {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "coverage target {} is outside 0 to 100",
+                    self.coverage_target
+                ),
+                "pass a coverage target from 0 to 100",
+            ));
+        }
+        if !(1..=1000).contains(&self.propose_changes) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "propose changes {} is outside 1 to 1000",
+                    self.propose_changes
+                ),
+                "pass a propose changes count from 1 to 1000",
+            ));
+        }
+        if let Some(home) = &self.decisions_home {
+            if home.trim().is_empty() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "decisions home is empty",
+                    "pass none for no decisions home",
+                ));
+            }
+            if home.trim() != home {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "decisions home has spaces at its ends",
+                    "pass the decisions home without them",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The gate settings the config digest follows (O18).
