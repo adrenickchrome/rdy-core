@@ -329,7 +329,10 @@ impl Rdy {
     /// walks from a landing that a canon sync ref named at any time
     /// (`StoreReader::sync_named_heads`): its prev chain, its provenance branches
     /// (`rebased_from`), and every other landing its links and attachments reach. A later fetch
-    /// or a fork's origin batch that changes the ref keeps it. No two tags denote one version.
+    /// or a fork's origin batch that changes the ref keeps it. A tag may also name a landing of
+    /// the retained local history (`retained_landings`): a pull never moves a tag to a replayed
+    /// landing, so a tag on a replayed source or on a chain that a take replaced stays where it
+    /// was. No two tags denote one version.
     /// Higher versions name later landings: on canon's chain among the tags of canon, and on
     /// each prev chain among the tags that canon does not hold. A local tag on canon and a
     /// fetched tag off it keep no order between them: the pull that applies the history judges
@@ -340,6 +343,7 @@ impl Rdy {
         let mut on_canon: Vec<TagAt> = vec![];
         let mut off_canon: Vec<(semver::Version, String, Hash)> = vec![];
         let mut fetched: Option<BTreeSet<Hash>> = None;
+        let mut retained: Option<BTreeSet<Hash>> = None;
         for (refname, value) in self.store.refs_with_prefix("tag/")? {
             let (v, tag) = match check_tag_ref(&self.store, &refname, &value) {
                 Ok(t) => t,
@@ -357,7 +361,11 @@ impl Rdy {
                 Some(f) => f,
                 None => fetched.insert(self.fetched_landings()?),
             };
-            if !landings.contains(&tag.landing) {
+            let kept = match &retained {
+                Some(r) => r,
+                None => retained.insert(self.retained_landings(chain)?),
+            };
+            if !landings.contains(&tag.landing) && !kept.contains(&tag.landing) {
                 problems.push(format!(
                     "{refname}: landing {} is not in canon's chain",
                     tag.landing.short()
@@ -390,6 +398,38 @@ impl Rdy {
             order(good);
         }
         tag_check_result(problems, all.len())
+    }
+
+    /// The retained local history: the landings that canon's chain (`chain`) and every landing
+    /// that a `replaced/` mark names reach through `prev` and `rebased_from`, to any depth. A pull
+    /// leaves a tag on its landing (D-KE83X): a clean replay keeps the replayed sources reachable
+    /// through `rebased_from`, and a take, a stop or a hub force keeps the old chain under
+    /// `replaced/`. A walk skips a landing that the store does not hold.
+    fn retained_landings(&self, chain: &[Hash]) -> Result<BTreeSet<Hash>, RdyError> {
+        let reader = self.store.reader();
+        let mut todo: Vec<Hash> = chain.to_vec();
+        for (refname, value) in reader.refs_with_prefix(rdy_store::hub_canon::REPLACED_REF)? {
+            let Ok(mark) = rdy_store::hub_canon::Replaced::decode(&value) else {
+                continue;
+            };
+            if mark.kind != rdy_store::hub_canon::ReplacedKind::Landing {
+                continue;
+            }
+            if let Ok(h) = refname[rdy_store::hub_canon::REPLACED_REF.len()..].parse::<Hash>() {
+                todo.push(h);
+            }
+        }
+        let mut seen = BTreeSet::new();
+        while let Some(l) = todo.pop() {
+            if seen.contains(&l) || !reader.has_kind(kinds::LANDING, &l)? {
+                continue;
+            }
+            seen.insert(l);
+            let rec = reader.landing(&l)?;
+            todo.extend(rec.prev);
+            todo.extend(rec.rebased_from);
+        }
+        Ok(seen)
     }
 
     /// The landings of the fetched canon closures: the closure that the canon history export

@@ -1251,3 +1251,53 @@ fn scc3_policy_refusal_stops_at_source_landing() {
     assert_eq!(w.landing(&w.canon().unwrap()).prev, Some(t));
     assert_eq!(out.view.as_deref(), Some("pull-1"));
 }
+
+/// Final review fix round 1 (finding 1): a tag on an unpushed local landing stays on that
+/// landing through a divergent pull (it never moves to a replayed landing). The store stays
+/// whole: fsck accepts the retained local history (the replay's `rebased_from` sources, or the
+/// chain that `replaced/` marks), and a dump of it loads.
+fn tagged_divergent_pull(take: bool) {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let l = land_doc(&mut w.local, "mine");
+    w.local
+        .tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    let t = land_doc(&mut w.hub, "theirs");
+    let out = w.pull_with(take, false).unwrap();
+    assert_eq!(out.status, PULLED, "{out:?}");
+    if take {
+        assert!(out.replayed.is_empty());
+        assert_eq!(w.canon(), Some(t));
+        assert_eq!(out.replaced, Some(l.to_string()));
+    } else {
+        assert_eq!(out.replayed.len(), 1);
+        assert!(out.replaced.is_none());
+        assert_eq!(w.landing(&w.canon().unwrap()).rebased_from, [l]);
+    }
+    let versions = w.local.read().versions().unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].landing, l.to_string(), "the tag never moves");
+    assert_eq!(w.local.fsck().unwrap().versions, 1);
+    w.reopen();
+    assert_eq!(w.local.fsck().unwrap().versions, 1);
+    // a dump of the store loads: load runs fsck
+    let file = w.dir.path().join("tagged.rdydump");
+    w.local.read().dump(&file).unwrap();
+    let to = w.dir.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    let loaded = Rdy::open(&to).unwrap();
+    assert_eq!(loaded.fsck().unwrap().versions, 1);
+    assert_eq!(loaded.read().versions().unwrap()[0].landing, l.to_string());
+}
+
+#[test]
+fn scc3_tagged_local_landing_survives_clean_replay_and_dump() {
+    tagged_divergent_pull(false);
+}
+
+#[test]
+fn scc3_tagged_local_landing_survives_take_and_dump() {
+    tagged_divergent_pull(true);
+}
