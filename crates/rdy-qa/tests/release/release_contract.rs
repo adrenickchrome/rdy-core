@@ -1588,20 +1588,29 @@ fn signatures_row() -> Value {
     })
 }
 
-/// scc3 (D-8ZEHP, D-9YAQS): a signature that a pull replay carried to L′ with its statement and
-/// signature bytes unchanged. The check rebuilds the statement with L′'s base set to the base of
-/// a landing in L′'s `rebased_from`, one level, and names that landing in `carried_from`. The
-/// vector is the plain one, carried to a replay of its landing on another base.
+/// scc3 (D-8ZEHP, D-9YAQS, ruling task-3b): a signature that a pull replay carried to L′ with its
+/// statement and signature bytes unchanged. The check rebuilds the statement with L′'s base set
+/// to the base of a landing on L′'s replay chain (its `rebased_from`, then each source's own, in
+/// turn), and names that landing in `carried_from`. The vector is the plain one, carried by two
+/// pulls: to a replay of its landing, then to a replay of that replay, each on another base.
 fn carried_signature() -> Value {
     use rdy_engine::signature_check::{CheckContext, SignatureSubject, check_signature_carried};
     let v = rdy_qa::signing::vector(false);
     let SignatureSubject::Landing { hash, record } = &v.context.subject else {
         unreachable!("the vector signs a landing")
     };
+    // the first pull's replay, on another base
+    let first = Hash([0x5e; 32]);
+    let first_record = rdy_model::LandingRecord {
+        prev: Some(Hash([0x5b; 32])),
+        rebased_from: vec![*hash],
+        ..record.clone()
+    };
+    // the second pull's replay of `first`: the subject
     let replay = Hash([0x5d; 32]);
     let carried = rdy_model::LandingRecord {
         prev: Some(Hash([0x5c; 32])),
-        rebased_from: vec![*hash],
+        rebased_from: vec![first],
         ..record.clone()
     };
     let context = CheckContext {
@@ -1615,15 +1624,15 @@ fn carried_signature() -> Value {
         subject: replay,
         ..v.record.clone()
     };
-    let check =
-        check_signature_carried(&record, &context, Some(&v.trust), &[(*hash, record_of(&v))]);
+    let sources = [(first, first_record), (*hash, record_of(&v))];
+    let check = check_signature_carried(&record, &context, Some(&v.trust), &sources);
     assert_eq!(check.carried_from, Some(hash.to_string()), "{check:?}");
     let json = serde_json::to_value(&check).unwrap();
     json!({
         "result_member": "carried_from",
-        "result_value": "the full hash of the landing in the subject's rebased_from whose base the statement names; absent for any other signature",
+        "result_value": "the full hash of the landing on the subject's replay chain whose base the statement names; absent for any other signature",
         "statement_rule": "the statement rebuilt from the subject with its base set to that landing's base; every other signed field is the subject's",
-        "levels": 1,
+        "chain": "the subject's rebased_from, then each held source's own rebased_from in turn, breadth first, each landing once; the first landing whose base the statement names",
         "record": "a new SIGNATURE whose subject is the replayed landing, with the source's namespace, statement, signature bytes and signer",
         "cli": rdy_engine::signing_read::signature_line(&json),
         "check": json,

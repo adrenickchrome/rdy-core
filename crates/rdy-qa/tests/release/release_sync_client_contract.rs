@@ -504,10 +504,10 @@ fn scc7_contract_adds_only_baseline_values() {
     );
 }
 
-/// scc3 (D-8ZEHP, D-9YAQS): the successor adds only the facts of a carried signature to the
-/// signatures row: `carried_from` holds the full hash of the source landing, the statement
-/// matches, and the CLI line names the first 12 characters. Every other member of the row is the
-/// predecessor's.
+/// scc3 (D-8ZEHP, D-9YAQS, ruling task-3b): the successor adds only the facts of a carried
+/// signature to the signatures row: `carried_from` holds the full hash of the landing on the
+/// replay chain whose base the statement names, the statement matches, and the CLI line names
+/// the first 12 characters. Every other member of the row is the predecessor's.
 #[test]
 fn scc3_contract_adds_only_replay_signature_facts() {
     let (old, new) = (read(PREDECESSOR), read(CURRENT));
@@ -525,7 +525,15 @@ fn scc3_contract_adds_only_replay_signature_facts() {
     );
     let carried = &new["signatures"]["carried"];
     assert_eq!(carried["result_member"], "carried_from");
-    assert_eq!(carried["levels"], 1);
+    // ruling task-3b: the check follows the whole replay chain
+    assert!(carried.get("levels").is_none());
+    assert!(
+        carried["chain"]
+            .as_str()
+            .unwrap()
+            .starts_with("the subject's rebased_from, then each held source's own"),
+        "{carried:#}"
+    );
     let check = &carried["check"];
     let from = check["carried_from"].as_str().unwrap();
     assert_eq!(from.len(), 64, "the full hash");

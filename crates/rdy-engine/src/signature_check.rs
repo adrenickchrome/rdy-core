@@ -45,7 +45,7 @@ use rdy_store::meta::{REF_ORIGIN, decode_origin};
 use rdy_store::signature::MAX_PER_SUBJECT;
 use rdy_store::{StoreError, kinds};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 /// `signed`: the signature verifies and names its key.
 pub const SIGNED_VALID: &str = "valid";
@@ -157,8 +157,9 @@ pub struct SignatureCheck {
     /// holder's own ([`STATEMENT_FOREIGN_REPO`]). Absent from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_repo: Option<String>,
-    /// A carried signature only (D-8ZEHP, D-9YAQS): the full hash of the landing in the
-    /// subject's `rebased_from` whose base the statement names. Absent from the JSON otherwise.
+    /// A carried signature only (D-8ZEHP, D-9YAQS, ruling task-3b): the full hash of the landing
+    /// on the subject's replay chain whose base the statement names. Absent from the JSON
+    /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried_from: Option<String>,
 }
@@ -248,12 +249,13 @@ pub fn check_signature(
 }
 
 /// [`check_signature`], then for a landing subject whose statement does not match: the check
-/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS). `sources` are the landings in
-/// the subject's `rebased_from` that the caller holds, with their records. The statement
-/// matches when it equals the one rebuilt from the subject with its base (`prev`) set to the
-/// `prev` of one of those landings: every other signed field is the subject's own. One level
-/// only: a source's own `rebased_from` is not followed. A carried match sets `carried_from` to
-/// that landing's full hash. Pure, as [`check_signature`] is.
+/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS, ruling task-3b). `sources` are
+/// the landings on the subject's replay chain that the caller holds, with their records, in the
+/// order [`carried_sources`] gives; a source that the chain does not reach through the sources
+/// before it is skipped. The statement matches when it equals the one rebuilt from the subject
+/// with its base (`prev`) set to the `prev` of one of those landings: every other signed field
+/// is the subject's own. The first source that matches wins, and `carried_from` names its full
+/// hash. Pure, as [`check_signature`] is.
 pub fn check_signature_carried(
     record: &Signature,
     context: &CheckContext,
@@ -267,8 +269,15 @@ pub fn check_signature_carried(
     if out.signed != SIGNED_VALID || out.statement != STATEMENT_MISMATCH {
         return out;
     }
+    // a source counts only when the chain reaches it: from the subject's `rebased_from`, or
+    // from the `rebased_from` of a source before it
+    let mut chain: HashSet<Hash> = l.rebased_from.iter().copied().collect();
     for (source, s) in sources {
-        if !l.rebased_from.contains(source) || s.prev == l.prev {
+        if !chain.contains(source) {
+            continue;
+        }
+        chain.extend(s.rebased_from.iter().copied());
+        if s.prev == l.prev {
             continue;
         }
         let at_base = CheckContext {
@@ -292,21 +301,29 @@ pub fn check_signature_carried(
     out
 }
 
-/// The landings in the subject's `rebased_from` that `state` holds before its log end, with
-/// their records: the sources [`check_signature_carried`] reads. Empty for any other subject.
+/// The landings on the subject's replay chain that `state` holds before its log end, with their
+/// records: the sources [`check_signature_carried`] reads (ruling task-3b). The chain is the
+/// subject's `rebased_from`, then each held source's own `rebased_from` in turn, breadth first,
+/// each landing once. A pull adds one link per replay and hashes keep the chain acyclic, so the
+/// walk has no depth cap. Empty for any other subject.
 pub(crate) fn carried_sources(
     state: &ReadState,
     context: &CheckContext,
 ) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
-    let SignatureSubject::Landing { record, .. } = &context.subject else {
+    let SignatureSubject::Landing { hash, record } = &context.subject else {
         return Ok(vec![]);
     };
     let reader = state.reader();
-    let mut out = vec![];
-    for source in &record.rebased_from {
-        if reader.has_kind_before(kinds::LANDING, source, state.seq())? {
-            out.push((*source, reader.landing(source)?));
+    let mut out: Vec<(Hash, LandingRecord)> = vec![];
+    let mut seen = HashSet::from([*hash]);
+    let mut queue: VecDeque<Hash> = record.rebased_from.iter().copied().collect();
+    while let Some(source) = queue.pop_front() {
+        if !seen.insert(source) || !reader.has_kind_before(kinds::LANDING, &source, state.seq())? {
+            continue;
         }
+        let l = reader.landing(&source)?;
+        queue.extend(l.rebased_from.iter().copied());
+        out.push((source, l));
     }
     Ok(out)
 }

@@ -641,6 +641,150 @@ fn scc3_take_keeps_old_tip_readable() {
     );
 }
 
+/// D-QCE8M, D-47HVF (fix round 1): a take of a hub tip that local canon holds below its tip moves
+/// canon back to the hub tip. The local landings after it leave canon, and `replaced/` keeps the
+/// old tip readable.
+#[test]
+fn scc3_take_of_ancestor_hub_tip_moves_canon_back() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let l = land_doc(&mut w.local, "mine");
+    // the hub tip is `base`, which local canon holds below `l`
+    let out = w.pull_with(true, false).unwrap();
+    assert_eq!(out.status, PULLED);
+    assert!(out.replayed.is_empty() && out.view.is_none());
+    assert_eq!(w.canon(), Some(w.base));
+    assert_eq!(out.canon, Some(w.base.to_string()));
+    assert_eq!(out.left_canon, [l.to_string()]);
+    assert_eq!(out.replaced, Some(l.to_string()));
+    assert_eq!(w.replaced(&l).expect("replaced mark").by, w.base);
+    assert_eq!(w.landing(&l).prev, Some(w.base), "readable");
+    assert_eq!(w.applied_tip(), Some(w.base));
+    w.local.store().check_objects().unwrap();
+}
+
+/// D-QCE8M (fix round 1): a hub forced back to a landing that local canon holds below `applied`
+/// replaced its canon. The landings up to `applied` leave canon and never replay; only the later
+/// ones replay onto the hub tip.
+#[test]
+fn scc3_hub_force_rewind_to_ancestor_drops_pushed_prefix() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    let pushed = land_doc(&mut w.local, "pushed");
+    w.applied(pushed);
+    let later = land_doc(&mut w.local, "later");
+    // the hub was forced back to `base`, which local canon holds below `pushed`
+    let out = w.pull();
+    assert_eq!(out.status, PULLED);
+    let sources: Vec<String> = out.replayed.iter().map(|r| r.source.clone()).collect();
+    assert_eq!(sources, [later.to_string()]);
+    let tip = w.canon().unwrap();
+    assert_eq!(chain(&w.local), [w.base, tip]);
+    assert_eq!(w.landing(&tip).rebased_from, [later]);
+    assert_eq!(out.left_canon, [pushed.to_string(), later.to_string()]);
+    assert_eq!(out.replaced, Some(later.to_string()));
+    assert_eq!(w.replaced(&later).expect("replaced mark").by, tip);
+    assert_eq!(w.landing(&later).prev, Some(pushed), "readable");
+    assert_eq!(w.applied_tip(), Some(w.base));
+    w.local.store().check_objects().unwrap();
+}
+
+/// Lands and signs L on `base`, then pulls `n` times before any push, the hub moving on each
+/// time. Returns the world, L and the last replay of L.
+fn pulls_before_push(n: usize) -> (World, Hash, Hash) {
+    let mut w = world();
+    w.applied(w.base);
+    let l = land_doc(&mut w.local, "signed");
+    let rec = w.landing(&l);
+    let repo = w.repo();
+    put_signature(
+        &mut w.local,
+        &signed(l, StatementSource::Approval(&rec), repo),
+    );
+    let mut last = l;
+    for k in 0..n {
+        land_doc(&mut w.hub, &format!("hub{k}"));
+        let out = w.pull();
+        assert_eq!(out.status, PULLED, "{out:?}");
+        let [r] = out.replayed.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(r.source, last.to_string());
+        assert_eq!(r.signatures, 1);
+        last = h(&r.landing);
+        // each replay names only its direct source
+        assert_eq!(w.landing(&last).rebased_from, [h(&r.source)]);
+    }
+    (w, l, last)
+}
+
+/// Asserts that the one signature on `subject` is valid, matches and is carried from `from`, and
+/// that fsck finds the store whole.
+fn assert_carried(w: &mut World, subject: &Hash, from: &Hash) {
+    let got = checks(&w.local, subject);
+    let [c] = got.as_slice() else {
+        panic!("{got:?}")
+    };
+    assert_eq!(c.signed, "valid");
+    assert_eq!(c.statement, "match", "{c:?}");
+    assert_eq!(c.code, None);
+    assert_eq!(c.carried_from, Some(from.to_string()));
+    w.local.fsck().unwrap();
+}
+
+/// D-8ZEHP, D-9YAQS (ruling task-3b): two pulls before a push replay L to L1, then L1 to L2. L2's
+/// carried signature follows the replay chain to L, whose base the statement names.
+#[test]
+fn scc3_twice_carried_signature_follows_the_replay_chain() {
+    let _clock = pin_clock(1_000_000);
+    let (mut w, l, last) = pulls_before_push(2);
+    assert_carried(&mut w, &last, &l);
+}
+
+/// Ruling task-3b: three pulls before a push; the carried signature still names L.
+#[test]
+fn scc3_thrice_carried_signature_follows_the_replay_chain() {
+    let _clock = pin_clock(1_000_000);
+    let (mut w, l, last) = pulls_before_push(3);
+    assert_carried(&mut w, &last, &l);
+}
+
+/// Ruling task-3b: following the chain widens nothing else. On L2, a statement whose base is no
+/// chain landing's `prev` stays a mismatch with no `carried_from`, beside the carried match.
+#[test]
+fn scc3_chain_carry_rejects_base_of_no_chain_landing() {
+    let _clock = pin_clock(1_000_000);
+    let (mut w, l, last) = pulls_before_push(2);
+    let rec = w.landing(&last);
+    let repo = w.repo();
+    // L is the `prev` of no landing on L2's chain (L2, L1, L)
+    let other = LandingRecord {
+        prev: Some(l),
+        ..rec.clone()
+    };
+    let mut odd = signed(last, StatementSource::Approval(&other), repo);
+    odd.signed_by.at_ms = 2_000;
+    put_signature(&mut w.local, &odd);
+    let mut got: Vec<(i64, String, Option<String>, Option<String>)> = checks(&w.local, &last)
+        .into_iter()
+        .map(|c| (c.at_ms, c.statement, c.code, c.carried_from))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (1_000, "match".into(), None, Some(l.to_string())),
+            (
+                2_000,
+                "mismatch".into(),
+                Some("E_SIG_OBJECT_MISMATCH".into()),
+                None
+            ),
+        ]
+    );
+}
+
 /// D-8ZEHP: L's signature is carried to L′ with the same statement and signature bytes: no key
 /// and no agent. It reads as a match, carried from L.
 #[test]

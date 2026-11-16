@@ -4,14 +4,16 @@
 //! The fetch ([`crate::sync_fetch::fetch`]) is the first batch: it takes the hub's records and
 //! records the fetched tip. [`plan`] then reads, with no write, what the second batch does:
 //!
-//! - **Up to date.** Local canon holds the hub tip: canon stays.
+//! - **Up to date.** Local canon holds the hub tip, and the hub did not move back past the
+//!   state's `applied` tip: canon stays.
 //! - **Fast forward.** The hub chain holds local canon: canon takes the hub tip.
-//! - **Take** (`take`): canon takes the hub tip, with no replay.
+//! - **Take** (`take`): canon takes the hub tip, with no replay, also a hub tip that local canon
+//!   holds below its tip.
 //! - **Replay.** The remote has usable sync state: the state's `applied` tip is on local canon,
 //!   and the hub's repo id is the state's. The unpushed landings are the local landings after
 //!   `applied`, less any the hub chain holds. When the hub chain does not hold `applied`, the hub
-//!   replaced its canon (a force move): the local landings up to `applied` leave canon and never
-//!   replay.
+//!   replaced its canon (a force move, also one back to a landing that local canon holds): the
+//!   local landings up to `applied` leave canon and never replay.
 //! - **No usable state.** A pull counts no landing as unpushed (D-3RSCW). Canon takes the hub
 //!   tip, and the local landings after the newest landing both chains hold go into `pull-<n>`.
 //!
@@ -244,10 +246,15 @@ pub fn plan(st: &ReadState, req: &PullRequest) -> Result<PullPlan, RdyError> {
             kind,
         })
     };
-    if local.contains(&hub) {
+    if local_tip == Some(hub) {
         return plan(PlanKind::UpToDate);
     }
-    let hub_chain = chain(reader, Some(hub))?;
+    // when local canon holds the hub tip, the hub chain is the local chain from it
+    let held = local.iter().position(|l| *l == hub);
+    let hub_chain = match held {
+        Some(at) => local[at..].to_vec(),
+        None => chain(reader, Some(hub))?,
+    };
     let hub_set: HashSet<Hash> = hub_chain.iter().copied().collect();
     if local_tip.is_none_or(|t| hub_set.contains(&t)) {
         return plan(PlanKind::FastForward);
@@ -256,10 +263,16 @@ pub fn plan(st: &ReadState, req: &PullRequest) -> Result<PullPlan, RdyError> {
     let common = local.iter().position(|l| hub_set.contains(l));
     let mut left: Vec<Hash> = local[..common.unwrap_or(local.len())].to_vec();
     left.reverse();
+    // a take selects the hub tip, also one that local canon holds below its tip
     if req.take {
         return plan(PlanKind::Take { left });
     }
-    let Some(applied) = usable_applied(reader, req, &local)? else {
+    let applied = usable_applied(reader, req, &local)?;
+    if held.is_some() && applied.is_none_or(|a| hub_set.contains(&a)) {
+        // local canon holds the hub tip, and the hub did not move back past `applied`
+        return plan(PlanKind::UpToDate);
+    }
+    let Some(applied) = applied else {
         return plan(PlanKind::NoState { suffix: left });
     };
     // the unpushed landings: after `applied`, less those the hub chain holds
