@@ -70,15 +70,18 @@ pub const MAX_STREAMS: usize = 32;
 /// The events a stream holds before it is dropped.
 pub const STREAM_QUEUE: usize = 8;
 /// The targets that keep a build while no page of theirs is open. A target with an open page
-/// keeps its build as long as the page is open (the next build is diffed against it), outside
-/// this count, so at most [`MAX_STREAMS`] such builds stay beside the inactive ones.
+/// keeps its slot as long as the page is open, outside this count, so at most [`MAX_STREAMS`]
+/// such slots stay beside the inactive ones; its build counts in
+/// [`MAX_INACTIVE_BUILD_BYTES`].
 /// Each profile target's slot also keeps its history memo, so at most `MAX_STREAMS + MAX_SCOPES`
 /// memos stay, each of at most `history_facts::MAX_LANDINGS` results.
 pub const MAX_SCOPES: usize = 8;
-/// The bytes the inactive targets' builds may hold together (TASK-2307): past it, inactive
-/// builds are dropped least recently used first, as past [`MAX_SCOPES`], keeping the most
-/// recently used one. A fixed limit by judgement: a build holds every figure's bytes, so a count
-/// alone let a few image-heavy builds hold gigabytes.
+/// The bytes the held builds may hold together, of targets with an open page or not (TASK-2307):
+/// past it, builds are dropped least recently used first, keeping the most recently used one.
+/// An inactive target goes with its build, as past [`MAX_SCOPES`]; a target with an open page
+/// keeps its streams and memo, and builds again on its next request, its pages compared with
+/// the revisions they opened at. A fixed limit by judgement: a build holds every figure's bytes
+/// and every page, so a count alone let a few large builds hold gigabytes.
 pub const MAX_INACTIVE_BUILD_BYTES: u64 = 256 * 1024 * 1024;
 /// What a held build counts per file beside its bytes: the file's path and the map's own entry.
 const FILE_OVERHEAD: u64 = 64;
@@ -280,9 +283,9 @@ struct Inner {
     clock: u64,
     next_id: u64,
     closed: bool,
-    /// The cap on the bytes of inactive builds: [`MAX_INACTIVE_BUILD_BYTES`], or a test's. Kept
-    /// here so every path that makes a build inactive (a new build, a cache hit, the last
-    /// stream of a target closing) enforces it under this lock.
+    /// The cap on the bytes of the held builds: [`MAX_INACTIVE_BUILD_BYTES`], or a test's. Kept
+    /// here so every path that adds a build or makes one inactive (a new build, a cache hit, the
+    /// last stream of a target closing) enforces it under this lock.
     cap: u64,
 }
 
@@ -301,7 +304,7 @@ impl Inner {
         s
     }
 
-    /// The bytes the inactive targets' builds hold.
+    /// The bytes the inactive targets' builds hold (a test's view; the cap counts every build).
     fn inactive_bytes(&self) -> u64 {
         self.scopes
             .values()
@@ -310,23 +313,21 @@ impl Inner {
             .sum()
     }
 
-    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], or while their
-    /// builds hold more than [`Inner::cap`] bytes together (keeping the most recently used one), least
-    /// recently used first, with their memos; a target with neither a build nor a stream goes
-    /// too. A target with an open stream keeps its build outside both limits ([`MAX_STREAMS`]
-    /// bounds those), so open pages never push an inactive build out of its slot. A dropped
-    /// build is built again on its next request.
-    fn evict(&mut self) {
+    /// Drops inactive targets (a build and no open stream) past [`MAX_SCOPES`], least recently
+    /// used first, with their memos; a target with neither a build nor a stream goes too. Then,
+    /// while the held builds of every target hold more than [`Inner::cap`] bytes together and
+    /// more than one is held, drops the least recently used build: an inactive target goes with
+    /// it, and a target with an open stream keeps its streams and memo and loses only its build
+    /// and key. The most recently used build always stays. A dropped build is built again on its
+    /// next request. Returns whether a build was dropped, so the caller can give the memory back
+    /// once it releases the lock.
+    fn evict(&mut self) -> bool {
         let cap = self.cap;
         self.scopes
             .retain(|_, s| s.build.is_some() || !s.streams.is_empty());
         let inactive = |s: &ScopeState| s.build.is_some() && s.streams.is_empty();
-        loop {
-            let count = self.scopes.values().filter(|s| inactive(s)).count();
-            let over = count > MAX_SCOPES || (count > 1 && self.inactive_bytes() > cap);
-            if !over {
-                return;
-            }
+        let mut dropped = false;
+        while self.scopes.values().filter(|s| inactive(s)).count() > MAX_SCOPES {
             let Some(oldest) = self
                 .scopes
                 .iter()
@@ -334,9 +335,38 @@ impl Inner {
                 .min_by_key(|(_, s)| s.used)
                 .map(|(k, _)| k.clone())
             else {
-                return;
+                break;
             };
             self.scopes.remove(&oldest);
+            dropped = true;
+        }
+        loop {
+            let held = self.scopes.values().filter(|s| s.build.is_some());
+            let (count, bytes) = held.fold((0usize, 0u64), |(n, b), s| (n + 1, b + s.bytes));
+            if count <= 1 || bytes <= cap {
+                return dropped;
+            }
+            let Some((oldest, open)) = self
+                .scopes
+                .iter()
+                .filter(|(_, s)| s.build.is_some())
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, s)| (k.clone(), !s.streams.is_empty()))
+            else {
+                return dropped;
+            };
+            if open {
+                // the next build compares each open page with the revision it opened at
+                // (`Stream::against`), as with no build to diff
+                if let Some(s) = self.scopes.get_mut(&oldest) {
+                    s.build = None;
+                    s.bytes = 0;
+                    s.key = None;
+                }
+            } else {
+                self.scopes.remove(&oldest);
+            }
+            dropped = true;
         }
     }
 }
@@ -349,6 +379,13 @@ fn held_size(b: &SiteBuild) -> u64 {
         .iter()
         .map(|(k, v)| k.len() as u64 + v.len() as u64 + FILE_OVERHEAD)
         .sum()
+}
+
+/// Gives the allocator's free memory back and counts it in `count`. Never called under the site
+/// lock: the trim holds the allocator's arenas for a fraction of a second.
+fn release_free_memory(count: &AtomicU64) {
+    crate::sys::release_free_memory();
+    count.fetch_add(1, Ordering::SeqCst);
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -368,8 +405,10 @@ pub struct LiveSite {
     /// Shared with each [`Subscription`], which removes its stream when dropped.
     inner: Arc<Mutex<Inner>>,
     builds: AtomicU64,
-    /// The times a build gave the allocator's free memory back ([`crate::sys::release_free_memory`]).
-    memory_releases: AtomicU64,
+    /// The times the site gave the allocator's free memory back
+    /// ([`crate::sys::release_free_memory`]): after a build, or after an eviction that dropped a
+    /// build. Shared with each [`Subscription`].
+    memory_releases: Arc<AtomicU64>,
     /// The docs each view or proposal version changes, for the versions page: keyed by the scope
     /// and what its count reads (see [`count_key`]). At most [`MAX_COUNTS`] entries.
     counts: Mutex<BTreeMap<(ScopeRef, Hash), usize>>,
@@ -499,6 +538,8 @@ pub struct Subscription {
     epoch: u64,
     key: StreamKey,
     inner: Weak<Mutex<Inner>>,
+    /// The site's count of memory releases: a close that drops a build gives memory back.
+    releases: Arc<AtomicU64>,
 }
 
 impl Subscription {
@@ -521,7 +562,11 @@ impl Drop for Subscription {
                     // the target's build may be inactive now: the count and byte caps hold
                     // from here, not from the next build (review F1); this also forgets the
                     // target when it holds neither a build nor a stream
-                    inner.evict();
+                    if inner.evict() {
+                        // the dropped build's memory goes back, never under the site lock
+                        drop(inner);
+                        release_free_memory(&self.releases);
+                    }
                 }
                 StreamKey::Ui => inner.ui_streams.retain(|st| st.id != self.id),
             }
@@ -541,7 +586,7 @@ impl LiveSite {
                 ..Inner::default()
             })),
             builds: AtomicU64::new(0),
-            memory_releases: AtomicU64::new(0),
+            memory_releases: Arc::new(AtomicU64::new(0)),
             counts: Mutex::new(BTreeMap::new()),
             docs_changed: Mutex::new(None),
             before_publish: Mutex::new(None),
@@ -558,13 +603,13 @@ impl LiveSite {
         *lock(&self.log_hook) = f;
     }
 
-    /// Test hook: from now on, inactive builds hold at most `cap` bytes together (`None`:
+    /// Test hook: from now on, the held builds hold at most `cap` bytes together (`None`:
     /// [`MAX_INACTIVE_BUILD_BYTES`]).
     #[doc(hidden)]
     pub fn set_inactive_build_cap(&self, cap: Option<u64>) {
         let mut inner = lock(&self.inner);
         inner.cap = cap.unwrap_or(MAX_INACTIVE_BUILD_BYTES);
-        inner.evict();
+        let _ = inner.evict();
     }
 
     /// Test hook: the builds the site holds, of every target.
@@ -699,7 +744,7 @@ impl LiveSite {
         // between a build's check and its insertion leaves it in the cache, unused)
         let current = sh.state.load().reader().redaction_epoch();
         // an unknown target leaves no state: nothing is touched before the target resolves and
-        // builds (or finds its build)
+        // builds (or finds its build). A hit comes with whether its eviction dropped a build.
         let cached = |inner: &mut Inner, fresh: &dyn Fn(&ScopeState) -> bool| {
             let hit = inner.scopes.get(scope).and_then(|s| {
                 s.build
@@ -709,11 +754,21 @@ impl LiveSite {
             })?;
             let s = inner.touch(scope);
             s.seen = now;
-            inner.evict();
-            Some(hit)
+            Some((hit, inner.evict()))
         };
-        if let Some(b) = cached(&mut lock(&self.inner), &|s| s.seen == now) {
-            return Ok((b, false));
+        // a dropped build's memory goes back once the site lock is released: each lookup is its
+        // own statement, so its guard is gone before `hit` runs
+        let hit = |found: Option<(Arc<SiteBuild>, bool)>| {
+            found.map(|(b, dropped)| {
+                if dropped {
+                    self.release_free_memory();
+                }
+                (b, false)
+            })
+        };
+        let found = cached(&mut lock(&self.inner), &|s| s.seen == now);
+        if let Some(out) = hit(found) {
+            return Ok(out);
         }
         // the generation before the state: the writer moves it only after it stores the state
         // that holds the move, so a newer generation never pairs with an older state (an older
@@ -723,8 +778,9 @@ impl LiveSite {
         // a state older than a removal builds nothing: the writer publishes the fresh one next
         st.ensure_current_epoch()?;
         let key = (st.redaction_epoch(), target_key(&st, scope, generation)?);
-        if let Some(b) = cached(&mut lock(&self.inner), &|s| s.key == Some(key)) {
-            return Ok((b, false));
+        let found = cached(&mut lock(&self.inner), &|s| s.key == Some(key));
+        if let Some(out) = hit(found) {
+            return Ok(out);
         }
         // a profile build continues its slot's memo; the memo goes back only with a published
         // build, so a failed build leaves no new cursor or result behind
@@ -803,7 +859,7 @@ impl LiveSite {
         if selected {
             s.memo = memo;
         }
-        inner.evict();
+        let _ = inner.evict();
         // the build's freed memory goes back to the system, never while the site lock is held:
         // the trim holds the allocator's arenas for a fraction of a second
         drop(inner);
@@ -811,10 +867,9 @@ impl LiveSite {
         Ok((new, true))
     }
 
-    /// Gives the allocator's free memory back after a build, and counts it.
+    /// Gives the allocator's free memory back after a build or an eviction, and counts it.
     fn release_free_memory(&self) {
-        crate::sys::release_free_memory();
-        self.memory_releases.fetch_add(1, Ordering::SeqCst);
+        release_free_memory(&self.memory_releases);
     }
 
     /// Builds `target` (normalized and valid) from `st`, with `memo` for a profile's history.
@@ -984,6 +1039,7 @@ impl LiveSite {
             epoch,
             key: StreamKey::Site(scope.clone()),
             inner: Arc::downgrade(&self.inner),
+            releases: Arc::clone(&self.memory_releases),
         };
         // A removal came between the build and the comparison. Its fresh state may be
         // published already, and the worker's step for that publish may have run before the
@@ -1079,6 +1135,7 @@ impl LiveSite {
             epoch,
             key: StreamKey::Ui,
             inner: Arc::downgrade(&self.inner),
+            releases: Arc::clone(&self.memory_releases),
         };
         let hook = lock(&self.before_ui_compare).clone();
         if let Some(hook) = hook {
@@ -1152,7 +1209,7 @@ impl LiveSite {
         self.builds.load(Ordering::SeqCst)
     }
 
-    /// Test hook: the times a build gave the allocator's free memory back.
+    /// Test hook: the times the site gave the allocator's free memory back.
     #[doc(hidden)]
     pub fn memory_releases(&self) -> u64 {
         self.memory_releases.load(Ordering::SeqCst)

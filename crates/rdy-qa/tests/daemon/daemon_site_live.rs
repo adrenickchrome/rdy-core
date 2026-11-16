@@ -576,27 +576,140 @@ fn slb1_a_dropped_build_is_rebuilt_on_its_next_request() {
     );
 }
 
-/// slb1: a target with an open stream keeps its build, whatever the inactive bytes.
+/// The bytes the site's cap counts for build `b` (as the daemon's `held_size`).
+fn counted(b: &SiteBuild) -> u64 {
+    b.live
+        .files
+        .iter()
+        .map(|(k, v)| k.len() as u64 + v.len() as u64 + 64)
+        .sum()
+}
+
+/// A landing that changes the Figures page of [`figures_host`] (its prose), and no figure.
+fn edit_figures_prose(r: &mut Rdy, body: &str) {
+    let m = r.read().materialized(&Scope::Canon).unwrap();
+    let doc = m
+        .iter()
+        .find(|b| b.field_str("title") == Some("Figures"))
+        .unwrap()
+        .id
+        .clone();
+    let prose = m
+        .children(Some(&doc))
+        .iter()
+        .find(|b| b.body == "Figures first.")
+        .unwrap()
+        .id
+        .clone();
+    rdy_qa::golden::write(
+        r,
+        "work",
+        json!([{"op": "update", "id": prose.to_string(), "body": body}]),
+    )
+    .unwrap();
+    land(r, "work").unwrap();
+}
+
+/// The builds of targets with an open page count in the byte cap: past it, builds are dropped
+/// least recently used first whether a page is open or not, keeping the most recently used one;
+/// every stream stays open.
 #[test]
-fn slb1_open_stream_builds_are_never_dropped_by_bytes() {
+fn slb1_open_targets_builds_count_in_the_byte_cap() {
+    let h = figures_host();
+    let sh = shared(&h);
+    let one = sh.site.refresh(&sh, &C).unwrap();
+    let size = counted(&one);
+    drop(one);
+    // room for two builds and not three
+    let cap = size * 5 / 2;
+    sh.site.set_inactive_build_cap(Some(cap));
+    let mut subs = Vec::new();
+    for t in [C, view(0), view(1), view(2)] {
+        let b = sh.site.refresh(&sh, &t).unwrap();
+        subs.push(sub(&sh, &t, "index.html", &b));
+        assert!(
+            sh.site.held_bytes() <= cap,
+            "{} bytes held in {} builds",
+            sh.site.held_bytes(),
+            sh.site.held_builds()
+        );
+    }
+    assert_eq!(sh.site.held_builds(), 2, "the cap holds two builds");
+    assert_eq!(sh.site.streams(), 4, "every page stays open");
+    assert_eq!(sh.site.scopes(), 4, "every open target keeps its slot");
+    // a cap below one build keeps only the most recently used build, over the cap
+    sh.site.set_inactive_build_cap(Some(size / 2));
+    assert_eq!(sh.site.held_builds(), 1);
+    assert!(sh.site.held_bytes() > size / 2);
+    let builds = sh.site.builds();
+    sh.site.refresh(&sh, &view(2)).unwrap();
+    assert_eq!(sh.site.builds(), builds, "the most recent build is kept");
+    assert_eq!(sh.site.streams(), 4);
+}
+
+/// An open target whose build the byte cap dropped is built again on its next request, and its
+/// page's stream, compared with the revision the page opened at, gets nothing while its page is
+/// unchanged and `Reload` once a landing changes it.
+#[test]
+fn slb1_an_evicted_open_target_rebuilds_and_its_page_still_hears() {
     let h = figures_host();
     let sh = shared(&h);
     sh.site.set_inactive_build_cap(Some(SLB1_CAP));
     let b = sh.site.refresh(&sh, &C).unwrap();
-    let _home = sub(&sh, &C, "index.html", &b);
-    let size: u64 = b.live.files.values().map(|f| f.len() as u64).sum();
+    assert!(counted(&b) > SLB1_CAP / 2, "one build fits, two do not");
+    let mut figures = sub(&sh, &C, "figures.html", &b);
     drop(b);
-    for v in 0..10 {
-        sh.site.refresh(&sh, &view(v)).unwrap();
+    let mut others = Vec::new();
+    for v in 0..2 {
+        let b = sh.site.refresh(&sh, &view(v)).unwrap();
+        others.push(sub(&sh, &view(v), "index.html", &b));
     }
-    assert!(sh.site.held_inactive_bytes() <= SLB1_CAP);
-    assert!(
-        sh.site.held_bytes() - sh.site.held_inactive_bytes() >= size,
-        "the open target's build is still held"
-    );
+    assert_eq!(sh.site.held_builds(), 1, "canon's build was dropped");
+    assert_eq!(sh.site.streams(), 3, "canon's page is still open");
+    // the next request builds canon again; its page did not change
     let builds = sh.site.builds();
     sh.site.refresh(&sh, &C).unwrap();
-    assert_eq!(sh.site.builds(), builds, "canon kept its build");
+    assert_eq!(sh.site.builds(), builds + 1, "canon builds again");
+    assert!(empty(&mut figures), "an unchanged page gets nothing");
+    // canon's build goes again, then a landing changes its page
+    sh.site.refresh(&sh, &view(0)).unwrap();
+    assert_eq!(sh.site.held_builds(), 1);
+    on_writer(&sh, |r| edit_figures_prose(r, "Figures changed."));
+    // the worker may build canon first; after this refresh a build of the landing has fanned out
+    sh.site.refresh(&sh, &C).unwrap();
+    assert_eq!(figures.rx.try_recv(), Ok(LiveEvent::Reload));
+}
+
+/// A page whose close makes the caps drop a build gives the allocator's free memory back once;
+/// a close that drops no build gives nothing back.
+#[test]
+fn slb1_closing_a_page_that_drops_a_build_gives_memory_back() {
+    let h = figures_host();
+    let sh = shared(&h);
+    let mut subs = Vec::new();
+    for t in std::iter::once(C).chain((0..9).map(view)) {
+        let b = sh.site.refresh(&sh, &t).unwrap();
+        subs.push(sub(&sh, &t, "index.html", &b));
+    }
+    assert_eq!(sh.site.held_builds(), 10, "ten builds fit the default cap");
+    let builds = sh.site.builds();
+    // closed oldest first: past MAX_SCOPES inactive targets, each close drops one build
+    for (i, s) in subs.into_iter().enumerate() {
+        let before = sh.site.memory_releases();
+        drop(s);
+        let dropped = i >= MAX_SCOPES;
+        assert_eq!(
+            sh.site.memory_releases(),
+            before + u64::from(dropped),
+            "close {i}"
+        );
+        assert_eq!(
+            sh.site.held_builds(),
+            10 - (i + 1).saturating_sub(MAX_SCOPES),
+            "close {i}"
+        );
+    }
+    assert_eq!(sh.site.builds(), builds, "no close builds");
 }
 
 /// slb1: after a landing rebuilds an open target, the old build is released: no slot, worker
@@ -650,8 +763,12 @@ fn slb1_closing_the_last_streams_enforces_the_byte_cap() {
         let b = sh.site.refresh(&sh, &t).unwrap();
         subs.push(sub(&sh, &t, "index.html", &b));
     }
-    assert_eq!(sh.site.held_builds(), 4, "open targets keep their builds");
-    assert!(sh.site.held_bytes() > SLB1_CAP, "{}", sh.site.held_bytes());
+    assert_eq!(
+        sh.site.held_builds(),
+        1,
+        "open targets' builds count in the cap"
+    );
+    assert_eq!(sh.site.streams(), 4);
     drop(subs);
     let builds = sh.site.builds();
     sh.site.refresh(&sh, &view(2)).unwrap();
