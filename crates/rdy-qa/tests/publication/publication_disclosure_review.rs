@@ -503,6 +503,16 @@ fn rr2_new_review_members_match_on_every_surface() {
         (&intro["position"], &old["position"], &setup["position"]),
         (&json!(0), &json!(1), &json!(2))
     );
+    // D-6T9WJ: the same total on every surface: a changed row's counts, an added row's and a
+    // removed row's size, with 1 for the doc
+    assert_eq!(
+        (
+            &intro["changes_total"],
+            &setup["changes_total"],
+            &old["changes_total"]
+        ),
+        (&json!(8), &json!(6), &json!(2))
+    );
     // the outline of Start: p1 and two claims, each a change; the planned note is hidden
     let outline = intro["outline"].as_array().unwrap();
     assert_eq!(outline.len(), 1, "{intro}");

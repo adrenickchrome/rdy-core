@@ -267,6 +267,14 @@ fn attachment_labels(l: Option<&AttachmentLabels>) -> Map<String, Value> {
     .unwrap_or_default()
 }
 
+/// A doc row's `changes_total` (D-6T9WJ), where its review gives one. It enters no selection hash,
+/// selection identity or doc digest (D-B2AC3).
+fn total_member(total: Option<u64>) -> Map<String, Value> {
+    total
+        .map(|n| object([("changes_total", json!(n))]))
+        .unwrap_or_default()
+}
+
 /// What a row outside docs adds: its type, label, change, `what` and `record_only`, and a
 /// decision's own fields when it has a change.
 fn outside_members(o: &OutsideReview) -> Map<String, Value> {
@@ -304,7 +312,10 @@ fn disclosure_json(
     let added_docs = put(
         "added_docs",
         kept.iter()
-            .map(|(x, r)| with(doc_row(x), r.map(members).unwrap_or_default()))
+            .map(|(x, r)| {
+                let total = total_member(r.map(|r| r.size.changes_total()));
+                with(with(doc_row(x), r.map(members).unwrap_or_default()), total)
+            })
             .collect(),
         left,
     );
@@ -313,7 +324,10 @@ fn disclosure_json(
     let removed_docs = put(
         "removed_docs",
         kept.iter()
-            .map(|(x, r)| with(doc_row(x), r.map(members).unwrap_or_default()))
+            .map(|(x, r)| {
+                let total = total_member(r.map(|r| r.size.changes_total()));
+                with(with(doc_row(x), r.map(members).unwrap_or_default()), total)
+            })
             .collect(),
         left,
     );
@@ -331,7 +345,8 @@ fn disclosure_json(
                     "after_digest": x.after_digest.to_string(),
                     "redacted": x.redacted,
                 });
-                with(old, r.map(members).unwrap_or_default())
+                let total = total_member(r.map(|r| r.changes_total()));
+                with(with(old, r.map(members).unwrap_or_default()), total)
             })
             .collect(),
         left,

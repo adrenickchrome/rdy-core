@@ -25,6 +25,7 @@
     ],
     "added_docs": [
       {
+        "changes_total": 6,
         "decision_titles": [
           "Pin versions"
         ],
@@ -184,6 +185,7 @@
             ]
           }
         ],
+        "changes_total": 8,
         "counts": {
           "added": 2,
           "decisions_added": 2,
@@ -352,6 +354,7 @@
     "removed_docs": [
       {
         "before_page": "guides/old.html",
+        "changes_total": 2,
         "digest": "38c3221512ffeb8e400a30869d40656061a20e082199cfb60ce5f70f51d8ce71",
         "folder": "Guides",
         "folder_redacted": false,
