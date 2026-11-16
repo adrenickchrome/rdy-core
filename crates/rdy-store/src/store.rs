@@ -4511,7 +4511,7 @@ impl StoreReader {
         };
         let mut landed: Option<(Location, Hash)> = None;
         for c in &all {
-            if let Some(l) = self.index().first_carrier(c, None)? {
+            if let Some(l) = self.index().landing_of(c)? {
                 let key = (at(kinds::LANDING, &l)?, *c);
                 landed = Some(landed.map_or(key, |k| k.min(key)));
             }

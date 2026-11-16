@@ -763,7 +763,7 @@ const READERS: [(&str, u32, u32, u32, Reads); 37] = [
         4222,
         4426,
         4514,
-        Reads::History,
+        Reads::Canon,
     ),
     (
         "crates/rdy-store/src/store.rs",
