@@ -504,6 +504,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         SiteParams,
         StreamCheckParams,
         SupersedeParams,
+        SuspectsParams,
         TagParams,
         TagsParams,
         TensionsParams,

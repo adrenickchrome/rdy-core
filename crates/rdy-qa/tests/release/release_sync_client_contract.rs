@@ -300,6 +300,27 @@ const CT_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members the paging of `rdy_suspects` changes (D-T0GXT), each with the reason it moves: the tool takes
+/// `page`, the reply gains `total`, a cut result carries `next`, and the cursor error row names the tool; nothing else.
+const SPG1_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /mcp/result_fields/rdy_suspects/ok/total",
+        "the reply of the tool counts every suspect, as the reply of rdy_query does (D-T0GXT)",
+    ),
+    (
+        "added /mcp/tools/rdy_suspects/input_schema/properties/page",
+        "the input page of the tool: the next of a cut result, with the same scope",
+    ),
+    (
+        "changed /errors_warnings/error_rows/row=E_PAGE_STALE",
+        "the row of the code names rdy_suspects among the paged reads",
+    ),
+    (
+        "added /mcp/tools/rdy_suspects/input_schema/properties/max_tokens/description",
+        "the input max_tokens gains its description, as the other paged reads give it",
+    ),
+];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -361,7 +382,7 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2, scc3, scc4, scc5, scc7, scc7b and the changes total together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3, scc4, scc5, scc7, scc7b, the changes total and spg1 together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
@@ -373,6 +394,7 @@ fn all_changes() -> Vec<String> {
         .chain(SCC5_CHANGES)
         .chain(SCC7B_CHANGES)
         .chain(CT_CHANGES)
+        .chain(SPG1_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -969,6 +991,7 @@ fn scc7_contract_delta_is_exactly_the_owned_leaves() {
         .chain(SCC7_CHANGES)
         .chain(SCC7B_CHANGES)
         .chain(CT_CHANGES)
+        .chain(SPG1_CHANGES)
     {
         assert!(why.len() > 10, "{p}: {why}");
     }

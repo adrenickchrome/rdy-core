@@ -3,8 +3,10 @@
 //! (in [`ReadState::suspect_details`]) the suspects on cited blocks (repo links, D-Y49PX).
 //! `rdy_graph::Suspect` and the stored TRANSITION stay structural: a code row has no target
 //! block, and no deferral text is copied into a stored record.
+use crate::error::{E_LIMIT, E_PAGE_STALE, PAGE_STALE_FIX};
 use crate::foreign_refs::RepoLinks;
-use crate::{RdyError, ReadState, Scope};
+use crate::tool_reads::tokens_of;
+use crate::{RdyError, ReadState, Scope, cursor};
 use rdy_graph::Suspect;
 use rdy_model::foreign::ForeignId;
 use rdy_model::plan::PlanAnswer;
@@ -13,6 +15,7 @@ use rdy_store::kinds;
 use rdy_store::plan::{AcceptedDeferral, MAX_DEFERRAL_PAIRS};
 use rdy_store::{StoreError, StoreReader};
 use serde::{Serialize, Serializer};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -108,7 +111,105 @@ fn sort_rows(rows: &mut [SuspectReply]) {
     });
 }
 
+/// The tool whose cursors page the suspects.
+const SUSPECTS_TOOL: &str = "rdy_suspects";
+
+/// The domain of the page token of `rdy_suspects` (D-T0GXT).
+const SUSPECTS_TOKEN_DOMAIN: &[u8] = b"rdy-suspects-1\0";
+
+/// The default budget of a `rdy_suspects` reply, in tokens.
+pub const SUSPECTS_DEFAULT_TOKENS: usize = 4_000;
+
+/// The token of a suspects read (D-T0GXT): the domain, the scope text and each row's block,
+/// target and reason, in order. A changed scope or list changes it; a deferral does not.
+fn suspects_token(scope_text: &str, rows: &[SuspectReply]) -> Hash {
+    let mut token = SUSPECTS_TOKEN_DOMAIN.to_vec();
+    token.extend_from_slice(scope_text.as_bytes());
+    token.push(0);
+    for row in rows {
+        token.extend_from_slice(row.block.as_str().as_bytes());
+        token.push(0);
+        if let Some(target) = &row.target {
+            token.extend_from_slice(target.to_string().as_bytes());
+        }
+        token.push(0);
+        token.extend_from_slice(row.reason.as_bytes());
+        token.push(0);
+    }
+    Hash::of(&token)
+}
+
+/// The reply of the page `rows[start..end]`: `total` counts every row, and `next` is there while
+/// rows remain.
+fn suspects_reply(rows: &[Value], token: &Hash, start: usize, end: usize) -> Value {
+    let mut v = json!({"items": rows[start..end], "total": rows.len()});
+    if end < rows.len() {
+        v["next"] = json!(cursor::make(token, end));
+    }
+    v
+}
+
 impl ReadState {
+    /// The reply of `rdy_suspects` (D-T0GXT): `{items, total, next?}`. Every suspect of `scope`
+    /// when they fit `max_tokens`, else the page of whole rows that fits, cut from the end in the
+    /// one sort order, with `next` while rows remain. `page` is the `next` of the page before, in
+    /// the same scope; each page reads the list again. `E_PAGE_STALE` when the list or the scope
+    /// differs from the first page's, and the filter's past-the-end refusal for an offset past the
+    /// list. A page fits when its JSON length in bytes, divided by 4 and rounded down, is at most
+    /// `max_tokens`.
+    pub fn suspects_page(
+        &self,
+        scope: &Scope,
+        scope_text: &str,
+        page: Option<&str>,
+        max_tokens: usize,
+    ) -> Result<Value, RdyError> {
+        let cursor = page.map(|p| cursor::parse(p, SUSPECTS_TOOL)).transpose()?;
+        let details = self.suspect_details(scope)?;
+        let token = suspects_token(scope_text, &details);
+        let rows: Vec<Value> = details
+            .iter()
+            .map(|r| serde_json::to_value(r).expect("suspect row json"))
+            .collect();
+        let start = match cursor {
+            None => 0,
+            Some((t, _)) if t != token => {
+                return Err(RdyError::new(
+                    E_PAGE_STALE,
+                    "the suspects behind this page changed since the first page, or the scope differs",
+                    PAGE_STALE_FIX,
+                ));
+            }
+            Some((_, offset)) if offset >= rows.len() => {
+                return Err(crate::filter::bad_page(SUSPECTS_TOOL));
+            }
+            Some((_, offset)) => offset,
+        };
+        let fits = |end: usize| tokens_of(&suspects_reply(&rows, &token, start, end)) <= max_tokens;
+        // the rest fits (this includes a list with no rows)
+        if fits(rows.len()) {
+            return Ok(suspects_reply(&rows, &token, start, rows.len()));
+        }
+        if !fits(start + 1) {
+            return Err(RdyError::new(
+                E_LIMIT,
+                "the token budget cannot hold one suspect",
+                "increase max_tokens",
+            ));
+        }
+        // the most rows that fit: `lo` fits, and `hi` is the most that could
+        let (mut lo, mut hi) = (start + 1, rows.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Ok(suspects_reply(&rows, &token, start, lo))
+    }
+
     /// Every suspect of `scope` as a read shows it: the structural rows with their accepted
     /// deferrals, the rows on cited blocks ([`ReadState::foreign_suspects`], D-Y49PX), and, in
     /// canon, a view or the in-flight scope, the code rows.
