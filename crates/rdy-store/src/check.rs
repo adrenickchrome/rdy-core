@@ -881,9 +881,10 @@ impl StoreReader {
     }
 
     /// Checks one view: its chain, head, index entries, recorded conflicts and undo chains. An
-    /// indexed op off the chain is allowed when a writer put it on the chain since the walk, or
-    /// when it is an op of a fetched view history (`StoreReader::sync_fetched_view_ops`, read
-    /// into `fetched` at the first view that needs it).
+    /// indexed op off the chain is allowed when a writer put it on the chain since the walk, when
+    /// it is an op of a fetched view history (`StoreReader::sync_fetched_view_ops`), or when a
+    /// `replaced/` mark keeps its old chain readable (`StoreReader::replaced_view_ops`), both
+    /// read into `fetched` at the first view that needs them.
     fn check_view(
         &self,
         name: &str,
@@ -956,7 +957,12 @@ impl StoreReader {
             .filter(|h| !newer.contains(*h))
             .collect();
         if !off.is_empty() && fetched.is_none() {
-            *fetched = Some(self.sync_fetched_view_ops()?);
+            // the old chains that a pull's re-chain or a view take marked replaced (D-4E32E)
+            let mut f = self.sync_fetched_view_ops()?;
+            for (view, ops) in self.replaced_view_ops()? {
+                f.entry(view).or_default().extend(ops);
+            }
+            *fetched = Some(f);
         }
         let of_view = fetched.as_ref().and_then(|f| f.get(name));
         if let Some(h) = off

@@ -8,7 +8,9 @@
 //! digests of the `sync4-*` stream fixtures, and the fix text `SYNC_LOCKED_FIX`. scc7 (D-CDQF7) also adds the error values of the
 //! portable publication baseline: the code `E_PUBLICATION_BASELINE` and its texts. scc3
 //! (D-8ZEHP, D-9YAQS) adds the facts of a signature that a pull replay carried, in the signatures
-//! row. Every other member is the predecessor's.
+//! row. scc4 (D-4E32E, D-47HVF) adds the rules of views that travel with a sync: the code
+//! `E_VIEW_DIVERGED`, the texts of the view refusals and the sync row's `views` probe. Every
+//! other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -113,6 +115,75 @@ const SCC3_CHANGES: &[(&str, &str)] = &[(
     "a signature a pull replay carried: its carried_from member, its statement rule and its CLI line",
 )];
 
+/// The members Task 4 adds to [`CURRENT`], each with the reason it moves: the rules of views
+/// that travel with a sync (D-4E32E, D-47HVF) and nothing else.
+const SCC4_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /errors_warnings/codes/E_VIEW_DIVERGED",
+        "a pull cannot re-chain a view whose unpushed work a record names",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_FORK_SOURCE_FIX",
+        "the fix of a push of a fork whose source the hub does not hold",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_FORK_SOURCE_MESSAGE",
+        "the text of a push of a fork whose source the hub does not hold",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_UNDO_OWNER_FIX",
+        "the fix of an undo that would change the owner of a view with a hub head",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_UNDO_OWNER_MESSAGE",
+        "the text of an undo that would change the owner of a view with a hub head",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_DIVERGED_FIX",
+        "the fix of a re-chain that a record or an open proposal blocks",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_DIVERGED_MESSAGE",
+        "the text of a re-chain that a record or an open proposal blocks",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_EXISTS_FIX",
+        "the fix of a pull that meets a local view with another root",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_EXISTS_MESSAGE",
+        "the text of a pull that meets a local view with another root",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_MISSING_FIX",
+        "the fix of a pull of a view the hub lacks",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_MISSING_MESSAGE",
+        "the text of a pull of a view the hub lacks",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_ROOT_FIX",
+        "the fix of a push of a view whose root is not the hub view's",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_ROOT_MESSAGE",
+        "the text of a push of a view whose root is not the hub view's",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_TWICE_FIX",
+        "the fix of a push or pull that names a view twice",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_VIEW_TWICE_MESSAGE",
+        "the text of a push or pull that names a view twice",
+    ),
+    (
+        "added /sync/views",
+        "the synced-view probe: the state ref, the replaced kind, the pull statuses, the push order and each view refusal",
+    ),
+];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -174,7 +245,7 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2, scc3 and scc7 together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3, scc4 and scc7 together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
@@ -182,6 +253,7 @@ fn all_changes() -> Vec<String> {
         .chain(SCC2_CHANGES)
         .chain(SCC7_CHANGES)
         .chain(SCC3_CHANGES)
+        .chain(SCC4_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -467,7 +539,7 @@ fn scc7_contract_adds_only_baseline_values() {
         &mut found,
     );
     found.sort();
-    // the error row also gains scc2's SYNC_LOCKED_FIX
+    // the error row also gains scc2's SYNC_LOCKED_FIX and scc4's view refusals
     let want: Vec<String> = all_changes()
         .into_iter()
         .filter(|p| p.contains(" /errors_warnings/"))
@@ -477,7 +549,7 @@ fn scc7_contract_adds_only_baseline_values() {
     }
     assert_eq!(
         found, want,
-        "the error row gains the baseline's values and scc2's fix text alone"
+        "the error row gains the baseline's values, scc2's fix text and scc4's view refusals alone"
     );
     let e = &new["errors_warnings"];
     // the row holds each constant's source literal, quotes included
@@ -551,4 +623,71 @@ fn scc3_contract_adds_only_replay_signature_facts() {
     for v in new["signatures"]["vectors"].as_object().unwrap().values() {
         assert!(v.get("carried_from").is_none());
     }
+}
+
+/// scc4 (D-4E32E, D-47HVF): the successor adds only the rules of views that travel with a sync:
+/// the code `E_VIEW_DIVERGED`, the texts of the view refusals, each the engine's own constant,
+/// and the sync row's `views` probe. Every other member of the error and sync rows is the
+/// predecessor's or another listed task's.
+#[test]
+fn scc4_contract_adds_only_synced_view_rules() {
+    use rdy_engine::*;
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    for (p, _) in SCC4_CHANGES {
+        assert!(found.iter().any(|f| f == p), "{p} is a change of {CURRENT}");
+    }
+    let scc4: Vec<&String> = found
+        .iter()
+        .filter(|f| {
+            f.contains("E_VIEW_DIVERGED") || f.contains("/SYNC_") || f.contains("/sync/views")
+        })
+        .filter(|f| !f.ends_with("/SYNC_LOCKED_FIX"))
+        .collect();
+    let want: Vec<&str> = SCC4_CHANGES.iter().map(|(p, _)| *p).collect();
+    assert_eq!(scc4, want, "scc4 adds these members alone");
+    let e = &new["errors_warnings"];
+    let literal = |x: &str| Value::String(format!("\"{x}\""));
+    assert_eq!(e["codes"]["E_VIEW_DIVERGED"], literal(E_VIEW_DIVERGED));
+    for (name, text) in [
+        ("SYNC_VIEW_EXISTS_MESSAGE", SYNC_VIEW_EXISTS_MESSAGE),
+        ("SYNC_VIEW_EXISTS_FIX", SYNC_VIEW_EXISTS_FIX),
+        ("SYNC_VIEW_ROOT_MESSAGE", SYNC_VIEW_ROOT_MESSAGE),
+        ("SYNC_VIEW_ROOT_FIX", SYNC_VIEW_ROOT_FIX),
+        ("SYNC_VIEW_DIVERGED_MESSAGE", SYNC_VIEW_DIVERGED_MESSAGE),
+        ("SYNC_VIEW_DIVERGED_FIX", SYNC_VIEW_DIVERGED_FIX),
+        ("SYNC_FORK_SOURCE_MESSAGE", SYNC_FORK_SOURCE_MESSAGE),
+        ("SYNC_FORK_SOURCE_FIX", SYNC_FORK_SOURCE_FIX),
+        ("SYNC_UNDO_OWNER_MESSAGE", SYNC_UNDO_OWNER_MESSAGE),
+        ("SYNC_UNDO_OWNER_FIX", SYNC_UNDO_OWNER_FIX),
+        ("SYNC_VIEW_TWICE_MESSAGE", SYNC_VIEW_TWICE_MESSAGE),
+        ("SYNC_VIEW_TWICE_FIX", SYNC_VIEW_TWICE_FIX),
+        ("SYNC_VIEW_MISSING_MESSAGE", SYNC_VIEW_MISSING_MESSAGE),
+        ("SYNC_VIEW_MISSING_FIX", SYNC_VIEW_MISSING_FIX),
+    ] {
+        assert_eq!(e["templates"][name], literal(text), "{name}");
+    }
+    let views = &new["sync"]["views"];
+    assert_eq!(views["state_ref"], "meta/sync/<remote>/view/<name>");
+    assert_eq!(views["replaced_kind"], 1);
+    assert_eq!(views["push_order"]["sent"], serde_json::json!(["v", "f"]));
+    let r = &views["refusals"];
+    assert_eq!(
+        r["diverged_proposal"][1],
+        "view v cannot re-chain because P-0123456789ab@1 names its unpushed work"
+    );
+    assert_eq!(r["pull_root"][2], "run rdy pull --take --view v");
+    assert_eq!(
+        r["push_root"][2],
+        "fork the view to another name, then push that view"
+    );
+    assert_eq!(
+        r["push_unknown"],
+        serde_json::json!([
+            "E_NOT_FOUND",
+            "no view \"nope\"",
+            "list views with rdy view ls (MCP: rdy_view list)"
+        ])
+    );
 }

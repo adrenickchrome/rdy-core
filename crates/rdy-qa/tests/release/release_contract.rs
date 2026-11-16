@@ -1189,6 +1189,8 @@ fn sync_row() -> Value {
         // the canon and view histories of stream format 4 and the upload minimum (D-KE83X,
         // D-4XHPH; Sync client A Task 2)
         "history": history_facts(),
+        // the views that travel with a sync (D-4E32E, D-47HVF; Sync client A Task 4)
+        "views": synced_view_facts(),
         "logical_keys": "kind: u8 || hash: [u8; 32]",
         "prerequisite_order": "strictly ascending logical keys",
         "trailer_fields": ["records: u64", "bytes: u64", "digest: [u8; 32]"],
@@ -5676,6 +5678,61 @@ fn history_facts() -> Value {
         "read_formats": sync_stream::READ_FORMATS,
         "roots": roots,
         "minimum_classes": minimum_classes,
+    })
+}
+
+/// The rules of views that travel with a sync (D-4E32E, D-3RSCW, D-47HVF), each from the code
+/// that applies it: the ref of a view's sync state, the `replaced/` kind of a view op, the
+/// statuses a pull reports, a push's order and fork-source refusal on a probe project, and each
+/// view refusal's code, message and fix with sample values.
+fn synced_view_facts() -> Value {
+    use rdy_engine::sync_views::{self, ViewPullStatus};
+    let (_dir, mut r) = project();
+    rdy_qa::fixtures::seed_doc(&mut r, "v");
+    r.view_fork(&rdy_qa::fixtures::writer(), "v", "f")
+        .expect("the probe fork");
+    let names = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let none = BTreeMap::new();
+    let order: Vec<String> = sync_views::push_plan(&r.read(), &names(&["f", "v"]), &none)
+        .expect("a push of a fork and its source")
+        .into_iter()
+        .map(|p| p.view)
+        .collect();
+    let row = |e: RdyError| json!([e.code, e.message, e.fix]);
+    let fork_alone = sync_views::push_plan(&r.read(), &names(&["f"]), &none)
+        .expect_err("a fork without its source");
+    let twice = sync_views::push_plan(&r.read(), &names(&["v", "v"]), &none)
+        .expect_err("a name given twice");
+    let unknown = sync_views::push_plan(&r.read(), &names(&["nope"]), &none)
+        .expect_err("a view this project lacks");
+    let (local, hub) = (Hash([1; 32]), Hash([2; 32]));
+    let statuses: Vec<Value> = [
+        ViewPullStatus::New,
+        ViewPullStatus::UpToDate,
+        ViewPullStatus::FastForward,
+        ViewPullStatus::Rechained,
+        ViewPullStatus::Taken,
+        ViewPullStatus::Refused,
+    ]
+    .iter()
+    .map(|s| serde_json::to_value(s).expect("a status"))
+    .collect();
+    json!({
+        "state_ref": rdy_store::sync_state::view_ref("<remote>", "<name>"),
+        "replaced_kind": rdy_store::hub_canon::ReplacedKind::ViewOp.byte(),
+        "pull_statuses": statuses,
+        "push_order": {"named": ["f", "v"], "sent": order},
+        "refusals": {
+            "push_fork_alone": row(fork_alone),
+            "push_twice": row(twice),
+            "push_unknown": row(unknown),
+            "pull_root": row(sync_views::view_exists("v", &local, &hub)),
+            "push_root": row(sync_views::view_root("v", &local, &hub)),
+            "diverged_proposal": row(sync_views::view_diverged("v", "P-0123456789ab@1")),
+            "diverged_view": row(sync_views::view_diverged("v", "view f")),
+            "undo_owner": row(sync_views::undo_owner("v")),
+            "pull_missing": row(sync_views::view_missing("v", "origin")),
+        },
     })
 }
 

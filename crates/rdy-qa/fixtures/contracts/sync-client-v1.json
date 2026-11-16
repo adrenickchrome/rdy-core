@@ -19431,6 +19431,7 @@
       "E_VALIDATION": "\"E_VALIDATION\"",
       "E_VERSION_ORDER": "\"E_VERSION_ORDER\"",
       "E_VIEW_CLOSED": "\"E_VIEW_CLOSED\"",
+      "E_VIEW_DIVERGED": "\"E_VIEW_DIVERGED\"",
       "E_VIEW_EXISTS": "\"E_VIEW_EXISTS\"",
       "E_VIEW_OWNER": "\"E_VIEW_OWNER\"",
       "E_WC_CONFLICT": "\"E_WC_CONFLICT\"",
@@ -20305,7 +20306,21 @@
       "SUPERSEDE_CONFIRM_FIX": "\"this block states no removed value. Check that it still holds, then point each listed link at the decision in force.\"",
       "SUPERSEDE_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest, then point each listed link at the decision in force.\"",
       "SUPERSEDE_UPDATE_FIX": "\"update the block for the removed values. Point each listed link at the decision in force.\"",
+      "SYNC_FORK_SOURCE_FIX": "\"push the source view too, or start a view from canon and include the changes\"",
+      "SYNC_FORK_SOURCE_MESSAGE": "\"view <name> forks from view <source>, which the hub does not hold\"",
       "SYNC_LOCKED_FIX": "\"wait for it to end, then try again\"",
+      "SYNC_UNDO_OWNER_FIX": "\"use rdy view own\"",
+      "SYNC_UNDO_OWNER_MESSAGE": "\"view <name> has a hub head; undo cannot change its owner\"",
+      "SYNC_VIEW_DIVERGED_FIX": "\"push the view first if the hub head has not moved, or run rdy pull --take --view <name>\"",
+      "SYNC_VIEW_DIVERGED_MESSAGE": "\"view <name> cannot re-chain because <record> names its unpushed work\"",
+      "SYNC_VIEW_EXISTS_FIX": "\"run rdy pull --take --view <name>\"",
+      "SYNC_VIEW_EXISTS_MESSAGE": "\"view <name> has local root <local> and hub root <hub>\"",
+      "SYNC_VIEW_MISSING_FIX": "\"check the name, or push the view from a machine that has it\"",
+      "SYNC_VIEW_MISSING_MESSAGE": "\"view <name> is not on remote <remote>\"",
+      "SYNC_VIEW_ROOT_FIX": "\"fork the view to another name, then push that view\"",
+      "SYNC_VIEW_ROOT_MESSAGE": "\"view <name> has local root <local> and hub root <hub>\"",
+      "SYNC_VIEW_TWICE_FIX": "\"name each view once\"",
+      "SYNC_VIEW_TWICE_MESSAGE": "\"view <name> is named twice\"",
       "TARGET_FIX": "\"name the cited decision as alias:id: rdy_links {op: \\\"show\\\", alias} / rdy links show <alias>\"",
       "TENSION_FIX": "\"resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve\"",
       "TIME_FIX": "\"write an RFC 3339 UTC time, such as 2026-10-21T15:10:58Z, or a date, such as 2026-10-05\"",
@@ -32084,7 +32099,76 @@
       "records: u64",
       "bytes: u64",
       "digest: [u8; 32]"
-    ]
+    ],
+    "views": {
+      "pull_statuses": [
+        "new",
+        "up_to_date",
+        "fast_forward",
+        "rechained",
+        "taken",
+        "refused"
+      ],
+      "push_order": {
+        "named": [
+          "f",
+          "v"
+        ],
+        "sent": [
+          "v",
+          "f"
+        ]
+      },
+      "refusals": {
+        "diverged_proposal": [
+          "E_VIEW_DIVERGED",
+          "view v cannot re-chain because P-0123456789ab@1 names its unpushed work",
+          "push the view first if the hub head has not moved, or run rdy pull --take --view v"
+        ],
+        "diverged_view": [
+          "E_VIEW_DIVERGED",
+          "view v cannot re-chain because view f names its unpushed work",
+          "push the view first if the hub head has not moved, or run rdy pull --take --view v"
+        ],
+        "pull_missing": [
+          "E_NOT_FOUND",
+          "view v is not on remote origin",
+          "check the name, or push the view from a machine that has it"
+        ],
+        "pull_root": [
+          "E_VIEW_EXISTS",
+          "view v has local root 0101010101010101010101010101010101010101010101010101010101010101 and hub root 0202020202020202020202020202020202020202020202020202020202020202",
+          "run rdy pull --take --view v"
+        ],
+        "push_fork_alone": [
+          "E_BAD_INPUT",
+          "view f forks from view v, which the hub does not hold",
+          "push the source view too, or start a view from canon and include the changes"
+        ],
+        "push_root": [
+          "E_VIEW_EXISTS",
+          "view v has local root 0101010101010101010101010101010101010101010101010101010101010101 and hub root 0202020202020202020202020202020202020202020202020202020202020202",
+          "fork the view to another name, then push that view"
+        ],
+        "push_twice": [
+          "E_BAD_INPUT",
+          "view v is named twice",
+          "name each view once"
+        ],
+        "push_unknown": [
+          "E_NOT_FOUND",
+          "no view \"nope\"",
+          "list views with rdy view ls (MCP: rdy_view list)"
+        ],
+        "undo_owner": [
+          "E_BAD_INPUT",
+          "view v has a hub head; undo cannot change its owner",
+          "use rdy view own"
+        ]
+      },
+      "replaced_kind": 1,
+      "state_ref": "meta/sync/<remote>/view/<name>"
+    }
   },
   "working_copy": {
     "checkout_reply": {
