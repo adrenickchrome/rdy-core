@@ -523,6 +523,62 @@ fn scc4_rechain_remaps_undo_and_drops_rebase() {
 }
 
 #[test]
+fn scc4_rechain_onto_current_base_drops_landed_changes() {
+    let mut w = world();
+    w.write(Side::A, &sa(), "v", "base");
+    w.push(Side::A, &["v"]);
+    w.pull(Side::B, &["v"]);
+    // b commits c on v, then lands c through another view: b's rebase of v drops c
+    let c = w.write(Side::B, &sb(), "v", "b lands this").change;
+    w.b.view_include(&sb(), "w", std::slice::from_ref(&c))
+        .unwrap();
+    land(&mut w.b, "w").unwrap();
+    assert!(!included(&w, Side::B, "v").contains(&h(&c)));
+    let b_rebase = chain(&w, Side::B, "v")[0].0;
+    // a is a copy of b with b's canon; a takes the hub's v, rebases it onto that canon and
+    // writes on, so the hub's v has its own rebase and a base equal to b's canon
+    let a2 = w.dir.path().join("a2");
+    copy_dir(&w.dir.path().join("b"), &a2);
+    w.a = Rdy::open(&a2).unwrap();
+    let got = w.pull_req(Side::A, &["v"], true, None).unwrap();
+    assert_eq!(got[0].status, ViewPullStatus::Taken, "{got:?}");
+    let by = sa().provenance();
+    assert!(
+        w.a.store_mut()
+            .view_rebase_rechained("v", &by)
+            .unwrap()
+            .is_some()
+    );
+    // the copy keeps b's local owner of v
+    w.write(Side::A, &sb(), "v", "a on");
+    w.push(Side::A, &["v"]);
+    let canon = w.b.store().reader().canon_head().unwrap();
+    assert_eq!(w.head(Side::A, "v").base, canon);
+    // b's pull re-chains its commit of c and drops its rebase; the base is canon already, yet
+    // the view rebase rule still drops the landed c
+    let got = w.pull(Side::B, &["v"]);
+    let p = &got[0];
+    assert_eq!(p.status, ViewPullStatus::Rechained, "{p:?}");
+    assert_eq!(p.dropped_rebases, vec![b_rebase.to_string()]);
+    assert!(p.rebase.is_some(), "the landed c needs a rebase: {p:?}");
+    let ch = chain(&w, Side::B, "v");
+    match &ch[0].1.op {
+        ViewOpKind::Rebase {
+            landing, dropped, ..
+        } => {
+            assert_eq!(Some(*landing), canon);
+            assert_eq!(dropped, &vec![h(&c)]);
+        }
+        op => panic!("the head is a rebase: {op:?}"),
+    }
+    assert_eq!(w.head(Side::B, "v").base, canon);
+    assert!(!included(&w, Side::B, "v").contains(&h(&c)));
+    let inflight = w.b.read().inflight_set().unwrap();
+    assert!(!inflight.changes.contains(&h(&c)));
+    w.fsck_clean(Side::B);
+}
+
+#[test]
 fn scc4_close_and_undo_close_travel() {
     let mut w = world();
     w.write(Side::A, &sa(), "v", "one");

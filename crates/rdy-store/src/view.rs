@@ -1386,10 +1386,12 @@ impl Store {
     }
 
     /// The view rebase rule on view `name` after a re-chain (D-4E32E), by `by`: an open, unpinned
-    /// view with changes whose base is not canon's head gets a `Rebase` onto it, which drops the
-    /// landed changes and records the conflicts of the rest. A rebase whose merge would make a
-    /// parent loop is not written. Returns the rebase op and its conflicts, or None. Into the
-    /// open batch, when one is open.
+    /// view with changes gets a `Rebase` onto canon's head when its base is not that head, or
+    /// when it includes a landed change. A re-chain drops the local `Rebase` that took a landed
+    /// change out, and the hub's base can equal canon already, so the base alone does not tell.
+    /// The rebase drops the landed changes and records the conflicts of the rest. A rebase whose
+    /// merge would make a parent loop is not written. Returns the rebase op and its conflicts,
+    /// or None. Into the open batch, when one is open.
     pub fn view_rebase_rechained(
         &mut self,
         name: &str,
@@ -1403,10 +1405,22 @@ impl Store {
         let Some(landing) = canon else {
             return Ok(None);
         };
-        if head.closed || head.pinned || head.len == 0 || head.base == canon {
+        if head.closed || head.pinned || head.len == 0 {
             return Ok(None);
         }
         let changes = self.included_at(name, &head)?.as_ref().clone();
+        if head.base == canon {
+            let mut landed = false;
+            for c in &changes {
+                if self.landing_of(c)?.is_some() {
+                    landed = true;
+                    break;
+                }
+            }
+            if !landed {
+                return Ok(None);
+            }
+        }
         let onto = self.rebase_onto(landing, changes)?;
         if onto.cycle.is_some() {
             return Ok(None);
