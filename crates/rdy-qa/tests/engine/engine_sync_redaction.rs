@@ -1206,3 +1206,49 @@ fn scc5_removal_conflict_is_recorded_until_written() {
     let bytes = history(&w.local, t, Some(head(&w.hub)));
     assert!(!holds(&bytes, SECRET.as_bytes()));
 }
+
+/// Fix round 2: a full dump after a removal landed here, then a fetch of the hub's own removal of
+/// the same content and an increment after that dump. The local apply stays the proof of each
+/// span both removals cover, but the increment's trailer counts the fetched request's spans as
+/// the writer does: the chain loads, reads the stub and holds no removed byte.
+#[test]
+fn scc5_native_then_fetched_removal_increment_loads() {
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    let prose = w.prose.clone();
+    let mine = remove_on(&mut w.local, "redact", vec![prose.clone()]);
+    let mine_request = request_of(&w.local, &mine);
+    let full = w.dir.path().join("full.rdydump");
+    w.local.read().dump(&full).unwrap();
+    let theirs = remove_on(&mut w.hub, "redact", vec![prose.clone()]);
+    let theirs_request = request_of(&w.hub, &theirs);
+    assert_ne!(mine_request, theirs_request, "two approvals");
+    let f = w.fetch();
+    assert_eq!(f.removals.len(), 1, "{f:?}");
+    let inc = w.dir.path().join("inc.rdydump");
+    w.local.read().dump_after_file(&full, &inc).unwrap();
+    let dest = w.dir.path().join("copy");
+    std::fs::create_dir(&dest).unwrap();
+    rdy_engine::load::load_chain(&[full, inc], &dest, None).unwrap();
+    let loaded = Rdy::open(&dest).unwrap();
+    assert_eq!(
+        loaded
+            .read()
+            .block(&Scope::At(w.base), &id(&prose))
+            .unwrap()
+            .body,
+        CONTENT_REMOVED
+    );
+    assert_eq!(
+        loaded
+            .store()
+            .reader()
+            .redaction_of(kinds::BLOCK, &w.secret_version())
+            .unwrap(),
+        Some(mine_request),
+        "the local apply stays the proof"
+    );
+    assert!(!on_disk(&dest, SECRET.as_bytes()));
+    loaded.store().reader().check_objects().unwrap();
+}

@@ -714,6 +714,18 @@ impl SyncedAuthority {
         })
     }
 
+    /// The spans of the request that fetched apply `apply` approves: every copy of its approved
+    /// tuples in this log, as the store's rows list them, whichever apply is the proof of each.
+    /// Empty for any other apply.
+    pub(crate) fn request_spans(&self, apply: &Hash) -> impl Iterator<Item = RedactedSpan> {
+        self.imported
+            .removals
+            .get(apply)
+            .map(|r| self.imported.spans_of(&r.request))
+            .unwrap_or_default()
+            .into_iter()
+    }
+
     /// Lays what the fetched applies authorize over `auth`: a span a native apply already
     /// authorizes keeps that apply as its proof, and the validated fetched applies join
     /// `auth.applies` in log order. Two different holes at one place are `RedactionCorrupt`.

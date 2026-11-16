@@ -708,12 +708,17 @@ struct CarriedFact {
 
 /// One foreign removal of a project's chain (an apply that a FOREIGN `Removal` entry of its own
 /// batch names, `crate::foreign_removal`): its apply, the end of its batch, its input, and, once
-/// the whole chain authorized it, the occurrences of this log it erases.
+/// the whole chain authorized it, the occurrences of this log it erases. A fetched removal uses
+/// the same fact, and also keeps the lowest span its request lists for the trailer.
 struct ForeignFact {
     apply: Hash,
     batch_end: Location,
     file: usize,
     spans: Vec<RedactedSpan>,
+    /// A fetched removal's lowest request span before its input's end, which the trailer
+    /// counts even where a local apply stays the proof (`RemovalTally::resolved`). None for a
+    /// foreign removal, whose trailer counts its spans.
+    listed: Option<Location>,
 }
 
 /// One frame of a removable kind in a holder's chain.
@@ -2710,6 +2715,7 @@ impl<'p> Scan<'p> {
             batch_end: end,
             file: f.file,
             spans: Vec::new(),
+            listed: None,
         });
         f.foreign += 1;
         Ok(())
@@ -2741,6 +2747,7 @@ impl<'p> Scan<'p> {
             batch_end: end,
             file: f.file,
             spans: Vec::new(),
+            listed: None,
         });
         f.foreign += 1;
         Ok(())
@@ -3343,8 +3350,9 @@ impl<'p> Scan<'p> {
     /// its spans are every copy of an approved tuple in this log, derived by tuple, never the
     /// places its request names (those are the hub's). Each dropped frame of such a span that
     /// no local apply covers is then released by it, as the store keeps the local apply as the
-    /// proof of a span both cover. Like a foreign removal, it gives no carried record: a stop
-    /// before it refuses a retained frame only it dropped.
+    /// proof of a span both cover. Its trailer still counts every span its request lists before
+    /// its input's end, as the writer does. Like a foreign removal, it gives no carried record:
+    /// a stop before it refuses a retained frame only it dropped.
     fn synced_removals(&mut self) -> Result<(), ScanError> {
         if self.synced.is_empty() {
             return Ok(());
@@ -3370,6 +3378,17 @@ impl<'p> Scan<'p> {
             Ok(a) => a,
             Err(e) => return Err(self.chain_refusal(e, first_file)),
         };
+        // the trailer counts each request's spans as the writer reads them from the store's
+        // rows: every copy of an approved tuple, also one a local apply stays the proof of
+        for x in &mut self.synced {
+            let end = self.envs[x.file - self.base].header.log_end;
+            x.listed = authority
+                .request_spans(&x.apply)
+                .map(|s| s.loc)
+                .filter(|l| *l < end)
+                .min();
+        }
+        // the release: a span a local apply covers stays released by that apply
         for s in authority.spans().collect::<Vec<_>>() {
             let native = self
                 .validator
@@ -3408,9 +3427,14 @@ impl<'p> Scan<'p> {
             let first = self
                 .foreign
                 .iter()
-                .chain(&self.synced)
                 .filter(|x| x.file == file)
                 .flat_map(|x| x.spans.iter().map(|s| s.loc))
+                .chain(
+                    self.synced
+                        .iter()
+                        .filter(|x| x.file == file)
+                        .filter_map(|x| x.listed),
+                )
                 .chain(local)
                 .min();
             let env = &self.envs[file - self.base];
