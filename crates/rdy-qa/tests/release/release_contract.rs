@@ -1590,7 +1590,7 @@ fn signatures_row() -> Value {
     })
 }
 
-/// scc3 (D-8ZEHP, D-9YAQS, ruling task-3b): a signature that a pull replay carried to L′ with its
+/// scc3 (D-8ZEHP, D-9YAQS, D-6Z9BR): a signature that a pull replay carried to L′ with its
 /// statement and signature bytes unchanged. The check rebuilds the statement with L′'s base set
 /// to the base of a landing on L′'s replay chain (its `rebased_from`, then each source's own, in
 /// turn), and names that landing in `carried_from`. The vector is the plain one, carried by two

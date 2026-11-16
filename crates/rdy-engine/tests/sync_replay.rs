@@ -733,7 +733,7 @@ fn assert_carried(w: &mut World, subject: &Hash, from: &Hash) {
     w.local.fsck().unwrap();
 }
 
-/// D-8ZEHP, D-9YAQS (ruling task-3b): two pulls before a push replay L to L1, then L1 to L2. L2's
+/// D-8ZEHP, D-9YAQS (D-6Z9BR): two pulls before a push replay L to L1, then L1 to L2. L2's
 /// carried signature follows the replay chain to L, whose base the statement names.
 #[test]
 fn scc3_twice_carried_signature_follows_the_replay_chain() {
@@ -742,7 +742,7 @@ fn scc3_twice_carried_signature_follows_the_replay_chain() {
     assert_carried(&mut w, &last, &l);
 }
 
-/// Ruling task-3b: three pulls before a push; the carried signature still names L.
+/// D-6Z9BR: three pulls before a push; the carried signature still names L.
 #[test]
 fn scc3_thrice_carried_signature_follows_the_replay_chain() {
     let _clock = pin_clock(1_000_000);
@@ -750,7 +750,7 @@ fn scc3_thrice_carried_signature_follows_the_replay_chain() {
     assert_carried(&mut w, &last, &l);
 }
 
-/// Ruling task-3b: following the chain widens nothing else. On L2, a statement whose base is no
+/// D-6Z9BR: following the chain widens nothing else. On L2, a statement whose base is no
 /// chain landing's `prev` stays a mismatch with no `carried_from`, beside the carried match.
 #[test]
 fn scc3_chain_carry_rejects_base_of_no_chain_landing() {

@@ -157,7 +157,7 @@ pub struct SignatureCheck {
     /// holder's own ([`STATEMENT_FOREIGN_REPO`]). Absent from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_repo: Option<String>,
-    /// A carried signature only (D-8ZEHP, D-9YAQS, ruling task-3b): the full hash of the landing
+    /// A carried signature only (D-8ZEHP, D-9YAQS, D-6Z9BR): the full hash of the landing
     /// on the subject's replay chain whose base the statement names. Absent from the JSON
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,7 +249,7 @@ pub fn check_signature(
 }
 
 /// [`check_signature`], then for a landing subject whose statement does not match: the check
-/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS, ruling task-3b). `sources` are
+/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS, D-6Z9BR). `sources` are
 /// the landings on the subject's replay chain that the caller holds, with their records, in the
 /// order [`carried_sources`] gives; a source that the chain does not reach through the sources
 /// before it is skipped. The statement matches when it equals the one rebuilt from the subject
@@ -302,7 +302,7 @@ pub fn check_signature_carried(
 }
 
 /// The landings on the subject's replay chain that `state` holds before its log end, with their
-/// records: the sources [`check_signature_carried`] reads (ruling task-3b). The chain is the
+/// records: the sources [`check_signature_carried`] reads (D-6Z9BR). The chain is the
 /// subject's `rebased_from`, then each held source's own `rebased_from` in turn, breadth first,
 /// each landing once. A pull adds one link per replay and hashes keep the chain acyclic, so the
 /// walk has no depth cap. Empty for any other subject.

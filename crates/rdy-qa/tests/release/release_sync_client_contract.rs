@@ -650,7 +650,7 @@ fn scc7_contract_adds_only_baseline_values() {
     );
 }
 
-/// scc3 (D-8ZEHP, D-9YAQS, ruling task-3b): the successor adds only the facts of a carried
+/// scc3 (D-8ZEHP, D-9YAQS, D-6Z9BR): the successor adds only the facts of a carried
 /// signature to the signatures row: `carried_from` holds the full hash of the landing on the
 /// replay chain whose base the statement names, the statement matches, and the CLI line names
 /// the first 12 characters. Every other member of the row is the predecessor's.
@@ -671,7 +671,7 @@ fn scc3_contract_adds_only_replay_signature_facts() {
     );
     let carried = &new["signatures"]["carried"];
     assert_eq!(carried["result_member"], "carried_from");
-    // ruling task-3b: the check follows the whole replay chain
+    // D-6Z9BR: the check follows the whole replay chain
     assert!(carried.get("levels").is_none());
     assert!(
         carried["chain"]
