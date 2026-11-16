@@ -74,6 +74,9 @@ fn not_owned() -> RdyError {
     )
 }
 
+/// The new changes of a view replay in replay order, and each source with its new change.
+pub(crate) type Prepared = (Vec<Change>, Vec<(Hash, Hash)>);
+
 /// The replay order of `nodes` (each a source and its deps): Kahn's algorithm over the graph
 /// the selected sources induce (a dep outside them is no edge), its ready set in ascending hash
 /// order. A cycle among them is refused.
@@ -341,7 +344,7 @@ pub(crate) fn replay_changes(
     head: &str,
     requested: &[Hash],
     by: &Provenance,
-) -> Result<(Vec<Change>, Vec<(Hash, Hash)>), RdyError> {
+) -> Result<Prepared, RdyError> {
     {
         if requested.len() > MAX_REPLAY_CHANGES {
             return Err(limit());

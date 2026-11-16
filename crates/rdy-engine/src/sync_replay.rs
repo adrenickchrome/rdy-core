@@ -236,7 +236,7 @@ pub fn plan(st: &ReadState, req: &PullRequest) -> Result<PullPlan, RdyError> {
             "fetch the remote's canon first",
         ));
     }
-    let local = chain(&reader, local_tip)?;
+    let local = chain(reader, local_tip)?;
     let plan = |kind| {
         Ok(PullPlan {
             hub_tip: Some(hub),
@@ -247,7 +247,7 @@ pub fn plan(st: &ReadState, req: &PullRequest) -> Result<PullPlan, RdyError> {
     if local.contains(&hub) {
         return plan(PlanKind::UpToDate);
     }
-    let hub_chain = chain(&reader, Some(hub))?;
+    let hub_chain = chain(reader, Some(hub))?;
     let hub_set: HashSet<Hash> = hub_chain.iter().copied().collect();
     if local_tip.is_none_or(|t| hub_set.contains(&t)) {
         return plan(PlanKind::FastForward);
@@ -259,7 +259,7 @@ pub fn plan(st: &ReadState, req: &PullRequest) -> Result<PullPlan, RdyError> {
     if req.take {
         return plan(PlanKind::Take { left });
     }
-    let Some(applied) = usable_applied(&reader, req, &local)? else {
+    let Some(applied) = usable_applied(reader, req, &local)? else {
         return plan(PlanKind::NoState { suffix: left });
     };
     // the unpushed landings: after `applied`, less those the hub chain holds
@@ -394,7 +394,7 @@ fn replay_one(
         return Ok(Step::Stopped(StopReason::Removal, None));
     }
     // 1. the new changes and the merge onto canon now
-    let changes = replayed_changes(&reader, source, &l, new_of)?;
+    let changes = replayed_changes(reader, source, &l, new_of)?;
     let state = match rdy.store.replay_merge(&changes)? {
         ReplayMerge::Clean(state) => state,
         ReplayMerge::Conflict(message) => {
@@ -611,7 +611,7 @@ fn second_batch(
             out.no_sync_state = true;
             for l in suffix {
                 out.not_replayed
-                    .push(not_replayed(&reader, l, StopReason::NoSyncState, None)?);
+                    .push(not_replayed(reader, l, StopReason::NoSyncState, None)?);
             }
             remainder = suffix.clone();
             mark = true;
@@ -649,10 +649,10 @@ fn second_batch(
                     }
                     Step::Stopped(reason, detail) => {
                         out.not_replayed
-                            .push(not_replayed(&reader, l, reason, detail)?);
+                            .push(not_replayed(reader, l, reason, detail)?);
                         for later in &unpushed[i + 1..] {
                             out.not_replayed.push(not_replayed(
-                                &reader,
+                                reader,
                                 later,
                                 StopReason::AfterStop,
                                 None,
@@ -669,7 +669,7 @@ fn second_batch(
     }
     let tip = rdy.store.canon_head()?;
     if !remainder.is_empty() {
-        let sources = remainder_changes(&reader, &remainder)?;
+        let sources = remainder_changes(reader, &remainder)?;
         out.view = Some(remainder_view(rdy, s, st, inputs, &sources)?);
     }
     let mut refs = vec![];
