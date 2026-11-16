@@ -56,9 +56,9 @@ fn sdc6_mcp_encodes_e_held_by_reader_and_lists_its_row() {
     assert_eq!(
         at[0] + 4,
         ERROR_ROWS.len(),
-        "directly before the three publication rows"
+        "directly before the baseline row and the two publication rows"
     );
-    assert_eq!(ERROR_ROWS[at[0] + 1].0, "E_PUBLICATION_REFERENCE");
-    assert_eq!(ERROR_ROWS[at[0] + 2].0, "W_PUBLICATION_REFERENCE");
-    assert_eq!(ERROR_ROWS[at[0] + 3].0, "E_PUBLICATION_BASELINE");
+    assert_eq!(ERROR_ROWS[at[0] + 1].0, "E_PUBLICATION_BASELINE");
+    assert_eq!(ERROR_ROWS[at[0] + 2].0, "E_PUBLICATION_REFERENCE");
+    assert_eq!(ERROR_ROWS[at[0] + 3].0, "W_PUBLICATION_REFERENCE");
 }

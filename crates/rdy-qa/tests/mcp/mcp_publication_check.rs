@@ -103,7 +103,10 @@ fn pub9_check_inputs_are_strict_and_policy_is_not_authorization() {
         p.sort();
         p
     };
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 
     // a session is required
@@ -389,6 +392,9 @@ fn drv6_tool_description_names_the_readable_review() {
         .map(String::as_str)
         .collect();
     props.sort();
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
 }

@@ -567,6 +567,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         HELD_BY_READER_FIX,
     ),
     (
+        E_PUBLICATION_BASELINE,
+        "rdy_publication_check against_baseline names a baseline file that does not verify, was made for another previous publication, or comes from a project outside this project's lineage",
+        "make the baseline again with rdy_publication_baseline in the project that published, and pass the complete path of the new file as against_baseline",
+    ),
+    (
         E_PUBLICATION_REFERENCE,
         "a public profile refers to blocks outside its selection",
         "Include the target docs or remove these references. Run the publication check again.",
@@ -575,10 +580,5 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         W_PUBLICATION_REFERENCE,
         "an org profile has references outside its selection, or a live public profile has blocked references",
         "follow the warning's own fix",
-    ),
-    (
-        E_PUBLICATION_BASELINE,
-        "rdy_publication_check against_baseline names a baseline file that does not verify, was made for another previous publication, or comes from a project outside this project's lineage",
-        "make the baseline again with rdy_publication_baseline in the project that published, and pass the complete path of the new file as against_baseline",
     ),
 ];
