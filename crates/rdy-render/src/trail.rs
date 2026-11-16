@@ -248,7 +248,7 @@ impl Cx<'_> {
             n if n > 5 => format!("{} and {} more", names[..5].join(", "), n - 5),
             _ => list_and(&names),
         };
-        format!("Also governed through: {list}.")
+        format!("Also decided about: {list}.")
     }
 
     /// `start` and every decision reached from it through `supersedes` and `revokes` edges, in
@@ -732,7 +732,7 @@ mod tests {
         );
         assert_eq!(anchors(&t.through), 1, "{}", t.through);
         assert!(
-            t.through.starts_with("Also governed through: <a href=\""),
+            t.through.starts_with("Also decided about: <a href=\""),
             "{}",
             t.through
         );

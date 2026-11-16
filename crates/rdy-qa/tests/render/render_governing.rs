@@ -113,7 +113,7 @@ fn rf7_site_why_includes_affected_described_entities() {
     assert_eq!(c1.matches("<li").count(), 0, "{c1}");
     assert!(
         c1.contains(
-            "Also governed through: <a href=\"#audit-service\">Audit service</a> and \
+            "Also decided about: <a href=\"#audit-service\">Audit service</a> and \
              <a href=\"#ledger-service\">Ledger service</a>."
         ),
         "{c1}"
@@ -245,7 +245,7 @@ fn rf7_profile_trail_does_not_leak_excluded_supporting_text() {
             // D-CMXNP: the claim's trail names the selected entity, hostile as written, escaped;
             // the held-back entity is neither named nor counted
             assert!(
-                t.contains("Also governed through: <a href=")
+                t.contains("Also decided about: <a href=")
                     && t.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
                 "{key}: {t}"
             );
