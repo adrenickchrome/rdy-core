@@ -259,3 +259,67 @@ fn scc3_normal_approval_keeps_freshness_only() {
         }
     );
 }
+
+/// The sync frames of the store `s` from its start, in log order: what an initial upload brings.
+fn sync_frames(s: &rdy_store::Store) -> Vec<(u8, Vec<u8>)> {
+    let origin = Location {
+        segment: 0,
+        offset: 0,
+    };
+    let mut out = vec![];
+    s.reader()
+        .for_each_frame_from(origin, s.log_end(), |_, raw, _, payload, _| {
+            if rdy_store::sync_stream::is_sync_kind(rdy_store::codec::logical_kind(raw)) {
+                out.push((raw, payload.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// A first landing (no `prev`) checks in a `hub_canon` holder as it checks in its project: the
+/// evaluator's empty base is the candidate's own input, not a canon read, so the holder's
+/// refusal of canon reads (`holder reads need a tag or landing`) does not apply to it. An
+/// ordinary canon read of a holder with no canon still refuses.
+#[test]
+fn scc3_first_landing_checks_in_a_holder() {
+    let (_dir, mut r) = rdy_qa::fixtures::project();
+    put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$t", "parent": "$n", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "parent": "$t", "body": "X holds."}
+        ]),
+        j_typo(),
+    );
+    land(&mut r, "seed").unwrap();
+    let (head, landing) = head_record(&r);
+    assert_eq!(landing.prev, None, "the project's first landing");
+    let inputs = CheckInputs::of_state(&r.read());
+    let want = check_landing(&r.read(), &landing, &inputs).unwrap();
+    assert!(want.pass, "{want:#?}");
+    let repo = r.store().reader().repo_id().unwrap().unwrap();
+    let records = sync_frames(r.store());
+    // a holder of the same repo, seeded with the project's records, then reopened
+    let hd = tempfile::tempdir().unwrap();
+    let mut hr = Rdy::create_holder(hd.path(), repo).unwrap();
+    // before the seed the holder has no canon, and an ordinary canon read still refuses
+    let e = hr.read().resolve_scope("canon").unwrap_err();
+    assert_eq!(e.message, "holder reads need a tag or landing", "{e:#?}");
+    let s = hr.store_mut();
+    let b = s.reader().check_move_batch(records, head).unwrap();
+    s.move_canon(
+        &b,
+        &rdy_store::hub_canon::CanonMove::Seed,
+        None,
+        1_763_164_800_000,
+    )
+    .unwrap();
+    hr.close().unwrap();
+    let hr = Rdy::open_holder(hd.path()).unwrap();
+    // the holder's check of the first landing equals the project's
+    assert_eq!(check_landing(&hr.read(), &landing, &inputs).unwrap(), want);
+}

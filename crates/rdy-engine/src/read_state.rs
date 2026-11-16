@@ -677,6 +677,11 @@ pub struct ReadState {
     /// HEAD). False only for an explicit candidate's state ([`ReadState::candidate_state`]),
     /// whose every input is a record or the caller's.
     pub(crate) reads_files: bool,
+    /// Whether `canon_head` is the caller's explicit base rather than the store's canon. True
+    /// only for an explicit candidate's state ([`ReadState::candidate_state`]): its base, even
+    /// none (a first landing's `prev`), is an input of the check, so a holder's refusal of canon
+    /// reads does not apply to it. Every other state, published or held, keeps that refusal.
+    pub(crate) explicit_base: bool,
     /// The site's name and description, parsed from `.rdy.yaml` by a full publish.
     pub(crate) name: Arc<str>,
     pub(crate) description: Option<Arc<str>>,
@@ -1038,6 +1043,7 @@ impl ReadState {
             pack,
             root: Arc::clone(&self.root),
             reads_files: false,
+            explicit_base: true,
             name: Arc::clone(&self.name),
             description: self.description.clone(),
             require_up_to_date: inputs.require_up_to_date,
@@ -1078,8 +1084,13 @@ impl ReadState {
 
     /// A holder's refusal of every read that needs canon (`holder reads need a tag or
     /// landing`): a holder has no canon, so its scopes are tags and landings only. A state with a
-    /// canon head is never a holder's, so only a state without one reads the store's mode.
+    /// canon head is never a holder's, so only a state without one reads the store's mode. An
+    /// explicit candidate's state reads the base its caller names, never the store's canon, so
+    /// it is never refused (an empty base is a first landing's `prev`).
     pub(crate) fn refuse_holder_canon(&self) -> Result<(), RdyError> {
+        if self.explicit_base {
+            return Ok(());
+        }
         if self.canon_head.is_none() && self.reader.mode()? == StoreMode::Holder {
             return Err(crate::holder::needs_tag());
         }
