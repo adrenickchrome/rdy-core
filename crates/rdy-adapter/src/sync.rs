@@ -9,7 +9,8 @@
 //!    checked objects and their facts ([`QuarantineFacts`]): the repo, the purpose, the pushed
 //!    head, the pushed view and its root, the objects, and the minimum rdy before and after a
 //!    move (D-4XHPH). [`Snapshot::canon_chain`] reads the chain facts ([`ChainFacts`]) on the
-//!    same snapshot. Neither call writes.
+//!    same snapshot, and [`Snapshot::check_pushed_landing`] checks each pushed landing
+//!    (D-0WWYR). No such call writes to the holder.
 //! 2. It chooses a move ([`CanonMove`]) and the tip or head it expects, and calls
 //!    [`StoreHandle::move_canon`]. Under the store's one writer, core checks that no removal
 //!    has run since the snapshot, checks the objects again when the store moved since, compares
@@ -26,7 +27,7 @@
 use crate::store::{Snapshot, StoreHandle};
 use rdy_engine::engine::with_writer_result;
 use rdy_engine::stream_error::to_rdy;
-use rdy_engine::{E_BAD_INPUT, E_IO, RdyError, ReadState, stream_check};
+use rdy_engine::{E_BAD_INPUT, E_INTERNAL, E_IO, RdyError, ReadState, stream_check};
 use rdy_model::{Hash, LandingRecord, RepoId};
 use rdy_store::format::{FEATURE_HUB_CANON, StoreFeatures, registered_features, required_features};
 use rdy_store::hub_canon::MoveBatch;
@@ -41,7 +42,9 @@ use rdy_store::view::ViewOp;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use rdy_store::format::RdyVersion;
 pub use rdy_store::hub_canon::{CanonMove, Moved};
@@ -84,6 +87,11 @@ pub struct CheckedQuarantine {
     /// The pushed landings by hash, with their `prev`, for the chain facts.
     landings: BTreeMap<Hash, Option<Hash>>,
     facts: QuarantineFacts,
+    /// The push's batch files (cloned handles; none for a stored head), for the scratch holder
+    /// of [`Snapshot::check_pushed_landing`].
+    files: Vec<File>,
+    /// That scratch holder, made at the first check and kept with the quarantine.
+    scratch: Mutex<Option<Arc<Scratch>>>,
 }
 
 impl std::fmt::Debug for CheckedQuarantine {
@@ -98,6 +106,130 @@ impl CheckedQuarantine {
     /// The facts the hub reads before its verdict.
     pub fn facts(&self) -> &QuarantineFacts {
         &self.facts
+    }
+
+    /// Whether `snap` is the snapshot this quarantine was checked on.
+    pub(crate) fn bound_to(&self, snap: &Snapshot) -> bool {
+        Arc::ptr_eq(&self.state, snap.shared_state())
+    }
+
+    /// Whether the push's own records hold landing `landing`.
+    pub(crate) fn pushes(&self, landing: &Hash) -> bool {
+        self.landings.contains_key(landing)
+    }
+
+    /// The scratch holder of this quarantine on `snap`, its snapshot: made at the first call
+    /// ([`Scratch::make`]) and kept.
+    pub(crate) fn scratch(&self, snap: &Snapshot) -> Result<Arc<Scratch>, RdyError> {
+        let mut slot = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = slot.as_ref() {
+            return Ok(Arc::clone(s));
+        }
+        let s = Arc::new(Scratch::make(snap, &self.files)?);
+        *slot = Some(Arc::clone(&s));
+        Ok(s)
+    }
+}
+
+/// A holder in a private temporary directory that holds what the snapshot's holder holds for a
+/// landing check (its canon history and its held chains, exported from the snapshot) and the
+/// push of a checked quarantine, taken by the same checks and moves as on the holder. The
+/// landing check reads a quarantined landing there, so the holder itself stores nothing before
+/// the hub's move. The directory is removed when the scratch drops.
+pub(crate) struct Scratch {
+    dir: PathBuf,
+    handle: Option<StoreHandle>,
+    snap: Option<Snapshot>,
+}
+
+impl Scratch {
+    /// The scratch of `files`, a push checked on `snap`.
+    fn make(snap: &Snapshot, files: &[File]) -> Result<Scratch, RdyError> {
+        let dir = scratch_dir()?;
+        let mut out = Scratch {
+            dir,
+            handle: None,
+            snap: None,
+        };
+        let h = StoreHandle::create_holder(&out.dir.join("holder"), snap.identity().repo_id)?;
+        let h = out.handle.insert(h);
+        let empty = BTreeSet::new();
+        let export = |root: Hash, base: Option<Hash>, name: &str| -> Result<File, RdyError> {
+            let path = out.dir.join(name);
+            let f = File::create(&path).map_err(io)?;
+            snap.write_history(StreamPurpose::CanonHistory, root, base, &empty, f)?;
+            File::open(&path).map_err(io)
+        };
+        let take = |files: &[File], mv: CanonMove| -> Result<(), RdyError> {
+            let s = h.snapshot()?;
+            let q = s.check_quarantine(files)?;
+            let mv = match (mv, s.canon()) {
+                (CanonMove::Force, Some(_)) if s.canon_chain(&q)?.holds_expected => {
+                    CanonMove::Extend
+                }
+                (CanonMove::Force, None) => CanonMove::Seed,
+                (mv, _) => mv,
+            };
+            match h.move_canon(&q, mv, s.canon())? {
+                Moved::Moved { .. } => Ok(()),
+                Moved::Behind { tip } => Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("the scratch holder of a landing check moved to {tip:?}"),
+                    "report this as a bug in rdy",
+                )),
+            }
+        };
+        if let Some(tip) = snap.canon() {
+            take(&[export(tip, None, "canon.rdysync")?], CanonMove::Seed)?;
+            for (i, held) in snap.captured_held().iter().enumerate() {
+                let s = h.snapshot()?;
+                let key = ObjectKey {
+                    kind: kinds::LANDING,
+                    hash: *held,
+                };
+                if s.has_objects(&[key])?.iter().any(|p| p.present) {
+                    continue;
+                }
+                take(
+                    &[export(*held, Some(tip), &format!("held-{i}.rdysync"))?],
+                    CanonMove::Hold,
+                )?;
+            }
+        }
+        // the push: an extend when it holds the scratch tip, else a force or the seed
+        take(files, CanonMove::Force)?;
+        out.snap = Some(h.snapshot()?);
+        Ok(out)
+    }
+
+    /// The scratch holder's snapshot, with the push taken.
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        self.snap.as_ref().expect("a made scratch has its snapshot")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        self.snap = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.close();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A new private directory for a scratch holder, under the system's temporary directory.
+fn scratch_dir() -> Result<PathBuf, RdyError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let base = std::env::temp_dir();
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("rdy-landing-check-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io(e)),
+        }
     }
 }
 
@@ -273,7 +405,12 @@ impl Snapshot {
             }
         }
         let batch = read.reader().check_move_batch(records, header.tag)?;
-        self.checked(batch, header.purpose, landings, &ops, objects, need)
+        let files = batches
+            .iter()
+            .map(File::try_clone)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io)?;
+        self.checked(batch, header.purpose, landings, &ops, objects, need, files)
     }
 
     /// A checked quarantine with no new batch: the head `head` that this snapshot's holder
@@ -295,6 +432,7 @@ impl Snapshot {
             &BTreeMap::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -307,6 +445,7 @@ impl Snapshot {
         ops: &BTreeMap<Hash, ViewOp>,
         objects: Vec<ObjectKey>,
         mut need: Vec<rdy_store::format::StoreFeature>,
+        files: Vec<File>,
     ) -> Result<CheckedQuarantine, RdyError> {
         let read = self.read_state();
         let head = batch.head();
@@ -352,6 +491,8 @@ impl Snapshot {
             batch: Arc::new(batch),
             landings,
             facts,
+            files,
+            scratch: Mutex::new(None),
         })
     }
 

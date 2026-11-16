@@ -8,10 +8,15 @@
 //! module checks the inputs, pins the landing to the snapshot's captured histories and returns
 //! core's result. Who approved and the signatures are the hub's to judge, not this check's.
 //!
+//! [`Snapshot::check_landing`] checks a landing the holder stores.
+//! [`Snapshot::check_pushed_landing`] checks a landing of a checked quarantine before the hub's
+//! move, the first push included: the holder stores nothing until the move.
+//!
 //! [`Snapshot::capture_gate_inputs`] reads a project's pack and gate settings once, for a push:
 //! the hub keeps them, and a holder cannot rebuild them from a digest.
 
 use crate::store::Snapshot;
+use crate::sync::CheckedQuarantine;
 use rdy_engine::history_facts;
 use rdy_engine::{E_BAD_INPUT, RdyError};
 use rdy_model::Hash;
@@ -45,6 +50,41 @@ impl Snapshot {
         }
         let record = read.reader().landing(&landing)?;
         let out = rdy_engine::landing_check::check_landing(read, &record, inputs)?;
+        read.ensure_current_epoch()?;
+        Ok(out)
+    }
+
+    /// The check of landing `landing` of the push `checked`, before the hub's move (D-0WWYR:
+    /// the landing and its `prev` may be in the quarantine). `checked` must have been checked on
+    /// this snapshot (`E_BAD_INPUT` otherwise), and the inputs are checked first. A landing the
+    /// push's records do not hold is [`Snapshot::check_landing`]'s. A pushed landing is checked
+    /// by core's evaluator in a scratch holder: a private temporary holder that takes this
+    /// snapshot's canon history and held chains, as it captured them, and then the push, by the
+    /// same checks and moves. The holder itself stores nothing, and its canon does not move: the
+    /// hub's [`StoreHandle::move_canon`](crate::StoreHandle::move_canon) still compares the
+    /// expected tip. The scratch is made at the first check of `checked` and kept with it. A
+    /// removal since the snapshot is `E_REDACTED_STATE`.
+    pub fn check_pushed_landing(
+        &self,
+        checked: &CheckedQuarantine,
+        landing: Hash,
+        inputs: &CheckInputs,
+    ) -> Result<LandingCheck, RdyError> {
+        inputs.check()?;
+        if !checked.bound_to(self) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "the checked quarantine is bound to another snapshot",
+                "check the landing on the snapshot that checked the push",
+            ));
+        }
+        let read = self.read_state();
+        read.ensure_current_epoch()?;
+        if !checked.pushes(&landing) {
+            return self.check_landing(landing, inputs);
+        }
+        let scratch = checked.scratch(self)?;
+        let out = scratch.snapshot().check_landing(landing, inputs)?;
         read.ensure_current_epoch()?;
         Ok(out)
     }

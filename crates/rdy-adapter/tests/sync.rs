@@ -419,6 +419,17 @@ fn scc6_extend_from_a_held_chain_with_no_new_batches() {
     assert_eq!(e.code, "E_BAD_INPUT", "{e:#?}");
     let stored = s2.check_stored_head(w.p2).unwrap();
     assert!(stored.facts().objects.is_empty());
+    // fix round 1: a push beside the held chain checks before any move, in a scratch holder that
+    // takes canon and the held chain; the holder stores none of it
+    let sibling = check(&s2, &[&w.eq]).unwrap();
+    let inputs = inputs_of(&w.p());
+    let want = oracle(&Rdy::open(&w.dir.path().join("q")).unwrap(), w.q2, &inputs);
+    assert_eq!(
+        s2.check_pushed_landing(&sibling, w.q2, &inputs).unwrap(),
+        want
+    );
+    assert!(holds_none(&h, &sibling.facts().objects));
+    drop(sibling);
     assert_eq!(stored.facts().head, w.p2);
     assert_eq!(
         s2.canon_chain(&stored).unwrap(),
@@ -897,6 +908,145 @@ fn scc6_check_landing_uses_prev_pack_and_settings() {
     h.close().unwrap();
 }
 
+/// Writes the canon history of the project at `dir` at `root`, less `base`'s closure, to `out`.
+fn export_canon(dir: &Path, root: Hash, base: Option<Hash>, out: &Path) {
+    export(dir, StreamPurpose::CanonHistory, root, base, out);
+}
+
+/// Whether the snapshot of `h` holds none of `keys`.
+fn holds_none(h: &StoreHandle, keys: &[ObjectKey]) -> bool {
+    h.snapshot()
+        .unwrap()
+        .has_objects(keys)
+        .unwrap()
+        .iter()
+        .all(|p| !p.present)
+}
+
+/// D-0WWYR (fix round 1): a hub checks the landings of a push while they are only in its checked
+/// quarantine, before any move: the first push to an empty holder, and a push that extends a
+/// seeded one. The check equals the project's own, a failing check stores nothing and moves no
+/// canon, and the guarded move still compares the expected tip afterwards.
+#[test]
+fn scc6_check_landing_of_a_quarantined_push_before_intake() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    let r = Rdy::open(c.dir.path()).unwrap();
+    let want_adv = oracle(&r, c.l2, &c.advisory);
+    let want_blk = oracle(&r, c.l2, &c.blocking);
+    let want_l1 = oracle(&r, c.l1, &c.blocking);
+    let repo = repo_of(&r);
+    r.close().unwrap();
+    assert!(want_adv.pass && !want_blk.pass && want_l1.pass);
+    let first = c.dir.path().join("first.rdysync");
+    export_canon(c.dir.path(), c.l2, None, &first);
+    let at_l1 = c.dir.path().join("l1.rdysync");
+    export_canon(c.dir.path(), c.l1, None, &at_l1);
+    let next = c.dir.path().join("next.rdysync");
+    export_canon(c.dir.path(), c.l2, Some(c.l1), &next);
+
+    // the first push to an empty holder
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let q = check(&s0, &[&first]).unwrap();
+    // the stored-only check does not see the quarantine
+    assert_eq!(
+        s0.check_landing(c.l2, &c.advisory).unwrap_err().code,
+        "E_NOT_FOUND"
+    );
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l2, &c.blocking).unwrap(),
+        want_blk
+    );
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l1, &c.blocking).unwrap(),
+        want_l1
+    );
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l2, &c.advisory).unwrap(),
+        want_adv
+    );
+    // a landing neither the push nor the holder holds
+    assert_eq!(
+        s0.check_pushed_landing(&q, Hash::of(b"no such landing"), &c.advisory)
+            .unwrap_err()
+            .code,
+        "E_NOT_FOUND"
+    );
+    // inputs out of range are refused first
+    let mut bad = c.advisory.clone();
+    bad.coverage_target = 101;
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l2, &bad).unwrap_err().code,
+        "E_BAD_INPUT"
+    );
+    // the failing check stored nothing and moved no canon
+    assert_eq!(h.snapshot().unwrap().canon(), None);
+    assert!(holds_none(&h, &q.facts().objects));
+    // the passing check, then the guarded move: a wrong expectation is still Behind
+    assert_eq!(
+        h.move_canon(&q, CanonMove::Seed, Some(c.l1)).unwrap(),
+        Moved::Behind { tip: None }
+    );
+    assert_eq!(
+        h.move_canon(&q, CanonMove::Seed, None).unwrap(),
+        moved(c.l2)
+    );
+    let s1 = h.snapshot().unwrap();
+    assert_eq!(s1.check_landing(c.l2, &c.advisory).unwrap(), want_adv);
+    h.close().unwrap();
+
+    // a push that extends a seeded holder
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let q1 = check(&s0, &[&at_l1]).unwrap();
+    assert_eq!(
+        h.move_canon(&q1, CanonMove::Seed, None).unwrap(),
+        moved(c.l1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let q2 = check(&s1, &[&next]).unwrap();
+    // a quarantine checked on another snapshot is refused
+    assert_eq!(
+        s1.check_pushed_landing(&q1, c.l1, &c.advisory)
+            .unwrap_err()
+            .code,
+        "E_BAD_INPUT"
+    );
+    assert_eq!(
+        s1.check_landing(c.l2, &c.blocking).unwrap_err().code,
+        "E_NOT_FOUND"
+    );
+    assert_eq!(
+        s1.check_pushed_landing(&q2, c.l2, &c.blocking).unwrap(),
+        want_blk
+    );
+    assert_eq!(
+        s1.check_pushed_landing(&q2, c.l2, &c.advisory).unwrap(),
+        want_adv
+    );
+    // a landing the holder stores checks as the stored check does
+    assert_eq!(
+        s1.check_pushed_landing(&q2, c.l1, &c.blocking).unwrap(),
+        s1.check_landing(c.l1, &c.blocking).unwrap()
+    );
+    assert_eq!(h.snapshot().unwrap().canon(), Some(c.l1));
+    assert!(holds_none(
+        &h,
+        &[ObjectKey {
+            kind: rdy_store::kinds::LANDING,
+            hash: c.l2
+        }]
+    ));
+    assert_eq!(
+        h.move_canon(&q2, CanonMove::Extend, Some(c.l1)).unwrap(),
+        moved(c.l2)
+    );
+    h.close().unwrap();
+}
+
 /// D-0WWYR: work in flight in a view changes nothing, and `assessment_matches` says whether the
 /// landing's stored assessment names the pack and config digests of the inputs.
 #[test]
@@ -1069,6 +1219,15 @@ fn scc6_removal_invalidates_captured_check() {
     let snap = h.snapshot().unwrap();
     let checked = check(&snap, &[&e1]).unwrap();
     assert!(snap.canon_chain(&checked).is_ok());
+    // the push's landing checks before any move
+    assert!(
+        snap.check_pushed_landing(
+            &checked,
+            l1,
+            &rdy_engine::landing_check::CheckInputs::of_state(&r.read())
+        )
+        .is_ok()
+    );
     assert!(
         snap.check_landing(
             l1,
@@ -1103,6 +1262,12 @@ fn scc6_removal_invalidates_captured_check() {
     );
     assert_eq!(
         snap.check_landing(l1, &inputs).unwrap_err().code,
+        "E_REDACTED_STATE"
+    );
+    assert_eq!(
+        snap.check_pushed_landing(&checked, l1, &inputs)
+            .unwrap_err()
+            .code,
         "E_REDACTED_STATE"
     );
     assert_eq!(snap.view_heads().unwrap_err().code, "E_REDACTED_STATE");
