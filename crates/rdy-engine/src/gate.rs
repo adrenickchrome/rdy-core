@@ -885,15 +885,27 @@ pub(crate) fn blocking_conflicts(
         }
     }
     let order_only = reader.order_only_pairs(&state, cs.iter().flat_map(|c| &c.ops));
-    Ok(merge_on_blocks(
+    let merged = merge_on_blocks(
         &state,
         &input,
         &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
         &|v, op| order_only.holds(v, op),
         &touched,
-    )
-    .conflicts)
+    );
+    // a block of removed content a pull's replay left out, until a later change writes it
+    // (D-FNRXT): it blocks too, though no change of the set writes it
+    let by_id: HashMap<Hash, Change> = changes.iter().copied().zip(cs.iter().cloned()).collect();
+    let mut conflicts = merged.conflicts;
+    let removed = crate::sync_redaction::removal_conflicts(
+        reader,
+        changes,
+        &by_id,
+        &|b| merged.state.blocks.get(b).copied(),
+        &conflicts,
+    )?;
+    conflicts.extend(removed);
+    Ok(conflicts)
 }
 
 /// `E_CONFLICT_UNRESOLVED` for the conflicts a version carries on the blocks it writes: one

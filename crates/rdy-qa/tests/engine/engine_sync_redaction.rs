@@ -1133,3 +1133,76 @@ fn scc5_fetched_removal_dump_loads_with_divergent_layout() {
     rdy_engine::load::load(&file, &dest).unwrap();
     check(&Rdy::open(&dest).unwrap(), &dest);
 }
+
+/// Fix round 1, F3 (D-FNRXT): a pull replay that stops at a change holding removed content
+/// records a conflict on that block in `pull-<n>`: it names the removal and holds no text, it
+/// stays across a reopen and a reindex, it blocks the landing, and it ends when the person
+/// writes the block in the view again.
+#[test]
+fn scc5_removal_conflict_is_recorded_until_written() {
+    const REWRITTEN: &str = "scc5-rewritten-by-a-person";
+    let _clock = pin_clock(1_000_000);
+    let mut w = world();
+    w.applied(w.base);
+    away_and_back(&mut w, "keep");
+    land_view(&mut w.local, "keep");
+    let prose = w.prose.clone();
+    let l = remove_on(&mut w.hub, "redact", vec![prose.clone()]);
+    let request = request_of(&w.hub, &l);
+    w.fetch();
+    let out = w.pull_only();
+    assert_eq!(out.status, PULLED_WITH_CONFLICTS, "{out:?}");
+    let view = out.view.clone().expect("pull-<n>");
+    let scope = Scope::View(view.clone());
+    let check = |w: &World| {
+        let read = w.local.read();
+        let conflicts = read.conflicts(&scope).unwrap();
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].block, id(&prose));
+        let removed = w.secret_version();
+        assert!(
+            conflicts[0]
+                .sides
+                .iter()
+                .any(|s| s.version == Some(removed)),
+            "{conflicts:?}"
+        );
+        let info = read.conflict_info(&scope, &id(&prose)).unwrap().unwrap();
+        let text = serde_json::to_string(&info).unwrap();
+        assert!(
+            text.contains(&request.to_string()),
+            "names the removal: {text}"
+        );
+        assert!(!text.contains(SECRET), "{text}");
+    };
+    check(&w);
+    w.reopen();
+    check(&w);
+    w.local.store_mut().reindex().unwrap();
+    check(&w);
+    // the conflict blocks the landing
+    let e = land(&mut w.local, &view).unwrap_err();
+    assert!(
+        e.issues.iter().any(|i| i.code == E_CONFLICT_UNRESOLVED),
+        "{e:?}"
+    );
+    // the person writes the block again, on the conflict's base: the conflict ends, and the
+    // view lands
+    let base = w.local.read().conflicts(&scope).unwrap()[0]
+        .base
+        .expect("the view's version");
+    write(
+        &mut w.local,
+        &view,
+        json!([{"op": "update", "id": prose, "body": REWRITTEN, "base": base.to_string()}]),
+    )
+    .unwrap();
+    assert!(w.local.read().conflicts(&scope).unwrap().is_empty());
+    w.reopen();
+    assert!(w.local.read().conflicts(&scope).unwrap().is_empty());
+    let t = land_view(&mut w.local, &view);
+    assert_eq!(w.prose_in(Scope::Canon), REWRITTEN);
+    // the next push copies no removed text
+    let bytes = history(&w.local, t, Some(head(&w.hub)));
+    assert!(!holds(&bytes, SECRET.as_bytes()));
+}

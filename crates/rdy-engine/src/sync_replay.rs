@@ -40,8 +40,11 @@
 //! On a stop, canon keeps the landings replayed so far. A new view `pull-<n>`, which the caller
 //! owns, gets the changes of L and of every later unpushed landing by the ordinary view replay
 //! (the caller is their author), never a removal's carrier change and never a change that holds
-//! removed content: the reply lists each block of such a change with the removal that removed
-//! it, and no text of it (`removed`). `replaced/<old local tip>`
+//! removed content (D-3M81W). For each block of removed content such a change writes, the view
+//! records a conflict that names the removal and holds no text, until the person writes the
+//! block there again (D-FNRXT, [`crate::sync_redaction::removal_conflicts`]). The reply lists
+//! each such block with the removal that removed it, and no text of it (`removed`).
+//! `replaced/<old local tip>`
 //! keeps the old chain readable, and the reply is [`PULLED_WITH_CONFLICTS`]. A take, a pull after
 //! a hub force move and a pull with no usable state write that mark too; a clean replay writes
 //! none, because `rebased_from` keeps its sources reachable.
@@ -185,7 +188,8 @@ pub struct PullOutcome {
     /// True when the remote had no usable sync state ([`NO_SYNC_STATE`]).
     pub no_sync_state: bool,
     /// The blocks of the changes that `pull-<n>` does not get because they hold removed
-    /// content, each with its change and the removal that removed it; never their text.
+    /// content, each with its change and the removal that removed it; never their text. The
+    /// view records a conflict on each.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<RemovedBlock>,
 }
@@ -502,11 +506,13 @@ fn replay_one(
 
 /// The changes of `landings` that a `pull-<n>` view replays: each landing's changes in order,
 /// without a removal's carrier change (D-HVZC9) and without a change that holds removed
-/// content (D-3M81W), whose blocks `removed` gains, each with its removal.
+/// content (D-3M81W), whose blocks `removed` gains, each with its removal, and `marks` each
+/// with the removed version it writes, once per block (D-FNRXT: the view's conflicts).
 fn remainder_changes(
     reader: &StoreReader,
     landings: &[Hash],
     removed: &mut Vec<RemovedBlock>,
+    marks: &mut Vec<crate::sync_redaction::RemovalMark>,
 ) -> Result<Vec<Hash>, RdyError> {
     let mut out = vec![];
     let mut seen = HashSet::new();
@@ -515,54 +521,36 @@ fn remainder_changes(
             if reader.redaction_for_carrier(&c)?.is_some() || !seen.insert(c) {
                 continue;
             }
-            let blocks = removed_blocks(reader, &c)?;
+            let blocks = crate::sync_redaction::removed_ops(reader, &c)?;
             if blocks.is_empty() {
                 out.push(c);
                 continue;
             }
-            for (block, removal) in blocks {
+            for m in blocks {
                 removed.push(RemovedBlock {
-                    block,
+                    block: m.block.to_string(),
                     change: c.to_string(),
-                    removal: removal.to_string(),
+                    removal: m.removal.to_string(),
                 });
+                if !marks.iter().any(|x| x.block == m.block) {
+                    marks.push(m);
+                }
             }
         }
     }
     Ok(out)
 }
 
-/// The blocks of change `c` whose content a removal removed, each with that removal, in op
-/// order: every block of a removed change, else each block whose produced version is removed.
-fn removed_blocks(reader: &StoreReader, c: &Hash) -> Result<Vec<(String, Hash)>, RdyError> {
-    use rdy_model::Op;
-    use rdy_store::kinds;
-    // a removed change reads as its projection, which keeps its block ids and no text
-    let whole = reader.redaction_of(kinds::CHANGE, c)?;
-    let mut out = vec![];
-    for op in &reader.change(c)?.ops {
-        let removal = match (whole, op) {
-            (Some(r), _) => Some(r),
-            (None, Op::Create { block } | Op::Update { block, .. }) => {
-                reader.redaction_of(kinds::BLOCK, &block.version_hash())?
-            }
-            (None, Op::Delete { .. }) => None,
-        };
-        if let Some(r) = removal {
-            out.push((op.block_id().to_string(), r));
-        }
-    }
-    Ok(out)
-}
-
-/// Makes the `pull-<n>` view on canon now, owned by `s`, and replays `sources` into it by the
-/// ordinary view replay, in the open batch. Returns its name.
+/// Makes the `pull-<n>` view on canon now, owned by `s`, replays `sources` into it by the
+/// ordinary view replay, then commits one text-free mark per block of `marks`
+/// ([`crate::sync_redaction::mark_change`]), in the open batch. Returns its name.
 fn remainder_view(
     rdy: &mut Rdy,
     s: &Session,
     st: &ReadState,
     inputs: &CheckInputs,
     sources: &[Hash],
+    marks: &[crate::sync_redaction::RemovalMark],
 ) -> Result<String, RdyError> {
     let name = free_view(&rdy.store.reader())?;
     let tip = rdy.store.canon_head()?;
@@ -581,6 +569,14 @@ fn remainder_view(
             &by,
         )?;
         rdy.store.view_replay_prepared(&name, &prepared, &by)?;
+    }
+    if !marks.is_empty() {
+        let changes: Vec<Change> = marks
+            .iter()
+            .map(|m| crate::sync_redaction::mark_change(&name, m, &by))
+            .collect();
+        rdy.store
+            .commit_many(&name, changes, &|_| None, &[], None, &by)?;
     }
     Ok(name)
 }
@@ -738,8 +734,9 @@ fn second_batch(
     }
     let tip = rdy.store.canon_head()?;
     if !remainder.is_empty() {
-        let sources = remainder_changes(reader, &remainder, &mut out.removed)?;
-        out.view = Some(remainder_view(rdy, s, st, inputs, &sources)?);
+        let mut marks = vec![];
+        let sources = remainder_changes(reader, &remainder, &mut out.removed, &mut marks)?;
+        out.view = Some(remainder_view(rdy, s, st, inputs, &sources, &marks)?);
     }
     let mut refs = vec![];
     if mark && let (Some(old), Some(by)) = (plan.local_tip, tip) {

@@ -1318,7 +1318,20 @@ fn build_merged(
             Arc::new(Materialized::build(merged.state, blocks))
         }
     };
-    Ok(Built::new(m, Arc::new(merged.conflicts)))
+    // the blocks of removed content a pull's replay left out (D-FNRXT)
+    let mut conflicts = merged.conflicts;
+    let removed = crate::sync_redaction::removal_conflicts(
+        reader,
+        &entry.included,
+        changes,
+        &|b| m.version_of(b),
+        &conflicts,
+    )?;
+    if !removed.is_empty() {
+        conflicts.extend(removed);
+        conflicts.sort_by(|a, b| a.block.cmp(&b.block));
+    }
+    Ok(Built::new(m, Arc::new(conflicts)))
 }
 
 impl ReadState {

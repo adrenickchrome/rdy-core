@@ -324,6 +324,12 @@ impl StoreReader {
         Ok(self.mask_of(kind, h)?.map(|m| m.request))
     }
 
+    /// Whether this reader may read any object as removed: an active mask row, or a preview.
+    /// False means [`StoreReader::redaction_of`] is None for every object.
+    pub fn any_removal(&self) -> bool {
+        self.index().any_redaction_active() || self.preview().is_some()
+    }
+
     /// The uncovered carriers (D-FNRXT): each change, not itself removed and not a removal's
     /// carrier, with an op that produces a block version an active removal holds, with that
     /// removal's request; once per change (its lowest request), in ascending change order. Such a
