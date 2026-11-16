@@ -1,7 +1,8 @@
 //! rf7 (D-VPATZ): the site's Why trail finds a block's governing decisions through the one graph
 //! route query. A decision that affects an entity governs each block that describes the entity
-//! (`describes/affects`), next to `decided_by`, `implements` and `affects`. The trail stays prose
-//! for readers, keeps its lineage, escaping and selection rules, and a finding or a source
+//! (`describes/affects`), next to `decided_by`, `implements` and `affects`. D-CMXNP: on a
+//! describing block's trail such a decision is no row; the trail ends with one line naming the
+//! entity, linked to its home, whose own trail lists it. The trail stays prose for readers, keeps its lineage, escaping and selection rules, and a finding or a source
 //! stays supporting: no page, no navigation entry, no search or llms text.
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{DecisionInput, Rdy, Scope};
@@ -106,20 +107,35 @@ fn rf7_site_why_includes_affected_described_entities() {
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = read(out.path(), "ops.html");
 
+    // D-CMXNP: the decisions reach the claims only through entities, so they are no rows: each
+    // claim's trail is one line naming its entities, and each entity's own trail lists them
     let c1 = trail_of(&h, &id("$c1")).expect("the described claim has a trail");
-    assert_eq!(
-        c1.matches("Ruled: Ledger entries are never rewritten.")
-            .count(),
-        1,
-        "once, though two entities lead to it: {c1}"
+    assert_eq!(c1.matches("<li").count(), 0, "{c1}");
+    assert!(
+        c1.contains(
+            "Also governed through: <a href=\"#audit-service\">Audit service</a> and \
+             <a href=\"#ledger-service\">Ledger service</a>."
+        ),
+        "{c1}"
     );
-    assert_eq!(c1.matches("<li").count(), 1, "{c1}");
-    for other in ["Billing is nightly", "Home-only ruling", "Mention of"] {
+    for other in ["Billing", "Home-only ruling", "Mention of", "Ruled:"] {
         assert!(!c1.contains(other), "{other}: {c1}");
     }
+    for k in ["$e1", "$e3"] {
+        let e = trail_of(&h, &id(k)).expect("the entity has a trail");
+        assert_eq!(
+            e.matches("Ruled: Ledger entries are never rewritten.")
+                .count(),
+            1,
+            "{k}: {e}"
+        );
+        assert_eq!(e.matches("<li").count(), 1, "{k}: {e}");
+    }
     let c2 = trail_of(&h, &id("$c2")).expect("the second claim has a trail");
-    assert!(c2.contains("Ruled: Billing is nightly."), "{c2}");
-    assert!(!c2.contains("Ledger entries"), "{c2}");
+    assert!(c2.contains(">Billing service</a>."), "{c2}");
+    assert!(!c2.contains("Ledger"), "{c2}");
+    let e2 = trail_of(&h, &id("$e2")).expect("the billing entity has a trail");
+    assert!(e2.contains("Ruled: Billing is nightly."), "{e2}");
     for k in ["$c3", "$c4"] {
         assert_eq!(trail_of(&h, &id(k)), None, "{k} has no governing decision");
     }
@@ -131,6 +147,7 @@ struct Guide {
     _dir: tempfile::TempDir,
     r: Rdy,
     claim: BlockId,
+    entity: BlockId,
 }
 
 fn guide() -> Guide {
@@ -196,6 +213,7 @@ fn guide() -> Guide {
         _dir: dir,
         r,
         claim: BlockId::parse(&id("$gc")).unwrap(),
+        entity: BlockId::parse(&id("$ge")).unwrap(),
     }
 }
 
@@ -224,13 +242,25 @@ fn rf7_profile_trail_does_not_leak_excluded_supporting_text() {
         let trail = trail_of(intro, &claim);
         if trail_shown {
             let t = trail.unwrap_or_else(|| panic!("{key}: no trail\n{intro}"));
-            // the selected decision, hostile as written, reads escaped
+            // D-CMXNP: the claim's trail names the selected entity, hostile as written, escaped;
+            // the held-back entity is neither named nor counted
             assert!(
-                t.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+                t.contains("Also governed through: <a href=")
+                    && t.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
                 "{key}: {t}"
             );
-            assert_eq!(t.matches("<li").count(), 1, "{key}: {t}");
+            assert_eq!(t.matches("<li").count(), 0, "{key}: {t}");
+            assert_eq!(t.matches("<a href=").count(), 1, "{key}: {t}");
+            assert!(!t.contains("more"), "{key}: {t}");
             assert!(!t.contains("Crosses the selection"), "{key}: {t}");
+            // the entity's own trail lists the selected decision, escaped
+            let e = trail_of(intro, &g.entity.to_string())
+                .unwrap_or_else(|| panic!("{key}: no entity trail\n{intro}"));
+            assert!(
+                e.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+                "{key}: {e}"
+            );
+            assert_eq!(e.matches("<li").count(), 1, "{key}: {e}");
         } else {
             assert_eq!(trail, None, "{key}");
         }
@@ -315,10 +345,13 @@ fn rf7_supporting_types_get_no_site_or_working_page() {
             );
         }
     }
-    // the governed claim still reads its decision through the entity
+    // the governed claim still leads to its decision through the entity (D-CMXNP: a line
+    // naming the entity, whose own trail lists the decision)
     let h = read(out.path(), "ops.html");
     let t = trail_of(&h, &id("$c")).expect("a trail");
-    assert!(t.contains("Ruled: Entries stay as written."), "{t}");
+    assert!(t.contains(">Ledger service</a>."), "{t}");
+    let e = trail_of(&h, &id("$e")).expect("the entity's trail");
+    assert!(e.contains("Ruled: Entries stay as written."), "{e}");
 
     // the working copy (the projection `rdy checkout` writes) gives neither type a page or a
     // file, a projected block, or a word, id or link in any file it does write
