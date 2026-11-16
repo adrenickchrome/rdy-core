@@ -706,12 +706,14 @@ fn cp14_guidance_and_error_rows_match_the_live_contract() {
         assert!(s["errors"][code]["when"].is_string(), "{code}");
     }
 
-    // the rows, word for word, before E_HELD_BY_READER and the two publication rows
+    // the rows, word for word, before E_HELD_BY_READER, the baseline row and the two
+    // publication rows
     let n = ERROR_ROWS.len();
     assert_eq!(
-        ERROR_ROWS[n - 3..].iter().map(|r| r.0).collect::<Vec<_>>(),
+        ERROR_ROWS[n - 4..].iter().map(|r| r.0).collect::<Vec<_>>(),
         [
             "E_HELD_BY_READER",
+            "E_PUBLICATION_BASELINE",
             "E_PUBLICATION_REFERENCE",
             "W_PUBLICATION_REFERENCE"
         ]

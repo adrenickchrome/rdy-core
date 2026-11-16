@@ -89,7 +89,10 @@ fn ab6_chat_release_check_is_strict_and_needs_no_daemon() {
         .map(String::as_str)
         .collect();
     props.sort();
-    assert_eq!(props, ["against", "profile", "release", "scope"]);
+    assert_eq!(
+        props,
+        ["against", "against_baseline", "profile", "release", "scope"]
+    );
     assert_eq!(t["inputSchema"]["required"], json!(["profile"]));
     assert!(
         t["inputSchema"]["properties"]["release"]
