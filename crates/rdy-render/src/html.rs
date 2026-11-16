@@ -92,7 +92,7 @@ pub fn words_html(
 
 /// `<a>` for a link, with its hover title when it has one; the label alone, escaped, for a
 /// block with no place on the site.
-fn anchor(l: &Link) -> String {
+pub(crate) fn anchor(l: &Link) -> String {
     match &l.href {
         None => escape(&l.label),
         Some(href) if l.title.is_empty() => {
