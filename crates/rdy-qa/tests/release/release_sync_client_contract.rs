@@ -254,6 +254,52 @@ const SCC7B_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members the doc rows' `changes_total` adds to [`CURRENT`] (D-6T9WJ), each with the reason it
+/// moves: the number on each changed, added and removed doc row of the disclosure review, in the
+/// probes of the check on both surfaces, and nothing else.
+const CT_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /cli/runtime/probes/publication check against/stdout/disclosure/changed_docs/id=string/changes_total",
+        "a changed doc row gives the count of its changed blocks and decisions, over every change a cap leaves out too",
+    ),
+    (
+        "added /cli/runtime/probes/publication check against/stdout/disclosure/removed_docs/id=string/changes_total",
+        "a removed doc row gives the count of its changed blocks and decisions: 1 for the doc and its baseline size",
+    ),
+    (
+        "added /cli/runtime/probes/publication check review rows/stdout/disclosure/|null/added_docs/id=string/changes_total",
+        "an added doc row gives the count of its changed blocks and decisions: 1 for the doc and its size",
+    ),
+    (
+        "added /cli/runtime/probes/publication check review rows/stdout/disclosure/|null/changed_docs/id=string/changes_total",
+        "a changed doc row gives the count of its changed blocks and decisions, over every change a cap leaves out too",
+    ),
+    (
+        "added /cli/runtime/probes/publication check review rows/stdout/disclosure/|null/removed_docs/id=string/changes_total",
+        "a removed doc row gives the count of its changed blocks and decisions: 1 for the doc and its baseline size",
+    ),
+    (
+        "added /mcp/result_fields/rdy_publication_check against/ok/disclosure/changed_docs/id=string/changes_total",
+        "a changed doc row gives the count of its changed blocks and decisions, over every change a cap leaves out too",
+    ),
+    (
+        "added /mcp/result_fields/rdy_publication_check against/ok/disclosure/removed_docs/id=string/changes_total",
+        "a removed doc row gives the count of its changed blocks and decisions: 1 for the doc and its baseline size",
+    ),
+    (
+        "added /mcp/result_fields/rdy_publication_check review rows/ok/disclosure/|null/added_docs/id=string/changes_total",
+        "an added doc row gives the count of its changed blocks and decisions: 1 for the doc and its size",
+    ),
+    (
+        "added /mcp/result_fields/rdy_publication_check review rows/ok/disclosure/|null/changed_docs/id=string/changes_total",
+        "a changed doc row gives the count of its changed blocks and decisions, over every change a cap leaves out too",
+    ),
+    (
+        "added /mcp/result_fields/rdy_publication_check review rows/ok/disclosure/|null/removed_docs/id=string/changes_total",
+        "a removed doc row gives the count of its changed blocks and decisions: 1 for the doc and its baseline size",
+    ),
+];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -315,7 +361,7 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2, scc3, scc4, scc5, scc7 and scc7b together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3, scc4, scc5, scc7, scc7b and the changes total together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
@@ -326,6 +372,7 @@ fn all_changes() -> Vec<String> {
         .chain(SCC4_CHANGES)
         .chain(SCC5_CHANGES)
         .chain(SCC7B_CHANGES)
+        .chain(CT_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -921,6 +968,7 @@ fn scc7_contract_delta_is_exactly_the_owned_leaves() {
         .chain(SCC5_CHANGES)
         .chain(SCC7_CHANGES)
         .chain(SCC7B_CHANGES)
+        .chain(CT_CHANGES)
     {
         assert!(why.len() > 10, "{p}: {why}");
     }

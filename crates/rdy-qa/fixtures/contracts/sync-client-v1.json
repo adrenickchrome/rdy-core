@@ -1486,6 +1486,7 @@
                       ]
                     }
                   ],
+                  "changes_total": "number",
                   "counts": {
                     "added": "number",
                     "decisions_added": "number",
@@ -1562,6 +1563,7 @@
               "removed_docs": [
                 {
                   "before_page": "string",
+                  "changes_total": "number",
                   "digest": "string",
                   "folder": "null",
                   "folder_redacted": "bool",
@@ -1803,6 +1805,7 @@
                 ],
                 "added_docs": [
                   {
+                    "changes_total": "number",
                     "decision_titles": [
                       "string"
                     ],
@@ -1895,6 +1898,7 @@
                         ]
                       }
                     ],
+                    "changes_total": "number",
                     "counts": {
                       "added": "number",
                       "decisions_added": "number",
@@ -2032,6 +2036,7 @@
                 "removed_docs": [
                   {
                     "before_page": "string",
+                    "changes_total": "number",
                     "digest": "string",
                     "folder": "string",
                     "folder_redacted": "bool",
@@ -22660,6 +22665,7 @@
                     ]
                   }
                 ],
+                "changes_total": "number",
                 "counts": {
                   "added": "number",
                   "decisions_added": "number",
@@ -22736,6 +22742,7 @@
             "removed_docs": [
               {
                 "before_page": "string",
+                "changes_total": "number",
                 "digest": "string",
                 "folder": "null",
                 "folder_redacted": "bool",
@@ -22971,6 +22978,7 @@
               ],
               "added_docs": [
                 {
+                  "changes_total": "number",
                   "decision_titles": [
                     "string"
                   ],
@@ -23063,6 +23071,7 @@
                       ]
                     }
                   ],
+                  "changes_total": "number",
                   "counts": {
                     "added": "number",
                     "decisions_added": "number",
@@ -23200,6 +23209,7 @@
               "removed_docs": [
                 {
                   "before_page": "string",
+                  "changes_total": "number",
                   "digest": "string",
                   "folder": "string",
                   "folder_redacted": "bool",

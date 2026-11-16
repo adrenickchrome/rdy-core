@@ -65,6 +65,28 @@ pub struct ReviewCounts {
     pub decisions_updated: u64,
 }
 
+impl ReviewCounts {
+    /// The doc's changed blocks plus its changed decisions (D-6T9WJ). A section and a figure are
+    /// blocks already counted, so their own counts stay out.
+    pub fn changes_total(&self) -> u64 {
+        self.added
+            + self.removed
+            + self.updated
+            + self.moved
+            + self.decisions_added
+            + self.decisions_removed
+            + self.decisions_updated
+    }
+}
+
+impl DocSize {
+    /// The `changes_total` of an added or removed doc (D-6T9WJ): 1 for the doc, plus its blocks
+    /// and its decisions.
+    pub fn changes_total(&self) -> u64 {
+        1 + self.blocks + self.decisions
+    }
+}
+
 /// One change in a changed doc. `what` lists the changed parts of an update, in part order, with
 /// `place` for a counted move; it is empty for every other kind. `section` is the label of the
 /// nearest section (the baseline's, for a removed block), and `section_id` that section's id.
@@ -140,6 +162,14 @@ pub struct ChangedDocReview {
     pub omitted_changes: u64,
     pub decisions: Vec<DecisionRow>,
     pub omitted_decisions: u64,
+}
+
+impl ChangedDocReview {
+    /// The row's `changes_total` (D-6T9WJ): its counts' changed blocks and decisions, over every
+    /// change, also those a cap leaves out of the lists. A record-only row has none.
+    pub fn changes_total(&self) -> u64 {
+        self.counts.changes_total()
+    }
 }
 
 /// The size of a doc as its side's view shows it.
