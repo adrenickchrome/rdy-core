@@ -491,7 +491,7 @@ fn relay_evidence_kind(
 }
 
 /// `h`'s proposal reference, as the approver saw it: `P-<stable short>@<n>`.
-fn version_ref(st: &ReadState, h: &Hash) -> Result<ProposalRef, RdyError> {
+pub(crate) fn version_ref(st: &ReadState, h: &Hash) -> Result<ProposalRef, RdyError> {
     let p = st.reader().proposal(h)?;
     Ok(ProposalRef {
         version: *h,

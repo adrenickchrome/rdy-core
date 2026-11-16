@@ -34,5 +34,6 @@ mod gate_rule_lifecycle;
 mod gate_rules;
 mod gate_semantic;
 mod gate_signing;
+mod gate_sync_replay;
 mod gate_tensions;
 mod gate_withdrawn;

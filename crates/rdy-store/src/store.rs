@@ -3933,6 +3933,15 @@ impl StoreReader {
         &self.tracking
     }
 
+    /// This reader with the tracking fields `t` in place of its own: the same index, epoch and
+    /// masks. A check that passes its own pack reads with that pack's fields.
+    pub fn with_tracking(&self, t: Tracking) -> StoreReader {
+        StoreReader {
+            tracking: Arc::new(t),
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn index(&self) -> &Index {
         &self.index
     }

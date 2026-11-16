@@ -79,6 +79,7 @@ mod io;
 mod keys;
 pub mod kungfu;
 pub mod kungfu_counts;
+pub mod landing_check;
 pub mod landing_order;
 pub mod lexicon;
 pub mod link_export;
