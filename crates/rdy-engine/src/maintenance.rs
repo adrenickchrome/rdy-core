@@ -38,6 +38,20 @@ pub fn store_dir(root: &Path) -> PathBuf {
     root.join(".rdy").join(layout::STORE_DIR)
 }
 
+/// The upgrade backups beside the store of the project at `root` (D-CRXNA), as `rdy status` and
+/// `rdy_overview` show them: `[{name, bytes}]`, sorted by name. None when there is none, so a
+/// project with no backup has no member.
+pub fn backups_json(root: &Path) -> Option<Value> {
+    let list = rdy_store::upgrade::backups(&store_dir(root));
+    (!list.is_empty()).then(|| {
+        Value::Array(
+            list.into_iter()
+                .map(|b| json!({"name": b.name, "bytes": b.bytes}))
+                .collect(),
+        )
+    })
+}
+
 /// The upgrade plan of the closed store of the project at `root`, with this rdy's steps. It
 /// opens no store, takes or creates no lock, and writes nothing. A preview store (a scalar
 /// format) is refused with its dump-and-load fix. A sealed upgrade whose completion is pending

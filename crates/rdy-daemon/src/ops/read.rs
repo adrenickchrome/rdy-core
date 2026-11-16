@@ -192,6 +192,10 @@ pub(super) fn status(cx: &OpContext, a: StatusArgs) -> Result<Value, RdyError> {
     if !carried.is_empty() {
         v["redaction_warnings"] = to_json(&carried);
     }
+    // D-CRXNA: each upgrade backup beside the store, with its size; none, no member
+    if let Some(b) = rdy_engine::maintenance::backups_json(&cx.engine.root()) {
+        v["upgrade_backups"] = b;
+    }
     // D-Y18E1: the local kungfu miss counts, one line and the retained rows; nothing when zero
     {
         use rdy_engine::kungfu_counts as kc;

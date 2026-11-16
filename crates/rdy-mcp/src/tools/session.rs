@@ -319,6 +319,11 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     if let Some(w) = carried_json {
         out["redaction_warnings"] = w;
     }
+    // D-CRXNA: each upgrade backup beside the store with its size, as `rdy status` lists them;
+    // a local fact added whole, like the warnings. None, no member
+    if let Some(b) = rdy_engine::maintenance::backups_json(&st.engine.root()) {
+        out["upgrade_backups"] = b;
+    }
     if reminder_tokens > 0 {
         super::add_reminder(&mut out);
     }
