@@ -5450,7 +5450,7 @@ impl Store {
             check,
         )?;
         drop(reader);
-        let (end, frames) = self.seal_take(files, &plan)?;
+        let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
         let empty = plan.writes.is_empty() && plan.refs.is_empty();
         Ok(crate::take_batch::BatchTaken {
             new_objects: plan.writes.len() as u64,
@@ -5534,7 +5534,7 @@ impl Store {
         drop(reader);
         // the fetch is one sealed batch of its own (as a move): no held batch is open here
         let held = std::mem::replace(&mut self.held, false);
-        let sealed = self.seal_take(files, &plan);
+        let sealed = self.seal_take(files, &plan, RefWrite::Take);
         self.held = held;
         let (end, frames) = sealed?;
         let empty = plan.writes.is_empty() && plan.refs.is_empty();
@@ -5610,7 +5610,7 @@ impl Store {
             target,
         )?;
         drop(reader);
-        let (end, frames) = self.seal_take(files, &plan)?;
+        let (end, frames) = self.seal_take(files, &plan, RefWrite::Take)?;
         let empty = plan.writes.is_empty() && plan.refs.is_empty();
         Ok(crate::take_batch::HistoryTaken {
             new_objects: plan.writes.len() as u64,
@@ -5623,12 +5623,98 @@ impl Store {
         })
     }
 
+    /// The batch of a canon or view move whose pushed history carries a removal
+    /// (`Store::move_canon_with`, D-FNRXT): the take's checks over the holder
+    /// (`crate::take_batch::prepare_history`), then one sealed batch of its own, held batches on
+    /// or off, with the records the holder lacks, the approved drops, the move's `refs` (which
+    /// list `hub_canon` when the holder does not list it yet) and the features ref last. Every
+    /// present record of the quarantine (`records`) must be one the take writes or the holder
+    /// holds: other input is `input changed during take`. A failure writes nothing.
+    pub(crate) fn take_history_move<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::HistoryTarget,
+        records: &[(u8, Vec<u8>)],
+        refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let mut plan = crate::take_batch::prepare_history(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+        )?;
+        let written: HashSet<crate::object_refs::ObjectKey> =
+            plan.writes.iter().map(|w| w.key()).collect();
+        for (raw, payload) in records {
+            let key = crate::object_refs::ObjectKey {
+                kind: crate::codec::logical_kind(*raw),
+                hash: Hash::of(payload),
+            };
+            if !written.contains(&key) && !reader.has_kind(key.kind, &key.hash)? {
+                return Err(TakeError::Stream(
+                    crate::stream_error::StreamError::bad_record(
+                        0,
+                        0,
+                        crate::stream_error::Reason::InputChangedDuringTake,
+                    )
+                    .with_object(Some(key)),
+                ));
+            }
+        }
+        drop(reader);
+        // the move's refs, then the features ref last: the batch lists `hub_canon` with its
+        // first hub ref (D-DZDB7)
+        plan.refs.retain(|(n, _)| n != format::REF_STORE_FEATURES);
+        plan.refs.extend(refs);
+        let current = plan
+            .features
+            .clone()
+            .unwrap_or_else(|| self.features.clone());
+        let features = if current.has(format::FEATURE_HUB_CANON) {
+            current
+        } else {
+            current.merged(&[format::registered(format::FEATURE_HUB_CANON)])
+        };
+        if features != self.features {
+            plan.refs
+                .push((format::REF_STORE_FEATURES.into(), features.to_json()));
+            plan.features = Some(features);
+        } else {
+            plan.features = None;
+        }
+        let held = std::mem::replace(&mut self.held, false);
+        let sealed = self.seal_take(files, &plan, RefWrite::Move);
+        self.held = held;
+        sealed?;
+        Ok(())
+    }
+
     /// Writes a prepared take (see [`Store::take_batches`], [`Store::take_fetched`]): returns
     /// the log's end after it and the data frames it wrote (none for a complete retry).
     fn seal_take<E>(
         &mut self,
         files: &[File],
         plan: &crate::take_batch::Plan,
+        how: RefWrite,
     ) -> Result<(Location, u64), crate::take_batch::TakeError<E>> {
         use crate::take_batch::TakeError;
         if plan.writes.is_empty() && plan.refs.is_empty() {
@@ -5636,11 +5722,11 @@ impl Store {
         }
         let refs = self.ref_items(plan.refs.clone());
         // an answer ref may name a TAG object the plan writes in this batch (the root)
-        crate::holder::check_ref_writes(self.creation.mode, &refs, RefWrite::Take, |k, h| {
+        crate::holder::check_ref_writes(self.creation.mode, &refs, how, |k, h| {
             let key = crate::object_refs::ObjectKey { kind: k, hash: *h };
             Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(k, h)?)
         })?;
-        crate::holder::refuse_upgrade_writes(&refs, RefWrite::Take)?;
+        crate::holder::refuse_upgrade_writes(&refs, how)?;
         let epoch = if plan.new_applies {
             Some(
                 self.shared

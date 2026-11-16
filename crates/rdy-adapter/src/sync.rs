@@ -260,15 +260,6 @@ fn other_store() -> RdyError {
     )
 }
 
-/// `E_BAD_INPUT`: a dropped record in a push.
-fn dropped(key: &ObjectKey) -> RdyError {
-    RdyError::new(
-        E_BAD_INPUT,
-        format!("a move batch cannot hold the dropped object {key}"),
-        "push the history from a store that holds the object",
-    )
-}
-
 fn io(e: std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
@@ -277,8 +268,9 @@ fn io(e: std::io::Error) -> RdyError {
     )
 }
 
-/// A push read: its header, its present records as (kind, bytes), and their keys.
-type PushRead = (StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>);
+/// A push read: its header, its present records as (kind, bytes), the keys of its records,
+/// present or dropped, and whether it carries a removal (a dropped record or a removal record).
+type PushRead = (StreamHeader, Vec<(u8, Vec<u8>)>, Vec<ObjectKey>, bool);
 
 /// The checked header and present records of the push `batches` for the holder of `repo`: each
 /// file passes core's batch check, the headers agree, and every record is a canon or view
@@ -297,6 +289,7 @@ fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
     let mut first: Option<StreamHeader> = None;
     let mut records: Vec<(u8, Vec<u8>)> = Vec::new();
     let mut keys: BTreeSet<ObjectKey> = BTreeSet::new();
+    let mut removal = false;
     for f in batches {
         let mut f = f.try_clone().map_err(io)?;
         f.seek(SeekFrom::Start(0)).map_err(io)?;
@@ -346,12 +339,21 @@ fn read_push(batches: &[File], repo: RepoId) -> Result<PushRead, RdyError> {
                         records.push((raw, payload));
                     }
                 }
-                StreamRecord::Dropped { .. } => return Err(dropped(&key)),
+                StreamRecord::Dropped { .. } => {
+                    keys.insert(key);
+                    removal = true;
+                }
             }
         }
     }
+    removal |= keys.iter().any(|k| {
+        matches!(
+            k.kind,
+            kinds::REDACTION | kinds::REDACTION_RESIDUE | kinds::REDACTION_APPLY
+        )
+    });
     let header = first.expect("at least one batch file");
-    Ok((header, records, keys.into_iter().collect()))
+    Ok((header, records, keys.into_iter().collect(), removal))
 }
 
 impl Snapshot {
@@ -366,7 +368,7 @@ impl Snapshot {
         let read = self.read_state();
         read.ensure_current_epoch()?;
         let repo = self.identity().repo_id;
-        let (header, records, objects) = read_push(batches, repo)?;
+        let (header, records, objects, removal) = read_push(batches, repo)?;
         let mut need: Vec<rdy_store::format::StoreFeature> = Vec::new();
         let mut landings = BTreeMap::new();
         let mut ops: BTreeMap<Hash, ViewOp> = BTreeMap::new();
@@ -382,7 +384,19 @@ impl Snapshot {
                 ops.insert(hash, op);
             }
         }
-        let batch = read.reader().check_move_batch(records, header.tag)?;
+        let batch = if removal {
+            // a history that carries a removal: its proofs, the stale-content rule and its
+            // closure are the take's checks, which the move runs over the holder under the
+            // writer (`Store::move_canon_with`), on its own handles of the files
+            let mut files = Vec::with_capacity(batches.len());
+            for f in batches {
+                files.push(f.try_clone().map_err(io)?);
+            }
+            read.reader()
+                .check_history_move_batch(records, header.tag, files, header.purpose)?
+        } else {
+            read.reader().check_move_batch(records, header.tag)?
+        };
         self.checked(batch, header.purpose, landings, &ops, objects, need)
     }
 
@@ -589,7 +603,16 @@ impl StoreHandle {
             }
             // a move is a batch of its own: one a raw write left open is sealed first
             rdy.seal_open()?;
-            let out = rdy.store_mut().move_canon(&batch, &mv, expected, at_ms)?;
+            let out = rdy
+                .store_mut()
+                .move_canon_with(
+                    &batch,
+                    &mv,
+                    expected,
+                    at_ms,
+                    rdy_engine::stream_take::move_tag_choice,
+                )
+                .map_err(rdy_engine::stream_take::move_error)?;
             if matches!(out, Moved::Moved { .. }) {
                 rdy.invalidate();
             }

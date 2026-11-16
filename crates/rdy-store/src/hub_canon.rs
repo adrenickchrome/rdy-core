@@ -37,6 +37,12 @@
 //! - **Set view head:** `view/<name>` is the expected head, or absent. The pushed chain of view
 //!   `<name>` holds that head, and its root is the hub view's root.
 //!
+//! A seed, an extend or a force also names the tags on the chain it makes canon that no
+//! `tag/` ref names yet ([`CarriedTag`]), in the same batch, by its caller's tag rule; a hold
+//! names none until a later move makes its chain canon. A plan whose pushed history carries a
+//! removal takes it through the store's checked take, under the writer, with the move's refs in
+//! the take's one batch ([`Store::move_canon_with`], D-FNRXT).
+//!
 //! A compare that fails is no error: the move writes nothing and returns
 //! [`Moved::Behind`] with the tip or head it found. A chain rule that fails is
 //! `StoreError::Refused` (E_BAD_INPUT) with D-47HVF's one reason for the move. The hub chooses
@@ -49,10 +55,13 @@ use crate::object_refs::{ObjectKey, portable_kinds, portable_refs_of};
 use crate::segment::Location;
 use crate::snapshot::{FoldRefusal, SnapshotSource};
 use crate::store::{Store, StoreReader};
+use crate::take_batch::TakeError;
 use crate::view::{ResolvedOp, ViewHead, ViewOp, ViewOpKind};
-use rdy_model::{Block, Hash, LandingRecord, SnapshotDelta, StateSnapshot};
+use rdy_model::{Answer, Block, Hash, LandingRecord, SnapshotDelta, StateSnapshot, Tag};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::File;
+use std::sync::Arc;
 
 /// Hub canon's tip: a landing hash.
 pub const CANON_REF: &str = "canon";
@@ -333,6 +342,17 @@ pub struct MoveBatch {
     head: Hash,
     head_kind: u8,
     checked_at: Location,
+    /// A pushed history that carries a removal (D-FNRXT): its batch files and target. The move
+    /// takes it through the store's checked take, with the move's refs in the same batch
+    /// ([`Store::move_canon_with`]); `records` then holds its present records only.
+    history: Option<Arc<HistoryFiles>>,
+}
+
+/// The batch files of a pushed history that carries a removal, and its target.
+#[derive(Debug)]
+struct HistoryFiles {
+    files: Vec<File>,
+    target: crate::take_batch::HistoryTarget,
 }
 
 impl MoveBatch {
@@ -360,6 +380,21 @@ impl MoveBatch {
     pub fn checked_at(&self) -> Location {
         self.checked_at
     }
+
+    /// Whether the plan is a pushed history that carries a removal, which the move takes
+    /// through the store's checked take.
+    pub fn carries_removal(&self) -> bool {
+        self.history.is_some()
+    }
+}
+
+/// A tag a canon move carries: a TAG object whose landing is on the chain the move makes
+/// canon, and that no `tag/` ref names (D-KE83X). The tag rule of the move's caller
+/// ([`Store::move_canon_with`]) chooses which of them the move names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedTag {
+    pub hash: Hash,
+    pub tag: Tag,
 }
 
 /// The refusal of input that a move batch cannot hold (E_BAD_INPUT).
@@ -704,6 +739,67 @@ impl StoreReader {
             head,
             head_kind,
             checked_at,
+            history: None,
+        })
+    }
+
+    /// The checked batch plan of a pushed history that carries a removal (D-FNRXT): its
+    /// present `records`, the head it names, and its batch `files` (cloned by the caller, read
+    /// again from their start by the move) of history purpose `purpose`. Refused as
+    /// [`StoreReader::check_move_batch`] refuses a store that is not a holder, a holder that
+    /// does not list `snapshot_delta`, too many records, or a head that is not one landing or
+    /// view op of the records or the holder. The records' links, the removal's proofs, the
+    /// stale-content rule and the closure are the take's checks, which the move runs over the
+    /// holder under the writer ([`Store::move_canon_with`]).
+    pub fn check_history_move_batch(
+        &self,
+        records: Vec<(u8, Vec<u8>)>,
+        head: Hash,
+        files: Vec<File>,
+        purpose: crate::sync_stream::StreamPurpose,
+    ) -> Result<MoveBatch, StoreError> {
+        if self.mode()? != StoreMode::Holder {
+            return Err(refused("a move needs a holder store"));
+        }
+        let features = crate::snapshot::held_features(self)?;
+        if !features.has(crate::format::FEATURE_SNAPSHOT_DELTA) {
+            return Err(StoreError::UpgradeRequired);
+        }
+        if records.len() > MAX_MOVE_RECORDS {
+            return Err(refused(format!(
+                "a move batch holds at most {MAX_MOVE_RECORDS} records"
+            )));
+        }
+        if !purpose.is_history() {
+            return Err(refused("a move takes a canon or view history"));
+        }
+        let checked_at = self.index().indexed_upto()?;
+        let overlay = Overlay::new(self, &records);
+        let head_kind = match (
+            overlay.has(kinds::LANDING, &head)?,
+            overlay.has(kinds::VIEW_OP, &head)?,
+        ) {
+            (true, false) => kinds::LANDING,
+            (false, true) => kinds::VIEW_OP,
+            _ => {
+                return Err(refused(format!(
+                    "the pushed head {head} is not one landing or view op of the batch or the holder"
+                )));
+            }
+        };
+        drop(overlay);
+        Ok(MoveBatch {
+            records,
+            head,
+            head_kind,
+            checked_at,
+            history: Some(Arc::new(HistoryFiles {
+                files,
+                target: crate::take_batch::HistoryTarget {
+                    purpose,
+                    root: head,
+                },
+            })),
         })
     }
 
@@ -861,8 +957,151 @@ impl StoreReader {
     }
 }
 
-/// A move's ref writes, or the tip or head its failed compare found.
-type Planned = Result<Vec<(String, Vec<u8>)>, Option<Hash>>;
+/// A move's ref writes and the tags it carries, or the tip or head its failed compare found.
+type Planned = Result<(Vec<(String, Vec<u8>)>, Vec<CarriedTag>), Option<Hash>>;
+
+/// The tags a canon move to the chain `chain` carries (see [`CarriedTag`]): each TAG object of
+/// the plan or the holder whose landing is on `chain` and that no `tag/` ref names, in name
+/// and hash order.
+fn carried_tags(
+    reader: &StoreReader,
+    overlay: &Overlay<'_>,
+    chain: &[Hash],
+) -> Result<Vec<CarriedTag>, StoreError> {
+    let on: HashSet<&Hash> = chain.iter().collect();
+    let mut named: HashSet<Hash> = HashSet::new();
+    for (_, v) in reader.refs_with_prefix(crate::holder::TAG_REF)? {
+        if let Ok(b) = <[u8; 32]>::try_from(v.as_slice()) {
+            named.insert(Hash(b));
+        }
+    }
+    let mut hashes: BTreeSet<Hash> = BTreeSet::new();
+    for (raw, payload) in overlay.records {
+        if crate::codec::logical_kind(*raw) == kinds::TAG {
+            hashes.insert(Hash::of(payload));
+        }
+    }
+    reader.for_each_object_of(kinds::TAG, |h| {
+        hashes.insert(h);
+        Ok(())
+    })?;
+    let mut out = vec![];
+    for h in hashes {
+        if named.contains(&h) {
+            continue;
+        }
+        let Some(tag) = overlay.typed::<Tag>(kinds::TAG, &h)? else {
+            continue;
+        };
+        if on.contains(&tag.landing) {
+            out.push(CarriedTag { hash: h, tag });
+        }
+    }
+    out.sort_by(|a, b| (&a.tag.name, a.hash).cmp(&(&b.tag.name, b.hash)));
+    Ok(out)
+}
+
+/// The refs that name the tags `chosen` of `carried`: `tag/<name>` for each, and
+/// `answer/tag-object:<tag>` for each that has a relay answer in the plan or the holder and no
+/// such ref yet (O11, ruling task-13). A `tag/<name>` that names another tag refuses the move.
+fn tag_refs(
+    reader: &StoreReader,
+    overlay: &Overlay<'_>,
+    carried: &[CarriedTag],
+    chosen: &[Hash],
+) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    let mut out: Vec<(String, Vec<u8>)> = vec![];
+    let mut held_answers: Option<Vec<(Hash, Answer)>> = None;
+    for c in carried.iter().filter(|c| chosen.contains(&c.hash)) {
+        let name = format!("{}{}", crate::holder::TAG_REF, c.tag.name);
+        if out.iter().any(|(n, _)| *n == name) {
+            return Err(refused(format!("{name} names two tags of the move")));
+        }
+        match reader.get_ref(&name)? {
+            None => out.push((name, c.hash.0.to_vec())),
+            Some(v) if v == c.hash.0 => {}
+            Some(_) => return Err(refused(format!("{name} names another tag"))),
+        }
+        let answer = crate::holder::answer_tag_object_ref(&c.hash);
+        if reader.get_ref(&answer)?.is_some() {
+            continue;
+        }
+        let relay = |a: &Answer| crate::holder::is_relay_answer_of(a, &c.hash, &c.tag.name);
+        let mut found: Option<Hash> = None;
+        for (raw, payload) in overlay.records {
+            if crate::codec::logical_kind(*raw) == kinds::ANSWER
+                && let Ok(a) = crate::codec::decode_record::<Answer>(*raw, payload)
+                && relay(&a)
+            {
+                found = Some(Hash::of(payload));
+                break;
+            }
+        }
+        if found.is_none()
+            && !overlay.by_key.contains_key(&ObjectKey {
+                kind: kinds::TAG,
+                hash: c.hash,
+            })
+        {
+            let answers = match &held_answers {
+                Some(a) => a,
+                None => {
+                    let mut all = vec![];
+                    let mut hashes = vec![];
+                    reader.for_each_object_of(kinds::ANSWER, |h| {
+                        hashes.push(h);
+                        Ok(())
+                    })?;
+                    for h in hashes {
+                        if let Ok(a) = reader.get_typed::<Answer>(kinds::ANSWER, &h) {
+                            all.push((h, a));
+                        }
+                    }
+                    held_answers.insert(all)
+                }
+            };
+            found = answers.iter().find(|(_, a)| relay(a)).map(|(h, _)| *h);
+        }
+        if let Some(a) = found {
+            out.push((answer, a.0.to_vec()));
+        }
+    }
+    Ok(out)
+}
+
+/// The store's own tag rule for [`Store::move_canon`]: a carried tag whose name is free is
+/// named; one whose name names a tag of the same landing is not; one whose name names a tag of
+/// another landing refuses the move.
+fn store_tag_rule(reader: &StoreReader, carried: &[CarriedTag]) -> Result<Vec<Hash>, StoreError> {
+    let mut out = vec![];
+    let mut names: HashSet<&str> = HashSet::new();
+    for c in carried {
+        let name = format!("{}{}", crate::holder::TAG_REF, c.tag.name);
+        match reader.get_ref(&name)? {
+            None if names.insert(&c.tag.name) => out.push(c.hash),
+            None => {}
+            Some(v) => {
+                let held = crate::index::hash_from(&v, "tag ref")?;
+                let landing = reader.read_tag(&held)?.landing;
+                if landing != c.tag.landing {
+                    return Err(refused(format!(
+                        "version {} already names landing {landing}",
+                        c.tag.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A take's error as the store's own, for [`Store::move_canon`].
+fn take_to_store(e: TakeError<StoreError>) -> StoreError {
+    match e {
+        TakeError::Store(e) | TakeError::Validation(e) => e,
+        other => refused(other.to_string()),
+    }
+}
 
 /// The ref writes of `mv` from plan `batch`, after its compare and chain rule, over `reader`.
 /// Returns the refs and the value the move moves to, or the compare's observed tip or head.
@@ -914,10 +1153,10 @@ fn plan_move(
             }
             None => hub_head(reader, name, &chain, None)?,
         };
-        return Ok(Ok(vec![(
-            format!("{VIEW_REF}{name}"),
-            crate::store::encode(&value),
-        )]));
+        return Ok(Ok((
+            vec![(format!("{VIEW_REF}{name}"), crate::store::encode(&value))],
+            vec![],
+        )));
     }
     let current = reader.canon_head()?;
     let compare = match mv {
@@ -932,18 +1171,20 @@ fn plan_move(
     }
     let (chain, complete) = walk_landings(&head, &mut |h| overlay.landing(h))?;
     let canon = (CANON_REF.to_string(), head.0.to_vec());
+    // a move that makes the chain canon carries the tags on it; a hold names none
+    let carried = |chain: &[Hash]| carried_tags(reader, &overlay, chain);
     match (mv, current) {
         (CanonMove::Seed, _) => {
             if !complete {
                 return Err(refused(SEED_REASON));
             }
-            Ok(Ok(vec![canon]))
+            Ok(Ok((vec![canon], carried(&chain)?)))
         }
         (CanonMove::Extend, Some(tip)) => {
             if !chain.contains(&tip) {
                 return Err(refused(extend_reason(&tip)));
             }
-            Ok(Ok(vec![canon]))
+            Ok(Ok((vec![canon], carried(&chain)?)))
         }
         (CanonMove::Force, Some(tip)) => {
             if chain.contains(&tip) {
@@ -957,20 +1198,36 @@ fn plan_move(
                 by: head,
                 at_ms,
             };
-            Ok(Ok(vec![canon, (replaced_ref(&tip), mark.encode())]))
+            Ok(Ok((
+                vec![canon, (replaced_ref(&tip), mark.encode())],
+                carried(&chain)?,
+            )))
         }
         (CanonMove::Hold, Some(tip)) => {
             let canon_set = reader.canon_landings(&tip)?;
             if !chain.iter().any(|l| canon_set.contains(l)) {
                 return Err(refused(HOLD_REASON));
             }
-            Ok(Ok(vec![(held_ref(&head), vec![])]))
+            Ok(Ok((vec![(held_ref(&head), vec![])], vec![])))
         }
         _ => unreachable!("the compare holds a tip for every move but seed"),
     }
 }
 
 impl Store {
+    /// Move `mv` of plan `batch` (see the module docs) with the store's own tag rule
+    /// (`store_tag_rule`): [`Store::move_canon_with`], its errors as the store's.
+    pub fn move_canon(
+        &mut self,
+        batch: &MoveBatch,
+        mv: &CanonMove,
+        expected: Option<Hash>,
+        at_ms: i64,
+    ) -> Result<Moved, StoreError> {
+        self.move_canon_with(batch, mv, expected, at_ms, store_tag_rule)
+            .map_err(take_to_store)
+    }
+
     /// Move `mv` of plan `batch` (see the module docs): the compare of `expected` with the
     /// current tip or head under the writer, the move's chain rule, then the plan's objects and
     /// the move's refs in one batch, which lists `hub_canon` when it first writes one of its
@@ -979,33 +1236,61 @@ impl Store {
     /// the compare fails; a chain rule that fails is `Refused` with D-47HVF's reason. A batch
     /// that fails to write leaves the objects, the refs, the features and the index as they
     /// were.
-    pub fn move_canon(
+    ///
+    /// A seed, an extend or a force carries the tags on the chain it makes canon
+    /// ([`CarriedTag`]). `tag_rule` gets them and returns the ones the move names, or its own
+    /// refusal (`TakeError::Validation`), before anything is written. The batch then names each
+    /// by `tag/<name>`, with its relay answer by `answer/tag-object:<tag>`.
+    ///
+    /// A plan that carries a removal ([`MoveBatch::carries_removal`]) is taken through the
+    /// store's checked take of a pushed history (`crate::take_batch::prepare_history`), whose
+    /// checks run here, under the writer: each file, the union over the holder, the closure,
+    /// each new removal's portable proof and the stale-content rule. The batch holds the
+    /// records the holder lacks, the approved drops, the move's refs and the tag refs; the
+    /// holder's own copies of what the removal approves are erased once it is durable, and the
+    /// removal epoch advances.
+    pub fn move_canon_with<E>(
         &mut self,
         batch: &MoveBatch,
         mv: &CanonMove,
         expected: Option<Hash>,
         at_ms: i64,
-    ) -> Result<Moved, StoreError> {
+        tag_rule: impl FnOnce(&StoreReader, &[CarriedTag]) -> Result<Vec<Hash>, E>,
+    ) -> Result<Moved, TakeError<E>> {
         self.ensure_writable()?;
         if self.open_batch().is_some() {
-            return Err(crate::store::batch_open("before a move"));
+            return Err(crate::store::batch_open("before a move").into());
         }
         let reader = self.reader();
         let rechecked;
-        let batch = if reader.index().indexed_upto()? == batch.checked_at {
+        let batch = if batch.history.is_some() || reader.index().indexed_upto()? == batch.checked_at
+        {
             batch
         } else {
             rechecked = reader.check_move_batch(batch.records.clone(), batch.head)?;
             &rechecked
         };
-        let refs = match plan_move(&reader, batch, mv, expected, at_ms)? {
-            Ok(refs) => refs,
+        let (mut refs, carried) = match plan_move(&reader, batch, mv, expected, at_ms)? {
+            Ok(planned) => planned,
             Err(tip) => return Ok(Moved::Behind { tip }),
         };
+        if !carried.is_empty() {
+            let chosen = tag_rule(&reader, &carried).map_err(TakeError::Validation)?;
+            let overlay = Overlay::new(&reader, &batch.records);
+            refs.extend(tag_refs(&reader, &overlay, &carried, &chosen)?);
+        }
+        drop(reader);
         let tip = batch.head;
-        let mut items = batch.records.clone();
-        items.extend(self.ref_items_pub(refs));
-        self.write_move(items)?;
+        match &batch.history {
+            None => {
+                let mut items = batch.records.clone();
+                items.extend(self.ref_items_pub(refs));
+                self.write_move(items)?;
+            }
+            Some(h) => {
+                self.take_history_move(&h.files, &h.target, &batch.records, refs)?;
+            }
+        }
         Ok(Moved::Moved { tip })
     }
 }

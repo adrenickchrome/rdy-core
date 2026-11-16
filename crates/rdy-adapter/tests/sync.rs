@@ -1424,3 +1424,256 @@ fn scc6_contract_reports_sync_capabilities() {
     let formats = serde_json::to_value(rdy_adapter::capabilities::format_capabilities()).unwrap();
     assert!(formats.get("sync").is_none());
 }
+
+// ---------------------------------------------------------------------------------------------
+// final review fix round 1: removals and tags through a move
+
+/// Whether the store of `r` reads object `k` as removed.
+fn removed_in(r: &Rdy, k: &ObjectKey) -> bool {
+    matches!(
+        r.store().reader().get_kind_raw(k.kind, &k.hash),
+        Err(rdy_store::StoreError::Redacted { .. })
+    )
+}
+
+/// Final review finding 2 (D-FNRXT, D-47HVF): a canon history that carries a project's removal
+/// is a valid push. The quarantine takes it; the move checks the removal's proof under the
+/// writer and writes the incoming objects, the removal and the canon ref in one batch. A move
+/// that is behind writes none of it. The removal ends every snapshot captured before it.
+#[test]
+fn scc6_removal_history_push_moves_with_its_removal() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let mut r = project(&pd);
+    let repo = repo_of(&r);
+    let w = doc(&mut r, "work", "Intro", "Public words.");
+    let secret = write_in(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$x", "parent": w.created["$s"], "body": "The launch code is ZEBRA-7731."}]),
+    );
+    let l1 = land(&mut r, "work");
+    r.close().unwrap();
+    let e1 = dir.path().join("e1.rdysync");
+    export(&pd, StreamPurpose::CanonHistory, l1, None, &e1);
+    let h = StoreHandle::create_holder(&dir.path().join("hub"), repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&e1]).unwrap();
+    assert_eq!(h.move_canon(&c1, CanonMove::Seed, None).unwrap(), moved(l1));
+
+    // the project removes the secret in a landing of its own, and pushes that increment
+    let mut r = Rdy::open(&pd).unwrap();
+    remove(&mut r, &secret.created["$x"]);
+    let l2 = r.store().reader().canon_head().unwrap().unwrap();
+    r.close().unwrap();
+    let e2 = dir.path().join("e2.rdysync");
+    export(&pd, StreamPurpose::CanonHistory, l2, Some(l1), &e2);
+
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&e2]).unwrap();
+    assert_eq!(c2.facts().head, l2);
+    assert_eq!(
+        s1.canon_chain(&c2).unwrap(),
+        ChainFacts {
+            head: Some(l1),
+            entered: vec![l2],
+            holds_expected: true,
+            replaced: vec![],
+        }
+    );
+    let r = Rdy::open(&pd).unwrap();
+    let keys: BTreeSet<ObjectKey> = c1
+        .facts()
+        .objects
+        .iter()
+        .chain(&c2.facts().objects)
+        .copied()
+        .collect();
+    let gone: Vec<ObjectKey> = keys.into_iter().filter(|k| removed_in(&r, k)).collect();
+    assert!(!gone.is_empty(), "the project removed objects");
+    let inputs = rdy_engine::landing_check::CheckInputs::of_state(&r.read());
+    drop(r);
+    // the pushed landing checks before any move
+    assert!(s1.check_pushed_landing(&c2, l2, &inputs).is_ok());
+
+    // behind: nothing is written, the removal included
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Extend, Some(l2)).unwrap(),
+        Moved::Behind { tip: Some(l1) }
+    );
+    assert_eq!(h.snapshot().unwrap().canon(), Some(l1));
+    assert!(s1.view_heads().is_ok(), "no removal ran");
+
+    // the move: the objects, the removal and the canon ref in one batch
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Extend, Some(l1)).unwrap(),
+        moved(l2)
+    );
+    assert_eq!(h.snapshot().unwrap().canon(), Some(l2));
+    assert_eq!(s1.view_heads().unwrap_err().code, "E_REDACTED_STATE");
+    h.fsck().unwrap();
+    drop((s0, c1, s1, c2));
+    h.close().unwrap();
+    let raw = Rdy::open_holder(&dir.path().join("hub")).unwrap();
+    for k in &gone {
+        assert!(removed_in(&raw, k), "the holder removed {k}");
+    }
+}
+
+/// The source of a tag world: project P lands `p1`, Q is a copy of P at `p1`. P lands `p2` and
+/// tags it `v2.0.0`; Q lands `q2` and tags it `v2.0.0` too. Returns P's histories at p1 and at
+/// p2 less p1, Q's at q2 less p1, and the landings.
+struct TagWorld {
+    dir: tempfile::TempDir,
+    repo: RepoId,
+    p1: Hash,
+    p2: Hash,
+    q2: Hash,
+    e1: PathBuf,
+    e2: PathBuf,
+    eq: PathBuf,
+}
+
+fn tag_world() -> TagWorld {
+    let dir = tempfile::tempdir().unwrap();
+    let pd = dir.path().join("p");
+    let qd = dir.path().join("q");
+    let mut p = project(&pd);
+    let repo = repo_of(&p);
+    doc(&mut p, "w0", "Canon", "The hub keeps one canon.");
+    let p1 = land(&mut p, "w0");
+    tag(&mut p, "v1.0.0");
+    p.close().unwrap();
+    copy_dir(&pd, &qd);
+    let mut p = Rdy::open(&pd).unwrap();
+    doc(&mut p, "w1", "Extend", "The canon moves forward.");
+    let p2 = land(&mut p, "w1");
+    tag(&mut p, "v2.0.0");
+    p.close().unwrap();
+    let mut q = Rdy::open(&qd).unwrap();
+    doc(&mut q, "w2", "Other", "Another chain.");
+    let q2 = land(&mut q, "w2");
+    tag(&mut q, "v2.0.0");
+    q.close().unwrap();
+    let at = |n: &str| dir.path().join(format!("{n}.rdysync"));
+    let canon = StreamPurpose::CanonHistory;
+    export(&pd, canon, p1, None, &at("e1"));
+    export(&pd, canon, p2, Some(p1), &at("e2"));
+    export(&qd, canon, q2, Some(p1), &at("eq"));
+    TagWorld {
+        repo,
+        p1,
+        p2,
+        q2,
+        e1: at("e1"),
+        e2: at("e2"),
+        eq: at("eq"),
+        dir,
+    }
+}
+
+fn tag_names(snap: &Snapshot) -> Vec<(String, Hash)> {
+    snap.tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| (t.name, t.landing))
+        .collect()
+}
+
+/// Final review finding 3 (D-KE83X, D-BPYN8): a canon move takes the tags its history carries,
+/// in the move's batch: the seed names `v1.0.0`, the extend `v2.0.0`. A push whose carried tag
+/// names a version the hub names at another landing is `E_TAG_EXISTS`, and that move writes
+/// nothing.
+#[test]
+fn scc6_canon_moves_take_carried_tags() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = tag_world();
+    let h = StoreHandle::create_holder(&w.dir.path().join("hub"), w.repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&w.e1]).unwrap();
+    assert!(
+        c1.facts()
+            .objects
+            .iter()
+            .any(|k| k.kind == rdy_store::kinds::TAG)
+    );
+    assert_eq!(
+        h.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(w.p1)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p1)]
+    );
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&w.e2]).unwrap();
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Extend, Some(w.p1)).unwrap(),
+        moved(w.p2)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p1), ("v2.0.0".to_string(), w.p2)]
+    );
+    // Q's force carries v2.0.0 at q2: refused before anything is written
+    let s2 = h.snapshot().unwrap();
+    let cq = check(&s2, &[&w.eq]).unwrap();
+    let e = h.move_canon(&cq, CanonMove::Force, Some(w.p2)).unwrap_err();
+    assert_eq!(e.code, "E_TAG_EXISTS", "{e:#?}");
+    let after = h.snapshot().unwrap();
+    assert_eq!(after.canon(), Some(w.p2));
+    assert_eq!(
+        tag_names(&after),
+        [("v1.0.0".to_string(), w.p1), ("v2.0.0".to_string(), w.p2)]
+    );
+    drop((s0, c1, s1, c2, s2, cq, after));
+    assert!(holds_none(
+        &h,
+        &[ObjectKey {
+            kind: rdy_store::kinds::LANDING,
+            hash: w.q2,
+        }]
+    ));
+    h.fsck().unwrap();
+    h.close().unwrap();
+}
+
+/// Finding 3 with a hold: a held chain names no version, and the extend from it with no new
+/// batch takes the tags the held history carried.
+#[test]
+fn scc6_held_chain_tags_land_with_its_extend() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let w = tag_world();
+    let h = StoreHandle::create_holder(&w.dir.path().join("hub"), w.repo).unwrap();
+    let s0 = h.snapshot().unwrap();
+    let c1 = check(&s0, &[&w.e1]).unwrap();
+    assert_eq!(
+        h.move_canon(&c1, CanonMove::Seed, None).unwrap(),
+        moved(w.p1)
+    );
+    let s1 = h.snapshot().unwrap();
+    let c2 = check(&s1, &[&w.e2]).unwrap();
+    assert_eq!(
+        h.move_canon(&c2, CanonMove::Hold, Some(w.p1)).unwrap(),
+        moved(w.p2)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p1)]
+    );
+    let s2 = h.snapshot().unwrap();
+    let stored = s2.check_stored_head(w.p2).unwrap();
+    assert_eq!(
+        h.move_canon(&stored, CanonMove::Extend, Some(w.p1))
+            .unwrap(),
+        moved(w.p2)
+    );
+    assert_eq!(
+        tag_names(&h.snapshot().unwrap()),
+        [("v1.0.0".to_string(), w.p1), ("v2.0.0".to_string(), w.p2)]
+    );
+    drop((s0, c1, s1, c2, s2, stored));
+    h.fsck().unwrap();
+    h.close().unwrap();
+}

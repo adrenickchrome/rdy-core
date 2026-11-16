@@ -616,7 +616,10 @@ pub(crate) fn check_ref_writes(
                 let Some(h) = tag_object(t) else {
                     return Err(cannot_write(&u.name));
                 };
-                if how != RefWrite::Take || !(beside(kinds::TAG, &h) || has_kind(kinds::TAG, &h)?) {
+                // a take's, or a canon move's carried tag (`Store::move_canon_with`)
+                if !matches!(how, RefWrite::Take | RefWrite::Move)
+                    || !(beside(kinds::TAG, &h) || has_kind(kinds::TAG, &h)?)
+                {
                     return Err(cannot_write(&u.name));
                 }
             }
