@@ -573,12 +573,12 @@ enum Reads {
 /// how it reads). S is the execution base b4fde86e.
 const READERS: [(&str, u32, u32, u32, Reads); 37] = [
     ("crates/rdy-engine/src/gate.rs", 665, 665, 670, Reads::Canon),
-    ("crates/rdy-engine/src/gate.rs", 906, 906, 921, Reads::Canon),
+    ("crates/rdy-engine/src/gate.rs", 906, 906, 933, Reads::Canon),
     (
         "crates/rdy-engine/src/gate.rs",
         2695,
         2695,
-        2728,
+        2740,
         Reads::Canon,
     ),
     (
@@ -669,21 +669,21 @@ const READERS: [(&str, u32, u32, u32, Reads); 37] = [
         "crates/rdy-engine/src/views.rs",
         423,
         423,
-        423,
+        433,
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
         670,
         670,
-        670,
+        680,
         Reads::Canon,
     ),
     (
         "crates/rdy-engine/src/views.rs",
         847,
         847,
-        847,
+        857,
         Reads::Canon,
     ),
     (
@@ -711,7 +711,7 @@ const READERS: [(&str, u32, u32, u32, Reads); 37] = [
         "crates/rdy-engine/src/views/undo.rs",
         440,
         440,
-        440,
+        446,
         Reads::Canon,
     ),
     (
@@ -794,12 +794,16 @@ const READERS: [(&str, u32, u32, u32, Reads); 37] = [
         Reads::History,
     ),
     ("crates/rdy-store/src/view.rs", 445, 445, 445, Reads::Canon),
-    ("crates/rdy-store/src/view.rs", 731, 731, 731, Reads::Canon),
+    ("crates/rdy-store/src/view.rs", 731, 731, 1128, Reads::Canon),
 ];
 
-/// The production `landing_of` call the gate fix after Task 1b added (D-TVC38, D-08SPN:
-/// `through_replay` in `landed_as`), which reads current canon too.
-const ADDED: (&str, u32) = ("crates/rdy-engine/src/gate.rs", 2702);
+/// The production `landing_of` calls added after b8b16064, which read current canon too: the
+/// gate fix after Task 1b (D-TVC38, D-08SPN: `through_replay` in `landed_as`), and Task 4's
+/// re-chained view onto a current base, which drops its landed changes (`view_rebase_rechained`).
+const ADDED: [(&str, u32); 2] = [
+    ("crates/rdy-engine/src/gate.rs", 2714),
+    ("crates/rdy-store/src/view.rs", 1415),
+];
 
 fn workspace() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -841,13 +845,16 @@ fn scc3_landing_dependencies_use_current_canon_membership() {
             "{file}:{b8} (S {s}) reads by {reads:?}: line {now} is {line:?}"
         );
     }
-    let text = std::fs::read_to_string(workspace().join(ADDED.0)).unwrap();
-    assert!(
-        text.lines()
-            .nth(ADDED.1 as usize - 1)
-            .unwrap()
-            .contains("landing_of(")
-    );
+    for (file, now) in ADDED {
+        let text = std::fs::read_to_string(workspace().join(file)).unwrap();
+        assert!(
+            text.lines()
+                .nth(now as usize - 1)
+                .unwrap()
+                .contains("landing_of("),
+            "{file}:{now} is not a landing_of reader"
+        );
+    }
     // no unlisted production reader of current canon
     let mut files: Vec<&str> = READERS.iter().map(|r| r.0).collect();
     files.sort();
@@ -882,7 +889,7 @@ fn scc3_landing_dependencies_use_current_canon_membership() {
         .iter()
         .filter(|r| r.4 == Reads::Canon)
         .map(|r| (r.0.to_string(), r.3))
-        .chain([(ADDED.0.to_string(), ADDED.1)])
+        .chain(ADDED.iter().map(|(f, n)| (f.to_string(), *n)))
         .collect();
     want.sort();
     assert_eq!(
