@@ -1074,6 +1074,256 @@ impl Store {
     }
 }
 
+/// One landing of a pull replay (D-QCE8M, D-NME32): the source landing L, its new changes in
+/// L's order (each with `links.replayed_from` set to its source), the fresh ASSESSMENT of L's
+/// approved version at the new base, and the policy version that accepts the new landing there
+/// (only for a policy landing).
+#[derive(Clone, Debug)]
+pub struct ReplayLanding {
+    pub source: Hash,
+    pub changes: Vec<Change>,
+    pub assessment: rdy_model::assessment::AssessmentV2,
+    pub policy: Option<PolicyRef>,
+}
+
+/// A pull replay's new landing L′, built by [`Store::prepare_replay_landing`] and not yet
+/// written: its frames, its record and hash, its new change ids, its assessment's hash and how
+/// many signatures it carries.
+#[derive(Debug)]
+pub struct PreparedReplay {
+    items: Vec<(u8, Vec<u8>)>,
+    landing: LandingRecord,
+    hash: Hash,
+    changes: Vec<Hash>,
+    assessment: Hash,
+    signatures: usize,
+}
+
+impl PreparedReplay {
+    /// The new landing record.
+    pub fn landing(&self) -> &LandingRecord {
+        &self.landing
+    }
+
+    /// Its hash.
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    /// The new changes, in the source's order.
+    pub fn changes(&self) -> &[Hash] {
+        &self.changes
+    }
+
+    /// The fresh assessment the batch writes.
+    pub fn assessment(&self) -> Hash {
+        self.assessment
+    }
+
+    /// How many signatures of the source the new landing carries.
+    pub fn signatures(&self) -> usize {
+        self.signatures
+    }
+}
+
+/// What a replay's merge onto canon gives: the new state, or the conflict that stops it.
+#[derive(Clone, Debug)]
+pub enum ReplayMerge {
+    Clean(rdy_model::StateSnapshot),
+    Conflict(String),
+}
+
+impl Store {
+    /// The state `changes` give on canon now (a pull replay's new base): the merge and its rules
+    /// of an ordinary landing (`merge_checked`). A stale base, a block deleted or created since,
+    /// and an edit of a frozen decision are the conflict that stops the replay, with the store's
+    /// own text; any other error fails the call. Writes nothing.
+    pub fn replay_merge(&self, changes: &[Change]) -> Result<ReplayMerge, StoreError> {
+        let canon = self.canon_state()?;
+        match self.merge_checked_with(&canon, changes, None) {
+            Ok((merged, _)) => Ok(ReplayMerge::Clean(merged.state)),
+            Err(
+                e @ (StoreError::StaleBase { .. }
+                | StoreError::DeletedSince(_)
+                | StoreError::AlreadyExists(_)
+                | StoreError::Frozen(_)),
+            ) => Ok(ReplayMerge::Conflict(e.to_string())),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The new landing L′ of a pull replay of landing `req.source` (D-NME32), on canon now, with
+    /// `state` from [`Store::replay_merge`], prepared without writing anything. L′ copies L's
+    /// `proposal`, `approved_version`, `approved_by`, `assurance`, `relayed_by`,
+    /// `relay_evidence`, `evidence`, `chosen` and `checks`; its `prev` is canon now, its
+    /// `changes` the new changes, its `state` the new state and its `rebased_from` `[L]`. Its
+    /// `assessment` names the fresh assessment when L's is set, else none, and its `policy` is
+    /// `req.policy`, which a policy landing needs and any other refuses. The batch holds the new
+    /// changes (with the block versions they write), the assessment, L′, its SNAPSHOT_DELTA, a
+    /// copy of each of L's signatures with the subject L′ and unchanged statement and signature
+    /// bytes (D-8ZEHP), and `canon` naming L′. A landing whose `checks` name a removal request is
+    /// refused (D-HVZC9): no apply could name L′.
+    pub fn prepare_replay_landing(
+        &self,
+        req: ReplayLanding,
+        state: rdy_model::StateSnapshot,
+    ) -> Result<PreparedReplay, StoreError> {
+        let source = self.landing(&req.source)?;
+        if !source.checks.is_empty() {
+            return Err(StoreError::Refused(format!(
+                "landing {} applies a removal: it does not replay",
+                req.source
+            )));
+        }
+        if source.policy.is_some() != req.policy.is_some() {
+            return Err(StoreError::Refused(
+                "a replayed landing names a policy exactly when its source does".into(),
+            ));
+        }
+        let prev = self.canon_head()?;
+        let prev_state = self.canon_state()?;
+        let mut items: Vec<(u8, Vec<u8>)> = vec![];
+        let mut ids = Vec::with_capacity(req.changes.len());
+        for change in &req.changes {
+            if change.links.replayed_from.is_none() {
+                return Err(StoreError::Decode(
+                    "prepare_replay_landing: a change is no replay".into(),
+                ));
+            }
+            self.refuse_copy_of(change)?;
+            for op in &change.ops {
+                if let Op::Create { block } | Op::Update { block, .. } = op {
+                    items.push(crate::codec::item_new(kinds::BLOCK, block));
+                }
+            }
+            let item = crate::codec::item(kinds::CHANGE, change)?;
+            ids.push(Hash::of(&item.1));
+            items.push(item);
+        }
+        let assessment = crate::codec::item_new(kinds::ASSESSMENT, &req.assessment);
+        let aid = Hash::of(&assessment.1);
+        self.check_carried::<rdy_model::assessment::AssessmentV2>(&assessment, &items)?;
+        items.push(assessment);
+        let sid = rdy_model::snapshot_map_id(&state.blocks);
+        let legacy = crate::format::legacy_writer();
+        if legacy {
+            items.push(crate::codec::item_new(kinds::SNAPSHOT, &state));
+        }
+        let base = match prev {
+            Some(h) if !legacy => Some(
+                self.snapshot_delta_of(&h)?
+                    .ok_or(StoreError::UpgradeRequired)?
+                    .0,
+            ),
+            _ => None,
+        };
+        let landing = LandingRecord {
+            proposal: source.proposal,
+            prev,
+            state: sid,
+            approved_by: source.approved_by.clone(),
+            changes: ids.clone(),
+            chosen: source.chosen.clone(),
+            checks: source.checks.clone(),
+            assurance: source.assurance,
+            relayed_by: source.relayed_by.clone(),
+            relay_evidence: source.relay_evidence.clone(),
+            approved_version: source.approved_version,
+            rebased_from: vec![req.source],
+            evidence: source.evidence.clone(),
+            assessment: source.assessment.map(|_| aid),
+            policy: req.policy,
+            read_identity: None,
+        };
+        // the carried rules of the record: its fields, its policy block, and the assessment it
+        // names (held, of the approved version, on an ancestor), read from this batch first
+        let frame = crate::codec::item(kinds::LANDING, &landing)?;
+        let lid = Hash::of(&frame.1);
+        let refuse = |reason| crate::carried_records::refusal(&lid, kinds::LANDING, reason);
+        crate::carried_records::landing_local(&landing).map_err(refuse)?;
+        let key = crate::object_refs::ObjectKey {
+            kind: kinds::LANDING,
+            hash: lid,
+        };
+        let mut pending = crate::state::PendingFrames {
+            store: crate::carried_records::StoreObjects(self),
+            batch: &items,
+            last: &frame,
+        };
+        if let Some(reason) = crate::carried_records::validate_refs(&mut pending, key)? {
+            return Err(refuse(reason));
+        }
+        items.push(frame);
+        if !legacy {
+            let delta = rdy_model::diff_snapshots(lid, base, &prev_state.blocks, &state.blocks);
+            items.push(crate::codec::item_new(kinds::SNAPSHOT_DELTA, &delta));
+        }
+        let mut carried = vec![];
+        for g in self.signatures_of(&req.source)? {
+            let record = self.signature(&g)?;
+            carried.push(Signature {
+                subject: lid,
+                ..record
+            });
+        }
+        let signatures = carried.len();
+        items.extend(crate::signature::frames(&carried)?);
+        items.extend(self.ref_items_pub(vec![("canon".to_string(), lid.0.to_vec())]));
+        Ok(PreparedReplay {
+            items,
+            landing,
+            hash: lid,
+            changes: ids,
+            assessment: aid,
+            signatures,
+        })
+    }
+
+    /// Writes the replayed landing `prepared` into the open batch of a pull's second batch (or
+    /// as a batch of its own when held batches are off). A failed write writes nothing of it.
+    pub fn commit_replay_landing(&mut self, prepared: PreparedReplay) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
+        crate::redaction::refuse_redaction_kinds(&prepared.items)?;
+        self.write_guarded(prepared.items)?;
+        Ok(prepared.hash)
+    }
+
+    /// Writes the refs `refs` (`replaced/` marks) and the canon sync state `canon` of remote
+    /// `remote` that end a pull's second batch, in that batch (D-3RSCW: the second batch writes
+    /// `applied` with the canon or view move). Each ref keeps its rules.
+    pub fn write_pull_refs(
+        &mut self,
+        remote: &str,
+        canon: crate::sync_state::SyncCanon,
+        mut refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), StoreError> {
+        self.ensure_writable()?;
+        if !crate::sync_state::is_remote(remote) {
+            return Err(StoreError::Refused(format!(
+                "{remote:?} is not a remote name"
+            )));
+        }
+        refs.push((
+            crate::sync_state::canon_ref(remote),
+            crate::sync_state::SyncValue::Canon(canon).encode(),
+        ));
+        let items = self.ref_items_pub(refs);
+        self.write_refs_as(items, crate::holder::RefWrite::Sync)
+            .map(|_| ())
+    }
+
+    /// Moves `canon` to the held landing `tip` (a pull's take of the hub tip), in the open batch
+    /// of a pull's second batch: the landed rows follow it in the same index commit (D-QCE8M).
+    pub fn move_project_canon(&mut self, tip: Hash) -> Result<(), StoreError> {
+        self.ensure_writable()?;
+        if !self.has_kind(kinds::LANDING, &tip)? {
+            return Err(StoreError::NotFound(tip));
+        }
+        let items = self.ref_items_pub(vec![("canon".to_string(), tip.0.to_vec())]);
+        self.write_guarded(items).map(|_| ())
+    }
+}
+
 /// The reason of the `Close` op of a re-affirmation card's internal view.
 pub const REAFFIRM_CLOSE_REASON: &str = "the re-affirmation card landed";
 

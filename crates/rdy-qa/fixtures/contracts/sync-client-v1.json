@@ -30966,6 +30966,31 @@
   },
   "signatures": {
     "algorithm": "ssh-ed25519 and sk-ssh-ed25519@openssh.com in an SSHSIG envelope with sha512",
+    "carried": {
+      "check": {
+        "at_ms": 1,
+        "carried_from": "557e2e89563f708ecbd81a15bc2b88c199c7ad39533d5c90a12c86c00c16d142",
+        "code": null,
+        "key": "SHA256:8nEdi2dFYm+E9JRNIKxJNA5RGKdcAaVkhr4NVgAnE/4",
+        "key_type": "ssh-ed25519",
+        "kind": "approval",
+        "presence": "absent",
+        "signed": "valid",
+        "signed_by": {
+          "actor": "human:qa",
+          "run": null
+        },
+        "statement": "match",
+        "trust": "trusted",
+        "warnings": []
+      },
+      "cli": "signed approval valid by SHA256:8nEdi2dFYm+E9JRNIKxJNA5RGKdcAaVkhr4NVgAnE/4 (ssh-ed25519), key trusted, presence absent, carried from 557e2e89563f",
+      "levels": 1,
+      "record": "a new SIGNATURE whose subject is the replayed landing, with the source's namespace, statement, signature bytes and signer",
+      "result_member": "carried_from",
+      "result_value": "the full hash of the landing in the subject's rebased_from whose base the statement names; absent for any other signature",
+      "statement_rule": "the statement rebuilt from the subject with its base set to that landing's base; every other signed field is the subject's"
+    },
     "envelope": "SSHSIG blob over the statement bytes, in the namespace of the statement kind",
     "key_representation": "SHA256:<43 base64 characters> fingerprint of the OpenSSH public key",
     "limits": {

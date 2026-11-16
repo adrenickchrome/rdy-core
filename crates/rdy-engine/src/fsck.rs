@@ -1,8 +1,8 @@
 //! `rdy fsck`: the store's consistency report.
 
 use crate::signature_check::{
-    CheckContext, STATEMENT_FOREIGN_REPO, STATEMENT_MATCH, check_signature, repo_ids,
-    subject_context,
+    CheckContext, STATEMENT_FOREIGN_REPO, STATEMENT_MATCH, carried_sources,
+    check_signature_carried, repo_ids, subject_context,
 };
 use crate::{E_LIMIT, E_SIG_INVALID, Rdy, RdyError, sig_invalid, sig_object_mismatch};
 use rdy_schema::{Issue, Severity};
@@ -169,6 +169,8 @@ impl Rdy {
         let mut failed = 0usize;
         let mut issues: Vec<Issue> = Vec::new();
         let mut context: Option<CheckContext> = None;
+        // the landings a carried signature of the subject may name (D-9YAQS)
+        let mut carried: Vec<(rdy_model::Hash, rdy_model::LandingRecord)> = vec![];
         let mut read_error: Option<RdyError> = None;
         // the repo ids a signature may name, read once, at the first signature
         let mut repos: Option<(rdy_model::RepoId, Vec<rdy_model::RepoId>)> = None;
@@ -183,10 +185,16 @@ impl Rdy {
                     Some(r) => Ok(r.clone()),
                     None => repo_ids(&st).inspect(|r| repos = Some(r.clone())),
                 };
-                match read.and_then(|(current, sources)| {
-                    subject_context(&st, &g.subject, current, sources)
-                }) {
-                    Ok(c) => context = Some(c),
+                match read
+                    .and_then(|(current, sources)| {
+                        subject_context(&st, &g.subject, current, sources)
+                    })
+                    .and_then(|c| carried_sources(&st, &c).map(|from| (c, from)))
+                {
+                    Ok((c, from)) => {
+                        context = Some(c);
+                        carried = from;
+                    }
                     Err(e) => {
                         read_error = Some(e);
                         return Err(StoreError::Refused("fsck stopped".into()));
@@ -196,7 +204,7 @@ impl Rdy {
             let Some(c) = context.as_ref() else {
                 return Ok(());
             };
-            let check = check_signature(g, c, None);
+            let check = check_signature_carried(g, c, None, &carried);
             if check.statement == STATEMENT_MATCH {
                 return Ok(());
             }

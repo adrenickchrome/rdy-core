@@ -4264,6 +4264,17 @@ impl StoreReader {
         Ok(self.index().typed(kind, h)?.is_some_and(|at| at < end))
     }
 
+    /// The landing whose frame first carried `change` in log order, of those the log holds
+    /// before `before` (all for None), on canon or not: a history reader's carrier, as the log
+    /// stood at its bound. [`StoreReader::landing_of`] is current canon's instead.
+    pub fn first_carrier(
+        &self,
+        change: &Hash,
+        before: Option<Location>,
+    ) -> Result<Option<Hash>, StoreError> {
+        self.index().first_carrier(change, before)
+    }
+
     /// The place in the log of the object of `kind` with hash `h`, from the index alone.
     pub fn kind_location(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
         self.index().typed(kind, h)
@@ -4500,7 +4511,7 @@ impl StoreReader {
         };
         let mut landed: Option<(Location, Hash)> = None;
         for c in &all {
-            if let Some(l) = self.index().landing_of(c)? {
+            if let Some(l) = self.index().first_carrier(c, None)? {
                 let key = (at(kinds::LANDING, &l)?, *c);
                 landed = Some(landed.map_or(key, |k| k.min(key)));
             }
@@ -4650,7 +4661,7 @@ impl StoreReader {
             let bound = at(kinds::LANDING, head)?;
             let mut landed: Option<(Location, Location, Hash)> = None;
             for c in changes {
-                if let Some(l) = self.index().landing_of(c)? {
+                if let Some(l) = self.index().first_carrier(c, None)? {
                     let l = at(kinds::LANDING, &l)?;
                     if l <= bound {
                         let key = (l, at(kinds::CHANGE, c)?, *c);
@@ -4684,13 +4695,13 @@ impl StoreReader {
         let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
             self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
         };
-        let Some(own) = self.index().landing_of(change)? else {
+        let Some(own) = self.index().first_carrier(change, None)? else {
             return Ok(None);
         };
         let bound = (at(kinds::LANDING, &own)?, at(kinds::CHANGE, change)?);
         let mut last: Option<(Location, Location, Hash)> = None;
         for c in changes {
-            if let Some(l) = self.index().landing_of(c)? {
+            if let Some(l) = self.index().first_carrier(c, None)? {
                 let key = (at(kinds::LANDING, &l)?, at(kinds::CHANGE, c)?, *c);
                 if (key.0, key.1) < bound {
                     last = Some(last.map_or(key, |k| k.max(key)));

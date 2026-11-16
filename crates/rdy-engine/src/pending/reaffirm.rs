@@ -266,7 +266,7 @@ pub(crate) fn landing_of_version(st: &ReadState, v: &Hash) -> Result<Option<Hash
     let Some(change) = reader.producer_at(&producers, st.canon_head().as_ref())? else {
         return Ok(None);
     };
-    Ok(reader.landing_of(&change)?)
+    Ok(reader.first_carrier(&change, Some(st.seq()))?)
 }
 
 /// Whether `b` is an accepted decision that supersedes or revokes `cause`: the retirement
@@ -389,7 +389,7 @@ fn retirement_landing(
     };
     known.put(walked, origin);
     match origin {
-        Some(c) => Ok(reader.landing_of(&c)?),
+        Some(c) => Ok(reader.first_carrier(&c, Some(st.seq()))?),
         None => Ok(None),
     }
 }
@@ -412,7 +412,7 @@ fn raised_by(
         landings.extend(landing_of_version(st, &v)?);
     }
     if let Some(d) = deleter {
-        landings.extend(reader.landing_of(&d)?);
+        landings.extend(reader.first_carrier(&d, Some(st.seq()))?);
     }
     for r in retirements {
         if let Some(b) = m.get(r) {

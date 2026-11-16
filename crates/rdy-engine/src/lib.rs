@@ -138,6 +138,7 @@ pub mod stream_take;
 pub mod suggest;
 pub mod suspect_reply;
 pub mod sync_fetch;
+pub mod sync_replay;
 pub mod tensions;
 pub mod testkit;
 pub mod tool_reads;

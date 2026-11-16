@@ -709,7 +709,7 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
             Err(e) => return Err(e),
         };
         for c in version.iter().flat_map(|v| &v.changes) {
-            if let Some(l) = r.index().landing_of(c)?
+            if let Some(l) = r.index().first_carrier(c, None)?
                 && landing(&l)?.is_some_and(|x| x.proposal == *p)
             {
                 return Ok(Some(l));

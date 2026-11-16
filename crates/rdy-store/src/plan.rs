@@ -922,7 +922,8 @@ impl PlanLookup for WriteLookup<'_> {
             return Ok(false);
         };
         for c in &version.changes {
-            if self.store.index().landing_of(c)?.is_some() {
+            // as the log stands: a carrier that left canon still landed the version
+            if self.store.index().first_carrier(c, None)?.is_some() {
                 return Ok(true);
             }
         }
@@ -1226,14 +1227,12 @@ impl PlanLookup for CheckLookup<'_> {
             return Ok(false);
         };
         for c in &version.changes {
-            let Some(l) = self.reader.index().landing_of(c)? else {
-                continue;
-            };
+            // as the log stood before the batch: a carrier that left canon since still landed it
             if self
                 .reader
                 .index()
-                .typed(kinds::LANDING, &l)?
-                .is_some_and(|at| at < self.batch_start)
+                .first_carrier(c, Some(self.batch_start))?
+                .is_some()
             {
                 return Ok(true);
             }
@@ -1261,7 +1260,7 @@ impl PlanLookup for CheckLookup<'_> {
             return Ok(None);
         };
         for c in &version.changes {
-            if let Some(l) = self.reader.index().landing_of(c)?
+            if let Some(l) = self.reader.index().first_carrier(c, None)?
                 && self.place(kinds::LANDING, &l)? == Place::Log
                 && lands(&l)?
             {

@@ -349,6 +349,11 @@ pub fn signature_line(check: &Value) -> String {
     if signed != SIGNED_INVALID && check["statement"].as_str() == Some(STATEMENT_MISMATCH) {
         line.push_str(", statement mismatch");
     }
+    // a signature a pull replay carried (D-9YAQS): the landing whose base it names
+    if let Some(from) = check["carried_from"].as_str() {
+        let short = from.get(..12).unwrap_or(from);
+        line.push_str(&format!(", carried from {short}"));
+    }
     line
 }
 

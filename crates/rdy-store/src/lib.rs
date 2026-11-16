@@ -77,7 +77,10 @@ pub fn adopt_view(card: &rdy_model::Hash) -> String {
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
-pub use land::{AltLanding, LandOutcome, LandRequest, PreparedLanding, RebasedView, Relay};
+pub use land::{
+    AltLanding, LandOutcome, LandRequest, PreparedLanding, PreparedReplay, RebasedView, Relay,
+    ReplayLanding, ReplayMerge,
+};
 pub use merge::{
     Conflict, MergeChange, Merged, Side, conflict_id, find_parent_cycle, merge, merge_on_blocks,
 };

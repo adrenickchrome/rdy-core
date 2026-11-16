@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub(crate) mod own;
-mod replay;
+pub(crate) mod replay;
 mod resolve;
 mod undo;
 

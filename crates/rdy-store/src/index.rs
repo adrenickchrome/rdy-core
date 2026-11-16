@@ -30,6 +30,11 @@ const LANDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landed");
 const LANDING_CARRIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landing_carries");
 /// A change's hash -> the change its `links.replayed_from` names (a pull or a view replay).
 const REPLAYS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("replays");
+/// A change's hash, then the hash of a landing whose LANDING frame carries it -> empty: every
+/// carrier of every change, on canon or not. The history readers read it with a log bound
+/// ([`Index::first_carrier`]): which landing first carried a change, as the log stood then,
+/// whatever canon is now (D-QCE8M reader audit, Task 3b).
+const CARRIERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("carriers");
 /// a block id's string bytes, a 0x00 byte, then the hash of a change that deletes it -> empty.
 const DELETERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("deleters");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
@@ -163,8 +168,9 @@ const COUNTS_UPTO_KEY: &str = "counts_upto";
 /// is an earlier rdy's, whose rows follow the first landing in log order: the open replaces it
 /// and rebuilds it from the log (`Checked::Outdated`).
 const LANDED_REVISION_KEY: &str = "landed_revision";
-/// The revision of [`LANDED`]'s rule: rows follow current canon and replay ancestry.
-const LANDED_REVISION: &[u8] = &[1];
+/// The revision of [`LANDED`]'s rule: rows follow current canon and replay ancestry, and
+/// [`CARRIERS`] holds every carrier (revision 2).
+const LANDED_REVISION: &[u8] = &[2];
 /// The `meta` key that holds the `indexed_upto` at which [`LANDED`] was last kept by this rule,
 /// written in the same commit as `indexed_upto`. An older rdy moves `indexed_upto` alone, with
 /// rows by its own rule, so an index whose two positions differ has landed rows behind its log
@@ -548,6 +554,7 @@ pub struct IndexDump {
     pub landed: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landing_carries: BTreeMap<Vec<u8>, Vec<u8>>,
     pub replays: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub carriers: BTreeMap<Vec<u8>, Vec<u8>>,
     pub deleters: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_tensions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub open_suspects: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -1446,6 +1453,7 @@ impl Index {
             w.open_table(LANDED).map_err(db)?;
             w.open_table(LANDING_CARRIES).map_err(db)?;
             w.open_table(REPLAYS).map_err(db)?;
+            w.open_table(CARRIERS).map_err(db)?;
             w.open_table(DELETERS).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
             w.open_table(OPEN_TENSIONS).map_err(db)?;
@@ -1694,6 +1702,13 @@ impl Index {
                         if t.get(&landing.0[..]).map_err(db)?.is_none() {
                             t.insert(&landing.0[..], &carries_value(prev.as_ref(), changes)[..])
                                 .map_err(db)?;
+                            let mut all = w.open_table(CARRIERS).map_err(db)?;
+                            for c in changes {
+                                let mut key = Vec::with_capacity(64);
+                                key.extend_from_slice(&c.0);
+                                key.extend_from_slice(&landing.0);
+                                all.insert(&key[..], &[][..]).map_err(db)?;
+                            }
                         }
                     }
                     IndexEntry::Replay { change, source } => {
@@ -2125,6 +2140,44 @@ impl Index {
         }
     }
 
+    /// The landing whose LANDING frame first carried `change` in log order, among those the log
+    /// holds before `before` (all of them for None), on canon or not. A history reader's answer:
+    /// what a landing carried as the log stood at its bound, whatever canon is now. It follows no
+    /// replay: a replayed change has carriers of its own.
+    pub fn first_carrier(
+        &self,
+        change: &Hash,
+        before: Option<Location>,
+    ) -> Result<Option<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(CARRIERS).map_err(db)?;
+        let typed = r.open_table(TYPED).map_err(db)?;
+        let mut lo = change.0.to_vec();
+        lo.extend_from_slice(&[0u8; 32]);
+        let mut hi = change.0.to_vec();
+        hi.extend_from_slice(&[0xffu8; 32]);
+        let mut first: Option<(Location, Hash)> = None;
+        for item in t.range(&lo[..]..=&hi[..]).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let landing = hash_from(&k.value()[32..], "carriers key")?;
+            let Some(at) = typed
+                .get(&typed_key(kinds::LANDING, &landing)[..])
+                .map_err(db)?
+                .map(|v| dec(v.value()))
+                .transpose()?
+            else {
+                continue;
+            };
+            if before.is_some_and(|end| at >= end) {
+                continue;
+            }
+            if first.is_none_or(|(f, _)| at < f) {
+                first = Some((at, landing));
+            }
+        }
+        Ok(first.map(|(_, l)| l))
+    }
+
     /// Canon's head and every landed row as (change, landing), in change order, from one read:
     /// the rows that head gives, while a writer moves canon.
     pub(crate) fn canon_and_landed(&self) -> Result<CanonRows, StoreError> {
@@ -2216,6 +2269,7 @@ impl Index {
             landed: dump_table(&r, LANDED)?,
             landing_carries: dump_table(&r, LANDING_CARRIES)?,
             replays: dump_table(&r, REPLAYS)?,
+            carriers: dump_table(&r, CARRIERS)?,
             deleters: dump_table(&r, DELETERS)?,
             open_tensions: dump_table(&r, OPEN_TENSIONS)?,
             open_suspects: dump_table(&r, OPEN_SUSPECTS)?,

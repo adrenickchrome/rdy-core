@@ -6,8 +6,9 @@
 //! stream format 4, the minimum rule and the project's sync state: the registered feature
 //! `sync_state` and its rule, the sync state refs and bounds, the history purposes and the
 //! digests of the `sync4-*` stream fixtures, and the fix text `SYNC_LOCKED_FIX`. scc7 (D-CDQF7) also adds the error values of the
-//! portable publication baseline: the code `E_PUBLICATION_BASELINE` and its texts. Every other
-//! member is the predecessor's.
+//! portable publication baseline: the code `E_PUBLICATION_BASELINE` and its texts. scc3
+//! (D-8ZEHP, D-9YAQS) adds the facts of a signature that a pull replay carried, in the signatures
+//! row. Every other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -105,6 +106,13 @@ const SCC7_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members Task 3b adds to [`CURRENT`], each with the reason it moves: the carried-signature
+/// result fields (D-8ZEHP, D-9YAQS) and nothing else.
+const SCC3_CHANGES: &[(&str, &str)] = &[(
+    "added /signatures/carried",
+    "a signature a pull replay carried: its carried_from member, its statement rule and its CLI line",
+)];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -166,13 +174,14 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2 and scc7 together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3 and scc7 together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
         .iter()
         .chain(SCC2_CHANGES)
         .chain(SCC7_CHANGES)
+        .chain(SCC3_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -293,8 +302,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     leaves(&keyed(&old), &keyed(&new), "", &mut found);
     let removed: Vec<&String> = found.iter().filter(|c| c.starts_with("removed ")).collect();
     assert!(removed.is_empty(), "{removed:?}");
-    // the rows of the predecessor are all there, and only the store, dump, sync and error rows
-    // move
+    // the rows of the predecessor are all there, and only the store, dump, sync, error and
+    // signature rows move
     let (Value::Object(was), Value::Object(now)) = (&old, &new) else {
         panic!("the fixtures are objects");
     };
@@ -303,7 +312,15 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
         now.keys().collect::<Vec<_>>()
     );
     for (row, v) in was {
-        if !["store", "dump_load", "sync", "errors_warnings"].contains(&row.as_str()) {
+        if ![
+            "store",
+            "dump_load",
+            "sync",
+            "errors_warnings",
+            "signatures",
+        ]
+        .contains(&row.as_str())
+        {
             assert_eq!(&now[row], v, "row {row} moved");
         }
     }
@@ -375,7 +392,7 @@ fn scc2_contract_adds_only_sync4_and_minimums() {
         assert!(found.iter().any(|f| f == p), "{p} is a change of {CURRENT}");
     }
     found.sort();
-    assert_eq!(found, all_changes(), "no change outside scc1 and scc2");
+    assert_eq!(found, all_changes(), "no change outside the listed tasks");
     let row = new["store"]["features"]
         .as_array()
         .unwrap()
@@ -485,4 +502,45 @@ fn scc7_contract_adds_only_baseline_values() {
         BASELINE_VERIFY_MESSAGE,
         "The publication baseline does not verify."
     );
+}
+
+/// scc3 (D-8ZEHP, D-9YAQS): the successor adds only the facts of a carried signature to the
+/// signatures row: `carried_from` holds the full hash of the source landing, the statement
+/// matches, and the CLI line names the first 12 characters. Every other member of the row is the
+/// predecessor's.
+#[test]
+fn scc3_contract_adds_only_replay_signature_facts() {
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(
+        &keyed(&old["signatures"]),
+        &keyed(&new["signatures"]),
+        "/signatures",
+        &mut found,
+    );
+    let want: Vec<String> = SCC3_CHANGES.iter().map(|(p, _)| (*p).to_string()).collect();
+    assert_eq!(
+        found, want,
+        "the signatures row gains the carried facts alone"
+    );
+    let carried = &new["signatures"]["carried"];
+    assert_eq!(carried["result_member"], "carried_from");
+    assert_eq!(carried["levels"], 1);
+    let check = &carried["check"];
+    let from = check["carried_from"].as_str().unwrap();
+    assert_eq!(from.len(), 64, "the full hash");
+    assert_eq!(check["statement"], "match");
+    assert_eq!(check["signed"], "valid");
+    assert!(check["code"].is_null());
+    assert!(
+        carried["cli"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(", carried from {}", &from[..12])),
+        "{carried:#}"
+    );
+    // an ordinary vector has no carried_from member
+    for v in new["signatures"]["vectors"].as_object().unwrap().values() {
+        assert!(v.get("carried_from").is_none());
+    }
 }

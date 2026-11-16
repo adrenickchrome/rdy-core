@@ -1584,7 +1584,58 @@ fn signatures_row() -> Value {
         },
         "statements": statements,
         "vectors": vectors,
+        "carried": carried_signature(),
     })
+}
+
+/// scc3 (D-8ZEHP, D-9YAQS): a signature that a pull replay carried to L′ with its statement and
+/// signature bytes unchanged. The check rebuilds the statement with L′'s base set to the base of
+/// a landing in L′'s `rebased_from`, one level, and names that landing in `carried_from`. The
+/// vector is the plain one, carried to a replay of its landing on another base.
+fn carried_signature() -> Value {
+    use rdy_engine::signature_check::{CheckContext, SignatureSubject, check_signature_carried};
+    let v = rdy_qa::signing::vector(false);
+    let SignatureSubject::Landing { hash, record } = &v.context.subject else {
+        unreachable!("the vector signs a landing")
+    };
+    let replay = Hash([0x5d; 32]);
+    let carried = rdy_model::LandingRecord {
+        prev: Some(Hash([0x5c; 32])),
+        rebased_from: vec![*hash],
+        ..record.clone()
+    };
+    let context = CheckContext {
+        subject: SignatureSubject::Landing {
+            hash: replay,
+            record: carried,
+        },
+        ..v.context.clone()
+    };
+    let record = rdy_model::signature::Signature {
+        subject: replay,
+        ..v.record.clone()
+    };
+    let check =
+        check_signature_carried(&record, &context, Some(&v.trust), &[(*hash, record_of(&v))]);
+    assert_eq!(check.carried_from, Some(hash.to_string()), "{check:?}");
+    let json = serde_json::to_value(&check).unwrap();
+    json!({
+        "result_member": "carried_from",
+        "result_value": "the full hash of the landing in the subject's rebased_from whose base the statement names; absent for any other signature",
+        "statement_rule": "the statement rebuilt from the subject with its base set to that landing's base; every other signed field is the subject's",
+        "levels": 1,
+        "record": "a new SIGNATURE whose subject is the replayed landing, with the source's namespace, statement, signature bytes and signer",
+        "cli": rdy_engine::signing_read::signature_line(&json),
+        "check": json,
+    })
+}
+
+/// The landing record the vector `v` signs.
+fn record_of(v: &rdy_qa::signing::Vector) -> rdy_model::LandingRecord {
+    match &v.context.subject {
+        rdy_engine::signature_check::SignatureSubject::Landing { record, .. } => record.clone(),
+        _ => unreachable!("the vector signs a landing"),
+    }
 }
 
 // ---- the seeded project and the probes ----

@@ -157,6 +157,10 @@ pub struct SignatureCheck {
     /// holder's own ([`STATEMENT_FOREIGN_REPO`]). Absent from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_repo: Option<String>,
+    /// A carried signature only (D-8ZEHP, D-9YAQS): the full hash of the landing in the
+    /// subject's `rebased_from` whose base the statement names. Absent from the JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<String>,
 }
 
 /// Checks `record` against `context`, with the caller's trust data (`None`: no allowed-signers
@@ -184,6 +188,7 @@ pub fn check_signature(
             code: Some(E_SIG_INVALID.into()),
             warnings: vec![],
             foreign_repo: None,
+            carried_from: None,
         };
     }
     let parsed = parse_statement(&record.statement).ok();
@@ -205,6 +210,7 @@ pub fn check_signature(
         code: Some(E_SIG_INVALID.into()),
         warnings: vec![],
         foreign_repo: None,
+        carried_from: None,
     };
     let (Some(parsed), Some(key)) = (parsed, crypto.key.as_deref()) else {
         return out;
@@ -239,6 +245,70 @@ pub fn check_signature(
             .push(sig_unknown_key(key, principal, &record.namespace).into());
     }
     out
+}
+
+/// [`check_signature`], then for a landing subject whose statement does not match: the check
+/// of a signature that a pull replay carried (D-8ZEHP, D-9YAQS). `sources` are the landings in
+/// the subject's `rebased_from` that the caller holds, with their records. The statement
+/// matches when it equals the one rebuilt from the subject with its base (`prev`) set to the
+/// `prev` of one of those landings: every other signed field is the subject's own. One level
+/// only: a source's own `rebased_from` is not followed. A carried match sets `carried_from` to
+/// that landing's full hash. Pure, as [`check_signature`] is.
+pub fn check_signature_carried(
+    record: &Signature,
+    context: &CheckContext,
+    trust: Option<&AllowedSigners>,
+    sources: &[(Hash, LandingRecord)],
+) -> SignatureCheck {
+    let out = check_signature(record, context, trust);
+    let SignatureSubject::Landing { hash, record: l } = &context.subject else {
+        return out;
+    };
+    if out.signed != SIGNED_VALID || out.statement != STATEMENT_MISMATCH {
+        return out;
+    }
+    for (source, s) in sources {
+        if !l.rebased_from.contains(source) || s.prev == l.prev {
+            continue;
+        }
+        let at_base = CheckContext {
+            subject: SignatureSubject::Landing {
+                hash: *hash,
+                record: LandingRecord {
+                    prev: s.prev,
+                    ..l.clone()
+                },
+            },
+            ..context.clone()
+        };
+        let carried = check_signature(record, &at_base, trust);
+        if carried.statement == STATEMENT_MATCH {
+            return SignatureCheck {
+                carried_from: Some(source.to_string()),
+                ..carried
+            };
+        }
+    }
+    out
+}
+
+/// The landings in the subject's `rebased_from` that `state` holds before its log end, with
+/// their records: the sources [`check_signature_carried`] reads. Empty for any other subject.
+pub(crate) fn carried_sources(
+    state: &ReadState,
+    context: &CheckContext,
+) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
+    let SignatureSubject::Landing { record, .. } = &context.subject else {
+        return Ok(vec![]);
+    };
+    let reader = state.reader();
+    let mut out = vec![];
+    for source in &record.rebased_from {
+        if reader.has_kind_before(kinds::LANDING, source, state.seq())? {
+            out.push((*source, reader.landing(source)?));
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `record` keeps the shared bounds a stored SIGNATURE keeps: each field within its own
@@ -465,8 +535,12 @@ impl<'s> Lineage<'s> {
         }
         let (current, sources) = self.ids()?;
         let context = subject_context(self.state, subject, *current, sources.clone())?;
+        let carried = carried_sources(self.state, &context)?;
         ids.iter()
-            .map(|id| Ok(check_signature(&reader.signature(id)?, &context, trust)))
+            .map(|id| {
+                let record = reader.signature(id)?;
+                Ok(check_signature_carried(&record, &context, trust, &carried))
+            })
             .collect()
     }
 }
