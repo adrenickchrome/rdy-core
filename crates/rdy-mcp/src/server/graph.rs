@@ -36,7 +36,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "References and premises (depends_on, conditional_on, implements, decided_by, reflects) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write. max_tokens defaults to 4000; a cut result carries next: pass it as page with the same scope until next is absent."
+        description = "References and premises (depends_on, conditional_on, implements, decided_by, reflects) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write. Returns items and total. max_tokens defaults to 4000; a cut result drops items from the end and carries next: pass it as page with the same scope until next is absent."
     )]
     async fn rdy_suspects(&self, Parameters(p): Parameters<SuspectsParams>) -> CallToolResult {
         self.run("rdy_suspects", p, tools::rdy_suspects).await

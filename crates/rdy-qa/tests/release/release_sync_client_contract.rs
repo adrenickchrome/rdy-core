@@ -254,9 +254,13 @@ const SCC7B_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The members the paging of `rdy_suspects` changes, each with the reason it moves: the tool takes
-/// `page`, a cut result carries `next`, and the cursor error row names the tool; nothing else.
+/// The members the paging of `rdy_suspects` changes (D-T0GXT), each with the reason it moves: the tool takes
+/// `page`, the reply gains `total`, a cut result carries `next`, and the cursor error row names the tool; nothing else.
 const SPG1_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /mcp/result_fields/rdy_suspects/ok/total",
+        "the reply of the tool counts every suspect, as the reply of rdy_query does (D-T0GXT)",
+    ),
     (
         "added /mcp/tools/rdy_suspects/input_schema/properties/page",
         "the input page of the tool: the next of a cut result, with the same scope",

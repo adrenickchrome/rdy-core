@@ -502,10 +502,10 @@ fn query_token(filter: &str, scope_text: &str, ids: &[BlockId]) -> Hash {
 }
 
 /// A cursor whose offset is at or past the matches reads as one that does not parse.
-fn bad_page() -> RdyError {
+pub(crate) fn bad_page(tool: &str) -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
-        format!("page is not a cursor from {QUERY_TOOL}'s next"),
+        format!("page is not a cursor from {tool}'s next"),
         "pass next from the previous page, unchanged",
     )
 }
@@ -600,7 +600,7 @@ impl ReadState {
                     PAGE_STALE_FIX,
                 ));
             }
-            Some((_, offset)) if offset >= total => return Err(bad_page()),
+            Some((_, offset)) if offset >= total => return Err(bad_page(QUERY_TOOL)),
             Some((_, offset)) => offset,
         };
 

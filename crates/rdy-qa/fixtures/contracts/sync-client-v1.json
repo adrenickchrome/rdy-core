@@ -25055,7 +25055,8 @@
               "reason": "string",
               "target": "string"
             }
-          ]
+          ],
+          "total": "number"
         }
       },
       "rdy_tag": {

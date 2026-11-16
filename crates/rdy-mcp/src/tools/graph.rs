@@ -58,7 +58,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     Ok(budget(v, p.max_tokens))
 }
 
-/// What `rdy_suspects` takes. The engine owns the token cut, so the reply is not budgeted again.
+/// What `rdy_suspects` takes (D-T0GXT). The engine owns the token cut, so the reply is not budgeted again.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SuspectsParams {
@@ -70,8 +70,8 @@ pub struct SuspectsParams {
     pub page: Option<String>,
 }
 
-/// `rdy_suspects`: every suspect when they fit the budget, else the page of rows that fits, with
-/// `next` while rows remain.
+/// `rdy_suspects` (D-T0GXT): `{items, total, next?}`: every suspect when they fit the budget, else
+/// the page of whole rows that fits, with `next` while rows remain.
 pub fn rdy_suspects(st: &mut McpState, p: SuspectsParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;

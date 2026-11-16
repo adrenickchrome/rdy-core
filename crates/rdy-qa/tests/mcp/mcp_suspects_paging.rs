@@ -1,5 +1,6 @@
-//! spg1: `rdy_suspects` pages a cut result as `rdy_query` does: a cut result carries `next`, and
-//! `page` reads the rest with the same cursor form and refusals.
+//! spg1 (D-T0GXT): `rdy_suspects` returns `{items, total, next?}` and pages a cut result as
+//! `rdy_query` does: a cut result carries `next`, and `page` reads the rest with the same cursor
+//! form and refusals.
 use rdy_engine::RdyError;
 use rdy_mcp::tools::*;
 use rdy_qa::fixtures::*;
@@ -52,7 +53,8 @@ fn blocks(v: &Value) -> Vec<String> {
 fn spg1_a_cut_result_pages_to_every_suspect_once() {
     let (_d, mut st) = st_with_suspects(60);
     let whole = suspects(&mut st, json!({"scope": "canon", "max_tokens": 100000})).unwrap();
-    assert!(whole.get("next").is_none() && whole.get("truncated").is_none());
+    assert!(whole.get("next").is_none());
+    assert_eq!(whole["total"], 60);
     let want = blocks(&whole);
     assert_eq!(want.len(), 60);
 
@@ -64,25 +66,23 @@ fn spg1_a_cut_result_pages_to_every_suspect_once() {
         a
     };
     let first = suspects(&mut st, args(None)).unwrap();
-    assert_eq!(first["truncated"], true, "{first}");
     assert!(
         first["next"].is_string(),
         "the first page has next: {first}"
     );
-    assert!(first["omitted"].as_u64().unwrap() > 0, "{first}");
     let mut got = blocks(&first);
     let mut v = first;
     let mut pages = 1;
     while let Some(next) = v["next"].as_str().map(String::from) {
         v = suspects(&mut st, args(Some(&next))).unwrap();
         got.extend(blocks(&v));
+        assert_eq!(v["total"], 60, "total is the same on every page: {v}");
         pages += 1;
         assert!(pages < 100);
     }
     assert!(pages > 2, "{pages}");
     assert_eq!(got, want, "every suspect once, in the one order");
     assert!(v.get("next").is_none(), "the last page has no next: {v}");
-    assert_eq!(v["omitted"], 0, "{v}");
 }
 
 #[test]
@@ -122,6 +122,12 @@ fn spg1_a_foreign_or_stale_page_is_refused_as_a_paged_read_refuses() {
     )
     .unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e:?}");
+    assert_eq!(e.message, "page is not a cursor from rdy_suspects's next");
+    assert_eq!(e.fix, "pass next from the previous page, unchanged");
+    // and the stale refusal is the existing one
+    let e = suspects(&mut st, json!({"max_tokens": 300, "page": next})).unwrap_err();
+    assert_eq!(e.code, "E_PAGE_STALE", "{e:?}");
+    assert_eq!(e.fix, rdy_engine::PAGE_STALE_FIX);
 }
 
 #[test]
@@ -141,16 +147,18 @@ fn spg1_a_changed_suspect_set_stales_the_cursor() {
 }
 
 #[test]
-fn spg1_a_result_that_fits_has_no_next_and_is_todays_output() {
+fn spg1_a_result_that_fits_has_no_next() {
     let (_d, mut st) = st_with_suspects(3);
     let got = suspects(&mut st, json!({"scope": "canon"})).unwrap();
     let want = {
         let read = st.engine.read();
-        json!({"items": read.suspect_details(&rdy_engine::Scope::Canon).unwrap()})
+        let rows = read.suspect_details(&rdy_engine::Scope::Canon).unwrap();
+        json!({"items": rows, "total": rows.len()})
     };
     assert_eq!(
         serde_json::to_string(&got).unwrap(),
         serde_json::to_string(&want).unwrap()
     );
+    assert_eq!(got["total"], 3);
     assert!(got.get("next").is_none() && got.get("truncated").is_none());
 }
