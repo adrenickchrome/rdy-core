@@ -29,6 +29,7 @@
 //! work caps, not a retained map: the key locations a scan collects live only while it runs.
 use crate::error::StoreError;
 use crate::holder::{FirstBatch, StoreMode};
+use crate::index::IndexEntry;
 use crate::index::RedactedSpan;
 use crate::kinds;
 use crate::object_refs::ObjectKey;
@@ -333,7 +334,15 @@ pub(crate) fn check_proved(
     let (holes, spans) = if applies.is_empty() {
         (Holes::new(), BTreeMap::new())
     } else {
-        derive_spans(log, upto, applies, &mut imported, &residues, &caps)?
+        derive_spans(
+            log,
+            upto,
+            applies,
+            &mut imported,
+            &residues,
+            &caps,
+            Uncovered::Damage,
+        )?
     };
     let mut auth = Authorization {
         holes,
@@ -412,7 +421,15 @@ fn derive(
         });
     }
     let placed: Vec<(Location, Hash)> = applies.iter().map(|a| (a.loc, a.hash)).collect();
-    let (holes, spans) = derive_spans(log, upto, &placed, &mut imported, &residues, &caps)?;
+    let (holes, spans) = derive_spans(
+        log,
+        upto,
+        &placed,
+        &mut imported,
+        &residues,
+        &caps,
+        Uncovered::Damage,
+    )?;
     let mut auth = Authorization {
         holes,
         spans,
@@ -436,6 +453,7 @@ fn derive_spans(
     imported: &mut Imported,
     residues: &Residues,
     caps: &ReceiverCaps,
+    uncovered: Uncovered,
 ) -> Result<(Holes, BTreeMap<Location, SpanAuth>), StoreError> {
     // 2. and 3. every copy of an approved tuple, and every uncovered embedding
     let mut approved: HashMap<ObjectKey, Vec<usize>> = HashMap::new();
@@ -516,7 +534,8 @@ fn derive_spans(
                         residue: r.objects[&key].residue,
                     });
             }
-        } else if crate::codec::logical_kind(f.kind) == kinds::CHANGE
+        } else if uncovered == Uncovered::Damage
+            && crate::codec::logical_kind(f.kind) == kinds::CHANGE
             && !versions.is_empty()
             && f.len as usize <= MAX_RECORD_BYTES
             && let Some(p) = f.intact()?
@@ -533,6 +552,213 @@ fn derive_spans(
         v.dedup_by_key(|s| s.loc);
     }
     Ok((holes, spans))
+}
+
+/// What rule 3 (see the module docs) does with an intact change outside the approved tuples
+/// that embeds an approved block version: a holder refuses it as damage; a project that fetched
+/// the removal keeps its bytes (D-FNRXT: an uncovered local carrier), and its reads warn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Uncovered {
+    Damage,
+    Kept,
+}
+
+/// What the removals a project fetched authorize (D-FNRXT), derived from its log alone: the
+/// applies of each batch that writes a `meta/sync/` ref (a fetch's batch) are checked by their
+/// portable proofs, as a holder checks its applies, and every copy of an approved tuple in the
+/// log is a span. The requests such a batch holds name places of another log: their index rows
+/// keep the spans this log derives, never those places. Not stored.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Synced {
+    /// What each validated fetched apply approves, and the spans of each request it approves.
+    pub(crate) imported: Imported,
+    /// Every request a fetch's batch holds, approved or not.
+    requests: HashSet<Hash>,
+}
+
+impl Synced {
+    /// The index entry of a request frame whose own entry is `native`, when a fetch's batch
+    /// holds that request: the objects its manifest names, with the spans this log derives
+    /// for it (none while no fetched apply approves it). None for any other request.
+    pub(crate) fn request_entry(&self, native: &IndexEntry) -> Option<IndexEntry> {
+        let IndexEntry::RedactionRequest {
+            request,
+            carrier,
+            objects,
+            ..
+        } = native
+        else {
+            return None;
+        };
+        self.requests
+            .contains(request)
+            .then(|| IndexEntry::RedactionRequest {
+                request: *request,
+                carrier: *carrier,
+                objects: objects.clone(),
+                spans: self.imported.spans_of(request),
+            })
+    }
+}
+
+/// The fetched applies of `c` the walk before `upto` (or a batch not yet written) holds.
+fn synced_frames(c: &Collected, upto: Location) -> Vec<&crate::redaction_io::ApplyFrame> {
+    c.synced
+        .iter()
+        .filter(|a| a.loc < upto || c.memory.contains_key(&a.loc))
+        .collect()
+}
+
+/// The holes the fetched applies before `below` would authorize, unchecked: every frame whose
+/// logical kind and hash a span of the request an apply names has. The marker rule's scan reads
+/// them as frames while the open decides which batches the acknowledged log holds.
+pub(crate) fn synced_candidate_holes(
+    c: &Collected,
+    readers: &[File],
+    below: Location,
+    holes: &mut Holes,
+) -> Result<(), StoreError> {
+    let applies: Vec<_> = c.synced.iter().filter(|a| a.loc < below).collect();
+    if applies.is_empty() {
+        return Ok(());
+    }
+    let none = BTreeMap::new();
+    let mut access = LogAccess {
+        readers,
+        memory: &none,
+    };
+    let mut named: HashSet<ObjectKey> = HashSet::new();
+    for a in applies {
+        let Some(record) = &a.record else {
+            continue;
+        };
+        let Some(loc) = c.request_place(&record.request).filter(|l| *l < a.loc) else {
+            continue;
+        };
+        let Some((raw, payload)) = crate::redaction_io::read_versioned(
+            &mut access,
+            loc,
+            kinds::REDACTION,
+            &record.request,
+        )?
+        else {
+            continue;
+        };
+        if let Ok(r) = crate::codec::decode_record::<rdy_model::redaction::Redaction>(raw, &payload)
+        {
+            named.extend(r.manifest.spans.iter().map(|s| ObjectKey {
+                kind: s.kind,
+                hash: s.hash,
+            }));
+        }
+    }
+    if named.is_empty() {
+        return Ok(());
+    }
+    crate::redaction_io::for_each_seen(readers, below, &BTreeMap::new(), |f| {
+        let key = ObjectKey {
+            kind: crate::codec::logical_kind(f.kind),
+            hash: f.hash,
+        };
+        if named.contains(&key) {
+            holes.entry(f.loc).or_insert(Hole {
+                kind: key.kind,
+                hash: f.hash,
+                len: f.len,
+            });
+        }
+        Ok(())
+    })
+}
+
+/// Adds what the fetched applies of `c` before `upto` authorize to `auth` (D-FNRXT; see
+/// [`Synced`]): each apply's portable proof over the log's own records (`sync_proof::check`:
+/// a person's approval, never a policy), then rules 2 and 3 of the module docs over every frame
+/// before `upto`, except that an uncovered local carrier keeps its bytes. A span an earlier
+/// native apply already authorizes keeps that apply as its proof. The validated applies join
+/// `auth.applies` in log order. A failure is `RedactionCorrupt` at the apply or the frame.
+pub(crate) fn authorize_synced(
+    c: &Collected,
+    log: &mut dyn FrameLog,
+    auth: &mut Authorization,
+    upto: Location,
+) -> Result<(), StoreError> {
+    auth.synced.requests = c.synced_requests.clone();
+    let frames = synced_frames(c, upto);
+    if frames.is_empty() {
+        return Ok(());
+    }
+    let caps = ReceiverCaps::current();
+    let (_, first) = locate(log, upto, &caps)?;
+    let mut source = LogSource {
+        log: &mut *log,
+        first,
+    };
+    let mut applies: Vec<Applied> = Vec::with_capacity(frames.len());
+    let mut imported = Imported::default();
+    let mut residues: Residues = HashMap::new();
+    for a in &frames {
+        let corrupt = || StoreError::corrupt_at(a.loc);
+        let record = a.record.clone().ok_or_else(corrupt)?;
+        let removal = sync_proof::check(&mut source, a.hash).map_err(|e| proof_error(e, a.loc))?;
+        for t in removal.objects.values() {
+            if let Some(r) = t.residue
+                && !residues.contains_key(&r)
+            {
+                let key = ObjectKey {
+                    kind: kinds::REDACTION_RESIDUE,
+                    hash: r,
+                };
+                let Some(rec @ StreamRecord::Present { .. }) =
+                    source.record(key).map_err(|e| proof_error(e, a.loc))?
+                else {
+                    return Err(corrupt());
+                };
+                let StreamRecord::Present { payload, .. } = &rec else {
+                    unreachable!("a present record")
+                };
+                let res: RedactionResidue =
+                    crate::codec::decode_bounded(rec.raw_kind(), payload).map_err(|_| corrupt())?;
+                let encoding = crate::codec::split(rec.raw_kind(), payload)
+                    .map_err(|_| corrupt())?
+                    .version;
+                residues.insert(r, (res, encoding));
+            }
+        }
+        imported.removals.insert(a.hash, removal);
+        applies.push(Applied {
+            loc: a.loc,
+            hash: a.hash,
+            record,
+        });
+    }
+    let placed: Vec<(Location, Hash)> = applies.iter().map(|a| (a.loc, a.hash)).collect();
+    let (holes, spans) = derive_spans(
+        log,
+        upto,
+        &placed,
+        &mut imported,
+        &residues,
+        &caps,
+        Uncovered::Kept,
+    )?;
+    for (loc, hole) in holes {
+        match auth.holes.get(&loc) {
+            // a native apply covers the frame already: it stays the frame's proof
+            Some(h) if *h == hole => {}
+            Some(_) => return Err(StoreError::corrupt_at(loc)),
+            None => {
+                let span = *spans.get(&loc).ok_or_else(|| StoreError::corrupt_at(loc))?;
+                auth.holes.insert(loc, hole);
+                auth.spans.insert(loc, span);
+            }
+        }
+    }
+    auth.keep_residues(residues)?;
+    auth.applies.extend(applies);
+    auth.applies.sort_by_key(|a| a.loc);
+    auth.synced.imported = imported;
+    Ok(())
 }
 
 /// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header

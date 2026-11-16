@@ -160,8 +160,8 @@ pub struct FetchFacts {
 
 /// What a fetch sealed: the distinct keys it wrote that the project did not hold, its data
 /// frames (the marker not counted), the log's end after it, the tag names it wrote, the tag
-/// names it did not take because the project's tag of that name names another landing, and the
-/// store's minimum rdy before and after the batch (D-4XHPH).
+/// names it did not take because the project's tag of that name names another landing, the
+/// store's minimum rdy before and after the batch (D-4XHPH), and the removals it took (D-FNRXT).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchTaken {
     pub new_objects: u64,
@@ -171,6 +171,11 @@ pub struct FetchTaken {
     pub tags_kept: Vec<String>,
     pub min_rdy_before: Option<RdyVersion>,
     pub min_rdy_after: Option<RdyVersion>,
+    /// The objects the batch removed (D-FNRXT): records written as drops, and the project's own
+    /// copies its approvals erase.
+    pub redacted_objects: u64,
+    /// The new applies the fetch took, in hash order.
+    pub applies: Vec<Hash>,
 }
 
 /// Which immutable tag ref survives the take: the upload's root (`tag/<root.name>`), or a tag
@@ -290,9 +295,6 @@ fn fetch_mismatch(root: ObjectKey) -> StreamError {
     }
 }
 
-/// The refusal of a fetched stream that holds a removal: the removal intake takes it.
-pub const FETCH_REMOVAL: &str = "a fetched history that holds a removal is not taken yet";
-
 /// The refusal of a root TAG that does not name the upload target.
 fn target_mismatch(root: ObjectKey) -> StreamError {
     StreamError {
@@ -411,6 +413,8 @@ pub(crate) struct Plan {
     pub(crate) redaction: bool,
     /// The batch holds a new apply (the redaction epoch advances).
     pub(crate) new_applies: bool,
+    /// The new applies whose proofs the take checked, in hash order.
+    pub(crate) applies: Vec<Hash>,
     pub(crate) redacted_objects: u64,
     pub(crate) tag_hash: Hash,
     /// The root TAG of an upload; None for a fetch.
@@ -1211,10 +1215,47 @@ type UploadCheck<'a, E> =
 type FetchCheck<'a, E> = Box<dyn FnOnce(&mut dyn ObjectSource, &FetchFacts) -> Result<(), E> + 'a>;
 
 /// What a take takes: a holder's upload for a publication tag, or a project's fetched canon or
-/// view history (D-3RSCW), each with the caller's check.
+/// view history (D-3RSCW), each with the caller's check; or a holder's pushed canon or view
+/// history (D-FNRXT), whose records and removals it takes with no ref.
 pub(crate) enum Intake<'a, E> {
     Upload(&'a UploadTarget, UploadCheck<'a, E>),
     Fetch(&'a FetchTarget, FetchCheck<'a, E>),
+    History(&'a HistoryTarget),
+}
+
+/// A pushed canon or view history a holder takes (D-FNRXT): its purpose and its root (a
+/// landing, or a view op). The take writes the records the holder lacks, drops what the
+/// removals it carries approve and erases the holder's own copies of it, in one batch, and
+/// moves no ref: the hub moves canon or a view afterwards, by the head it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryTarget {
+    pub purpose: crate::sync_stream::StreamPurpose,
+    pub root: Hash,
+}
+
+/// What a holder's take of a pushed history sealed: the distinct keys it wrote that the holder
+/// did not hold, its data frames (the marker not counted), the objects it removed (written as
+/// drops, or local copies its approvals erase), the applies it took, the log's end after it,
+/// and the holder's minimum rdy before and after the batch (D-4XHPH).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryTaken {
+    pub new_objects: u64,
+    pub frames: u64,
+    pub redacted_objects: u64,
+    pub applies: Vec<Hash>,
+    pub end: Location,
+    pub min_rdy_before: Option<RdyVersion>,
+    pub min_rdy_after: Option<RdyVersion>,
+}
+
+/// Prepares a holder's take of a pushed history (see [`Intake::History`]): the take's steps 1
+/// to 7 and 9 over the holder, with the header's purpose and root the target's.
+pub(crate) fn prepare_history<E>(
+    rx: &Receiver,
+    files: &[File],
+    target: &HistoryTarget,
+) -> Result<Plan, TakeError<E>> {
+    prepare_intake(rx, files, Intake::History(target))
 }
 
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
@@ -1234,8 +1275,11 @@ pub(crate) fn prepare<'a, E>(
 /// landing stays; one that names another landing is kept and listed), and the remote's sync
 /// state with the root as its fetched tip or head, in the same batch. A tag the project names
 /// after the fetch keeps its relay answer by `answer/tag:<name>` when that ref is free. No canon
-/// or view ref moves. A removal in the stream is refused
-/// ([`FETCH_REMOVAL`]).
+/// or view ref moves. A removal in the stream (D-FNRXT) is taken as a holder takes it: each new
+/// apply passes its portable proof (a person's approval, never a policy), each record it approves
+/// is written as a drop, and the project's own copies of what it approves are erased once the
+/// batch is durable. A local change that embeds an approved version and that no approval covers
+/// keeps its bytes: it is no refusal here, and the project's reads warn of it.
 pub(crate) fn prepare_fetch<'a, E>(
     rx: &Receiver,
     files: &[File],
@@ -1269,11 +1313,14 @@ fn prepare_intake<E>(
     let expected = match &intake {
         Intake::Upload(..) => header.purpose == crate::sync_stream::StreamPurpose::TagHistory,
         Intake::Fetch(t, _) => header.purpose == t.purpose,
+        Intake::History(t) => header.purpose == t.purpose && t.purpose.is_history(),
     };
     if !expected {
         let want = match &intake {
             Intake::Upload(..) => crate::sync_stream::StreamPurpose::TagHistory,
             Intake::Fetch(t, _) => t.purpose,
+            Intake::History(t) if t.purpose.is_history() => t.purpose,
+            Intake::History(_) => crate::sync_stream::StreamPurpose::CanonHistory,
         };
         return Err(
             StreamError::purpose_for(Some(0), 0, header.purpose.byte(), want.name()).into(),
@@ -1335,6 +1382,12 @@ fn prepare_intake<E>(
             }
             None
         }
+        Intake::History(target) => {
+            if header.purpose != target.purpose || root_key.hash != target.root {
+                return Err(fetch_mismatch(root_key).into());
+            }
+            None
+        }
     };
     // 4. SIG's rule on every new signature
     for k in union.keys().filter(|k| k.kind == kinds::SIGNATURE) {
@@ -1385,9 +1438,13 @@ fn prepare_intake<E>(
     }
     stream_source::check_typed_context(&mut source, Some(reader), &new_keys)?;
     drop(new_keys);
-    // 6. the approvals: every new apply's proof, and the holder's active ones
-    let empty = Imported::default();
-    let active: &Imported = rx.auth.imported.as_ref().unwrap_or(&empty);
+    // 6. the approvals: every new apply's proof, and the holder's active ones (a project's are
+    // the removals it fetched before, D-FNRXT)
+    let active: &Imported = rx
+        .auth
+        .imported
+        .as_ref()
+        .unwrap_or(&rx.auth.synced.imported);
     let mut new_applies: Vec<Hash> = Vec::new();
     for k in union.keys().filter(|k| k.kind == kinds::REDACTION_APPLY) {
         if !rx.holds(k)? {
@@ -1584,7 +1641,8 @@ fn prepare_intake<E>(
                 }
                 local_spans += 1;
                 redacted.insert(key);
-            } else if crate::codec::logical_kind(f.kind) == kinds::CHANGE
+            } else if !fetch
+                && crate::codec::logical_kind(f.kind) == kinds::CHANGE
                 && !new_versions.is_empty()
                 && !approved.contains_key(&key)
                 && f.len as usize <= rdy_model::redaction::MAX_RECORD_BYTES
@@ -1710,6 +1768,8 @@ fn prepare_intake<E>(
             }
             (root_key.hash, None)
         }
+        // a pushed history: its records and removals, and no ref
+        Intake::History(_) => (root_key.hash, None),
     };
     // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
     merged
@@ -1770,10 +1830,6 @@ fn prepare_intake<E>(
                 kinds::REDACTION | kinds::REDACTION_RESIDUE | kinds::REDACTION_APPLY
             )
     });
-    // a fetched removal is the removal intake's (a later step): the fetch takes none
-    if fetch && (redaction || !incoming.is_empty() || !redacted.is_empty()) {
-        return Err(TakeError::Store(StoreError::Refused(FETCH_REMOVAL.into())));
-    }
     let min_rdy = (
         rx.features.min_rdy(),
         features.as_ref().unwrap_or(rx.features).min_rdy(),
@@ -1789,6 +1845,7 @@ fn prepare_intake<E>(
         refs,
         redaction,
         new_applies: !incoming.is_empty(),
+        applies: incoming.keys().copied().collect(),
         redacted_objects: redacted.len() as u64,
         tag_hash,
         tag,

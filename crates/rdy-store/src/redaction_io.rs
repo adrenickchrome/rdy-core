@@ -220,6 +220,9 @@ pub(crate) struct Authorization {
     pub(crate) carried: Vec<crate::redaction_carried::CarriedAt>,
     /// What the verified foreign removals of a project authorize (`crate::foreign_removal`).
     pub(crate) foreign: crate::foreign_removal::ForeignAuthority,
+    /// What the removals a project fetched authorize (D-FNRXT,
+    /// `crate::redaction_import::authorize_synced`).
+    pub(crate) synced: crate::redaction_import::Synced,
 }
 
 impl Authorization {
@@ -403,6 +406,9 @@ impl Authorization {
         if let Some(e) = self.foreign.request_entry(&entry) {
             return Ok(e);
         }
+        if let Some(e) = self.synced.request_entry(&entry) {
+            return Ok(e);
+        }
         match (&self.imported, entry) {
             (
                 Some(imported),
@@ -547,6 +553,9 @@ struct Pending {
     /// The FOREIGN frames of the batch: place, raw kind, hash and, when it was read, payload. A
     /// batch with no apply keeps none of them.
     foreign: Vec<(Location, u8, Hash, Option<Vec<u8>>)>,
+    /// Whether the batch writes a `meta/sync/` ref: a fetch's batch (D-FNRXT), whose requests and
+    /// applies came from another store. Read only for a batch that holds a request or an apply.
+    sync: bool,
 }
 
 /// What the header pass collected from the sealed batches, in log order. It holds the redaction
@@ -564,6 +573,13 @@ pub(crate) struct Collected {
     /// The applies that a FOREIGN Removal entry of their own batch names (a project's foreign
     /// removals, `crate::foreign_removal`), in log order: they are no native applies.
     pub(crate) foreign_proofs: Vec<crate::foreign_removal::ProofFrame>,
+    /// The applies of a batch that writes a `meta/sync/` ref (a fetch's batch, D-FNRXT), in log
+    /// order: they are no native applies. Their requests name places of another log, so their
+    /// portable proofs authorize them (`crate::redaction_import::authorize_synced`).
+    pub(crate) synced: Vec<ApplyFrame>,
+    /// The requests such a batch holds, approved or not: their manifests name places of
+    /// another log, so no span of this log is theirs by place.
+    pub(crate) synced_requests: HashSet<Hash>,
     /// Frames of a batch not yet written (the live writer's): kind and payload, by location.
     pub(crate) memory: BTreeMap<Location, (u8, Vec<u8>)>,
     batches: u64,
@@ -611,6 +627,12 @@ impl Collected {
     }
 
     fn seal(&mut self, mut p: Pending) {
+        if p.sync {
+            // a fetch's batch: its requests and applies came from another store
+            self.synced_requests
+                .extend(p.requests.iter().map(|(_, h)| *h));
+            self.synced.append(&mut p.applies);
+        }
         if !p.applies.is_empty() && !p.foreign.is_empty() {
             let start = p.start.expect("a batch with frames has a start");
             let foreign = std::mem::take(&mut p.foreign);
@@ -673,10 +695,26 @@ impl Collected {
             kinds::FOREIGN => p
                 .foreign
                 .push((loc, kind, hash, payload.map(<[u8]>::to_vec))),
+            kinds::REF_UPDATE => {
+                if let Some(b) = payload.filter(|b| Hash::of(b) == hash)
+                    && let Ok(u) = crate::store::decode::<kinds::RefUpdate>(b)
+                    && crate::sync_state::is_sync_ref(&u.name)
+                {
+                    p.sync = true;
+                }
+            }
             _ => {}
         }
         Ok(())
     }
+}
+
+/// Whether the header pass reads the payload of a `REF_UPDATE` frame of `len` bytes in the
+/// batch `p` collects: only in a batch that holds a request or an apply, and only within the
+/// sync ref bound, so it can tell a fetch's batch (D-FNRXT).
+fn reads_ref(p: &Pending, len: u32) -> bool {
+    (!p.applies.is_empty() || !p.requests.is_empty())
+        && (len as usize) <= crate::sync_state::MAX_VALUE_BYTES + 4_096
 }
 
 /// A read window over one file: header reads of a sequential walk cost one positioned read per
@@ -833,6 +871,13 @@ pub(crate) fn collect(readers: &[File]) -> Result<Collected, StoreError> {
                 };
                 let checked = payload.filter(|b| Hash::of(b) == hash);
                 c.note(&mut p, loc, kind, hash, checked.as_deref())?;
+            } else if kind == kinds::REF_UPDATE && reads_ref(&p, len) {
+                let payload = if len as usize <= ERASE_BUFFER {
+                    w.get(payload_start, len as usize)?.to_vec()
+                } else {
+                    read_payload(f, payload_start, len)?
+                };
+                c.note(&mut p, loc, kind, hash, Some(&payload))?;
             } else {
                 c.note(&mut p, loc, kind, hash, None)?;
             }
@@ -1730,7 +1775,8 @@ fn check_log(
 /// finishes the store.
 pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     let c = collect(readers)?;
-    if c.applies.is_empty() && c.requests.is_empty() && c.carried.is_empty() {
+    if c.applies.is_empty() && c.requests.is_empty() && c.carried.is_empty() && c.synced.is_empty()
+    {
         return Ok(Authorization::default());
     }
     let mut applies: Vec<&ApplyFrame> = c.applies.iter().collect();
@@ -1742,11 +1788,13 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
         let mut holes = candidate_holes(&c, readers, &applies)?;
         crate::redaction_carried::candidate_holes(&c, below, &mut holes);
         crate::foreign_removal::candidate_holes(&c, readers, below, &mut holes)?;
+        crate::redaction_import::synced_candidate_holes(&c, readers, below, &mut holes)?;
         let end = segment::acknowledged_end(readers, &holes)?;
         let before = (
             applies.len(),
             carried_below(&c, below),
             foreign_below(&c, below),
+            synced_below(&c, below),
         );
         applies.retain(|a| a.loc < end);
         below = end;
@@ -1754,6 +1802,7 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
             applies.len(),
             carried_below(&c, below),
             foreign_below(&c, below),
+            synced_below(&c, below),
         ) == before
         {
             break end;
@@ -1767,6 +1816,7 @@ pub(crate) fn bootstrap(readers: &[File]) -> Result<Authorization, StoreError> {
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, end)?;
     check_log(&mut log, &c.memory, &auth, &sel, end)?;
     crate::foreign_removal::authorize(&c, &mut log, &mut auth, end)?;
+    crate::redaction_import::authorize_synced(&c, &mut log, &mut auth, end)?;
     auth.requests = c
         .requests
         .iter()
@@ -1787,6 +1837,11 @@ fn foreign_below(c: &Collected, below: Location) -> usize {
         .iter()
         .filter(|f| f.apply.loc < below)
         .count()
+}
+
+/// How many fetched applies lie before `below`.
+fn synced_below(c: &Collected, below: Location) -> usize {
+    c.synced.iter().filter(|a| a.loc < below).count()
 }
 
 /// The authorization of a log whose every batch is whole (a load's ingest checked each batch
@@ -1812,7 +1867,12 @@ pub(crate) fn sealed_of(
     readers: &[File],
     carried_upto: Location,
 ) -> Result<Authorization, StoreError> {
-    if c.applies.is_empty() && c.carried.is_empty() && c.foreign_proofs.is_empty() {
+    if c.applies.is_empty()
+        && c.carried.is_empty()
+        && c.foreign_proofs.is_empty()
+        && c.synced.is_empty()
+        && c.synced_requests.is_empty()
+    {
         return Ok(Authorization::default());
     }
     let applies: Vec<&ApplyFrame> = c.applies.iter().collect();
@@ -1828,6 +1888,7 @@ pub(crate) fn sealed_of(
     });
     check_log(&mut log, &BTreeMap::new(), &auth, &sel, upto)?;
     crate::foreign_removal::authorize(c, &mut log, &mut auth, upto)?;
+    crate::redaction_import::authorize_synced(c, &mut log, &mut auth, upto)?;
     Ok(auth)
 }
 
@@ -1853,6 +1914,7 @@ pub(crate) fn bootstrap_pending(
     crate::redaction_carried::overlay(&c, &mut log, &mut auth, start)?;
     check_log(&mut log, &c.memory, &auth, &sel, start)?;
     crate::foreign_removal::authorize(&c, &mut log, &mut auth, start)?;
+    crate::redaction_import::authorize_synced(&c, &mut log, &mut auth, start)?;
     auth.requests = c.requests.clone();
     Ok(auth)
 }

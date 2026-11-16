@@ -324,6 +324,29 @@ impl StoreReader {
         Ok(self.mask_of(kind, h)?.map(|m| m.request))
     }
 
+    /// The uncovered carriers (D-FNRXT): each change, not itself removed and not a removal's
+    /// carrier, with an op that produces a block version an active removal holds, with that
+    /// removal's request; once per change (its lowest request), in ascending change order. Such a
+    /// change keeps its bytes: a sync applies a removal only to what it covers.
+    pub fn uncovered_carriers(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        let index = self.index();
+        let mut found: std::collections::BTreeMap<Hash, Hash> = std::collections::BTreeMap::new();
+        for (version, row) in index.redaction_active_of(kinds::BLOCK)? {
+            for change in index.producers(&version)? {
+                if index.redaction_active(kinds::CHANGE, &change)?.is_some()
+                    || index.redaction_carrier(&change)?.is_some()
+                {
+                    continue;
+                }
+                let slot = found.entry(change).or_insert(row.request);
+                if row.request < *slot {
+                    *slot = row.request;
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
     /// The redaction request with hash `h`. Requests are never removed.
     pub fn redaction_request(&self, h: &Hash) -> Result<Redaction, StoreError> {
         self.get_named(kinds::REDACTION, "redaction request", h)

@@ -225,6 +225,14 @@ pub const W_REDACTION_QUARANTINE_MESSAGE: &str = "Quarantine files may hold the 
 pub const W_REDACTION_SECRET_MESSAGE: &str =
     "Rotate or revoke the secret. Redaction does not undo its exposure.";
 
+/// A local change that holds content a synced removal removed, and that no removal covers
+/// (D-FNRXT): it keeps its bytes, and the warning repeats once per change on every read.
+pub const W_REDACTION_UNCOVERED: &str = "W_REDACTION_UNCOVERED";
+/// The message of `W_REDACTION_UNCOVERED` (D-47HVF `SYNC_UNCOVERED`).
+pub const SYNC_UNCOVERED_MESSAGE: &str = "change <change> holds content removed by <removal>";
+/// The fix of `W_REDACTION_UNCOVERED`.
+pub const SYNC_UNCOVERED_FIX: &str = "redact this content here; a person approves the removal";
+
 /// A public publication profile whose selection references blocks outside it (D-0VCQ5): its
 /// output is blocked.
 pub const E_PUBLICATION_REFERENCE: &str = "E_PUBLICATION_REFERENCE";

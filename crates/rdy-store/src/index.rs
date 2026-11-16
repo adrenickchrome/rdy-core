@@ -3079,6 +3079,31 @@ impl Index {
         self.redacted.load(Ordering::Acquire)
     }
 
+    /// Every active mask row of `kind`, as (object hash, row), in ascending hash order: one read
+    /// of the active mask, and none when it is empty.
+    pub fn redaction_active_of(&self, kind: u8) -> Result<Vec<(Hash, ActiveObject)>, StoreError> {
+        if !self.any_redaction_active() {
+            return Ok(vec![]);
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REDACTION_ACTIVE).map_err(db)?;
+        let mut out = vec![];
+        for item in t.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            let key = k.value();
+            if key.len() != 33 {
+                return Err(StoreError::Decode("redaction active entry".into()));
+            }
+            if key[32] == kind {
+                out.push((
+                    hash_from(&key[..32], "redaction active entry")?,
+                    active_object_from(v.value())?,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// The request logged for carrier change `carrier`, if one was.
     pub fn redaction_carrier(&self, carrier: &Hash) -> Result<Option<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;

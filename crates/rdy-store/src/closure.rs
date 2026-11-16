@@ -302,6 +302,11 @@ fn link_closure(
         let refs = record
             .refs(&features)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))?;
+        // a removed record's drop links its residue, part of this store's removal proof, which
+        // the receiver of the original need not hold (D-FNRXT): it is not assumed held
+        if matches!(record, StreamRecord::Dropped { .. }) {
+            continue;
+        }
         for r in refs {
             let target = match r.kind {
                 Some(kind) => ObjectKey { kind, hash: r.hash },

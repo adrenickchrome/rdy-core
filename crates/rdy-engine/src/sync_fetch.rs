@@ -11,6 +11,12 @@
 //! name is listed. The first sync state write activates the `sync_state` feature in its batch.
 //! A retry of a fetch already taken writes nothing.
 //!
+//! A fetched removal (D-FNRXT) is taken when a person's approval proves it: the fetch applies it
+//! in its own batch, erases what it covers here once the batch is durable, and every view then
+//! reads the stub. A local change that holds removed content and that no removal covers keeps
+//! its bytes; the outcome lists one warning per such change
+//! ([`crate::sync_redaction::UncoveredWarning`]), and reads repeat it.
+//!
 //! [`usable_canon_state`] and [`usable_view_state`] read one remote's state as a sync uses it
 //! after the hub's state step: only when the reply's repo id is the state's, and, for canon,
 //! when the reply's canon is not null. A changed URL keeps the state. The read never reads
@@ -30,8 +36,9 @@ use std::fs::File;
 const _: () = assert!(rdy_store::sync_state::MAX_URL_BYTES == crate::hub_types::MAX_URL_BYTES);
 
 /// What one fetch did: the objects it wrote that the project lacked, its data frames, the tag
-/// names it took and those it kept local, the store's minimum rdy before and after it, and the
-/// log's end after it. `unchanged` is true when it wrote nothing (a retry).
+/// names it took and those it kept local, the store's minimum rdy before and after it, the
+/// log's end after it, the removals it applied and what they removed here, and the warnings of
+/// the uncovered local carriers after it. `unchanged` is true when it wrote nothing (a retry).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchOutcome {
     pub records_taken: u64,
@@ -42,6 +49,11 @@ pub struct FetchOutcome {
     pub min_rdy_after: Option<RdyVersion>,
     pub end: StorePosition,
     pub unchanged: bool,
+    /// The removal applies the fetch took, in hash order.
+    pub removals: Vec<Hash>,
+    /// The objects those removals removed: written as drops, or erased here.
+    pub redacted_objects: u64,
+    pub warnings: Vec<crate::sync_redaction::UncoveredWarning>,
 }
 
 /// Takes the batch files `batches` of one fetched history for `target` into the project `rdy`
@@ -70,6 +82,7 @@ pub fn fetch(
             if t.frames > 0 {
                 republish(rdy, epoch)?;
             }
+            let warnings = rdy.read().uncovered_warnings()?;
             Ok(FetchOutcome {
                 records_taken: t.new_objects,
                 frames_written: t.frames,
@@ -82,6 +95,9 @@ pub fn fetch(
                     offset: t.end.offset,
                 },
                 unchanged: t.frames == 0,
+                removals: t.applies,
+                redacted_objects: t.redacted_objects,
+                warnings,
             })
         }
         Err(e) => Err(fetch_error(e)),

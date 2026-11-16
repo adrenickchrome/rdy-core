@@ -5537,12 +5537,87 @@ impl Store {
         let sealed = self.seal_take(files, &plan);
         self.held = held;
         let (end, frames) = sealed?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
         Ok(crate::take_batch::FetchTaken {
             new_objects: plan.writes.len() as u64,
             frames,
             end,
             tags_taken: plan.tags_taken,
             tags_kept: plan.tags_kept,
+            min_rdy_before: plan.min_rdy.0,
+            min_rdy_after: plan.min_rdy.1,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            applies: plan.applies,
+        })
+    }
+
+    /// A holder's take of a pushed canon or view history (D-FNRXT): the take's checks over the
+    /// holder (`crate::take_batch::prepare_history`), then one sealed batch with the records the
+    /// holder lacks and the drops the pushed removals approve. Each new apply passes its
+    /// portable proof, and the holder's own copies of what it approves are erased once the
+    /// batch is durable, as an upload's take erases them. A holder change that embeds an
+    /// approved version and that no approval covers refuses the take (`UncoveredChange`). No
+    /// ref moves: the hub moves canon or a view afterwards ([`Store::move_canon`]). A project
+    /// is `TakeError::ModeMismatch`; a retry of a take already made writes nothing.
+    pub fn take_history<E>(
+        &mut self,
+        files: &[File],
+        target: &crate::take_batch::HistoryTarget,
+    ) -> Result<crate::take_batch::HistoryTaken, crate::take_batch::TakeError<E>> {
+        use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
+        if files.is_empty() {
+            return Err(TakeError::Stream(
+                crate::stream_error::StreamError::bad_record(
+                    0,
+                    0,
+                    crate::stream_error::Reason::NoBatchFiles,
+                ),
+            ));
+        }
+        if files.len() > crate::sync_stream::MAX_BATCH_FILES {
+            return Err(TakeError::Stream(crate::stream_error::StreamError::limit(
+                None,
+                0,
+                crate::sync_stream::LIMIT_BATCH_FILES,
+            )));
+        }
+        self.ensure_writable().map_err(TakeError::Store)?;
+        if self.poisoned {
+            return Err(TakeError::Store(self.poisoned_err()));
+        }
+        if self.held || self.open.is_some() {
+            return Err(TakeError::Store(batch_open("before a take")));
+        }
+        if self.creation.mode != StoreMode::Holder {
+            return Err(TakeError::ModeMismatch);
+        }
+        let repo = self
+            .repo_id()?
+            .ok_or_else(|| StoreError::Decode("a holder has no meta/repo_id".into()))?;
+        let reader = self.reader();
+        let auth = Arc::clone(self.log.authorization());
+        let plan = crate::take_batch::prepare_history(
+            &Receiver {
+                reader: &reader,
+                log: self.log.readers(),
+                auth: &auth,
+                end: self.log.end(),
+                repo,
+                features: &self.features,
+            },
+            files,
+            target,
+        )?;
+        drop(reader);
+        let (end, frames) = self.seal_take(files, &plan)?;
+        let empty = plan.writes.is_empty() && plan.refs.is_empty();
+        Ok(crate::take_batch::HistoryTaken {
+            new_objects: plan.writes.len() as u64,
+            frames,
+            redacted_objects: if empty { 0 } else { plan.redacted_objects },
+            applies: plan.applies,
+            end,
             min_rdy_before: plan.min_rdy.0,
             min_rdy_after: plan.min_rdy.1,
         })
@@ -5595,10 +5670,15 @@ impl Store {
                 return Err(e);
             }
         };
-        // a batch that changes the removal authorization is judged by the holder's own
-        // bootstrap over the log it makes, before it is synced
+        // a batch that changes the removal authorization is judged by the store's own
+        // bootstrap over the log it makes, before it is synced: a holder's, or a project's,
+        // which authorizes a fetch's applies by their portable proofs (D-FNRXT)
         let auth = if plan.redaction {
-            match crate::redaction_import::bootstrap_holder(self.log.readers()) {
+            let judged = match self.creation.mode {
+                StoreMode::Holder => crate::redaction_import::bootstrap_holder(self.log.readers()),
+                StoreMode::Project => crate::redaction_io::bootstrap(self.log.readers()),
+            };
+            match judged {
                 Ok(a) => Some(a),
                 Err(e) => {
                     if self.roll_back(before) && published {

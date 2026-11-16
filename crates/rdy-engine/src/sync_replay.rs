@@ -32,12 +32,16 @@
 //!
 //! - conflicts with the new canon (the merge rules of an ordinary landing),
 //! - fails the gate, or whose policy refuses it,
-//! - names a removal request in its `checks` (D-HVZC9), or
+//! - names a removal request in its `checks` (D-HVZC9),
+//! - has a change that holds removed content (D-FNRXT, D-3M81W): a change a removal removed, or
+//!   one that produces a removed block version, or
 //! - comes first, under `strict` or `reviews.require_up_to_date`.
 //!
 //! On a stop, canon keeps the landings replayed so far. A new view `pull-<n>`, which the caller
 //! owns, gets the changes of L and of every later unpushed landing by the ordinary view replay
-//! (the caller is their author), never a removal's carrier change. `replaced/<old local tip>`
+//! (the caller is their author), never a removal's carrier change and never a change that holds
+//! removed content: the reply lists each block of such a change with the removal that removed
+//! it, and no text of it (`removed`). `replaced/<old local tip>`
 //! keeps the old chain readable, and the reply is [`PULLED_WITH_CONFLICTS`]. A take, a pull after
 //! a hub force move and a pull with no usable state write that mark too; a clean replay writes
 //! none, because `rebased_from` keeps its sources reachable.
@@ -180,6 +184,19 @@ pub struct PullOutcome {
     pub replaced: Option<String>,
     /// True when the remote had no usable sync state ([`NO_SYNC_STATE`]).
     pub no_sync_state: bool,
+    /// The blocks of the changes that `pull-<n>` does not get because they hold removed
+    /// content, each with its change and the removal that removed it; never their text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<RemovedBlock>,
+}
+
+/// A block of a change that holds removed content, which a pull does not replay (D-3M81W): its
+/// id, the change and the removal request. It carries no text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemovedBlock {
+    pub block: String,
+    pub change: String,
+    pub removal: String,
 }
 
 fn depth_limit() -> RdyError {
@@ -403,7 +420,7 @@ fn replay_one(
 ) -> Result<Step, RdyError> {
     let reader = st.reader();
     let l = reader.landing(source)?;
-    if !l.checks.is_empty() {
+    if !l.checks.is_empty() || !crate::sync_redaction::removed_in(reader, &l)?.is_empty() {
         return Ok(Step::Stopped(StopReason::Removal, None));
     }
     // 1. the new changes and the merge onto canon now
@@ -484,18 +501,55 @@ fn replay_one(
 }
 
 /// The changes of `landings` that a `pull-<n>` view replays: each landing's changes in order,
-/// without a removal's carrier change (D-HVZC9).
-fn remainder_changes(reader: &StoreReader, landings: &[Hash]) -> Result<Vec<Hash>, RdyError> {
+/// without a removal's carrier change (D-HVZC9) and without a change that holds removed
+/// content (D-3M81W), whose blocks `removed` gains, each with its removal.
+fn remainder_changes(
+    reader: &StoreReader,
+    landings: &[Hash],
+    removed: &mut Vec<RemovedBlock>,
+) -> Result<Vec<Hash>, RdyError> {
     let mut out = vec![];
     let mut seen = HashSet::new();
     for l in landings {
         for c in reader.landing(l)?.changes {
-            if reader.redaction_for_carrier(&c)?.is_some() {
+            if reader.redaction_for_carrier(&c)?.is_some() || !seen.insert(c) {
                 continue;
             }
-            if seen.insert(c) {
+            let blocks = removed_blocks(reader, &c)?;
+            if blocks.is_empty() {
                 out.push(c);
+                continue;
             }
+            for (block, removal) in blocks {
+                removed.push(RemovedBlock {
+                    block,
+                    change: c.to_string(),
+                    removal: removal.to_string(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The blocks of change `c` whose content a removal removed, each with that removal, in op
+/// order: every block of a removed change, else each block whose produced version is removed.
+fn removed_blocks(reader: &StoreReader, c: &Hash) -> Result<Vec<(String, Hash)>, RdyError> {
+    use rdy_model::Op;
+    use rdy_store::kinds;
+    // a removed change reads as its projection, which keeps its block ids and no text
+    let whole = reader.redaction_of(kinds::CHANGE, c)?;
+    let mut out = vec![];
+    for op in &reader.change(c)?.ops {
+        let removal = match (whole, op) {
+            (Some(r), _) => Some(r),
+            (None, Op::Create { block } | Op::Update { block, .. }) => {
+                reader.redaction_of(kinds::BLOCK, &block.version_hash())?
+            }
+            (None, Op::Delete { .. }) => None,
+        };
+        if let Some(r) = removal {
+            out.push((op.block_id().to_string(), r));
         }
     }
     Ok(out)
@@ -566,6 +620,7 @@ pub fn pull(rdy: &mut Rdy, s: &Session, req: &PullRequest) -> Result<PullOutcome
             view: None,
             replaced: None,
             no_sync_state: false,
+            removed: vec![],
         });
     }
     let inputs = CheckInputs::of_state(&st);
@@ -604,6 +659,7 @@ fn second_batch(
         view: None,
         replaced: None,
         no_sync_state: false,
+        removed: vec![],
     };
     // the landings that go into `pull-<n>`, and whether the old tip is marked replaced
     let mut remainder: Vec<Hash> = vec![];
@@ -682,7 +738,7 @@ fn second_batch(
     }
     let tip = rdy.store.canon_head()?;
     if !remainder.is_empty() {
-        let sources = remainder_changes(reader, &remainder)?;
+        let sources = remainder_changes(reader, &remainder, &mut out.removed)?;
         out.view = Some(remainder_view(rdy, s, st, inputs, &sources)?);
     }
     let mut refs = vec![];
@@ -712,7 +768,12 @@ fn not_replayed(
     detail: Option<String>,
 ) -> Result<NotReplayed, RdyError> {
     let removals = if reason == StopReason::Removal {
-        strings(&reader.landing(l)?.checks)
+        let rec = reader.landing(l)?;
+        if rec.checks.is_empty() {
+            strings(&crate::sync_redaction::removed_in(reader, &rec)?)
+        } else {
+            strings(&rec.checks)
+        }
     } else {
         vec![]
     };

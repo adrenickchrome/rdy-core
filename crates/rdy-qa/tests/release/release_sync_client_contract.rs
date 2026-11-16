@@ -9,8 +9,9 @@
 //! portable publication baseline: the code `E_PUBLICATION_BASELINE` and its texts. scc3
 //! (D-8ZEHP, D-9YAQS) adds the facts of a signature that a pull replay carried, in the signatures
 //! row. scc4 (D-4E32E, D-47HVF) adds the rules of views that travel with a sync: the code
-//! `E_VIEW_DIVERGED`, the texts of the view refusals and the sync row's `views` probe. Every
-//! other member is the predecessor's.
+//! `E_VIEW_DIVERGED`, the texts of the view refusals and the sync row's `views` probe. scc5
+//! (D-FNRXT, D-47HVF) adds the uncovered-carrier warning alone: the code `W_REDACTION_UNCOVERED`
+//! and the texts of its `SYNC_UNCOVERED` row. Every other member is the predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -184,6 +185,23 @@ const SCC4_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members Task 5 adds to [`CURRENT`], each with the reason it moves: the warning of a
+/// local change that holds content a synced removal removed (D-FNRXT, D-47HVF) and nothing else.
+const SCC5_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /errors_warnings/codes/W_REDACTION_UNCOVERED",
+        "a local change holds content a synced removal removed, and no removal covers it",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_UNCOVERED_FIX",
+        "the fix of the uncovered-carrier warning",
+    ),
+    (
+        "added /errors_warnings/templates/SYNC_UNCOVERED_MESSAGE",
+        "the text of the uncovered-carrier warning",
+    ),
+];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -245,7 +263,7 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2, scc3, scc4 and scc7 together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3, scc4, scc5 and scc7 together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
@@ -254,6 +272,7 @@ fn all_changes() -> Vec<String> {
         .chain(SCC7_CHANGES)
         .chain(SCC3_CHANGES)
         .chain(SCC4_CHANGES)
+        .chain(SCC5_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -539,7 +558,7 @@ fn scc7_contract_adds_only_baseline_values() {
         &mut found,
     );
     found.sort();
-    // the error row also gains scc2's SYNC_LOCKED_FIX and scc4's view refusals
+    // the error row also gains scc2's SYNC_LOCKED_FIX, scc4's view refusals and scc5's warning
     let want: Vec<String> = all_changes()
         .into_iter()
         .filter(|p| p.contains(" /errors_warnings/"))
@@ -549,7 +568,7 @@ fn scc7_contract_adds_only_baseline_values() {
     }
     assert_eq!(
         found, want,
-        "the error row gains the baseline's values, scc2's fix text and scc4's view refusals alone"
+        "the error row gains the baseline's values, scc2's fix text, scc4's view refusals and scc5's warning alone"
     );
     let e = &new["errors_warnings"];
     // the row holds each constant's source literal, quotes included
@@ -643,7 +662,7 @@ fn scc4_contract_adds_only_synced_view_rules() {
         .filter(|f| {
             f.contains("E_VIEW_DIVERGED") || f.contains("/SYNC_") || f.contains("/sync/views")
         })
-        .filter(|f| !f.ends_with("/SYNC_LOCKED_FIX"))
+        .filter(|f| !f.ends_with("/SYNC_LOCKED_FIX") && !f.contains("/SYNC_UNCOVERED_"))
         .collect();
     let want: Vec<&str> = SCC4_CHANGES.iter().map(|(p, _)| *p).collect();
     assert_eq!(scc4, want, "scc4 adds these members alone");
@@ -689,5 +708,45 @@ fn scc4_contract_adds_only_synced_view_rules() {
             "no view \"nope\"",
             "list views with rdy view ls (MCP: rdy_view list)"
         ])
+    );
+}
+
+/// scc5 (D-FNRXT, D-47HVF): the successor adds only the uncovered-carrier warning: the code
+/// `W_REDACTION_UNCOVERED` and its `SYNC_UNCOVERED` message and fix, each the engine's own
+/// constant, lower case as D-47HVF gives them. Every other member is the predecessor's or
+/// another listed task's.
+#[test]
+fn scc5_contract_adds_only_uncovered_removal_warning() {
+    use rdy_engine::{SYNC_UNCOVERED_FIX, SYNC_UNCOVERED_MESSAGE, W_REDACTION_UNCOVERED};
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    let scc5: Vec<&String> = found
+        .iter()
+        .filter(|f| f.contains("UNCOVERED") || f.contains("/sync/removal"))
+        .collect();
+    let want: Vec<&str> = SCC5_CHANGES.iter().map(|(p, _)| *p).collect();
+    assert_eq!(scc5, want, "scc5 adds these members alone");
+    let e = &new["errors_warnings"];
+    let literal = |x: &str| Value::String(format!("\"{x}\""));
+    assert_eq!(
+        e["codes"]["W_REDACTION_UNCOVERED"],
+        literal(W_REDACTION_UNCOVERED)
+    );
+    assert_eq!(
+        e["templates"]["SYNC_UNCOVERED_MESSAGE"],
+        literal(SYNC_UNCOVERED_MESSAGE)
+    );
+    assert_eq!(
+        e["templates"]["SYNC_UNCOVERED_FIX"],
+        literal(SYNC_UNCOVERED_FIX)
+    );
+    assert_eq!(
+        SYNC_UNCOVERED_MESSAGE,
+        "change <change> holds content removed by <removal>"
+    );
+    assert_eq!(
+        SYNC_UNCOVERED_FIX,
+        "redact this content here; a person approves the removal"
     );
 }
