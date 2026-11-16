@@ -11,7 +11,10 @@
 //! row. scc4 (D-4E32E, D-47HVF) adds the rules of views that travel with a sync: the code
 //! `E_VIEW_DIVERGED`, the texts of the view refusals and the sync row's `views` probe. scc5
 //! (D-FNRXT, D-47HVF) adds the uncovered-carrier warning alone: the code `W_REDACTION_UNCOVERED`
-//! and the texts of its `SYNC_UNCOVERED` row. Every other member is the predecessor's.
+//! and the texts of its `SYNC_UNCOVERED` row. scc7b (D-CDQF7, D-6WD17, D-2VM48) adds the baseline
+//! surfaces: the tool `rdy_publication_baseline`, the command `rdy publication baseline`, and the
+//! input `against_baseline` of the check, with the error row of the code. Every other member is the
+//! predecessor's.
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -202,6 +205,55 @@ const SCC5_CHANGES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The members Task 7b adds to [`CURRENT`], each with the reason it moves: the baseline's chat and
+/// command line surfaces (D-CDQF7, D-6WD17, D-2VM48) and nothing else.
+const SCC7B_CHANGES: &[(&str, &str)] = &[
+    (
+        "added /cli/runtime/not_probed_commands/publication baseline",
+        "the command writes a baseline; cli_sync_baseline pins its replies",
+    ),
+    (
+        "added /cli/tree/subcommands/name=publication/subcommands/name=baseline",
+        "the command rdy publication baseline: --profile, --scope and --out",
+    ),
+    (
+        "added /cli/tree/subcommands/name=publication/subcommands/name=check/args/id=against_baseline",
+        "the flag --against-baseline of the check, which excludes --against",
+    ),
+    (
+        "added /errors_warnings/error_rows/row=E_PUBLICATION_BASELINE",
+        "the row of the code in the schema's error table, with a fix that names the complete path",
+    ),
+    (
+        "added /mcp/result_fields/rdy_schema/ok/errors?/E_PUBLICATION_BASELINE",
+        "the schema reply lists the error row",
+    ),
+    (
+        "added /mcp/result_fields_not_captured/rdy_publication_baseline",
+        "the tool writes a baseline; cli_sync_baseline and mcp_sync_baseline pin its replies",
+    ),
+    (
+        "added /mcp/tools/rdy_publication_baseline",
+        "the tool rdy_publication_baseline: profile, scope and out",
+    ),
+    (
+        "added /mcp/tools/rdy_publication_check/input_schema/properties/against_baseline",
+        "the input against_baseline of the check",
+    ),
+    (
+        "changed /cli/tree/subcommands/name=publication/subcommands/name=check/groups/id=Check/args",
+        "the group of the check's flags gains against_baseline",
+    ),
+    (
+        "changed /mcp/refusal_error_rows",
+        "the refusal rows count the new error row",
+    ),
+    (
+        "changed /mcp/tool_names",
+        "the tool list gains rdy_publication_baseline",
+    ),
+];
+
 /// The members that scc2 (Sync client A Task 2) changes, with the reason each moves. Closed:
 /// Task 2 adds sync stream format 4, the minimum rule and the sync state alone.
 const SCC2_CHANGES: &[(&str, &str)] = &[
@@ -263,7 +315,7 @@ const SYNC4_FILES: [&str; 4] = [
     "sync4-view-history.expect.json",
 ];
 
-/// The changed paths of scc1, scc2, scc3, scc4, scc5 and scc7 together, sorted and without repeats: scc1 and
+/// The changed paths of scc1, scc2, scc3, scc4, scc5, scc7 and scc7b together, sorted and without repeats: scc1 and
 /// scc2 both move `/store/registered_names` and `/store/sources`.
 fn all_changes() -> Vec<String> {
     let set: BTreeSet<String> = SCC1_CHANGES
@@ -273,6 +325,7 @@ fn all_changes() -> Vec<String> {
         .chain(SCC3_CHANGES)
         .chain(SCC4_CHANGES)
         .chain(SCC5_CHANGES)
+        .chain(SCC7B_CHANGES)
         .map(|(p, _)| (*p).to_string())
         .collect();
     set.into_iter().collect()
@@ -393,8 +446,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
     leaves(&keyed(&old), &keyed(&new), "", &mut found);
     let removed: Vec<&String> = found.iter().filter(|c| c.starts_with("removed ")).collect();
     assert!(removed.is_empty(), "{removed:?}");
-    // the rows of the predecessor are all there, and only the store, dump, sync, error and
-    // signature rows move
+    // the rows of the predecessor are all there, and only the store, dump, sync, error, signature, cli and
+    // mcp rows move
     let (Value::Object(was), Value::Object(now)) = (&old, &new) else {
         panic!("the fixtures are objects");
     };
@@ -409,6 +462,8 @@ fn scc1_successor_starts_from_the_shipped_predecessor() {
             "sync",
             "errors_warnings",
             "signatures",
+            "cli",
+            "mcp",
         ]
         .contains(&row.as_str())
         {
@@ -748,5 +803,183 @@ fn scc5_contract_adds_only_uncovered_removal_warning() {
     assert_eq!(
         SYNC_UNCOVERED_FIX,
         "redact this content here; a person approves the removal"
+    );
+}
+
+/// scc7b (D-CDQF7, D-6WD17, D-2VM48): the successor adds the baseline's chat and command line
+/// surfaces and nothing else of its own. Each listed path is a changed path of the fixture; the
+/// tool, the command, the check's new input and the error row hold the values the code gives;
+/// and the engine's table owns the tool as `rdy:publish`, response `warn`.
+#[test]
+fn scc7_contract_adds_only_baseline_surfaces() {
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    for (p, _) in SCC7B_CHANGES {
+        assert!(found.iter().any(|f| f == p), "{p} is a change of {CURRENT}");
+    }
+    // the members that name a baseline surface are these and no others
+    let mine: Vec<&String> = found
+        .iter()
+        .filter(|f| f.contains("publication_baseline") || f.contains("against_baseline"))
+        .collect();
+    for f in &mine {
+        assert!(
+            SCC7B_CHANGES.iter().any(|(p, _)| p == f),
+            "{f} is not listed with its reason"
+        );
+    }
+    // the tool: a closed schema with the three inputs
+    let tool = &new["mcp"]["tools"]["rdy_publication_baseline"]["input_schema"];
+    assert_eq!(tool["additionalProperties"], false);
+    assert_eq!(tool["required"], serde_json::json!(["profile", "scope"]));
+    let props: Vec<&String> = tool["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(props, ["out", "profile", "scope"]);
+    assert!(
+        new["mcp"]["tool_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "rdy_publication_baseline")
+    );
+    let check = &new["mcp"]["tools"]["rdy_publication_check"]["input_schema"]["properties"];
+    assert!(
+        check["against_baseline"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("complete path")
+    );
+    // the command and the flag, in the order the parser declares them
+    let sub = |of: &Value, name: &str| -> Value {
+        of["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no command {name}"))
+            .clone()
+    };
+    let publication = sub(&new["cli"]["tree"], "publication");
+    let baseline = sub(&publication, "baseline");
+    let ids: Vec<&str> = baseline["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(3)
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["profile", "scope", "out"]);
+    let check = sub(&publication, "check");
+    let flag = check["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "against_baseline")
+        .expect("the flag");
+    assert_eq!(flag["conflicts_with"], serde_json::json!(["against"]));
+    assert_eq!(flag["long"], "against-baseline");
+    // the error row, with the fix that names the complete path
+    let row = new["errors_warnings"]["error_rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r[0] == "E_PUBLICATION_BASELINE")
+        .expect("the error row");
+    assert!(row[2].as_str().unwrap().contains("complete path"), "{row}");
+    assert_eq!(
+        row[0],
+        rdy_engine::E_PUBLICATION_BASELINE,
+        "the row names the engine's code"
+    );
+    // the engine's table owns the tool under rdy:publish with the response warn
+    let policy = rdy_engine::kungfu::policy("rdy_publication_baseline").unwrap();
+    assert_eq!(policy.ruleset, Some("rdy:publish"));
+    assert_eq!(policy.response, rdy_engine::kungfu::Response::Warn);
+}
+
+/// scc7 (F13): the union of the owned leaves of every Plan A task is the whole delta against
+/// `sd1-v1.json`: each changed path of the current fixture is listed with a reason, each listed
+/// path is a changed path, and no list names a path that no task moves.
+#[test]
+fn scc7_contract_delta_is_exactly_the_owned_leaves() {
+    let (old, new) = (read(PREDECESSOR), read(CURRENT));
+    let mut found = vec![];
+    leaves(&keyed(&old), &keyed(&new), "", &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        all_changes(),
+        "every changed path of {CURRENT} is owned, and every owned path changed"
+    );
+    // nothing is removed, and every reason is a sentence
+    assert!(found.iter().all(|f| !f.starts_with("removed ")));
+    for (p, why) in SCC1_CHANGES
+        .iter()
+        .chain(SCC2_CHANGES)
+        .chain(SCC3_CHANGES)
+        .chain(SCC4_CHANGES)
+        .chain(SCC5_CHANGES)
+        .chain(SCC7_CHANGES)
+        .chain(SCC7B_CHANGES)
+    {
+        assert!(why.len() > 10, "{p}: {why}");
+    }
+}
+
+/// The contract fixtures that are frozen, each with the sha256 of the bytes its release shipped.
+/// `sd1-v1.json` is the predecessor of the current fixture.
+const FROZEN: &[(&str, &str)] = &[
+    (
+        "release-1.json",
+        "635f63e24cb0a743892f52944b9b5182f4f013ca75f5491d9e05c120400a6ef6",
+    ),
+    (
+        "repo-links-v1.json",
+        "b975e0cad885386f134d9dbfab08bf7677ccdbbc9bdeb0c927289e9346f4ca27",
+    ),
+    (
+        "mcp-http-v1.json",
+        "13a8de668dedbbbd2591a6da4e24d65d7897de8368107ff90e9d89917e26a3de",
+    ),
+    (
+        "m4a-v1.json",
+        "49ca6b3f9cab4e97445c1de5df5a513fe97ceee3971d9ae17853307bc9922a71",
+    ),
+    (
+        "m4bc-v1.json",
+        "f8a229b41fff5337d52d8b614670a5b0edcbee534598b35c001064fa040d06c6",
+    ),
+    (
+        "readme-from-rdy-v1.json",
+        "883debf0ad6ba99e983662a92ddb8c7f044306cea027ca835994b39b5187dc16",
+    ),
+    (
+        "disclosure-review-v1.json",
+        "956044b4b5e6a51a9810f31a4c0c16ad81aa9a035d735ed4d8b9d7a1d9edf139",
+    ),
+    (PREDECESSOR, PREDECESSOR_SHA),
+];
+
+/// scc7: every frozen fixture keeps its shipped bytes, `sd1-v1.json` included, and the contracts
+/// folder holds these and the current fixture alone, so a capture never wrote a baseline.
+#[test]
+fn scc7_predecessor_fixtures_keep_their_bytes() {
+    for (name, want) in FROZEN {
+        assert_eq!(&sha(&bytes(name)), want, "{name} is frozen");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(contracts())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut want: Vec<&str> = FROZEN.iter().map(|(n, _)| *n).chain([CURRENT]).collect();
+    want.sort();
+    assert_eq!(
+        names, want,
+        "the folder holds the frozen fixtures and {CURRENT}"
+    );
+    assert!(
+        FROZEN.iter().any(|(n, _)| *n == "sd1-v1.json"),
+        "sd1-v1.json is among them"
     );
 }

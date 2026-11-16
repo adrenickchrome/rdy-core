@@ -684,6 +684,11 @@ fn script(x: &mut Script, spec: &Spec, scratch: &Path) {
         "rdy_publication_check",
         json!({"profile": "implicit:org", "scope": "canon"}),
     );
+    // the world holds no published tag: the baseline of canon is the tool's own refusal
+    x.step(
+        "rdy_publication_baseline",
+        json!({"profile": "implicit:org", "scope": "canon"}),
+    );
     x.step(
         "rdy_publish",
         json!({"tag": "none", "to": "none", "site": "none"}),
@@ -779,6 +784,7 @@ fn import_tree(out: &Path) {
 const REFUSED: &[(&str, &str)] = &[
     ("rdy_resolve", "E_NOT_FOUND"),
     ("rdy_land", "E_EXCEPTION_OPEN"),
+    ("rdy_publication_baseline", "E_BAD_INPUT"),
     ("rdy_publish", "E_BAD_TAG_NAME"),
     ("rdy_auth", "E_BAD_INPUT"),
     ("rdy_key_bind", "E_NOT_FOUND"),
@@ -857,7 +863,7 @@ fn kfu4_each_tool_keeps_its_action_for_all_values() {
 
     // the matrix accounts for every router name
     let names: BTreeSet<String> = kungfu::TOOLS.iter().map(|p| p.tool.to_string()).collect();
-    assert_eq!(names.len(), 62);
+    assert_eq!(names.len(), 63);
     assert_eq!(correct.called, names);
 
     same_steps(&correct, &absent, "absent");

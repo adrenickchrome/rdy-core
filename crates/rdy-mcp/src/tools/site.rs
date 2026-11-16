@@ -142,6 +142,8 @@ pub struct PublicationCheckParams {
     pub scope: Option<String>,
     /// A baseline to compare with: canon, tag:<name> or landing:<hash>. It must hold the same profile id and audience. Omit it for no comparison.
     pub against: Option<String>,
+    /// The complete path of a publication baseline file, made by rdy_publication_baseline in the project that published the previous version. It stands in for against: pass one or the other. It must hold the same profile id and audience, and share this project's lineage. A path that is not absolute is under the project directory.
+    pub against_baseline: Option<String>,
     /// The product version this candidate ships as, such as 1.2.0 or 2.0.0-rc.1 (one leading v is allowed; no +build). Omit it for no release check. Content that is since a later version, and decisions built in one, block the result. Against never supplies it.
     pub release: Option<String>,
 }
@@ -160,13 +162,46 @@ pub fn rdy_publication_check(
         .build_warning_due
         .as_ref()
         .map_or(0, |w| w.to_string().len() + r#","warnings":[]"#.len());
-    rdy_engine::publication::check_reserving(
+    let file = p
+        .against_baseline
+        .as_ref()
+        .map(|f| st.engine.root().join(f));
+    rdy_engine::publication::check_with_inputs(
         &st.engine.read(),
         &p.profile,
         p.scope.as_deref(),
         p.against.as_deref(),
+        file.as_deref(),
         p.release.as_deref(),
         reserve,
+    )
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationBaselineParams {
+    /// A publication profile id or key in the tag's scope, or implicit:org for every doc.
+    pub profile: String,
+    /// The tag to make the baseline of: tag:<name>. A baseline needs a tag.
+    pub scope: String,
+    /// A new file to write the baseline to: absolute, or relative to the project directory. It must not exist, and it must be outside .rdy. Leave it out to get the baseline in the reply.
+    pub out: Option<String>,
+}
+
+/// `rdy_publication_baseline`: the portable baseline of a profile at a tag (D-CDQF7, D-6WD17),
+/// the input that `rdy_publication_check` takes as `against_baseline`. A session is required;
+/// every role may make one, because it reads source and writes at most the new file `out`.
+pub fn rdy_publication_baseline(
+    st: &mut McpState,
+    p: PublicationBaselineParams,
+) -> Result<Value, RdyError> {
+    session(st)?;
+    let out = p.out.as_ref().map(|o| st.engine.root().join(o));
+    rdy_engine::publication::baseline_reply(
+        &st.engine.read(),
+        &p.profile,
+        Some(&p.scope),
+        out.as_deref(),
     )
 }
 

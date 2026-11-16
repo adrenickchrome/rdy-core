@@ -3,11 +3,12 @@
 //! which calls the engine function `rdy_publication_check` calls; this file only prints the reply.
 //! `--json` prints the reply as it is. The check authorizes nothing: no approval or publish
 //! prompt follows it.
-use crate::conn::{Env, call};
+use crate::conn::{Env, call, path_arg};
 use crate::output::{num, text};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub(crate) enum PublicationCmd {
@@ -25,9 +26,24 @@ pub(crate) enum PublicationCmd {
         /// A baseline to compare with: canon, tag:<name> or landing:<hash>. Same profile id and audience.
         #[arg(long)]
         against: Option<String>,
+        /// A baseline file to compare with, made by rdy publication baseline in the project that published the previous version. Same profile id and audience, and a shared lineage. Use it in place of --against.
+        #[arg(long, value_name = "FILE", conflicts_with = "against")]
+        against_baseline: Option<PathBuf>,
         /// The product version this candidate ships as, such as 1.2.0. Shown content and decisions that ship in a later version make the result blocked, which still exits 0. Omit it for no release check.
         #[arg(long)]
         release: Option<String>,
+    },
+    /// Make the portable baseline of a publication profile at a tag: labels, counts and hashes, with no reader text. Pass the file to rdy publication check with --against-baseline in the project that publishes next. With --out the baseline goes to a new file; without it the baseline prints. The chat path is rdy_publication_baseline.
+    Baseline {
+        /// The profile: its id or key, or implicit:org.
+        #[arg(long)]
+        profile: String,
+        /// The tag to make the baseline of: tag:<name>.
+        #[arg(long)]
+        scope: String,
+        /// A new file to write the baseline to. It must not exist, and it must be outside .rdy.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -189,6 +205,14 @@ fn check_text(v: &Value, asked: &str) -> String {
     }
     lines.extend(hidden_line("Hidden as planned", &v["hidden_planned"]));
     let d = &v["disclosure"];
+    if d["baseline"].is_object() {
+        let b = &d["baseline"];
+        lines.push(format!(
+            "Compared with baseline of tag {} ({}).",
+            text(&b["tag"]),
+            text(&b["baseline_hash"])
+        ));
+    }
     if d.is_object() {
         let changed = if d["profile_changed"].as_bool().unwrap_or(false) {
             "yes"
@@ -225,20 +249,53 @@ fn check_text(v: &Value, asked: &str) -> String {
     lines.join("\n")
 }
 
+/// The text of a `publication_baseline` reply: with a file, one line that names its path and
+/// the baseline hash; without one, the baseline as the canonical JSON a file would hold.
+fn baseline_text(v: &Value) -> String {
+    if v["out"].is_null() {
+        return v["content"].to_string();
+    }
+    format!(
+        "Wrote the baseline of tag {} ({}) to {}.",
+        text(&v["baseline"]["tag"]),
+        text(&v["baseline"]["baseline_hash"]),
+        text(&v["out"])
+    )
+}
+
 pub(crate) fn publication(env: &Env, cmd: PublicationCmd) -> Result<(Value, String), ErrorReply> {
-    let PublicationCmd::Check {
-        profile,
-        scope,
-        against,
-        release,
-    } = cmd;
-    let v = call(
-        env,
-        "publication_check",
-        json!({"profile": profile, "scope": scope, "against": against, "release": release}),
-    )?;
-    let t = check_text(&v, &profile);
-    Ok((v, t))
+    match cmd {
+        PublicationCmd::Check {
+            profile,
+            scope,
+            against,
+            against_baseline,
+            release,
+        } => {
+            let file = against_baseline.as_deref().map(path_arg).transpose()?;
+            let v = call(
+                env,
+                "publication_check",
+                json!({"profile": profile, "scope": scope, "against": against, "against_baseline": file, "release": release}),
+            )?;
+            let t = check_text(&v, &profile);
+            Ok((v, t))
+        }
+        PublicationCmd::Baseline {
+            profile,
+            scope,
+            out,
+        } => {
+            let out = out.as_deref().map(path_arg).transpose()?;
+            let v = call(
+                env,
+                "publication_baseline",
+                json!({"profile": profile, "scope": scope, "out": out}),
+            )?;
+            let t = baseline_text(&v);
+            Ok((v, t))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ const OWNERS: [(&str, &str); 9] = [
     ),
     (
         "publish",
-        "rdy_auth, rdy_export, rdy_key_bind, rdy_key_retire, rdy_key_revoke, rdy_key_show, rdy_publication_check, rdy_publish, rdy_remote, rdy_render",
+        "rdy_auth, rdy_export, rdy_key_bind, rdy_key_retire, rdy_key_revoke, rdy_key_show, rdy_publication_baseline, rdy_publication_check, rdy_publish, rdy_remote, rdy_render",
     ),
     ("review", "rdy_review, rdy_review_next, rdy_review_submit"),
     ("parallel", "rdy_alternatives, rdy_view"),

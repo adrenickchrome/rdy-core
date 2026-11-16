@@ -397,6 +397,39 @@ impl Baseline {
         Ok(baseline)
     }
 
+    /// Reads a baseline from the file at `path`: the file's length is checked against the input
+    /// bound before a byte is read, and at most one byte more than the bound is ever read, so a
+    /// file that grows during the read still refuses (D-6WD17). A file that cannot be opened or
+    /// read is `E_IO`; the rest is [`Baseline::read`].
+    pub fn read_file(path: &std::path::Path) -> Result<Baseline, RdyError> {
+        use std::io::Read;
+        let io = |e: std::io::Error| {
+            RdyError::new(
+                E_IO,
+                format!("{}: {e}", path.display()),
+                "check the path and its permissions",
+            )
+        };
+        let cap = caps().input;
+        let file = std::fs::File::open(path).map_err(io)?;
+        let meta = file.metadata().map_err(io)?;
+        if !meta.is_file() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{} is not a file", path.display()),
+                "pass the file that rdy publication baseline wrote",
+            ));
+        }
+        if meta.len() > cap as u64 {
+            return Err(not_verified());
+        }
+        let mut bytes = Vec::new();
+        file.take(cap as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io)?;
+        Baseline::read(&bytes)
+    }
+
     /// Checks the hash again: the members still give the baseline hash.
     fn verify(&self) -> Result<(), RdyError> {
         let canonical = rfc8785_safe_integers(&self.to_value(false)).map_err(|_| not_verified())?;
@@ -1522,6 +1555,49 @@ pub fn make(read: &ReadState, scope: &str, profile: &str) -> Result<Baseline, Rd
         .find(|(v, t)| t.name == name || want.as_ref().is_some_and(|w| v.cmp_precedence(w).is_eq()))
         .map_or_else(|| name.to_string(), |(_, t)| t.name);
     make_at(read, &tag, landing, profile)
+}
+
+/// The command the baseline's file output names in its texts.
+const BASELINE_CMD: &str = "rdy publication baseline";
+
+/// The reply of a baseline make (D-CDQF7, D-6WD17), the one form `rdy_publication_baseline` and
+/// `rdy publication baseline` share: the baseline of `profile` at `scope`, which must be
+/// `tag:<name>` (an absent scope is refused as any other scope is). With `out` the canonical
+/// bytes go to that new file, through the output guards of a dump, and the reply holds no
+/// baseline; without it the reply holds the baseline as `content`. `baseline` names the
+/// baseline as a comparison does: its source's repo id, its tag and landing, and its hash. It
+/// writes nothing else.
+pub fn make_reply(
+    read: &ReadState,
+    profile: &str,
+    scope: Option<&str>,
+    out: Option<&std::path::Path>,
+) -> Result<Value, RdyError> {
+    let baseline = make(read, scope.unwrap_or("canon"), profile)?;
+    let bytes = baseline.to_bytes();
+    let src = baseline.source();
+    let mut reply = json!({
+        "baseline": {
+            "repo_id": src.repo_id.to_string(),
+            "tag": src.tag,
+            "landing": src.landing.to_string(),
+            "baseline_hash": baseline.baseline_hash().to_string(),
+        },
+        "profile": {
+            "id": baseline.profile_id().map(ToString::to_string),
+            "audience": baseline.audience().as_str(),
+        },
+        "bytes": bytes.len(),
+        "out": null,
+    });
+    match out {
+        Some(out) => {
+            read.write_new_output(out, &bytes, BASELINE_CMD)?;
+            reply["out"] = json!(out.display().to_string());
+        }
+        None => reply["content"] = baseline.to_json(),
+    }
+    Ok(reply)
 }
 
 // ---- compare ------------------------------------------------------------------------------

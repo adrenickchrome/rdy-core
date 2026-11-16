@@ -33,6 +33,7 @@
 {"tool": "rdy_plan", "ruleset": "rdy:after-write", "response": "warn"},
 {"tool": "rdy_policy", "ruleset": "rdy:approvals", "response": "warn"},
 {"tool": "rdy_propose", "ruleset": "rdy:after-write", "response": "warn"},
+{"tool": "rdy_publication_baseline", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_publication_check", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_publish", "ruleset": "rdy:publish", "response": "warn"},
 {"tool": "rdy_query", "ruleset": "rdy:bootstrap", "response": "warn"},

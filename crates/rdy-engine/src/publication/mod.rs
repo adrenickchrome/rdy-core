@@ -36,7 +36,7 @@ pub use baseline::{
     BaselineDecision, BaselineDoc, BaselineEntry, BaselineFolder, BaselineReviewSide,
     BaselineSource, PathPart, build as build_baseline, canonical_json as baseline_canonical_json,
     check_lineage as check_baseline_lineage, compare as compare_with_baseline,
-    make as make_baseline, make_at as make_baseline_at,
+    make as make_baseline, make_at as make_baseline_at, make_reply as baseline_reply,
 };
 #[cfg(feature = "test-support")]
 pub use baseline::{BaselineCapsGuard, override_baseline_caps_for_tests};
@@ -47,7 +47,10 @@ pub use diff::{
 pub use hidden::{HiddenList, HiddenPlanned, HiddenRow};
 pub use rdy_schema::publication::Audience;
 pub use references::{CheckStatus, Classification, ReferenceReport, ReferenceRow};
-pub use report::{REPORT_BYTES, REPORT_ROWS, check, check_reserving, reference_summary};
+pub use report::{
+    REPORT_BYTES, REPORT_ROWS, check, check_against_baseline, check_reserving, check_with_inputs,
+    reference_summary,
+};
 pub use review_changes::{DIFF_MAX, EXCERPT_MAX, changed_doc_reviews, excerpt, short_diff};
 pub use review_docs::{
     DECISION_TITLES_MAX, DocReviews, FIGURES_MAX, OUTLINE_MAX, doc_positions, doc_reviews,

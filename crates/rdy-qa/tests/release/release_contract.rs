@@ -2127,6 +2127,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
+    (
+        "publication baseline",
+        "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
+    ),
     ("publish", "uploads a site to a host"),
     (
         "reaffirm",
@@ -3273,6 +3277,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "rdy_policy",
         "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+    ),
+    (
+        "rdy_publication_baseline",
+        "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
     ),
     ("rdy_publish", "uploads a site to a host"),
     ("rdy_redact", "destroys content; no dry run is probed"),
@@ -9361,7 +9369,8 @@ fn m4a5_contract_changes_only_hook_surfaces() {
     // the generated kungfu delivery: the tool has its row in the table and its ruleset's line
     let policy = rdy_engine::kungfu::policy("rdy_hook").expect("a kungfu row for rdy_hook");
     assert_eq!(policy.ruleset, Some("rdy:project-ops"));
-    assert_eq!(rdy_engine::kungfu::TOOLS.len(), 62);
+    // the live table also holds the tools of later releases, each pinned by its own task
+    assert!(rdy_engine::kungfu::TOOLS.len() >= 62);
     let owner = rdy_engine::kungfu::owner("project-ops").expect("the project-ops value");
     assert!(
         owner.suffix.contains("rdy_hook"),

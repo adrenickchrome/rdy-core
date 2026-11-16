@@ -39,6 +39,7 @@
         "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
         "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+        "publication baseline": "makes a baseline of a tagged publication; cli_sync_baseline pins its replies",
         "publish": "uploads a site to a host",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
         "redact": "destroys content; no dry run is probed",
@@ -12520,6 +12521,18 @@
                 },
                 {
                   "action": "set",
+                  "conflicts_with": [
+                    "against"
+                  ],
+                  "id": "against_baseline",
+                  "long": "against-baseline",
+                  "num_args": "1",
+                  "value_names": [
+                    "FILE"
+                  ]
+                },
+                {
+                  "action": "set",
                   "id": "release",
                   "long": "release",
                   "num_args": "1",
@@ -12575,6 +12588,7 @@
                 {
                   "args": [
                     "against",
+                    "against_baseline",
                     "profile",
                     "release",
                     "scope"
@@ -12585,6 +12599,96 @@
                 }
               ],
               "name": "check",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "profile",
+                  "long": "profile",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "PROFILE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "scope",
+                  "long": "scope",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "SCOPE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "out",
+                  "long": "out",
+                  "num_args": "1",
+                  "value_names": [
+                    "FILE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "out",
+                    "profile",
+                    "scope"
+                  ],
+                  "id": "Baseline",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "baseline",
               "subcommands": []
             }
           ]
@@ -20099,6 +20203,11 @@
         "Include the target docs or remove these references. Run the publication check again."
       ],
       [
+        "E_PUBLICATION_BASELINE",
+        "rdy_publication_check against_baseline names a baseline file that does not verify, was made for another previous publication, or comes from a project outside this project's lineage",
+        "make the baseline again with rdy_publication_baseline in the project that published, and pass the complete path of the new file as against_baseline"
+      ],
+      [
         "W_PUBLICATION_REFERENCE",
         "an org profile has references outside its selection, or a live public profile has blocked references",
         "follow the warning's own fix"
@@ -20853,6 +20962,7 @@
       "E_FROZEN",
       "E_HELD_BY_READER",
       "E_PUBLICATION_REFERENCE",
+      "E_PUBLICATION_BASELINE",
       "W_PUBLICATION_REFERENCE"
     ],
     "result_fields": {
@@ -24388,6 +24498,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_PUBLICATION_BASELINE": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_PUBLICATION_REFERENCE": {
               "fix": "string",
               "when": "string"
@@ -25390,6 +25504,7 @@
       "rdy_land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+      "rdy_publication_baseline": "makes a baseline of a tagged publication; cli_sync_baseline and mcp_sync_baseline pin its replies",
       "rdy_publish": "uploads a site to a host",
       "rdy_redact": "destroys content; no dry run is probed",
       "rdy_remote": "edits the remotes of the project",
@@ -25437,6 +25552,7 @@
       "rdy_plan",
       "rdy_policy",
       "rdy_propose",
+      "rdy_publication_baseline",
       "rdy_publication_check",
       "rdy_publish",
       "rdy_query",
@@ -27535,6 +27651,34 @@
           "type": "object"
         }
       },
+      "rdy_publication_baseline": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "out": {
+              "description": "A new file to write the baseline to: absolute, or relative to the project directory. It must not exist, and it must be outside .rdy. Leave it out to get the baseline in the reply.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profile": {
+              "description": "A publication profile id or key in the tag's scope, or implicit:org for every doc.",
+              "type": "string"
+            },
+            "scope": {
+              "description": "The tag to make the baseline of: tag:<name>. A baseline needs a tag.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "profile",
+            "scope"
+          ],
+          "type": "object"
+        }
+      },
       "rdy_publication_check": {
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -27542,6 +27686,13 @@
           "properties": {
             "against": {
               "description": "A baseline to compare with: canon, tag:<name> or landing:<hash>. It must hold the same profile id and audience. Omit it for no comparison.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "against_baseline": {
+              "description": "The complete path of a publication baseline file, made by rdy_publication_baseline in the project that published the previous version. It stands in for against: pass one or the other. It must hold the same profile id and audience, and share this project's lineage. A path that is not absolute is under the project directory.",
               "type": [
                 "string",
                 "null"

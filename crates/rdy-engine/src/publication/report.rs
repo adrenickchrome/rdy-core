@@ -8,6 +8,7 @@
 //! ([`super::review_json`], D-RDH1C); [`reference_summary`] stays the old summary for the
 //! callers that show no review.
 
+use super::baseline::{Baseline, compare};
 use super::diff::disclosure_diff;
 use super::hidden::HiddenList;
 use super::references::{CheckStatus, ReferenceReport};
@@ -186,7 +187,7 @@ pub(super) fn hidden_json(h: &HiddenList) -> Value {
 fn report_json(
     r: &Resolved,
     scope: &Side,
-    against: Option<&Side>,
+    against: Option<Value>,
     release: Option<(CheckStatus, Value)>,
     review: ReviewJson,
 ) -> Value {
@@ -218,7 +219,7 @@ fn report_json(
             "trail": r.profile.trail,
         },
         "scope": scope.json(),
-        "against": against.map(Side::json),
+        "against": against,
         "selection": {
             "hash": r.selection_hash.to_string(),
             "identity": r.selection_identity.to_string(),
@@ -328,10 +329,84 @@ pub fn check_reserving(
         &review,
     );
     fit_reserving(
-        report_json(&after, &candidate, baseline.as_ref(), checked, json),
+        report_json(
+            &after,
+            &candidate,
+            baseline.as_ref().map(Side::json),
+            checked,
+            json,
+        ),
         REPORT_BYTES,
         reserve,
     )
+}
+
+/// [`check`] against a portable baseline (D-CDQF7, D-6WD17) in place of a scope of this store.
+/// The report has the same members; `against` is `{kind: "baseline", landing, tag}` of the
+/// baseline's source, and `disclosure` names the baseline and both sides' redaction sets. The
+/// comparison checks, in order, the baseline hash, the profile id and audience and the shared
+/// lineage, and reads no record of the baseline's store. It writes nothing.
+pub fn check_against_baseline(
+    read: &ReadState,
+    profile: &str,
+    scope: Option<&str>,
+    baseline: &Baseline,
+    release: Option<&str>,
+    reserve: usize,
+) -> Result<Value, RdyError> {
+    let release = release.map(release::parse).transpose()?;
+    let candidate = candidate(read, scope)?;
+    let after = resolve_inspection(read, &candidate.scope, profile)?;
+    let checked = release.as_ref().map(|v| release::report(&after, v));
+    let source_state = read.materialized(&candidate.scope)?;
+    let (title, description) = (read.project_name(), read.project_description());
+    let source =
+        ReadPublicationSource::with_settings(read, read.pack(), &title, description.as_deref());
+    let (diff, review) = compare(read, &source, &source_state, &after, baseline, None)?;
+    let json = review_json(
+        ReviewProjection::Report,
+        &after.references,
+        Some(&diff),
+        &review,
+    );
+    let src = baseline.source();
+    let against = json!({
+        "kind": "baseline",
+        "landing": src.landing.to_string(),
+        "tag": src.tag,
+    });
+    fit_reserving(
+        report_json(&after, &candidate, Some(against), checked, json),
+        REPORT_BYTES,
+        reserve,
+    )
+}
+
+/// The check of `profile` for the callers that take a baseline as a file (D-CDQF7): `against`
+/// is a scope of this store as [`check_reserving`] reads it, `against_baseline` the file of a
+/// portable baseline, and the two are never both given. The file is read after the profile, the
+/// scope and the release are parsed, as the checks read their own inputs.
+pub fn check_with_inputs(
+    read: &ReadState,
+    profile: &str,
+    scope: Option<&str>,
+    against: Option<&str>,
+    against_baseline: Option<&std::path::Path>,
+    release: Option<&str>,
+    reserve: usize,
+) -> Result<Value, RdyError> {
+    match (against, against_baseline) {
+        (Some(_), Some(_)) => Err(RdyError::new(
+            E_BAD_INPUT,
+            "Publication check takes against or against_baseline, not both.",
+            "Pass the scope of a previous publication as against, or the file of its baseline as against_baseline.",
+        )),
+        (_, Some(file)) => {
+            let baseline = Baseline::read_file(file)?;
+            check_against_baseline(read, profile, scope, &baseline, release, reserve)
+        }
+        _ => check_reserving(read, profile, scope, against, release, reserve),
+    }
 }
 
 #[cfg(test)]

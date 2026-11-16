@@ -770,6 +770,7 @@ const REFUSED: &[(&str, &str)] = &[
     ("rdy_land", "E_EXCEPTION_OPEN"),
     // an engine without a daemon refuses the four tools that run in one (E_SITE, E_BAD_INPUT)
     ("rdy_site", "E_SITE"),
+    ("rdy_publication_baseline", "E_BAD_INPUT"),
     ("rdy_publish", "E_BAD_INPUT"),
     ("rdy_render", "E_BAD_INPUT"),
     ("rdy_export", "E_BAD_INPUT"),
@@ -914,6 +915,12 @@ async fn script(x: &mut Run<'_>, tools: &[String]) {
 
     x.ok(
         "rdy_publication_check",
+        json!({"profile": "implicit:org", "scope": "canon"}),
+    )
+    .await;
+    // the world holds no published tag: the baseline of canon is the tool's own refusal
+    x.ok(
+        "rdy_publication_baseline",
         json!({"profile": "implicit:org", "scope": "canon"}),
     )
     .await;

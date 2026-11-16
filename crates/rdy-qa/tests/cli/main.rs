@@ -81,6 +81,7 @@ mod cli_store_compact;
 mod cli_stream;
 mod cli_supporting;
 mod cli_suspects;
+mod cli_sync_baseline;
 mod cli_tag_relay;
 mod cli_techdocs;
 mod cli_tensions;
