@@ -1047,6 +1047,104 @@ fn scc6_check_landing_of_a_quarantined_push_before_intake() {
     h.close().unwrap();
 }
 
+/// D-0WWYR (fix round 2): the `prev` of a pushed landing may be one the holder stores only
+/// through a tag. A holder that took tag `v1.0.0` at `l1`, and has no canon, checks the
+/// incremental canon push of `l2` (less `l1`'s closure) before its first canon move: the check
+/// equals the project's own, stores nothing and moves no canon. The check reads the records the
+/// quarantine checked, not the batch file again: a file emptied after the check changes nothing.
+#[test]
+fn scc6_check_landing_of_a_push_onto_a_tagged_base() {
+    let _clock = rdy_engine::pin_clock(AT);
+    let c = checked();
+    let mut r = Rdy::open(c.dir.path()).unwrap();
+    r.tag(
+        &session(Role::Approver),
+        "v1.0.0",
+        Some(&c.l1.to_string()),
+        None,
+    )
+    .unwrap();
+    let v1 = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, _, _)| n == "v1.0.0")
+        .unwrap()
+        .1;
+    let mut out = Vec::new();
+    rdy_engine::stream_export::write(&r.read(), v1, &BTreeSet::new(), &mut out).unwrap();
+    let t1 = c.dir.path().join("t1.rdysync");
+    std::fs::write(&t1, out).unwrap();
+    let want_adv = oracle(&r, c.l2, &c.advisory);
+    let want_blk = oracle(&r, c.l2, &c.blocking);
+    let want_l1 = oracle(&r, c.l1, &c.blocking);
+    let repo = repo_of(&r);
+    r.close().unwrap();
+    assert!(want_adv.pass && !want_blk.pass && want_l1.pass);
+    let next = c.dir.path().join("next.rdysync");
+    export_canon(c.dir.path(), c.l2, Some(c.l1), &next);
+
+    let hub = tempfile::tempdir().unwrap();
+    let h = StoreHandle::create_holder(hub.path(), repo).unwrap();
+    h.take(
+        &[File::open(&t1).unwrap()],
+        rdy_adapter::take::UploadTarget {
+            tag: "v1.0.0".into(),
+            landing: c.l1,
+        },
+    )
+    .unwrap();
+    let s0 = h.snapshot().unwrap();
+    assert_eq!(s0.canon(), None);
+    let q = check(&s0, &[&next]).unwrap();
+    assert_eq!(
+        s0.canon_chain(&q).unwrap(),
+        ChainFacts {
+            head: None,
+            entered: vec![c.l1, c.l2],
+            holds_expected: false,
+            replaced: vec![],
+        }
+    );
+    // the hub's file is emptied after the check: the quarantine keeps its records
+    std::fs::write(&next, b"").unwrap();
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l2, &c.blocking).unwrap(),
+        want_blk
+    );
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l2, &c.advisory).unwrap(),
+        want_adv
+    );
+    // the tagged base checks as the stored check does
+    assert_eq!(
+        s0.check_pushed_landing(&q, c.l1, &c.blocking).unwrap(),
+        want_l1
+    );
+    // the checks stored nothing and moved no canon
+    assert_eq!(h.snapshot().unwrap().canon(), None);
+    assert!(holds_none(
+        &h,
+        &[ObjectKey {
+            kind: rdy_store::kinds::LANDING,
+            hash: c.l2
+        }]
+    ));
+    // the guarded first move, over the tagged base
+    assert_eq!(
+        h.move_canon(&q, CanonMove::Seed, Some(c.l1)).unwrap(),
+        Moved::Behind { tip: None }
+    );
+    assert_eq!(
+        h.move_canon(&q, CanonMove::Seed, None).unwrap(),
+        moved(c.l2)
+    );
+    let s1 = h.snapshot().unwrap();
+    assert_eq!(s1.check_landing(c.l2, &c.blocking).unwrap(), want_blk);
+    h.close().unwrap();
+}
+
 /// D-0WWYR: work in flight in a view changes nothing, and `assessment_matches` says whether the
 /// landing's stored assessment names the pack and config digests of the inputs.
 #[test]

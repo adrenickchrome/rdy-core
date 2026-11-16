@@ -87,10 +87,8 @@ pub struct CheckedQuarantine {
     /// The pushed landings by hash, with their `prev`, for the chain facts.
     landings: BTreeMap<Hash, Option<Hash>>,
     facts: QuarantineFacts,
-    /// The push's batch files (cloned handles; none for a stored head), for the scratch holder
-    /// of [`Snapshot::check_pushed_landing`].
-    files: Vec<File>,
-    /// That scratch holder, made at the first check and kept with the quarantine.
+    /// The scratch holder of [`Snapshot::check_pushed_landing`], made at the first check and
+    /// kept with the quarantine.
     scratch: Mutex<Option<Arc<Scratch>>>,
 }
 
@@ -125,17 +123,19 @@ impl CheckedQuarantine {
         if let Some(s) = slot.as_ref() {
             return Ok(Arc::clone(s));
         }
-        let s = Arc::new(Scratch::make(snap, &self.files)?);
+        let s = Arc::new(Scratch::make(snap, self)?);
         *slot = Some(Arc::clone(&s));
         Ok(s)
     }
 }
 
-/// A holder in a private temporary directory that holds what the snapshot's holder holds for a
-/// landing check (its canon history and its held chains, exported from the snapshot) and the
-/// push of a checked quarantine, taken by the same checks and moves as on the holder. The
-/// landing check reads a quarantined landing there, so the holder itself stores nothing before
-/// the hub's move. The directory is removed when the scratch drops.
+/// A holder in a private temporary directory that holds what the snapshot's holder held, and
+/// the push of a checked quarantine. It is a dump of the snapshot's published state, loaded as a
+/// holder: every record the holder held at the snapshot, through canon, a tag, a `held/` chain
+/// or a view, at the same log place. Then the quarantine's own checked records are moved in
+/// through the store's move, as on the holder. The landing check reads a quarantined landing
+/// there, so the holder itself stores nothing before the hub's move. The directory is removed
+/// when the scratch drops.
 pub(crate) struct Scratch {
     dir: PathBuf,
     handle: Option<StoreHandle>,
@@ -143,61 +143,39 @@ pub(crate) struct Scratch {
 }
 
 impl Scratch {
-    /// The scratch of `files`, a push checked on `snap`.
-    fn make(snap: &Snapshot, files: &[File]) -> Result<Scratch, RdyError> {
+    /// The scratch of `checked`, a push checked on `snap`. The push moves in as an extend when
+    /// its chain holds the snapshot's canon tip, as the seed when there is no canon, and else as
+    /// a force. The records are the ones the quarantine checked: the batch files are not read
+    /// again.
+    fn make(snap: &Snapshot, checked: &CheckedQuarantine) -> Result<Scratch, RdyError> {
         let dir = scratch_dir()?;
         let mut out = Scratch {
             dir,
             handle: None,
             snap: None,
         };
-        let h = StoreHandle::create_holder(&out.dir.join("holder"), snap.identity().repo_id)?;
-        let h = out.handle.insert(h);
-        let empty = BTreeSet::new();
-        let export = |root: Hash, base: Option<Hash>, name: &str| -> Result<File, RdyError> {
-            let path = out.dir.join(name);
-            let f = File::create(&path).map_err(io)?;
-            snap.write_history(StreamPurpose::CanonHistory, root, base, &empty, f)?;
-            File::open(&path).map_err(io)
+        let dump = out.dir.join("holder.rdydump");
+        snap.read_state().dump(&dump)?;
+        let root = out.dir.join("holder");
+        rdy_engine::load::load(&dump, &root)?;
+        std::fs::remove_file(&dump).map_err(io)?;
+        let h = out.handle.insert(StoreHandle::open_holder(&root)?);
+        let tip = snap.canon();
+        let mv = match tip {
+            None => CanonMove::Seed,
+            Some(_) if snap.canon_chain(checked)?.holds_expected => CanonMove::Extend,
+            Some(_) => CanonMove::Force,
         };
-        let take = |files: &[File], mv: CanonMove| -> Result<(), RdyError> {
-            let s = h.snapshot()?;
-            let q = s.check_quarantine(files)?;
-            let mv = match (mv, s.canon()) {
-                (CanonMove::Force, Some(_)) if s.canon_chain(&q)?.holds_expected => {
-                    CanonMove::Extend
-                }
-                (CanonMove::Force, None) => CanonMove::Seed,
-                (mv, _) => mv,
-            };
-            match h.move_canon(&q, mv, s.canon())? {
-                Moved::Moved { .. } => Ok(()),
-                Moved::Behind { tip } => Err(RdyError::new(
+        match h.move_batch(None, Arc::clone(&checked.batch), mv, tip)? {
+            Moved::Moved { .. } => {}
+            Moved::Behind { tip } => {
+                return Err(RdyError::new(
                     E_INTERNAL,
                     format!("the scratch holder of a landing check moved to {tip:?}"),
                     "report this as a bug in rdy",
-                )),
-            }
-        };
-        if let Some(tip) = snap.canon() {
-            take(&[export(tip, None, "canon.rdysync")?], CanonMove::Seed)?;
-            for (i, held) in snap.captured_held().iter().enumerate() {
-                let s = h.snapshot()?;
-                let key = ObjectKey {
-                    kind: kinds::LANDING,
-                    hash: *held,
-                };
-                if s.has_objects(&[key])?.iter().any(|p| p.present) {
-                    continue;
-                }
-                take(
-                    &[export(*held, Some(tip), &format!("held-{i}.rdysync"))?],
-                    CanonMove::Hold,
-                )?;
+                ));
             }
         }
-        // the push: an extend when it holds the scratch tip, else a force or the seed
-        take(files, CanonMove::Force)?;
         out.snap = Some(h.snapshot()?);
         Ok(out)
     }
@@ -297,14 +275,6 @@ fn io(e: std::io::Error) -> RdyError {
         format!("stream input: {e}"),
         "check that the stream file can be read",
     )
-}
-
-/// What a push brings besides its checked batch: the distinct keys of its objects, sorted, and
-/// its batch files (cloned handles). Empty for a stored head.
-#[derive(Default)]
-struct Pushed {
-    objects: Vec<ObjectKey>,
-    files: Vec<File>,
 }
 
 /// A push read: its header, its present records as (kind, bytes), and their keys.
@@ -413,13 +383,7 @@ impl Snapshot {
             }
         }
         let batch = read.reader().check_move_batch(records, header.tag)?;
-        let files = batches
-            .iter()
-            .map(File::try_clone)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(io)?;
-        let pushed = Pushed { objects, files };
-        self.checked(batch, header.purpose, landings, &ops, pushed, need)
+        self.checked(batch, header.purpose, landings, &ops, objects, need)
     }
 
     /// A checked quarantine with no new batch: the head `head` that this snapshot's holder
@@ -439,7 +403,7 @@ impl Snapshot {
             purpose,
             BTreeMap::new(),
             &BTreeMap::new(),
-            Pushed::default(),
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -451,10 +415,9 @@ impl Snapshot {
         purpose: StreamPurpose,
         landings: BTreeMap<Hash, Option<Hash>>,
         ops: &BTreeMap<Hash, ViewOp>,
-        pushed: Pushed,
+        objects: Vec<ObjectKey>,
         mut need: Vec<rdy_store::format::StoreFeature>,
     ) -> Result<CheckedQuarantine, RdyError> {
-        let Pushed { objects, files } = pushed;
         let read = self.read_state();
         let head = batch.head();
         let head_purpose = if batch.head_kind() == kinds::VIEW_OP {
@@ -499,7 +462,6 @@ impl Snapshot {
             batch: Arc::new(batch),
             landings,
             facts,
-            files,
             scratch: Mutex::new(None),
         })
     }
@@ -599,14 +561,32 @@ impl StoreHandle {
         mv: CanonMove,
         expected: Option<Hash>,
     ) -> Result<Moved, RdyError> {
+        self.move_batch(
+            Some(Arc::clone(&checked.state)),
+            Arc::clone(&checked.batch),
+            mv,
+            expected,
+        )
+    }
+
+    /// Move `mv` of `batch`, expecting `expected`, under the store's one writer. With `bound`,
+    /// the state the batch was checked on, the store must be that state's, with no removal since
+    /// it. A scratch holder passes none: its store is a load of that state.
+    fn move_batch(
+        &self,
+        bound: Option<Arc<ReadState>>,
+        batch: Arc<MoveBatch>,
+        mv: CanonMove,
+        expected: Option<Hash>,
+    ) -> Result<Moved, RdyError> {
         let at_ms = rdy_engine::now_ms();
-        let state = Arc::clone(&checked.state);
-        let batch = Arc::clone(&checked.batch);
         with_writer_result(self.local(), move |rdy| {
-            if state.root() != rdy.root() {
-                return Err(other_store());
+            if let Some(state) = &bound {
+                if state.root() != rdy.root() {
+                    return Err(other_store());
+                }
+                state.ensure_current_epoch()?;
             }
-            state.ensure_current_epoch()?;
             // a move is a batch of its own: one a raw write left open is sealed first
             rdy.seal_open()?;
             let out = rdy.store_mut().move_canon(&batch, &mv, expected, at_ms)?;

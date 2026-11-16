@@ -58,12 +58,13 @@ impl Snapshot {
     /// the landing and its `prev` may be in the quarantine). `checked` must have been checked on
     /// this snapshot (`E_BAD_INPUT` otherwise), and the inputs are checked first. A landing the
     /// push's records do not hold is [`Snapshot::check_landing`]'s. A pushed landing is checked
-    /// by core's evaluator in a scratch holder: a private temporary holder that takes this
-    /// snapshot's canon history and held chains, as it captured them, and then the push, by the
-    /// same checks and moves. The holder itself stores nothing, and its canon does not move: the
-    /// hub's [`StoreHandle::move_canon`](crate::StoreHandle::move_canon) still compares the
-    /// expected tip. The scratch is made at the first check of `checked` and kept with it. A
-    /// removal since the snapshot is `E_REDACTED_STATE`.
+    /// by core's evaluator in a scratch holder: a private temporary holder loaded from a dump of
+    /// this snapshot's published state, so it holds every record the holder held (canon, tags,
+    /// `held/` chains and views), and then the push's checked records, by the same move. The
+    /// batch files are not read again. The holder itself stores nothing, and its canon does not
+    /// move: the hub's [`StoreHandle::move_canon`](crate::StoreHandle::move_canon) still
+    /// compares the expected tip. The scratch is made at the first check of `checked` and kept
+    /// with it. A removal since the snapshot is `E_REDACTED_STATE`.
     pub fn check_pushed_landing(
         &self,
         checked: &CheckedQuarantine,
