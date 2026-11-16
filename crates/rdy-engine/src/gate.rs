@@ -658,21 +658,30 @@ fn unapplied_warnings(
         .collect())
 }
 
-/// The landing that already carried `p` into canon: Some when every change of `p` already
-/// reads landed, as the landing of its first change; one index lookup per change (lidx1). A
-/// change that reads landed through a replay that landed elsewhere (D-NME32) does not make the
-/// proposal landed while another of its changes has not.
+/// The landing that already carried `p` into canon (lidx1): the landing of the first change of
+/// `p` that its landing carries itself, or, when every change of `p` reads landed only through
+/// a replay that landed elsewhere (D-NME32), the landing of the first. A change that reads
+/// landed only through its replay does not make the proposal landed while another of its
+/// changes has not.
 pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
     let mut first = None;
+    let mut all = true;
     for c in &p.changes {
         match st.reader().landing_of(c)? {
+            Some(l) if !through_replay(st, c, &l)? => return Ok(Some(l)),
             Some(l) => {
                 first.get_or_insert(l);
             }
-            None => return Ok(None),
+            None => all = false,
         }
     }
-    Ok(first)
+    Ok(first.filter(|_| all))
+}
+
+/// Whether change `c`, which reads landed at `landing`, reads landed only through a replay of it
+/// that landing carries (D-NME32): the landing does not carry `c` itself.
+fn through_replay(st: &ReadState, c: &Hash, landing: &Hash) -> Result<bool, RdyError> {
+    Ok(!st.reader().landing(landing)?.changes.contains(c))
 }
 
 /// Whether proposal version `version` (`p`) is withdrawn (D-K0SS1): its view is closed now, or
@@ -2684,16 +2693,23 @@ impl Rdy {
                 out
             }
         };
-        // a change that already reads landed (its replay landed, D-NME32) stays in the view but
-        // is not carried again, while the selection holds a change that has not landed
-        let mut unlanded = Vec::with_capacity(ids.len());
+        // a change that reads landed only through its replay (D-NME32) stays in the view but is
+        // not carried again, while the selection holds a change that has not landed. A change
+        // its landing carries itself stays in the selection, and the landing refuses it
+        let mut kept = Vec::with_capacity(ids.len());
+        let mut unlanded = false;
         for c in &ids {
-            if st.reader().landing_of(c)?.is_none() {
-                unlanded.push(*c);
+            match st.reader().landing_of(c)? {
+                Some(l) if through_replay(&st, c, &l)? => {}
+                Some(_) => kept.push(*c),
+                None => {
+                    unlanded = true;
+                    kept.push(*c);
+                }
             }
         }
-        if !unlanded.is_empty() && unlanded.len() < ids.len() {
-            ids = unlanded;
+        if unlanded && kept.len() < ids.len() {
+            ids = kept;
         }
         let changes = changes_of(&st, &ids)?;
         linked_alts(&st, view, alternative.as_ref(), &ids, &changes)?;
